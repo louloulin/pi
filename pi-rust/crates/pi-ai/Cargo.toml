@@ -21,6 +21,7 @@ pi-protocol = { path = "../pi-protocol" }
 
 tokio-util.workspace = true
 futures.workspace = true
+bytes.workspace = true
 async-trait.workspace = true
 
 serde.workspace = true
