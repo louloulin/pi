@@ -9,10 +9,16 @@ description = "Multi-provider LLM client for the Pi Rust port (OpenAI, Anthropic
 [lints]
 workspace = true
 
+[features]
+# `wasm` enables the `wasm-bindgen` exports — `register_faux_provider` and the
+# SharedStreamFn registry the JS host uses. Native builds leave it off so we
+# do not pay the size cost of the WASM shims.
+default = []
+wasm = ["pi-protocol/wasm"]
+
 [dependencies]
 pi-protocol = { path = "../pi-protocol" }
 
-tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
 async-trait.workspace = true
@@ -21,10 +27,25 @@ serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
 
-reqwest.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+
+# Tokio's feature set is target-conditional: the workspace dep pulls `full`
+# (which transitively depends on `mio`), and `mio` does not compile on
+# `wasm32-unknown-unknown`. We therefore declare tokio *only* in the
+# per-target sections so the wasm target can pick a minimal feature set.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.38", default-features = false, features = ["sync", "macros", "rt", "time"] }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+serde-wasm-bindgen.workspace = true
+getrandom.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -54,7 +54,7 @@ pub async fn run_text_fallback(agent: &mut Agent, reason: FallbackReason) -> any
         while let Some(event) = rx.recv().await {
             match event {
                 pi_agent_core::AgentEvent::MessageUpdate(
-                    pi_agent_core::AssistantMessageUpdate::TextDelta(delta),
+                    pi_agent_core::AssistantMessageUpdate::TextDelta { delta },
                 ) => {
                     write!(stdout, "{delta}")?;
                     stdout.flush()?;

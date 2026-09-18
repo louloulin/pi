@@ -27,7 +27,7 @@ fn faux_model() -> Model {
 fn app() -> App {
     let agent = Agent::new(AgentOptions::new(
         faux_model(),
-        Arc::new(FauxProvider),
+        Arc::new(FauxProvider::default()),
         "you are pi",
     ));
     let config = AppConfig {
@@ -41,7 +41,7 @@ fn app() -> App {
 async fn submit_then_drain_renders_assistant_message() {
     let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
         faux_model(),
-        Arc::new(FauxProvider),
+        Arc::new(FauxProvider::default()),
         "you are pi",
     ))));
     let config = AppConfig {
@@ -89,7 +89,7 @@ async fn submit_then_drain_renders_assistant_message() {
 async fn slash_command_does_not_reach_agent() {
     let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
         faux_model(),
-        Arc::new(FauxProvider),
+        Arc::new(FauxProvider::default()),
         "you are pi",
     ))));
     let config = AppConfig {
@@ -147,7 +147,7 @@ async fn agent_subscriber_receives_text_delta_and_turn_end() {
     // sequence the TUI consumes.
     let mut agent = Agent::new(AgentOptions::new(
         faux_model(),
-        Arc::new(FauxProvider),
+        Arc::new(FauxProvider::default()),
         "you are pi",
     ));
     let mut rx = agent.subscribe();
@@ -158,7 +158,7 @@ async fn agent_subscriber_receives_text_delta_and_turn_end() {
     while let Ok(event) = rx.try_recv() {
         collected.push(event.clone());
         match event {
-            AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta(delta)) => {
+            AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta { delta }) => {
                 if delta.contains("(faux) hello") {
                     saw_text_delta = true;
                 }
