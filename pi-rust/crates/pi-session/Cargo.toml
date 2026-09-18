@@ -1,0 +1,24 @@
+[package]
+name = "pi-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite session backend for the Pi Rust port. Round-trips SessionEntry values with the TS `packages/session-backends/sqlite-node` port (via JSON payloads)."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+
+rusqlite.workspace = true
+zstd.workspace = true
+parking_lot.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
