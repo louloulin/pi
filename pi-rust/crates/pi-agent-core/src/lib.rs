@@ -8,12 +8,14 @@
 
 mod agent;
 mod agent_loop;
+mod events;
 mod hooks;
 mod queue;
 mod state;
 
 pub use agent::*;
 pub use agent_loop::*;
+pub use events::*;
 pub use hooks::*;
 pub use queue::*;
 pub use state::*;

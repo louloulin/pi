@@ -1,0 +1,606 @@
+//! Top-level [`App`] — owns the editor / message view / status bar and
+//! drives the render loop.
+//!
+//! The App is intentionally framework-agnostic: it operates on the
+//! [`InputEvent`] enum and a [`ratatui::buffer::Buffer`] view, so unit
+//! tests can drive the full loop with synthetic input and assert on
+//! the rendered buffer without ever touching a real terminal.
+//!
+//! Concrete binaries embed the App in a `crossterm`-backed
+//! [`ratatui::Terminal`] and feed it events from the terminal input.
+//! See `crates/pi-coding-agent/src/interactive.rs` for the wiring.
+
+use std::time::Duration;
+
+use crossterm::event::Event as CtEvent;
+use parking_lot::Mutex;
+use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate};
+use pi_protocol::Content;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
+
+use crate::editor::EditorAction;
+use crate::input::{InputEvent, Key, KeyCode, KeyModifiers};
+use crate::message::{MessageItem, MessageView};
+use crate::prompt::{Prompt, PromptAction};
+use crate::selector::{Selector, SelectorAction, SelectorItem};
+use crate::status::{StatusBar, StatusData};
+
+/// Configuration knobs for the App.
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    /// Placeholder shown in the prompt when it is empty.
+    pub prompt_placeholder: String,
+    /// Session identifier shown in the status bar.
+    pub session_id: String,
+    /// Polling interval for `crossterm::event::poll` (microseconds). The
+    /// TUI uses this to throttle the render loop when there is no
+    /// input.
+    pub event_poll_interval: Duration,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            prompt_placeholder: "type a prompt — /help for commands".to_string(),
+            session_id: "local".to_string(),
+            event_poll_interval: Duration::from_millis(50),
+        }
+    }
+}
+
+/// Outcome returned by [`App::step`] after each key event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepOutcome {
+    /// Step made no meaningful state change.
+    Idle,
+    /// Step mutated the rendered state.
+    Redraw,
+    /// User submitted a prompt. The caller is responsible for handing
+    /// the text to the agent.
+    Submitted(String),
+    /// User pressed Ctrl+C / Ctrl+D — the caller should shut the App
+    /// down and (optionally) fall back to print mode.
+    Exit,
+}
+
+/// Snapshot of the rendered App for tests.
+#[derive(Debug, Clone)]
+pub struct RenderSnapshot {
+    /// Width the snapshot was rendered at.
+    pub width: u16,
+    /// Height the snapshot was rendered at.
+    pub height: u16,
+    /// Pre-rendered content lines, top to bottom.
+    pub lines: Vec<String>,
+    /// Currently displayed placeholder text (empty if the prompt has
+    /// a buffer).
+    pub prompt_placeholder: String,
+    /// Buffer text the editor currently shows.
+    pub prompt_buffer: String,
+    /// Whether the selector modal is currently visible.
+    pub selector_open: bool,
+    /// Selector title (when open).
+    pub selector_title: Option<String>,
+    /// Selector items (when open).
+    pub selector_items: Vec<SelectorItem>,
+    /// Selector cursor index (when open).
+    pub selector_cursor: Option<usize>,
+    /// Status bar snapshot.
+    pub status: StatusData,
+}
+
+impl RenderSnapshot {
+    /// Convert the lines into a `Buffer` so callers can compare against
+    /// `Buffer::with_lines` results.
+    pub fn to_buffer(&self) -> Buffer {
+        Buffer::with_lines(self.lines.iter().map(String::as_str))
+    }
+}
+
+/// Top-level App.
+pub struct App {
+    config: AppConfig,
+    prompt: Prompt,
+    messages: MessageView,
+    status_bar: StatusBar,
+    status_data: StatusData,
+    selector: Option<Selector>,
+    /// Live subscription to agent events. Constructed in
+    /// [`App::new`] from `agent.subscribe()` so the App receives every
+    /// event the agent emits across all turns.
+    event_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
+    /// Cancellation token for the in-flight prompt, if any.
+    cancel_token: Option<CancellationToken>,
+    /// Last user-facing error surfaced by the agent loop. Rendered
+    /// into the message view on the next step.
+    pending_error: Option<String>,
+    /// Set when the App should exit at the next opportunity. The TUI
+    /// exit path checks this between key events.
+    exit_requested: bool,
+}
+
+impl App {
+    /// Construct an App over an [`Agent`] handle. The App subscribes
+    /// to the agent's event stream immediately and drains events
+    /// during [`App::drain_agent_events`] (called by the render
+    /// loop).
+    pub fn new(agent: &Agent, config: AppConfig) -> Self {
+        let mut status_data = StatusData::new(
+            agent
+                .model()
+                .label
+                .clone()
+                .unwrap_or_else(|| agent.model().id.clone()),
+            config.session_id.clone(),
+        );
+        status_data.hint = Some("? for help".to_string());
+        let mut prompt = Prompt::new("> ");
+        prompt.set_placeholder(config.prompt_placeholder.clone());
+        let event_rx = agent.subscribe();
+        Self {
+            config,
+            prompt,
+            messages: MessageView::new(),
+            status_bar: StatusBar::new(),
+            status_data,
+            selector: None,
+            event_rx: Some(event_rx),
+            cancel_token: None,
+            pending_error: None,
+            exit_requested: false,
+        }
+    }
+
+    /// Borrow the message view (for tests and snapshots).
+    pub fn messages(&self) -> &MessageView {
+        &self.messages
+    }
+
+    /// Mutable borrow of the message view.
+    pub fn messages_mut(&mut self) -> &mut MessageView {
+        &mut self.messages
+    }
+
+    /// Borrow the prompt.
+    pub fn prompt(&self) -> &Prompt {
+        &self.prompt
+    }
+
+    /// Mutable borrow of the prompt.
+    pub fn prompt_mut(&mut self) -> &mut Prompt {
+        &mut self.prompt
+    }
+
+    /// Borrow the status data.
+    pub fn status_data(&self) -> &StatusData {
+        &self.status_data
+    }
+
+    /// Mutable borrow of the status data.
+    pub fn status_data_mut(&mut self) -> &mut StatusData {
+        &mut self.status_data
+    }
+
+    /// Whether the user has requested an exit.
+    pub fn is_exit_requested(&self) -> bool {
+        self.exit_requested
+    }
+
+    /// Whether a background agent turn is currently in flight.
+    pub fn is_busy(&self) -> bool {
+        self.cancel_token.is_some()
+    }
+
+    /// Set a model override that takes effect on the next
+    /// `Agent::prompt` call.
+    pub fn queue_model_switch(&mut self, agent: &mut Agent, model: pi_protocol::Model) {
+        self.status_data.model = model.label.clone().unwrap_or_else(|| model.id.clone());
+        agent.set_model(model);
+    }
+
+    /// Drain any pending agent events into the message view. The
+    /// caller calls this on every render tick — the App drains
+    /// synchronously, so the TUI never blocks on the agent.
+    pub fn drain_agent_events(&mut self) -> bool {
+        let mut changed = false;
+        loop {
+            let event = match self.event_rx.as_mut() {
+                None => break,
+                Some(rx) => match rx.try_recv() {
+                    Ok(event) => event,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.cancel_token = None;
+                        self.event_rx = None;
+                        changed = true;
+                        break;
+                    }
+                },
+            };
+            changed = true;
+            self.apply_event(event);
+        }
+        changed
+    }
+
+    /// Apply a single [`AgentEvent`] to the message view + status bar.
+    fn apply_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::TurnStart => {}
+            AgentEvent::MessageStart { model } => {
+                self.messages.begin_assistant_stream(&model);
+            }
+            AgentEvent::MessageUpdate(update) => match update {
+                AssistantMessageUpdate::TextDelta(delta) => {
+                    self.messages.append_assistant_delta(&delta);
+                }
+                AssistantMessageUpdate::ThinkingDelta(_delta) => {
+                    // Collapsed thinking — not rendered by Stage 4.
+                }
+                AssistantMessageUpdate::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta: _,
+                } => {
+                    let label = name.unwrap_or_else(|| format!("tool-{index}"));
+                    let _ = id; // placeholder — Stage 4 collapses into a single block
+                    self.messages.push_tool(&label, "(streaming)", "", false);
+                }
+            },
+            AgentEvent::MessageEnd { message } => {
+                self.messages.end_assistant_stream();
+                self.status_data
+                    .add_tokens(message.usage.input, message.usage.output);
+            }
+            AgentEvent::ToolExecutionStart { call } => {
+                self.messages.push_tool(&call.name, "(running)", "", false);
+            }
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id: _,
+                delta,
+            } => {
+                self.messages.append_assistant_delta(&delta);
+            }
+            AgentEvent::ToolExecutionEnd {
+                result,
+                duration_ms,
+            } => {
+                let name = String::new();
+                let is_error = result.is_error;
+                let body = match result.content.as_ref() {
+                    Content::Text(t) => t.text.clone(),
+                    _ => "(binary result)".to_string(),
+                };
+                self.messages
+                    .push_tool(&name, &format!("{duration_ms}ms"), &body, is_error);
+            }
+            AgentEvent::TurnEnd {
+                message,
+                tool_results,
+            } => {
+                let _ = tool_results; // tool results already pushed by the per-tool events
+                if message.stop_reason == pi_protocol::StopReason::Error {
+                    self.pending_error = Some("provider returned an error".into());
+                }
+            }
+            AgentEvent::UserMessage(_) => {}
+            AgentEvent::Error(message) => {
+                self.pending_error = Some(message);
+            }
+        }
+    }
+
+    /// Pop the last pending error (if any). The TUI prints this on
+    /// the next render so the user sees the agent surface error.
+    pub fn take_error(&mut self) -> Option<String> {
+        self.pending_error.take()
+    }
+
+    /// Begin an agent turn asynchronously. The App spawns a tokio
+    /// task that calls `Agent::prompt`; events flow through the
+    /// subscriber channel established in [`App::new`] and are drained
+    /// by [`App::drain_agent_events`].
+    pub fn submit(&mut self, agent: Arc<AsyncMutex<Agent>>, text: String) {
+        if self.cancel_token.is_some() {
+            return; // already busy
+        }
+        if self.event_rx.is_none() {
+            // App constructed without a subscription — re-establish one.
+            if let Ok(guard) = agent.try_lock() {
+                self.event_rx = Some(guard.subscribe());
+            }
+        }
+        self.messages.push(MessageItem::user(&text));
+        self.prompt.push_history(&text);
+        let cancel = CancellationToken::new();
+        self.cancel_token = Some(cancel.clone());
+
+        let cancel_for_task = cancel.clone();
+        let agent_clone = agent.clone();
+        let text_clone = text.clone();
+        tokio::spawn(async move {
+            let mut guard = agent_clone.lock().await;
+            let result = guard.prompt(&text_clone).await;
+            drop(guard);
+            if let Err(err) = result {
+                let _ = cancel_for_task; // keep the cancellation alive until drop
+                let guard = agent_clone.lock().await;
+                guard.emit(AgentEvent::Error(err.to_string()));
+            }
+        });
+    }
+
+    /// Cancel the in-flight turn (if any).
+    pub fn cancel(&mut self) {
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+        }
+    }
+
+    /// Open the model selector. The selector lists the supplied
+    /// candidates; the App does not interpret `value` — the caller
+    /// closes the selector with [`App::close_selector`] and applies
+    /// the picked value.
+    pub fn open_selector(&mut self, selector: Selector) {
+        self.selector = Some(selector);
+    }
+
+    /// Close the selector and return the picked value if any.
+    pub fn close_selector(&mut self) -> Option<Selector> {
+        self.selector.take()
+    }
+
+    /// Replace the active selector — used by the binary entry point
+    /// when it wants to mutate the selector state in response to a key
+    /// event without taking it out of the App.
+    pub fn replace_selector(&mut self, selector: Selector) {
+        self.selector = Some(selector);
+    }
+
+    /// Whether the selector modal is currently visible.
+    pub fn selector_open(&self) -> bool {
+        self.selector.is_some()
+    }
+
+    /// Borrow the active selector (if any).
+    pub fn selector(&self) -> Option<&Selector> {
+        self.selector.as_ref()
+    }
+
+    /// Process a single [`InputEvent`]. Returns the outcome so the
+    /// caller can decide whether to redraw.
+    pub fn step(&mut self, event: InputEvent) -> StepOutcome {
+        if self.exit_requested {
+            return StepOutcome::Exit;
+        }
+        // Selector gets first dibs on keys when it is open.
+        if let Some(selector) = self.selector.as_mut() {
+            let InputEvent::Key(key) = event else {
+                return StepOutcome::Idle;
+            };
+            match selector.handle_key(key) {
+                SelectorAction::None => return StepOutcome::Idle,
+                SelectorAction::Changed => return StepOutcome::Redraw,
+                SelectorAction::Selected(_) | SelectorAction::Cancelled => {
+                    return StepOutcome::Redraw;
+                }
+            }
+        }
+        let InputEvent::Key(key) = event else {
+            return StepOutcome::Idle;
+        };
+        self.step_key(key)
+    }
+
+    /// Process a single [`Key`]. Public so tests can step the App
+    /// with explicit keys.
+    pub fn step_key(&mut self, key: Key) -> StepOutcome {
+        // Global keys first.
+        match key {
+            // Esc cancels the in-flight turn, otherwise dismisses
+            // selectors (handled above) or is a no-op.
+            Key {
+                code: KeyCode::Esc,
+                modifiers,
+            } if modifiers.is_empty() && self.is_busy() => {
+                self.cancel();
+                return StepOutcome::Redraw;
+            }
+            // Global Ctrl+C.
+            Key {
+                code: KeyCode::Char('c'),
+                modifiers,
+            } if modifiers == KeyModifiers::CONTROL => {
+                if self.is_busy() {
+                    self.cancel();
+                    return StepOutcome::Redraw;
+                }
+                self.exit_requested = true;
+                return StepOutcome::Exit;
+            }
+            // Global Ctrl+L clears the screen.
+            Key {
+                code: KeyCode::Char('l'),
+                modifiers,
+            } if modifiers == KeyModifiers::CONTROL => {
+                self.messages.clear();
+                return StepOutcome::Redraw;
+            }
+            _ => {}
+        }
+
+        match self.prompt.handle_key(key) {
+            PromptAction::None => StepOutcome::Idle,
+            PromptAction::Changed => StepOutcome::Redraw,
+            PromptAction::Submit(text) => {
+                // Caller is responsible for invoking `submit` with an
+                // `Arc<AsyncMutex<Agent>>` — we just announce the
+                // submitted text and clear the buffer.
+                let submitted = text.clone();
+                self.prompt.clear();
+                StepOutcome::Submitted(submitted)
+            }
+            PromptAction::Interrupt => {
+                self.cancel();
+                StepOutcome::Redraw
+            }
+            PromptAction::Eof => {
+                self.exit_requested = true;
+                StepOutcome::Exit
+            }
+        }
+    }
+
+    /// Mark the App for exit (e.g. after `/exit`).
+    pub fn request_exit(&mut self) {
+        self.exit_requested = true;
+    }
+
+    /// Append a free-form info line to the message view (used by
+    /// slash commands to print help / errors).
+    pub fn info(&mut self, text: impl Into<String>) {
+        self.messages.push_info(text);
+    }
+
+    /// Render the App into a `Buffer` at the given area.
+    pub fn render_to_buffer(&self, area: Rect, buf: &mut Buffer) {
+        // Layout: message view fills the top, prompt the bottom row,
+        // status bar the row above the prompt.
+        let status_height = 1u16;
+        let prompt_height = 1u16;
+        let message_height = area.height.saturating_sub(status_height + prompt_height);
+        let message_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: message_height,
+        };
+        let status_area = Rect {
+            x: area.x,
+            y: area.y + message_height,
+            width: area.width,
+            height: status_height,
+        };
+        let prompt_area = Rect {
+            x: area.x,
+            y: area.y + message_height + status_height,
+            width: area.width,
+            height: prompt_height,
+        };
+
+        self.messages.render_to_buffer(message_area, buf);
+        self.status_bar
+            .render_to_buffer(&self.status_data, status_area, buf);
+
+        // Prompt line.
+        let line = self.prompt.render_line(area.width);
+        for (col, ch) in line.chars().enumerate() {
+            let x = prompt_area.x + col as u16;
+            if x >= prompt_area.x + prompt_area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, prompt_area.y)) {
+                cell.set_char(ch);
+            }
+        }
+
+        // Selector overlay — when open, draw on top of everything
+        // except the prompt and status.
+        if let Some(selector) = &self.selector {
+            let lines = selector.render_lines(area.width);
+            let start_row = area.y + 1;
+            for (offset, line) in lines.iter().enumerate() {
+                let y = start_row + offset as u16;
+                if y >= area.y + area.height.saturating_sub(status_height + prompt_height) {
+                    break;
+                }
+                for (col, ch) in line.chars().enumerate() {
+                    let x = area.x + col as u16;
+                    if x >= area.x + area.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char(ch);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render the App into a flat snapshot (used by the snapshot tests
+    /// in `tests/snapshot.rs`).
+    pub fn render_snapshot(&self, width: u16, height: u16) -> RenderSnapshot {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let mut buf = Buffer::empty(area);
+        self.render_to_buffer(area, &mut buf);
+        let lines = buf
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        RenderSnapshot {
+            width,
+            height,
+            lines,
+            prompt_placeholder: self.config.prompt_placeholder.clone(),
+            prompt_buffer: self.prompt.text().to_string(),
+            selector_open: self.selector_open(),
+            selector_title: self.selector.as_ref().map(|s| s.title().to_string()),
+            selector_items: self
+                .selector
+                .as_ref()
+                .map(|s| s.items().to_vec())
+                .unwrap_or_default(),
+            selector_cursor: self.selector.as_ref().map(|s| s.cursor()),
+            status: self.status_data.clone(),
+        }
+    }
+
+    /// Convert a raw `crossterm` event into an [`InputEvent`]. Used by
+    /// the binary entry point.
+    pub fn translate_event(event: CtEvent) -> InputEvent {
+        match event {
+            CtEvent::Key(key) => InputEvent::from(key),
+            CtEvent::Resize(w, h) => InputEvent::Resize {
+                width: w,
+                height: h,
+            },
+            _ => InputEvent::Ignored,
+        }
+    }
+
+    /// Translate a slice of `crossterm` events.
+    pub fn translate_events<I: IntoIterator<Item = CtEvent>>(events: I) -> Vec<InputEvent> {
+        events.into_iter().map(Self::translate_event).collect()
+    }
+}
+
+// Quiet unused-import warning for the parking_lot::Mutex, which we
+// keep available for downstream code that wants to wrap state behind
+// the App handle.
+#[allow(dead_code)]
+fn _keep_mutex_path() -> Arc<Mutex<()>> {
+    Arc::new(Mutex::new(()))
+}
+
+// Quiet unused-editor-action warning — the import is there for the
+// public method signature contract.
+#[allow(dead_code)]
+const _: EditorAction = EditorAction::None;

@@ -859,6 +859,7 @@ dependencies = [
  "async-trait",
  "futures",
  "indexmap",
+ "parking_lot",
  "pi-ai",
  "pi-protocol",
  "serde",
@@ -892,12 +893,16 @@ name = "pi-coding-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
+ "crossterm",
+ "parking_lot",
  "pi-agent-core",
  "pi-ai",
  "pi-extensions",
  "pi-protocol",
  "pi-tui",
+ "ratatui",
  "serde",
  "serde_json",
  "tokio",
@@ -952,10 +957,15 @@ dependencies = [
  "anyhow",
  "crossterm",
  "parking_lot",
+ "pi-agent-core",
+ "pi-ai",
+ "pi-protocol",
  "ratatui",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

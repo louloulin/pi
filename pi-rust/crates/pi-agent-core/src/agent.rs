@@ -1,29 +1,22 @@
 //! High-level `Agent` facade. Mirrors the `Agent` class exported from
 //! `packages/agent/src/agent.ts`.
 
+use parking_lot::Mutex;
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Message, Model};
+use pi_protocol::{Content, Message, Model};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::agent_loop::{AgentLoop, TurnOutcome};
+use crate::events::{AgentEvent, AssistantMessageUpdate};
 use crate::hooks::{AgentHookAdapter, PrepareHookFn, ShouldStopHookFn};
 use crate::queue::{MessageQueue, QueueMode};
 use crate::state::{AgentConfig, AgentState};
 
-/// Public event emitted to subscribers. Stage 2 fills in the full union.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    /// A user message was enqueued.
-    UserMessage(Message),
-    /// A turn finished.
-    TurnEnd(TurnOutcome),
-}
-
 /// User-facing options for constructing an [`Agent`].
 ///
-/// Mirrors `AgentOptions` from `packages/agent/src/agent.ts` (the fields
-/// relevant to Stage 2 of the Rust port — Stage 4 fills in queue policies
-/// and follow-up / steering APIs).
+/// Mirrors `AgentOptions` from `packages/agent/src/agent.ts`.
 #[derive(Clone)]
 pub struct AgentOptions {
     /// Default model the agent picks when none is supplied at call time.
@@ -92,21 +85,25 @@ impl AgentOptions {
     }
 }
 
+/// Subscriber handle — every `subscribe()` call returns one and every
+/// event is fanned out to all live subscribers.
+pub type SubscriberSender = mpsc::UnboundedSender<AgentEvent>;
+
 /// User-facing agent handle.
 pub struct Agent {
     inner: AgentLoop,
     queue: MessageQueue,
-    /// Live event sink for [`Agent::subscribe`]. Stage 4 wires the
-    /// bridge from `AgentLoop` events to subscribers; today the field
-    /// is parked so the struct shape stays stable for downstream work.
-    #[allow(dead_code)]
-    events: mpsc::UnboundedSender<AgentEvent>,
+    /// Shared sink for events fanned out from the loop's observer
+    /// hook. New senders registered via [`Agent::subscribe`] are added
+    /// here; subscribers that fall behind stay in lockstep with the
+    /// loop because the observer is synchronous (no awaits between
+    /// events).
+    subscribers: Arc<Mutex<Vec<SubscriberSender>>>,
 }
 
 impl Agent {
     /// Construct an agent from [`AgentOptions`].
     pub fn new(options: AgentOptions) -> Self {
-        let (tx, _rx) = mpsc::unbounded_channel();
         let state = AgentState {
             system_prompt: options.system_prompt.clone(),
             messages: Vec::new(),
@@ -120,15 +117,19 @@ impl Agent {
         Self {
             inner: AgentLoop::new(config, state, hooks),
             queue: MessageQueue::new(QueueMode::default()),
-            events: tx,
+            subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Subscribe to agent events.
+    ///
+    /// Every subscriber receives every event — the TUI and any
+    /// extension bridge share the same fan-out. Subscribers whose
+    /// channel is closed are pruned by the fan-out loop the next time
+    /// an event is emitted.
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        // Forward `tx` into a side-channel — Stage 2 wires the live bridge.
-        let _ = tx;
+        self.subscribers.lock().push(tx);
         rx
     }
 
@@ -148,14 +149,172 @@ impl Agent {
         self.inner.hooks()
     }
 
-    /// Enqueue a user message and trigger a turn.
+    /// Mutable borrow of the hook adapter — tests use this to swap
+    /// hooks in mid-run.
+    pub fn hooks_mut(&mut self) -> &mut AgentHookAdapter {
+        self.inner.hooks_mut()
+    }
+
+    /// Active model — the one the loop will dispatch to on the next
+    /// turn unless overridden via [`Agent::set_model_override`].
+    pub fn model(&self) -> &Model {
+        &self.inner.config().model
+    }
+
+    /// Mutable borrow of the configured model. Used by the
+    /// `/model` slash command to swap the active model.
+    pub fn set_model(&mut self, model: Model) {
+        self.inner.config_mut().model = model;
+    }
+
+    /// Set a per-turn model override. Pass `None` to clear.
+    pub fn set_model_override(&mut self, model: Option<Model>) {
+        self.inner.state_mut().model_override = model;
+    }
+
+    /// Mutable borrow of the inner state — used by tests and by the
+    /// session layer to inspect / mutate the message log.
+    pub fn state_mut(&mut self) -> &mut AgentState {
+        self.inner.state_mut()
+    }
+
+    /// Immutable borrow of the inner state.
+    pub fn state(&self) -> &AgentState {
+        self.inner.state()
+    }
+
+    /// Borrow the message queue (used by tests to inspect queued
+    /// messages between turns).
+    pub fn queue(&self) -> &MessageQueue {
+        &self.queue
+    }
+
+    /// Enqueue a user message, drain the queue, and run a turn.
+    ///
+    /// The loop drives each turn through the streaming layer, executes
+    /// any tool calls the model emits, and emits the full event union
+    /// on every subscriber channel. The call returns when the loop
+    /// exits (either because the model stopped, the user hook
+    /// requested an early exit, or the loop surface returned an
+    /// error).
     pub async fn prompt(&mut self, text: &str) -> Result<(), crate::agent_loop::AgentError> {
-        // Stage 0: enqueue only. Stage 2 drains + streams + executes tools.
-        self.queue.push(Message {
+        let user_message = Message {
             role: pi_protocol::Role::User,
-            content: vec![pi_protocol::Content::text(text)],
+            content: vec![Content::text(text)],
             model: None,
-        });
+        };
+        self.queue.push(user_message.clone());
+        self.emit(AgentEvent::UserMessage(user_message));
+
+        let drained = self.queue.drain();
+        if drained.is_empty() {
+            return Ok(());
+        }
+
+        // Build an observer that fans events out to all subscribers
+        // for the duration of this turn. Drop the Arc when the call
+        // returns so the closure captures a weak handle that does not
+        // extend the Agent's lifetime.
+        let subscribers = self.subscribers.clone();
+        self.inner
+            .run(drained, |turn: &TurnOutcome| {
+                fan_turn_to_subscribers(&subscribers, turn);
+            })
+            .await?;
+
         Ok(())
     }
+
+    /// Emit an event to every subscriber. Subscribers whose channel is
+    /// closed are silently skipped. Public so the TUI / extension
+    /// bridge can re-emit events they want to surface (e.g. when the
+    /// `Agent::prompt` call returns an error and the TUI wants to
+    /// surface it).
+    pub fn emit(&self, event: AgentEvent) {
+        let mut guard = self.subscribers.lock();
+        guard.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+}
+
+/// Translate a finished `TurnOutcome` into the AgentEvent sequence the
+/// TUI consumes and fan it out to every subscriber.
+///
+/// The translator covers the three event groups the TUI depends on:
+/// `TurnStart` → `MessageStart` → `MessageUpdate(*)` → `MessageEnd` →
+/// `ToolExecutionStart`(* per tool call) → `ToolExecutionEnd`(*) →
+/// `TurnEnd`.
+fn fan_turn_to_subscribers(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, turn: &TurnOutcome) {
+    emit_to(subscribers, AgentEvent::TurnStart);
+    emit_to(
+        subscribers,
+        AgentEvent::MessageStart {
+            model: turn.message.model.clone(),
+        },
+    );
+
+    for block in &turn.message.content {
+        match block {
+            Content::Text(text) => {
+                emit_to(
+                    subscribers,
+                    AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta(text.text.clone())),
+                );
+            }
+            Content::ToolCall(call) => {
+                emit_to(
+                    subscribers,
+                    AgentEvent::MessageUpdate(AssistantMessageUpdate::ToolCallDelta {
+                        index: 0,
+                        id: Some(call.id.clone()),
+                        name: Some(call.name.clone()),
+                        arguments_delta: Some(call.arguments.to_string()),
+                    }),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    emit_to(
+        subscribers,
+        AgentEvent::MessageEnd {
+            message: turn.message.clone(),
+        },
+    );
+
+    let started = Instant::now();
+    for tool_message in &turn.tool_results {
+        let result = tool_message.content.iter().find_map(|c| match c {
+            Content::ToolResult(r) => Some(r.clone()),
+            _ => None,
+        });
+        if let Some(result) = result {
+            let call = pi_protocol::ToolCall {
+                id: result.tool_call_id.clone(),
+                name: String::new(),
+                arguments: serde_json::Value::Null,
+            };
+            emit_to(subscribers, AgentEvent::ToolExecutionStart { call });
+            emit_to(
+                subscribers,
+                AgentEvent::ToolExecutionEnd {
+                    result,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+            );
+        }
+    }
+
+    emit_to(
+        subscribers,
+        AgentEvent::TurnEnd {
+            message: turn.message.clone(),
+            tool_results: turn.tool_results.clone(),
+        },
+    );
+}
+
+fn emit_to(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, event: AgentEvent) {
+    let mut guard = subscribers.lock();
+    guard.retain(|tx| tx.send(event.clone()).is_ok());
 }

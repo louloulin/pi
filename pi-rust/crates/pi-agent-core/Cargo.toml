@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
 
+parking_lot.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

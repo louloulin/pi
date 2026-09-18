@@ -17,6 +17,7 @@ mod events;
 mod model;
 mod session;
 mod tool;
+mod ui;
 
 pub use content::*;
 pub use context::*;
@@ -24,3 +25,4 @@ pub use events::*;
 pub use model::*;
 pub use session::*;
 pub use tool::*;
+pub use ui::*;
