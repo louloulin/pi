@@ -7,6 +7,7 @@ members = [
     "crates/pi-tui",
     "crates/pi-protocol",
     "crates/pi-extensions",
+    "crates/pi-session",
     "crates/pi-mono",
 ]
 
@@ -56,8 +57,12 @@ wasi = "0.13"
 crossterm = "0.28"
 ratatui = "0.28"
 
-# SQLite (session storage)
-rusqlite = { version = "0.31", features = ["bundled"] }
+# SQLite (session storage) — locked to a specific version so the bundled
+# sqlite is byte-compatible across machines (the Stage 5 pi-session crate
+# reads files produced by the TS port and vice-versa).
+rusqlite = { version = "=0.31", features = ["bundled"] }
+# zstd compression — used to compress the messages payload column.
+zstd = "=0.13"
 
 # WASM bindings — used by the `wasm` feature on `pi-ai` and `pi-agent-core`.
 # These crates are pure rust + small generated shims, so they build on both
@@ -72,7 +77,7 @@ getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.3", features = ["serde"] }
-parking_lot = "0.12"
+parking_lot = "=0.12"
 walkdir = "2.5"
 notify = "6.1"
 dirs = "5.0"
