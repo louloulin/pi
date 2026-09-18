@@ -335,39 +335,40 @@ async fn run_slash_command(
             ));
         }
         SlashCommand::Resume => {
-            // Stage 4 fallback: list session files under the session
-            // directory if available, otherwise inform the user that
-            // `/resume` requires a session directory.
-            if let Some(log) = &options.session_log {
-                let dir = log.directory().to_path_buf();
-                let entries = match list_session_files(&dir) {
-                    Ok(entries) => entries,
-                    Err(err) => {
-                        app.info(format!("/resume: {err}"));
-                        return Ok(());
-                    }
-                };
-                if entries.is_empty() {
-                    app.info("/resume: no saved sessions".to_string());
-                } else {
-                    let items = entries
-                        .into_iter()
-                        .map(|entry| {
-                            let id = entry
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            SelectorItem::new(format!("resume:{id}"), id.clone())
-                                .with_description(entry.display().to_string())
-                        })
-                        .collect::<Vec<_>>();
-                    let selector = Selector::new("Pick a session to resume", items);
-                    app.open_selector(selector);
-                }
-            } else {
+            // Stage 5: drive the selector from the SQLite reader via
+            // `pi_coding_agent::list_resumable` so the user sees
+            // versioned, time-stamped session metadata instead of raw
+            // filenames. Falls back to a friendly message when the
+            // session directory is empty or unconfigured.
+            let dir = options
+                .session_log
+                .as_ref()
+                .map(|log| log.directory().to_path_buf());
+            let Some(dir) = dir else {
                 app.info("/resume: session directory not configured".to_string());
+                return Ok(());
+            };
+            let refs = match crate::list_resumable(&dir) {
+                Ok(refs) => refs,
+                Err(err) => {
+                    app.info(format!("/resume: {err}"));
+                    return Ok(());
+                }
+            };
+            if refs.is_empty() {
+                app.info("/resume: no saved sessions".to_string());
+                return Ok(());
             }
+            let items = refs
+                .into_iter()
+                .map(|r| {
+                    let value = format!("resume:{}", r.session_id);
+                    let label = r.session_id.clone();
+                    SelectorItem::new(value, label).with_description(r.display())
+                })
+                .collect::<Vec<_>>();
+            let selector = Selector::new("Pick a session to resume", items);
+            app.open_selector(selector);
         }
         SlashCommand::Unknown(name) => {
             app.info(format!("unknown command /{name} — try /help"));
@@ -376,6 +377,7 @@ async fn run_slash_command(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn list_session_files(dir: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
     if !dir.exists() {
         return Ok(Vec::new());
