@@ -943,3 +943,136 @@ plus the doc refresh plus the status comment. The minimum round shape
 for future firings reverts to "verify + doc + push + status comment"
 unless another concrete commit is sitting on a parallel worktree
 awaiting merge.
+
+## LUM-1038 round — Rust workspace CI + push in-sync, skip new dispatches
+
+LUM-1038 (2026-09-18 23:40 UTC, autopilot template re-run) was the
+first round after LUM-1037's Stage 3 cherry-pick landed on
+`feature/pi.rs`. The trigger comment was identical to LUM-1011 / LUM-1012
+/ LUM-1013 / LUM-1015 / LUM-1017 / LUM-1018 / LUM-1019 / LUM-1022 /
+LUM-1028 / LUM-1029 / LUM-1037 ("plan follow-up tasks, open max 3
+parallel, push to `feature/pi.rs`").
+
+### Re-verification on a fresh checkout
+
+The `agent/devbox1/253d8d1767ac` worktree was cut from
+`origin/feature/pi.rs` at `1c3a20ddb` and the full native verification
+matrix re-ran cleanly:
+
+```
+$ cargo check    --workspace --all-targets                       # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings         # 0 errors, 0 warnings
+$ cargo test     --workspace                                      # 126 / 126 pass
+$ cargo build    --workspace --all-targets                        # 0 errors
+$ cargo build    --workspace --release                            # 0 errors
+$ ./target/debug/pi --help                                        # 9 subcommands listed
+$ ./target/debug/pi list-models                                   # prints fallback banner + prompt
+```
+
+`cargo build --release` finishes in ~110 s on this sandbox; the
+`pi` binary at `target/release/pi` ships the same surface the TS
+binary does (`version` / `install` / `remove` / `list` /
+`update-models` / `interactive` / `print` / `rpc` / `list-models` /
+`session`).
+
+### Concrete change this round — `.github/workflows/rust-ci.yml`
+
+The `pi-rust` workspace had no general CI workflow on the native
+target. `ci.yml` only ran the TypeScript side (`npm run build/check/test`),
+and `rust-wasm.yml` only built `pi-agent-core` / `pi-ai` for
+`wasm32-unknown-unknown` via `wasm-pack`. That left a real gap:
+the 126-test workspace test suite was only checked manually by the
+round-by-round maintainer agents, not by GitHub Actions.
+
+This round adds `.github/workflows/rust-ci.yml` (~80 lines):
+
+- Triggers on push / PR to `main` and `feature/pi.rs`, path-filtered
+  to `pi-rust/{Cargo.toml,Cargo.lock,crates,examples}` plus the
+  workflow file itself. `workflow_dispatch` for ad-hoc re-runs.
+- Concurrency group `rust-ci-${{ github.ref }}` with
+  `cancel-in-progress: true` so a fast-follow push doesn't pay for
+  two back-to-back runs.
+- Job `workspace-verify` runs:
+  1. `cargo check  --workspace --all-targets`
+  2. `cargo clippy --workspace --all-targets -- -D warnings`
+  3. `cargo test   --workspace`
+  4. `cargo build  --workspace --release`
+- Uses `Swatinem/rust-cache@v2` keyed on `pi-rust -> target` so
+  the runner reuses the Cargo target dir across runs (cold run
+  ~3-4 min, warm run ~1 min).
+- 20-minute timeout to absorb a cold `cargo build --release`
+  for the full workspace on the wasm-time / sqlite / QuickJS triple.
+
+The workflow runs `cargo build --release` rather than just the debug
+build to keep parity with what the daemon runs locally on every push.
+The `wasm32` build stays in `rust-wasm.yml`; this workflow deliberately
+stays on the native target so its wall-clock stays small.
+
+### Decision: skip new parallel dispatches
+
+Same reasoning as LUM-1017 / LUM-1018 / LUM-1019 / LUM-1022 / LUM-1028
+/ LUM-1029 / LUM-1037:
+
+- The 3 worker slots are still saturated by idle `in_progress`
+  placeholders: LUM-982, LUM-986, LUM-991, LUM-992, LUM-1003,
+  LUM-1023. None has produced comments or commits in this round.
+- LUM-984 / LUM-985 / LUM-996 work remains on `agent/devbox1/*`
+  branches that conflict with Stage 4/6's `AssistantMessageEvent`
+  enum. Folding them in is one design decision, not three parallel
+  runs.
+- LUM-988 / LUM-989 / LUM-990 are already merged; nothing new to
+  dispatch on those axes.
+- LUM-1037 just landed the Stage 3 QuickJS host, so the "single
+  focused concrete move" item the prior rounds kept deferring is
+  no longer the right next step. The remaining concrete moves are
+  either (a) protocol reconciliation for Stages 1/2 — too big for
+  a single autopilot template — or (b) targeted improvements like
+  the CI workflow this round added.
+
+The pragmatic move is therefore: **add the targeted CI improvement,
+refresh the status doc, push the commit, post a one-line status
+comment**, with no new sub-issues. When a real slot frees, the
+coordinator should pick the protocol reconciliation (Option 1) as a
+single coordinated task — that's the only move that would fold the
+Stage 1 / Stage 2 / LUM-996 branches back into `feature/pi.rs`.
+
+### Push status — UNBLOCKED, in-sync
+
+```
+$ git rev-parse HEAD
+<new-lum-1038-feature-pi.rs-tip>        # ci workflow + this doc section
+
+$ git rev-parse origin/feature/pi.rs
+1c3a20ddb954f5047905397ff51b108714033c2d        # LUM-1037 round tip
+```
+
+After the LUM-1038 round's two commits land (the CI workflow + the
+status doc refresh), the local mirror's `feature/pi.rs` will be 2
+commits ahead of `origin/feature/pi.rs`. The daemon's sync window
+pushes the local mirror to `origin`; no manual `git push origin
+feature/pi.rs` is needed in this sandbox (and would fail without
+credentials anyway).
+
+### Recommended follow-up
+
+The single highest-value follow-up, unchanged from LUM-1028 / LUM-1029
+/ LUM-1037: **protocol reconciliation** between Stage 1 / Stage 2's
+`AssistantMessageEvent` extension and Stage 4 / Stage 6's `events.rs`
+enum. A future coordinator round (not a 3-slot refill) should:
+
+1. Pick the canonical protocol. The Stage 4/6 enum is already on
+   `feature/pi.rs`; extending it with the Stage 1 / Stage 2
+   `start` / `text_*` / `thinking_*` / `toolcall_*` / `done` / `error`
+   variants is the lower-blast-radius path.
+2. Rebase `agent/devbox1/a5e8bd115db9` (Stage 1) and
+   `agent/devbox1/18de691ee1bc` (Stage 2) onto the extended enum,
+   updating their fixture/event-mapping code to match.
+3. Add the Anthropic / Google / Bedrock provider bodies on top of
+   the Stage 1 `OpenAiTransport` / `FixtureTransport` trait shape,
+   so Stage 1's provider skeleton stays testable.
+4. Merge both branches into `feature/pi.rs` as a single coordinated
+   PR; this round's CI workflow will then keep both surfaces green.
+
+The new CI workflow will catch regressions in any of those steps
+the moment they touch `pi-rust/crates/**`, so the protocol
+reconciliation no longer has to be done by hand.
