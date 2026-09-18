@@ -1,0 +1,83 @@
+name: Rust CI
+
+# Workspace-level CI for the `pi-rust/` port of pi. Mirrors the
+# verification matrix the local maintainers run on every push to
+# `feature/pi.rs` / `main`:
+#
+#   cargo check  --workspace --all-targets
+#   cargo clippy --workspace --all-targets -- -D warnings
+#   cargo test   --workspace
+#
+# The wasm32 build + JS host smoke is covered by `rust-wasm.yml`;
+# this workflow stays on the native target so it runs in under 5
+# minutes on a fresh `ubuntu-latest` runner.
+
+on:
+  push:
+    branches: [main, feature/pi.rs]
+    paths:
+      - "pi-rust/Cargo.toml"
+      - "pi-rust/Cargo.lock"
+      - "pi-rust/crates/**"
+      - "pi-rust/examples/**"
+      - ".github/workflows/rust-ci.yml"
+  pull_request:
+    branches: [main, feature/pi.rs]
+    paths:
+      - "pi-rust/Cargo.toml"
+      - "pi-rust/Cargo.lock"
+      - "pi-rust/crates/**"
+      - "pi-rust/examples/**"
+      - ".github/workflows/rust-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  workspace-verify:
+    name: cargo check / clippy / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "pi-rust -> target"
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        # crossterm / ratatui don't need anything special, but a couple
+        # of dev-deps (`wiremock` in pi-ai's tests) listen on 0.0.0.0
+        # which the runner's firewall allows by default. Keep this
+        # step defensive in case future deps need extra packages.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: cargo check (workspace)
+        working-directory: pi-rust
+        run: cargo check --workspace --all-targets
+
+      - name: cargo clippy (workspace, deny warnings)
+        working-directory: pi-rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (workspace)
+        working-directory: pi-rust
+        run: cargo test --workspace
+
+      - name: cargo build (release)
+        working-directory: pi-rust
+        run: cargo build --workspace --release
