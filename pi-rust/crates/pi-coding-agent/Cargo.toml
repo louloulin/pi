@@ -19,6 +19,7 @@ pi-ai = { path = "../pi-ai" }
 pi-agent-core = { path = "../pi-agent-core" }
 pi-extensions = { path = "../pi-extensions" }
 pi-tui = { path = "../pi-tui" }
+pi-session = { path = "../pi-session" }
 
 tokio.workspace = true
 serde.workspace = true
