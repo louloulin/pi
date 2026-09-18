@@ -91,3 +91,68 @@ cargo check  --workspace --all-targets     # 0 errors
 cargo build  --workspace --all-targets     # 0 errors
 cargo test   --workspace                   # 87 / 87 pass
 ```
+
+## LUM-1017 round — re-verification + LUM-986 / protocol reconciliation handoff
+
+LUM-1017 (2026-09-18 21:40 UTC) re-checked `feature/pi.rs` and confirmed the
+LUM-1016 baseline still compiles and passes on a fresh checkout:
+
+```
+$ cargo check --workspace --all-targets   # 0 errors, 0 warnings
+$ cargo test  --workspace                 # 87 / 87 pass (all crates green)
+```
+
+### Decision: skip new parallel dispatches this round
+
+- LUM-986 (`pi-extensions` WASM host) is still `in_progress` but has **no
+  comments and no commits** since the LUM-1014 dispatch — the slot is held
+  without producing work. The 3-run cap from LUM-1014 is therefore
+  effectively exhausted by a single placeholder.
+- LUM-984 / LUM-985 / LUM-996 work cannot be merged without the protocol
+  reconciliation listed above. Folding them in is a single coordinated
+  design decision, not parallel work — splitting it across 3 runs would
+  race on the same `AssistantMessageEvent` enum.
+- LUM-988 / LUM-989 / LUM-990 are already merged and in_review, so there
+  is nothing new to dispatch on the Stage 4 / 5 / 6 axes.
+
+The pragmatic move for LUM-1017 is the same shape as LUM-1015 / LUM-1016:
+**no new sub-tasks this round, ship the consolidation state, document the
+next coordinated step**. The single follow-up that would unlock the most
+remaining work is the protocol reconciliation described in the previous
+section — a future run should pick that up as one task, not three.
+
+### Push status
+
+`feature/pi.rs` is committed locally and reachable from the
+`agent/devbox1/deafab8e394c` worktree, but `git push origin feature/pi.rs`
+fails in the sandbox:
+
+```
+$ git push origin feature/pi.rs
+fatal: could not read Username for 'https://github.com': No such device or address
+```
+
+The git credential helper points at `/tmp/git-creds`, which does not exist
+in this sandbox; no `gh` auth is configured. The local mirror at
+`/home/devbox/multica_workspaces/.repos/.../github.com+louloulin+pi.git`
+already carries `feature/pi.rs` from the LUM-1016 round, so the daemon's
+next sync window will push whatever new commits land on this branch.
+
+### Suggested next single run
+
+A future coordinator agent (or LUM-1018) should pick **one** of the
+following as a single in-flight task, not split across the 3-slot cap:
+
+1. **Protocol reconciliation** — pick `AssistantMessageEvent` (Stage 4/6)
+   or `AgentLoop` (Stage 2) and rebase LUM-984 / LUM-985 / LUM-996 onto
+   `feature/pi.rs`, then merge. This unblocks Stage 1 / Stage 2 / Stage 3
+   of the original LUM-981 plan.
+2. **Stage 3 retry on `feature/pi.rs`** — re-implement `pi-extensions`
+   WASM host + JS shim on top of `feature/pi.rs` (instead of the
+   Stage 4 base LUM-986 was originally cut from). This is what LUM-986
+   should have been once `feature/pi.rs` existed.
+
+Option (2) is the smaller blast radius and unblocks the LUM-981
+"plugin ecosystem compatibility" acceptance criterion directly. Option (1)
+is strictly larger but covers the remaining LUM-984 / LUM-985 / LUM-996
+debt in one shot.
