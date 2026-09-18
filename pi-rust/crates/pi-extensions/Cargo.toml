@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "WASM host for Pi extensions. Loads JS extensions and bridges them to the Rust agent runtime."
+description = "JS extension host for Pi extensions. Loads JS/TS extension source into an embedded QuickJS runtime and bridges calls to the Rust agent."
 
 [lints]
 workspace = true
@@ -12,6 +12,11 @@ workspace = true
 [dependencies]
 pi-protocol = { path = "../pi-protocol" }
 pi-agent-core = { path = "../pi-agent-core" }
+
+# JS engine. `futures` enables `AsyncRuntime` / `AsyncContext` so we can
+# drive the runtime from tokio and use `Async<F>` for the JS host imports
+# that need to await host responses (ui.confirm / input / select).
+rquickjs-core = { version = "0.9", default-features = false, features = ["futures", "parallel"] }
 
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +26,9 @@ async-trait.workspace = true
 tokio.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true
+once_cell = "1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
