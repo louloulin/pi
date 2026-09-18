@@ -77,9 +77,9 @@ fn extension_event_tagged() {
     let ev = ExtensionEvent::ToolResult {
         result: ToolResult {
             tool_call_id: "1".into(),
-            content: Content::Text(TextContent {
+            content: Box::new(Content::Text(TextContent {
                 text: "ok".into(),
-            }),
+            })),
             is_error: false,
             details: None,
         },

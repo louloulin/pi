@@ -12,5 +12,5 @@ pub mod stream;
 pub mod types;
 
 pub use models::Models;
-pub use stream::{AssistantMessageEventStream, StreamFn};
+pub use stream::{AssistantMessageEventStream, SharedStreamFn, StreamFn};
 pub use types::{SimpleStreamOptions, StreamError};

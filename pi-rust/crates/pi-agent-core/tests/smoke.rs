@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use pi_agent_core::agent::Agent;
+use pi_agent_core::Agent;
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Model, ProviderId};
 

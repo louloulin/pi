@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Plain text content block.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextContent {
     /// UTF-8 text.
     pub text: String,
@@ -40,7 +40,10 @@ pub struct ToolResult {
     pub tool_call_id: String,
     /// Tool result content. Use a [`Content::Text`] block for human-readable
     /// output; structured data goes into [`ToolResult::details`].
-    pub content: Content,
+    ///
+    /// `Box<Content>` breaks the otherwise-infinite recursion between
+    /// [`ToolResult`] and [`Content::ToolResult`].
+    pub content: Box<Content>,
     /// True when the tool failed and the model should treat it as an error.
     #[serde(default)]
     pub is_error: bool,
@@ -48,6 +51,17 @@ pub struct ToolResult {
     /// to the host (e.g. diff metadata, exit codes, structured errors).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+impl Default for ToolResult {
+    fn default() -> Self {
+        Self {
+            tool_call_id: String::new(),
+            content: Box::new(Content::Text(TextContent::default())),
+            is_error: false,
+            details: None,
+        }
+    }
 }
 
 /// A single content block — text, image, tool call, or tool result.
