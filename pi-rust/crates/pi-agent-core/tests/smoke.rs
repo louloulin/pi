@@ -21,7 +21,7 @@ fn faux_model() -> Model {
 async fn agent_prompt_enqueues_message() {
     let mut agent = Agent::new(AgentOptions::new(
         faux_model(),
-        Arc::new(FauxProvider),
+        Arc::new(FauxProvider::default()),
         "you are pi",
     ));
     agent.prompt("hello").await.expect("prompt enqueue");
@@ -31,7 +31,7 @@ async fn agent_prompt_enqueues_message() {
 async fn agent_new_without_hooks_runs_default_loop() {
     let mut agent = Agent::new(AgentOptions::new(
         faux_model(),
-        Arc::new(FauxProvider),
+        Arc::new(FauxProvider::default()),
         "you are pi",
     ));
     // No hooks registered — the loop must fall back to the defaults

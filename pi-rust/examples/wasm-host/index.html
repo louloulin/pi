@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pi Rust WASM host</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        min-height: 100vh;
+        background: #fafafa;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #111;
+          color: #eee;
+        }
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.1rem;
+        font-weight: 600;
+      }
+      .hint {
+        font-size: 0.85rem;
+        opacity: 0.7;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 0.5rem 0.75rem;
+        font-size: 1rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        background: white;
+        color: inherit;
+      }
+      @media (prefers-color-scheme: dark) {
+        input[type="text"] {
+          background: #1c1c1c;
+          border-color: #333;
+        }
+      }
+      button {
+        padding: 0.5rem 1rem;
+        font-size: 1rem;
+        background: #0070f3;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      pre {
+        flex: 1;
+        margin: 0;
+        padding: 0.75rem;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 0.85rem;
+        line-height: 1.4;
+        background: #f3f3f3;
+        border-radius: 4px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      @media (prefers-color-scheme: dark) {
+        pre {
+          background: #1c1c1c;
+        }
+      }
+      .event {
+        margin: 0;
+        padding: 0.25rem 0;
+        border-bottom: 1px dashed rgba(127, 127, 127, 0.25);
+      }
+      .event:last-child {
+        border-bottom: none;
+      }
+      .event .tag {
+        font-weight: 600;
+        margin-right: 0.5rem;
+        opacity: 0.85;
+      }
+      .event.error .tag {
+        color: #d33;
+      }
+      .event.assistant .tag {
+        color: #06c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Pi Rust agent — WASM host</h1>
+    <p class="hint">
+      Type a prompt, press <kbd>Enter</kbd> (or click <em>Send</em>) — the
+      faux provider streams a scripted reply and the agent emits an
+      event for each stage. Open the browser devtools console for raw
+      diagnostics.
+    </p>
+    <form class="row" id="prompt-form">
+      <input
+        type="text"
+        id="prompt-input"
+        placeholder="Try: hello"
+        autocomplete="off"
+        autofocus
+      />
+      <button type="submit" id="send-button">Send</button>
+    </form>
+    <pre id="output" aria-live="polite"></pre>
+    <script type="module" src="/main.mjs"></script>
+  </body>
+</html>

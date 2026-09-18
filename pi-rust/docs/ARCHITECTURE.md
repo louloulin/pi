@@ -108,3 +108,51 @@ The TS port has `packages/protocol` but `packages/agent` and `packages/coding-ag
 both re-import those types. In Rust we make this an explicit dependency so we
 never accidentally fork a wire type and break round-trip with the TS session
 format.
+
+## Stage 6 — `wasm32-unknown-unknown` build
+
+`pi-agent-core` and `pi-ai` expose a `wasm` cargo feature that
+activates the `wasm-bindgen` exports consumed by the JS host in
+`examples/wasm-host/`. The same Rust source compiles for both
+native (`x86_64-unknown-linux-gnu`, etc.) and wasm targets; the
+target-specific `Cargo.toml` overrides keep `mio`, `reqwest`, and
+the full `tokio` feature set out of the wasm build.
+
+### Public JS surface
+
+The `wasm-pack build -p pi-agent-core --target web` artifact exports:
+
+* `default init(...)` / `initSync(...)` — instantiate the WebAssembly
+  module.
+* `AgentHandle` — wraps `Agent` with `new(modelId)`, `prompt(text)`,
+  `subscribe(cb)`, `unsubscribe(id)`. `prompt` returns a JS
+  `Promise<void>`; events are fanned out to all subscribers via
+  `serde-wasm-bindgen` (u64 fields round-trip as `BigInt`).
+* `register_faux_provider(responses?)` — seeds the in-memory
+  `Models` catalog with a faux provider and the given script of
+  canned replies. Subsequent `AgentHandle.prompt` calls reuse the
+  last reply once the queue is exhausted.
+* `lookup_model(id)` / `list_models()` — introspection helpers for
+  the host's debug overlay.
+
+### WASM-specific build details
+
+* `tokio`'s `full` feature pulls in `mio`, which does not compile on
+  `wasm32-unknown-unknown`. The wasm target switches to a minimal
+  `tokio` feature set (`sync`, `macros`, `rt`, `time`) and the
+  `pi-ai` `SimpleStreamOptions::signal` field wraps a
+  `tokio_util::sync::CancellationToken` on native and a
+  `js_sys::Function`-backed flag on wasm.
+* `Instant::now()` panics on wasm (no monotonic clock source).
+  `Agent`'s `fan_turn_to_subscribers` uses a target-conditional
+  `Monotonic` helper that falls back to `js_sys::Date::now()` on
+  wasm so `ToolExecutionEnd.duration_ms` is always a sensible
+  wall-clock millisecond count.
+* `serialize_large_number_types_as_bigints(true)` keeps `u64`
+  fields (`duration_ms`, token counts) lossless across the
+  wasm-bindgen boundary.
+* `Cargo.toml` release profile enables `lto = "fat"`,
+  `codegen-units = 1`, `panic = "abort"`, `strip = true`, and
+  `opt-level = "z"` to keep the `.wasm` small; combined with
+  `wasm-opt -Oz` the final `pi_agent_core_bg.wasm` is ~130 KB.
+

@@ -3,8 +3,15 @@
 //! The variants mirror the `agent.subscribe` event union in
 //! `packages/agent/src/agent.ts`. The agent emits these to subscribers
 //! via the channel returned by [`Agent::subscribe`](crate::Agent::subscribe).
+//!
+//! `Serialize` / `Deserialize` are derived so the `wasm` module can hand
+//! events to the JS host via `serde-wasm-bindgen`. The serde shape mirrors
+//! the TypeScript discriminated union — `type` is a literal string tag
+//! (`"turn_start"`, `"message_update"`, etc.) and the per-variant
+//! payload follows.
 
 use pi_protocol::{AssistantMessage, Message, ToolCall, ToolResult};
+use serde::{Deserialize, Serialize};
 
 /// Per-event payload delivered to subscribers of an
 /// [`Agent`](crate::Agent).
@@ -18,7 +25,8 @@ use pi_protocol::{AssistantMessage, Message, ToolCall, ToolResult};
 ///   bracket the execution of a single tool call.
 /// * `AgentStart` / `AgentEnd` bracket a single
 ///   [`Agent::prompt`](crate::Agent::prompt) call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// A new turn began.
     ///
@@ -98,13 +106,28 @@ pub enum AgentEvent {
 
 /// One incremental update emitted between `MessageStart` and
 /// `MessageEnd`.
-#[derive(Debug, Clone)]
+///
+/// `serde-wasm-bindgen` cannot serialise tagged-enum newtype variants
+/// directly (`TextDelta("foo")` becomes a `{ "TextDelta": "foo" }`
+/// object in JSON, which the JS host would have to dig into). We
+/// therefore use `#[serde(tag = "kind", content = "data")]` so the
+/// payload sits in a flat `data` field — matching the TS agent's
+/// `MessageUpdate` surface where the payload type is a discriminant
+/// (`"text_delta"`, `"thinking_delta"`, `"tool_call_delta"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AssistantMessageUpdate {
     /// Text delta — append to the current assistant block.
-    TextDelta(String),
+    TextDelta {
+        /// New text fragment to append.
+        delta: String,
+    },
     /// Thinking/reasoning delta — append to a (possibly collapsed)
     /// thinking block.
-    ThinkingDelta(String),
+    ThinkingDelta {
+        /// New thinking fragment to append.
+        delta: String,
+    },
     /// Tool-call delta — index identifies which tool call the delta
     /// belongs to. `id` and `name` are populated on the first delta
     /// for a given index; subsequent deltas carry only `arguments_delta`.

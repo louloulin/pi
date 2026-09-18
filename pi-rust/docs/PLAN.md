@@ -93,12 +93,34 @@ Scope: port `packages/session-backends/sqlite-node` to `rusqlite`.
 Exit criterion: a session recorded by the TS CLI round-trips through the
 Rust session backend without diff.
 
-### Stage 6 — WASM target for `pi-agent-core`
+### Stage 6 — WASM target for `pi-agent-core` + `pi-ai`
 Scope: compile `pi-agent-core` + `pi-ai` for `wasm32-unknown-unknown` with the
-`wasm-bindgen` ABI.
+`wasm-bindgen` ABI and ship a minimal JS host that drives an agent turn
+end-to-end through the faux provider.
 
-Exit criterion: a JS host page embeds the WASM build and drives an agent loop
-with the faux provider.
+Concrete deliverables:
+- Conditional `wasm` feature on `pi-ai` and `pi-agent-core` (no
+  `mio` / `reqwest` on the wasm target — the workspace dep overrides
+  strip `net`, `process`, `rt-multi-thread`, and `signal` from tokio).
+- `pi_ai::wasm::register_faux_provider` — seeds the in-memory model
+  catalog with a faux provider and a script of canned replies.
+- `pi_agent_core::wasm::AgentHandle` — `wasm-bindgen` wrapper that
+  exposes `new`, `prompt`, `subscribe`, `unsubscribe`; events fan out
+  to JS callbacks via `serde-wasm-bindgen` (`u64` round-tripped as
+  `BigInt`).
+- `examples/wasm-host/` — minimal Vite + ESM JS host (`index.html`,
+  `main.mjs`, `test.mjs`) that loads the wasm-pack-built package
+  and runs four `node --test` smoke tests.
+- `.github/workflows/rust-wasm.yml` — CI workflow that builds
+  `wasm-pack build -p pi-agent-core --target web`, runs the JS
+  smoke tests, asserts `pi_agent_core_bg.wasm` is under the 500 KB
+  budget.
+- Size budget: `pi_agent_core_bg.wasm` < 500 KB (currently ~130 KB
+  after `wasm-opt -Oz`).
+
+Exit criterion: a JS host page embeds the WASM build and drives an agent
+loop with the faux provider; `wasm-pack build -p pi-agent-core --target web`
+produces a `.wasm` < 500 KB.
 
 ## Concurrent execution
 

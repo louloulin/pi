@@ -78,7 +78,7 @@ pub struct InteractiveOptions {
 
 /// Entry point invoked from `main`.
 pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<InteractiveExit> {
-    let stream_fn: SharedStreamFn = Arc::new(FauxProvider);
+    let stream_fn: SharedStreamFn = Arc::new(FauxProvider::default());
     let resolved_model = options
         .model
         .clone()

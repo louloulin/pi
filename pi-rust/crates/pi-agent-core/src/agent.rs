@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{Content, Message, Model};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -257,7 +258,9 @@ fn fan_turn_to_subscribers(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, turn
             Content::Text(text) => {
                 emit_to(
                     subscribers,
-                    AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta(text.text.clone())),
+                    AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta {
+                        delta: text.text.clone(),
+                    }),
                 );
             }
             Content::ToolCall(call) => {
@@ -282,7 +285,7 @@ fn fan_turn_to_subscribers(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, turn
         },
     );
 
-    let started = Instant::now();
+    let started = monotonic_now();
     for tool_message in &turn.tool_results {
         let result = tool_message.content.iter().find_map(|c| match c {
             Content::ToolResult(r) => Some(r.clone()),
@@ -299,7 +302,7 @@ fn fan_turn_to_subscribers(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, turn
                 subscribers,
                 AgentEvent::ToolExecutionEnd {
                     result,
-                    duration_ms: started.elapsed().as_millis() as u64,
+                    duration_ms: monotonic_ms_since(started),
                 },
             );
         }
@@ -312,6 +315,66 @@ fn fan_turn_to_subscribers(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, turn
             tool_results: turn.tool_results.clone(),
         },
     );
+}
+
+/// Monotonic timestamp — wraps [`Instant::now`] on native targets and
+/// returns a `SystemTime`-based fallback on `wasm32-unknown-unknown`
+/// where `Instant::now` panics (no monotonic clock source is
+/// available).
+fn monotonic_now() -> Monotonic {
+    Monotonic::now()
+}
+
+/// Elapsed milliseconds since the given monotonic timestamp.
+///
+/// Always returns `0` on wasm32 because the only timestamp source
+/// available there is wall-clock — it does not satisfy the
+/// `Instant` monotonicity contract.
+fn monotonic_ms_since(started: Monotonic) -> u64 {
+    started.elapsed_ms()
+}
+
+#[derive(Copy, Clone)]
+struct Monotonic {
+    #[cfg(not(target_arch = "wasm32"))]
+    instant: Instant,
+    #[cfg(target_arch = "wasm32")]
+    millis: u64,
+}
+
+impl Monotonic {
+    fn now() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                instant: Instant::now(),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // `js_sys::Date::now()` returns wall-clock milliseconds since
+            // the Unix epoch. We only need *elapsed* milliseconds so the
+            // absolute origin does not matter — wall clock is good
+            // enough for a tool-execution duration.
+            let now = js_sys::Date::now() as u64;
+            Self { millis: now }
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.instant.elapsed().as_millis() as u64
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Clamp to zero so a clock that runs slightly backwards
+            // (e.g. NTP correction) does not surface as a negative
+            // duration.
+            let now = js_sys::Date::now() as u64;
+            now.saturating_sub(self.millis)
+        }
+    }
 }
 
 fn emit_to(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, event: AgentEvent) {

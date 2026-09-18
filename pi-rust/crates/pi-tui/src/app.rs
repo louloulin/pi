@@ -236,10 +236,10 @@ impl App {
                 self.messages.begin_assistant_stream(&model);
             }
             AgentEvent::MessageUpdate(update) => match update {
-                AssistantMessageUpdate::TextDelta(delta) => {
+                AssistantMessageUpdate::TextDelta { delta } => {
                     self.messages.append_assistant_delta(&delta);
                 }
-                AssistantMessageUpdate::ThinkingDelta(_delta) => {
+                AssistantMessageUpdate::ThinkingDelta { .. } => {
                     // Collapsed thinking — not rendered by Stage 4.
                 }
                 AssistantMessageUpdate::ToolCallDelta {
