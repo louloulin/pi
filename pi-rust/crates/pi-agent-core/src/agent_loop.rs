@@ -96,9 +96,22 @@ impl AgentLoop {
         &self.state
     }
 
+    /// Mutable borrow of the state — used by [`Agent`] for
+    /// per-turn overrides and by the session layer to inspect /
+    /// mutate the message log.
+    pub fn state_mut(&mut self) -> &mut AgentState {
+        &mut self.state
+    }
+
     /// Borrow the configuration.
     pub fn config(&self) -> &AgentConfig {
         &self.config
+    }
+
+    /// Mutable borrow of the configuration — used by [`Agent::set_model`]
+    /// to swap the active model between turns.
+    pub fn config_mut(&mut self) -> &mut AgentConfig {
+        &mut self.config
     }
 
     /// Borrow the hook adapter driving this loop.
