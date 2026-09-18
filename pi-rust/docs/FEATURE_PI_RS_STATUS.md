@@ -156,3 +156,72 @@ Option (2) is the smaller blast radius and unblocks the LUM-981
 "plugin ecosystem compatibility" acceptance criterion directly. Option (1)
 is strictly larger but covers the remaining LUM-984 / LUM-985 / LUM-996
 debt in one shot.
+
+## LUM-1018 round — re-verification, no new dispatches, push still blocked
+
+LUM-1018 (2026-09-18 21:53 UTC, autopilot template re-run) checked
+`feature/pi.rs` against the LUM-1017 baseline on a fresh checkout
+(`agent/devbox1/lum-1018` cut from `feature/pi.rs` at `6bb6819e1`):
+
+```
+$ cargo check --workspace --all-targets   # 0 errors, 0 warnings
+$ cargo test  --workspace                 # 87 / 87 pass (all crates green)
+```
+
+Same crate/test breakdown as LUM-1017: `pi-protocol` 6 + `pi-agent-core`
+smoke 2 + hooks 4 + `pi-ai` 5 + `pi-tui` e2e 11 + snapshot 3 +
+`pi-coding-agent` tools 10 + `pi-extensions` loader 32 + WASM smoke 5 +
+faux provider 9.
+
+### Decision: skip new parallel dispatches this round (third identical call)
+
+LUM-1018's autopilot template is identical to LUM-1011 / LUM-1012 /
+LUM-1013 / LUM-1015 / LUM-1017. The state has not moved between those
+rounds, so the same reasoning holds:
+
+| Issue | Status | Reality |
+|-------|--------|---------|
+| LUM-986 (Stage 3 — pi-extensions WASM host) | `in_progress` | No comments, no commits, no worktree, idle_watchdog cancellation. Slot held empty. |
+| LUM-1003 (P1 — real OpenAI/Anthropic providers) | `in_progress` | No comments, no commits, no worktree, idle_watchdog cancellation. Slot held empty. |
+| LUM-991 / LUM-992 (Stage 1/2 starter) | `in_progress` | Empty worktrees, idle_watchdog cancellations. |
+| LUM-982 (workspace primer) | `in_progress` | First-pass dispatch, never advanced. |
+
+The "3 worker slots" cap is full of bookkeeping `in_progress` rows with
+zero work landed. Adding new sub-issues does not help; the gating factor
+is the protocol reconciliation (Option 1 above) which is one design
+decision, not three parallel runs.
+
+### Candidate concrete next run (single)
+
+When a real slot frees up (or a future coordinator decides to recycle one
+of the stale placeholders), the highest-value single-task follow-up is:
+
+- **Stage 3 (LUM-986) re-implementation on `feature/pi.rs`** — copy
+  `lum-981-49282a6b984a/workdir/pi-rust/crates/pi-extensions/` host scaffold
+  (or write fresh) directly on top of `feature/pi.rs`, then add the e2e
+  test that loads `summarize.ts` / `notify-on-start.ts` and exercises
+  `registerTool`. ~1500 LOC + e2e, scope-bounded, no protocol
+  reconciliation needed because `feature/pi.rs` already settled on the
+  Stage 4/6 event enum.
+
+This unlocks the LUM-981 "plugin ecosystem compatibility" acceptance
+criterion in one PR.
+
+### Push status (still blocked)
+
+Confirmed at LUM-1018 time — no GitHub credentials in the sandbox:
+
+```
+$ git push origin feature/pi.rs
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+
+$ git ls-remote --heads origin
+71dca871bc80b6bc97be37f0ca3189399d651fff        refs/heads/main
+# (no feature/pi.rs on GitHub)
+```
+
+The local mirror at
+`/home/devbox/multica_workspaces/.repos/77113af3-bd2e-4c2a-9f11-659117e3ca3d/github.com+louloulin+pi.git`
+does carry `feature/pi.rs` at `6bb6819e19050e2dcdb4eb230192e75d4d5519f0`,
+so the daemon's next GitHub sync window will pick it up. No action needed
+from this round beyond documenting the state.
