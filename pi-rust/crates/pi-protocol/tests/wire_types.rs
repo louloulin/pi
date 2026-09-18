@@ -36,9 +36,7 @@ fn context_round_trip() {
         system_prompt: "you are pi".into(),
         messages: vec![Message {
             role: Role::User,
-            content: vec![Content::Text(TextContent {
-                text: "hi".into(),
-            })],
+            content: vec![Content::Text(TextContent { text: "hi".into() })],
             model: None,
         }],
         tools: vec![ToolDefinition {
@@ -57,9 +55,7 @@ fn context_round_trip() {
 #[test]
 fn assistant_message_event_round_trip() {
     let event = AssistantMessageEvent::Done {
-        content: vec![Content::Text(TextContent {
-            text: "ok".into(),
-        })],
+        content: vec![Content::Text(TextContent { text: "ok".into() })],
         stop_reason: StopReason::Stop,
         usage: Usage {
             input: 10,
@@ -77,9 +73,7 @@ fn extension_event_tagged() {
     let ev = ExtensionEvent::ToolResult {
         result: ToolResult {
             tool_call_id: "1".into(),
-            content: Content::Text(TextContent {
-                text: "ok".into(),
-            }),
+            content: Box::new(Content::Text(TextContent { text: "ok".into() })),
             is_error: false,
             details: None,
         },
@@ -141,9 +135,7 @@ fn model_round_trip() {
 fn assistant_message_round_trip() {
     let m = AssistantMessage {
         model: "faux-model".into(),
-        content: vec![Content::Text(TextContent {
-            text: "hi".into(),
-        })],
+        content: vec![Content::Text(TextContent { text: "hi".into() })],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
     };
