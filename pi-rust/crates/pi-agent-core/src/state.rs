@@ -1,6 +1,6 @@
 //! Agent state — system prompt, model, and message log.
 
-use pi_ai::SharedStreamFn;
+use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{Context, Message, Model};
 
 /// Runtime configuration that is fixed for the lifetime of an [`Agent`](crate::Agent).
@@ -25,7 +25,7 @@ pub struct AgentState {
 
 impl AgentState {
     /// Build the [`Context`] snapshot fed to the streaming layer.
-    pub fn context(&self, config: &AgentConfig) -> Context {
+    pub fn context(&self, _config: &AgentConfig) -> Context {
         Context {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),

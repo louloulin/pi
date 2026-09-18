@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use pi_extensions::loader::ExtensionSearchPaths;
+use pi_extensions::ExtensionSearchPaths;
 
 #[test]
 fn candidates_skip_missing_dirs() {
@@ -24,18 +24,18 @@ fn entry_for_uses_file_stem() {
 
 #[test]
 fn registry_records_tools() {
-    use pi_extensions::registry::ExtensionRegistry;
+    use pi_extensions::{ExtensionCapabilities, ExtensionEntry, ExtensionRegistry};
     use pi_protocol::ToolDefinition;
     use serde_json::json;
 
     let mut reg = ExtensionRegistry::new();
     reg.register(
-        pi_extensions::api::ExtensionEntry {
+        ExtensionEntry {
             source: PathBuf::from("/tmp/x.ts"),
             id: "x".into(),
             label: None,
         },
-        pi_extensions::api::ExtensionCapabilities {
+        ExtensionCapabilities {
             tools: vec![ToolDefinition {
                 name: "echo".into(),
                 label: "Echo".into(),

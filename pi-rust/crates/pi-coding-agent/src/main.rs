@@ -14,9 +14,7 @@ fn main() -> anyhow::Result<()> {
         | Some(Command::Remove { .. })
         | Some(Command::List)
         | Some(Command::UpdateModels) => {
-            anyhow::bail!(
-                "pi (rust) is at Stage 0 scaffold — subcommand support lands in Stage 4"
-            );
+            anyhow::bail!("pi (rust) is at Stage 0 scaffold — subcommand support lands in Stage 4");
         }
         None => {
             // Interactive / print / rpc mode — Stage 4.

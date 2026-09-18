@@ -160,10 +160,11 @@ pub enum UiRequest {
 }
 
 /// UI severity — drives colour and icon in the TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiLevel {
     /// Informational.
+    #[default]
     Info,
     /// Success.
     Success,
