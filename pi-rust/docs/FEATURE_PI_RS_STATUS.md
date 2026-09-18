@@ -310,4 +310,76 @@ The local mirror at
 `/home/devbox/multica_workspaces/.repos/77113af3-bd2e-4c2a-9f11-659117e3ca3d/github.com+louloulin+pi.git`
 does carry `feature/pi.rs` at `ebf66874ad09e311653acd79c2948362465c05d1`,
 so the daemon's next GitHub sync window will pick it up. No action needed
-from this round beyond documenting the state.
+
+## LUM-1022 round — re-verification, no new dispatches, push still blocked
+
+LUM-1022 (2026-09-18 22:20 UTC, autopilot template re-run with the
+original LUM-982 wording — "plan follow-up tasks, open max 3 parallel")
+checked `feature/pi.rs` against the LUM-1019 baseline on a fresh
+checkout (`agent/devbox1/lum-1022` cut from `feature/pi.rs` at
+`aade66d67`):
+
+```
+$ cargo check --workspace --all-targets   # 0 errors, 0 warnings
+$ cargo test  --workspace                 # 87 / 87 pass (all crates green)
+```
+
+Same crate/test breakdown as LUM-1017 / LUM-1018 / LUM-1019:
+`pi-protocol` 6 + `pi-agent-core` smoke 2 + hooks 4 + `pi-ai` 5 +
+`pi-tui` e2e 11 + snapshot 3 + `pi-coding-agent` tools 10 +
+`pi-extensions` loader 32 + WASM smoke 5 + faux provider 9.
+
+### Decision: skip new parallel dispatches this round (sixth identical call)
+
+LUM-1022's autopilot template is identical to LUM-1011 / LUM-1012 /
+LUM-1013 / LUM-1015 / LUM-1017 / LUM-1018 / LUM-1019. The state has not
+moved between those rounds, so the same reasoning holds.
+
+A first-pass reflex here was to spawn three "R2 stage" sub-issues
+(`pi-extensions` QuickJS host, `pi-session` rusqlite backend, `wasm32`
+browser host) under LUM-1022, but those are exactly the slots the
+established pattern says **not** to fill — the placeholder bookkeeping
+issues already exhaust the 3-slot cap and adding more parallel
+dispatches would race on the same `AssistantMessageEvent` enum. Those
+sub-issues were created and then cancelled in the same round (LUM-1023
+/ LUM-1024 / LUM-1025, all `status: cancelled`). Net new dispatch
+count: **0**.
+
+### Why the autopilot template keeps firing
+
+The trigger comment on LUM-1022 still says "If this task exists, plan
+follow-up tasks, open max 3 parallel". That language was authored for
+the first round (LUM-982) when the slots were empty. Once idle
+placeholders filled the slots, every subsequent round inherits the same
+template, and the only honest answer has been "no, the slots are
+saturated". The template does not have a "skip if saturated" branch, so
+each round has to decide by hand and document it.
+
+The pragmatic observation: an autopilot template that re-fires every
+~15 minutes on a stalled task queue produces zero forward motion. The
+correct counter-measure is one focused single-task dispatch (not the
+template), not more re-runs of the template.
+
+### Candidate concrete next run (single)
+
+Unchanged from LUM-1017 / LUM-1018 / LUM-1019: Stage 3 (LUM-986)
+re-implementation on `feature/pi.rs`. The `pi-extensions` scaffold in
+the current `feature/pi.rs` tree is the right starting point; the
+previous `lum-981-49282a6b984a/workdir/pi-rust/crates/pi-extensions/`
+work predates the Stage 4/6 event enum and would need to be ported, not
+copied.
+
+### Push status (still blocked)
+
+Re-confirmed at LUM-1022 time — no GitHub credentials in the sandbox:
+
+```
+$ git push origin feature/pi.rs
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+```
+
+The local mirror at
+`/home/devbox/multica_workspaces/.repos/77113af3-bd2e-4c2a-9f11-659117e3ca3d/github.com+louloulin+pi.git`
+already carries `feature/pi.rs` at `aade66d67`; the daemon's next
+GitHub sync window will pick up whatever new commit lands on this
+branch.
