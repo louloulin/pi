@@ -77,4 +77,51 @@ pub enum Command {
     /// List built-in models — used by the `/model` slash command and
     /// the `--list-models` flag.
     ListModels,
+    /// Session management subcommands (`list`, `show`, `export`,
+    /// `migrate`). See [`SessionCommand`].
+    Session {
+        /// Session sub-action.
+        #[command(subcommand)]
+        action: SessionCommand,
+    },
+}
+
+/// `pi session <action>` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// List every session in the session directory.
+    List {
+        /// Optional path to a specific SQLite database; defaults to
+        /// every `*.sqlite` in the session directory.
+        #[arg(long, value_name = "PATH")]
+        database: Option<std::path::PathBuf>,
+    },
+    /// Show the entries of a single session as JSON Lines on stdout.
+    Show {
+        /// Session id to show (matches the `id` field of the header).
+        session_id: String,
+        /// Path to the SQLite database containing the session.
+        #[arg(long, value_name = "PATH")]
+        database: std::path::PathBuf,
+    },
+    /// Export a session to stdout as JSON Lines (alias for `show`,
+    /// kept for parity with the TS CLI).
+    Export {
+        /// Session id to export.
+        session_id: String,
+        /// Path to the SQLite database containing the session.
+        #[arg(long, value_name = "PATH")]
+        database: std::path::PathBuf,
+    },
+    /// Migrate a Stage 4 JSONL session file into the SQLite backend.
+    /// The original JSONL is preserved on disk; the migration is
+    /// non-blocking on failure.
+    Migrate {
+        /// Path to the JSONL session file.
+        jsonl_path: std::path::PathBuf,
+        /// Optional destination path; defaults to `<jsonl-stem>.sqlite`
+        /// alongside the source.
+        #[arg(long, value_name = "PATH")]
+        to: Option<std::path::PathBuf>,
+    },
 }

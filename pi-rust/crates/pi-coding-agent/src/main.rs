@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     let target_mode = match cli.command.as_ref() {
         Some(Command::Print { .. }) => ModeTarget::Print,
         Some(Command::Rpc) => ModeTarget::Rpc,
+        Some(Command::Session { .. }) => ModeTarget::Session,
         _ => {
             if cli.print {
                 ModeTarget::Print
@@ -76,6 +77,12 @@ fn main() -> anyhow::Result<()> {
                 env!("CARGO_PKG_VERSION")
             );
         }
+        ModeTarget::Session => {
+            let Some(Command::Session { action }) = cli.command else {
+                unreachable!("ModeTarget::Session only set when command is Session");
+            };
+            pi_coding_agent::run_session_command(action)?;
+        }
     }
 
     Ok(())
@@ -86,6 +93,7 @@ enum ModeTarget {
     Interactive,
     Print,
     Rpc,
+    Session,
 }
 
 fn default_system_prompt() -> String {

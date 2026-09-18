@@ -18,3 +18,6 @@ pub mod interactive;
 pub mod session_log;
 pub mod text_fallback;
 pub mod tools;
+
+pub use commands::resume::{list_resumable, resolve as resolve_resume, SessionRef};
+pub use commands::session::run as run_session_command;
