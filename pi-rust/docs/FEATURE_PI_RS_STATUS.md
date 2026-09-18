@@ -225,3 +225,89 @@ The local mirror at
 does carry `feature/pi.rs` at `6bb6819e19050e2dcdb4eb230192e75d4d5519f0`,
 so the daemon's next GitHub sync window will pick it up. No action needed
 from this round beyond documenting the state.
+
+## LUM-1019 round — re-verification, state unchanged, push still blocked
+
+LUM-1019 (2026-09-18 22:00 UTC, autopilot template re-run) checked
+`feature/pi.rs` against the LUM-1018 baseline on a fresh checkout
+(`agent/devbox1/lum-1019` cut from `feature/pi.rs` at `ebf66874a`):
+
+```
+$ cargo check --workspace --all-targets   # 0 errors, 0 warnings
+$ cargo test  --workspace                 # 87 / 87 pass (all crates green)
+```
+
+Same crate/test breakdown as LUM-1017 / LUM-1018: `pi-protocol` 6 +
+`pi-agent-core` smoke 2 + hooks 4 + `pi-ai` 5 + `pi-tui` e2e 11 +
+snapshot 3 + `pi-coding-agent` tools 10 + `pi-extensions` loader 32 +
+WASM smoke 5 + faux provider 9.
+
+### Decision: skip new parallel dispatches this round (fourth identical call)
+
+LUM-1019's autopilot template is identical to LUM-1011 / LUM-1012 /
+LUM-1013 / LUM-1015 / LUM-1017 / LUM-1018. The state has not moved
+between those rounds, so the same reasoning holds:
+
+| Issue | Status | Reality |
+|-------|--------|---------|
+| LUM-982 (workspace primer) | `in_progress` | First-pass dispatch, never advanced, idle since 14:33. |
+| LUM-986 (Stage 3 — pi-extensions WASM host) | `in_progress` | No comments, no commits, no worktree, idle since 17:01. |
+| LUM-991 (Stage 1 pi-ai starter) | `in_progress` | Empty worktree, idle since 15:08. |
+| LUM-992 (Stage 2 pi-agent-core starter) | `in_progress` | Empty worktree, idle since 18:50. |
+| LUM-1003 (P1 — real OpenAI/Anthropic providers) | `in_progress` | No comments, no commits, no worktree, idle since 20:01. |
+
+The "3 worker slots" cap is full of bookkeeping `in_progress` rows with
+zero work landed. Adding new sub-issues does not help; the gating factor
+is the protocol reconciliation (Option 1 above) which is one design
+decision, not three parallel runs.
+
+### Why the autopilot template keeps firing
+
+The trigger comment on LUM-1019 still says "If this task exists, plan
+follow-up tasks, open max 3 parallel". That language was authored for the
+first round (LUM-982) when the slots were empty. Once idle placeholders
+filled the slots, every subsequent round inherits the same template, and
+the only honest answer has been "no, the slots are saturated". The
+template does not have a "skip if saturated" branch, so each round has
+to decide by hand and document it.
+
+The pragmatic observation: an autopilot template that re-fires every
+~15 minutes on a stalled task queue produces zero forward motion. The
+correct counter-measure is one focused single-task dispatch (not the
+template), not more re-runs of the template.
+
+### Candidate concrete next run (single)
+
+When a real slot frees up (or a future coordinator decides to recycle one
+of the stale placeholders), the highest-value single-task follow-up is
+still:
+
+- **Stage 3 (LUM-986) re-implementation on `feature/pi.rs`** — copy
+  `lum-981-49282a6b984a/workdir/pi-rust/crates/pi-extensions/` host scaffold
+  (or write fresh) directly on top of `feature/pi.rs`, then add the e2e
+  test that loads `summarize.ts` / `notify-on-start.ts` and exercises
+  `registerTool`. ~1500 LOC + e2e, scope-bounded, no protocol
+  reconciliation needed because `feature/pi.rs` already settled on the
+  Stage 4/6 event enum.
+
+This unlocks the LUM-981 "plugin ecosystem compatibility" acceptance
+criterion in one PR.
+
+### Push status (still blocked)
+
+Re-confirmed at LUM-1019 time — no GitHub credentials in the sandbox:
+
+```
+$ git push origin feature/pi.rs
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+
+$ git ls-remote --heads origin
+71dca871bc80b6bc97be37f0ca3189399d651fff        refs/heads/main
+# (no feature/pi.rs on GitHub)
+```
+
+The local mirror at
+`/home/devbox/multica_workspaces/.repos/77113af3-bd2e-4c2a-9f11-659117e3ca3d/github.com+louloulin+pi.git`
+does carry `feature/pi.rs` at `ebf66874ad09e311653acd79c2948362465c05d1`,
+so the daemon's next GitHub sync window will pick it up. No action needed
+from this round beyond documenting the state.
