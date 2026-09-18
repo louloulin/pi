@@ -7,6 +7,9 @@
 //! ([`tools`]): `read`, `write`, `edit`, `bash`. These are the tools the
 //! model sees by default; extension tools are layered on top of them via
 //! [`pi_extensions`].
+//!
+//! Stage 3 wires the [`extensions`] module so the agent can load JS /
+//! TypeScript extensions from disk through the embedded QuickJS host.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -14,6 +17,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod extensions;
 pub mod interactive;
 pub mod session_log;
 pub mod text_fallback;
