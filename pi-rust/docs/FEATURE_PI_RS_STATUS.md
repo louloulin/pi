@@ -10079,3 +10079,124 @@ LUM-1139 的旧 target 后回到 12G 空闲；清理对象都是可复现的构�
 并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-ai`（新增 `json_parse.rs` +
 两个 fixture + `lib.rs` / 三个 provider 的收口 + `tests/anthropic.rs`）与本文档。
+
+---
+
+## LUM-1144 round — `pi-tui` 滚条渲染 / 悬停高亮 / 拖拽 + X10 鼠标序列解析（frontier 第 6 项收口）+ 合并推送 feature/pi.rs
+
+Stage 42。本轮起点 `ce44b692f`（LUM-1142 合并态），代码提交 `7b6d33615`，合并提交
+`b22371424`（第一父 `7b6d33615`、第二父 `2745e1c76` = LUM-1145 合并态），本节文档提交见
+第五节补记。
+
+### 一、范围与落点
+
+把上游的滚条三件套搬进 `pi-tui`：`packages/tui/src/layout.ts` 的
+`ScrollbarGeometry` / `getScrollbarGeometry` / `paintScrollbar`（`:44-51,280-326`）、
+`packages/tui/src/tui-alt-screen.ts` 的 `getScrollbarTargetAt` / `setScrollbarHover` /
+`updateScrollbarHover` / `scrollScrollbarToPointer` / `handleScrollbarMouseEvent` /
+`ScrollbarDrag`（`:129-138,1041-1109`），以及**遗留 X10 鼠标序列**（`:939-1000,1613-1616`）。
+
+落点只有两个文件：`app.rs`（几何 + 绘制 + 指针状态机）与 `input.rs`（原始字节解码）。
+上游按 `ScrollView` 组织（一处几何一套拖拽状态），而 `App` 只有**一块可滚动区域**——消息日志——
+所以 per-view 的查找与状态数组都塌缩成单份，这一点写进了 `app.rs` 的 `# Scrollbar` 模块文档。
+
+### 二、实现
+
+| 上游 | Rust 落点 |
+|------|-----------|
+| `ScrollbarGeometry`（`layout.ts:44-51`） | `app.rs:555`（公开类型，`lib.rs:37` 再导出） |
+| `getScrollbarGeometry`（`layout.ts:280-301`） | `App::scrollbar_geometry` `app.rs:1989` |
+| `paintScrollbar`（`layout.ts:303-326`） | `App::apply_scrollbar` `app.rs:1854`，由 `render_to_buffer_impl`（`app.rs:2930`）在 selection / search 高亮之后、状态栏与全部 overlay 之前调用 |
+| 绘制闸门 | `render_to_buffer` 传 `true`（`app.rs:2898`）、`render_snapshot` 传 `false`（`app.rs:3078`）——见第四节 |
+| `getScrollbarTargetAt`（`tui-alt-screen.ts:1041-1055`） | `App::scrollbar_geometry_at` `app.rs:2034` |
+| `updateScrollbarHover` / `setScrollbarHover`（`:1058-1064`） | `App::update_scrollbar_hover` `app.rs:2044`、字段 `scrollbar_hover`、只读口 `scrollbar_hovered()` `app.rs:1973` |
+| `scrollScrollbarToPointer`（`:1067-1078`） | `App::scroll_scrollbar_to_pointer` `app.rs:2060` |
+| `handleScrollbarMouseEvent`（`:1080-1109`） | `App::step_scrollbar_mouse_gesture` `app.rs:2098` + `ScrollbarDrag` `app.rs:576`、只读口 `scrollbar_dragging()` `app.rs:1978` |
+| 分派顺序（滚条先于选区） | `App::step_mouse_gesture` `app.rs:2188`：模态 → 搜索栏 → 滚条 → 悬停更新 → 选区 |
+| `parseSgrMouseEvent` / `isMouseSequence` + X10（`:939-1000,1613-1616`） | `input.rs:378` `parse_mouse_sequence`、`input.rs:425` `is_mouse_sequence`、`input.rs:468` `decode_mouse_report`（`lib.rs:47-49` 再导出） |
+
+要点：
+
+- **几何**：`content = messages.line_count(width)`、`max_scroll = self.max_scroll()`（沿用既有口径），
+  `thumb_height = clamp(round(track²/content), min(2, track), track)`，
+  `thumb_top = origin_y + round(scroll_top · max_thumb_top / max_scroll)`，其中
+  `scroll_top = max_scroll - resolved_scroll()`——`resolved_scroll()` 是**底部相对**、滚条是**顶部相对**，
+  这一步换算就是「底部钉住时拇指落到轨道末端」的来源。`round_div`（`app.rs:207`）对应 `Math.round`。
+- **拖拽反向映射**：`offset = max_scroll - round(top · max_scroll / max_thumb_top)`，最后经
+  `messages.set_scroll_from_bottom(offset)` 落回既有滚动 API（`0` 即重新贴尾）。没有新的偏移方案。
+- **拖拽语义**：按拇指取 `grab_offset = y - thumb_top`；按轨道取 `thumb_height / 2`（拇指居中）并
+  **立即跳转**；按下即清文本选区 / `selection_dragging` / 双击计数并停掉 autoscroll。一旦进入拖拽，
+  **所有非滚轮手势都归滚条**（对应上游 `if (this.scrollbarDrag) { … return true; }`），直到抬手。
+- **X10**：`ESC [ M` + 恰好 3 字节，`Cb` 为按钮/修饰键码 + 32、`Cx`/`Cy` 为 1-based 坐标 + 32；
+  `decode_mouse_report` 的位布局与 crossterm 0.28 的 `parse_cb`
+  （`crossterm-0.28.1/src/event/sys/unix/parse.rs:772-806`）逐位一致，SGR 的小写 `m` 则按
+  `parse_csi_sgr_mouse`（同文件 `:746`）把 press 翻成 release。驱动侧本来就走 crossterm（X10 已被其
+  `parse_csi_normal_mouse` 解出），所以这份解析器的价值是**给出无后端依赖的等价实现与测试面**，
+  并把 X10 从「碰巧能用」变成「有回归」。（水平滚轮 6/7 与 crossterm 拒绝的 8..15 归 `Ignored`，同上游
+  `routeWheel` 无消费方的口径。）
+
+### 三、验证
+
+- `cargo test -p pi-tui`：**546 通过 / 0 失败**（lib 单测 237 + 26 个集成测试文件的 303 个用例 + 6 个文档测试）。
+- 任务书点名的三个回归文件原样通过：`mouse_scroll.rs`(7)、`mouse_selection.rs`(12)、
+  `selection_granularity.rs`(12)；`app_scroll.rs`(9)、`snapshot.rs`(9)、`app_theme.rs`(5)、
+  `mouse_region.rs`(13)、`e2e.rs`(9) 亦全绿。
+- 新增 `tests/scrollbar.rs` 10 例：几何在「渲染前」与「内容不溢出」时隐藏、比例与底部钉住、滚到顶/中点/
+  底、`render_to_buffer` 与 `render_snapshot` 的绘制差异、悬停高亮（track / thumb 颜色 + bold + 字形
+  `┃`→`█`）与移开后的回落、悬停必须命中最后一列且在轨道行内、模态打开时滚条让位、轨道点击跳转、
+  拇指点击不跳转、拖到两端与中点、抬手结束拖拽、拖拽期间不产生文本选区。
+- 新增 `input.rs` 5 个单测：SGR 按钮/坐标/大写 `M` 与小写 `m`、SGR 滚轮（含 Alt 与水平滚轮）、
+  X10 全谱（按下/释放/拖拽/移动/滚轮/Alt/高位坐标）、残缺与异形序列一律拒绝、
+  `is_mouse_sequence` 与 `parse_mouse_sequence` 口径一致（含数字字段越界的用例）。
+- 合并态全量 `cargo test --workspace`：**1471 通过 / 0 失败**（本切片自身新增 15 个用例：
+  `scrollbar.rs` 10 + `input.rs` 5；其余差额来自本轮合并进来的 LUM-1141/1143/1145 用例）。
+- `cargo clippy -p pi-tui --all-targets -- -D warnings`：exit 0。
+- rustfmt：只保证新代码；`cargo fmt -p pi-tui` 会连带把 `settings.rs` / `tests/settings_list.rs` 的
+  **既有**漂移一起格式化，已把那两个文件还原，使本轮 diff 只含本切片（全量 fmt 仍归 LUM-1138）。
+
+### 四、刻意的偏差（同时写在 `app.rs` 的 `# Scrollbar` 模块文档里）
+
+1. **单滚条**：上游每 `ScrollView` 一套几何并命中指针下那一块；本移植只有消息日志一块，
+   `scrollbar_geometry` **就是**那一套几何，`getScrollViewBox` 的查找消失。将来出现第二块可滚动
+   区域（例如 diff 面板）必须把它带回来——已记为后续项。
+2. **没有 1000 ms 瞬时隐藏**：上游默认 `scrollbar: "auto"`，滚动作后在 `scrollbarHideDelayMs` 内
+   显示、悬停期间保持；本 crate **不 spawn 计时线程**，于是退成「溢出即显示、不溢出即隐藏」
+   = 上游 `"always"` 变体加一道溢出闸。悬停与拖拽行为与上游一致。
+3. **active 额外加粗**：上游只把拇指字形从 `┃` 换成 `█`，样式通道上没有可断言的变化；本移植保留
+   字形切换并给轨道+拇指加 `BOLD`，让悬停状态在 `Buffer` 上可断言（任务书要求）。
+4. **`render_snapshot` 不画条**：它是扁平的文本快照，同时是 `/transcript` 导出的后端，约 40 个调用点
+   的断言按「纯内容」写的；滚条是实时帧的交互件，只由 `render_to_buffer` 绘制。放在
+   `render_to_buffer_impl` 里靠一个显式布尔闸门控制，而不是事后补画，因此 z 序（在状态栏与所有
+   overlay 之下）仍然正确。
+
+### 五、合并与推送
+
+代码提交 `7b6d33615`（父 `ce44b692f`）4 文件 `+1182/-7`：
+`pi-rust/crates/pi-tui/src/app.rs(+380/-5)`、`pi-rust/crates/pi-tui/src/input.rs(+423/-0)`、
+`pi-rust/crates/pi-tui/src/lib.rs(+5/-2)`、`pi-rust/crates/pi-tui/tests/scrollbar.rs(+374/-0)`。
+本轮只碰 `pi-tui`，与 LUM-1141（`pi-agent-core`）、LUM-1143（`pi-agent-core`）、LUM-1145
+（`pi-ai`）零文件交集，`git merge origin/feature/pi.rs @ 2745e1c76` 无冲突，合并提交 `b22371424`。
+
+推送与远端哈希见本轮补记（`feature/pi.rs` 与留档分支 `work/lum-1144` 指向同一提交）。
+
+### 六、frontier（本轮更新）
+
+1. ~~**P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**~~ **本轮（LUM-1144）收口**。
+2. **P3 `latex.ts` 剩余**（OSC-8 hyperlink / 语法高亮 / 块级 HTML）：要动 ratatui `Cell` 与 `app.rs`
+   写入路径。随本轮收口，`app.rs` 当前无写方；启动前仍须确认没有别的在跑任务正在改它。
+3. **新入账：`app.rs` 的滚条目前只服务消息日志**。若后续出现第二块可滚动区域（diff 面板、
+   工具输出折叠区等），需要恢复上游的 `getScrollViewBox` 查找与 per-view 几何/拖拽状态；
+   当前单份几何的假设会立刻失效。
+4. **质量门清偿** = LUM-1138（`backlog`）：确认只剩 `cargo fmt --all -- --check`（122 文件漂移）；
+   `cargo clippy -p pi-tui --all-targets -- -D warnings` 本轮实测 exit 0。
+5. 其余项（provider catalog / LUM-1090、`utils/overflow.ts`、`utils/estimate.ts`、
+   bedrock/mistral/azure/vertex/oauth/images、`PLAN.md` 停在 Stage 14）照上一节不变。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-tui`
+（`src/app.rs` / `src/input.rs` / `src/lib.rs` / 新增 `tests/scrollbar.rs`）与本文档。
+
+环境记录：本轮构建期间根分区一度 100% 满（初次全量 `cargo test --workspace` 因此在
+`pi-session` / `pi-coding-agent` 的链接阶段直接失败），清掉本工作树的 `target/debug/incremental`
+（1.5G）并等另一路释放空间后补跑成功；所有被清理的对象都是可复现的构建产物。
+
