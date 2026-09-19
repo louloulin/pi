@@ -4623,3 +4623,66 @@ prompt templates / context files）；剩余缺口是**扩展加载器只认 Com
 `feature/pi.rs`：1 个 merge commit（Stage 19 `pi-server`）+ 1 个把同期 Stage 23 / Stage 24
 两轮合进来的 merge commit + 本节状态文档，共 3 个 commit 在本分支上，push 到
 `origin/feature/pi.rs`。
+
+## LUM-1089 round — 核验 `feature/pi.rs` 已含 Stage 19–24，派发 Stage 19 `pi-client`
+
+本轮（autopilot，2026-09-19 09:20Z）开工时 `origin/feature/pi.rs` 已经推进到
+`12b458844`（= LUM-1087 的 Stage 19 `pi-server` merge + Stage 23 / Stage 24），
+所以先把「远程到底有没有缺功能块」梳一遍，再决定派发。
+
+### 一、核验：没有「已提交未合并」的功能分支了
+
+- `git ls-remote --heads origin` → `refs/heads/feature/pi.rs = 12b458844`；
+- `git ls-tree -r origin/feature/pi.rs | grep crates/pi-server/` → 20 个文件，
+  `pi-protocol/src/rpc/{framing,protocol,mod}.rs` 也在树上，LUM-1087 节已在文档里；
+- 枚举所有 remote 分支、按 `12b458844..<branch>` 求差集后，剩下 `ahead > 0` 的只有
+  状态文档已判定为「重复落地」或「刻意跳过」的那几条：
+  `9f0097e10886` / `lum-1023`（Stage 12 RPC 旧提交）、`a5e8bd115db9`（Stage 1）、
+  `18de691ee1bc`（Stage 2）、`b662db4686e7`（LUM-996 全量 merge）等。
+  **没有任何新的缺失实现需要合并。**
+
+结论：LUM-1087 已经把 `pi-server` 推送成功，本轮不需要再合并代码；本轮的价值在
+「核验 + 按 frontier 派发」。
+
+### 二、验证（`origin/feature/pi.rs` = `12b458844`，native）
+
+```
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo test   -p pi-protocol -p pi-server --offline                # 24 + 21 passed / 0 failed
+$ cargo test   --workspace --no-fail-fast --offline                 # 仅 LUM-1083 记录的抖动 target 红
+```
+
+失败项全部落在文档已多处记录的 `pi-coding-agent` 抖动上，与本轮无关：
+
+| target | 本轮结果 | 单独复跑 |
+|--------|----------|----------|
+| `tests/cli_provider.rs` | 14 passed / 1 failed（`google_model_dials_...`） | 15/15 绿 |
+| `tests/rpc.rs` | 7 passed / 2 failed（`Disconnected`，子进程 `intrusive.rs:341` 下溢） | 第 3 次串行 9/9 绿，前两次各挂 1 个不同用例 |
+
+证据形态与 LUM-1083 / LUM-1087 节完全一致：`event-listener-5.4.2/src/intrusive.rs:341`
+计数下溢 → 子进程 SIGABRT，高负载下概率触发、单跑可复现为「不同用例随机挂」。这是
+依赖链问题（`pi-extensions → rquickjs-core → async-lock → event-listener`），不是本轮
+新增代码引入的。
+
+### 三、派发（3 槽上限内）
+
+`multica daemon status`：`active_task_count = 2`（本协调 run + 1），即 1 个空槽。
+按「最多 3 个同时运行」只启动 1 个：
+
+1. **启动：LUM-1069 `pi-client`（Stage 19）** —— frontier 里依赖已解除、且是
+   LUM-981「构建相同的 crates」最后一个缺失 crate（`pi-protocol::rpc` 线格式 +
+   `pi-server::testing::client::ProtocolTestClient` 可直接参照）。由 `backlog` 置为
+   `todo`，占用第 3 个槽。
+2. **新立项（backlog 停放）：LUM-1090 `[Stage 25]` 用 `pi-client` 替换
+   `pi-coding-agent` 的内联 JSON-RPC** —— 依赖 LUM-1069，等槽位空出再 promote。
+3. 既有 backlog 继续排队：LUM-1088（项目信任门接 `loadProjectTrustExtensions`
+   bootstrap pass，插件生态安全对齐）、LUM-1083（`--rpc` SIGABRT，根因在
+   `event-listener` 计数下溢，暂无上游修复可升）。
+
+`.wasm` 扩展宿主仍受环境阻塞（缺 `wasm32-unknown-unknown` target 与 `wasmtime`），
+本轮不立项。
+
+### Push status
+
+`feature/pi.rs`：代码面 `12b458844` 已与 `origin/feature/pi.rs` 同步，无待推代码；
+本轮只追加本节状态文档并 push 到 `origin/feature/pi.rs`。
