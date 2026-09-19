@@ -6393,7 +6393,8 @@ LUM-1110（`node:child_process`）、LUM-1111（本轮 `Ctrl+B`/`Ctrl+F`），
 | 引用 | 提交 | 说明 |
 |------|------|------|
 | `origin/feature/pi.rs`（进入本轮时） | `58e619f94` | LUM-1112 主题消费层 |
-| `origin/feature/pi.rs`（本轮写入时） | `4161c6c73` | **LUM-1110 已自行合入并推送**：`node:child_process` 虚拟模块（`3449e2a03`） |
+| `origin/feature/pi.rs`（本轮合并前） | `4161c6c73` | **LUM-1110 已自行合入并推送**：`node:child_process` 虚拟模块（`3449e2a03`） |
+| `origin/feature/pi.rs`（本轮推送后） | `1246d8253` | 本轮 jump mode 合并提交（父：`4161c6c73` + `work/lum-1113`） |
 | 本地 `feature/pi.rs` / `mirror/feature/pi.rs` | `6423677ab` | 陈旧（LUM-1106 轮的合并点），落后 origin 两个合并层级 |
 
 结论：**LUM-1110（`node:child_process`）已经落到 `feature/pi.rs` 并推送**，本轮开始时担心的
@@ -6473,9 +6474,21 @@ workspace**：LUM-1110 正在自己的 worktree 里重建 `pi-extensions`（quic
 
 ### 五、合并与推送
 
-工作分支 `work/lum-1113`（起点 `origin/feature/pi.rs` @ `58e619f94`）→ 先把本地
-`feature/pi.rs` 快进到 `origin/feature/pi.rs`（`4161c6c73`）→ 再非 force 合入
-`feature/pi.rs` 并推送；`work/lum-1113` 同步留在远端。
+`feature/pi.rs` 当时被另一个 worktree（`lum-1078-57e1dac05a69`）占用，本 worktree 无法
+`git checkout`，因此改用 plumbing 完成同样的非 force 合并：
+
+```
+$ git merge-tree --write-tree origin/feature/pi.rs work/lum-1113   # 无冲突，tree c9c7e0398
+$ git commit-tree c9c7e0398 -p origin/feature/pi.rs -p work/lum-1113 \
+      -m "Merge branch 'work/lum-1113' into feature/pi.rs"          # 1246d8253
+$ git push origin 1246d8253:refs/heads/feature/pi.rs                # 4161c6c73..1246d8253
+$ git push origin work/lum-1113                                     # 新分支
+```
+
+核对：合并后的 `pi-rust/crates/pi-tui` 子树与 `work/lum-1113` 完全一致（`git rev-parse` 比对），
+且 LUM-1110 的 `crates/pi-extensions/tests/child_process.rs` 也在合并树上 —— 既没有丢
+LUM-1110 的成果，也没有覆盖它。本地 `feature/pi.rs` 引用保持原样（被别的 worktree 占用，
+不强行移动以免让那个 worktree 的 HEAD 与索引错位）；`origin/feature/pi.rs` = `1246d8253`。
 
 ### 六、frontier（本轮更新）+ 空槽派发
 
