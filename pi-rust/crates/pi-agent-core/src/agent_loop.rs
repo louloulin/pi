@@ -13,7 +13,7 @@ use futures::StreamExt;
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{
     AssistantMessage, AssistantMessageEvent, Content, Context as AgentContext, Message, Role,
-    ToolCall, ToolResult,
+    ToolCall, ToolExecutionMode, ToolResult,
 };
 use pi_telemetry::{SpanOptions, SpanRef, SpanStatus, TelemetryContextExt};
 use std::sync::Arc;
@@ -67,6 +67,9 @@ pub struct LoopConfig {
     pub model: pi_protocol::Model,
     /// Optional thinking level override.
     pub thinking_level: Option<crate::hooks::ThinkingLevel>,
+    /// How a tool batch without any `Sequential` tool is dispatched.
+    /// Copied from [`AgentConfig::tool_execution`].
+    pub tool_execution: ToolExecutionMode,
 }
 
 impl From<&AgentConfig> for LoopConfig {
@@ -74,6 +77,7 @@ impl From<&AgentConfig> for LoopConfig {
         Self {
             model: config.model.clone(),
             thinking_level: None,
+            tool_execution: config.tool_execution,
         }
     }
 }
@@ -456,6 +460,7 @@ async fn run_turn_batch(
         executor,
         hooks,
         &assistant_message,
+        config.tool_execution,
         signal,
         telemetry.as_ref(),
     )
@@ -571,14 +576,22 @@ async fn stream_assistant_events(
 
 /// Execute the tool calls emitted by an assistant message.
 ///
-/// Each call runs in source order. For every call the loop:
+/// Mirrors `executeToolCalls` in `packages/agent/src/agent-loop.ts`. A batch
+/// is serialized when `mode` is [`ToolExecutionMode::Sequential`] — or when
+/// any call in it belongs to a tool whose
+/// [`execution_mode`](crate::tools::ToolExecutor::execution_mode) is
+/// `Sequential` — and otherwise prepared in source order and executed
+/// concurrently. Results are always returned in source order.
+///
+/// For every call the loop:
 ///
 /// 1. asks the `BeforeToolCall` hook for a decision — a `Block` decision
 ///    turns into an `is_error: true` result without executing anything;
 /// 2. dispatches to the registered [`ToolExecutor`](crate::tools::ToolExecutor)
 ///    — or, when none is registered, keeps the Stage 2 stub behaviour so
 ///    callers that predate tool execution still work;
-/// 3. asks the `AfterToolCall` hook to rewrite the result.
+/// 3. asks the `AfterToolCall` hook to rewrite the result, exactly once per
+///    executed call.
 ///
 /// Tool failures never abort the turn: they surface as `is_error: true`
 /// [`ToolResult`]s so the model can react to them. `continue_loop` mirrors
@@ -588,6 +601,7 @@ async fn execute_tool_calls(
     executor: Option<&Arc<dyn ToolExecutor>>,
     hooks: &AgentHookAdapter,
     assistant_message: &AssistantMessage,
+    mode: ToolExecutionMode,
     signal: &CancellationToken,
     telemetry: Option<&SpanRef>,
 ) -> (Vec<ToolResult>, bool) {
@@ -604,73 +618,176 @@ async fn execute_tool_calls(
         return (Vec::new(), false);
     }
 
-    let mut all_terminate = true;
-    let mut results = Vec::with_capacity(tool_calls.len());
-    for call in tool_calls {
-        let decision = hooks.invoke_before_tool_call(call).await;
-        all_terminate &= decision.terminate;
+    // A missing executor means the Stage 2 stub, which has no per-tool mode
+    // to consult and therefore always runs one call at a time.
+    let sequential = match executor {
+        None => true,
+        Some(executor) => {
+            mode == ToolExecutionMode::Sequential
+                || tool_calls.iter().any(|call| {
+                    executor.execution_mode(&call.name) == ToolExecutionMode::Sequential
+                })
+        }
+    };
 
-        if decision.block {
-            let reason = decision
-                .reason
-                .unwrap_or_else(|| "blocked by before_tool_call".to_string());
-            results.push(ToolResult {
+    if sequential {
+        execute_batch_sequential(executor, hooks, &tool_calls, signal, telemetry).await
+    } else {
+        execute_batch_parallel(executor, hooks, &tool_calls, signal, telemetry).await
+    }
+}
+
+/// `BeforeToolCall` outcome for a single call.
+enum CallPreparation {
+    /// The call may be dispatched to the executor.
+    Execute,
+    /// The call is already complete and must not reach the executor.
+    Immediate(ToolResult),
+}
+
+/// Ask the `BeforeToolCall` hook about one call. The returned flag is the
+/// hook's `terminate` decision for [`TurnBatch::continue_loop`].
+async fn prepare_call(hooks: &AgentHookAdapter, call: &ToolCall) -> (CallPreparation, bool) {
+    let decision = hooks.invoke_before_tool_call(call).await;
+    if decision.block {
+        let reason = decision
+            .reason
+            .unwrap_or_else(|| "blocked by before_tool_call".to_string());
+        (
+            CallPreparation::Immediate(ToolResult {
                 tool_call_id: call.id.clone(),
                 content: Box::new(Content::text(format!("tool call blocked: {reason}"))),
                 is_error: true,
                 details: None,
-            });
-            continue;
-        }
-
-        let mut result = match telemetry {
-            None => call_tool(executor, hooks, call, signal).await,
-            Some(parent) => {
-                // One `pi.harness.tool` span per call, parented to the turn.
-                // Tool *arguments* and *output* are deliberately never
-                // recorded — only the name, the call id and whether the
-                // execution produced an error.
-                let options = SpanOptions::new(span_name::HARNESS_TOOL)
-                    .with_attribute(attribute_name::TOOL_NAME, call.name.clone())
-                    .with_attribute(attribute_name::TOOL_CALL_ID, call.id.clone());
-                parent
-                    .start_span_with(options, |span| async move {
-                        let result = call_tool(executor, hooks, call, signal).await;
-                        span.set_attributes(tool_attributes(&result));
-                        if result.is_error {
-                            span.set_status(SpanStatus::error(
-                                "ToolError",
-                                "tool call produced an error result",
-                            ));
-                        }
-                        Ok::<ToolResult, AgentError>(result)
-                    })
-                    .await
-                    .unwrap_or_else(|err| ToolResult {
-                        tool_call_id: call.id.clone(),
-                        content: Box::new(Content::text(err.to_string())),
-                        is_error: true,
-                        details: None,
-                    })
-            }
-        };
-        hooks.invoke_after_tool_call(&mut result).await;
-        results.push(result);
+            }),
+            decision.terminate,
+        )
+    } else {
+        (CallPreparation::Execute, decision.terminate)
     }
+}
 
+/// Serialized dispatch — each call is prepared, executed and finalized
+/// before the next one starts.
+async fn execute_batch_sequential(
+    executor: Option<&Arc<dyn ToolExecutor>>,
+    hooks: &AgentHookAdapter,
+    tool_calls: &[&ToolCall],
+    signal: &CancellationToken,
+    telemetry: Option<&SpanRef>,
+) -> (Vec<ToolResult>, bool) {
+    let mut all_terminate = true;
+    let mut results = Vec::with_capacity(tool_calls.len());
+    for call in tool_calls {
+        let (preparation, terminate) = prepare_call(hooks, call).await;
+        all_terminate &= terminate;
+        match preparation {
+            CallPreparation::Immediate(result) => results.push(result),
+            CallPreparation::Execute => {
+                results.push(run_call(executor, hooks, call, signal, telemetry).await);
+            }
+        }
+    }
     (results, !all_terminate)
 }
 
-/// Execute one tool call: run the `AfterToolCall` hook, dispatch to the
-/// registered executor and convert executor-level failures into error
-/// results so the turn continues.
-async fn call_tool(
+/// Concurrent dispatch — every call is prepared in source order (so the
+/// `BeforeToolCall` hook still observes the batch in model order), the
+/// allowed calls run concurrently, and their results are folded back into
+/// source order.
+async fn execute_batch_parallel(
+    executor: Option<&Arc<dyn ToolExecutor>>,
+    hooks: &AgentHookAdapter,
+    tool_calls: &[&ToolCall],
+    signal: &CancellationToken,
+    telemetry: Option<&SpanRef>,
+) -> (Vec<ToolResult>, bool) {
+    let mut all_terminate = true;
+    let mut slots: Vec<Option<ToolResult>> = Vec::with_capacity(tool_calls.len());
+    let mut prepared: Vec<(usize, &ToolCall)> = Vec::with_capacity(tool_calls.len());
+
+    for call in tool_calls {
+        let (preparation, terminate) = prepare_call(hooks, call).await;
+        all_terminate &= terminate;
+        match preparation {
+            CallPreparation::Immediate(result) => slots.push(Some(result)),
+            CallPreparation::Execute => {
+                prepared.push((slots.len(), call));
+                slots.push(None);
+            }
+        }
+    }
+
+    let futures = prepared.iter().map(|(slot, call)| async move {
+        (
+            *slot,
+            run_call(executor, hooks, call, signal, telemetry).await,
+        )
+    });
+    for (slot, result) in futures::future::join_all(futures).await {
+        slots[slot] = Some(result);
+    }
+
+    let results = slots.into_iter().flatten().collect();
+    (results, !all_terminate)
+}
+
+/// Execute one tool call and finalize it: dispatch to the registered executor
+/// (or the Stage 2 stub), convert executor-level failures into error results
+/// so the turn continues, then let the `AfterToolCall` hook rewrite the result
+/// exactly once. Wraps the dispatch in a `pi.harness.tool` span when telemetry
+/// is installed.
+///
+/// Tool *arguments* and *output* are deliberately never recorded in the span —
+/// only the name, the call id and whether the execution produced an error.
+async fn run_call(
     executor: Option<&Arc<dyn ToolExecutor>>,
     hooks: &AgentHookAdapter,
     call: &ToolCall,
     signal: &CancellationToken,
+    telemetry: Option<&SpanRef>,
 ) -> ToolResult {
-    let mut result = match executor {
+    let mut result = match telemetry {
+        None => dispatch_tool(executor, call, signal).await,
+        Some(parent) => {
+            // One `pi.harness.tool` span per call, parented to the turn.
+            let options = SpanOptions::new(span_name::HARNESS_TOOL)
+                .with_attribute(attribute_name::TOOL_NAME, call.name.clone())
+                .with_attribute(attribute_name::TOOL_CALL_ID, call.id.clone());
+            parent
+                .start_span_with(options, |span| async move {
+                    let result = dispatch_tool(executor, call, signal).await;
+                    span.set_attributes(tool_attributes(&result));
+                    if result.is_error {
+                        span.set_status(SpanStatus::error(
+                            "ToolError",
+                            "tool call produced an error result",
+                        ));
+                    }
+                    Ok::<ToolResult, AgentError>(result)
+                })
+                .await
+                .unwrap_or_else(|err| ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content: Box::new(Content::text(err.to_string())),
+                    is_error: true,
+                    details: None,
+                })
+        }
+    };
+    hooks.invoke_after_tool_call(&mut result).await;
+    result
+}
+
+/// Dispatch one tool call to the registered executor and convert
+/// executor-level failures into error results so the turn continues. This is
+/// the raw execution step — [`run_call`] adds the `AfterToolCall` hook.
+async fn dispatch_tool(
+    executor: Option<&Arc<dyn ToolExecutor>>,
+    call: &ToolCall,
+    signal: &CancellationToken,
+) -> ToolResult {
+    match executor {
         Some(executor) => match executor.execute(call, signal.clone()).await {
             Ok(result) => result,
             // Executor-level failures become error results; the turn
@@ -690,7 +807,5 @@ async fn call_tool(
             is_error: false,
             details: None,
         },
-    };
-    hooks.invoke_after_tool_call(&mut result).await;
-    result
+    }
 }

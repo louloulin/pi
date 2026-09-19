@@ -16,7 +16,7 @@ use pi_ai::StreamError;
 use pi_coding_agent::tool_executor::default_executor;
 use pi_protocol::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context as AgentContext, Message, Model,
-    ProviderId, Role, StopReason, TextContent, ToolCall, Usage,
+    ProviderId, Role, StopReason, TextContent, ToolCall, ToolResult, Usage,
 };
 use tempfile::TempDir;
 
@@ -139,6 +139,28 @@ fn first_tool_text(agent: &Agent) -> String {
             _ => None,
         })
         .expect("agent produced a tool result")
+}
+
+/// Every tool result in the agent's message log, in order.
+fn tool_results(agent: &Agent) -> Vec<ToolResult> {
+    agent
+        .loop_ref()
+        .state()
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            Content::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_result_text(result: &ToolResult) -> String {
+    match result.content.as_ref() {
+        Content::Text(text) => text.text.clone(),
+        other => format!("{other:?}"),
+    }
 }
 
 fn build_agent(stream: Arc<ScriptedStream>) -> Agent {
@@ -335,4 +357,58 @@ async fn tool_errors_are_marked_is_error_in_the_message_log() {
         })
         .expect("tool result present");
     assert!(is_error, "a failed read must be flagged as an error result");
+}
+
+#[tokio::test]
+async fn parallel_read_batch_lands_in_source_order() {
+    // `read` declares no execution-mode override, so a batch of reads takes
+    // the concurrent path in `pi-agent-core`; their results must still be
+    // appended in the order the model emitted them, each carrying the real
+    // file contents.
+    let dir = temp_dir("parallel-read");
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    std::fs::write(&first, "alpha contents\n").expect("write fixture");
+    std::fs::write(&second, "beta contents\n").expect("write fixture");
+
+    let batch = AssistantMessage {
+        model: "faux-model".into(),
+        content: vec![
+            Content::ToolCall(ToolCall {
+                id: "call-first".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": first}),
+            }),
+            Content::ToolCall(ToolCall {
+                id: "call-second".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": second}),
+            }),
+        ],
+        stop_reason: StopReason::ToolUse,
+        usage: Usage::default(),
+    };
+
+    let stream = Arc::new(ScriptedStream::new(vec![batch, text_reply("done")]));
+    let mut agent = build_agent(stream.clone());
+
+    agent
+        .loop_mut()
+        .run(vec![user_message("read both files")], |_| {})
+        .await
+        .expect("loop runs");
+
+    let results = tool_results(&agent);
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call-first", "call-second"],
+        "parallel results are appended in source order"
+    );
+    assert!(tool_result_text(&results[0]).contains("alpha contents"));
+    assert!(tool_result_text(&results[1]).contains("beta contents"));
+    assert!(results.iter().all(|result| !result.is_error));
+    assert_eq!(stream.call_count(), 2);
 }
