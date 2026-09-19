@@ -15,6 +15,7 @@ use pi_coding_agent::print_mode::{run_print_mode, PrintModeOptions};
 use pi_coding_agent::provider::ProviderRouter;
 use pi_coding_agent::resource_loader::{
     build_cli_prompt_templates_with_extensions, build_cli_system_prompt_with_extensions,
+    resolve_cli_project_trust,
 };
 use pi_coding_agent::session_log::SessionLog;
 use pi_extensions::DiscoveredResources;
@@ -342,6 +343,16 @@ fn build_system_prompt_for(
     extension_tools: &[pi_extensions::RegisteredToolPrompt],
     extension_resources: &DiscoveredResources,
 ) -> String {
+    // Resolved here rather than inside the loader so the notice can name
+    // the directory; the loader takes the decision as a flag.
+    let (trusted, has_trust_requiring_resources) = resolve_cli_project_trust(cli);
+    if has_trust_requiring_resources && !trusted {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        eprintln!(
+            "pi: {} is not trusted — project .pi resources are ignored.\n    Use `pi --approve` for this run, or /trust inside an interactive session.",
+            cwd.display()
+        );
+    }
     let (prompt, diagnostics) =
         build_cli_system_prompt_with_extensions(cli, extension_tools, extension_resources);
     for diagnostic in &diagnostics {

@@ -41,9 +41,13 @@ use crate::skills::{
 use crate::system_prompt::{
     build_system_prompt, builtin_prompt_contributions, pi_docs_paths, SystemPromptOptions,
 };
+use crate::trust::{
+    has_trust_requiring_project_resources, resolve_project_trusted, DefaultProjectTrust,
+    ProjectTrustStore,
+};
 
 /// Where resources are loaded from.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResourceLoadOptions {
     /// Working directory — the base for `.pi/` discovery.
     pub cwd: PathBuf,
@@ -63,12 +67,35 @@ pub struct ResourceLoadOptions {
     /// `--no-prompt-templates`: skip `~/.pi/agent/prompts` and
     /// `.pi/prompts` discovery (explicit paths still load).
     pub no_prompt_templates: bool,
+    /// Whether `<cwd>/.pi` resources (`.pi/SYSTEM.md`, `.pi/skills`,
+    /// `.pi/prompts`) may be read. See [`crate::trust`] for how the CLI
+    /// resolves this; it is never inferred from an untrusted project.
+    pub project_trusted: bool,
+}
+
+impl Default for ResourceLoadOptions {
+    /// Library-friendly defaults; the CLI always fills `project_trusted`
+    /// from the trust store and the `--approve` / `--no-approve` flags.
+    fn default() -> Self {
+        Self {
+            cwd: PathBuf::new(),
+            agent_dir: PathBuf::new(),
+            skill_paths: Vec::new(),
+            no_skills: false,
+            no_context_files: false,
+            append_system_prompt: Vec::new(),
+            prompt_template_paths: Vec::new(),
+            no_prompt_templates: false,
+            project_trusted: true,
+        }
+    }
 }
 
 /// Everything the system prompt is built from.
 #[derive(Debug, Clone, Default)]
 pub struct LoadedResources {
-    /// `~/.pi/agent/SYSTEM.md`, which replaces the built-in prompt.
+    /// `~/.pi/agent/SYSTEM.md` (or a trusted `.pi/SYSTEM.md`), which
+    /// replaces the built-in prompt.
     pub custom_prompt: Option<String>,
     /// Concatenated append segments (loader file first, then CLI).
     pub append_system_prompt: Option<String>,
@@ -82,6 +109,10 @@ pub struct LoadedResources {
     pub diagnostics: Vec<SkillDiagnostic>,
     /// Non-fatal prompt template problems worth reporting on stderr.
     pub prompt_diagnostics: Vec<PromptTemplateDiagnostic>,
+    /// Whether project `.pi` resources were allowed for this load.
+    pub project_trusted: bool,
+    /// Whether this project has resources that required a trust decision.
+    pub trust_requiring_resources: bool,
 }
 
 impl LoadedResources {
@@ -152,10 +183,15 @@ impl LoadedResources {
     /// extension cannot silently displace the project's own resources.
     /// Paths are resolved the same way the CLI flags are — relative
     /// entries against `cwd`.
+    /// `project_trusted` only reaches the two default-directory passes,
+    /// which this call disables: extension-provided paths are explicit
+    /// (`skill_paths` / `prompt_paths`), not project discovery, so they
+    /// are not gated on trust.
     pub fn extend_extension_resources(
         &mut self,
         cwd: &Path,
         agent_dir: &Path,
+        project_trusted: bool,
         resources: &DiscoveredResources,
     ) {
         if !resources.skill_paths.is_empty() {
@@ -164,6 +200,7 @@ impl LoadedResources {
                 agent_dir: agent_dir.to_path_buf(),
                 skill_paths: resources.skill_paths.clone(),
                 include_defaults: false,
+                project_trusted,
             });
             self.diagnostics.extend(loaded.diagnostics);
             for skill in loaded.skills {
@@ -183,6 +220,7 @@ impl LoadedResources {
                 agent_dir: agent_dir.to_path_buf(),
                 prompt_paths: resources.prompt_paths.clone(),
                 include_defaults: false,
+                project_trusted,
             });
             self.prompt_diagnostics.extend(loaded.diagnostics);
             for template in loaded.templates {
@@ -220,18 +258,20 @@ pub fn load_resources(options: &ResourceLoadOptions) -> LoadedResources {
             agent_dir: agent_dir.clone(),
             skill_paths: options.skill_paths.clone(),
             include_defaults: true,
+            project_trusted: options.project_trusted,
         });
         diagnostics.extend(loaded.diagnostics);
         loaded.skills
     };
 
-    let custom_prompt = discover_system_prompt_file(&agent_dir)
+    let custom_prompt = discover_system_prompt_file(&cwd, &agent_dir, options.project_trusted)
         .and_then(|path| read_prompt_file(&path))
         .filter(|content| !content.trim().is_empty());
 
     let mut append_segments: Vec<String> = Vec::new();
     if let Some(content) =
-        discover_append_system_prompt_file(&agent_dir).and_then(|path| read_prompt_file(&path))
+        discover_append_system_prompt_file(&cwd, &agent_dir, options.project_trusted)
+            .and_then(|path| read_prompt_file(&path))
     {
         if !content.is_empty() {
             append_segments.push(content);
@@ -245,6 +285,7 @@ pub fn load_resources(options: &ResourceLoadOptions) -> LoadedResources {
         agent_dir: agent_dir.clone(),
         prompt_paths: options.prompt_template_paths.clone(),
         include_defaults: !options.no_prompt_templates,
+        project_trusted: options.project_trusted,
     });
 
     LoadedResources {
@@ -256,7 +297,34 @@ pub fn load_resources(options: &ResourceLoadOptions) -> LoadedResources {
         prompt_templates: prompt_templates.templates,
         diagnostics,
         prompt_diagnostics: prompt_templates.diagnostics,
+        project_trusted: options.project_trusted,
+        trust_requiring_resources: has_trust_requiring_project_resources(&cwd),
     }
+}
+
+/// Resolve the effective project trust for one CLI invocation.
+///
+/// Returns `(project_trusted, has_trust_requiring_resources)` so callers
+/// can explain to the user why project resources were skipped. Resolution
+/// order lives in [`resolve_project_trusted`]: `--approve` /
+/// `--no-approve`, then the saved `.pi` decision, then "untrusted"
+/// because this entry point has no interactive prompt.
+pub fn resolve_cli_project_trust(cli: &Cli) -> (bool, bool) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_cli_project_trust_for(cli, &cwd, &agent_dir_or_default())
+}
+
+/// [`resolve_cli_project_trust`] against explicit directories.
+pub fn resolve_cli_project_trust_for(cli: &Cli, cwd: &Path, agent_dir: &Path) -> (bool, bool) {
+    let has_trust_requiring = has_trust_requiring_project_resources(cwd);
+    let store = ProjectTrustStore::new(agent_dir);
+    let trusted = resolve_project_trusted(
+        cwd,
+        &store,
+        cli.trust_override(),
+        DefaultProjectTrust::Ask,
+    );
+    (trusted, has_trust_requiring)
 }
 
 /// Build the system prompt from parsed CLI flags.
@@ -286,6 +354,7 @@ pub fn build_cli_system_prompt_with_extensions(
 ) -> (String, Vec<SkillDiagnostic>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let agent_dir = agent_dir_or_default();
+    let (project_trusted, _) = resolve_cli_project_trust(cli);
     let mut loaded = load_resources(&ResourceLoadOptions {
         cwd: cwd.clone(),
         agent_dir: agent_dir.clone(),
@@ -295,12 +364,13 @@ pub fn build_cli_system_prompt_with_extensions(
         append_system_prompt: cli.append_system_prompt.clone(),
         prompt_template_paths: cli.prompt_template.clone(),
         no_prompt_templates: cli.no_prompt_templates,
+        project_trusted,
     });
     // `--no-skills` disables skill discovery outright, extension paths
     // included: the flag is the user's "do not put skills in the prompt"
     // switch, and a plugin must not be able to override it.
     if !extension_resources.skill_paths.is_empty() && !cli.no_skills {
-        loaded.extend_extension_resources(&cwd, &agent_dir, extension_resources);
+        loaded.extend_extension_resources(&cwd, &agent_dir, project_trusted, extension_resources);
     }
 
     let prompt = loaded.build_system_prompt_with_extension_tools(&cwd, extension_tools);
@@ -324,11 +394,13 @@ pub fn build_cli_prompt_templates_with_extensions(
 ) -> PromptTemplatesLoadResult {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let agent_dir = agent_dir_or_default();
+    let (project_trusted, _) = resolve_cli_project_trust(cli);
     let mut result = load_prompt_templates(&LoadPromptTemplatesOptions {
         cwd: cwd.clone(),
         agent_dir: agent_dir.clone(),
         prompt_paths: cli.prompt_template.clone(),
         include_defaults: !cli.no_prompt_templates,
+        project_trusted,
     });
     // `--no-prompt-templates` keeps the CLI paths but drops the default
     // directories; the same flag silences extension-provided templates
@@ -339,6 +411,7 @@ pub fn build_cli_prompt_templates_with_extensions(
             agent_dir,
             prompt_paths: extension_resources.prompt_paths.clone(),
             include_defaults: false,
+            project_trusted,
         });
         result.diagnostics.extend(extra.diagnostics);
         for template in extra.templates {
@@ -561,6 +634,44 @@ mod tests {
     }
 
     #[test]
+    fn cli_project_trust_uses_flags_and_the_saved_store() {
+        let temp = TempDir::new("cli-trust");
+        temp.write("project/.pi/settings.json", "{}");
+        let cwd = temp.path.join("project");
+        let agent_dir = temp.path.join("agent");
+
+        // Trust-requiring resources + no saved decision + no UI: untrusted.
+        let plain = Cli::try_parse_from(["pi", "--print", "hi"]).expect("parses");
+        assert_eq!(
+            resolve_cli_project_trust_for(&plain, &cwd, &agent_dir),
+            (false, true)
+        );
+
+        // `--approve` overrides for one run, `--no-approve` forces off.
+        let approved = Cli::try_parse_from(["pi", "--approve", "--print", "hi"])
+            .expect("parses");
+        assert_eq!(
+            resolve_cli_project_trust_for(&approved, &cwd, &agent_dir),
+            (true, true)
+        );
+        let denied = Cli::try_parse_from(["pi", "--no-approve", "--print", "hi"])
+            .expect("parses");
+        assert_eq!(
+            resolve_cli_project_trust_for(&denied, &cwd, &agent_dir),
+            (false, true)
+        );
+
+        // A saved decision applies when neither flag is given.
+        ProjectTrustStore::new(&agent_dir)
+            .set(&cwd, Some(true))
+            .expect("save trust");
+        assert_eq!(
+            resolve_cli_project_trust_for(&plain, &cwd, &agent_dir),
+            (true, true)
+        );
+    }
+
+    #[test]
     fn cli_flags_reach_the_loaded_resources() {
         let cli = Cli::try_parse_from([
             "pi",
@@ -613,7 +724,7 @@ mod tests {
             prompt_paths: vec![temp.path.join("dynamic/prompts/dyn.md")],
             theme_paths: vec![temp.path.join("dynamic/theme.json")],
         };
-        loaded.extend_extension_resources(&project, &temp.path.join("agent"), &extension_resources);
+        loaded.extend_extension_resources(&project, &temp.path.join("agent"), true, &extension_resources);
 
         let prompt = loaded.build_system_prompt(&absolute(&project));
         assert!(prompt.contains("<name>local</name>"), "{prompt}");
@@ -653,6 +764,7 @@ mod tests {
         loaded.extend_extension_resources(
             &project,
             &temp.path.join("agent"),
+            true,
             &DiscoveredResources {
                 skill_paths: vec![temp.path.join("dynamic/SKILL.md")],
                 prompt_paths: vec![temp.path.join("dynamic/note.md")],
@@ -680,6 +792,7 @@ mod tests {
         loaded.extend_extension_resources(
             &temp.path.join("project"),
             &temp.path.join("agent"),
+            true,
             &DiscoveredResources {
                 skill_paths: vec![temp.path.join("nope/SKILL.md")],
                 prompt_paths: vec![temp.path.join("nope/note.md")],

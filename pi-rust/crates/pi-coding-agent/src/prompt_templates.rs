@@ -101,6 +101,11 @@ pub struct LoadPromptTemplatesOptions {
     pub prompt_paths: Vec<PathBuf>,
     /// Whether the two default locations are searched.
     pub include_defaults: bool,
+    /// Whether `<cwd>/.pi/prompts` may be loaded. Project prompt
+    /// templates are trust-requiring: an untrusted clone must not be able
+    /// to install a `/command`. `~/.pi/agent/prompts` is never gated.
+    /// Defaults to `false` (safe).
+    pub project_trusted: bool,
 }
 
 /// Split a command argument string into arguments, respecting quotes.
@@ -323,15 +328,17 @@ pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> PromptTemp
 
     if options.include_defaults {
         let global_dir = agent_dir.join("prompts");
-        let project_dir = cwd.join(CONFIG_DIR_NAME).join("prompts");
         add(
             load_templates_from_dir(&global_dir, PromptTemplateSource::User),
             &mut result,
         );
-        add(
-            load_templates_from_dir(&project_dir, PromptTemplateSource::Project),
-            &mut result,
-        );
+        if options.project_trusted {
+            let project_dir = cwd.join(CONFIG_DIR_NAME).join("prompts");
+            add(
+                load_templates_from_dir(&project_dir, PromptTemplateSource::Project),
+                &mut result,
+            );
+        }
     }
 
     for raw_path in &options.prompt_paths {
@@ -516,6 +523,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             prompt_paths: vec![temp.path.join("prompts")],
             include_defaults: false,
+            project_trusted: true,
         });
 
         assert_eq!(result.templates.len(), 2, "{:?}", result.diagnostics);
@@ -548,6 +556,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             prompt_paths: vec![temp.path.join("prompts")],
             include_defaults: false,
+            project_trusted: true,
         });
 
         let template = &result.templates[0];
@@ -570,6 +579,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             prompt_paths: vec![temp.path.join("extra.md")],
             include_defaults: true,
+            project_trusted: true,
         });
 
         assert_eq!(result.templates.len(), 2);
@@ -580,6 +590,31 @@ mod tests {
     }
 
     #[test]
+    fn an_untrusted_project_hides_project_templates() {
+        let temp = TempDir::new("untrusted-project");
+        temp.write(
+            "agent/prompts/global.md",
+            "---\ndescription: From agent.\n---\nagent\n",
+        );
+        temp.write(
+            "project/.pi/prompts/local.md",
+            "---\ndescription: From project.\n---\nproject\n",
+        );
+
+        let result = load_prompt_templates(&LoadPromptTemplatesOptions {
+            cwd: temp.path.join("project"),
+            agent_dir: temp.path.join("agent"),
+            prompt_paths: Vec::new(),
+            include_defaults: true,
+            project_trusted: false,
+        });
+
+        assert_eq!(result.templates.len(), 1);
+        assert_eq!(result.templates[0].name, "global");
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn missing_explicit_path_reports_a_diagnostic() {
         let temp = TempDir::new("missing");
         let result = load_prompt_templates(&LoadPromptTemplatesOptions {
@@ -587,6 +622,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             prompt_paths: vec![temp.path.join("nope.md")],
             include_defaults: false,
+            project_trusted: true,
         });
 
         assert!(result.templates.is_empty());

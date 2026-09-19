@@ -83,6 +83,16 @@ pub struct Cli {
     #[arg(long = "no-prompt-templates")]
     pub no_prompt_templates: bool,
 
+    /// Trust the current project's `.pi` resources for this run
+    /// (`--approve`, `-a` in the TS CLI). Overrides any saved decision.
+    #[arg(long = "approve", short = 'a', conflicts_with = "no_approve")]
+    pub approve: bool,
+
+    /// Ignore the current project's `.pi` resources for this run, even if
+    /// a saved decision trusts them (`--no-approve`, `-na` in the TS CLI).
+    #[arg(long = "no-approve")]
+    pub no_approve: bool,
+
     /// Path to a session directory. Defaults to `~/.pi/sessions/`.
     #[arg(long, value_name = "PATH")]
     pub session_dir: Option<std::path::PathBuf>,
@@ -117,9 +127,21 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// `Some(true)` for `--approve`, `Some(false)` for `--no-approve`,
+    /// `None` when neither flag was passed.
+    pub fn trust_override(&self) -> Option<bool> {
+        if self.approve {
+            Some(true)
+        } else if self.no_approve {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// Parse `std::env::args_os()`, normalising the multi-character short
     /// flags the TS CLI accepts but clap cannot express on its own
-    /// (`-np` → `--no-prompt-templates`).
+    /// (`-np` → `--no-prompt-templates`, `-na` → `--no-approve`).
     pub fn parse_with_aliases() -> Self {
         Self::parse_from(std::env::args_os().map(normalize_arg))
     }
@@ -135,6 +157,8 @@ impl Cli {
 fn normalize_arg(arg: std::ffi::OsString) -> std::ffi::OsString {
     if arg == "-np" {
         std::ffi::OsString::from("--no-prompt-templates")
+    } else if arg == "-na" {
+        std::ffi::OsString::from("--no-approve")
     } else {
         arg
     }
@@ -151,7 +175,30 @@ mod tests {
             normalize_arg(OsString::from("-np")),
             OsString::from("--no-prompt-templates")
         );
+        assert_eq!(
+            normalize_arg(OsString::from("-na")),
+            OsString::from("--no-approve")
+        );
         assert_eq!(normalize_arg(OsString::from("--print")), OsString::from("--print"));
+    }
+
+    #[test]
+    fn trust_flags_resolve_to_an_override() {
+        let plain = Cli::try_parse_from(["pi", "--print", "hi"]).expect("parses");
+        assert_eq!(plain.trust_override(), None);
+
+        let approve = Cli::try_parse_from(["pi", "--approve", "--print", "hi"]).expect("parses");
+        assert_eq!(approve.trust_override(), Some(true));
+        let short = Cli::try_parse_from(["pi", "-a", "--print", "hi"]).expect("parses");
+        assert_eq!(short.trust_override(), Some(true));
+
+        let deny =
+            Cli::try_parse_from(["pi", "--no-approve", "--print", "hi"]).expect("parses");
+        assert_eq!(deny.trust_override(), Some(false));
+
+        // The two flags contradict each other.
+        assert!(Cli::try_parse_from(["pi", "--approve", "--no-approve", "--print", "hi"])
+            .is_err());
     }
 }
 

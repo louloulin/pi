@@ -3980,10 +3980,146 @@ $ cargo test --workspace --no-fail-fast -- --test-threads=1   # 695 passed / 1 f
 + 本节状态文档），rebase 到 `origin/feature/pi.rs`（`d18fe9ae2`，含 LUM-1080/1081 的 Stage 22）
 之后 push。
 
+## LUM-1085 round — Stage 23：项目信任管理器（`.pi` 资源信任门 + `--approve`/`-na` + `/trust`）
+
+### 为什么是这一项
+
+LUM-1081 / LUM-1082 收口后的 frontier 里，「`/trust` + 项目本地 `.pi/SYSTEM.md`」是
+**唯一一个已经存在安全缺口的**：Stage 21 把 `.pi/skills`、`.pi/prompts`、`.pi/SYSTEM.md`
+都接进来了，但当时的端口没有信任管理器，只能靠「一律不加载项目 `SYSTEM.md`」这种硬编码
+兜底（`context_files.rs` 旧注释写明了这一点）。其余 frontier 要么被上游阻塞
+（`pi-client` 等 LUM-1068），要么环境不允许（`.wasm` 宿主缺 wasm32 target + `wasmtime`
+不在 `Cargo.lock`）；本轮 3 个并发槽已满（`active_task_count = 3`），不派发新子任务，
+直接落地这一项。
+
+### 上游对应实现
+
+- `packages/coding-agent/src/core/trust-manager.ts`（245 行）—— 决策读写与继承、
+  `TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES`、`hasTrustRequiringProjectResources`、
+  `resolveProjectTrusted`。
+- `packages/coding-agent/src/core/project-trust.ts` —— `defaultProjectTrust` 与
+  `--approve` / `--no-approve` 的覆盖顺序。
+- `ui/interactive-mode.ts:3047` `showTrustSelector`；`resource-loader.ts:1023-1049`
+  的 `discoverSystemPromptFile` / `discoverAppendSystemPromptFile`。
+- CLI：`cli/args.ts:220/222` 的 `--approve`/`-a`、`--no-approve`/`-na`
+  （`projectTrustOverride`）。
+
+### 落地内容
+
+新增 `crates/pi-coding-agent/src/trust.rs`（纯文件系统层，无 UI、无扩展钩子）：
+
+| API | 语义 |
+|-----|------|
+| `TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES` | `.pi` 下 7 个需要信任才能加载的条目，与上游同序同集 |
+| `ProjectTrustStore` | `<agent_dir>/trust.json` 的读写；`get` / `get_entry` 沿父目录链继承并忽略 `null` |
+| `ProjectTrustStore::set` / `set_many` | 写入决策（`BTreeMap` 排序键、2 空格缩进 + 结尾换行、剥 BOM、拒绝非 bool/null） |
+| `has_trust_requiring_project_resources` | 从 `cwd` 向上找 `.pi/<7 项>` 或 `.agents/skills`；另有 `_with_home` 变体便于测试 |
+| `resolve_project_trusted` | `override → 无资源短路 → 已保存决策 → DefaultProjectTrust`（`Ask` 在无 UI 下 = `false`） |
+| `resolve_cli_project_trust` / `..._for` | CLI 入口：返回 `(project_trusted, has_trust_requiring_resources)` |
+| `TrustLock` | `create_new` 锁文件 `<trust.json>.lock`（10 次 × 20 ms 重试，`Drop` 清理） |
+
+门控接线：
+
+- `context_files.rs`：`discover_system_prompt_file(cwd, agent_dir, project_trusted)` /
+  `discover_append_system_prompt_file(...)` —— 可信项目的 `.pi/SYSTEM.md` 优先于全局，
+  不可信时项目文件对发现逻辑**不存在**（与 `resource-loader.ts:1023-1049` 同序）。
+- `skills.rs`：`LoadSkillsOptions.project_trusted` —— 只门控 `<cwd>/.pi/skills`，
+  `~/.pi/agent/skills` 永不门控。
+- `prompt_templates.rs`：`LoadPromptTemplatesOptions.project_trusted` —— 同上，默认 `false`。
+- `resource_loader.rs`：`ResourceLoadOptions.project_trusted`（手写 `Default`，库场景默认
+  `true` 以保持既有调用方语义）；`LoadedResources` 增加 `project_trusted` /
+  `trust_requiring_resources`，供调用方解释「为什么项目资源被跳过」。
+- `cli.rs`：`--approve`/`-a` 与 `--no-approve`（互斥）、`Cli::trust_override()`；
+  `normalize_arg` 把 `-na` 映射成 `--no-approve`。
+- `commands/slash.rs` + `interactive.rs`：`/trust` / `/trust yes|no` 查看或写入决策，
+  写盘后提示 “Restart pi for this to take effect.”（与上游提示一致）。
+- `main.rs`：构建系统提示时若「有需要信任的资源但未信任」，向 stderr 打印一行提示，
+  指向 `--approve` 与 `/trust`。
+
+### 与上游的刻意差异
+
+- **无 UI 时不上询问**：上游 `hasUI: false` 时 `Ask` 会落到 `defaultProjectTrust`
+  （默认 `"never"`）；Rust 的非交互入口（`--print` / `--rpc`）没有对话框，因此
+  `DefaultProjectTrust::Ask` 直接解析为 `false`，并把原因打印到 stderr。交互模式用
+  `/trust` 持久化决策——上游是启动时的 `showTrustSelector`，Rust 侧放进 slash 命令，
+  避免首帧前阻塞 TUI。
+- **锁实现**：上游用 `proper-lockfile`，Rust 侧没有等价依赖，改为 `create_new` 独占
+  锁文件 + 短重试 + `Drop` 删除。并发写窗口极小，拿不到锁会返回 `TrustError::Lock`
+  而不是静默覆盖。
+- **损坏的 store 不等于崩溃**：`resolve_project_trusted` 把 `TrustError` 当成「无决策」，
+  保证一个坏掉的 `trust.json` 不会让 agent 起不来；上游会抛异常。
+
+
+### 验证
+
+```
+$ cargo build  -p pi-coding-agent                               # clean
+$ cargo clippy -p pi-coding-agent --all-targets -- -D warnings  # 0 warnings
+$ cargo test   -p pi-coding-agent --lib                         # 186 passed / 0 failed
+$ cargo test   -p pi-coding-agent --test system_prompt_resources # 6 passed / 0 failed
+```
+
+新增测试：
+
+- `trust.rs` 7 个单测：父目录继承、`null` 忽略、损坏 store、资源探测、空项目、
+  override 优先于已保存决策、无资源短路。
+- `cli.rs` `trust_flags_resolve_to_an_override`：`--approve` / `-a` / `--no-approve` / 互斥。
+- `resource_loader.rs` `cli_project_trust_uses_flags_and_the_saved_store`：
+  flag → 已保存决策 → 默认的三段式解析。
+- `skills.rs` / `prompt_templates.rs`：未信任项目隐藏项目 skills / prompts。
+- `context_files.rs` `a_trusted_project_system_md_shadows_the_global_one`。
+- `tests/system_prompt_resources.rs`：`project_local_system_md_is_gated_by_trust`
+  （由原来的 `..._is_not_loaded` 改写），同时断言不可信时忽略、可信时生效。
+
+`--test rpc` 的并行子进程抖动（既存缺陷，LUM-1081 节已记录）本轮再次出现：把本轮改动
+`git stash` 后在父提交 `d77318b52` 上连跑 5 次 `--test rpc`，**同样 2 次失败**，确认与
+本轮无关；`--test-threads=1` 连跑 3 次全绿。
+
+### 剩余 frontier
+
+1. **扩展 `resources_discover` 钩子**（LUM-1084 在跑）：扩展仍不能注入 skills /
+   context files / prompt templates。
+2. **`.wasm` 扩展宿主**：环境缺 wasm32 target，`wasmtime` 未进 `Cargo.lock`。
+3. **`pi-client`**：仍等 LUM-1068。
+4. **dialog 剩余两个外观项**：`input` 多行输入、鼠标点击/滚动、描述列对齐。
+5. **provider 家族**：`mistral-conversations` / `azure-openai-responses` /
+   `google-vertex` / `openai-codex-responses` / `bedrock-converse`（缺 `./data/*.json`）。
+6. **`themes` 目录的信任门**：`trust.rs` 已把 `themes` 列入需要信任的条目，但 `pi-tui`
+   的主题加载还没接项目目录；接线时直接复用这个判定。
+
+### Push status
+
+`feature/pi.rs`：本轮 1 个代码 commit + 本节状态文档，push 到 `origin/feature/pi.rs`。
+
+
 ## LUM-1084 round — Stage 23：扩展资源发现（`resources_discover`）
 
 Stage 22 的「仍未做」第一条正是这一项：扩展工具已经能进提示词，但扩展还**不能**注入
 skills / prompt templates。本轮把它补上，仍然不引入新依赖。
+
+### 0. 与同期的 LUM-1085（项目信任管理器）的交叉
+
+本轮分支合入 `origin/feature/pi.rs` 时，LUM-1085 刚刚落地，两份改动正好撞在同一批文件
+（`main.rs` / `resource_loader.rs`），冲突三处。语义上的合并结果：
+
+- `build_cli_system_prompt_with_extensions` 同时接两条线：`resolve_cli_project_trust(cli)` 得到的
+  `project_trusted` 传给 `ResourceLoadOptions`，扩展发现的 skills 则继续走
+  `extend_extension_resources`。信任提示（stderr 那一行）留在 `main.rs`，因为提示要带目录名。
+- `extend_extension_resources` 多了一个 `project_trusted` 参数，透传给内部两次
+  `load_skills` / `load_prompt_templates`。它在那里是**惰性的**（两次调用都是
+  `include_defaults: false`，而 `project_trusted` 只影响默认目录那一支），加上只是为了
+  让签名不再隐含一个固定值（未来一旦改成默认目录也参与，那里就自动是对的）。
+- **没有把扩展路径也交给信任门**：扩展报的路径是显式 `skill_paths`，不是项目默认目录发现，
+  上游也把它们与信任解耦（用户级 / CLI 扩展在未信任项目里同样生效）。所以要堵的是
+  「未信任项目里的扩展本身该不该加载」，而不是这些路径。
+- **发现一个跨阶段的真实缺口（本轮不修，另开待办）**：上游 `resource-loader.ts:377`
+  `loadProjectTrustExtensions()` 专门用「未信任」跑一次 bootstrap，把**项目本地扩展**
+  挡在外面（`TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES` 里就含 `extensions`）；Rust 侧
+  `extensions/wiring.rs` 还没有这道门，未信任仓库里的 `.pi/extensions/*.js` 照旧被加载。
+  Stage 22 就已经能把扩展工具描述写进提示词，本轮又多了 skills / prompt templates 两条
+  注入面，所以这个缺口的价值随本阶段上升。修法在上游已有现成参照（bootstrap pass），
+  但属于 `wiring.rs` + `trust.rs` 的地盘，与本轮的 `resources_discover` 可以独立回退，
+  因此单独立项而不是塞进这次提交。
 
 ### 1. 协议事件（`pi-protocol`）
 
@@ -4047,6 +4183,7 @@ target 打 warn 并返回空集合。**发现是 best-effort**：坏扩展不能
   这套写法，Rust 侧现在**不能原样加载**（`js_loader.rs` 只做简单的 TS 类型标注剥离 +
   `module.exports = function (pi) {}` 包装）。本轮的集成用例因此写成 CommonJS 的等价体。
   这是本阶段最大的兼容缺口，已作为 Stage 24 候选单独立项。
+
 
 ### 验证
 
@@ -4116,15 +4253,20 @@ $ cargo test   -p pi-coding-agent --lib                    # 176 passed
 2. **ESM 扩展加载**（`export default` + `node:path` / `node:url` 虚拟模块）—— 插件生态兼容
    的最大缺口，Stage 24 候选；
 3. 主题系统（`themePaths` 有了来源但还没有消费方）；
-4. `/trust` + 项目本地 `.pi/SYSTEM.md`；
+4. ~~`/trust` + 项目本地 `.pi/SYSTEM.md`~~ → LUM-1085（同期）落地；
 5. 会话压缩（`/compact`）；
 6. `.wasm` 扩展宿主；
 7. 把 `pi-client` 接进 `--rpc`，替换 Stage 12 的内联 JSON-RPC；
 8. LUM-1068 落地后 promote **LUM-1069**（`pi-server` / `pi-client` 端到端）；
-9. 修 **LUM-1083**（`pi --rpc` 扩展宿主堆破坏 / 算术溢出）。
+9. 修 **LUM-1083**（`pi --rpc` 扩展宿主堆破坏 / 算术溢出）；
+10. 未信任项目的**扩展加载门**（本轮发现的跨阶段缺口，见本文 0 节）。
 
 ### Push status
 
-`feature/pi.rs`，commit 见本轮 push（Stage 23 代码 + 本节状态文档）。push 前先把已落到
-`origin/feature/pi.rs` 的 LUM-1082（`f3e3ea64d` / `d77318b52`：`/model`、`/resume` 的可搜索
-选择器）合入本轮分支，冲突只在 `FEATURE_PI_RS_STATUS.md` 的追加位置。
+`feature/pi.rs`，commit 见本轮 push（Stage 23 代码 + 本节状态文档）。push 前同时合入了已落到
+`origin/feature/pi.rs` 的两轮：LUM-1082（`f3e3ea64d` / `d77318b52`：`/model`、`/resume` 的
+可搜索选择器）与 LUM-1085（`7eff3b7c7` / `877acfc8b`：项目信任管理器）。LUM-1082 的冲突
+只在文档追加位置；LUM-1085 的冲突在 `main.rs` / `resource_loader.rs` / 文档共 3 处，
+解决方式见上面第 0 节。
+
+
