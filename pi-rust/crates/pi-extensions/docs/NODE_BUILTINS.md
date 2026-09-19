@@ -172,15 +172,16 @@ absent (the failure is a plain "undefined is not a function").
 |---|---|---|
 | `claude-rules.ts`, `file-trigger.ts`, `preset.ts`, `provider-payload.ts`, `titlebar-spinner.ts`, `truncated-tool.ts`, `subagent/agents.ts`, `dynamic-resources/index.ts`, `gondolin/index.ts` | `node:fs`, `node:fs/promises`, `node:path`, `node:url` | Builtins **fully covered**. |
 | `.pi/extensions/import-repro.ts` | `node:buffer`, `node:fs`, `node:path` | Covered; additionally needs the `fetch` global. |
-| `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; additionally needs the `@earendil-works/pi-tui` module. |
-| `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; need the `@earendil-works/*` modules only. |
+| `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; the `@earendil-works/pi-tui` module it needs is bridged as well (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
+| `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; the `@earendil-works/*` modules they need are bridged (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
 | `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | `node:child_process` is bridged (LUM-1110); still blocked on `node:readline` / `node:module` / `node:zlib`. `sandbox/index.ts` additionally needs `setTimeout` / `process.kill`, which are engine/process-contract gaps rather than builtin ones. |
 | `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `truncated-tool.ts` | `node:child_process` (+ `node:util`) | **Unblocked**: all four now have the builtins they import. `ssh.ts`'s timed/abortable path additionally needs the `setTimeout` global (engine-level, not builtin); `AbortSignal` is available since LUM-1116. |
 | `auto-commit-on-exit.ts`, `border-status-editor.ts`, `dirty-repo-guard.ts`, `git-checkpoint.ts`, `github-issue-autocomplete.ts`, `inline-bash.ts`, `input-transform-streaming.ts`, `shutdown-command.ts` | — (shell out through the extension API) | **Unblocked**: these use `pi.exec`, which is now bridged to the Rust host (see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)); they never import `node:child_process` themselves. |
 
-The `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
-specifiers are a separate gap: they are pi's own APIs, not Node ones, and
-virtualising them is its own work item.
+The `@earendil-works/*` specifiers are pi's own APIs rather than Node
+ones, so they have their own document: [`SDK_MODULES.md`](SDK_MODULES.md)
+lists what each virtual module implements, which names are documented
+gaps, and every divergence.
 
 ## Deliberate divergences from Node
 

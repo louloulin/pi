@@ -234,7 +234,43 @@ function makeUiContext(hasUI) {
       // Swallow — notify is fire-and-forget.
     }
   }
-  return Object.freeze({
+  const warnedKinds = {};
+  function reportUnsupported(kind) {
+    if (warnedKinds[kind]) return;
+    warnedKinds[kind] = true;
+    if (typeof globalThis.host_ui_notify !== "function") return;
+    try {
+      globalThis.host_ui_notify(
+        "ctx.ui." + kind + " is not available in the pi extension host: it has no widget or render channel",
+        "warning",
+      );
+    } catch (_e) {
+      // Swallow — notify is fire-and-forget.
+    }
+  }
+  function unsupportedError(kind) {
+    const error = new Error(
+      "ctx.ui." +
+        kind +
+        " is not available in the pi extension host: it has no interactive render channel. See docs/SDK_MODULES.md.",
+    );
+    error.code = "ERR_PI_UI_UNSUPPORTED";
+    return error;
+  }
+  const ui = {
+    // The host has no colour palette: every style helper is an identity
+    // function so `ctx.ui.theme.fg("accent", text)` still returns text.
+    theme: Object.freeze({
+      fg: (color, text) => String(text),
+      bg: (color, text) => String(text),
+      bold: (text) => String(text),
+      italic: (text) => String(text),
+      underline: (text) => String(text),
+      inverse: (text) => String(text),
+      strikethrough: (text) => String(text),
+      getFgAnsi: () => "",
+      getBgAnsi: () => "",
+    }),
     notify(message, level) {
       if (typeof globalThis.host_ui_notify === "function") {
         try {
@@ -281,7 +317,37 @@ function makeUiContext(hasUI) {
         return null;
       }
     },
-  });
+    async editor(title) {
+      reportDenied("editor", title);
+      return null;
+    },
+    custom() {
+      throw unsupportedError("custom");
+    },
+  };
+  // Widget / status / theme / footer channels have no host bridge: accept the
+  // call so extensions that configure them at load time still load, warn once,
+  // and keep the value inert.
+  for (const kind of [
+    "setWidget",
+    "setStatus",
+    "setTitle",
+    "setFooter",
+    "setHeader",
+    "setEditorText",
+    "setHiddenThinkingLabel",
+    "setWorkingIndicator",
+    "setWorkingVisible",
+    "setWorkingMessage",
+    "setEditorComponent",
+    "addAutocompleteProvider",
+    "setTheme",
+  ]) {
+    ui[kind] = () => {
+      reportUnsupported(kind);
+    };
+  }
+  return Object.freeze(ui);
 }
 
 /** The `pi` object extensions see — mirrors `ExtensionAPI`. */
@@ -1783,7 +1849,7 @@ const __pi_typebox_module = (() => {
 //     text comes from Rust's `io::Error`;
 //   - `fs.mkdirSync(path, {recursive: true})` returns `undefined`
 //     instead of the first created directory;
-//   - `node:child_process`, `node:stream`, `node:http`, … and
+//   - `node:stream`, `node:http`, `node:zlib`, … and
 //     `crypto.createHash` are not provided: importing them fails with
 //     the readable "unsupported import" error that lists what exists.
 // ---------------------------------------------------------------------------
@@ -4360,6 +4426,1552 @@ const __pi_child_process_module = (() => {
 if (typeof globalThis.TextEncoder === "undefined") globalThis.TextEncoder = __pi_util_module.TextEncoder;
 if (typeof globalThis.TextDecoder === "undefined") globalThis.TextDecoder = __pi_util_module.TextDecoder;
 
+// ===========================================================================
+// SDK virtual modules — `@earendil-works/*` (LUM-1120)
+//
+// Upstream extensions import pi's own SDK packages, not just Node builtins:
+//
+//   @earendil-works/pi-tui           Text / Box / Container / … components
+//   @earendil-works/pi-coding-agent  defineTool / getAgentDir / DynamicBorder
+//   @earendil-works/pi-ai            Type / StringEnum / uuidv7 / contentText
+//   @earendil-works/pi-agent-core    (type-only in the upstream examples)
+//   @earendil-works/pi-ai/compat     provider registration (gaps below)
+//
+// The packages used to be published under the `@mariozechner/` scope, so every
+// specifier is registered under both scopes as well as the bare package name.
+//
+// The extension host has no terminal render loop: there is no live `TUI`
+// object and no widget/overlay channel, so the component classes below are
+// pure-JS renderables — they implement the constructor surface upstream code
+// uses and `render(width)` returns strings, but nothing drives them on screen.
+// `ctx.ui.custom()` therefore throws a named error instead of silently
+// returning `undefined` (see `docs/SDK_MODULES.md`).
+//
+// Hard rule: a name this file does not implement must never evaluate to
+// `undefined`. Implemented names are real values; names that upstream imports
+// but this shim cannot back throw an `ERR_PI_SDK_UNIMPLEMENTED` error that
+// names the specifier, the export and the doc; any other name throws a
+// "has no export" error. `globalThis.__pi_sdk_manifest()` returns the
+// machine-readable per-specifier inventory (implemented / documented gaps) so
+// `tests/sdk_modules.rs` checks it against the upstream examples.
+// ===========================================================================
+
+// --- ANSI / width helpers -------------------------------------------------
+
+const __pi_sdk_ansi_pattern = new RegExp(
+  "\\x1b\\[[0-9;?]*[ -/]*[@-~]" +
+    "|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)" +
+    "|\\x1b[_P^][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)" +
+    "|\\x1b[@-Z\\\\-_]" +
+    "|\\x9b[0-9;?]*[ -/]*[@-~]",
+  "g",
+);
+
+function __pi_sdk_strip_terminal_sequences(text) {
+  return String(text).replace(__pi_sdk_ansi_pattern, "");
+}
+
+// Approximate terminal cell width for one code point. This is a range table,
+// not a full East-Asian-Width/grapheme implementation: combining marks and
+// emoji ZWJ sequences are approximated, which `docs/SDK_MODULES.md` records as
+// a known divergence from `@earendil-works/pi-tui`.
+function __pi_sdk_code_point_width(codePoint) {
+  if (!Number.isFinite(codePoint) || codePoint <= 0) return 0;
+  if (codePoint < 32) return 0;
+  if (codePoint >= 0x7f && codePoint < 0xa0) return 0;
+  if (codePoint >= 0x0300 && codePoint <= 0x036f) return 0;
+  if (codePoint >= 0x1ab0 && codePoint <= 0x1aff) return 0;
+  if (codePoint >= 0x1dc0 && codePoint <= 0x1dff) return 0;
+  if (codePoint >= 0x20d0 && codePoint <= 0x20ff) return 0;
+  if (codePoint >= 0xfe00 && codePoint <= 0xfe0f) return 0;
+  if (codePoint >= 0xfe20 && codePoint <= 0xfe2f) return 0;
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0x303e) ||
+    (codePoint >= 0x3041 && codePoint <= 0x33ff) ||
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+    (codePoint >= 0xa000 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xa960 && codePoint <= 0xa97f) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+    (codePoint >= 0x1f900 && codePoint <= 0x1f9ff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function __pi_sdk_visible_width(text) {
+  const plain = __pi_sdk_strip_terminal_sequences(String(text)).replace(/\t/g, "   ");
+  let width = 0;
+  for (const ch of plain) width += __pi_sdk_code_point_width(ch.codePointAt(0));
+  return width;
+}
+
+function __pi_sdk_truncate_to_width(text, maxWidth, ellipsis, pad) {
+  const source = text === undefined || text === null ? "" : String(text);
+  const limit = Math.max(0, Math.floor(Number(maxWidth) || 0));
+  const marker = ellipsis === undefined ? "..." : String(ellipsis);
+  let result = source;
+
+  if (__pi_sdk_visible_width(source) > limit) {
+    const markerWidth = __pi_sdk_visible_width(marker);
+    if (markerWidth > limit) {
+      result = "";
+    } else {
+      const budget = limit - markerWidth;
+      let kept = "";
+      let used = 0;
+      for (const ch of source) {
+        const charWidth = __pi_sdk_code_point_width(ch.codePointAt(0));
+        if (used + charWidth > budget) break;
+        kept += ch;
+        used += charWidth;
+      }
+      result = kept + marker;
+    }
+  }
+
+  if (pad) {
+    const used = __pi_sdk_visible_width(result);
+    if (used < limit) result += " ".repeat(limit - used);
+  }
+  return result;
+}
+
+function __pi_sdk_wrap_single_line(line, width) {
+  if (__pi_sdk_visible_width(line) <= width) return [line];
+  const out = [];
+  const tokens = line.split(/(\s+)/).filter((token) => token.length > 0);
+  let current = "";
+  let currentWidth = 0;
+
+  for (const token of tokens) {
+    const tokenWidth = __pi_sdk_visible_width(token);
+    if (tokenWidth > width && token.trim() !== "") {
+      if (current !== "") {
+        out.push(current.replace(/\s+$/, ""));
+        current = "";
+        currentWidth = 0;
+      }
+      let rest = token;
+      while (__pi_sdk_visible_width(rest) > width) {
+        let piece = "";
+        let pieceWidth = 0;
+        for (const ch of rest) {
+          const charWidth = __pi_sdk_code_point_width(ch.codePointAt(0));
+          if (pieceWidth + charWidth > width) break;
+          piece += ch;
+          pieceWidth += charWidth;
+        }
+        if (piece === "") break;
+        out.push(piece);
+        rest = rest.slice(piece.length);
+      }
+      current = rest;
+      currentWidth = __pi_sdk_visible_width(rest);
+      continue;
+    }
+    if (currentWidth > 0 && currentWidth + tokenWidth > width) {
+      out.push(current.replace(/\s+$/, ""));
+      if (token.trim() === "") {
+        current = "";
+        currentWidth = 0;
+      } else {
+        current = token;
+        currentWidth = tokenWidth;
+      }
+    } else {
+      current += token;
+      currentWidth += tokenWidth;
+    }
+  }
+  if (current !== "") out.push(current.replace(/\s+$/, ""));
+  return out.length > 0 ? out : [""];
+}
+
+function __pi_sdk_wrap_text(text, width) {
+  const limit = Number(width) > 0 ? Math.floor(Number(width)) : 1;
+  if (text === undefined || text === null) return [""];
+  const source = String(text);
+  if (source === "") return [""];
+  const out = [];
+  for (const inputLine of source.split(/\r\n|\r|\n/)) {
+    if (inputLine === "") {
+      out.push("");
+      continue;
+    }
+    for (const line of __pi_sdk_wrap_single_line(inputLine, limit)) out.push(line);
+  }
+  return out.length > 0 ? out : [""];
+}
+
+function __pi_sdk_hyperlink(text, url) {
+  return "\x1b]8;;" + String(url) + "\x1b\\" + String(text) + "\x1b]8;;\x1b\\";
+}
+
+const __pi_sdk_cursor_marker = "\x1b_pi:c\x07";
+
+// --- keys -----------------------------------------------------------------
+
+const __pi_sdk_legacy_keys = {
+  "\x1b": "escape",
+  "\x1c": "ctrl+\\",
+  "\x1d": "ctrl+]",
+  "\x1f": "ctrl+-",
+  "\x1b\x1b": "ctrl+alt+[",
+  "\x1b\x1c": "ctrl+alt+\\",
+  "\x1b\x1d": "ctrl+alt+]",
+  "\x1b\x1f": "ctrl+alt+-",
+  "\t": "tab",
+  "\r": "enter",
+  "\n": "enter",
+  "\x1bOM": "enter",
+  "\x00": "ctrl+space",
+  " ": "space",
+  "\x7f": "backspace",
+  "\x08": "backspace",
+  "\x1b[Z": "shift+tab",
+  "\x1b\r": "alt+enter",
+  "\x1b ": "alt+space",
+  "\x1b\x7f": "alt+backspace",
+  "\x1b\b": "alt+backspace",
+  "\x1bB": "alt+left",
+  "\x1bF": "alt+right",
+  "\x1b[A": "up",
+  "\x1b[B": "down",
+  "\x1b[C": "right",
+  "\x1b[D": "left",
+  "\x1b[H": "home",
+  "\x1bOH": "home",
+  "\x1b[F": "end",
+  "\x1bOF": "end",
+  "\x1b[3~": "delete",
+  "\x1b[5~": "pageUp",
+  "\x1b[6~": "pageDown",
+};
+
+function __pi_sdk_parse_key(data) {
+  if (typeof data !== "string") return undefined;
+  if (Object.prototype.hasOwnProperty.call(__pi_sdk_legacy_keys, data)) return __pi_sdk_legacy_keys[data];
+  if (data.length === 2 && data.charCodeAt(0) === 27) {
+    const code = data.charCodeAt(1);
+    if (code >= 1 && code <= 26) return "ctrl+alt+" + String.fromCharCode(code + 96);
+    if ((code >= 97 && code <= 122) || (code >= 48 && code <= 57)) return "alt+" + data[1];
+  }
+  if (data.length === 1) {
+    const code = data.charCodeAt(0);
+    if (code >= 1 && code <= 26) return "ctrl+" + String.fromCharCode(code + 96);
+    if (code >= 32 && code <= 126) return data;
+  }
+  return undefined;
+}
+
+function __pi_sdk_matches_key(data, keyId) {
+  if (typeof keyId !== "string") return false;
+  const parsed = __pi_sdk_parse_key(data);
+  if (parsed === keyId) return true;
+  if (keyId === "escape" && parsed === "esc") return true;
+  if (keyId === "return" && parsed === "enter") return true;
+  return false;
+}
+
+function __pi_sdk_is_event(data, flag) {
+  if (typeof data !== "string") return false;
+  // Bracketed paste must never be mistaken for a Kitty protocol event.
+  if (data.indexOf("\x1b[200~") !== -1) return false;
+  const suffixes = ["u", "~", "A", "B", "C", "D", "H", "F"].map((tail) => ":" + flag + tail);
+  for (const suffix of suffixes) if (data.indexOf(suffix) !== -1) return true;
+  return false;
+}
+
+function __pi_sdk_make_key_object() {
+  const base = {};
+  const names = [
+    "escape", "enter", "return", "tab", "space", "backspace", "delete", "insert",
+    "up", "down", "left", "right", "home", "end", "pageUp", "pageDown",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+  ];
+  for (const name of names) base[name] = name;
+  const symbols = {
+    leftbracket: "[", rightbracket: "]", backslash: "\\", semicolon: ";", quote: "'",
+    comma: ",", period: ".", slash: "/", exclamation: "!", at: "@", hash: "#",
+    dollar: "$", percent: "%", caret: "^", ampersand: "&", asterisk: "*",
+    leftparen: "(", rightparen: ")", underscore: "_", plus: "+", pipe: "|",
+    tilde: "~", leftbrace: "{", rightbrace: "}", colon: ":", lessthan: "<",
+    greaterthan: ">", question: "?",
+  };
+  for (const name of Object.keys(symbols)) base[name] = symbols[name];
+  const prefixes = [
+    ["ctrl", "ctrl+"], ["shift", "shift+"], ["alt", "alt+"], ["super", "super+"],
+    ["ctrlShift", "ctrl+shift+"], ["shiftCtrl", "shift+ctrl+"],
+    ["ctrlAlt", "ctrl+alt+"], ["altCtrl", "alt+ctrl+"],
+    ["shiftAlt", "shift+alt+"], ["altShift", "alt+shift+"],
+    ["ctrlSuper", "ctrl+super+"], ["superCtrl", "super+ctrl+"],
+    ["shiftSuper", "shift+super+"], ["superShift", "super+shift+"],
+    ["altSuper", "alt+super+"], ["superAlt", "super+alt+"],
+    ["ctrlShiftAlt", "ctrl+shift+alt+"], ["ctrlShiftSuper", "ctrl+shift+super+"],
+  ];
+  for (const pair of prefixes) base[pair[0]] = (key) => pair[1] + key;
+  return base;
+}
+
+const __pi_sdk_Key = __pi_sdk_make_key_object();
+
+// --- fuzzy matching -------------------------------------------------------
+
+function __pi_sdk_fuzzy_match(query, text) {
+  const queryLower = String(query).toLowerCase();
+  const textLower = String(text).toLowerCase();
+
+  function matchOne(normalized) {
+    if (normalized.length === 0) return { matches: true, score: 0 };
+    if (normalized.length > textLower.length) return { matches: false, score: 0 };
+    let queryIndex = 0;
+    let score = 0;
+    let lastMatchIndex = -1;
+    let consecutive = 0;
+    for (let i = 0; i < textLower.length && queryIndex < normalized.length; i++) {
+      if (textLower[i] !== normalized[queryIndex]) continue;
+      const isWordBoundary = i === 0 || /[\s\-_./:]/.test(textLower[i - 1]);
+      if (lastMatchIndex === i - 1) {
+        consecutive += 1;
+        score -= consecutive * 5;
+      } else {
+        consecutive = 0;
+        if (lastMatchIndex >= 0) score += (i - lastMatchIndex - 1) * 2;
+      }
+      if (isWordBoundary) score -= 10;
+      score += i * 0.1;
+      lastMatchIndex = i;
+      queryIndex += 1;
+    }
+    if (queryIndex < normalized.length) return { matches: false, score: 0 };
+    if (normalized === textLower) score -= 100;
+    return { matches: true, score };
+  }
+
+  const primary = matchOne(queryLower);
+  if (primary.matches) return primary;
+  const alphaNumeric = /^([a-z]+)([0-9]+)$/.exec(queryLower);
+  const numericAlpha = /^([0-9]+)([a-z]+)$/.exec(queryLower);
+  const swapped = alphaNumeric
+    ? alphaNumeric[2] + alphaNumeric[1]
+    : numericAlpha
+      ? numericAlpha[2] + numericAlpha[1]
+      : "";
+  if (!swapped) return primary;
+  const swappedMatch = matchOne(swapped);
+  if (!swappedMatch.matches) return primary;
+  return { matches: true, score: swappedMatch.score + 5 };
+}
+
+function __pi_sdk_fuzzy_filter(items, query, getText) {
+  const list = Array.isArray(items) ? items : [];
+  const raw = query === undefined || query === null ? "" : String(query);
+  if (raw.trim() === "") return list;
+  const tokens = raw.trim().split(/[\s/]+/).filter((token) => token.length > 0);
+  if (tokens.length === 0) return list;
+  const results = [];
+  for (const item of list) {
+    const text = String(getText(item));
+    let total = 0;
+    let allMatch = true;
+    for (const token of tokens) {
+      const match = __pi_sdk_fuzzy_match(token, text);
+      if (!match.matches) {
+        allMatch = false;
+        break;
+      }
+      total += match.score;
+    }
+    if (allMatch) results.push({ item: item, score: total });
+  }
+  results.sort((a, b) => a.score - b.score);
+  return results.map((entry) => entry.item);
+}
+
+// --- themes ---------------------------------------------------------------
+//
+// The extension host has no colour palette and no TTY, so every style helper is
+// either an identity function or a plain cursor string. Passing a real theme
+// object is still supported — the components only call the documented
+// functions.
+
+function __pi_sdk_identity(text) {
+  return String(text);
+}
+
+function __pi_sdk_identity2(text) {
+  return String(text);
+}
+
+function __pi_sdk_default_markdown_theme() {
+  return {
+    heading: __pi_sdk_identity,
+    link: __pi_sdk_identity,
+    linkUrl: __pi_sdk_identity,
+    code: __pi_sdk_identity,
+    codeBlock: __pi_sdk_identity,
+    codeBlockBorder: __pi_sdk_identity,
+    quote: __pi_sdk_identity,
+    quoteBorder: __pi_sdk_identity,
+    hr: __pi_sdk_identity,
+    listBullet: __pi_sdk_identity,
+    bold: __pi_sdk_identity,
+    italic: __pi_sdk_identity,
+    underline: __pi_sdk_identity,
+    strikethrough: __pi_sdk_identity,
+  };
+}
+
+function __pi_sdk_default_select_list_theme() {
+  return {
+    selectedPrefix: __pi_sdk_identity,
+    selectedText: __pi_sdk_identity,
+    description: __pi_sdk_identity,
+    scrollInfo: __pi_sdk_identity,
+    noMatch: __pi_sdk_identity,
+  };
+}
+
+function __pi_sdk_default_settings_list_theme() {
+  return {
+    label: __pi_sdk_identity2,
+    value: __pi_sdk_identity2,
+    description: __pi_sdk_identity,
+    cursor: "> ",
+    hint: __pi_sdk_identity,
+  };
+}
+
+function __pi_sdk_default_editor_theme() {
+  return { borderColor: __pi_sdk_identity, selectList: __pi_sdk_default_select_list_theme() };
+}
+
+// --- pi-tui components ----------------------------------------------------
+
+class Text {
+  constructor(text, paddingX, paddingY, customBgFn) {
+    this.text = text === undefined || text === null ? "" : String(text);
+    this.paddingX = typeof paddingX === "number" ? paddingX : 1;
+    this.paddingY = typeof paddingY === "number" ? paddingY : 1;
+    this.customBgFn = customBgFn;
+  }
+  setText(text) {
+    this.text = text === undefined || text === null ? "" : String(text);
+    return this;
+  }
+  getText() {
+    return this.text;
+  }
+  setCustomBgFn(fn) {
+    this.customBgFn = fn;
+    return this;
+  }
+  invalidate() {}
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    if (!this.text || this.text.trim() === "") return [];
+    const paddingX = Math.max(0, Math.min(Math.floor(this.paddingX), Math.floor((totalWidth - 1) / 2)));
+    const contentWidth = Math.max(1, totalWidth - paddingX * 2);
+    const left = " ".repeat(paddingX);
+    const lines = __pi_sdk_wrap_text(this.text.replace(/\t/g, "   "), contentWidth).map((line) => {
+      let rendered = left + line + left;
+      if (typeof this.customBgFn === "function") rendered = this.customBgFn(rendered);
+      return rendered + " ".repeat(Math.max(0, totalWidth - __pi_sdk_visible_width(rendered)));
+    });
+    const emptyLines = [];
+    for (let i = 0; i < Math.max(0, Math.floor(this.paddingY)); i++) emptyLines.push(" ".repeat(totalWidth));
+    const result = emptyLines.concat(lines, emptyLines);
+    return result.length > 0 ? result : [""];
+  }
+}
+
+class Spacer {
+  constructor(height) {
+    this.height = Math.max(0, Math.floor(typeof height === "number" ? height : 1));
+  }
+  invalidate() {}
+  render(width) {
+    const lines = [];
+    for (let i = 0; i < this.height; i++) lines.push(" ".repeat(Math.max(0, Math.floor(Number(width) || 0))));
+    return lines;
+  }
+}
+
+class Box {
+  constructor(paddingX, paddingY, bgFn) {
+    this.paddingX = typeof paddingX === "number" ? paddingX : 1;
+    this.paddingY = typeof paddingY === "number" ? paddingY : 1;
+    this.bgFn = bgFn;
+    this.children = [];
+  }
+  addChild(child) {
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+  }
+  clear() {
+    this.children.length = 0;
+  }
+  setBgFn(fn) {
+    this.bgFn = fn;
+    return this;
+  }
+  invalidate() {
+    for (const child of this.children) if (child && typeof child.invalidate === "function") child.invalidate();
+  }
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    const paddingX = Math.max(0, Math.min(Math.floor(this.paddingX), Math.floor((totalWidth - 1) / 2)));
+    const contentWidth = Math.max(1, totalWidth - paddingX * 2);
+    const left = " ".repeat(paddingX);
+    const content = [];
+    for (const child of this.children) {
+      const childLines = child && typeof child.render === "function" ? child.render(contentWidth) : [];
+      for (const line of childLines) content.push(line);
+    }
+    const lines = content.map((line) => {
+      let rendered = left + line + left;
+      if (typeof this.bgFn === "function") rendered = this.bgFn(rendered);
+      return rendered + " ".repeat(Math.max(0, totalWidth - __pi_sdk_visible_width(rendered)));
+    });
+    const emptyLines = [];
+    for (let i = 0; i < Math.max(0, Math.floor(this.paddingY)); i++) emptyLines.push(" ".repeat(totalWidth));
+    return emptyLines.concat(lines, emptyLines);
+  }
+}
+
+class Container {
+  constructor() {
+    this.children = [];
+  }
+  addChild(child) {
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+  }
+  clear() {
+    this.children.length = 0;
+  }
+  invalidate() {
+    for (const child of this.children) if (child && typeof child.invalidate === "function") child.invalidate();
+  }
+  render(width) {
+    const lines = [];
+    for (const child of this.children) {
+      const childLines = child && typeof child.render === "function" ? child.render(width) : [];
+      for (const line of childLines) lines.push(line);
+    }
+    return lines;
+  }
+}
+
+class Markdown {
+  constructor(text, paddingX, paddingY, theme, defaultTextStyle, options) {
+    this.text = text === undefined || text === null ? "" : String(text);
+    this.paddingX = typeof paddingX === "number" ? paddingX : 1;
+    this.paddingY = typeof paddingY === "number" ? paddingY : 1;
+    this.theme = theme;
+    this.defaultTextStyle = defaultTextStyle;
+    this.options = options || {};
+  }
+  setText(text) {
+    this.text = text === undefined || text === null ? "" : String(text);
+    return this;
+  }
+  getText() {
+    return this.text;
+  }
+  invalidate() {}
+  render(width) {
+    const theme = this.theme || __pi_sdk_default_markdown_theme();
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    const paddingX = Math.max(0, Math.min(Math.floor(this.paddingX), Math.floor((totalWidth - 1) / 2)));
+    const contentWidth = Math.max(1, totalWidth - paddingX * 2);
+    const left = " ".repeat(paddingX);
+    const out = [];
+    let inCode = false;
+    for (const sourceLine of this.text.split(/\r\n|\r|\n/)) {
+      if (/^\s*```/.test(sourceLine)) {
+        inCode = !inCode;
+        out.push("");
+        continue;
+      }
+      if (inCode) {
+        for (const line of __pi_sdk_wrap_text(theme.codeBlock(sourceLine), contentWidth)) out.push(line);
+        continue;
+      }
+      let text = sourceLine;
+      let prefix = "";
+      const heading = /^(#{1,6})\s+(.*)$/.exec(text);
+      if (heading) {
+        text = theme.heading(heading[2]);
+      } else {
+        const bullet = /^(\s*)([-*+])\s+(.*)$/.exec(text);
+        const ordered = bullet ? null : /^(\s*)(\d+)[.)]\s+(.*)$/.exec(text);
+        const quote = bullet || ordered ? null : /^(\s*)>\s?(.*)$/.exec(text);
+        if (bullet) {
+          prefix = bullet[1] + theme.listBullet("* ");
+          text = bullet[3];
+        } else if (ordered) {
+          prefix = ordered[1] + ordered[2] + ". ";
+          text = ordered[3];
+        } else if (quote) {
+          prefix = quote[1] + theme.quoteBorder("| ");
+          text = theme.quote(quote[2]);
+        }
+      }
+      text = text.replace(/\[([^\]]*)\]\(([^)]+)\)/g, (match, label, url) => theme.link(label) + " (" + theme.linkUrl(url) + ")");
+      text = text.replace(/\*\*([^*]+)\*\*/g, (match, bold) => theme.bold(bold));
+      text = text.replace(/(^|\s)\*([^*]+)\*/g, (match, lead, italic) => lead + theme.italic(italic));
+      text = text.replace(/`([^`]+)`/g, (match, code) => theme.code(code));
+      for (const line of __pi_sdk_wrap_text(prefix + text, contentWidth)) {
+        out.push(left + line + " ".repeat(Math.max(0, totalWidth - __pi_sdk_visible_width(line) - paddingX)));
+      }
+    }
+    const emptyLines = [];
+    for (let i = 0; i < Math.max(0, Math.floor(this.paddingY)); i++) emptyLines.push(" ".repeat(totalWidth));
+    return emptyLines.concat(out, emptyLines);
+  }
+}
+
+class DynamicBorder {
+  constructor(color) {
+    this.color = typeof color === "function" ? color : __pi_sdk_identity;
+  }
+  invalidate() {}
+  render(width) {
+    return [this.color("-".repeat(Math.max(1, Math.floor(Number(width) || 1))))];
+  }
+}
+
+class Input {
+  constructor(options) {
+    this.options = options || {};
+    this.prompt = typeof this.options.prompt === "string" ? this.options.prompt : "> ";
+    this.placeholder = typeof this.options.placeholder === "string" ? this.options.placeholder : "";
+    this.value = typeof this.options.value === "string" ? this.options.value : "";
+    this.onSubmit = typeof this.options.onSubmit === "function" ? this.options.onSubmit : undefined;
+    this.onChange = typeof this.options.onChange === "function" ? this.options.onChange : undefined;
+  }
+  getValue() {
+    return this.value;
+  }
+  setValue(value) {
+    this.value = value === undefined || value === null ? "" : String(value);
+    if (this.onChange) this.onChange(this.value);
+    return this;
+  }
+  invalidate() {}
+  handleInput(data) {
+    if (typeof data !== "string" || data.length === 0) return;
+    if (data === "\r" || data === "\n") {
+      if (this.onSubmit) this.onSubmit(this.value);
+      return;
+    }
+    if (data === "\x7f" || data === "\b") {
+      this.setValue(this.value.slice(0, -1));
+      return;
+    }
+    if (data.charCodeAt(0) === 27) return;
+    this.setValue(this.value + data);
+  }
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    const body = this.value !== "" ? this.value : this.placeholder;
+    return [__pi_sdk_truncate_to_width(this.prompt + body, totalWidth, "", true)];
+  }
+}
+
+class Editor {
+  constructor(tui, theme, options) {
+    this.tui = tui;
+    this.theme = theme || __pi_sdk_default_editor_theme();
+    this.options = options || {};
+    this.text = typeof this.options.initialText === "string" ? this.options.initialText : "";
+    this.onSubmit = typeof this.options.onSubmit === "function" ? this.options.onSubmit : undefined;
+    this.onChange = typeof this.options.onChange === "function" ? this.options.onChange : undefined;
+  }
+  getText() {
+    return this.text;
+  }
+  setText(text) {
+    this.text = text === undefined || text === null ? "" : String(text);
+    if (this.onChange) this.onChange(this.text);
+    return this;
+  }
+  getCursor() {
+    return this.text.length;
+  }
+  invalidate() {}
+  handleInput(data) {
+    if (typeof data !== "string" || data.length === 0) return;
+    if (data === "\r" || data === "\n") {
+      if (this.onSubmit) this.onSubmit(this.text);
+      return;
+    }
+    if (data === "\x7f" || data === "\b") {
+      this.setText(this.text.slice(0, -1));
+      return;
+    }
+    if (data.charCodeAt(0) === 27) return;
+    this.setText(this.text + data);
+  }
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    return this.text.split(/\r\n|\r|\n/).map((line) => __pi_sdk_truncate_to_width(line, totalWidth, "", true));
+  }
+}
+
+class CustomEditor extends Editor {
+  constructor(tui, theme, keybindings, options) {
+    super(tui, theme, options);
+    this.keybindings = keybindings;
+    this.actionHandlers = new Map();
+    this.embedWorkingStatus = !!(options && options.embedWorkingStatus);
+  }
+  setWorkingStatusIndicator(indicator) {
+    this.workingStatusIndicator = indicator;
+  }
+}
+
+class Loader {
+  constructor(tui, spinnerColor, messageColor, message) {
+    this.tui = tui;
+    this.spinnerColor = typeof spinnerColor === "function" ? spinnerColor : __pi_sdk_identity;
+    this.messageColor = typeof messageColor === "function" ? messageColor : __pi_sdk_identity;
+    this.message = message === undefined ? "" : String(message);
+    this.frame = 0;
+  }
+  setMessage(message) {
+    this.message = message === undefined ? "" : String(message);
+  }
+  invalidate() {}
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    const spinner = ["-", "\\", "|", "/"][this.frame % 4];
+    const line = this.spinnerColor(spinner) + " " + this.messageColor(this.message);
+    return [__pi_sdk_truncate_to_width(line, totalWidth, "", true)];
+  }
+}
+
+class BorderedLoader extends Container {
+  constructor(tui, theme, message, options) {
+    super();
+    this.cancellable = !(options && options.cancellable === false);
+    const borderColor = theme && typeof theme.fg === "function" ? (text) => theme.fg("border", text) : __pi_sdk_identity;
+    this.abortController = typeof AbortController === "function" ? new AbortController() : null;
+    this.addChild(new DynamicBorder(borderColor));
+    this.addChild(new Loader(tui, __pi_sdk_identity, __pi_sdk_identity, message));
+    if (this.cancellable) this.addChild(new Text("(cancel)", 1, 0));
+    this.addChild(new Spacer(1));
+    this.addChild(new DynamicBorder(borderColor));
+  }
+  get signal() {
+    return this.abortController ? this.abortController.signal : undefined;
+  }
+  start() {
+    return this;
+  }
+  stop() {
+    if (this.abortController) this.abortController.abort();
+  }
+}
+
+class SelectList {
+  constructor(items, maxVisible, theme, layout) {
+    this.items = Array.isArray(items) ? items : [];
+    this.filteredItems = this.items;
+    this.maxVisible = Math.max(1, Math.floor(typeof maxVisible === "number" ? maxVisible : 5));
+    this.theme = theme || __pi_sdk_default_select_list_theme();
+    this.layout = layout || {};
+    this.selectedIndex = 0;
+  }
+  setFilter(filter) {
+    const needle = filter === undefined || filter === null ? "" : String(filter).toLowerCase();
+    this.filteredItems = this.items.filter((item) => {
+      const label = item && item.label !== undefined ? String(item.label) : String(item && item.value);
+      return needle === "" || label.toLowerCase().indexOf(needle) !== -1;
+    });
+    this.selectedIndex = 0;
+  }
+  setSelectedIndex(index) {
+    const count = this.filteredItems.length;
+    if (count === 0) {
+      this.selectedIndex = 0;
+      return;
+    }
+    this.selectedIndex = Math.max(0, Math.min(count - 1, Math.floor(Number(index) || 0)));
+  }
+  getSelectedItem() {
+    return this.filteredItems[this.selectedIndex] || null;
+  }
+  invalidate() {}
+  handleInput(data) {
+    if (__pi_sdk_matches_key(data, "up") || data === "k") this.setSelectedIndex(this.selectedIndex - 1);
+    else if (__pi_sdk_matches_key(data, "down") || data === "j") this.setSelectedIndex(this.selectedIndex + 1);
+  }
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    const theme = this.theme;
+    const items = this.filteredItems;
+    if (items.length === 0) return [theme.noMatch("No matches")];
+    const maxVisible = Math.min(this.maxVisible, items.length);
+    let start = 0;
+    if (items.length > maxVisible) {
+      start = Math.min(Math.max(0, this.selectedIndex - Math.floor(maxVisible / 2)), items.length - maxVisible);
+    }
+    const lines = [];
+    for (let i = start; i < start + maxVisible; i++) {
+      const item = items[i];
+      const selected = i === this.selectedIndex;
+      const label = item && item.label !== undefined ? String(item.label) : String(item && item.value);
+      let line = (selected ? theme.selectedPrefix("> ") : "  ") + (selected ? theme.selectedText(label) : label);
+      if (item && item.description) line += " " + theme.description(String(item.description));
+      lines.push(__pi_sdk_truncate_to_width(line, totalWidth, "...", true));
+    }
+    if (items.length > maxVisible) lines.push(theme.scrollInfo("(" + (this.selectedIndex + 1) + "/" + items.length + ")"));
+    return lines;
+  }
+}
+
+class SettingsList {
+  constructor(items, maxVisible, theme, onChange, onCancel, options) {
+    this.items = Array.isArray(items) ? items : [];
+    this.filteredItems = this.items;
+    this.maxVisible = Math.max(1, Math.floor(typeof maxVisible === "number" ? maxVisible : 8));
+    this.theme = theme || __pi_sdk_default_settings_list_theme();
+    this.onChange = typeof onChange === "function" ? onChange : () => {};
+    this.onCancel = typeof onCancel === "function" ? onCancel : () => {};
+    this.options = options || {};
+    this.selectedIndex = 0;
+  }
+  setSelectedIndex(index) {
+    const count = this.filteredItems.length;
+    this.selectedIndex = count === 0 ? 0 : Math.max(0, Math.min(count - 1, Math.floor(Number(index) || 0)));
+  }
+  getSelectedItem() {
+    return this.filteredItems[this.selectedIndex] || null;
+  }
+  invalidate() {}
+  handleInput(data) {
+    if (__pi_sdk_matches_key(data, "up") || data === "k") {
+      this.setSelectedIndex(this.selectedIndex - 1);
+      return;
+    }
+    if (__pi_sdk_matches_key(data, "down") || data === "j") {
+      this.setSelectedIndex(this.selectedIndex + 1);
+      return;
+    }
+    if (__pi_sdk_matches_key(data, "escape")) {
+      this.onCancel();
+      return;
+    }
+    if (data === "\r" || data === " ") {
+      const item = this.getSelectedItem();
+      if (!item || !Array.isArray(item.values) || item.values.length === 0) return;
+      const current = item.values.indexOf(item.currentValue);
+      const next = item.values[(current + 1) % item.values.length];
+      item.currentValue = next;
+      this.onChange(item.id, next);
+    }
+  }
+  render(width) {
+    const totalWidth = Math.max(1, Math.floor(Number(width) || 1));
+    const theme = this.theme;
+    const items = this.filteredItems;
+    if (items.length === 0) return [__pi_sdk_truncate_to_width("(no settings)", totalWidth, "...", true)];
+    const maxVisible = Math.min(this.maxVisible, items.length);
+    let start = 0;
+    if (items.length > maxVisible) {
+      start = Math.min(Math.max(0, this.selectedIndex - Math.floor(maxVisible / 2)), items.length - maxVisible);
+    }
+    const lines = [];
+    for (let i = start; i < start + maxVisible; i++) {
+      const item = items[i];
+      const selected = i === this.selectedIndex;
+      let line = (selected ? theme.cursor : "  ") + theme.label(String(item.label), selected);
+      line += "  " + theme.value(item.currentValue === undefined ? "" : String(item.currentValue), selected);
+      lines.push(__pi_sdk_truncate_to_width(line, totalWidth, "...", true));
+      if (selected && item.description) {
+        lines.push(__pi_sdk_truncate_to_width("  " + theme.description(String(item.description)), totalWidth, "...", true));
+      }
+    }
+    if (items.length > maxVisible) lines.push(theme.hint("(" + (this.selectedIndex + 1) + "/" + items.length + ")"));
+    return lines;
+  }
+}
+// --- pi-coding-agent helpers ----------------------------------------------
+
+function __pi_sdk_expand_home(input) {
+  const value = String(input);
+  if (value === "~") return __pi_os_module.homedir();
+  if (value.indexOf("~/") === 0) return __pi_path_module.join(__pi_os_module.homedir(), value.slice(2));
+  return value;
+}
+
+function __pi_sdk_get_agent_dir() {
+  const env = __pi_process_module.env || {};
+  const fromEnv = env.PI_CODING_AGENT_DIR;
+  if (typeof fromEnv === "string" && fromEnv.length > 0) return __pi_sdk_expand_home(fromEnv);
+  return __pi_path_module.join(__pi_os_module.homedir(), ".pi", "agent");
+}
+
+function __pi_sdk_format_size(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return value + "B";
+  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + "KB";
+  return (value / (1024 * 1024)).toFixed(1) + "MB";
+}
+
+function __pi_sdk_utf8_byte_length(value) {
+  let total = 0;
+  for (const ch of String(value)) {
+    const code = ch.codePointAt(0);
+    if (code < 0x80) total += 1;
+    else if (code < 0x800) total += 2;
+    else if (code < 0x10000) total += 3;
+    else total += 4;
+  }
+  return total;
+}
+
+function __pi_sdk_split_lines_for_counting(content) {
+  if (content.length === 0) return [];
+  const lines = content.split("\n");
+  if (content.charAt(content.length - 1) === "\n") lines.pop();
+  return lines;
+}
+
+// Mirrors `truncateHead` from packages/coding-agent/src/core/tools/truncate.ts:
+// options object, whole-line output, and the full TruncationResult shape.
+function __pi_sdk_truncate_head(content, options) {
+  const source = content === undefined || content === null ? "" : String(content);
+  const opts = options || {};
+  const maxLines = typeof opts.maxLines === "number" ? opts.maxLines : 2000;
+  const maxBytes = typeof opts.maxBytes === "number" ? opts.maxBytes : 50 * 1024;
+
+  const totalBytes = __pi_sdk_utf8_byte_length(source);
+  const sourceLines = __pi_sdk_split_lines_for_counting(source);
+  const totalLines = sourceLines.length;
+
+  if (totalLines <= maxLines && totalBytes <= maxBytes) {
+    return {
+      content: source,
+      truncated: false,
+      truncatedBy: null,
+      totalLines: totalLines,
+      totalBytes: totalBytes,
+      outputLines: totalLines,
+      outputBytes: totalBytes,
+      lastLinePartial: false,
+      firstLineExceedsLimit: false,
+      maxLines: maxLines,
+      maxBytes: maxBytes,
+    };
+  }
+
+  if (__pi_sdk_utf8_byte_length(sourceLines[0]) > maxBytes) {
+    return {
+      content: "",
+      truncated: true,
+      truncatedBy: "bytes",
+      totalLines: totalLines,
+      totalBytes: totalBytes,
+      outputLines: 0,
+      outputBytes: 0,
+      lastLinePartial: false,
+      firstLineExceedsLimit: true,
+      maxLines: maxLines,
+      maxBytes: maxBytes,
+    };
+  }
+
+  const kept = [];
+  let outputBytes = 0;
+  let truncatedBy = "lines";
+  for (let i = 0; i < sourceLines.length && i < maxLines; i++) {
+    const lineBytes = __pi_sdk_utf8_byte_length(sourceLines[i]) + (i > 0 ? 1 : 0);
+    if (outputBytes + lineBytes > maxBytes) {
+      truncatedBy = "bytes";
+      break;
+    }
+    kept.push(sourceLines[i]);
+    outputBytes += lineBytes;
+  }
+  if (kept.length >= maxLines && outputBytes <= maxBytes) truncatedBy = "lines";
+
+  const outputContent = kept.join("\n");
+  return {
+    content: outputContent,
+    truncated: true,
+    truncatedBy: truncatedBy,
+    totalLines: totalLines,
+    totalBytes: totalBytes,
+    outputLines: kept.length,
+    outputBytes: __pi_sdk_utf8_byte_length(outputContent),
+    lastLinePartial: false,
+    firstLineExceedsLimit: false,
+    maxLines: maxLines,
+    maxBytes: maxBytes,
+  };
+}
+
+function __pi_sdk_truncate_line(line, maxChars) {
+  const source = line === undefined || line === null ? "" : String(line);
+  const limit = typeof maxChars === "number" && maxChars > 0 ? Math.floor(maxChars) : 500;
+  if (source.length <= limit) return { text: source, wasTruncated: false };
+  return { text: source.slice(0, limit) + "... [truncated]", wasTruncated: true };
+}
+
+function __pi_sdk_parse_yaml_scalar(raw) {
+  const value = raw.trim();
+  if (value === "" || value === "~" || value === "null") return null;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+$/.test(value)) return Number(value);
+  if (/^-?\d+\.\d+$/.test(value)) return Number(value);
+  const first = value.charAt(0);
+  const last = value.charAt(value.length - 1);
+  if (value.length >= 2 && ((first === '"' && last === '"') || (first === "'" && last === "'"))) return value.slice(1, -1);
+  if (first === "[" && last === "]") {
+    return value.slice(1, -1).split(",").map((entry) => __pi_sdk_parse_yaml_scalar(entry));
+  }
+  if (first === "{" && last === "}") {
+    const object = {};
+    for (const entry of value.slice(1, -1).split(",")) {
+      const separator = entry.indexOf(":");
+      if (separator === -1) continue;
+      object[entry.slice(0, separator).trim()] = __pi_sdk_parse_yaml_scalar(entry.slice(separator + 1));
+    }
+    return object;
+  }
+  return value;
+}
+
+// Mirrors `parseFrontmatter` from packages/coding-agent/src/utils/frontmatter.ts.
+// Upstream parses YAML with the `yaml` package; this shim parses a flat/nested
+// subset (scalars, inline flow collections, one nesting level) and leaves
+// anchors, block scalars and comments after values as strings — see
+// docs/SDK_MODULES.md.
+function __pi_sdk_strip_bom(value) {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+}
+
+function __pi_sdk_parse_frontmatter(content) {
+  const normalized = __pi_sdk_strip_bom(String(content === undefined || content === null ? "" : content))
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  if (normalized.indexOf("---", 0) !== 0) return { frontmatter: {}, body: normalized };
+  const endIndex = normalized.indexOf("\n---", 3);
+  if (endIndex === -1) return { frontmatter: {}, body: normalized };
+  const yamlString = normalized.slice(4, endIndex);
+  const body = normalized.slice(endIndex + 4).trim();
+  const frontmatter = {};
+  let currentKey = null;
+  for (const rawLine of yamlString.split("\n")) {
+    if (rawLine.trim() === "" || rawLine.trim().indexOf("#") === 0) continue;
+    const indent = rawLine.length - rawLine.replace(/^\s+/, "").length;
+    const separator = rawLine.indexOf(":");
+    if (separator === -1) continue;
+    if (indent > 0 && currentKey !== null) {
+      const nestedKey = rawLine.slice(0, separator).trim();
+      if (!frontmatter[currentKey] || typeof frontmatter[currentKey] !== "object" || Array.isArray(frontmatter[currentKey])) {
+        frontmatter[currentKey] = {};
+      }
+      frontmatter[currentKey][nestedKey] = __pi_sdk_parse_yaml_scalar(rawLine.slice(separator + 1));
+      continue;
+    }
+    currentKey = rawLine.slice(0, separator).trim();
+    const rawValue = rawLine.slice(separator + 1);
+    frontmatter[currentKey] = rawValue.trim() === "" ? {} : __pi_sdk_parse_yaml_scalar(rawValue);
+  }
+  return { frontmatter: frontmatter, body: body };
+}
+
+function __pi_sdk_strip_frontmatter(content) {
+  return __pi_sdk_parse_frontmatter(content).body;
+}
+
+const __pi_sdk_file_mutation_queues = new Map();
+
+function __pi_sdk_with_file_mutation_queue(filePath, fn) {
+  const key = __pi_path_module.resolve(__pi_sdk_expand_home(String(filePath)));
+  const previous = __pi_sdk_file_mutation_queues.get(key) || Promise.resolve();
+  const run = previous.then(
+    () => fn(),
+    () => fn(),
+  );
+  const settled = run.then(
+    () => {},
+    () => {},
+  );
+  __pi_sdk_file_mutation_queues.set(key, settled);
+  settled.then(() => {
+    if (__pi_sdk_file_mutation_queues.get(key) === settled) __pi_sdk_file_mutation_queues.delete(key);
+  });
+  return run;
+}
+
+const __pi_sdk_compaction_summary_prefix =
+  "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const __pi_sdk_compaction_summary_suffix = "\n</summary>";
+const __pi_sdk_branch_summary_prefix =
+  "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
+const __pi_sdk_branch_summary_suffix = "</summary>";
+
+function __pi_sdk_bash_execution_to_text(message) {
+  let text = "Ran `" + message.command + "`\n";
+  if (message.output) text += "```\n" + message.output + "\n```";
+  else text += "(no output)";
+  if (message.cancelled) text += "\n\n(command cancelled)";
+  else if (message.exitCode !== null && message.exitCode !== undefined && message.exitCode !== 0) {
+    text += "\n\nCommand exited with code " + message.exitCode;
+  }
+  if (message.truncated && message.fullOutputPath) text += "\n\n[Output truncated. Full output: " + message.fullOutputPath + "]";
+  return text;
+}
+
+function __pi_sdk_convert_to_llm(messages) {
+  const out = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (!message || typeof message !== "object") continue;
+    switch (message.role) {
+      case "bashExecution":
+        if (message.excludeFromContext) continue;
+        out.push({
+          role: "user",
+          content: [{ type: "text", text: __pi_sdk_bash_execution_to_text(message) }],
+          timestamp: message.timestamp,
+        });
+        break;
+      case "custom":
+        out.push({
+          role: "user",
+          content: typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content,
+          timestamp: message.timestamp,
+        });
+        break;
+      case "branchSummary":
+        out.push({
+          role: "user",
+          content: [{ type: "text", text: __pi_sdk_branch_summary_prefix + message.summary + __pi_sdk_branch_summary_suffix }],
+          timestamp: message.timestamp,
+        });
+        break;
+      case "compactionSummary":
+        out.push({
+          role: "user",
+          content: [{ type: "text", text: __pi_sdk_compaction_summary_prefix + message.summary + __pi_sdk_compaction_summary_suffix }],
+          timestamp: message.timestamp,
+        });
+        break;
+      case "user":
+      case "assistant":
+      case "toolResult":
+        out.push(message);
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+const __pi_sdk_tool_result_max_chars = 2000;
+
+function __pi_sdk_content_text(content, separator) {
+  const joiner = separator === undefined ? "\n" : String(separator);
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block && block.type === "text")
+    .map((block) => String(block.text))
+    .join(joiner);
+}
+
+function __pi_sdk_serialize_conversation(messages) {
+  const parts = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (!message || typeof message !== "object") continue;
+    if (message.role === "user") {
+      const content = __pi_sdk_content_text(message.content, "");
+      if (content) parts.push("[User]: " + content);
+      continue;
+    }
+    if (message.role === "assistant") {
+      const thinking = [];
+      const toolCalls = [];
+      const blocks = Array.isArray(message.content) ? message.content : [];
+      for (const block of blocks) {
+        if (!block) continue;
+        if (block.type === "thinking") thinking.push(String(block.thinking));
+        else if (block.type === "toolCall") {
+          const args = block.arguments && typeof block.arguments === "object" ? block.arguments : {};
+          const rendered = Object.keys(args)
+            .map((key) => key + "=" + JSON.stringify(args[key]))
+            .join(", ");
+          toolCalls.push(String(block.name) + "(" + rendered + ")");
+        }
+      }
+      if (thinking.length > 0) parts.push("[Assistant thinking]: " + thinking.join("\n"));
+      if (blocks.some((block) => block && block.type === "text")) parts.push("[Assistant]: " + __pi_sdk_content_text(message.content));
+      if (toolCalls.length > 0) parts.push("[Assistant tool calls]: " + toolCalls.join("; "));
+      continue;
+    }
+    if (message.role === "toolResult") {
+      const content = __pi_sdk_content_text(message.content, "");
+      if (!content) continue;
+      const truncated =
+        content.length > __pi_sdk_tool_result_max_chars
+          ? content.slice(0, __pi_sdk_tool_result_max_chars) +
+            "\n\n[... " +
+            (content.length - __pi_sdk_tool_result_max_chars) +
+            " more characters truncated]"
+          : content;
+      parts.push("[Tool result]: " + truncated);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+function __pi_sdk_define_tool(tool) {
+  return tool;
+}
+
+// --- pi-ai helpers --------------------------------------------------------
+
+function __pi_sdk_string_enum(values, options) {
+  const schema = { type: "string", enum: Array.isArray(values) ? values.slice() : [] };
+  const opts = options || {};
+  if (opts.description !== undefined) schema.description = opts.description;
+  if (opts.default !== undefined) schema.default = opts.default;
+  return __pi_typebox_module.Type.Unsafe(schema);
+}
+
+const __pi_sdk_uuid_v7_max_timestamp = 0xffffffffffff;
+const __pi_sdk_uuid_v7_max_sequence = (1n << 42n) - 1n;
+let __pi_sdk_uuid_v7_last_timestamp = 0;
+let __pi_sdk_uuid_v7_sequence;
+
+function __pi_sdk_uuid_v7(timestampMs) {
+  const requested = timestampMs === undefined ? Date.now() : Number(timestampMs);
+  if (!Number.isInteger(requested) || requested < 0 || requested > __pi_sdk_uuid_v7_max_timestamp) {
+    throw new RangeError("UUIDv7 timestamp must be an integer between 0 and " + __pi_sdk_uuid_v7_max_timestamp);
+  }
+  const effective = timestampMs === undefined ? Math.max(requested, __pi_sdk_uuid_v7_last_timestamp) : requested;
+  if (timestampMs === undefined) __pi_sdk_uuid_v7_last_timestamp = effective;
+
+  const bytes = __pi_crypto_module.randomBytes(16);
+  if (__pi_sdk_uuid_v7_sequence === undefined) {
+    __pi_sdk_uuid_v7_sequence =
+      (BigInt(bytes[1]) << 32n) |
+      (BigInt(bytes[2]) << 24n) |
+      (BigInt(bytes[3]) << 16n) |
+      (BigInt(bytes[4]) << 8n) |
+      BigInt(bytes[5]);
+  } else {
+    if (__pi_sdk_uuid_v7_sequence === __pi_sdk_uuid_v7_max_sequence) {
+      throw new RangeError("UUIDv7 generator sequence exhausted");
+    }
+    __pi_sdk_uuid_v7_sequence += 1n;
+  }
+  const sequence = __pi_sdk_uuid_v7_sequence;
+
+  const timestamp = BigInt(effective);
+  for (let index = 5; index >= 0; index--) {
+    bytes[index] = Number((timestamp >> BigInt((5 - index) * 8)) & 0xffn);
+  }
+  bytes[6] = 0x70 | Number((sequence >> 37n) & 0x0fn);
+  bytes[7] = Number((sequence >> 29n) & 0xffn);
+  bytes[8] = 0x80 | Number((sequence >> 23n) & 0x3fn);
+  bytes[9] = Number((sequence >> 15n) & 0xffn);
+  bytes[10] = Number((sequence >> 7n) & 0xffn);
+  bytes[11] = Number((sequence & 0x7fn) << 1n) | (bytes[11] & 0x01);
+
+  const hex = [];
+  for (let i = 0; i < 16; i++) hex.push((bytes[i] & 0xff).toString(16).padStart(2, "0"));
+  return (
+    hex.slice(0, 4).join("") +
+    "-" +
+    hex.slice(4, 6).join("") +
+    "-" +
+    hex.slice(6, 8).join("") +
+    "-" +
+    hex.slice(8, 10).join("") +
+    "-" +
+    hex.slice(10).join("")
+  );
+}
+
+function __pi_sdk_calculate_cost(model, usage) {
+  if (!model || !model.cost || !usage || !usage.cost) {
+    throw new Error("calculateCost(model, usage) requires model.cost rates and a usage.cost object");
+  }
+  const rates = model.cost;
+  const inputTokens = (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
+  let matched = rates;
+  let matchedThreshold = -1;
+  for (const tier of rates.tiers || []) {
+    if (inputTokens > tier.inputTokensAbove && tier.inputTokensAbove > matchedThreshold) {
+      matched = tier;
+      matchedThreshold = tier.inputTokensAbove;
+    }
+  }
+  const longWrite = usage.cacheWrite1h || 0;
+  const shortWrite = (usage.cacheWrite || 0) - longWrite;
+  usage.cost.input = ((matched.input || 0) / 1000000) * (usage.input || 0);
+  usage.cost.output = ((matched.output || 0) / 1000000) * (usage.output || 0);
+  usage.cost.cacheRead = ((matched.cacheRead || 0) / 1000000) * (usage.cacheRead || 0);
+  usage.cost.cacheWrite = ((matched.cacheWrite || 0) * shortWrite + (matched.input || 0) * 2 * longWrite) / 1000000;
+  usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+  return usage.cost;
+}
+
+// --- module plumbing ------------------------------------------------------
+
+const __pi_sdk_manifest_data = {};
+
+function __pi_sdk_gap_error(specifier, name, reason) {
+  const error = new Error(
+    'Import "' + name + '" from "' + specifier + '" is not implemented by the pi extension host: ' + reason + ". See docs/SDK_MODULES.md.",
+  );
+  error.code = "ERR_PI_SDK_UNIMPLEMENTED";
+  error.specifier = specifier;
+  error.exportName = name;
+  return error;
+}
+
+function __pi_sdk_unknown_export_error(specifier, name) {
+  const error = new Error('Module "' + specifier + '" has no export "' + name + '". See docs/SDK_MODULES.md.');
+  error.code = "ERR_PI_SDK_UNKNOWN_EXPORT";
+  error.specifier = specifier;
+  error.exportName = name;
+  return error;
+}
+
+// Protocol / JS-internal property names the engine and bundlers probe on module
+// namespaces. Returning `undefined` for these keeps `await import()`,
+// `JSON.stringify`, interop and object inspection working instead of throwing a
+// bogus "no export `then`" error.
+const __pi_sdk_protocol_names = {
+  then: true,
+  catch: true,
+  finally: true,
+  toJSON: true,
+  toString: true,
+  valueOf: true,
+  inspect: true,
+  constructor: true,
+  prototype: true,
+  hasOwnProperty: true,
+  __esModule: true,
+  $$typeof: true,
+};
+
+function __pi_sdk_module(specifier, implemented, gaps) {
+  const moduleGaps = gaps || {};
+  const target = {};
+  for (const name of Object.keys(implemented)) target[name] = implemented[name];
+
+  const handlers = {
+    get: function (inner, key, receiver) {
+      if (typeof key === "symbol") {
+        if (typeof Symbol !== "undefined" && key === Symbol.toStringTag) return "Module";
+        return Reflect.get(inner, key, receiver);
+      }
+      if (Object.prototype.hasOwnProperty.call(inner, key)) return inner[key];
+      if (Object.prototype.hasOwnProperty.call(moduleGaps, key)) throw __pi_sdk_gap_error(specifier, key, moduleGaps[key]);
+      if (Object.prototype.hasOwnProperty.call(__pi_sdk_protocol_names, key)) return undefined;
+      throw __pi_sdk_unknown_export_error(specifier, key);
+    },
+    // `has` / `ownKeys` / `getOwnPropertyDescriptor` report the implemented
+    // exports only, so `Object.keys(mod)` and `"name" in mod` agree with the
+    // target object. Documented gaps stay readable (and throw a named error),
+    // but they are not reported as properties: they are not exports the shim
+    // can hand over.
+    has: function (inner, key) {
+      return Object.prototype.hasOwnProperty.call(inner, key);
+    },
+    ownKeys: function (inner) {
+      return Reflect.ownKeys(inner);
+    },
+    getOwnPropertyDescriptor: function (inner, key) {
+      return Reflect.getOwnPropertyDescriptor(inner, key);
+    },
+  };
+
+  const proxy = new Proxy(target, handlers);
+  target.default = proxy;
+  __pi_sdk_manifest_data[specifier] = {
+    implemented: Object.keys(implemented).sort(),
+    unimplemented: Object.keys(moduleGaps).sort(),
+  };
+  return proxy;
+}
+
+// An alias shares the canonical module object and its manifest entry.
+function __pi_sdk_alias(canonical, alias, proxy) {
+  __pi_sdk_manifest_data[alias] = __pi_sdk_manifest_data[canonical];
+  return proxy;
+}
+
+const __pi_sdk_pi_tui = __pi_sdk_module("@earendil-works/pi-tui", {
+  Box: Box,
+  CURSOR_MARKER: __pi_sdk_cursor_marker,
+  Container: Container,
+  CustomEditor: CustomEditor,
+  Editor: Editor,
+  Input: Input,
+  Key: __pi_sdk_Key,
+  Loader: Loader,
+  Markdown: Markdown,
+  SelectList: SelectList,
+  SettingsList: SettingsList,
+  Spacer: Spacer,
+  Text: Text,
+  fuzzyFilter: __pi_sdk_fuzzy_filter,
+  fuzzyMatch: __pi_sdk_fuzzy_match,
+  getMarkdownTheme: __pi_sdk_default_markdown_theme,
+  getSelectListTheme: __pi_sdk_default_select_list_theme,
+  getSettingsListTheme: __pi_sdk_default_settings_list_theme,
+  hyperlink: __pi_sdk_hyperlink,
+  isKeyRelease: function (data) {
+    return __pi_sdk_is_event(data, "3");
+  },
+  isKeyRepeat: function (data) {
+    return __pi_sdk_is_event(data, "2");
+  },
+  matchesKey: __pi_sdk_matches_key,
+  parseKey: __pi_sdk_parse_key,
+  stripTerminalSequences: __pi_sdk_strip_terminal_sequences,
+  truncateToWidth: __pi_sdk_truncate_to_width,
+  visibleWidth: __pi_sdk_visible_width,
+  wrapTextWithAnsi: __pi_sdk_wrap_text,
+});
+
+const __pi_sdk_tool_factory_gap =
+  "tool factories need the host tool-invocation bridge, which the extension host does not expose yet";
+
+const __pi_sdk_pi_coding_agent = __pi_sdk_module(
+  "@earendil-works/pi-coding-agent",
+  {
+    BorderedLoader: BorderedLoader,
+    CONFIG_DIR_NAME: ".pi",
+    CustomEditor: CustomEditor,
+    DEFAULT_MAX_BYTES: 50 * 1024,
+    DEFAULT_MAX_LINES: 2000,
+    DynamicBorder: DynamicBorder,
+    VERSION: "0.85.1-pi-rust",
+    convertToLlm: __pi_sdk_convert_to_llm,
+    defineTool: __pi_sdk_define_tool,
+    formatSize: __pi_sdk_format_size,
+    getAgentDir: __pi_sdk_get_agent_dir,
+    getEditorTheme: __pi_sdk_default_editor_theme,
+    getMarkdownTheme: __pi_sdk_default_markdown_theme,
+    getSelectListTheme: __pi_sdk_default_select_list_theme,
+    getSettingsListTheme: __pi_sdk_default_settings_list_theme,
+    parseFrontmatter: __pi_sdk_parse_frontmatter,
+    serializeConversation: __pi_sdk_serialize_conversation,
+    stripFrontmatter: __pi_sdk_strip_frontmatter,
+    truncateHead: __pi_sdk_truncate_head,
+    truncateLine: __pi_sdk_truncate_line,
+    withFileMutationQueue: __pi_sdk_with_file_mutation_queue,
+  },
+  {
+    createBashTool: __pi_sdk_tool_factory_gap,
+    createEditTool: __pi_sdk_tool_factory_gap,
+    createFindTool: __pi_sdk_tool_factory_gap,
+    createGrepTool: __pi_sdk_tool_factory_gap,
+    createLsTool: __pi_sdk_tool_factory_gap,
+    createReadTool: __pi_sdk_tool_factory_gap,
+    createWriteTool: __pi_sdk_tool_factory_gap,
+  },
+);
+
+const __pi_sdk_stream_gap = "streaming assistant-message events need the model-streaming bridge, which the extension host does not expose yet";
+
+const __pi_sdk_pi_ai = __pi_sdk_module(
+  "@earendil-works/pi-ai",
+  {
+    StringEnum: __pi_sdk_string_enum,
+    Type: __pi_typebox_module.Type,
+    calculateCost: __pi_sdk_calculate_cost,
+    contentText: __pi_sdk_content_text,
+    uuidv7: __pi_sdk_uuid_v7,
+  },
+  {
+    createAssistantMessageEventStream: __pi_sdk_stream_gap,
+  },
+);
+
+const __pi_sdk_pi_ai_compat = __pi_sdk_module(
+  "@earendil-works/pi-ai/compat",
+  {},
+  {
+    anthropicMessagesApi: __pi_sdk_stream_gap,
+    createAssistantMessageEventStream: __pi_sdk_stream_gap,
+    openAIResponsesApi: __pi_sdk_stream_gap,
+    registerApiProvider: __pi_sdk_stream_gap,
+    streamSimple: __pi_sdk_stream_gap,
+  },
+);
+
+// Every value import from pi-agent-core in the upstream examples is type-only
+// (`import type`), which the loader erases, so the module intentionally has no
+// runtime exports of its own — it only needs to resolve.
+const __pi_sdk_pi_agent_core = __pi_sdk_module("@earendil-works/pi-agent-core", {}, {});
+
+const __pi_sdk_gondolin_gap = "the gondolin sandbox is a third-party VM package and is not bundled with the extension host";
+const __pi_sdk_gondolin = __pi_sdk_module(
+  "@earendil-works/gondolin",
+  {},
+  {
+    RealFSProvider: __pi_sdk_gondolin_gap,
+    VM: __pi_sdk_gondolin_gap,
+  },
+);
+
+const __pi_sdk_specifiers = {
+  "@earendil-works/pi-tui": __pi_sdk_pi_tui,
+  "@earendil-works/pi-coding-agent": __pi_sdk_pi_coding_agent,
+  "@earendil-works/pi-ai": __pi_sdk_pi_ai,
+  "@earendil-works/pi-ai/compat": __pi_sdk_pi_ai_compat,
+  "@earendil-works/pi-agent-core": __pi_sdk_pi_agent_core,
+  "@earendil-works/gondolin": __pi_sdk_gondolin,
+};
+
+// Register the historical `@mariozechner/…` scope and the bare package name so
+// extensions written against either naming keep loading.
+for (const canonical of Object.keys(__pi_sdk_specifiers)) {
+  const proxy = __pi_sdk_specifiers[canonical];
+  const bare = canonical.indexOf("@earendil-works/") === 0 ? canonical.slice("@earendil-works/".length) : canonical;
+  for (const alias of ["@mariozechner/" + bare, bare]) {
+    if (Object.prototype.hasOwnProperty.call(__pi_sdk_specifiers, alias)) continue;
+    __pi_sdk_specifiers[alias] = __pi_sdk_alias(canonical, alias, proxy);
+  }
+}
+
+// Machine-readable inventory consumed by `tests/sdk_modules.rs`.
+globalThis.__pi_sdk_manifest = function () {
+  return JSON.stringify(__pi_sdk_manifest_data);
+};
+
 // Built last so the module objects above are initialized before they are
 // referenced (a `const` declared later in the file would otherwise throw
 // a TDZ ReferenceError here).
@@ -4386,6 +5998,7 @@ globalThis.__pi_virtual_modules = Object.freeze({
   child_process: __pi_child_process_module,
   typebox: __pi_typebox_module,
   "@sinclair/typebox": __pi_typebox_module,
+  ...__pi_sdk_specifiers,
 });
 
 // `Buffer` and `process` are Node globals, not just module exports: upstream
