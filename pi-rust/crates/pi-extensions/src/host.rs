@@ -2627,6 +2627,14 @@ fn node_arg_str(args: &serde_json::Value, key: &str) -> Result<String, NodeError
         .ok_or_else(|| NodeError::invalid(format!("missing string argument `{key}`")))
 }
 
+/// Read a required base64-encoded byte argument. The shim sends binary
+/// payloads as base64 so the op table stays JSON-in / JSON-out.
+fn node_arg_bytes(args: &serde_json::Value, key: &str) -> Result<Vec<u8>, NodeError> {
+    let encoded = node_arg_str(args, key)?;
+    base64_decode(&encoded)
+        .ok_or_else(|| NodeError::invalid(format!("`{key}` argument is not valid base64")))
+}
+
 fn node_arg_bool(args: &serde_json::Value, key: &str) -> bool {
     args.get(key)
         .and_then(|value| value.as_bool())
@@ -2842,6 +2850,44 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
             Ok(serde_json::json!({ "base64": base64_encode(&bytes) }))
         }
 
+        // -- zlib ------------------------------------------------------------
+        //
+        // `node:zlib`'s zstd family is the one compression backend the
+        // workspace already bundles (`zstd = 0.13`, used by `pi-session`),
+        // so it is the one the bridge exposes. gzip/deflate would need
+        // `flate2`/`miniz_oxide`, which the offline registry does not have
+        // (see docs/NODE_BUILTINS.md).
+        "zlib.zstdCompress" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            // Node's default for `zstdCompressSync` is zstd's default (3).
+            let level = match args.get("level") {
+                Some(value) => value
+                    .as_i64()
+                    .and_then(|value| i32::try_from(value).ok())
+                    .ok_or_else(|| NodeError::invalid("`level` argument is out of range"))?,
+                None => zstd::DEFAULT_COMPRESSION_LEVEL,
+            };
+            let compressed = zstd::stream::encode_all(std::io::Cursor::new(bytes), level)
+                .map_err(|e| zstd_error(&e))?;
+            Ok(serde_json::json!({ "base64": base64_encode(&compressed) }))
+        }
+        "zlib.zstdDecompress" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let decoded = zstd::stream::decode_all(std::io::Cursor::new(bytes))
+                .map_err(|e| zstd_error(&e))?;
+            Ok(serde_json::json!({ "base64": base64_encode(&decoded) }))
+        }
+        "zlib.crc32" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            // Node's second argument is the *previous* (finalised) CRC, so a
+            // chained call continues the same stream.
+            let value = args
+                .get("value")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32;
+            Ok(serde_json::json!({ "value": crc32(&bytes, value) }))
+        }
+
         other => Err(NodeError::new(
             "ERR_UNSUPPORTED_OPERATION",
             format!("node bridge op `{other}` is not implemented"),
@@ -2977,4 +3023,52 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
         }
     }
     (padding <= 2).then_some(out)
+}
+
+/// CRC-32/ISO-HDLC (`CRC-32 IEEE 802.3`), the checksum Node's
+/// `zlib.crc32` returns: polynomial `0xEDB88320` (reflected), initial
+/// value `0xFFFFFFFF`, final XOR.
+///
+/// `value` is Node's second argument — the *finalised* CRC of the bytes
+/// processed so far — so `crc32(b, crc32(a)) == crc32(a ++ b)`. Node also
+/// returns an unsigned 32-bit integer (`crc32("123456789") ===
+/// 3421780262`), hence the `u32` return type rather than `i32`.
+fn crc32(bytes: &[u8], value: u32) -> u32 {
+    const POLYNOMIAL: u32 = 0xEDB8_8320;
+    let mut crc = value ^ 0xFFFF_FFFF;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (POLYNOMIAL & mask);
+        }
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+/// Build the `NodeError` for a failed zstd call. The `zstd` crate wraps
+/// the raw error code in an `io::Error` whose message is
+/// `ZSTD_getErrorName(code)`; the code is recovered from that prose so
+/// `err.code` matches Node's `ZSTD_ErrorCode` names.
+fn zstd_error(err: &std::io::Error) -> NodeError {
+    let name = err.to_string();
+    NodeError::new(zstd_error_code(&name), format!("ZSTD: {name}"))
+}
+
+/// `ZSTD_getErrorName()` prose → Node's `ZSTD_error_*` code. Node reports
+/// the enum name (a corrupt frame is `ZSTD_error_prefix_unknown`), while
+/// the `zstd` crate only exposes the C error string; the realistic decode
+/// failures are mapped back here and anything else falls back to
+/// `ZSTD_error_GENERIC` rather than inventing a code.
+fn zstd_error_code(message: &str) -> &'static str {
+    match message {
+        "Unknown frame descriptor" => "ZSTD_error_prefix_unknown",
+        "Data corruption detected" => "ZSTD_error_corruption_detected",
+        "Restored data doesn't match checksum" => "ZSTD_error_checksum_wrong",
+        "Src size is incorrect" => "ZSTD_error_srcSize_wrong",
+        "Destination buffer is too small" => "ZSTD_error_dstSize_tooSmall",
+        "Unsupported frame parameter" => "ZSTD_error_frameParameter_unsupported",
+        "Version not supported" => "ZSTD_error_version_unsupported",
+        _ => "ZSTD_error_GENERIC",
+    }
 }

@@ -438,20 +438,23 @@ fn node_globals_are_installed_and_unsupported_builtins_are_reported() {
         // process owns that stream (JSON-RPC) — so it is reported through
         // the host log; the write returning `true` is what extension code
         // observes.
+        // `node:readline` is still unbridged (see KNOWN_UNBRIDGED in the
+        // compatibility gate below), so the import has to fail loudly and
+        // name the modules that do exist.
         let err = host
             .load(
-                entry_at("zlib", "/tmp/pi_node_builtins/zlib.mjs"),
+                entry_at("readline", "/tmp/pi_node_builtins/readline.mjs"),
                 r#"
-                    import { gzipSync } from "node:zlib";
+                    import { createInterface } from "node:readline";
                     export default function (pi) {
                         pi.appendEntry("loaded", { ok: true });
                     }
                 "#,
             )
             .await
-            .expect_err("node:zlib is not bridged yet");
+            .expect_err("node:readline is not bridged yet");
         let message = err.to_string();
-        assert!(message.contains("node:zlib"), "{message}");
+        assert!(message.contains("node:readline"), "{message}");
         assert!(message.contains("node:fs"), "{message}");
         assert!(message.contains("node:fs/promises"), "{message}");
 
@@ -747,7 +750,7 @@ fn upstream_node_imports_are_all_bridged_or_documented() {
     /// Builtins the upstream examples reach for that are not bridged yet.
     /// Every entry must appear in `docs/NODE_BUILTINS.md` under
     /// "Not bridged", and must *not* be in the shim's map.
-    const KNOWN_UNBRIDGED: [&str; 3] = ["node:module", "node:readline", "node:zlib"];
+    const KNOWN_UNBRIDGED: [&str; 2] = ["node:module", "node:readline"];
 
     fn shim_specifiers() -> BTreeSet<String> {
         let shim = include_str!("../runtime/pi-ext-shim.mjs");

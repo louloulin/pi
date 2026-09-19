@@ -825,8 +825,9 @@ globalThis._pi_execute_tool = function _pi_execute_tool(name, argsJson) {
  * runs the result through the same factory wrapper. No bundler and no
  * extra JS dependency is involved; the `node:path` / `node:url` /
  * `node:fs` / `node:fs/promises` / `node:os` / `node:buffer` /
- * `node:crypto` / `node:process` and `typebox` / `@sinclair/typebox`
- * slice of the upstream `VIRTUAL_MODULES` map is provided.
+ * `node:crypto` / `node:zlib` / `node:process` and `typebox` /
+ * `@sinclair/typebox` slice of the upstream `VIRTUAL_MODULES` map is
+ * provided.
  *
  * @param {string} source extension source text
  * @param {string} [path] absolute path of the extension file; backs
@@ -1834,8 +1835,8 @@ const __pi_typebox_module = (() => {
 //
 // Upstream runs extensions on Node/Bun, so the examples under
 // `packages/coding-agent/examples/extensions/` import `node:fs`,
-// `node:fs/promises`, `node:os`, `node:buffer`, `node:crypto` and read
-// the `process` global directly. The embedded QuickJS runtime has no
+// `node:fs/promises`, `node:os`, `node:buffer`, `node:crypto`, `node:zlib`
+// and read the `process` global directly. The embedded QuickJS runtime has no
 // operating-system surface of its own, so every call below goes through
 // the single `host_node_call(op, argsJson)` host import installed by
 // `JsExtensionHost` (native-only, like the rest of the extension host).
@@ -1849,7 +1850,7 @@ const __pi_typebox_module = (() => {
 //     text comes from Rust's `io::Error`;
 //   - `fs.mkdirSync(path, {recursive: true})` returns `undefined`
 //     instead of the first created directory;
-//   - `node:stream`, `node:http`, `node:zlib`, … and
+//   - `node:stream`, `node:http`, … and
 //     `crypto.createHash` are not provided: importing them fails with
 //     the readable "unsupported import" error that lists what exists.
 // ---------------------------------------------------------------------------
@@ -2591,6 +2592,71 @@ const __pi_crypto_module = (() => {
     randomUUID: randomUUID,
     randomInt: randomInt,
     createHash: createHash,
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:zlib` — the zstd family plus `crc32`, the subset the upstream repo
+// actually calls. `pi-ai` reads `process.getBuiltinModule("node:zlib")` to
+// zstd-compress Codex request bodies (`packages/ai/src/api/openai-codex-responses.ts`),
+// `tool-result-images.test.ts` builds PNG chunks from `crc32` + `deflateSync`,
+// and `doom-overlay/wad-finder.ts` gunzips a downloaded WAD. Only the zstd
+// half is bridged: the workspace bundles `zstd = 0.13` (used by `pi-session`)
+// but no `flate2`/`miniz_oxide`, so gzip/deflate have no backend to stand on
+// (see docs/NODE_BUILTINS.md).
+//
+// `zstdCompressSync` accepts `options.params[constants.ZSTD_c_compressionLevel]`
+// like Node, because that is exactly how `openai-codex-responses.ts` requests
+// level 3. The async/callback forms (`zstdCompress`/`zstdDecompress`) are not
+// provided — the bridge is synchronous, and nothing in the repo uses them.
+// ---------------------------------------------------------------------------
+
+const __pi_zlib_module = (() => {
+  const BufferCtor = __pi_buffer_module.Buffer;
+  // `zstd.h`'s `ZSTD_c_compressionLevel`. Node re-exports the zstd parameter
+  // enum through `zlib.constants`, so the upstream call site works verbatim.
+  const ZSTD_c_compressionLevel = 100;
+
+  /** Resolve the compression level from Node's options shape. */
+  function zstdLevel(options) {
+    if (options && typeof options === "object") {
+      const params = options.params;
+      if (params && typeof params === "object") {
+        const fromParams = params[ZSTD_c_compressionLevel];
+        if (fromParams !== undefined && fromParams !== null) return Number(fromParams);
+      }
+      if (options.level !== undefined && options.level !== null) return Number(options.level);
+    }
+    return undefined;
+  }
+
+  function zstdCompressSync(data, options) {
+    const args = { base64: BufferCtor.__toBase64(data) };
+    const level = zstdLevel(options);
+    if (level !== undefined) args.level = level;
+    return BufferCtor.from(__pi_node_call("zlib.zstdCompress", args).base64, "base64");
+  }
+
+  function zstdDecompressSync(data) {
+    const result = __pi_node_call("zlib.zstdDecompress", {
+      base64: BufferCtor.__toBase64(data),
+    });
+    return BufferCtor.from(result.base64, "base64");
+  }
+
+  function crc32(data, value) {
+    const args = { base64: BufferCtor.__toBase64(data) };
+    if (value !== undefined) args.value = Number(value) >>> 0;
+    return __pi_node_call("zlib.crc32", args).value >>> 0;
+  }
+
+  const mod = {
+    zstdCompressSync: zstdCompressSync,
+    zstdDecompressSync: zstdDecompressSync,
+    crc32: crc32,
+    constants: Object.freeze({ ZSTD_c_compressionLevel: ZSTD_c_compressionLevel }),
   };
   mod.default = mod;
   return Object.freeze(mod);
@@ -5990,6 +6056,8 @@ globalThis.__pi_virtual_modules = Object.freeze({
   buffer: __pi_buffer_module,
   "node:crypto": __pi_crypto_module,
   crypto: __pi_crypto_module,
+  "node:zlib": __pi_zlib_module,
+  zlib: __pi_zlib_module,
   "node:process": __pi_process_module,
   process: __pi_process_module,
   "node:util": __pi_util_module,
