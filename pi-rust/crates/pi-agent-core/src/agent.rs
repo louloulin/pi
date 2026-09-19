@@ -3,7 +3,7 @@
 
 use parking_lot::Mutex;
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Content, Message, Model};
+use pi_protocol::{Content, Message, Model, ToolExecutionMode};
 use pi_telemetry::TelemetryContext;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,6 +38,11 @@ pub struct AgentOptions {
     /// Optional tool executor. When set, the loop advertises its definitions
     /// to the model and dispatches tool calls to it.
     pub tool_executor: Option<Arc<dyn ToolExecutor>>,
+    /// How a tool batch without any `Sequential` tool is dispatched.
+    /// Defaults to [`ToolExecutionMode::Parallel`], matching the upstream
+    /// `AgentLoopConfig.toolExecution` default; set it to
+    /// [`ToolExecutionMode::Sequential`] to force one call at a time.
+    pub tool_execution: ToolExecutionMode,
     /// Optional telemetry context. When set, the loop emits one span per run,
     /// turn, provider request and tool execution. `None` records nothing.
     pub telemetry: Option<Arc<dyn TelemetryContext>>,
@@ -61,6 +66,7 @@ impl std::fmt::Debug for AgentOptions {
                 "tool_executor",
                 &self.tool_executor.as_ref().map(|_| "…"),
             )
+            .field("tool_execution", &self.tool_execution)
             .field("telemetry", &self.telemetry.as_ref().map(|_| "…"))
             .finish()
     }
@@ -76,6 +82,7 @@ impl AgentOptions {
             should_stop_after_turn: None,
             prepare_next_turn: None,
             tool_executor: None,
+            tool_execution: ToolExecutionMode::Parallel,
             telemetry: None,
         }
     }
@@ -101,6 +108,15 @@ impl AgentOptions {
     /// Builder-style setter for [`tool_executor`](Self::tool_executor).
     pub fn with_tool_executor(mut self, executor: Arc<dyn ToolExecutor>) -> Self {
         self.tool_executor = Some(executor);
+        self
+    }
+
+    /// Builder-style setter for [`tool_execution`](Self::tool_execution).
+    ///
+    /// [`ToolExecutionMode::Sequential`] serializes every tool batch, which
+    /// is the escape hatch for hosts whose tools cannot be run concurrently.
+    pub fn with_tool_execution(mut self, mode: ToolExecutionMode) -> Self {
+        self.tool_execution = mode;
         self
     }
 
@@ -141,6 +157,7 @@ impl Agent {
             stream_fn: options.stream_fn.clone(),
             model: options.model.clone(),
             tool_executor: options.tool_executor.clone(),
+            tool_execution: options.tool_execution,
             telemetry: options.telemetry.clone(),
         };
         let hooks = options.hook_adapter();

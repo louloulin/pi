@@ -8734,6 +8734,292 @@ LUM-1132 已记为全仓 122 文件），本轮**没有**顺手格式化它们�
 - 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节
   如实记录（基线即红，与本轮无关；本 crate `--no-deps` 零 warning）。
 
+
+---
+
+## LUM-1135 round — `fetch` 全局 HTTP 桥（`host_fetch` + `Headers`/`Request`/`Response`）+ 派发 Stage 39
+
+本轮由 autopilot 定时触发（LUM-1135，建单标题 `pi`，开工后按平台要求改名），是 Stage 38 合并之后的一轮：
+既收一个 frontier 切片，又按「最多 3 路并发」的口径补派后继。
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1135`，起点 `origin/feature/pi.rs @ 8b1ad7e13`（Stage 37 的补记提交）。
+- 开工时 `origin/feature/pi.rs` 已推进到 **`c880702e2`**（LUM-1133 的 Stage 37 `466144269` + LUM-1134 的
+  Stage 38 `288ec3781` 与补记 `c880702e2`），先合入（合并提交见补记），**零冲突**：那两轮只碰 `pi-tui` /
+  `pi-coding-agent`，本轮只碰 `pi-extensions`，本文档两边都是末尾追加。
+- 槽位：起手 `multica daemon status` 报 `running_task_count = 2`（LUM-1133、LUM-1134 都已进 `in_review`），
+  上限 3 路 ⇒ 收尾可补派 1 个子任务。
+- 切片选择：frontier 上唯一「自包含、不碰 `app.rs` / `host.rs` 之外的串行区、又能解除仓库自己扩展的阻塞」
+  的 P2 项是 **`fetch` 全局**。LUM-1132 / LUM-1134 两轮的 frontier 都把它记成「要真实 HTTP 桥，不在一轮内做」
+  ——本轮把它做完。
+
+### 二、本轮切片：`pi-extensions` 的 `fetch` 全局
+
+`fetch` 是扩展生态的真实依赖面：上游扩展跑在 Node/Bun 下，平台自带；仓库自己的
+`.pi/extensions/import-repro.ts`（`:222` / `:240` / `:264`）用 `fetch` + `response.ok/status/text()/json()`
+读 gist 与 issue 评论。QuickJS 不带 `fetch`，纯 JS polyfill 又碰不到网络，所以必须做宿主桥：
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-extensions/src/host.rs` | `FetchRequest`（`{id?, url, method?, headers?, body?(base64), timeout?}`）+ `default_fetch_method()` + `fetch_client()`（进程级 `OnceLock<reqwest::Client>`）+ `fetch_error_envelope()` + `sleep_until_opt()` + `host_fetch_impl()` / `run_fetch()`；注册 `host_fetch`（async `Function`）与 `host_fetch_cancel` |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | `HeadersPolyfill` / `RequestPolyfill` / `ResponsePolyfill` / `fetchPolyfill`，只在 `typeof globalThis.X === "undefined"` 时安装（不遮盖引擎自带实现） |
+| `crates/pi-extensions/tests/fetch.rs`（新，5 条用例） | 手写 HTTP/1.1 loopback 服务器（`TcpListener` 绑 `127.0.0.1:0`，零新依赖），路由 `/json`、`/missing`、`/echo`、`/slow` |
+| `crates/pi-extensions/Cargo.toml` | `reqwest.workspace = true`（与 `pi-ai` 同一个 `reqwest` 构建） |
+| `crates/pi-extensions/docs/EXTENSIONS.md` / `docs/NODE_BUILTINS.md` | Host-imports 表 + `fetch` 一节 + 兼容表 + 缺口表同步 |
+
+关键设计：
+
+- **复用 `pi-ai` 的 `reqwest` 栈**（同一 `reqwest.workspace`、同一 rustls-tls / 代理环境变量策略），
+  网络策略不会出现第二套口径；client 是进程级 `OnceLock`，不是每次调用新建。
+- **复用 `ExecBridge`** 做 fetch 的取消与超时：`id` 由 shim 从与 `pi.exec` **共用**的 `__pi_next_exec_id`
+  计数器分配，`signal` 触发时 shim 调 `host_fetch_cancel(id)`；per-call 上限抬到 `timeout + 1s`，同样 clamp 到 24h。
+- **信封协议**：成功 `{ok:true,status,statusText,url,redirected,headers,body(base64)}`，失败
+  `{ok:false,name,message}`；**host 侧永不 reject**，JS 侧的 `AbortError` / `TimeoutError` / `TypeError`
+  一律由 shim 构造，错误对象形态归 JS 所有。
+- **继承 Node 语义**：4xx / 5xx **resolve** 且 `ok === false`（不 reject）；响应头名由 `reqwest` 归一为小写。
+
+### 三、有意偏离（都写进了 `docs/EXTENSIONS.md` 的 `fetch` 一节）
+
+1. **无流式**：`Response.body` 是 `null`，没有 `ReadableStream`，body 在宿主侧先整体缓冲。
+2. **无 `FormData` / `Blob` body**；body 支持 `string` / `ArrayBuffer` / TypedArray / `URLSearchParams`。
+3. **`credentials` / `mode` / `cache` / `redirect` / `keepalive` / `referrer` 忽略**（没有浏览器同源与 cookie jar）。
+4. **网络错误消息**是 transport 文本（`reqwest` 的 message），不是浏览器那套 `TypeError: fetch failed` + `cause`。
+5. **`redirected`** 由 `finalUrl !== requestUrl` 推得，不是重定向计数。
+6. **不自动解压**：workspace 的 `reqwest` 没开 `gzip` feature，因此不发 `Accept-Encoding`，调用方拿到原始字节
+   （服务端无视该头仍压缩时，用 `node:zlib` 自己解）。
+7. **`signal` 走带外通道**（与 `pi.exec(options.signal)` 同形）；`signal` 已 aborted 时不发起请求直接拒绝。
+   非标准的 `init.timeout`（ms）以 `TimeoutError` 拒绝。
+
+`docs/NODE_BUILTINS.md` 同步：`fetch` 从「未桥接（frontier）」表移出，`.pi/extensions/import-repro.ts`
+一行从「还差 `fetch`」改为**已解封**。
+
+### 四、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home cargo check -p pi-extensions --all-targets --offline      # exit 0
+$ cargo test -p pi-extensions --offline                                                # 14 个 suite
+  passed = 100, failed = 0      # 其中 tests/fetch.rs 5 个新用例
+$ cargo test --workspace --offline                 # 合并态
+  passed = 1357, failed = 0
+$ rustfmt --edition 2021 --check crates/pi-extensions/src/host.rs crates/pi-extensions/tests/fetch.rs
+  0 diff
+```
+
+`tests/fetch.rs` 用的是**真实宿主 + 本地 loopback HTTP 服务器**（手写 HTTP/1.1 responder，零新依赖），
+5 个用例覆盖：GET 的 status / ok / statusText / 响应头 / `text()`、`json()` 与 404 的 `ok:false`、
+POST body 的 UTF-8 往返、预中止信号、以及**飞行中中止**（用 `pi.exec("sleep", "0.3")` 制造真实延迟，
+断言 `AbortError` 且耗时 < 1.5s，即真的丢掉了那个 2s 响应）。文件按 `pi_exec.rs` 的先例标 `#![cfg(unix)]`。
+
+**`-D warnings` 门的真实状态（如实记录，与 LUM-1133 / LUM-1134 同一结论）**：
+`cargo clippy --workspace --all-targets -- -D warnings` 在本分支上**仍是红的**，原因与本轮无关：
+1.85.0 工具链下实测 8 处既有 lint（`pi-telemetry` 2 条 `needless_lifetimes`、`pi-extensions`
+`deflate.rs:650` `precedence` 与 `tests/zlib_deflate.rs:55` `format_collect`（都是 LUM-1131 的代码）、
+`pi-tui` 2 条、`pi-server/src/transports/unix.rs:13` `duplicated_attributes`）。
+把它们用 `-A` 放行后，`cargo clippy -p pi-extensions --all-targets --no-deps -- -D warnings` **exit 0**
+——即本轮新增的 `host.rs` / `tests/fetch.rs` **一条 lint 都没有**。
+
+顺带记录一次环境事故：跑全量 workspace 测试时 `target/debug/incremental` 长到 1.7 G 把 50 G 盘打满
+（`No space left on device`，`pi-tui` 两个测试目标编译失败）；只删掉**属于已完成轮次自己的**
+`CARGO_TARGET_DIR` 下那个 `incremental` 目录后复跑通过，后续 cargo 调用统一带 `CARGO_INCREMENTAL=0`。
+
+### 五、合并与推送
+
+起点 `8b1ad7e13`；先落代码提交，再把 `origin/feature/pi.rs @ c880702e2` 合入（合并提交），
+然后补一个 rustfmt 收尾提交（分支已推送，不做 amend / force push）。
+`origin/feature/pi.rs` 是这些提交的祖先，因此并入是**快进、无 plumbing merge**。真实哈希与 numstat 见本节末补记。
+
+### 六、frontier（本轮更新）
+
+1. ~~P2 `fetch` 全局~~ **本轮（LUM-1135）收口**：`host_fetch` 导入 + `Headers`/`Request`/`Response`/`fetch`，
+   带取消与超时；`import-repro.ts` 已解封。（这一项在 LUM-1132 / LUM-1134 两轮的 frontier 里都被判
+   「要真实 HTTP 桥，不在一轮内做」而挂起。）
+2. **keybindings 消费方（Stage 39）**：注册表（LUM-1132）与配置层（LUM-1134）都已落地，只剩把
+   `app.rs` / `editor.rs` 里散落的硬编码和弦换成 `get_keybindings()`（含 `app.*` 动作分发）。
+   自包含、且现在没有别的轮次在写 `app.rs` —— **本轮已派发**（见补记）。
+3. **P3 `alt-screen-search.ts`**：与已落地的选区 / 高亮有天然联动，要 `app.rs` 钩子，与第 2 项同属串行区。
+4. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 ratatui `Cell` 支持链接单元
+   （0.28 不带），得改 `app.rs` 的 buffer 写入路径，与第 2、3 项串行。
+5. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径，排在后面。
+6. **质量门清偿（本轮确认清单，建议单开任务）**：`cargo clippy --workspace --all-targets -- -D warnings`
+   实测 **8 处**既有 lint（5 个 crate），`cargo fmt --all -- --check` **122 个文件**有 diff
+   （`pi-coding-agent` 49、`pi-chord` 27、`pi-server` 11、`pi-evals` 10、`pi-ai` 7、`pi-session` 5、
+   `pi-protocol` 4、`pi-extensions` 3、`pi-agent-core` 3、`pi-tui` 2、`pi-mono` 1）。都是既有项、
+   都不影响本轮，但会挡住「CI 绿」这个门 —— **本轮已作为 backlog 子任务记录**（见补记）。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉；既有欠账
+   （`settings.rs` / `tests/settings_list.rs` 的 rustfmt diff、`pi-agent-core/src/tools.rs:13` 并行工具路径、
+   `pi-ai` registry 缺 `openai-codex` / `kimi-coding`）维持不动。
+
+并发口径维持：上限 3 路；`pi-extensions/src/host.rs`、`pi-tui/src/app.rs`、`docs/FEATURE_PI_RS_STATUS.md`
+各自一次只允许一路在写（本轮只写前者与本文档）。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `fcec9519f`（7 文件）、rustfmt 收尾 `d9ab3c001`（2 文件）、合并提交 `1f47a80bf`
+  （第一父 `fcec9519f`、第二父 `c880702e2`）、本节文档提交 `516a20e6c`（+119 行）。
+- 推送是**快进、无额外 merge**：`git push origin 516a20e6c:refs/heads/feature/pi.rs` →
+  `1f47a80bf..516a20e6c`，`work/lum-1135` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `516a20e6cd4271288a46355ce9191584aa22bb0d`。（推送时 git 打了 `unable to get credential storage lock` 的
+  提示，但 ref 已更新，事上为成功。）
+- `git diff --numstat c880702e2 516a20e6c`（本轮全部改动，8 个文件、**+1144 / − 12**）：
+  `pi-extensions/runtime/pi-ext-shim.mjs` +306（新）、`pi-extensions/tests/fetch.rs` +395（新）、
+  `pi-extensions/src/host.rs` +264/−10、`pi-extensions/docs/EXTENSIONS.md` +53、
+  `pi-extensions/docs/NODE_BUILTINS.md` +2/−2、`pi-extensions/Cargo.toml` +4、`Cargo.lock` +1、
+  本节文档 +119。**`pi-tui` / `pi-coding-agent` / `pi-session` / `pi-ai` 一个文件都不在其中。**
+- 合并态复测（第四节）跑的树与 `feature/pi.rs` 的新头 `516a20e6c` 同源，数字即第四节所列。
+- 本轮**派发 1 个子任务**（接第 3 路并发位）：
+  `[Stage 39] pi-tui/pi-coding-agent: keybindings 消费方（app.rs/editor.rs 硬编码和弦 → get_keybindings() + app.* 动作分发）`
+  = **LUM-1137**（`01a0bb2c-62ee-74f0-9891-1157874e81d5`，priority `high`，`--status todo`，创建即起跑）。
+  另记 1 个 **backlog** 子任务（不占并发槽，等有空位再提升为 `todo`）：
+  `[Tech-debt] 清偿 workspace 质量门：cargo fmt 122 文件漂移 + clippy 8 处既有 lint`
+  = **LUM-1138**（`01a0bb2c-705a-7986-8caa-35e2b6de1fd7`，priority `medium`）。
+  派发后 `multica daemon status` 报 `running_task_count = 3`（满额）。
+
+## LUM-1136 round — 转录搜索覆盖层（`alt-screen-search.ts` 全量移植，frontier 第 3 项收口）+ 槽位满未派发
+
+本轮不是协调轮派发的：LUM-1136 自己就是那个切片（建单标题 `pi`，开工后按平台要求改名）。
+只做 frontier 第 3 项，改动全部落在 `pi-tui`，不碰 `pi-extensions` / `pi-coding-agent` / `pi-session`，
+不做第 4、5 项（LaTeX 剩余 / 滚条悬停拖拽），不派发子任务。
+
+### 一、起点与槽位
+
+- 开工时 `origin/feature/pi.rs @ e5f5585d7`（LUM-1133 补记）；本轮进行中该分支连推两轮 —
+  `288ec3781`（LUM-1134 keybindings 配置层）、`9412e1c00`（LUM-1135 `fetch` 桥 + 派发 Stage 39）。
+  工作提交 `cecd36498` **rebase** 到 `9412e1c00` 之上，因此并入 `feature/pi.rs` 是**快进**。
+- LUM-1134 改 `pi-coding-agent/src/keybindings.rs`、LUM-1135 改 `pi-extensions/*`，
+  与本轮唯一触碰的 `pi-tui/src/app.rs` 无重叠，rebase 零冲突。
+- 槽位：`multica daemon status` 报 `running_task_count = 3`（LUM-1136 + Stage 39 LUM-1137 + …），
+  按上限 3 路的口径**本轮不派发子任务**。frontier 里唯一「够小、够独立」的第 5 项（滚条）撞在
+  `app.rs` 上、且明确排在 Stage 39 之后，不适合再塞进满槽的一轮。
+- **串行线提示（给 Stage 39 / LUM-1137）**：本轮把 `Ctrl+Shift+F` 开关接到 `App::step_key` 的
+  全局段、并在 `App` 上加了 `search` 字段 / 一批 pub API，`pi-tui/src/app.rs` 因此偏移。
+  LUM-1137（`app.rs` / `editor.rs` 硬编码和弦 → `get_keybindings()`）**必须 rebase 到 `cecd36498`**，
+  不能基于 `9412e1c00` 直接改。
+
+### 二、上游语义逐条对齐（`packages/tui/src/alt-screen-search.ts` + `tui-alt-screen.ts`）
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| `buildSearchCorpus`：把**渲染后的纯文本行**拼成语料，每条记录带 `row` + 字符列区间；ASCII 期快速路径与 grapheme 路径并存 | `alt-screen-search.ts:60`–`205` | `SearchCorpus` / `build_corpus`（可打印 ASCII 走 `push_ascii_matches`，其余走 `GraphemeSearch` trait 的 `unicode-segmentation` 路径）/ `lowercase_chars` |
+| `findMatches`：查询先 `normalize`（折叠空白 + trim），空查询返回 `[]`；同一行相邻片段合并 | `:120`–`240` | `normalize_query` / `find_corpus_matches` / `find_matches` / `SearchMatch::key` |
+| `AltScreenSearchIndex` 复用上一帧语料，`search()` 返回 `changed` | `:250`–`300` | `SearchIndex::search` → `SearchResult { matches, changed }`；`clear` |
+| `SearchBar`：`query` / 光标位置 / `resultIndex` / `resultCount` / `resultLabel`（`"No matches"` vs `"1/2"`）+ 编辑动作 + `navigationDirectionAt(row,col)` | `:240`–`420` | `SearchBar`（`insert_char` / `backspace` / `delete_forward` / `move_left|right|home|end` / `delete_to_start|end` / `result_label` / `navigation_direction_at`）+ `apply_query_key` |
+| 覆盖层几何：`width: "40%"`、`minWidth: 32`、右上角、margin 1；底边规则里放 `↑ <searchPrevious 首键>` 与 `↓ <searchNext 首键>` 两个按钮 | `:300`–`460` | `search_bar_rect` / `SearchBarLayout { lines, previous_span, next_span }` / `render_search_bar` / `format_key` / `first_key_label` / `search_bar_text` / `SEARCH_PLACEHOLDER` |
+| `tui.altScreen.search`（默认 `ctrl+shift+f`）**先于**「覆盖层是否持有焦点」判定，永远 toggle | `tui-alt-screen.ts:705`–`708` | `App::step_key` 全局段 `get_keybindings().matches(…, "tui.altScreen.search")` → `open_search()`；覆盖层开着时由 `step_search_key` 先消费同一和弦并 `close_search()` |
+| `searchNext` / `searchPrevious` / `searchClose` **只在** `activeSearch.overlay.isFocused()` 时生效 | `:709`–`720` | `step_search_key` 的前三分支（`1` / `-1` / 关闭），其余键才进查询编辑 |
+| `shouldDeferViewportInputToOverlay()` 在搜索覆盖层持有焦点时为 `false`，视口和弦继续走视口 | `:644`–`645` | `PageUp` / `PageDown` / `Home` / `End`（无修饰）与 `Ctrl+C` / `Ctrl+L` 返回 `PassThrough`，落到既有全局处理 |
+| 查询变更后把锚点设为 `getVisibleLineRange()[0]`，选**第一个 `row >= anchor`** 的命中；`searchNext`/`searchPrevious` 各自回绕 | `:496`–`600` | `SearchSelectionMode { Query, Retain, Next, Previous }` + `search_anchor_row` + `viewport_skip` + `search_base_index`（精确 → 钳到前一个 → `-1`） |
+| 命中不在可见区间时滚到 `firstRow − page/3` 并钳到 `max`；已在屏上不动 | `:560`–`640` | `search_reveal`（按 `MessageView::line_count` / `set_scroll_from_bottom`） |
+| `searchMatchStyle` / `searchCurrentMatchStyle`（其余命中下划线、当前命中加粗 + 反显） | `:40`–`60` | `apply_search_highlight`：非当前 `Modifier::UNDERLINED`、当前 `Modifier::BOLD | Modifier::REVERSED`，**保留原有 fg**，按位或叠加，因此与选区反显可共存 |
+| `getSearchNavigationDirectionAt` + `handleSearchMouseEvent`：悬停高亮、按下导航；覆盖层矩形内的手势归 overlay，不外泄给聊天日志 | `:640`–`700` | `App::step_search_mouse_gesture`（在 `step_mouse_gesture` 最前面挂钩）+ `SearchBar::set_hovered` / `hovered()` |
+| 关闭即销毁组件，重新打开是空查询 | `:600`–`660` | `close_search` 直接把 `self.search = None`（无「上次查询」记忆） |
+
+### 三、刻意偏离（都写进 `search.rs` / `app.rs` 的模块文档，不是遗漏）
+
+1. **列按字符计，不按显示宽度**：沿用 LUM-1124 / LUM-1133 的口径（`selection_text` 就是 1 char = 1 列），
+   `SearchSegment` 的 `start_col` / `end_col` 也用 `chars().count()`；**没有**做宽字符整格扩边，
+   因此宽字符行的高亮可能比上游窄一格。`unicode-segmentation` 只在大小写折叠对齐时用其 grapheme 路径。
+2. **大小写折叠是逐字符 `to_lowercase()`**，不是上游 `regex` 的 `iu` 完整 Unicode case folding：
+   `pi-tui` 的依赖表里没有 `regex`（`Cargo.toml`: pi-protocol / pi-agent-core / pi-ai / serde /
+   serde_json / crossterm / ratatui / parking_lot / tokio / tokio-util / anyhow / thiserror /
+   unicode-segmentation），为这一处匹配拉进 `regex` 不划算。`ß`/`İ` 这类折叠差异与上游不同（已注明）。
+3. **语料本身就是纯文本**：上游在 `buildSearchCorpus` 里还要 `stripTerminalSequences`，而本仓库的
+   `MessageView::visible_lines` + `styled::plain_text` 产出的已经是无转义序列的纯文本（扩展输出的
+   ANSI 在写入日志时就已被清洗），所以没有这一层，也没有「命中落在被剥离的序列里」这一类边界。
+4. **不绘制输入光标单元**：上游 `SearchBar` 由终端光标停在输入框内指示位置；本实现只保留 `cursor` 偏移
+   （编辑语义完整、`move_left|right|home|end` 可测），**不**在栏内画反色块。
+   边框 `┌│└┐┘` 由 `render_search_bar` 补齐，所以 `search_bar_text` 输出的每一行宽度严格等于栏宽（有测试）。
+5. **覆盖层贴的是消息视口，不是整个终端**：`App::record_viewport` 记下的消息区（整宽 × 视口高）
+   是上游挂 overlay 的容器；App 不拥有状态行 / 输入行，所以搜索栏只可能盖住聊天日志。
+   搜索栏在 `render_to_buffer_impl` **最后**绘制（`apply_selection_highlight` → `apply_search_highlight`
+   → 搜索栏），因此扩展弹窗 / 对话框也盖不住它。
+6. **没有 timer / 后台线程**：`refresh_search` 在每帧渲染前同步重算（`SearchIndex::search` 用上一帧语料，
+   只在语料变化时重建），驱动侧的 50 ms 渲染循环负责重绘；流水日志在栏开着时也会被重新索引（有测试）。
+
+### 四、改动清单（自 `9412e1c00`）
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-tui/src/search.rs`（新，1100 行） | `SearchSegment` / `SearchMatch`（`key()` / `first_row` / `last_row`）/ `normalize_query` / `SourceSpan` / `SearchCorpus` / `build_corpus`（`GraphemeSearch` trait）/ `lowercase_chars` / `find_corpus_matches` / `find_matches` / `SearchResult` / `SearchIndex` / `SearchSelectionMode` / `SearchBar`（编辑 + `result_label` + `navigation_direction_at`）/ `byte_index` / `SearchBarLayout` / `search_bar_rect` / `format_key` / `first_key_label` / `render_search_bar` / `apply_query_key` / `search_bar_text` / `SEARCH_PLACEHOLDER`；13 条单测 |
+| `crates/pi-tui/src/app.rs` | 新增 `SearchState { index, bar, matches, selected_index, selected_key, anchor_row, selection_mode }` / `SearchKeyOutcome`；`App` 新增 `search` 字段；`step_key` 全局段接 `tui.altScreen.search` 开关；`step_search_key`（关闭 / 前后跳 / 编辑 / 视口和弦 PassThrough）；pub API `search_open` / `search_query` / `search_matches` / `search_match_index` / `search_bar` / `open_search` / `close_search` / `toggle_search` / `set_search_query` / `navigate_search` / `refresh_search`；私有 `search_query_changed` / `search_anchor_row` / `viewport_skip` / `search_reveal` / `apply_search_highlight` / `step_search_mouse_gesture`；`record_viewport`；`render_to_buffer` 重算并绘制搜索栏；模块文档新增 `# Transcript search` 一节 |
+| `crates/pi-tui/src/lib.rs` | `pub mod search;` + 12 个公开类型 / 函数的 re-export |
+| `crates/pi-tui/tests/alt_screen_search.rs`（新，454 行） | 12 条 App 级契约：开关与栏几何、打字建索引并锚定首个命中、无命中清空选择、`Enter`/`Ctrl+G` 与 `Shift+Enter`/`Ctrl+Shift+G` 步进与回绕、命中高亮就地切换、查询锚定视口顶行并滚动揭示、重开是空查询、流水日志重新索引、鼠标悬停/点击导航按钮与离开清悬停、栏矩形吞掉点击（下方同一手势仍可选区）、栏持有焦点时视口和弦仍生效、覆盖层不改变日志文本 |
+
+既有公开契约（`App::step` / `render_to_buffer` / `MessageView` / keybindings 注册表）**没变**：
+搜索只新增字段与 API，`Ctrl+Shift+F` 之前没有任何处理器（`tui.altScreen.search` 注册了但无人消费），
+所以不存在「抢键」回归 —— `Ctrl+F` / `Esc` / `Enter` 的旧行为全部由既有测试继续守着。
+
+### 五、验证（rustc 1.98.1）
+
+```
+$ CARGO_TARGET_DIR=… cargo test -p pi-tui
+  26 个 suite 共 530 passed / 0 failed    # 起点 25 suite / 505（LUM-1133 补记口径），+1 suite / +25
+$ … cargo test -p pi-tui --test alt_screen_search
+  12 passed / 0 failed
+$ … cargo check --workspace --all-targets
+  0 error / 0 warning                      # 8 个 crate 全过
+$ … cargo clippy -p pi-tui --all-targets
+  0 warning                                # 含本轮新代码
+$ rustfmt --edition 2021 --check src/app.rs src/search.rs src/lib.rs tests/alt_screen_search.rs
+  0 diff
+```
+
+`+25` 的来源：`src/search.rs` 13 条单测（`lib` 232 中含这 13 条，起点 219）+ `tests/alt_screen_search.rs` 12（新 suite）。
+
+**质量门的两条如实记录**：
+1. `cargo fmt -p pi-tui --check` 仍报 `src/settings.rs` 8 处 + `tests/settings_list.rs` 8 处 diff ——
+   即 LUM-1135 记的「122 文件 rustfmt 漂移」中属于 `pi-tui` 的那 2 个文件。本轮**跑 fmt 时曾把整个包一起
+   格式化了**（`cargo fmt -p pi-tui -- <显式文件>` 是包级动作，显式路径只是附加参数），发现后立刻
+   `git checkout` 把这两个文件**还原**，不把无关 churn 混进本轮提交。这 2 个（以及 workspace 另外 120 个）
+   留给 LUM-1138。
+2. `cargo clippy --workspace --all-targets -- -D warnings` 仍过不了，原因与本轮无关（既有 lint 在
+   `pi-telemetry` / `pi-server` / `pi-extensions` / `pi-tui` 的 `autocomplete.rs:427`、`theme.rs:213`）。
+   摘掉依赖后 `cargo clippy -p pi-tui --all-targets`（默认门）**零警告**是本轮的实际门。
+
+### 六、合并与推送
+
+起点 `9412e1c00` 就是推送时刻 `origin/feature/pi.rs` 的头，代码提交 `cecd36498` 在其上，
+所以 `feature/pi.rs` 是它的祖先 —— 推送**快进、无 merge、无 plumbing**。真实哈希与 numstat 见本节末补记。
+
+### 七、frontier（本轮更新）
+
+1. ~~P3 `alt-screen-search.ts`~~ **本轮（LUM-1136）收口**：搜索栏编辑 / 索引 / 锚定 / 步进回绕 / 滚动揭示 /
+   就地高亮 / 鼠标导航按钮 / 视口和弦共存，全部有测试；偏离已写进 `search.rs` 与 `app.rs` 的模块文档。
+2. **keybindings 消费方（Stage 39 / LUM-1137）**：注册表（LUM-1132）与配置层（LUM-1134）都已落地，
+   本轮之后 `app.rs` 的硬编码和弦正好包括搜索那几个 —— **必须 rebase 到 `cecd36498`**（见第一节末）。
+3. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 ratatui `Cell` 支持链接单元
+   （0.28 不带），得改 `app.rs` 的 buffer 写入路径，与第 2 项串行。
+4. **P3 X10 鼠标序列 / `updateScrollbarHover` 悬停高亮 / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径，
+   排在第 2、3 项之后。**本轮明确未做。**
+5. **质量门清偿（LUM-1138，backlog）**：`cargo fmt` 122 文件漂移 + workspace `-D warnings` 的 8 处既有 lint；
+   本轮只做到「新代码 0 diff / 0 警告」，没顺手清旧账（会与 LUM-1138 重复）。
+6. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+7. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉；既有欠账
+   （`pi-agent-core/src/tools.rs:13` 并行工具路径、`pi-ai` registry 缺 `openai-codex` / `kimi-coding`）维持不动。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、`docs/FEATURE_PI_RS_STATUS.md`
+各自一次只允许一路在写（本轮只写前者与本文档）。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `4ec928866`（4 个文件）、本节文档提交 `e468c1363`（+130 行）；两者都在
+  rebase 后的工作分支上，起点 `9412e1c00`。
+- `origin/feature/pi.rs` 在推送时刻仍是 `9412e1c00`（本轮第二次 `git fetch` 确认没有新推进），
+  所以本次并入是**快进、无 merge 提交、无 plumbing**：
+  `git push origin HEAD:refs/heads/feature/pi.rs` → `9412e1c00..e468c1363`（首次推送打了
+  `unable to get credential storage lock in 1000 ms` 的提示，但 ref 已更新，事上为成功）；
+  `work/lum-1136` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `e468c13631362791de447ba5b9cf69438aca45e8`。
+- `git diff --numstat 9412e1c00 e468c1363`（本轮全部改动，5 个文件、**+2318 / −10**）：
+  `pi-tui/src/search.rs` +1100（新）、`pi-tui/tests/alt_screen_search.rs` +454（新）、
+  `pi-tui/src/app.rs` +628/−10、`pi-tui/src/lib.rs` +6、本节文档 +130。
+  **`pi-extensions` / `pi-coding-agent` / `pi-session` / `pi-ai` 一个文件都不在其中。**
+- 合并态复测（第五节）跑的树就是推送出去的树，26 suite / 530 passed 的数字即第五节所列。
+- 本轮**未派发任何子任务**（槽位满：`multica daemon status` → `running_task_count = 3`）。
+
+---
+
 ## LUM-1137 round — keybindings 消费方：`app.rs` / `editor.rs` 全部改走 `get_keybindings()`（Stage 38 收口）+ 启动安装 + `reload` 重装
 
 Stage 38「keybindings」三段中的第三段（前两段：LUM-1132 注册表、LUM-1134 配置层）。本轮**不改默认行为**，
@@ -8826,3 +9112,306 @@ $ rustfmt --edition 2021 --config skip_children=true --check <本轮 8 个文件
    接入时按 id 直接分发即可（注册表已就绪）。既有欠账（workspace 级 `clippy -D warnings` 红、
    `pi-rust/docs/PLAN.md` 停在 Stage 14、全仓 rustfmt 漂移、`pi-agent-core/src/tools.rs:13` 并行工具路径、
    `pi-ai` registry 缺 `openai-codex`/`kimi-coding`）维持不动。
+
+
+---
+
+## LUM-1139 round — `pi-agent-core` 并行工具执行（`ToolExecutionMode`）+ `after_tool_call` 双调用修复
+
+本轮由 autopilot 定时触发（LUM-1139，建单标题 `pi`，开工后按平台要求改名），与 LUM-1136 / LUM-1137
+并行推进；切片取自 `pi-agent-core` 里挂了多轮的 P1 欠账。
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1139`，起点 `origin/feature/pi.rs @ 9412e1c00`（LUM-1135 的补记提交）。
+- 开工时 `origin/feature/pi.rs` 已推进到 **`5fa1c1999`**（LUM-1136 的转录搜索覆盖层 `4ec928866`
+  + 补记 `e468c1363`），收尾前合入（合并提交见补记），**零冲突**：LUM-1136 只碰
+  `pi-tui` + 本文档末尾，本轮只碰 `pi-agent-core` / `pi-coding-agent`。
+- 槽位：现场 `multica daemon status` 报 `running_task_count = 3`（LUM-1137 正在 `in_progress`），
+  已到 3 路上限 ⇒ **本轮不派发任何子任务**；LUM-1138（质量门清偿）维持 `backlog`。
+- 切片选择：`pi-rust/crates/pi-agent-core/src/tools.rs:13` 的注释从 Stage 10 起就写着
+  「Tool calls run sequentially in this stage … the parallel path is deferred to a later stage」，
+  LUM-1133 / 1134 / 1135 三轮 frontier 的「既有欠账」里一直挂着同一项。它自包含
+  （`pi-agent-core` + 一个消费方覆盖）、不碰 `app.rs` / `host.rs` 这两个串行区，是当时唯一能整段收口的 P1。
+
+### 二、本轮切片：按 `ToolExecutionMode` 分流工具批次 + after 钩子只跑一次
+
+上游口径在 `packages/agent/src/agent-loop.ts:409`（`executeToolCalls`）：`config.toolExecution === "sequential"`
+**或**批次里任一工具声明了 `executionMode: "sequential"` → 整批串行；否则先按源序 `prepareToolCall`
+（`BeforeToolCall` + 校验），再并发执行，结果仍按源序回填（`Promise.all` + `orderedFinalizedCalls`）。
+`prepareToolCall` 返回 `immediate`（被 block）的调用**不会**走 `finalizeExecutedToolCall`，即
+`AfterToolCall` 只对「真执行过」的调用触发一次。
+
+Rust 侧的实现缺口有两处：批次永远串行；且 `call_tool` 内部与 `execute_tool_calls` 外层各调一次
+`invoke_after_tool_call`，**一次工具调用会触发两次 after 钩子**（并发运行 after 钩子本就该是幂等地
+「改写结果」，两次调用埋着结果被改写两轮的隐患）。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-agent-core/src/tools.rs` | `ToolExecutor::execution_mode(name) -> ToolExecutionMode`，**默认 `Sequential`**；模块注释从「本阶段一律串行」改为「按 `ToolExecutionMode` 分流」 |
+| `crates/pi-agent-core/src/state.rs` | `AgentConfig` 新增 `tool_execution: ToolExecutionMode`（默认 `Parallel`） |
+| `crates/pi-agent-core/src/agent.rs` | `AgentOptions` 同名字段 + `with_tool_execution(mode)` 构造器 + `Debug` 增加该字段；构造 `AgentConfig` 时透传 |
+| `crates/pi-agent-core/src/agent_loop.rs` | `LoopConfig.tool_execution`（`From<&AgentConfig>` 拷贝）；`execute_tool_calls` 拆成 `execute_batch_sequential` / `execute_batch_parallel` + `prepare_call` / `run_call` / `dispatch_tool`；`run_call` 是**唯一**调用 `invoke_after_tool_call` 的地方 |
+| `crates/pi-coding-agent/src/tool_executor.rs` | `BuiltinToolExecutor::execution_mode`（查工具声明的 `AgentTool::execution_mode()`，`None` → `Parallel`）；`ExtensionToolExecutor::execution_mode`（内置工具沿用声明，扩展工具一律 `Sequential`）+ 抽出的 `extension_execution_mode()` 便于单测 |
+| `crates/pi-agent-core/tests/tool_parallel.rs`（新，9 条） | 并发窗口重叠 / 源序回填 / 批次含 `Sequential` 工具 → 整批串行 / 配置级 `Sequential` / 默认 `Sequential` / after 钩子次数 / block 与执行互不干扰 / 单调用批次 |
+| `crates/pi-coding-agent/tests/agent_tools.rs` | 新增「同一批两条 `read` → 源序 + 真实文件内容」集成用例 |
+| `crates/pi-agent-core/tests/{telemetry,tool_execution}.rs` | 三处 `AgentConfig` 字面量补 `tool_execution` 字段 |
+
+关键设计：
+
+- **`prepare → execute → finalize` 三段式**：`prepare_call` 按源序问 `BeforeToolCall` 并产出
+  `CallPreparation::{Execute, Immediate}`（block 的调用在这里就成了结果），`run_call` 才做「派发 + after 钩子」。
+  因此两条路径共享同一套语义，唯一差别是 `run_call` 是 `await` 顺序跑还是 `futures::future::join_all` 并发跑。
+- **结果用槽位回填**：并发路径先按源序建 `Vec<Option<ToolResult>>`，执行结果带槽位下标回收，
+  再 `flatten()` 成源序结果——与上游 `orderedFinalizedCalls` 同形，也顺手挡住了「并发完成顺序影响 message log」。
+- **默认值刻意分两处**：`ToolExecutor::execution_mode` 默认 `Sequential`（不覆盖的执行器 = 旧行为，
+  mock / 宿主自己的工具不会因为升级 trait 突然并发）；`BuiltinToolExecutor` 对**未声明**的工具给
+  `Parallel`（对齐上游 `executionMode === undefined`）。两处默认值都写进了 doc。
+- **扩展工具整类串行**：`JsExtensionHost::execute_tool` 的 interrupt deadline 是宿主共享状态
+  （`arm_deadline` / `disarm_deadline`），两个扩展工具并发跑会互相踩掉 deadline，因此
+  `ExtensionToolExecutor` 把非内置工具一律报成 `Sequential`。
+
+### 三、有意偏离（都写进了对应 doc 注释）
+
+1. **trait 默认 `Sequential`（上游默认 `Parallel`）**：保守取值，理由如上；真实宿主走
+   `BuiltinToolExecutor`，其口径与上游一致。
+2. **批次不因取消而短路**：上游两条路径在 `signal?.aborted` 时 `break`（并行分支里已排队的调用会
+   直接产出 `Operation aborted` 结果）；Rust 侧仍把整批交给 executor，由 executor / `AbortLike`
+   自己决定如何失败。这是**本轮之前就有的行为**，既有测试
+   `cancelled_token_is_forwarded_to_executor` 明确断言「预取消的 token 仍要到达 executor」，
+   本轮不改（改成上游语义要同时改那条测试，属另一个切片）。
+3. **不发射逐调用事件**：`ToolExecutionStart` / `ToolExecutionEnd` 仍由 `Agent` façade 在整批结束后
+   按结果补发（`agent.rs:346`，`ToolCall.name` 为空、duration 是补发时刻的时间戳），不是真正的流式
+   事件。本轮只改批次内部调度，不动事件层；已记入 frontier。
+
+### 四、验证
+
+```
+$ rustc --version                                     # 1.98.1 (48a229cea 2026-09-01) = CI 的 dtolnay/rust-toolchain@stable
+$ export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1139 \
+         CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+$ cargo clippy -p pi-agent-core -p pi-coding-agent --all-targets --offline --no-deps -- -D warnings
+  # exit 0 —— 与本轮文件相关的 lint 一条都没有
+$ PI_PRINT_MODE_SKIP_SIGINT_TEST=1 cargo test -p pi-agent-core -p pi-coding-agent --offline
+  # exit 0：25 个 suite、422 条用例全绿
+  #   其中 pi-agent-core 8 个 suite 38 条（含新增 tests/tool_parallel.rs 9 条）
+  #   pi-coding-agent lib 239 条（含 `tool_executor::tests` 3 条）+ 16 个集成 suite + 3 条 doc-test
+$ cargo check --workspace --offline                    # exit 0（合并态，含 LUM-1136 的 pi-tui）
+$ cargo check -p pi-tui --all-targets --offline        # exit 0（合并进来的搜索覆盖层测试目标也编得过）
+```
+
+并发批次是**用真实时钟验的**，不是靠断言调用次数：`tests/tool_parallel.rs` 的执行器记录每次调用
+的 `start` / `end`，`parallel_batch_runs_concurrently` 断言两条 250ms / 10ms 的调用**窗口重叠**、
+并且完成顺序是 `fast` 先于 `slow`（串行时不可能出现）；`sequential_tool_in_batch_serializes_everything`
+与 `config_sequential_mode_overrides_parallel_tools` 反过来断言窗口不重叠。`after_tool_call` 的
+双调用回归由 `CountingAfter` 计数器锁死（两条调用的批次必须恰好 2 次，修复前是 4 次）。
+
+**一例偶发失败（既有 flake，与本轮改动无关）**：不加 `PI_PRINT_MODE_SKIP_SIGINT_TEST` 跑全套时，
+`pi-coding-agent --test print_mode::sigint_or_clean_exit` 偶发失败，报错 `unexpected exit code: None`。
+该用例 `spawn` 真实 `pi` 二进制后**固定 `sleep 50ms` 再 `kill()`**（SIGKILL 时 `ExitStatus::code()`
+就是 `None`）；本文档 `:5598` 已记录同一现象（当时 4 过 1 挂，load average 17.8）。本轮实测：
+同一个二进制连跑 6 次 **1 过 5 挂**，空载时 `pi --print=hello` 退出耗时 **32–36ms**（50ms 预算被负载吃掉），
+即失败取决于机器负载而非代码差异。该用例自身支持 `PI_PRINT_MODE_SKIP_SIGINT_TEST` 跳过。
+
+**环境记录**：起手 `/` 只剩 7.3G，且 LUM-1131 工作区的 `target/`（14G）正被另一路并发任务占用，
+因此本轮**没有**复用任何在用的 target 目录，而是把 `CARGO_TARGET_DIR` 指到
+`/tmp/pi-rust-target-lum1139` 并关掉 debuginfo 与 incremental；为腾地方只删除了两个**已交付**
+（`in_review`）轮次工作区的 `target/`（`lum-1115` 441M、`lum-1133` 1G），源码与提交一律未动。
+
+### 五、合并与推送
+
+起点 `9412e1c00`；先落代码提交，再把 `origin/feature/pi.rs @ 5fa1c1999` 合入（合并提交），
+最后补本节文档提交。`origin/feature/pi.rs` 是这些提交的祖先，因此并入是**快进、无 plumbing merge**。
+真实哈希与 numstat 见本节末补记。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `d269d338e`（8 文件）、合并提交 `5d0fc3a86`（第一父 `d269d338e`、第二父 `5fa1c1999`）、
+  本节文档提交 `cd1acb3f2`（+145 行）。
+- 推送是**快进、无额外 merge**：`git push origin cd1acb3f2:refs/heads/feature/pi.rs` →
+  `5fa1c1999..cd1acb3f2`，`work/lum-1139` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `cd1acb3f2f115a2b4742780f6ee12e04c4bf2185`。（推送时 git 又打了 `unable to get credential storage lock`
+  的提示，但 ref 已更新，事上为成功——与前几轮同一现象。）
+- `git diff --numstat 5fa1c1999 cd1acb3f2`（本轮全部改动，10 个文件、**+1165 / − 66**）：
+  `pi-agent-core/tests/tool_parallel.rs` +616（新）、`pi-agent-core/src/agent_loop.rs` +171/−56、
+  `pi-coding-agent/src/tool_executor.rs` +96/−1、`pi-coding-agent/tests/agent_tools.rs` +77/−1、
+  `pi-agent-core/src/agent.rs` +18/−1、`pi-agent-core/src/state.rs` +12/−1、
+  `pi-agent-core/src/tools.rs` +28/−6、`pi-agent-core/tests/{telemetry,tool_execution}.rs` 各 +1、
+  本节文档 +145。**`pi-tui` / `pi-extensions` / `pi-session` / `pi-ai` 一个文件都不在其中。**
+- 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源，数字即第四节所列。
+- 本轮**未派发任何子任务**（`running_task_count = 3`，达上限）。
+
+### 六、frontier（本轮更新）
+
+1. ~~P1 `pi-agent-core` 并行工具路径~~ **本轮（LUM-1139）收口**：`ToolExecutionMode` 贯穿
+   `AgentConfig` / `AgentOptions` / `LoopConfig` / `ToolExecutor`，批次按模式分流，`after` 钩子
+   改为幂等的一次。LUM-1133 / 1134 / 1135 三轮 frontier 里的同一项欠账清除。
+2. **Stage 39 keybindings 消费方**：LUM-1137 正在 `in_progress`（`app.rs` / `editor.rs` 硬编码和弦
+   → `get_keybindings()`），与本轮无交集。
+3. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 ratatui `Cell` 支持链接
+   单元（0.28 不带），得改 `app.rs` 的 buffer 写入路径 —— 与第 2 项同属 `app.rs` 串行区。
+4. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径。
+5. **P2 工具批次的事件流**（本轮记入）：`ToolExecutionStart` / `ToolExecutionEnd` 目前是整批结束后
+   补发（`agent.rs:346`，`ToolCall.name` 为空、duration 是补发时刻），要真的给 TUI 用需要把事件出口
+   下移到 `agent_loop`。自包含、不碰 `app.rs` 的读路径，是个合适的下一轮切片。
+6. **P2 取消语义对齐**（本轮记入）：让两条路径在 `signal.aborted` 时停止派发剩余调用（上游行为），
+   代价是要改 `cancelled_token_is_forwarded_to_executor` 这条既有测试的口径。适合与第 5 项同轮做。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（仍 `backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的，都与本轮无关。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉（既有欠账）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-agent-core` /
+`pi-coding-agent` 与本文档）。
+
+## LUM-1140 round — `pi-session` JSONL 导出（export↔migrate 往返）+ 修复 header 时间戳毫秒误读 + 派发 Stage 40
+
+本轮由 autopilot 定时触发（LUM-1140，建单标题 `pi`，开工后按平台要求改名）。与 LUM-1137（Stage 39
+keybindings 消费方，`in_progress`）并行推进；切片取自 `pi-session` 的一处自包含缺口，不碰任何串行区。
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1140`，起点 `origin/feature/pi.rs @ cd1acb3f2`（LUM-1139 的文档提交）。
+  开工后 fetch 发现远端已推进到 **`8e1765325`**（LUM-1139 的补记提交：回填真实哈希 + numstat），
+  收尾前合入（合并提交 `f92bb3b0b`，快进式内容合并，**零冲突**——那笔补记只动本文档）。
+- 槽位：开工时 `multica daemon status` 报 `running_task_count = 3`（LUM-1137 + LUM-1139 + 本轮），
+  达 3 路上限 ⇒ 开局不派发；收尾复查 **`running_task_count = 2`**（LUM-1137 `in_progress` + 本轮，
+  LUM-1139 已转 `in_review`）⇒ 空出 1 槽，**派发 LUM-1141（Stage 40）**。LUM-1138（质量门清偿）
+  维持 `backlog`：它的 `cargo fmt` 会重排 `pi-tui/src/app.rs`，与仍在写的 LUM-1137 直接冲突。
+- 切片选择：frontier 第 5 项（工具事件流）是最有价值的下一轮切片，但它是 `pi-agent-core` /
+  `pi-coding-agent` 的**事件出口重构**（要动 `run` 的观察者管道 + 并发批次两条路径），
+  与本轮剩余预算不匹配；因此**把第 5 项派发成 Stage 40（LUM-1141）**，本轮自己做一个
+  自包含、可整段收口且不碰串行区的切片——`pi-session` 的 JSONL 反向导出。
+
+### 二、本轮切片：`pi session export` 从「别名 stub」变成真正的 JSONL 导出
+
+现状：迁移只有单向。`pi-session` 的 `migrate_jsonl` 能把 Stage 4 的 JSONL 读进 SQLite，
+但**没有任何反向导出**；CLI 的 `pi session export` 只是 `show` 的别名（`cli.rs:288`），
+只打印 `entries`、**不含 header 行**，把它喂回 `migrate` 会丢掉 `created_at` / `version`。
+上游对应能力是 `packages/coding-agent/src/core/session-export.ts` 的 `exportSessionToJsonl`。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-session/src/export.rs`（新，167 行） | `render_jsonl`（纯渲染，返回 String）/ `export_jsonl`（写文件 + `ExportReport`）/ `export_session`（缺省路径）/ `default_export_path`（`session-<sanitised-id>.jsonl`，非法字符替换为 `_`；空 id → `untitled`） |
+| `crates/pi-session/src/reader.rs` | 新增 `SessionReader::session_row(id)`（按 id 取单行 header；原来只有 `session_header()` 取「第一行」） |
+| `crates/pi-session/src/schema.rs` | 修复 `SessionRow::to_header` 把**毫秒**当秒传给 `from_timestamp` 的 bug（见下） |
+| `crates/pi-session/src/lib.rs` | 导出新 API + crate 文档加「Exporting back to JSONL」一节 |
+| `crates/pi-coding-agent/src/cli.rs` | `SessionCommand::Export` 增加 `--output PATH`，文档从「alias for show」改为真实语义 |
+| `crates/pi-coding-agent/src/commands/session.rs` | `export()` 取代原来的 `session show` fallthrough：不给 `--output` 时把 JSONL 打到 stdout，给了就写文件 + 打印 `{session_id, destination, entries_written, bytes_written}` |
+| `crates/pi-session/tests/export.rs`（新，253 行 / 7 条用例） | 渲染形状、export→migrate 逐条等价、header 行折叠、时间戳回归、缺省路径、未知 session、父目录自动创建 |
+
+关键设计：
+
+- **输出格式就是 `migrate_jsonl` 的输入**：第一行 `SessionEntry::Header`，随后每条 entry 一行，
+  行尾带 `\n`。因此 export → migrate 在 `entries` 表上是恒等（第 4 节的往返用例逐条比对 seq / type /
+  payload 验证了这一点）。
+- **header 行只写一次**：`sessions` 表是 header 的事实源；TS 写法会把 header **同时**存进
+  `entries`，这种库里 `iter_entries` 能看到一条 `header` 行，导出时折进首行而不是写两行
+  （`header_entry_rows_are_folded_into_the_leading_header_line` 覆盖）。
+- **header 用 Rust 的 `header` tag，不用 TS 的 `session` spelling**：`SessionEntry` 的
+  serde tag 就是 `header`，写成 TS spelling 会产出一个本 port 读不回来的文件。这是有意的格式偏离，
+  写进了模块文档。
+- **`cwd` 在 JSONL 里丢失**：`SessionEntry::Header` 没有该字段，`sessions.cwd` 只存在于数据库侧。
+  同样写进了 doc。
+- **CLI 默认仍是 stdout**：`--output` 是新增可选参数，不给时行为与之前兼容（多了首行 header），
+  避免破坏脚本；`session show` 未改动（依旧只打 entries）。
+
+### 三、顺带修掉的真实缺陷：header 时间戳被当成「秒」
+
+`crates/pi-session/src/schema.rs` 的 `SessionRow::to_header` 里：
+
+```rust
+created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(self.created_at, 0)
+```
+
+而 `sessions.created_at` 列按 schema 注释与 `SessionWriter::write_header`
+（`created_at.timestamp_millis()`）、`now_millis()` 的口径存的是**毫秒**。于是任何走
+`SessionRow::to_header()` 的路径都会把时间戳放大 1000 倍。真实复现（第 4 节的 E2E）：
+
+```
+$ pi session migrate session.jsonl --to e2e.sqlite && pi session export e2e-1 --database e2e.sqlite
+{"type":"header","id":"e2e-1","created_at":"+58299-09-13T00:00:00Z","version":"0.1.0"}   # 修复前
+{"type":"header","id":"e2e-1","created_at":"2026-05-01T00:00:00Z","version":"0.1.0"}      # 修复后
+```
+
+修复为 `from_timestamp_millis`，并加了两条回归用例：`schema::tests::to_header_reads_created_at_as_milliseconds`
+（单元）与 `tests/export.rs::exported_header_keeps_the_original_timestamp`（端到端，断言
+`"2026-05-01T12:34:56.789Z"` 逐字还原）。这个 bug 在本轮之前**没有任何测试覆盖**——它只有在一个
+「把 DB 行写回外部格式」的路径出现时才会暴露。
+
+### 四、验证
+
+```
+$ rustc --version                       # 1.85.0（本机 /tmp/rustup-home 工具链）
+$ export CARGO_HOME=/tmp/cargo-home CARGO_INCREMENTAL=0
+$ export CARGO_TARGET_DIR=<lum-1136 工作区的空 target>（复用，未新建、未删任何在用 target）
+$ cargo test -p pi-session --offline    # exit 0：7 + 7 + 6 + 5 + 1(doc) 条全绿
+  #   其中 tests/export.rs 7 条为本轮新增；tests/round_trip.rs / ts_compat.rs 未改一行
+$ cargo test -p pi-coding-agent --offline
+  # exit 0：lib 239 条 + 15 个集成 suite + doc-test 全绿（CLI 参数改动无回归）
+$ cargo clippy -p pi-session -p pi-coding-agent --all-targets --offline
+  # 本轮文件零告警；输出里的 5 条 warning 全在 pi-tui / pi-telemetry / pi-extensions（LUM-1138 的既有债）
+$ rustfmt --edition 2021 --check <本轮 7 个文件>   # 全部 clean
+```
+
+端到端（真实二进制，非 mock）：
+
+```
+$ pi session migrate session.jsonl --to e2e.sqlite     # {"entries_migrated":3,"header_id":"e2e-1"}
+$ pi session export e2e-1 --database e2e.sqlite --output out/deep/exported.jsonl
+  # {"bytes_written":322,"destination":"out/deep/exported.jsonl","entries_written":3,...}
+  #   父目录 out/deep 被自动创建
+$ diff session.jsonl out/deep/exported.jsonl && echo IDENTICAL
+IDENTICAL
+```
+
+即 `migrate → export` 得到与输入**字节完全一致**的 JSONL（含 header 行），再 `migrate` 回去
+`entries_migrated` 仍为 3、`header_id` 不变。
+
+### 五、合并与推送
+
+起点 `cd1acb3f2`；先落代码提交 `8c0193630`（7 文件），再把 `origin/feature/pi.rs @ 8e1765325`
+合入（合并提交 `f92bb3b0b`），最后补本节文档提交。`8e1765325` 是本轮所有提交的祖先，因此并入
+`feature/pi.rs` 是**快进、无 plumbing merge**（该补记只改本文档，与本轮文件零交集）。真实哈希与
+numstat 见本节末补记。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `8c0193630`（7 文件）、合并提交 `f92bb3b0b`（第一父 `8c0193630`、第二父 `8e1765325`）、
+  本节文档提交 `04a00d1b2`。
+- 推送是**快进、无额外 merge**：`git push origin 04a00d1b2:refs/heads/feature/pi.rs` →
+  `8e1765325..04a00d1b2`，`work/lum-1140` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查见下。
+- `git diff --numstat 8e1765325 f92bb3b0b`（本轮全部改动）：pi-rust/crates/pi-coding-agent/src/cli.rs(+12/-2) pi-rust/crates/pi-coding-agent/src/commands/session.rs(+42/-2) pi-rust/crates/pi-session/src/export.rs(+167/-0) pi-rust/crates/pi-session/src/lib.rs(+9/-0) pi-rust/crates/pi-session/src/reader.rs(+13/-0) pi-rust/crates/pi-session/src/schema.rs(+27/-1) pi-rust/crates/pi-session/tests/export.rs(+253/-0) 
+- 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源（合并只带来文档改动），数字即第四节所列。
+- 本轮**派发 1 个子任务**：LUM-1141（Stage 40，`pi-agent-core` 工具批次事件流），以 `backlog`
+  创建（先建单、后推送，保证它的 checkout 起点一定含本节）。
+  **收尾复查时槽位已被同刻启动的 LUM-1142 占用**（`running_task_count` 从 2 回到 3：
+  LUM-1137 + 本轮 + LUM-1142），因此 LUM-1141 **维持 `backlog`**，等任一路收手后晋升为 `todo`。
+
+### 六、frontier（本轮更新）
+
+1. ~~`pi-session` JSONL 反向导出~~ **本轮（LUM-1140）收口**：`render_jsonl` / `export_jsonl` /
+   `export_session` + `pi session export --output`，export↔migrate 在 `entries` 上是恒等；
+   顺带修掉 `SessionRow::to_header` 的毫秒/秒误读。本轮新增这一项，同轮收口。
+2. **Stage 39 keybindings 消费方**：LUM-1137 仍 `in_progress`（`app.rs` / `editor.rs` 硬编码和弦
+   → `get_keybindings()`），与本轮无交集。
+3. **P2 工具批次的事件流** → **已派发 LUM-1141（Stage 40，`backlog`，等槽位空出后晋升）**：
+   事件出口下移到 `agent_loop`（真实流式的 `ToolExecutionStart/End` + 逐条 delta + 单次调用
+   `duration_ms`），只碰 `pi-agent-core`（+ 消费方测试），不碰 `app.rs`。
+4. **P2 取消语义对齐**（LUM-1139 记入，仍挂）：让两条工具路径在 `signal.aborted` 时停止派发剩余
+   调用（上游行为），代价是要改 `cancelled_token_is_forwarded_to_executor` 的既有口径。
+   与第 3 项同属事件/调度层，**必须排在 LUM-1141 之后**（同一个 `agent_loop` 文件，避免并发写）。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要 ratatui `Cell` 支持链接单元
+   （0.28 不带），得改 `app.rs` 的 buffer 写入路径 —— 属 `app.rs` 串行区，要等 LUM-1137。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（仍 `backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的。**必须等 LUM-1137 收手**再启动，
+   否则 `cargo fmt` 会与它对 `app.rs` / `editor.rs` 的在写改动直接冲突。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉（既有欠账）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-session` /
+`pi-coding-agent` 的 session 命令与本文档；`pi-agent-core` 留给 LUM-1141）。
+

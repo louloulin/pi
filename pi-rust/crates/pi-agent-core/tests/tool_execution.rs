@@ -404,6 +404,7 @@ async fn context_exposes_executor_definitions() {
         stream_fn: Arc::new(ScriptedStream::new(vec![text_reply("unused")])),
         model: faux_model(),
         tool_executor: Some(executor),
+        tool_execution: pi_protocol::ToolExecutionMode::Parallel,
         telemetry: None,
     };
     let state = AgentState {

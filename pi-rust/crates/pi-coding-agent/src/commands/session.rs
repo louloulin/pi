@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use pi_session::{
-    default_destination, migrate_jsonl, MigrationReport, SessionError, SessionReader,
+    default_destination, export_jsonl, migrate_jsonl, render_jsonl, ExportReport,
+    MigrationReport, SessionError, SessionReader,
 };
 
 use crate::cli::SessionCommand;
@@ -22,7 +23,11 @@ pub fn run(action: SessionCommand) -> anyhow::Result<()> {
     match action {
         SessionCommand::List { database } => list(database.as_deref()),
         SessionCommand::Show { session_id, database } => show(&database, &session_id),
-        SessionCommand::Export { session_id, database } => show(&database, &session_id),
+        SessionCommand::Export {
+            session_id,
+            database,
+            output,
+        } => export(&database, &session_id, output.as_deref()),
         SessionCommand::Migrate { jsonl_path, to } => migrate(&jsonl_path, to.as_deref()),
     }
 }
@@ -73,6 +78,41 @@ fn show(database: &Path, session_id: &str) -> anyhow::Result<()> {
             .with_context(|| format!("serialising entry seq={}", entry.seq))?;
         writeln!(out, "{json}")?;
     }
+    Ok(())
+}
+
+fn export(database: &Path, session_id: &str, output: Option<&Path>) -> anyhow::Result<()> {
+    let reader = SessionReader::open(database)
+        .with_context(|| format!("opening session database {}", database.display()))?;
+    let context = || {
+        format!(
+            "exporting session {session_id:?} from {}",
+            database.display()
+        )
+    };
+    let Some(destination) = output else {
+        // No destination given — stream the JSONL to stdout.
+        let jsonl = render_jsonl(&reader, session_id).with_context(context)?;
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        out.write_all(jsonl.as_bytes())?;
+        return Ok(());
+    };
+
+    let report: ExportReport =
+        export_jsonl(&reader, session_id, destination).with_context(context)?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    writeln!(
+        out,
+        "{}",
+        serde_json::json!({
+            "session_id": report.session_id,
+            "destination": report.destination.display().to_string(),
+            "entries_written": report.entries_written,
+            "bytes_written": report.bytes_written,
+        })
+    )?;
     Ok(())
 }
 

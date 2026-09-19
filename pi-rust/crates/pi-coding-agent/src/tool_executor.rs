@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use pi_agent_core::tools::ToolExecutor;
 use pi_agent_core::AgentError;
 use pi_extensions::JsExtensionHost;
-use pi_protocol::{Content, ToolCall, ToolDefinition, ToolResult};
+use pi_protocol::{Content, ToolCall, ToolDefinition, ToolExecutionMode, ToolResult};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::{default_tool_bundle, AbortLike, DynAgentTool, ToolError};
@@ -57,6 +57,20 @@ impl std::fmt::Debug for BuiltinToolExecutor {
 /// Build the default executor as the trait object the agent loop expects.
 pub fn default_executor() -> Arc<dyn ToolExecutor> {
     Arc::new(BuiltinToolExecutor::with_default_tools())
+}
+
+/// Execution mode for a name resolved against the built-in bundle of an
+/// [`ExtensionToolExecutor`]: a built-in keeps its declared mode, and every
+/// other name is an extension tool — or a stale call — which is serialized
+/// out of caution.
+fn extension_execution_mode(
+    builtin: &BuiltinToolExecutor,
+    tool_name: &str,
+) -> ToolExecutionMode {
+    if builtin.tools().iter().any(|tool| tool.name() == tool_name) {
+        return builtin.execution_mode(tool_name);
+    }
+    ToolExecutionMode::Sequential
 }
 
 /// [`ToolExecutor`] that layers extension-registered tools on top of the
@@ -148,6 +162,15 @@ impl ToolExecutor for ExtensionToolExecutor {
         definitions
     }
 
+    /// Built-in tools keep their own declared mode. Extension tools are
+    /// deliberately reported [`ToolExecutionMode::Sequential`]: they all run
+    /// through one `JsExtensionHost`, whose interrupt deadline is armed and
+    /// disarmed on shared host state, so two concurrent `execute_tool` calls
+    /// would clobber each other's deadline.
+    fn execution_mode(&self, tool_name: &str) -> ToolExecutionMode {
+        extension_execution_mode(&self.builtin, tool_name)
+    }
+
     async fn execute(
         &self,
         call: &ToolCall,
@@ -221,6 +244,18 @@ fn content_blocks_from_json(blocks: &[serde_json::Value]) -> Vec<Content> {
 impl ToolExecutor for BuiltinToolExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|tool| tool.definition()).collect()
+    }
+
+    /// Each built-in tool declares its own mode; an unset mode means
+    /// [`ToolExecutionMode::Parallel`], matching the upstream
+    /// `executionMode === undefined` default. Unknown names are treated as
+    /// parallel so a stale call cannot serialize a whole batch.
+    fn execution_mode(&self, tool_name: &str) -> ToolExecutionMode {
+        self.tools
+            .iter()
+            .find(|tool| tool.name() == tool_name)
+            .and_then(|tool| tool.execution_mode())
+            .unwrap_or(ToolExecutionMode::Parallel)
     }
 
     async fn execute(
@@ -299,5 +334,65 @@ fn block_text(block: &Content) -> String {
         Content::Image(image) => format!("[image {}]", image.mime_type),
         Content::ToolCall(call) => format!("[tool call {}]", call.name),
         Content::ToolResult(result) => format!("[tool result {}]", result.tool_call_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_modes_follow_the_tool_declarations() {
+        let executor = BuiltinToolExecutor::with_default_tools();
+
+        // `bash` touches the shell and `find` / `grep` / `ls` walk the tree,
+        // so the loop must not run two of them at once.
+        for name in ["bash", "find", "grep", "ls"] {
+            assert_eq!(
+                executor.execution_mode(name),
+                ToolExecutionMode::Sequential,
+                "{name} must serialize a batch"
+            );
+        }
+
+        // The file tools are independent and declare no override, which the
+        // executor reads as the upstream default (`Parallel`).
+        for name in ["read", "write", "edit"] {
+            assert_eq!(
+                executor.execution_mode(name),
+                ToolExecutionMode::Parallel,
+                "{name} must be allowed to fan out"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_builtin_name_is_parallel() {
+        let executor = BuiltinToolExecutor::with_default_tools();
+        assert_eq!(
+            executor.execution_mode("no_such_tool"),
+            ToolExecutionMode::Parallel,
+            "a stale or renamed call must not serialize the batch"
+        );
+    }
+
+    #[test]
+    fn extension_tools_are_serialized() {
+        let builtin = BuiltinToolExecutor::with_default_tools();
+
+        // Not a built-in name → treated as an extension tool → Sequential.
+        assert_eq!(
+            extension_execution_mode(&builtin, "ext_exec"),
+            ToolExecutionMode::Sequential
+        );
+        // Built-in names still report their own declared mode.
+        assert_eq!(
+            extension_execution_mode(&builtin, "bash"),
+            ToolExecutionMode::Sequential
+        );
+        assert_eq!(
+            extension_execution_mode(&builtin, "read"),
+            ToolExecutionMode::Parallel
+        );
     }
 }

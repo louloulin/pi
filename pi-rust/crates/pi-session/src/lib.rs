@@ -37,17 +37,26 @@
 //! Stage 4 of the Rust port wrote sessions as JSONL. The
 //! [`migrate::migrate_jsonl`] function replays those files into a fresh
 //! SQLite database; the original JSONL is preserved on disk.
+//!
+//! # Exporting back to JSONL
+//!
+//! [`export::export_jsonl`] is the inverse: it writes the session header
+//! plus every stored entry back to JSONL. `export` followed by `migrate`
+//! is the identity on the `entries` table, so sessions can move between
+//! the SQLite backend and portable JSONL files losslessly.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod export;
 pub mod migrate;
 pub mod reader;
 pub mod schema;
 pub mod writer;
 
 pub use error::{Result, SessionError};
+pub use export::{default_export_path, export_jsonl, export_session, render_jsonl, ExportReport};
 pub use migrate::{default_destination, migrate_jsonl, MigrationReport};
 pub use reader::{DecodedEntry, SessionReader};
 pub use schema::{EntryRow, SessionRow, SCHEMA_VERSION};

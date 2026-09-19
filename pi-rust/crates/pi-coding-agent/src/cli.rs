@@ -285,14 +285,24 @@ pub enum SessionCommand {
         #[arg(long, value_name = "PATH")]
         database: std::path::PathBuf,
     },
-    /// Export a session to stdout as JSON Lines (alias for `show`,
-    /// kept for parity with the TS CLI).
+    /// Export a session as JSON Lines.
+    ///
+    /// The output starts with the session header line, followed by one
+    /// line per stored entry, and ends with a trailing newline — i.e. it
+    /// is a valid input for `pi session migrate` again.
+    ///
+    /// Without `--output` the JSONL is printed to stdout. With
+    /// `--output PATH` it is written to that file (its parent directory
+    /// is created when missing) and a JSON summary is printed instead.
     Export {
         /// Session id to export.
         session_id: String,
         /// Path to the SQLite database containing the session.
         #[arg(long, value_name = "PATH")]
         database: std::path::PathBuf,
+        /// Write the JSONL to this file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
     },
     /// Migrate a Stage 4 JSONL session file into the SQLite backend.
     /// The original JSONL is preserved on disk; the migration is

@@ -192,6 +192,7 @@ fn loop_with(
             stream_fn,
             model: faux_model(),
             tool_executor: executor,
+            tool_execution: pi_protocol::ToolExecutionMode::Parallel,
             telemetry,
         },
         AgentState {

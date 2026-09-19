@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Context, Message, Model, ToolDefinition};
+use pi_protocol::{Context, Message, Model, ToolDefinition, ToolExecutionMode};
 use pi_telemetry::TelemetryContext;
 
 use crate::tools::ToolExecutor;
@@ -20,6 +20,17 @@ pub struct AgentConfig {
     /// call to it. `None` keeps the Stage 2 stub behaviour so callers that
     /// predate tool execution still work.
     pub tool_executor: Option<Arc<dyn ToolExecutor>>,
+    /// How the loop dispatches a batch of tool calls that contains no
+    /// `Sequential` tool.
+    ///
+    /// Mirrors `AgentLoopConfig.toolExecution` in
+    /// `packages/agent/src/types.ts`: [`ToolExecutionMode::Parallel`] (the
+    /// default) runs the batch's calls concurrently, while
+    /// [`ToolExecutionMode::Sequential`] forces one call at a time no matter
+    /// what the tools declare. A batch that contains a tool whose
+    /// [`ToolExecutor::execution_mode`] is `Sequential` is serialized
+    /// regardless of this setting.
+    pub tool_execution: ToolExecutionMode,
     /// Optional telemetry parent for the spans the loop emits.
     ///
     /// `None` (the default) records nothing and adds no work to the hot
