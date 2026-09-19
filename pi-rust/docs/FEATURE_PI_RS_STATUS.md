@@ -10332,3 +10332,7 @@ issue 要求「分析后续哪些 feature 可规划可实现（上限 3 路并�
 环境记录：本轮复用 `/tmp/pi-rust-target-lum1143`（LUM-1145 占用
 `/tmp/pi-rust-target-lum1145`、LUM-1144 亦有独立 target），全程未触碰他路 target 目录；
 根分区在合并复测期间维持 8G 空闲。
+
+补记（推送哈希）：本轮代码提交 `bbb73d083` + 合并提交 `521f0595c` + 文档提交 `32dfd2322`，
+`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `910cd6f90` **快进至 `32dfd2322`**
+（`git ls-remote` 复查一致），留档分支 `work/lum-1146` 一并推送（同哈希）。
