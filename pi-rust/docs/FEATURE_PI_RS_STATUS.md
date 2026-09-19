@@ -6799,3 +6799,157 @@ frontier 重排（`pi.exec` 取消、`pi-tui` markdown 解析器、App 聊天日
 一路在写 `host.rs`」的并发建议一致，整体开工 1 路 + 派发 2 路 = 3 路。派发后
 `multica daemon status` 报 `running_task_count = 4`（本 run + LUM-1120 + LUM-1121 + 1 路族外任务；
 `multica issue runs 01a0b4d6… --siblings --active` 只返回 LUM-1120/1121 两行），因此本轮不再追加派发。
+
+## LUM-1119 round — 核验 `feature/pi.rs` + 上游 `fuzzy.ts` 移植并接入 `Selector` + 槽位已满不派发
+
+（autopilot 协调轮；开工后把 LUM-1119 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 4`：本 run + LUM-1120（`in_progress`）+
+  LUM-1121（当时仍在跑）+ 1 路族外任务。上限 3 路，**槽位已满（且超限）→ 本轮不派发任何新任务**。
+- 收尾复查 `running_task_count = 3`：本 run + LUM-1120 + 1 路族外；LUM-1121 已收工进 `in_review`
+  并合入 `feature/pi.rs`。按「上限 3 路」的既有口径仍是满槽，故不追加派发，本轮只做核验 + 一个
+  与在途两路零文件重叠的切片。
+- 进入本轮时 `origin/feature/pi.rs` = `dc7d4ae78`；切片写完后（推送前）复 fetch 发现 LUM-1121 已把
+  它推进到 `9c50439dc`（`Merge branch 'work/lum-1121'`）。本轮因此把两条一起合并，**没有把
+  LUM-1121 的工作覆盖掉，也没有遗留合并债**（见第六节）。
+- 磁盘：开工 `/` 空闲 9.2G；完成 `pi-tui` + `pi-coding-agent` 两轮构建后 6.6G（86%）。本轮不新增
+  worktree，构建产物复用既有 `target`。
+
+### 二、核验 `feature/pi.rs`
+
+在 `work/lum-1119`（起点 `origin/feature/pi.rs` @ `dc7d4ae78`）上复跑：
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  lib 158 + app_scroll 9 + app_theme 5 + cursor_chords 5 + e2e 9 + editor_ctrl_d 7
+  + editor_jump 14 + markdown 33 + selector_search 7 + snapshot 9 + styles 9 + theme 9
+  + undo 7 + word_navigation 7 + doctest 3 = **291 passed / 0 failed**
+$ ... cargo test -p pi-coding-agent --offline
+  342 passed + doctest 3 / 0 failed（首轮并发跑时 `print_mode::sigint_or_clean_exit` 偶发失败 1 次）
+```
+
+**一例偶发失败（已排除与本轮改动有关）**：`pi-coding-agent --test print_mode::sigint_or_clean_exit`
+在首次整包并发跑时报 `unexpected exit code: None`。该测试 `spawn` 出真实 `pi` 二进制、`sleep(50ms)`
+后 `child.kill()`（SIGKILL）再断言退出码 ∈ {0,130,143}——被 SIGKILL 的进程 `status.code()` 就是
+`None`，所以它本身就依赖「50ms 内子进程已经自己收工」的时序。隔离复跑 2 次均 17/17 通过，本轮
+切片落地后的整包复跑（`--no-fail-fast`）也 17/17 通过；判定为本轮之前就存在的并行/时序偶发，与本轮
+只动 `pi-tui` 过滤路径无关（LUM-1118 轮也记录过 `print_mode` 的同类偶发）。
+
+### 三、本轮切片：`Selector` 换成真正的模糊匹配（上游 `fuzzy.ts`）
+
+`crates/pi-tui/src/selector.rs` 的模块文档里原本挂着一条**明确的偏离**：`SelectList` 用
+`item.value` 大小写不敏感前缀匹配，而 Rust 侧改成了对 `value` / `label` / `description` 做
+大小写不敏感的 **`contains` 子串搜索**。这条偏离本身是有价值的（`value` 里装的是 `model:gpt-5` /
+`resume:<id>` 这类不透明载荷），但上游真正的搜索**不是子串匹配**：
+
+```
+packages/tui/src/fuzzy.ts                       137 行：fuzzyMatch / fuzzyFilter（唯一实现）
+packages/tui/src/autocomplete.ts:5,330          命令补全用 fuzzyFilter
+packages/coding-agent/.../model-selector.ts:281 / settings-list.ts:311 / thinking-selector.ts:121
+                                                 / settings-submenu.ts:112 / oauth-selector.ts
+                                                 / scoped-models-selector.ts / session-selector-search.ts:148
+                                                 —— 可搜索列表全部走 fuzzyFilter
+packages/tui/src/components/select-list.ts:61   ← 只有非搜索的 SelectList 自己用 startsWith
+```
+
+也就是说：**可搜索选择器一律模糊匹配并按分数排序**，前缀/子串匹配只属于非搜索的 `SelectList`。
+本轮把 `fuzzy.ts` 逐行移植进 `pi-tui`，并替换掉那条子串偏离。
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/fuzzy.rs`（新增 419 行） | `FuzzyMatch { matches, score }`、`fuzzy_match`、`fuzzy_match_all`（空白/斜杠分词，所有 token 必须命中）、`fuzzy_rank`（返回按分数升序的索引，**稳定排序**，同分保持原顺序）、`fuzzy_filter`；逐条移植上游的分数规则：连续命中累进 `-5/-10/-15`、跳字每字符 `+2`、词边界 `-10`、位置 `+0.1*i`、整串精确 `-100`；字母数字互换回退（`codex52` → `52codex`）命中后 `+5` |
+| `crates/pi-tui/src/selector.rs` | `SelectorItem::search_text()`（`value` + `label` + `description`）、`match_score() -> Option<f64>`、`matches()` 改为委托它；`refilter()` 改走 `fuzzy_rank`，过滤后**按分数排序**（同分保持列表顺序）；模块文档删掉子串偏离那条，改写为「与上游 `fuzzyFilter` 一致」 |
+| `crates/pi-tui/src/lib.rs` | 导出 `pub mod fuzzy` 与 `fuzzy_filter` / `fuzzy_match` / `fuzzy_match_all` / `fuzzy_rank` / `FuzzyMatch` |
+| `crates/pi-tui/tests/selector_fuzzy.rs`（新增 8 条） | `/model`、`/resume` 这类真实选择器的端到端行为 |
+
+移植时必须照抄的一处**反直觉细节**：上游用 `lastMatchIndex = -1` 当哨兵，于是
+`lastMatchIndex === i - 1` 在**首个字符命中于第 0 列时也成立**——首命中会拿到一次连续加分。
+Rust 侧若写成 `Option<usize>` 会丢掉这个加分，`consecutive > scattered` 的上游断言当场不过
+（本轮的 18 条单元测试里有 2 条先红后绿，正是这个原因）。现在的实现用 `i64` 哨兵，注释里写清原因。
+
+`fuzzy.rs` 单元测试 17 条（逐条移植 `packages/tui/test/fuzzy.test.ts` 的 14 条 + 分词/稳定排序 3 条），
+`selector.rs` 新增 2 条（分数排序、token 跨字段命中），`selector_fuzzy.rs` 8 条钉住语义：
+
+* 非相邻字符仍命中（`gpt` 命中 `model:gpt-5`，`gmp` 命中 `model:gemini-2.5-pro`）且能收窄到唯一项；
+* 过滤后**顺序会变**：`pro` 让 `model:gemini-2.5-pro` 排到 `model:deepseek-v4-pro` 前面
+  （前者在 `-pro` 处整段命中词边界，后者的首个 `p` 落在 `deepseek` 里要跳字）；
+* token 分别命中 `value` / `label` / `description`（`deepseek v4`、`anthropic/claude`），任一 token
+  不命中则整条被过滤（`openai zzz` → 0 条）；
+* 同分稳定：`model:` 对 4 个 model 条目得分完全相同（前 6 列一致），顺序与输入一致；
+* 清空 filter 恢复原始顺序；`fuzzy_filter` 与 `Selector` 的排序结果一致；渲染行跟随排序结果。
+
+### 四、验证
+
+**与上游 JS 逐值对齐（本轮新增的核验手法）**：直接用 node 跑上游实现，与本移植版比 27 组
+`(query, text)` 的分数，**10 位小数完全一致**：
+
+```
+$ node --experimental-strip-types packages/tui/test/fuzzy.test.ts     # 上游 14/14 通过
+$ node --experimental-strip-types /tmp/parity.mjs > js.txt            # 27 组 (query,text,matches,score)
+$ cargo test -p pi-tui --test parity_tmp                              # 同一组用例打印本移植版结果
+$ diff js.txt rs.txt → 空                                             # PARITY OK（临时文件，未提交）
+```
+
+```
+$ ... cargo test -p pi-tui --offline
+  lib 177 + app_markdown 4 + app_scroll 9 + app_theme 5 + cursor_chords 5 + e2e 9
+  + editor_ctrl_d 7 + editor_jump 14 + markdown 33 + **selector_fuzzy 8** + selector_search 7
+  + snapshot 9 + styles 9 + theme 9 + undo 7 + word_navigation 7 + doctest 4 = **323 passed / 0 failed**
+$ ... cargo test -p pi-coding-agent --offline --no-fail-fast    # 342 + doctest 3 / 0 failed
+$ ... cargo clippy -p pi-tui --all-targets --offline -- -D warnings   # Finished，0 warnings
+$ cargo fmt -p pi-tui -- --check                                     # 干净
+```
+
+上面这轮数字是**在合并后的树上**跑的（含 LUM-1121 的 markdown 上线），不是只在工作分支上跑：
+`origin/feature/pi.rs` 在本轮进行中被 LUM-1121 推进过，所以先在 `work/lum-1119` 里
+`git merge --no-commit --no-ff origin/feature/pi.rs`（零冲突）后在合并态下跑完全部测试，才落合并提交。
+`cargo fmt -p pi-coding-agent -- --check` 仍有 211 处历史漂移（LUM-1118 轮记的同一批，非本轮引入）。
+
+`lib 158 → 177` = 本轮新增 17 条 `fuzzy` 单元测试 + 2 条 `selector` 单元测试；LUM-1121 没有动 lib 测试。
+
+行为影响面：`Selector` 的过滤/排序只作用于**可搜索**选择器（`/model`、`/resume`）；扩展
+`ctx.ui.select` 的对话框是只读非搜索的，filter 恒为空串 → 顺序与命中集合都不变。同时对
+`pi-coding-agent` 是纯增强：`/model` 现在支持 `deepseek pro`、`anthropic/claude` 这类多 token 与
+跳字查询，且最匹配的模型排在第一行。
+
+### 五、合并与推送
+
+- 工作分支 `work/lum-1119`，起点 `origin/feature/pi.rs` @ `dc7d4ae78`。
+- 切片提交 `c72b950a8`（4 files, +642 / −33）。
+- 合并态提交 `98a30ad3b`（`Merge branch 'feature/pi.rs' into work/lum-1119 (LUM-1121 markdown)`，
+  父 `c72b950a8` + `9c50439dc`）——测试就是在这个树上跑的。
+- 本轮文档提交（本节）在其之后；最终用 `git merge-tree --write-tree 9c50439dc work/lum-1119`
+  + `git commit-tree` 生成以 `feature/pi.rs` 为第一父的合并提交推上去，`work/lum-1119` 分支一并推送。
+
+### 六、frontier（本轮更新）+ 槽位决策
+
+**本轮消掉一条 frontier 之外的「已记录偏离」**：`Selector` 的子串过滤（见第三节）。`fuzzy.rs`
+落地后，上游最大的 `fuzzyFilter` 消费方（`autocomplete.ts`）也就有了前置件。
+
+frontier 重排（`pi.exec` 取消、markdown 解析器与上线、App 聊天日志滚动、模糊匹配均已落地）：
+
+1. **P1 `@earendil-works/*` SDK 虚拟模块**：LUM-1120 正在做（`in_progress`）——本仓库自带 4 个扩展
+   与上游 69 个示例扩展的绝大多数 import 都指向 SDK，而不是 node 内建。
+2. **P1 `pi-tui` 补 `autocomplete` 模块**（上游 `packages/tui/src/autocomplete.ts`，826 行，缺失）：
+   它是 `fuzzyFilter` 的最大消费方——`/` 命令补全（`:330`）与 `@` 模糊文件补全（`:301`、`:736`
+   经 `fd`，带 scoped query 与 `.gitignore` 语义）。本轮把 `fuzzyFilter` 准备好了，这是它最自然的
+   下一步；Rust 侧 `grep -ril autocomplete pi-rust/crates` 目前**零命中**。
+3. **P2 `settings-list` + `/settings` 子菜单**（上游 `components/settings-list.ts` 328 行 +
+   `settings-manager` 1417 行）：Rust `config.rs` 目前只读 `compaction` 一段，`/settings` 无 UI。
+   上游这几个列表也全部用 `fuzzyFilter`，可直接复用本轮成果。
+4. **P2 `node:module` / `node:readline` / `node:zlib`**：仍要动 `pi-extensions/src/host.rs` 的 op 表
+   （zlib 还要新依赖），与第 1 项**同一文件串行**排队。
+5. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+6. **P3 `alt-screen-search.ts`**（上游 327 行，alt-screen 回看内搜索）+ LUM-1118 提到的**鼠标滚轮**
+   （`interactive.rs:940` `CtEvent::Mouse(_) => Ok(None)`，从未 `EnableMouseCapture`）：都与滚动相邻，
+   是独立通道。
+7. **P3 `latex.ts`**（1394 行）与 `markdown.rs` 尚未覆盖的子集（表格 / LaTeX / OSC-8 hyperlink /
+   语法高亮）。
+8. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 就不写猜测值）。
+
+槽位决策：开工 `running_task_count = 4`、收尾 `= 3`（上限 3），**两处都满 → 本轮不派发**，把预算
+留给正在跑的 LUM-1120 与本轮的核验/切片。并发建议维持：上限 3 路；
+`pi-extensions/src/host.rs` 与 `docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。

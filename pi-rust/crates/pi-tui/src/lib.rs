@@ -13,6 +13,7 @@
 pub mod app;
 pub mod dialog;
 pub mod editor;
+pub mod fuzzy;
 pub mod input;
 pub mod kill_ring;
 pub mod markdown;
@@ -29,6 +30,7 @@ pub mod word_navigation;
 pub use app::{App, AppConfig, RenderSnapshot};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
+pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
 pub use input::{InputEvent, Key, KeyModifiers};
 pub use kill_ring::{KillDirection, KillRing};
 pub use markdown::{render_markdown, render_markdown_with_theme};
