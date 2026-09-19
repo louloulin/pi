@@ -6,6 +6,7 @@ extensions in the wild import Node builtins directly:
 ```
 node:path (43)  node:fs (28)  node:fs/promises (18)  node:os (16)
 node:crypto (15)  node:child_process (14)  node:url (8)  node:buffer (1)
+node:util (1)
 ```
 
 The `pi` Rust port embeds QuickJS, which has no operating-system surface
@@ -106,6 +107,35 @@ comes from `/dev/urandom`; there is no fallback PRNG on purpose.
 `env` (snapshot object), `platform`, `arch`, `pid`, `cwd()`, `nextTick`,
 `version`, `versions`, `exitCode`, `stdout.write`, `stderr.write`.
 
+### `node:util`
+
+Pure JS — no host op is involved, so the whole module is shim-side. The
+upstream examples import `promisify` (`mac-system-theme.ts`), and the
+evals reporters use `stripVTControlCharacters` / `styleText`.
+
+| Node API | Notes |
+|---|---|
+| `format` / `formatWithOptions` | `%s %d %i %f %j %o %O %c %%`; extra arguments are appended (strings verbatim, everything else inspected). Output matches Node v22 for the cases covered by `node_util_surface_matches_node`. |
+| `inspect(value[, options])` | `depth`, `colors`, `showHidden`, `maxArrayLength`, `maxStringLength`, `sorted`, `customInspect`; `Map` / `Set` / `Date` / `RegExp` / `Error` (stack) / typed arrays / `Buffer` / class instances / `Object.create(null)` / circular references (`<ref *N>` + `[Circular *N]`). `inspect.custom` and `inspect.defaultOptions` are wired. |
+| `promisify(fn)` | Honours `fn[util.promisify.custom]`. |
+| `callbackify(fn)` | Honours `fn[util.callbackify.custom]`; callbacks fire on the host microtask queue. |
+| `inherits(ctor, superCtor)` | Sets `super_`, the prototype chain and `Object.setPrototypeOf(ctor, superCtor)`. |
+| `deprecate(fn, msg[, code])` | Reports the first use through `host_log("warn", …)` (`[CODE] DeprecationWarning: …`). |
+| `stripVTControlCharacters(str)` | Node's own VT/OSC pattern. |
+| `styleText(format, text[, options])` | Node's `[open, close]` palette, one escape per style, closes reversed. |
+| `types` | The full Node 22 predicate set. `isProxy` / `isModuleNamespaceObject` / `isCryptoKey` / `isKeyObject` are `false`-only because no such objects exist in this runtime. |
+| `isDeepStrictEqual` | Prototype-aware for `Object.create(null)` and class instances, unordered for `Map` / `Set`, `NaN` equal, `0 !== -0`, own enumerable string **and** symbol keys. |
+| `debuglog` / `debug` | Enabled by `NODE_DEBUG` (section name or `*`); output goes to `host_log("debug", …)`. |
+| `isArray` / `isBoolean` / `isBuffer` / `isDate` / `isError` / `isFunction` / `isNull` / `isNullOrUndefined` / `isNumber` / `isObject` / `isPrimitive` / `isRegExp` / `isString` / `isSymbol` / `isUndefined`, `toUSVString`, `_extend`, `log` | The legacy helpers. |
+| `TextEncoder` / `TextDecoder` | `encode` / `encodeInto`; decoding labels `utf-8`, `utf-16le` and `windows-1252` (canonical for `latin1` / `ascii`), BOM stripping. Also installed as globals when the engine lacks them (QuickJS does). |
+
+Not covered: `parseArgs`, `parseEnv`, `diff`, `aborted`,
+`transferableAbortSignal` / `transferableAbortController`,
+`getSystemErrorName` / `getSystemErrorMessage` / `getSystemErrorMap`,
+`getCallSite` / `getCallSites`, `MIMEType` / `MIMEParams` and
+`setTraceSigInt` — importing the module still works, but those names are
+absent (the failure is a plain "undefined is not a function").
+
 ## Coverage against the repo's own extensions
 
 | Extension | Builtins it imports | Status |
@@ -115,7 +145,7 @@ comes from `/dev/urandom`; there is no fallback PRNG on purpose.
 | `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; additionally needs the `@earendil-works/pi-tui` module. |
 | `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; need the `@earendil-works/*` modules only. |
 | `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | Partially covered — blocked on the frontier rows below. |
-| `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts` | `node:child_process` (+ `node:util`) | Blocked on `node:child_process`. |
+| `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts` | `node:child_process` (+ `node:util`) | `node:util` is bridged; still blocked on `node:child_process`. |
 
 The `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
 specifiers are a separate gap: they are pi's own APIs, not Node ones, and
@@ -134,6 +164,9 @@ virtualising them is its own work item.
 | `process.version` is `"v0.0.0-pi-rust"`, not a Node version. | There is no Node here; version-gated feature checks take the conservative branch. |
 | `process.stdout.write` / `stderr.write` go to `host_log`, not the real streams. | The `pi` process owns stdout (`--rpc` speaks JSON-RPC on it); an extension must never write raw bytes there. `isTTY` is `false`. |
 | Reading a file without an encoding returns a `Buffer` (correct), but `Buffer` lacks the numeric `readUInt32BE` / `writeUInt32LE` / `fill`-with-pattern families. | Out of the subset the ecosystem uses so far. |
+| `util.inspect` renders everything on one line — `breakLength` / `compact` are accepted but ignored — and boxed primitives / Promises print as `Boolean {}` / `Promise { <pending> }` instead of Node's resolved-state form. | Extensions log the output; line wrapping buys nothing here. |
+| `util.styleText` always emits ANSI codes; it does not consult `process.stdout.hasColors` (there is no TTY in the embedded engine). | Pass `{validateStream: false}` for Node-identical bytes; the codes are what the evals reporters consume. |
+| `util.TextDecoder` ignores `{stream: true}` and `fatal: true`; decoding never throws on malformed input. | Streaming would need a per-instance byte buffer; non-fatal decoding matches Node's default. |
 
 ## Not bridged (frontier)
 
@@ -143,7 +176,6 @@ Importing these fails with the readable error
 | Builtin | Why it is missing | What it would take |
 |---|---|---|
 | `node:child_process` | Needs streaming stdio + a process lifetime model that respects the host deadline. | `tokio::process`, an op for spawn/exec with buffered stdout/stderr, and cancellation. Highest-value next step: `examples/extensions/interactive-shell.ts`, `mac-system-theme.ts`, `sandbox/index.ts` and community extensions shell out. |
-| `node:util` | Pure JS; nothing here needs a host op. | Cheapest unblock on this list: `promisify` / `callbackify` (the shim already has both internally for `node:fs`), then `format` / `inspect` / `types`. `mac-system-theme.ts` imports `promisify`, but is blocked on `node:child_process` as well. |
 | `node:module` | `createRequire` would let an extension `require` arbitrary paths off disk, which the virtual-module sandbox exists to prevent. | Would need a deliberate decision to widen the sandbox, e.g. require-from-`node_modules`-only. Used by `doom-overlay/doom-engine.ts`. |
 | `node:readline` | Interactive prompting; needs streams and stdin ownership. | `readline.createInterface` over a stream bridge; the host owns stdin. Used by `git-merge-and-resolve.ts`. |
 | `node:zlib` | No compression backend in the workspace. | Add `flate2`/`miniz_oxide` and expose `gunzipSync`/`gzipSync`/`inflateRawSync`/`deflateSync`. Used by `doom-overlay/wad-finder.ts` (`gunzipSync`). |
@@ -152,7 +184,7 @@ Importing these fails with the readable error
 | `fs.watch`, `fs.createReadStream/WriteStream` | Needs a filesystem watcher and stream plumbing. | `notify` crate + stream bridge. |
 | `os.cpus()`, `os.totalmem()`, `os.networkInterfaces()` | Machine topology has no consumer yet; inventing numbers would be worse than failing. | Straightforward `sysinfo`-style additions when needed. |
 | `process.argv`, `process.execPath`, `process.stdin`, `process.kill` | The host owns the process; extensions must not steer it. | Probably never. |
-| `node:test`, `node:assert` global, `TextEncoder`, `atob`/`btoa`, `fetch`, `URL` | Engine-level globals QuickJS 0.8 does not ship. | Small JS polyfills; add on demand. `fetch` is the one that matters most (the repo's own `.pi/extensions/import-repro.ts` fetches gists/issue comments), and it needs a real HTTP bridge, not a polyfill. |
+| `node:test`, `node:assert` global, `atob`/`btoa`, `fetch`, `URL` | Engine-level globals QuickJS does not ship (`TextEncoder` / `TextDecoder` are now polyfilled from `node:util` and installed globally). | Small JS polyfills; add on demand. `fetch` is the one that matters most (the repo's own `.pi/extensions/import-repro.ts` fetches gists/issue comments), and it needs a real HTTP bridge, not a polyfill. |
 
 The upstream examples are the compatibility yardstick: the test
 `upstream_node_imports_are_all_bridged_or_documented`

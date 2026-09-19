@@ -457,6 +457,206 @@ fn node_globals_are_installed_and_unsupported_builtins_are_reported() {
     });
 }
 
+/// The pure-JS `node:util` surface — LUM-1105. No host op backs it, so a
+/// single extension exercises every export and the assertions read the
+/// returned details object. The expected strings were captured from Node
+/// v22.23.2 (`util.format` / `util.inspect` / `util.styleText`), so a shim
+/// regression that drifts from upstream output fails here.
+#[test]
+fn node_util_surface_matches_node() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("util");
+        let host = host_with_cwd(&scratch.as_str()).await;
+
+        let source = r#"
+            import util from "node:util";
+            import {
+                format, formatWithOptions, inspect, isDeepStrictEqual,
+                promisify, callbackify, inherits, deprecate,
+                stripVTControlCharacters, styleText, types,
+                TextEncoder, TextDecoder,
+            } from "node:util";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "util_probe",
+                    label: "util probe",
+                    description: "exercises the node:util virtual module",
+                    parameters: { type: "object" },
+                    execute: async () => {
+                        const double = (value, callback) => {
+                            Promise.resolve().then(() => callback(null, value * 2));
+                        };
+                        const doubled = await promisify(double)(21);
+
+                        const fail = (callback) => {
+                            Promise.resolve().then(() => callback(new Error("boom")));
+                        };
+                        let rejected = false;
+                        try {
+                            await promisify(fail)();
+                        } catch (err) {
+                            rejected = err.message === "boom";
+                        }
+
+                        const custom = (callback) => callback(null, "plain");
+                        custom[util.promisify.custom] = () => Promise.resolve("custom");
+                        const customValue = await promisify(custom)();
+
+                        const asyncFn = async (value) => value + 1;
+                        const viaCallback = await new Promise((resolve, reject) => {
+                            callbackify(asyncFn)(41, (err, value) =>
+                                err ? reject(err) : resolve(value),
+                            );
+                        });
+
+                        const circular = {};
+                        circular.self = circular;
+
+                        function Base() {}
+                        Base.prototype.kind = "base";
+                        function Child() {}
+                        inherits(Child, Base);
+                        const child = new Child();
+
+                        let calls = 0;
+                        const deprecated = deprecate(
+                            (value) => {
+                                calls += 1;
+                                return value + 1;
+                            },
+                            "old",
+                            "DEP0001",
+                        );
+
+                        const encoded = new TextEncoder().encode("héllo");
+
+                        return {
+                            content: [{ type: "text", text: "util probe" }],
+                            details: {
+                                doubled,
+                                rejected,
+                                customValue,
+                                viaCallback,
+                                formatted: format("%s|%d|%i|%f|%j|%%", "hi", "42", "3.9", "2.5", { a: 1 }),
+                                extra: format("plain", "arg", 7),
+                                withOptions: formatWithOptions({ depth: 0 }, "%O", { a: { b: 1 } }),
+                                inspected: inspect({ a: [1, 2], b: "x" }),
+                                inspectedDepth: inspect({ a: { b: { c: { d: 1 } } } }),
+                                inspectedCircular: inspect(circular),
+                                inspectedMaxArray: inspect([1, 2, 3, 4, 5], { maxArrayLength: 2 }),
+                                inspectedColors: inspect({ a: 1 }, { colors: true }),
+                                inspectedCustom: inspect({ [util.inspect.custom]: () => "<custom>" }),
+                                typeChecks: [
+                                    types.isDate(new Date(0)),
+                                    types.isRegExp(/x/),
+                                    types.isNativeError(new TypeError("x")),
+                                    !types.isNativeError({}),
+                                    types.isPromise(Promise.resolve()),
+                                    types.isUint8Array(new Uint8Array(1)),
+                                    types.isTypedArray(new Float64Array(1)),
+                                    !types.isTypedArray(new DataView(new ArrayBuffer(4))),
+                                    types.isMap(new Map()),
+                                    types.isSet(new Set()),
+                                    types.isBoxedPrimitive(new Number(1)),
+                                    !types.isBoxedPrimitive(1),
+                                    types.isAnyArrayBuffer(new ArrayBuffer(1)),
+                                    types.isInt32Array(new Int32Array(1)),
+                                    types.isAsyncFunction(async () => {}),
+                                ],
+                                deepEqual: [
+                                    isDeepStrictEqual({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] }),
+                                    isDeepStrictEqual(
+                                        new Map([[1, 2], [3, 4]]),
+                                        new Map([[3, 4], [1, 2]]),
+                                    ),
+                                    isDeepStrictEqual(new Set([1, 1, 2]), new Set([2, 2, 1])),
+                                    isDeepStrictEqual(new Date(0), new Date(0)),
+                                    isDeepStrictEqual(NaN, NaN),
+                                    isDeepStrictEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2])),
+                                    !isDeepStrictEqual({ a: 1 }, { a: 2 }),
+                                    !isDeepStrictEqual({ a: 1 }, { a: 1, b: 2 }),
+                                    !isDeepStrictEqual(0, -0),
+                                    !isDeepStrictEqual(Object.create(null), {}),
+                                    !isDeepStrictEqual([1], Object.assign([1], { extra: 2 })),
+                                ],
+                                stripped: stripVTControlCharacters("\u001b[31mred\u001b[39m plain"),
+                                styled: styleText(["bold", "red"], "x", { validateStream: false }),
+                                styledBg: styleText("bgBlue", "x", { validateStream: false }),
+                                inherited:
+                                    child.kind === "base" &&
+                                    child instanceof Base &&
+                                    Child.super_ === Base,
+                                deprecatedValue: deprecated(1) + deprecated(1),
+                                deprecationCalls: calls,
+                                decoded: new TextDecoder().decode(encoded),
+                                encodedBytes: Array.from(encoded).join(","),
+                                latin1: new TextDecoder("latin1").decode(new Uint8Array([0x68, 0xe9])),
+                                utf16le: new TextDecoder("utf-16le").decode(
+                                    new Uint8Array([0x68, 0x00, 0xe9, 0x00]),
+                                ),
+                                encodeInto: new TextEncoder().encodeInto("héllo", new Uint8Array(4)),
+                                globals:
+                                    typeof globalThis.TextEncoder === "function" &&
+                                    typeof globalThis.TextDecoder === "function",
+                                defaultExport: util.default === util && typeof util.inspect === "function",
+                            },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("util_probe", "/tmp/pi_node_builtins/util_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load util probe extension");
+
+        let outcome = host
+            .execute_tool("util_probe", "{}")
+            .await
+            .expect("execute util probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(details["doubled"], 42);
+        assert_eq!(details["rejected"], true);
+        assert_eq!(details["customValue"], "custom");
+        assert_eq!(details["viaCallback"], 42);
+        assert_eq!(details["formatted"], "hi|42|3|2.5|{\"a\":1}|%");
+        assert_eq!(details["extra"], "plain arg 7");
+        assert_eq!(details["withOptions"], "{ a: [Object] }");
+        assert_eq!(details["inspected"], "{ a: [ 1, 2 ], b: 'x' }");
+        assert_eq!(details["inspectedDepth"], "{ a: { b: { c: [Object] } } }");
+        assert_eq!(details["inspectedCircular"], "<ref *1> { self: [Circular *1] }");
+        assert_eq!(details["inspectedMaxArray"], "[ 1, 2, ... 3 more items ]");
+        assert_eq!(details["inspectedColors"], "{ a: \u{1b}[33m1\u{1b}[39m }");
+        assert_eq!(details["inspectedCustom"], "<custom>");
+        for check in details["typeChecks"].as_array().expect("typeChecks") {
+            assert_eq!(*check, true, "typeChecks: {details}");
+        }
+        for check in details["deepEqual"].as_array().expect("deepEqual") {
+            assert_eq!(*check, true, "deepEqual: {details}");
+        }
+        assert_eq!(details["stripped"], "red plain");
+        assert_eq!(details["styled"], "\u{1b}[1m\u{1b}[31mx\u{1b}[39m\u{1b}[22m");
+        assert_eq!(details["styledBg"], "\u{1b}[44mx\u{1b}[49m");
+        assert_eq!(details["inherited"], true);
+        assert_eq!(details["deprecatedValue"], 4);
+        assert_eq!(details["deprecationCalls"], 2);
+        assert_eq!(details["decoded"], "héllo");
+        assert_eq!(details["encodedBytes"], "104,195,169,108,108,111");
+        assert_eq!(details["latin1"], "hé");
+        assert_eq!(details["utf16le"], "hé");
+        assert_eq!(details["encodeInto"], json!({"read": 3, "written": 4}));
+        assert_eq!(details["globals"], true);
+        assert_eq!(details["defaultExport"], true);
+    });
+}
+
 /// Recursively collect files under `dir` (the example trees are shallow).
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -513,11 +713,10 @@ fn upstream_node_imports_are_all_bridged_or_documented() {
     /// Builtins the upstream examples reach for that are not bridged yet.
     /// Every entry must appear in `docs/NODE_BUILTINS.md` under
     /// "Not bridged", and must *not* be in the shim's map.
-    const KNOWN_UNBRIDGED: [&str; 5] = [
+    const KNOWN_UNBRIDGED: [&str; 4] = [
         "node:child_process",
         "node:module",
         "node:readline",
-        "node:util",
         "node:zlib",
     ];
 

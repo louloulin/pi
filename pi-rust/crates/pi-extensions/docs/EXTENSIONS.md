@@ -142,11 +142,13 @@ etc. exactly as it does on Node.
 ### Node builtin virtual modules
 
 Extensions run on Node upstream, so `node:fs`, `node:fs/promises`,
-`node:os`, `node:buffer`, `node:crypto` and `node:process` (plus the
-`Buffer` / `process` globals) are provided as virtual modules in both
-module formats — `import { readFileSync } from "node:fs"` and
-`require("node:fs")`. The supported subset, the error shape and every
-deliberate divergence from Node are documented in
+`node:os`, `node:buffer`, `node:crypto`, `node:process` and `node:util`
+(plus the `Buffer` / `process` globals, and `TextEncoder` / `TextDecoder`)
+are provided as virtual modules in both module formats —
+`import { readFileSync } from "node:fs"` and
+`require("node:fs")`. `node:util` is pure JS and needs no host op; the
+rest ride the single `host_node_call` bridge. The supported subset, the
+error shape and every deliberate divergence from Node are documented in
 [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md); `node:child_process` is the
 main missing piece (needs streaming stdio + cancellation).
 
@@ -336,7 +338,7 @@ or a Stage 4+ follow-up:
 | ESM `import` statements                 | ✅ Supported   | `import type { … }` lines are erased; value imports resolve through the virtual module map (`node:*`, `node:path`, `node:url`, `typebox`, …); anything else fails with a readable error naming the specifier. |
 | `require("node:fs")` (CJS)             | ✅ Supported   | `require` resolves through the same virtual module map as the ESM rewrite. |
 | `node:fs` / `node:fs/promises`          | ✅ Subset      | Sync + promise + callback forms; see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md) for the op list and divergences. |
-| `node:os` / `node:buffer` / `node:crypto` / `node:process` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals. |
+| `node:os` / `node:buffer` / `node:crypto` / `node:process` / `node:util` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals; `node:util` is pure JS (`promisify` / `inspect` / `format` / `types` / `TextEncoder` / …) and installs `TextEncoder` / `TextDecoder` globally when the engine lacks them. |
 | `node:child_process`                    | ❌ Not bridged | Needs streaming stdio + process lifetime tied to the host deadline. Importing it reports the available modules. |
 | TypeBox parameter schemas               | ✅ Wire-only    | The JSON Schema `parameters` field is preserved verbatim.               |
 | Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI.                          |

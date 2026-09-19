@@ -2369,6 +2369,1079 @@ const __pi_process_module = (() => {
   return Object.freeze(mod);
 })();
 
+// ---------------------------------------------------------------------------
+// `node:util` — the pure-JS helpers the ecosystem imports. Nothing here needs
+// a host op (which is why it was the cheapest row on the `NODE_BUILTINS.md`
+// frontier): upstream examples import `promisify` from here
+// (`packages/coding-agent/examples/extensions/mac-system-theme.ts`) and the
+// evals reporters use `stripVTControlCharacters` / `styleText`.
+//
+// Covered: `format` / `formatWithOptions`, `inspect` (+ `inspect.custom`,
+// `inspect.defaultOptions`), `promisify` / `callbackify` (+ their `custom`
+// symbols), `inherits`, `deprecate`, `stripVTControlCharacters`, `styleText`,
+// `debuglog` / `debug`, `types`, `isDeepStrictEqual`, the legacy
+// `isArray`/`isString`/… predicates, `toUSVString`, `TextEncoder` /
+// `TextDecoder` (also installed as globals when the engine lacks them).
+//
+// Deliberately not covered, documented in `docs/NODE_BUILTINS.md`:
+// `parseArgs`, `parseEnv`, `diff`, `aborted` / `transferableAbortSignal` /
+// `transferableAbortController`, `getSystemErrorName` /
+// `getSystemErrorMessage` / `getSystemErrorMap`, `getCallSite(s)`,
+// `MIMEType` / `MIMEParams`, `setTraceSigInt`, `inspect`'s proxy / sorted /
+// breakLength niceties, and the streaming `TextDecoder` form
+// (`{ stream: true }`).
+// ---------------------------------------------------------------------------
+
+const __pi_util_module = (() => {
+  const BufferCtor = __pi_buffer_module.Buffer;
+  const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
+  const promisifyCustom = Symbol.for("nodejs.util.promisify.custom");
+  const callbackifyCustom = Symbol.for("nodejs.util.callbackify.custom");
+  const objectToString = Object.prototype.toString;
+  const hasOwn = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
+
+  function typeTag(value) {
+    return objectToString.call(value);
+  }
+
+  const DEFAULT_INSPECT_OPTIONS = {
+    showHidden: false,
+    depth: 2,
+    colors: false,
+    customInspect: true,
+    maxArrayLength: 100,
+    maxStringLength: 10000,
+    breakLength: 80,
+    compact: 3,
+    sorted: false,
+    getters: false,
+  };
+
+  const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+  // v22 palette; only the entries `inspect(..., { colors: true })` reaches.
+  const ANSI_CODES = {
+    bold: [1, 22],
+    gray: [90, 39],
+    green: [32, 39],
+    yellow: [33, 39],
+    magenta: [35, 39],
+    cyan: [36, 39],
+    red: [31, 39],
+  };
+
+  function colorize(text, name, options) {
+    if (!options.colors) return text;
+    const pair = ANSI_CODES[name];
+    if (!pair) return text;
+    return "\u001b[" + pair[0] + "m" + text + "\u001b[" + pair[1] + "m";
+  }
+
+  function invalidArgValue(name, value, reason) {
+    const err = new TypeError(
+      'The "' + name + '" argument must be ' + (reason || "a valid value") + ". Received " + inspect(value),
+    );
+    err.code = "ERR_INVALID_ARG_VALUE";
+    return err;
+  }
+
+  function invalidArgType(name, expected, value) {
+    const err = new TypeError(
+      'The "' + name + '" argument must be of type ' + expected + ". Received type " + typeof value,
+    );
+    err.code = "ERR_INVALID_ARG_TYPE";
+    return err;
+  }
+
+  // -------------------------------------------------------------------------
+  // inspect
+  // -------------------------------------------------------------------------
+
+  function quoteString(value) {
+    return (
+      "'" +
+      value
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t") +
+      "'"
+    );
+  }
+
+  function formatPrimitive(value, options) {
+    if (typeof value === "string") return colorize(quoteString(value), "green", options);
+    if (typeof value === "number") {
+      return colorize(Object.is(value, -0) ? "-0" : String(value), "yellow", options);
+    }
+    if (typeof value === "bigint") return colorize(String(value) + "n", "yellow", options);
+    if (typeof value === "boolean") return colorize(String(value), "yellow", options);
+    if (typeof value === "undefined") return colorize("undefined", "gray", options);
+    if (value === null) return colorize("null", "bold", options);
+    if (typeof value === "symbol") return colorize(value.toString(), "green", options);
+    return String(value);
+  }
+
+  function functionLabel(fn) {
+    const tag = typeTag(fn);
+    const name = fn.name;
+    if (tag === "[object AsyncFunction]") {
+      return name ? "[AsyncFunction: " + name + "]" : "[AsyncFunction (anonymous)]";
+    }
+    if (tag === "[object GeneratorFunction]") {
+      return name ? "[GeneratorFunction: " + name + "]" : "[GeneratorFunction (anonymous)]";
+    }
+    if (tag === "[object AsyncGeneratorFunction]") {
+      return name ? "[AsyncGeneratorFunction: " + name + "]" : "[AsyncGeneratorFunction (anonymous)]";
+    }
+    let source = "";
+    try {
+      source = Function.prototype.toString.call(fn);
+    } catch (_e) {
+      source = "";
+    }
+    if (source.indexOf("class") === 0) {
+      return "[class " + (name || "(anonymous)") + "]";
+    }
+    return name ? "[Function: " + name + "]" : "[Function (anonymous)]";
+  }
+
+  function ownKeys(value, options) {
+    let keys = options.showHidden
+      ? Reflect.ownKeys(value)
+      : Object.keys(value);
+    if (options.sorted) {
+      keys = keys.slice().sort((a, b) => {
+        const left = String(a);
+        const right = String(b);
+        return left < right ? -1 : left > right ? 1 : 0;
+      });
+    }
+    return keys;
+  }
+
+  function formatKey(key) {
+    if (typeof key === "symbol") return key.toString();
+    if (IDENTIFIER.test(key)) return key;
+    return quoteString(String(key));
+  }
+
+  function constructorPrefix(value) {
+    const proto = Object.getPrototypeOf(value);
+    if (proto === null) return "[Object: null prototype] ";
+    const ctor = proto.constructor;
+    if (typeof ctor === "function" && typeof ctor.name === "string" && ctor.name !== "Object") {
+      return ctor.name + " ";
+    }
+    return "";
+  }
+
+  function inspectString(value, options) {
+    const max = options.maxStringLength;
+    let text;
+    if (max !== null && max !== undefined && max >= 0 && value.length > max) {
+      text =
+        quoteString(value.slice(0, max)) +
+        "... " +
+        (value.length - max) +
+        " more character" +
+        (value.length - max === 1 ? "" : "s");
+    } else {
+      text = quoteString(value);
+    }
+    return colorize(text, "green", options);
+  }
+
+  // Pre-scan for repeated object identity so the first render can be tagged
+  // `<ref *N>` and later ones `[Circular *N]`, matching Node's `inspect`.
+  function collectRefs(value, visited, refs) {
+    if (value === null || (typeof value !== "object" && typeof value !== "function")) return;
+    if (visited.has(value)) {
+      if (!refs.has(value)) refs.set(value, refs.size + 1);
+      return;
+    }
+    visited.add(value);
+    if (typeof value === "function") return;
+    const tag = typeTag(value);
+    if (
+      tag === "[object Date]" ||
+      tag === "[object RegExp]" ||
+      tag === "[object Error]" ||
+      tag === "[object Promise]"
+    ) {
+      return;
+    }
+    if (BufferCtor.isBuffer && BufferCtor.isBuffer(value)) return;
+    if (ArrayBuffer.isView(value)) return;
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        if (i in value) collectRefs(value[i], visited, refs);
+      }
+      return;
+    }
+    if (tag === "[object Map]") {
+      value.forEach((entryValue, entryKey) => {
+        collectRefs(entryKey, visited, refs);
+        collectRefs(entryValue, visited, refs);
+      });
+      return;
+    }
+    if (tag === "[object Set]") {
+      value.forEach((entryValue) => collectRefs(entryValue, visited, refs));
+      return;
+    }
+    const keys = Object.keys(value);
+    for (let i = 0; i < keys.length; i++) collectRefs(value[keys[i]], visited, refs);
+  }
+
+  function inspectArray(value, depth, options, ctx) {
+    const length = value.length;
+    const max = options.maxArrayLength;
+    const limit = max === null || max === undefined || max === Infinity ? length : Math.min(length, max);
+    const parts = [];
+    for (let i = 0; i < limit; i++) {
+      parts.push(i in value ? inspectValue(value[i], depth + 1, options, ctx) : "<1 empty item>");
+    }
+    let body = parts.join(", ");
+    if (limit < length) {
+      const remaining = length - limit;
+      body += (body.length ? ", " : "") + "... " + remaining + " more item" + (remaining === 1 ? "" : "s");
+    }
+    if (body.length === 0) return "[]";
+    return "[ " + body + " ]";
+  }
+
+  function inspectObject(value, depth, options, ctx) {
+    const tag = typeTag(value);
+
+    if (tag === "[object Date]") {
+      return isNaN(value.getTime()) ? "Invalid Date" : colorize(value.toISOString(), "magenta", options);
+    }
+    if (tag === "[object RegExp]") return colorize(String(value), "red", options);
+    if (tag === "[object Error]") {
+      const head = value.name + (value.message ? ": " + value.message : "");
+      const stack = typeof value.stack === "string" ? value.stack : "";
+      return colorize(stack ? stack : head, "red", options);
+    }
+    if (tag === "[object Promise]") return "Promise { <pending> }";
+    if (tag === "[object Map]") {
+      const entries = [];
+      value.forEach((entryValue, entryKey) => {
+        entries.push(
+          inspectValue(entryKey, depth + 1, options, ctx) +
+            " => " +
+            inspectValue(entryValue, depth + 1, options, ctx),
+        );
+      });
+      return "Map(" + value.size + ")" + (entries.length ? " { " + entries.join(", ") + " }" : " {}");
+    }
+    if (tag === "[object Set]") {
+      const values = [];
+      value.forEach((entryValue) => {
+        values.push(inspectValue(entryValue, depth + 1, options, ctx));
+      });
+      return "Set(" + value.size + ")" + (values.length ? " { " + values.join(", ") + " }" : " {}");
+    }
+    if (tag === "[object ArrayBuffer]") return "ArrayBuffer { byteLength: " + value.byteLength + " }";
+    if (tag === "[object SharedArrayBuffer]") {
+      return "SharedArrayBuffer { byteLength: " + value.byteLength + " }";
+    }
+    if (tag === "[object DataView]") {
+      return (
+        "DataView { byteLength: " +
+        value.byteLength +
+        ", byteOffset: " +
+        value.byteOffset +
+        ", byteStride: undefined }"
+      );
+    }
+    if (BufferCtor.isBuffer && BufferCtor.isBuffer(value)) {
+      const bytes = [];
+      for (let i = 0; i < value.length; i++) {
+        const hex = value[i].toString(16);
+        bytes.push(hex.length === 1 ? "0" + hex : hex);
+      }
+      return "<Buffer " + bytes.join(" ") + ">";
+    }
+    if (ArrayBuffer.isView(value)) {
+      const ctor = value.constructor;
+      const name = ctor && ctor.name ? ctor.name : "TypedArray";
+      const parts = [];
+      for (let i = 0; i < value.length; i++) {
+        parts.push(inspectValue(value[i], depth + 1, options, ctx));
+      }
+      return name + "(" + value.length + ") [ " + parts.join(", ") + " ]";
+    }
+    if (Array.isArray(value)) return inspectArray(value, depth, options, ctx);
+
+    const keys = ownKeys(value, options);
+    const prefix = constructorPrefix(value);
+    if (keys.length === 0) return prefix + "{}";
+    const entries = [];
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      entries.push(formatKey(key) + ": " + inspectValue(value[key], depth + 1, options, ctx));
+    }
+    return prefix + "{ " + entries.join(", ") + " }";
+  }
+
+  function inspectValue(value, depth, options, ctx) {
+    if (
+      options.customInspect !== false &&
+      value !== null &&
+      (typeof value === "object" || typeof value === "function")
+    ) {
+      const custom = value[inspectCustom];
+      if (typeof custom === "function") {
+        const rendered = custom.call(value, depth, options, inspect);
+        if (typeof rendered === "string") return rendered;
+        return inspectValue(rendered, depth, options, ctx);
+      }
+    }
+
+    const kind = typeof value;
+    if (kind === "function") return functionLabel(value);
+    if (kind !== "object" || value === null) {
+      if (kind === "string") return inspectString(value, options);
+      return formatPrimitive(value, options);
+    }
+
+    if (ctx.refs.has(value) && ctx.renderedRefs.has(value)) {
+      return "[Circular *" + ctx.refs.get(value) + "]";
+    }
+    if (depth > options.depth) return Array.isArray(value) ? "[Array]" : "[Object]";
+
+    let prefix = "";
+    if (ctx.refs.has(value)) {
+      ctx.renderedRefs.add(value);
+      prefix = "<ref *" + ctx.refs.get(value) + "> ";
+    }
+    return prefix + inspectObject(value, depth, options, ctx);
+  }
+
+  function normalizeInspectOptions(options) {
+    if (options === undefined || options === null) return DEFAULT_INSPECT_OPTIONS;
+    if (typeof options === "boolean") {
+      return Object.assign({}, DEFAULT_INSPECT_OPTIONS, { showHidden: options });
+    }
+    if (typeof options === "object") {
+      return Object.assign({}, DEFAULT_INSPECT_OPTIONS, options);
+    }
+    return DEFAULT_INSPECT_OPTIONS;
+  }
+
+  function inspect(value, options) {
+    const resolved = normalizeInspectOptions(options);
+    const refs = new Map();
+    collectRefs(value, new Set(), refs);
+    return inspectValue(value, 0, resolved, { refs: refs, renderedRefs: new Set() });
+  }
+  inspect.custom = inspectCustom;
+  inspect.defaultOptions = Object.assign({}, DEFAULT_INSPECT_OPTIONS, {
+    showProxy: false,
+    numericSeparator: false,
+  });
+
+  // -------------------------------------------------------------------------
+  // format / formatWithOptions
+  // -------------------------------------------------------------------------
+
+  function formatWithOptions(inspectOptions, ...args) {
+    const options = normalizeInspectOptions(inspectOptions);
+    if (args.length === 0) return "";
+    const first = args[0];
+    if (typeof first !== "string") {
+      const rendered = [];
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        rendered.push(typeof arg === "string" ? arg : inspect(arg, options));
+      }
+      return rendered.join(" ");
+    }
+
+    let output = "";
+    let cursor = 0;
+    let next = 1;
+    const pattern = /%([sdifjoOc%])/g;
+    let match;
+    while ((match = pattern.exec(first)) !== null) {
+      output += first.slice(cursor, match.index);
+      cursor = match.index + match[0].length;
+      const specifier = match[1];
+      if (specifier === "%") {
+        output += "%";
+        continue;
+      }
+      if (next >= args.length) {
+        output += match[0];
+        continue;
+      }
+      const arg = args[next++];
+      if (specifier === "s") {
+        if (typeof arg === "string") output += arg;
+        else if (arg !== null && typeof arg === "object") {
+          output += inspect(arg, Object.assign({}, options, { depth: 0 }));
+        } else output += String(arg);
+      } else if (specifier === "d") {
+        output += typeof arg === "bigint" ? String(arg) : String(Number(arg));
+      } else if (specifier === "i") {
+        output += String(parseInt(arg, 10));
+      } else if (specifier === "f") {
+        output += String(parseFloat(arg));
+      } else if (specifier === "j") {
+        try {
+          output += JSON.stringify(arg);
+        } catch (_e) {
+          output += "[Circular]";
+        }
+      } else if (specifier === "o") {
+        output += inspect(arg, Object.assign({}, options, { showHidden: true, depth: 4 }));
+      } else if (specifier === "O") {
+        output += inspect(arg, options);
+      }
+      // `%c` consumes its argument and renders nothing.
+    }
+    output += first.slice(cursor);
+    for (; next < args.length; next++) {
+      const arg = args[next];
+      output += " " + (typeof arg === "string" ? arg : inspect(arg, options));
+    }
+    return output;
+  }
+
+  function format(...args) {
+    return formatWithOptions({}, ...args);
+  }
+
+  // -------------------------------------------------------------------------
+  // promisify / callbackify
+  // -------------------------------------------------------------------------
+
+  function promisify(original) {
+    if (typeof original !== "function") {
+      throw invalidArgType("original", "function", original);
+    }
+    if (original[promisifyCustom] !== undefined) return original[promisifyCustom];
+
+    function fn(...args) {
+      const self = this;
+      return new Promise((resolve, reject) => {
+        original.call(self, ...args, (err, value) => {
+          if (err) reject(err);
+          else resolve(value);
+        });
+      });
+    }
+    Object.setPrototypeOf(fn, Object.getPrototypeOf(original));
+    Object.defineProperty(fn, "name", { value: original.name, configurable: true });
+    return fn;
+  }
+  promisify.custom = promisifyCustom;
+
+  function callbackify(original) {
+    if (typeof original !== "function") {
+      throw invalidArgType("original", "function", original);
+    }
+    if (original[callbackifyCustom] !== undefined) return original[callbackifyCustom];
+
+    function callbackified(...args) {
+      const callback = args.pop();
+      if (typeof callback !== "function") {
+        throw invalidArgType("callback", "function", callback);
+      }
+      const self = this;
+      original.apply(self, args).then(
+        (value) => {
+          __pi_schedule(() => callback(null, value));
+        },
+        (err) => {
+          __pi_schedule(() => {
+            const reason =
+              err === null || err === undefined
+                ? new Error("Promise rejected with no or falsy value")
+                : err;
+            callback(reason);
+          });
+        },
+      );
+    }
+    Object.setPrototypeOf(callbackified, Object.getPrototypeOf(original));
+    Object.defineProperty(callbackified, "name", { value: original.name, configurable: true });
+    return callbackified;
+  }
+  callbackify.custom = callbackifyCustom;
+
+  // -------------------------------------------------------------------------
+  // inherits / deprecate
+  // -------------------------------------------------------------------------
+
+  function inherits(ctor, superCtor) {
+    if (typeof ctor !== "function") throw invalidArgType("ctor", "function", ctor);
+    if (typeof superCtor !== "function") throw invalidArgType("superCtor", "function", superCtor);
+    ctor.super_ = superCtor;
+    ctor.prototype = Object.create(superCtor.prototype, {
+      constructor: { value: ctor, enumerable: false, writable: true, configurable: true },
+    });
+    Object.setPrototypeOf(ctor, superCtor);
+  }
+
+  function deprecate(fn, msg, code) {
+    if (typeof fn !== "function") throw invalidArgType("fn", "function", fn);
+    let warned = false;
+    function deprecated(...args) {
+      if (!warned) {
+        warned = true;
+        const text =
+          (typeof code === "string" && code ? "[" + code + "] " : "") +
+          "DeprecationWarning: " +
+          String(msg);
+        if (typeof globalThis.host_log === "function") globalThis.host_log("warn", text);
+        else if (typeof console !== "undefined" && typeof console.warn === "function") console.warn(text);
+      }
+      return fn.apply(this, args);
+    }
+    Object.setPrototypeOf(deprecated, fn);
+    Object.defineProperty(deprecated, "name", { value: fn.name || "deprecated", configurable: true });
+    return deprecated;
+  }
+
+  // -------------------------------------------------------------------------
+  // stripVTControlCharacters / styleText
+  // -------------------------------------------------------------------------
+
+  // Node's own pattern (lib/internal/util/inspect.js).
+  const VT_PATTERN = new RegExp(
+    "[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))",
+    "g",
+  );
+
+  function stripVTControlCharacters(str) {
+    if (typeof str !== "string") throw invalidArgType("str", "string", str);
+    return str.replace(VT_PATTERN, "");
+  }
+
+  // [open, close] pairs copied from Node's `styleText` palette.
+  const STYLE_CODES = {
+    reset: [0, 0],
+    bold: [1, 22],
+    dim: [2, 22],
+    italic: [3, 23],
+    underline: [4, 24],
+    blink: [5, 25],
+    inverse: [7, 27],
+    hidden: [8, 28],
+    strikethrough: [9, 29],
+    doubleunderline: [21, 21],
+    framed: [51, 54],
+    overlined: [53, 55],
+    black: [30, 39],
+    red: [31, 39],
+    green: [32, 39],
+    yellow: [33, 39],
+    blue: [34, 39],
+    magenta: [35, 39],
+    cyan: [36, 39],
+    white: [37, 39],
+    gray: [90, 39],
+    grey: [90, 39],
+    blackbright: [90, 39],
+    redbright: [91, 39],
+    greenbright: [92, 39],
+    yellowbright: [93, 39],
+    bluebright: [94, 39],
+    magentabright: [95, 39],
+    cyanbright: [96, 39],
+    whitebright: [97, 39],
+    bgblack: [40, 49],
+    bgred: [41, 49],
+    bggreen: [42, 49],
+    bgyellow: [43, 49],
+    bgblue: [44, 49],
+    bgmagenta: [45, 49],
+    bgcyan: [46, 49],
+    bgwhite: [47, 49],
+    bggray: [100, 49],
+    bggrey: [100, 49],
+    bgblackbright: [100, 49],
+    bgredbright: [101, 49],
+    bggreenbright: [102, 49],
+    bgyellowbright: [103, 49],
+    bgbluebright: [104, 49],
+    bgmagentabright: [105, 49],
+    bgcyanbright: [106, 49],
+    bgwhitebright: [107, 49],
+  };
+
+  function styleText(format, text, options) {
+    if (text === undefined) {
+      throw invalidArgType("text", "string", text);
+    }
+    const body = String(text);
+    const formats = Array.isArray(format) ? format : [format];
+    if (formats.length === 0) return body;
+
+    const opens = [];
+    const closes = [];
+    for (let i = 0; i < formats.length; i++) {
+      const label = String(formats[i]).toLowerCase();
+      if (!hasOwn(STYLE_CODES, label)) {
+        throw invalidArgValue(
+          "format",
+          formats[i],
+          "one of the supported style names (e.g. 'red', 'bold', 'bgBlue')",
+        );
+      }
+      opens.push("\u001b[" + STYLE_CODES[label][0] + "m");
+    }
+    for (let i = formats.length - 1; i >= 0; i--) {
+      closes.push("\u001b[" + STYLE_CODES[String(formats[i]).toLowerCase()][1] + "m");
+    }
+    // Node emits one sequence per style, closes in reverse order.
+    return opens.join("") + body + closes.join("");
+  }
+
+  // -------------------------------------------------------------------------
+  // debuglog
+  // -------------------------------------------------------------------------
+
+  const debugSections = String(
+    (__pi_process_module.env && __pi_process_module.env.NODE_DEBUG) || "",
+  )
+    .split(/[\s,]+/)
+    .filter(Boolean);
+
+  function debuglog(section) {
+    const name = String(section);
+    if (debugSections.indexOf(name) === -1 && debugSections.indexOf("*") === -1) {
+      return function () {};
+    }
+    return function (...args) {
+      const text = name.toUpperCase() + " " + format(...args);
+      if (typeof globalThis.host_log === "function") globalThis.host_log("debug", text);
+    };
+  }
+
+  function log(...args) {
+    const stamp = new Date().toISOString().replace("T", " ").replace("Z", "");
+    if (typeof globalThis.host_log === "function") globalThis.host_log("info", stamp + " - " + format(...args));
+  }
+
+  // -------------------------------------------------------------------------
+  // types
+  // -------------------------------------------------------------------------
+
+  function isTypedArray(value) {
+    return ArrayBuffer.isView(value) && !(value instanceof DataView);
+  }
+
+  const BOXED_TAGS = [
+    "[object Boolean]",
+    "[object Number]",
+    "[object String]",
+    "[object Symbol]",
+    "[object BigInt]",
+  ];
+
+  const types = {
+    isAnyArrayBuffer: (value) => {
+      const tag = typeTag(value);
+      return tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]";
+    },
+    isArgumentsObject: (value) => typeTag(value) === "[object Arguments]",
+    isArrayBuffer: (value) => typeTag(value) === "[object ArrayBuffer]",
+    isArrayBufferView: (value) => ArrayBuffer.isView(value),
+    isAsyncFunction: (value) =>
+      typeTag(value) === "[object AsyncFunction]" ||
+      (typeof value === "function" &&
+        value.constructor &&
+        value.constructor.name === "AsyncFunction"),
+    isBigInt64Array: (value) => typeTag(value) === "[object BigInt64Array]",
+    isBigIntObject: (value) => typeTag(value) === "[object BigInt]",
+    isBigUint64Array: (value) => typeTag(value) === "[object BigUint64Array]",
+    isBooleanObject: (value) => typeTag(value) === "[object Boolean]",
+    isBoxedPrimitive: (value) =>
+      typeof value === "object" && value !== null && BOXED_TAGS.indexOf(typeTag(value)) !== -1,
+    isCryptoKey: () => false,
+    isDataView: (value) => typeTag(value) === "[object DataView]",
+    isDate: (value) => typeTag(value) === "[object Date]",
+    isExternal: () => false,
+    isFloat16Array: (value) => typeTag(value) === "[object Float16Array]",
+    isFloat32Array: (value) => typeTag(value) === "[object Float32Array]",
+    isFloat64Array: (value) => typeTag(value) === "[object Float64Array]",
+    isGeneratorFunction: (value) =>
+      typeTag(value) === "[object GeneratorFunction]" ||
+      (typeof value === "function" &&
+        value.constructor &&
+        value.constructor.name === "GeneratorFunction"),
+    isGeneratorObject: (value) => {
+      const tag = typeTag(value);
+      return tag === "[object Generator]" || tag === "[object AsyncGenerator]";
+    },
+    isInt8Array: (value) => typeTag(value) === "[object Int8Array]",
+    isInt16Array: (value) => typeTag(value) === "[object Int16Array]",
+    isInt32Array: (value) => typeTag(value) === "[object Int32Array]",
+    isKeyObject: () => false,
+    isMap: (value) => typeTag(value) === "[object Map]",
+    isMapIterator: (value) => typeTag(value) === "[object Map Iterator]",
+    isModuleNamespaceObject: () => false,
+    isNativeError: (value) => {
+      const tag = typeTag(value);
+      return tag === "[object Error]" || value instanceof Error;
+    },
+    isNumberObject: (value) => typeTag(value) === "[object Number]",
+    isPromise: (value) => typeTag(value) === "[object Promise]",
+    isProxy: () => false,
+    isRegExp: (value) => typeTag(value) === "[object RegExp]",
+    isSet: (value) => typeTag(value) === "[object Set]",
+    isSetIterator: (value) => typeTag(value) === "[object Set Iterator]",
+    isSharedArrayBuffer: (value) => typeTag(value) === "[object SharedArrayBuffer]",
+    isStringObject: (value) => typeTag(value) === "[object String]",
+    isSymbolObject: (value) => typeTag(value) === "[object Symbol]",
+    isTypedArray: isTypedArray,
+    isUint8Array: (value) => typeTag(value) === "[object Uint8Array]",
+    isUint8ClampedArray: (value) => typeTag(value) === "[object Uint8ClampedArray]",
+    isUint16Array: (value) => typeTag(value) === "[object Uint16Array]",
+    isUint32Array: (value) => typeTag(value) === "[object Uint32Array]",
+    isWeakMap: (value) => typeTag(value) === "[object WeakMap]",
+    isWeakSet: (value) => typeTag(value) === "[object WeakSet]",
+  };
+
+  // -------------------------------------------------------------------------
+  // legacy predicates
+  // -------------------------------------------------------------------------
+
+  const legacy = {
+    isArray: (value) => Array.isArray(value),
+    isBoolean: (value) => typeof value === "boolean",
+    isBuffer: (value) => !!(BufferCtor.isBuffer && BufferCtor.isBuffer(value)),
+    isDate: (value) => typeTag(value) === "[object Date]",
+    isError: (value) => {
+      const tag = typeTag(value);
+      return tag === "[object Error]" || value instanceof Error;
+    },
+    isFunction: (value) => typeof value === "function",
+    isNull: (value) => value === null,
+    isNullOrUndefined: (value) => value === null || value === undefined,
+    isNumber: (value) => typeof value === "number",
+    isObject: (value) => typeof value === "object" && value !== null,
+    isPrimitive: (value) => value === null || (typeof value !== "object" && typeof value !== "function"),
+    isRegExp: (value) => typeTag(value) === "[object RegExp]",
+    isString: (value) => typeof value === "string",
+    isSymbol: (value) => typeof value === "symbol",
+    isUndefined: (value) => value === undefined,
+  };
+
+  // -------------------------------------------------------------------------
+  // isDeepStrictEqual
+  // -------------------------------------------------------------------------
+
+  function enumerableOwnKeys(value) {
+    const keys = Reflect.ownKeys(value);
+    const result = [];
+    for (let i = 0; i < keys.length; i++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, keys[i]);
+      if (descriptor && descriptor.enumerable) result.push(keys[i]);
+    }
+    return result;
+  }
+
+  function prototypeCtor(value) {
+    const proto = Object.getPrototypeOf(value);
+    return proto === null ? null : proto.constructor;
+  }
+
+  function deepEqual(a, b, seen) {
+    if (Object.is(a, b)) return true;
+    if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+
+    const tag = typeTag(a);
+    if (tag !== typeTag(b)) return false;
+
+    const memo = seen.get(a);
+    if (memo !== undefined) return memo === b;
+    seen.set(a, b);
+
+    if (tag === "[object Date]") return Object.is(a.getTime(), b.getTime());
+    if (tag === "[object RegExp]") return a.source === b.source && a.flags === b.flags;
+    if (tag === "[object Number]" || tag === "[object String]" || tag === "[object Boolean]") {
+      return Object.is(a.valueOf(), b.valueOf());
+    }
+    if (tag === "[object Symbol]" || tag === "[object BigInt]") {
+      return Object.is(a.valueOf(), b.valueOf());
+    }
+    if (tag === "[object Error]") {
+      if (a.name !== b.name || a.message !== b.message) return false;
+    }
+    if (tag === "[object Map]") {
+      if (a.size !== b.size) return false;
+      const entries = [];
+      b.forEach((entryValue, entryKey) => entries.push([entryKey, entryValue]));
+      const used = [];
+      for (let i = 0; i < entries.length; i++) used.push(false);
+      let matchedAll = true;
+      a.forEach((entryValue, entryKey) => {
+        if (!matchedAll) return;
+        let matched = false;
+        for (let i = 0; i < entries.length; i++) {
+          if (used[i]) continue;
+          if (
+            deepEqual(entryKey, entries[i][0], seen) &&
+            deepEqual(entryValue, entries[i][1], seen)
+          ) {
+            used[i] = true;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) matchedAll = false;
+      });
+      return matchedAll;
+    }
+    if (tag === "[object Set]") {
+      if (a.size !== b.size) return false;
+      const values = [];
+      b.forEach((entryValue) => values.push(entryValue));
+      const used = [];
+      for (let i = 0; i < values.length; i++) used.push(false);
+      let matchedAll = true;
+      a.forEach((entryValue) => {
+        if (!matchedAll) return;
+        let matched = false;
+        for (let i = 0; i < values.length; i++) {
+          if (used[i]) continue;
+          if (deepEqual(entryValue, values[i], seen)) {
+            used[i] = true;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) matchedAll = false;
+      });
+      return matchedAll;
+    }
+    if (tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]") {
+      if (a.byteLength !== b.byteLength) return false;
+      const left = new Uint8Array(a);
+      const right = new Uint8Array(b);
+      for (let i = 0; i < left.length; i++) {
+        if (left[i] !== right[i]) return false;
+      }
+      return true;
+    }
+    if (tag === "[object DataView]") {
+      if (a.byteLength !== b.byteLength) return false;
+      const left = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+      const right = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+      for (let i = 0; i < left.length; i++) {
+        if (left[i] !== right[i]) return false;
+      }
+      return true;
+    }
+    if (isTypedArray(a)) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (!Object.is(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    if (Array.isArray(a) && a.length !== b.length) return false;
+    if (tag === "[object Object]" && prototypeCtor(a) !== prototypeCtor(b)) return false;
+
+    const keysA = enumerableOwnKeys(a);
+    const keysB = enumerableOwnKeys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (let i = 0; i < keysA.length; i++) {
+      const key = keysA[i];
+      if (!hasOwn(b, key)) return false;
+      if (!deepEqual(a[key], b[key], seen)) return false;
+    }
+    return true;
+  }
+
+  function isDeepStrictEqual(value1, value2) {
+    return deepEqual(value1, value2, new Map());
+  }
+
+  // -------------------------------------------------------------------------
+  // toUSVString
+  // -------------------------------------------------------------------------
+
+  function toUSVString(value) {
+    const input = String(value);
+    let output = "";
+    for (let i = 0; i < input.length; i++) {
+      const code = input.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = i + 1 < input.length ? input.charCodeAt(i + 1) : 0;
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          output += input[i] + input[i + 1];
+          i += 1;
+        } else {
+          output += "\ufffd";
+        }
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        output += "\ufffd";
+      } else {
+        output += input[i];
+      }
+    }
+    return output;
+  }
+
+  // -------------------------------------------------------------------------
+  // TextEncoder / TextDecoder
+  // -------------------------------------------------------------------------
+
+  class TextEncoder {
+    get encoding() {
+      return "utf-8";
+    }
+
+    encode(input) {
+      return new Uint8Array(BufferCtor.from(input === undefined ? "" : String(input), "utf8"));
+    }
+
+    encodeInto(source, destination) {
+      if (!(destination instanceof Uint8Array)) {
+        throw invalidArgType("destination", "Uint8Array", destination);
+      }
+      const input = source === undefined ? "" : String(source);
+      let read = 0;
+      let written = 0;
+      while (read < input.length) {
+        const code = input.charCodeAt(read);
+        const charCode = code >= 0xd800 && code <= 0xdbff && read + 1 < input.length ? 2 : 1;
+        const bytes = BufferCtor.from(input.substr(read, charCode), "utf8");
+        if (written + bytes.length > destination.length) break;
+        destination.set(bytes, written);
+        written += bytes.length;
+        read += charCode;
+      }
+      return { read: read, written: written };
+    }
+  }
+
+  const DECODER_ENCODINGS = {
+    "utf-8": "utf-8",
+    "utf8": "utf-8",
+    "unicode-1-1-utf-8": "utf-8",
+    "utf-16le": "utf-16le",
+    "utf-16": "utf-16le",
+    "ucs-2": "utf-16le",
+    "unicode": "utf-16le",
+    "unicodefeff": "utf-16le",
+    "iso-10646-ucs-2": "utf-16le",
+    "csunicode": "utf-16le",
+    "latin1": "windows-1252",
+    "ascii": "windows-1252",
+    "windows-1252": "windows-1252",
+    "iso-8859-1": "windows-1252",
+    "iso8859-1": "windows-1252",
+    "iso88591": "windows-1252",
+    "cp1252": "windows-1252",
+    "cp819": "windows-1252",
+    "ibm819": "windows-1252",
+    "l1": "windows-1252",
+    "us-ascii": "windows-1252",
+    "ansi_x3.4-1968": "windows-1252",
+    "csisolatin1": "windows-1252",
+    "iso-ir-100": "windows-1252",
+    "iso_8859-1": "windows-1252",
+    "iso_8859-1:1987": "windows-1252",
+    "x-cp1252": "windows-1252",
+  };
+
+  const CP1252_HIGH =
+    "\u20ac\u0081\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u008d\u017d\u008f" +
+    "\u0090\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u009d\u017e\u0178";
+
+  function decodeWindows1252(bytes) {
+    const parts = [];
+    for (let i = 0; i < bytes.length; i++) {
+      const byte = bytes[i];
+      parts.push(
+        byte >= 0x80 && byte <= 0x9f ? CP1252_HIGH.charAt(byte - 0x80) : String.fromCharCode(byte),
+      );
+    }
+    return parts.join("");
+  }
+
+  class TextDecoder {
+    constructor(label, options) {
+      const requested = label === undefined || label === null ? "utf-8" : String(label).toLowerCase();
+      const encoding = hasOwn(DECODER_ENCODINGS, requested) ? DECODER_ENCODINGS[requested] : null;
+      if (!encoding) {
+        const err = new RangeError(
+          'The "label" argument must be a valid encoding label. Received ' + JSON.stringify(label),
+        );
+        err.code = "ERR_ENCODING_NOT_SUPPORTED";
+        throw err;
+      }
+      Object.defineProperty(this, "encoding", { value: encoding, enumerable: true });
+      Object.defineProperty(this, "fatal", { value: !!(options && options.fatal), enumerable: true });
+      Object.defineProperty(this, "ignoreBOM", {
+        value: !!(options && options.ignoreBOM),
+        enumerable: true,
+      });
+    }
+
+    decode(input) {
+      if (input === undefined) return "";
+      let bytes;
+      if (input instanceof Uint8Array) bytes = input;
+      else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
+      else if (ArrayBuffer.isView(input)) {
+        bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      } else if (typeof input === "string") {
+        bytes = BufferCtor.from(input, "utf8");
+      } else {
+        throw invalidArgType("input", "ArrayBuffer, Buffer, TypedArray, or DataView", input);
+      }
+
+      let text;
+      if (this.encoding === "utf-8") text = BufferCtor.from(bytes).toString("utf8");
+      else if (this.encoding === "utf-16le") text = BufferCtor.from(bytes).toString("utf16le");
+      else text = decodeWindows1252(bytes);
+      if (!this.ignoreBOM && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      return text;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+
+  const mod = Object.assign({}, legacy, {
+    format: format,
+    formatWithOptions: formatWithOptions,
+    inspect: inspect,
+    promisify: promisify,
+    callbackify: callbackify,
+    inherits: inherits,
+    deprecate: deprecate,
+    stripVTControlCharacters: stripVTControlCharacters,
+    styleText: styleText,
+    debuglog: debuglog,
+    debug: debuglog,
+    log: log,
+    types: types,
+    isDeepStrictEqual: isDeepStrictEqual,
+    toUSVString: toUSVString,
+    // `parseArgs`, `parseEnv`, `diff`, `aborted`, `transferableAbort*`,
+    // `getSystemError*` and `getCallSite(s)` are intentionally absent; see
+    // `docs/NODE_BUILTINS.md` for the rationale.
+    _extend: (origin, add) => Object.assign(origin, add || {}),
+    TextEncoder: TextEncoder,
+    TextDecoder: TextDecoder,
+  });
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// `TextEncoder` / `TextDecoder` are globals on Node; expose them here when the
+// engine has no native implementation (QuickJS does not).
+if (typeof globalThis.TextEncoder === "undefined") globalThis.TextEncoder = __pi_util_module.TextEncoder;
+if (typeof globalThis.TextDecoder === "undefined") globalThis.TextDecoder = __pi_util_module.TextDecoder;
+
 // Built last so the module objects above are initialized before they are
 // referenced (a `const` declared later in the file would otherwise throw
 // a TDZ ReferenceError here).
@@ -2389,6 +3462,8 @@ globalThis.__pi_virtual_modules = Object.freeze({
   crypto: __pi_crypto_module,
   "node:process": __pi_process_module,
   process: __pi_process_module,
+  "node:util": __pi_util_module,
+  util: __pi_util_module,
   typebox: __pi_typebox_module,
   "@sinclair/typebox": __pi_typebox_module,
 });

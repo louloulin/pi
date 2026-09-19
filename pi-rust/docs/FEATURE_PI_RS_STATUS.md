@@ -5814,3 +5814,106 @@ $ cargo test   --workspace --no-fail-fast --offline                 # 71 targets
 `work/lum-1088`：基于 `origin/feature/pi.rs`（rebase 到 LUM-1096 的 `43b3fed20`）实现，
 改动 `wiring.rs` / `main.rs` / `pi-extensions` registry + host 与两处测试，另附本节文档，
 非 force push 到同名分支。
+## LUM-1105 round — Stage 26 后续：`node:util` 虚拟模块（纯 JS）+ 合并 `feature/pi.rs`
+
+（autopilot 协调轮，触发 2026-09-19 21:40 Asia/Shanghai；开工后把 LUM-1105 的泛标题「pi」
+改名为本轮实际内容。）
+
+### 一、选择：为什么是 `node:util`
+
+LUM-1100 轮把 frontier 里最便宜的一行留给了 `node:util`，本轮直接取用：
+
+- **纯 JS，零宿主 op**：`format` / `inspect` / `types` 在 QuickJS 里就能算；
+  `promisify` / `callbackify` shim 内部早就为 `node:fs` 的 `promises` 实现过，导出即可。
+  对比 `node:child_process`（要 `tokio::process` + 流式 stdio + 与宿主 deadline 联动的取消，
+  Stage 级），这是单轮能收口的切片。
+- **真需求**：上游 `packages/coding-agent/examples/extensions/mac-system-theme.ts` 导入
+  `promisify`；`packages/evals` 的两个 reporter 与 `packages/tui` 的测试用
+  `stripVTControlCharacters` / `styleText`。兼容闸门此前把 `node:util` 登记在
+  `KNOWN_UNBRIDGED`，本轮把它从清单里消掉。
+- **不动 `pi-tui`**：在途的 LUM-1103 / LUM-1104 两个 worktree 里都有**相同未提交**的
+  `pi-tui/src/editor.rs` / `undo_stack.rs` 改动（模板重复轮），本轮全程只碰 `pi-extensions`，
+  合并零冲突。
+- **不派发子任务**：开工时 `running_task_count = 4`（上限 3，含 LUM-1083 / LUM-1088 挂死槽位），
+  再派会把板面压得更死；本轮做自包含切片，槽位决策留给人工。
+
+### 二、实现
+
+`crates/pi-extensions/runtime/pi-ext-shim.mjs` 新增 `__pi_util_module`（`:2395` 起，+1075 行），
+虚拟模块表新增 `"node:util"` / `"util"`（`:3465` / `:3466`）。导出清单：
+
+- `format` / `formatWithOptions`（`%s %d %i %f %j %o %O %c %%`，多余参数按 Node 规则追加）
+- `inspect`（`depth` / `colors` / `showHidden` / `maxArrayLength` / `maxStringLength` / `sorted` /
+  `customInspect`；Map/Set/Date/RegExp/Error/typed array/Buffer/类实例/`Object.create(null)`；
+  **循环引用**渲染为 `<ref *1> { self: [Circular *1] }`；`inspect.custom` / `inspect.defaultOptions`）
+- `promisify` / `callbackify`（各带 `Symbol.for("nodejs.util.*.custom")`）
+- `inherits`、`deprecate`（首次使用经 `host_log("warn", …)` 报 `[CODE] DeprecationWarning`）
+- `stripVTControlCharacters`、`styleText`（`[open, close]` 调色板，按顺序开、逆序关）
+- `debuglog` / `debug`（`NODE_DEBUG` 开闸，输出走 `host_log("debug", …)`）
+- `types`（Node 22 全量谓词；`isProxy` / `isModuleNamespaceObject` / `isCryptoKey` / `isKeyObject`
+  恒 `false`，因为该引擎里不存在这类对象）
+- `isDeepStrictEqual`（原型感知、Map/Set 无序、`NaN === NaN`、`0 !== -0`、symbol 键参与比较）
+- 遗留谓词全家（`isArray` / `isString` / …）、`toUSVString`、`_extend`、`log`
+- `TextEncoder` / `TextDecoder`（`utf-8` / `utf-16le` / `windows-1252`，含 cp1252 0x80–0x9F 表；
+  引擎缺全局时同时安装为 globals）
+
+**先对照真 Node 再写断言**：写了一个 vm 沙箱 harness（真 `Buffer` + 桩 `__pi_node_call`，
+把 shim 模块与本机 `require("node:util")`（Node v22.23.2）逐项比对），第一轮就抓出 4 处偏差
+并修掉，之后 harness 输出 `ALL MATCH`：
+
+1. `inspect` 的字符串 Map 键在 Node 里**带绿色**，原实现没上色；
+2. `STYLE_CODES` 必须写成 `[open, close]` 对（`bold` 收尾是 22 不是 21），
+   `styleText(["bold","red"],"x")` 才会得到 `\x1b[1m\x1b[31mx\x1b[39m\x1b[22m`；
+3. `isBoxedPrimitive` 缺 `typeof value === "object"` 守卫；
+4. 循环引用需要预扫描 `collectRefs`，否则拿不到 `<ref *N>` 前缀 / `[Circular *N]` 标记。
+
+有意不做（写进 `NODE_BUILTINS.md` 的「Not covered」）：`parseArgs` / `parseEnv` / `diff` /
+`aborted` / `transferableAbort*` / `getSystemError(Name|Message|Map)` / `getCallSite(s)` /
+`MIMEType*` / `setTraceSigInt`；`TextDecoder` 的 `{stream:true}` / `fatal:true` 也不支持。
+另登记 3 条差异：`inspect` 单行输出（`breakLength` / `compact` 接受但忽略）、装箱原始值 / Promise
+按 `Boolean {}` / `Promise { <pending> }` 渲染、`styleText` 恒发 ANSI（不探测 TTY）。
+
+### 三、验证
+
+```
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p pi-extensions --offline
+  lib 0 + e2e 10 + host 32 + loader 3 + node_builtins 5 = 50 passed, 0 failed   # 此前 49
+```
+
+- 新测试 `node_util_surface_matches_node`（`tests/node_builtins.rs:466`）在真 QuickJS 宿主里
+  加载一个 ESM 扩展，断言取 harness 里逐个对照过 Node v22.23.2 的输出：`format` 的 6 种
+  specifier、`inspect` 的深度 / 颜色 / 自定义 / 循环 / `maxArrayLength`、`types` 15 项、
+  `isDeepStrictEqual` 11 项、`stripVTControlCharacters` / `styleText`（含背景色）、`inherits`、
+  `deprecate`（调用计数）、`TextEncoder` / `TextDecoder` 往返与 `encodeInto`、全局安装、默认导出。
+- 兼容闸门 `upstream_node_imports_are_all_bridged_or_documented` 仍绿：`KNOWN_UNBRIDGED`
+  由 5 项收敛到 4 项（`node:child_process` / `node:module` / `node:readline` / `node:zlib`），
+  文档表格同步删掉 `node:util` 行 —— 闸门双向校验（桥接了却留在清单里同样失败）。
+- 环境：开工时磁盘 95%（余 2.7G），且有 4 路 cargo 在编（LUM-1083 / LUM-1093 / LUM-1104，
+  外加 LUM-981 挂了 19 小时的僵尸 cargo），本 worktree 内没有可复用的 `target`。用
+  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0` 把本轮 `target` 压到 **323M**，未再复现
+  LUM-1100 轮记录过的共享 target ENOSPC。**没有**删任何别人的 target —— 三个 6.5G–11G 的
+  target 在最近 30 分钟内都有写入，即都在编。
+- `cargo fmt --check`：本轮新增代码 rustfmt 干净；crate 里 `bridge.rs` / `host.rs` / `e2e.rs`
+  等**既有**文件在 rustfmt 1.8.0 下本就不 clean（与本轮无关，未顺手格式化以免制造冲突）。
+
+### 四、合并与推送
+
+- 工作分支 `work/lum-1105`，起点 `2a5ec220e`（= 当时的 `origin/feature/pi.rs`）。
+- 本轮提交 `eaeae6a8b`（4 文件，+1319 −11），随后 `git merge --no-ff origin/feature/pi.rs`
+  （此时远端已到 `9c3df4d2f`，含 LUM-1103 的 `pi-tui` undo 栈）→ 合并提交 `6c6915a8b`，
+  **零冲突**（两轮文件不重叠）。
+- 非 force 推送到 `feature/pi.rs`。
+
+### 五、frontier（本轮更新）
+
+- ~~`node:util`~~ → **已落地**。
+- `node:child_process`：仍是插件生态**最大缺口**，`interactive-shell.ts` / `ssh.ts` /
+  `subagent/index.ts` / `sandbox/index.ts` / `mac-system-theme.ts` 都卡在它；Stage 级，
+  且要改 `host.rs`（与在途 LUM-1083 同文件），建议 LUM-1083 收口后再开。
+- `fetch` 全局：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+- `@earendil-works/pi-coding-agent` / `@earendil-works/pi-tui` 虚拟模块：pi 自己的 API，单独立项。
+- `node:module` / `node:readline` / `node:zlib` / `node:stream` 家族：理由与代价已在
+  `NODE_BUILTINS.md` 逐条登记，兼容闸门保证不会被忘掉。
+- 板面：LUM-1088 的 run 仍挂着（未推未合，占一个槽位）；LUM-1103 已进 `feature/pi.rs`；
+  LUM-1104 与 LUM-1103 是同模板重复轮（`pi-tui` 编辑器），建议人工合流。本轮**未派发**新子任务
+  （`running_task_count = 4` > 上限 3）。
