@@ -33,9 +33,12 @@ Key properties:
 
 - **One host import.** `host_node_call(op, argsJson)` is the *only*
   native entry point for all of `node:fs` / `node:os` / `node:buffer` /
-  `node:crypto` / `node:process`. Native-only, like every other host
-  import in `src/host.rs` (a `wasm32` binding would need to reimplement
-  the op table).
+  `node:crypto` / `node:process` / `node:child_process`. Native-only, like
+  every other host import in `src/host.rs` (a `wasm32` binding would need
+  to reimplement the op table). `node:child_process`'s `spawn` additionally
+  uses two async host imports — `host_child_read(handle, stream)` and
+  `host_child_wait(handle)` — because a live child outlives the call that
+  created it.
 - **Errors are values.** The bridge never throws: it returns
   `{"ok":false,"code","message","syscall","path"}` and the shim turns
   that into a Node-shaped `Error` (`err.code === "ENOENT"`) so
@@ -107,6 +110,33 @@ comes from `/dev/urandom`; there is no fallback PRNG on purpose.
 `env` (snapshot object), `platform`, `arch`, `pid`, `cwd()`, `nextTick`,
 `version`, `versions`, `exitCode`, `stdout.write`, `stderr.write`.
 
+### `node:child_process`
+
+The six upstream examples that hold a `ChildProcess` handle import this
+directly, so the buffered `pi.exec` bridge is not enough: `spawn` returns
+an object whose `stdout` / `stderr` emit `data`, whose `close` fires once
+the child is reaped, and whose `kill()` terminates it.
+
+| Node API | Bridge op | Notes |
+|---|---|---|
+| `execSync(command[, options])` | `child_process.runSync` | Shell command (`/bin/sh -c` on unix, `cmd.exe /C` on Windows). Returns a `Buffer`, or a string when `encoding` is set. Throws on a non-zero exit with `status` / `signal` / `stdout` / `stderr` / `pid` / `output` (`truncated-tool.ts` branches on `err.status === 1`). |
+| `execFileSync(file[, args][, options])` | `child_process.runSync` | No shell. Same return shape as `execSync`. |
+| `spawnSync(command[, args][, options])` | `child_process.runSync` | No shell by default (`{shell: true}` opts in). Never throws: a spawn failure becomes `{error, status: null, signal: null, pid: 0}`, and `output` is `[null, stdout, stderr]`. |
+| `exec(command[, options], callback)` | `child_process.runSync` | Runs through the shell; callback is `(error, stdout, stderr)` on the microtask queue. Default encoding `utf8`. |
+| `execFile(file[, args][, options], callback)` | `child_process.runSync` | No shell. |
+| `promisify(exec)` / `promisify(execFile)` | via `child_process.runSync` | The `util.promisify.custom` symbol is installed on both, so it resolves `{stdout, stderr}` and rejects with `error.stdout` / `error.stderr` — `mac-system-theme.ts` does `const { stdout } = await promisify(exec)(…)`. |
+| `spawn(command[, args][, options])` | `child_process.spawn` + `host_child_read` / `host_child_wait` | Returns a `ChildProcess`: `pid`, `killed`, `exitCode`, `signalCode`, `stdin` (`null` when ignored), `stdout` / `stderr` (`on("data")` / `on("end")` / `setEncoding`), `on("exit")` / `on("close")` / `on("error")`, `kill()`, `ref()` / `unref()`. |
+| `fork(modulePath)` | — | Not supported: needs an IPC channel the host does not have. Throws a named error. |
+
+Options: `cwd`, `env` (replaces the environment, like Node), `shell`,
+`encoding`, `maxBuffer`, `timeout`, `input`, `stdio`. `stdio` accepts
+`"pipe"` / `"ignore"` / `"inherit"` plus the positional array form; a
+stream or `"ipc"` entry throws. `detached` is accepted and ignored.
+
+The child is polled by a host task and each pipe drained by its own reader
+task, so a command that writes more than a pipe buffer cannot deadlock
+(`child_process_honours_cwd_env_and_drains_large_output`).
+
 ### `node:util`
 
 Pure JS — no host op is involved, so the whole module is shim-side. The
@@ -144,8 +174,8 @@ absent (the failure is a plain "undefined is not a function").
 | `.pi/extensions/import-repro.ts` | `node:buffer`, `node:fs`, `node:path` | Covered; additionally needs the `fetch` global. |
 | `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; additionally needs the `@earendil-works/pi-tui` module. |
 | `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; need the `@earendil-works/*` modules only. |
-| `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | Partially covered — blocked on the frontier rows below. |
-| `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `truncated-tool.ts` | `node:child_process` (+ `node:util`) | `node:util` is bridged; still blocked on `node:child_process`. |
+| `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | `node:child_process` is bridged (LUM-1110); still blocked on `node:readline` / `node:module` / `node:zlib`. `sandbox/index.ts` additionally needs `setTimeout` / `process.kill` / `AbortSignal`, which are engine/process-contract gaps rather than builtin ones. |
+| `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `truncated-tool.ts` | `node:child_process` (+ `node:util`) | **Unblocked**: all four now have the builtins they import. `ssh.ts`'s timed/abortable path additionally needs the `setTimeout` / `AbortSignal` globals (engine-level, not builtin). |
 | `auto-commit-on-exit.ts`, `border-status-editor.ts`, `dirty-repo-guard.ts`, `git-checkpoint.ts`, `github-issue-autocomplete.ts`, `inline-bash.ts`, `input-transform-streaming.ts`, `shutdown-command.ts` | — (shell out through the extension API) | **Unblocked**: these use `pi.exec`, which is now bridged to the Rust host (see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)); they never import `node:child_process` themselves. |
 
 The `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
@@ -168,6 +198,12 @@ virtualising them is its own work item.
 | `util.inspect` renders everything on one line — `breakLength` / `compact` are accepted but ignored — and boxed primitives / Promises print as `Boolean {}` / `Promise { <pending> }` instead of Node's resolved-state form. | Extensions log the output; line wrapping buys nothing here. |
 | `util.styleText` always emits ANSI codes; it does not consult `process.stdout.hasColors` (there is no TTY in the embedded engine). | Pass `{validateStream: false}` for Node-identical bytes; the codes are what the evals reporters consume. |
 | `util.TextDecoder` ignores `{stream: true}` and `fatal: true`; decoding never throws on malformed input. | Streaming would need a per-instance byte buffer; non-fatal decoding matches Node's default. |
+| `kill()` on a `spawn`ed child always sends SIGKILL and ignores its signal argument; a `timeout` also reports `signal: "SIGKILL"`, where Node uses SIGTERM. The error still carries `code: "ETIMEDOUT"` / `status: null` / `killed: true`, like Node. | The host owns one kill primitive; a portable per-signal path would need `libc::kill` on unix and a Windows equivalent. |
+| The buffered forms (`exec*` / `*Sync`) stop draining a pipe shortly after the direct child exits instead of waiting for EOF, so output written by a *grandchild* that inherited the pipe (`sh -c "sleep 5 & echo hi"`) is not waited for, and may be truncated. Node blocks until the pipe closes. | The reader threads are bounded so a grandchild cannot pin the host past its deadline. The direct child's own output is always captured: the reader only gives up after 250 ms of no EOF. |
+| Every `node:child_process` child is bounded by the host per-call timeout (5 s normally, 300 s in interactive mode); a child that outlives it is killed and reported as `killed` / `signal: "SIGKILL"`. | This is what stops a runaway extension from hanging `pi` — the same ceiling `pi.exec` and `host_exec` already enforce. Nothing in the shim can raise it. |
+| `spawn` pipes are fully buffered host-side; `maxBuffer` does not apply to `spawn` (only to the buffered forms), and there is no implicit 1 MiB default anywhere. | The reader tasks must always drain so the child never blocks on a full pipe; enforcing a cap on a live stream would mean dropping bytes an extension can still observe. |
+| `stdio: "inherit"` replays the captured output through the log-backed `process.stdout` / `stderr` after the child exits, instead of handing the real terminal to the child. | The `pi` process owns stdout (`--rpc`); a raw passthrough would corrupt the protocol. `spawnSync(…, {stdio: "inherit"})` therefore returns `stdout: null`, like Node. |
+| Writing to `child.stdin` is not supported (`spawn`'s stdin is `/dev/null`) and `detached` is ignored. | The host bridges no stdin channel; `detached` would need a process-group model the host does not have. |
 
 ## Not bridged (frontier)
 
@@ -176,7 +212,6 @@ Importing these fails with the readable error
 
 | Builtin | Why it is missing | What it would take |
 |---|---|---|
-| `node:child_process` | Extensions that need it import it directly (they hold a `ChildProcess` handle, not a `pi.exec` result); needs streaming stdio + a process lifetime model that respects the host deadline. | `tokio::process`, an op for spawn/exec with buffered stdout/stderr, and cancellation. Extensions that shell out through the documented `pi.exec` API are already covered by the `host_exec` bridge; the remaining examples are `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `sandbox/index.ts`, `subagent/index.ts` and `truncated-tool.ts`. |
 | `node:module` | `createRequire` would let an extension `require` arbitrary paths off disk, which the virtual-module sandbox exists to prevent. | Would need a deliberate decision to widen the sandbox, e.g. require-from-`node_modules`-only. Used by `doom-overlay/doom-engine.ts`. |
 | `node:readline` | Interactive prompting; needs streams and stdin ownership. | `readline.createInterface` over a stream bridge; the host owns stdin. Used by `git-merge-and-resolve.ts`. |
 | `node:zlib` | No compression backend in the workspace. | Add `flate2`/`miniz_oxide` and expose `gunzipSync`/`gzipSync`/`inflateRawSync`/`deflateSync`. Used by `doom-overlay/wad-finder.ts` (`gunzipSync`). |

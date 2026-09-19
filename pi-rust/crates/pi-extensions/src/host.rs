@@ -10,9 +10,11 @@
 //! when the agent calls a tool, the host invokes the JS-side execute
 //! function via [`JsExtensionHost::execute_tool`].
 
+use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +27,7 @@ use rquickjs_core::promise::MaybePromise;
 use rquickjs_core::{async_with, Ctx, Function};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::api::{ExtensionCapabilities, ExtensionEntry};
 use crate::error::ExtensionError;
@@ -306,12 +308,21 @@ pub struct JsExtensionHost {
     inner: Arc<Inner>,
 }
 
+/// Live `node:child_process` children, keyed by the shim-visible handle.
+type Children = Arc<Mutex<HashMap<u64, Arc<ChildEntry>>>>;
+
 struct Inner {
     /// Kept alive so the [`AsyncContext`](rquickjs_core::AsyncContext)
     /// below remains valid; the context holds a clone of the runtime
     /// but dropping the original would invalidate it.
     #[allow(dead_code)]
     runtime: rquickjs_core::AsyncRuntime,
+    /// Live `node:child_process` children, keyed by the handle the shim
+    /// passes back. [`Drop`] kills whatever is left so a detached child
+    /// can never outlive the host that started it.
+    children: Children,
+    /// Allocates the `node:child_process` handles above.
+    next_child: Arc<AtomicU64>,
     context: rquickjs_core::AsyncContext,
     ui_tx: mpsc::UnboundedSender<UiRequestEnvelope>,
     state: Arc<Mutex<HostState>>,
@@ -331,6 +342,21 @@ struct HostState {
     /// so `host_register_tool` can attribute tools to the extension
     /// that registered them without widening the host-import ABI.
     pending_extension: Option<String>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Ask every surviving child's wait task to kill it. The process
+        // is also protected by `kill_on_drop`, so a runtime shutdown that
+        // aborts the wait task still reaps it.
+        let children: Vec<Arc<ChildEntry>> = self.children.lock().values().cloned().collect();
+        for child in children {
+            child.killed.store(true, Ordering::Relaxed);
+            if let Some(kill) = child.kill_tx.lock().take() {
+                let _ = kill.send(());
+            }
+        }
+    }
 }
 
 impl JsExtensionHost {
@@ -360,6 +386,8 @@ impl JsExtensionHost {
         let deadline_nanos = Arc::new(AtomicU64::new(u64::MAX));
         let inner = Arc::new(Inner {
             runtime: runtime.clone(),
+            children: Arc::new(Mutex::new(HashMap::new())),
+            next_child: Arc::new(AtomicU64::new(1)),
             context: context.clone(),
             ui_tx,
             state,
@@ -1171,6 +1199,737 @@ where
     String::from_utf8_lossy(&buffer).into_owned()
 }
 
+// ---------------------------------------------------------------------------
+// `node:child_process` bridge
+//
+// `spawn` hands back a live handle, so unlike every other `node:*` op the
+// child outlives the JS call that created it:
+//
+//   shim                            host (Rust)
+//   spawn(cmd, args)                child_process.spawn → tokio::process::Command
+//     ──────────────────────────▶     + one reader task per pipe
+//     ◀──── {handle, pid}             + one wait task (deadline + kill channel)
+//   await host_child_read           parks on a `watch` channel until bytes / EOF
+//   await host_child_wait           parks until the process is reaped
+//
+// The buffered forms (`exec` / `execSync` / `spawnSync`) are a one-shot
+// variant that captures both pipes and returns a Node-shaped result. They are
+// the source of truth: the callback / promise wrappers in the shim run the
+// sync form and schedule their callback on the microtask queue, exactly like
+// `node:fs/promises` does.
+// ---------------------------------------------------------------------------
+
+/// Handles the shim passes back (`child_process.spawn` allocates them).
+#[derive(Clone)]
+struct ChildBridge {
+    children: Children,
+    next_child: Arc<AtomicU64>,
+    /// Ceiling every child gets: the host per-call timeout.
+    timeout: Duration,
+}
+
+/// One buffered pipe of a spawned child.
+struct ChildStream {
+    state: Mutex<ChildStreamState>,
+    /// Bumped on every write / EOF so `host_child_read` can park without
+    /// polling. A `watch` channel is used instead of `Notify` because its
+    /// version counter cannot lose a wake-up between the state check and the
+    /// await.
+    progress: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct ChildStreamState {
+    data: Vec<u8>,
+    eof: bool,
+}
+
+impl ChildStream {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ChildStreamState::default()),
+            progress: watch::channel(0u64).0,
+        }
+    }
+
+    fn push(&self, chunk: &[u8]) {
+        self.state.lock().data.extend_from_slice(chunk);
+        self.progress
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    fn finish(&self) {
+        self.state.lock().eof = true;
+        self.progress
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Take everything buffered. `None` means "nothing yet, not EOF".
+    fn take(&self) -> Option<(Vec<u8>, bool)> {
+        let mut state = self.state.lock();
+        if state.data.is_empty() {
+            return state.eof.then(|| (Vec::new(), true));
+        }
+        let data = std::mem::take(&mut state.data);
+        Some((data, state.eof))
+    }
+}
+
+/// Live state for one `node:child_process` child.
+struct ChildEntry {
+    stdout: Arc<ChildStream>,
+    stderr: Arc<ChildStream>,
+    exit: Mutex<Option<ChildExit>>,
+    exit_progress: watch::Sender<u64>,
+    /// Poked by `child.kill()`; the wait task owns the `Child` and performs
+    /// the signal, so no external code needs `&mut Child`.
+    kill_tx: Mutex<Option<mpsc::UnboundedSender<()>>>,
+    killed: AtomicBool,
+}
+
+#[derive(Clone, Serialize)]
+struct ChildExit {
+    code: Option<i32>,
+    signal: Option<String>,
+    killed: bool,
+    timed_out: bool,
+}
+
+impl ChildEntry {
+    fn new() -> Self {
+        Self {
+            stdout: Arc::new(ChildStream::new()),
+            stderr: Arc::new(ChildStream::new()),
+            exit: Mutex::new(None),
+            exit_progress: watch::channel(0u64).0,
+            kill_tx: Mutex::new(None),
+            killed: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Drain one child pipe into its [`ChildStream`] until EOF.
+async fn pump_child_stream<R>(mut pipe: R, stream: Arc<ChildStream>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => stream.push(&buffer[..read]),
+            Err(_) => break,
+        }
+    }
+    stream.finish();
+}
+
+/// Own the child until it exits, honouring the host deadline and any
+/// `child.kill()` request. Polling `try_wait` (rather than `select!` on
+/// `Child::wait`) keeps the `&mut Child` borrow in one place so the kill
+/// branch can signal it.
+async fn wait_child(
+    mut child: tokio::process::Child,
+    entry: Arc<ChildEntry>,
+    mut kill_rx: mpsc::UnboundedReceiver<()>,
+    deadline: Option<Instant>,
+) {
+    let mut killed = false;
+    let mut timed_out = false;
+    let mut kill_sent = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(_) => break None,
+        }
+        if !kill_sent && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            killed = true;
+            timed_out = true;
+            kill_sent = true;
+            let _ = child.start_kill();
+        }
+        let sleep = tokio::time::sleep(Duration::from_millis(5));
+        tokio::select! {
+            () = sleep => {}
+            request = kill_rx.recv() => {
+                if request.is_some() && !kill_sent {
+                    killed = true;
+                    kill_sent = true;
+                    let _ = child.start_kill();
+                }
+            }
+        }
+    };
+    if killed {
+        entry.killed.store(true, Ordering::Relaxed);
+    }
+    let (code, signal) = match status {
+        Some(status) => (status.code(), exit_signal_name(status)),
+        None => (None, None),
+    };
+    *entry.exit.lock() = Some(ChildExit {
+        code,
+        signal,
+        killed,
+        timed_out,
+    });
+    entry
+        .exit_progress
+        .send_modify(|version| *version = version.wrapping_add(1));
+}
+
+#[cfg(unix)]
+fn exit_signal_name(status: std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(signal_name)
+}
+
+#[cfg(not(unix))]
+fn exit_signal_name(_status: std::process::ExitStatus) -> Option<String> {
+    None
+}
+
+fn signal_name(signal: i32) -> String {
+    let name = match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return format!("SIG{signal}"),
+    };
+    name.to_string()
+}
+
+fn child_lookup(children: &Children, handle: u64) -> rquickjs_core::Result<Arc<ChildEntry>> {
+    children.lock().get(&handle).cloned().ok_or_else(|| {
+        rquickjs_core::Error::new_from_js_message(
+            "child_process",
+            "handle",
+            format!("unknown child process handle {handle}"),
+        )
+    })
+}
+
+/// `host_child_read(handle, stream)` — resolve once the stream has bytes or
+/// reaches EOF (`{data, done}`).
+async fn child_read_impl(
+    handle: u64,
+    stream: String,
+    children: &Children,
+) -> rquickjs_core::Result<String> {
+    let entry = child_lookup(children, handle)?;
+    let stream = match stream.as_str() {
+        "stdout" => entry.stdout.clone(),
+        "stderr" => entry.stderr.clone(),
+        other => {
+            return Err(rquickjs_core::Error::new_from_js_message(
+                "child_process",
+                "stream",
+                format!("unknown child stream `{other}`"),
+            ))
+        }
+    };
+    let mut progress = stream.progress.subscribe();
+    loop {
+        if let Some((data, done)) = stream.take() {
+            return Ok(serde_json::json!({
+                "data": base64_encode(&data),
+                "done": done,
+            })
+            .to_string());
+        }
+        if progress.changed().await.is_err() {
+            return Ok(serde_json::json!({ "data": "", "done": true }).to_string());
+        }
+    }
+}
+
+/// `host_child_wait(handle)` — resolve with the exit record once the child is
+/// reaped.
+async fn child_wait_impl(handle: u64, children: &Children) -> rquickjs_core::Result<String> {
+    let entry = child_lookup(children, handle)?;
+    let mut progress = entry.exit_progress.subscribe();
+    loop {
+        if let Some(exit) = entry.exit.lock().clone() {
+            return Ok(serde_json::to_string(&exit).unwrap_or_else(|_| "{}".to_string()));
+        }
+        if progress.changed().await.is_err() {
+            return Err(rquickjs_core::Error::new_from_js_message(
+                "child_process",
+                "handle",
+                "child process handle was dropped before it exited",
+            ));
+        }
+    }
+}
+
+/// `child_process.spawn` — start the process and return `{handle, pid}`.
+fn spawn_child(
+    args: &serde_json::Value,
+    bridge: &ChildBridge,
+) -> Result<serde_json::Value, NodeError> {
+    let program = node_arg_str(args, "program")?;
+    let argv = node_arg_str_array(args, "args")?;
+    let shell = node_arg_bool(args, "shell");
+    let cwd = args
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let env = node_arg_env(args)?;
+    let (program, argv) = if shell {
+        shell_wrap(&program, &argv)
+    } else {
+        (program, argv)
+    };
+
+    let mut command = tokio::process::Command::new(&program);
+    command
+        .args(&argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // A host that disappears must not orphan the OS process.
+        .kill_on_drop(true);
+    if let Some(cwd) = cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+        command.current_dir(cwd);
+    }
+    if let Some(env) = env.as_ref() {
+        command.env_clear();
+        command.envs(env.iter().map(|(key, value)| (key, value)));
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| NodeError::io(error, "spawn", &program))?;
+    let pid = child.id().unwrap_or(0);
+    let entry = Arc::new(ChildEntry::new());
+    if let Some(pipe) = child.stdout.take() {
+        tokio::spawn(pump_child_stream(pipe, entry.stdout.clone()));
+    } else {
+        entry.stdout.finish();
+    }
+    if let Some(pipe) = child.stderr.take() {
+        tokio::spawn(pump_child_stream(pipe, entry.stderr.clone()));
+    } else {
+        entry.stderr.finish();
+    }
+    let (kill_tx, kill_rx) = mpsc::unbounded_channel();
+    *entry.kill_tx.lock() = Some(kill_tx);
+    // Bounded by the host per-call timeout: a long-lived child cannot pin an
+    // extension call (or the `pi` process) forever. A shorter `timeout` in the
+    // options tightens the bound, never loosens it.
+    let requested = args
+        .get("timeoutMs")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis);
+    let deadline = Instant::now() + requested.unwrap_or(bridge.timeout).min(bridge.timeout);
+    tokio::spawn(wait_child(child, entry.clone(), kill_rx, Some(deadline)));
+    let handle = bridge.next_child.fetch_add(1, Ordering::Relaxed);
+    bridge.children.lock().insert(handle, entry);
+    Ok(serde_json::json!({ "handle": handle, "pid": pid }))
+}
+
+/// `child_process.kill` — ask the wait task to signal the child.
+fn kill_child(
+    args: &serde_json::Value,
+    bridge: &ChildBridge,
+) -> Result<serde_json::Value, NodeError> {
+    let handle = node_arg_u64(args, "handle")?;
+    let entry = bridge.children.lock().get(&handle).cloned();
+    let Some(entry) = entry else {
+        return Ok(serde_json::json!(false));
+    };
+    if entry.exit.lock().is_some() {
+        return Ok(serde_json::json!(false));
+    }
+    let sender = entry.kill_tx.lock().clone();
+    match sender {
+        Some(sender) => {
+            entry.killed.store(true, Ordering::Relaxed);
+            let _ = sender.send(());
+            Ok(serde_json::json!(true))
+        }
+        None => Ok(serde_json::json!(false)),
+    }
+}
+
+/// One-shot command used by `execSync` / `spawnSync` / `execFileSync` (and,
+/// through the shim, by the callback / promise forms).
+fn run_command_sync_op(
+    args: &serde_json::Value,
+    bridge: &ChildBridge,
+) -> Result<serde_json::Value, NodeError> {
+    let program = node_arg_str(args, "program")?;
+    let argv = node_arg_str_array(args, "args")?;
+    let shell = node_arg_bool(args, "shell");
+    let cwd = args
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let env = node_arg_env(args)?;
+    let input = match args.get("input").and_then(|value| value.as_str()) {
+        Some(encoded) => Some(
+            base64_decode(encoded)
+                .ok_or_else(|| NodeError::invalid("`input` is not valid base64"))?,
+        ),
+        None => None,
+    };
+    let requested = args
+        .get("timeoutMs")
+        .and_then(|value| value.as_u64())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis);
+    // The host deadline is a ceiling: an extension cannot opt into a call that
+    // outlives the per-call timeout the host itself enforces.
+    let timeout = Some(requested.map_or(bridge.timeout, |value| value.min(bridge.timeout)));
+    let max_buffer = args
+        .get("maxBuffer")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize);
+    let outcome = run_command_sync(RunSpec {
+        program,
+        args: argv,
+        shell,
+        cwd,
+        env,
+        input,
+        timeout,
+        max_buffer,
+    })?;
+    Ok(serde_json::json!({
+        "pid": outcome.pid,
+        "stdout": base64_encode(&outcome.stdout),
+        "stderr": base64_encode(&outcome.stderr),
+        "code": outcome.code,
+        "signal": outcome.signal,
+        "killed": outcome.killed,
+        "timedOut": outcome.timed_out,
+        "maxBufferExceeded": outcome.max_buffer_exceeded,
+    }))
+}
+
+/// Dispatch the `child_process.*` ops. Returns the same error shape as
+/// [`node_call`] so the shim's envelope handling is unchanged.
+fn child_process_call(
+    op: &str,
+    args: &serde_json::Value,
+    bridge: &ChildBridge,
+) -> Result<serde_json::Value, NodeError> {
+    match op {
+        "child_process.spawn" => spawn_child(args, bridge),
+        "child_process.kill" => kill_child(args, bridge),
+        "child_process.reap" => {
+            let handle = node_arg_u64(args, "handle")?;
+            bridge.children.lock().remove(&handle);
+            Ok(serde_json::json!(true))
+        }
+        "child_process.runSync" => run_command_sync_op(args, bridge),
+        other => Err(NodeError::new(
+            "ERR_UNSUPPORTED_OPERATION",
+            format!("node bridge op `{other}` is not implemented"),
+        )),
+    }
+}
+
+struct RunSpec {
+    program: String,
+    args: Vec<String>,
+    shell: bool,
+    cwd: Option<String>,
+    env: Option<Vec<(String, String)>>,
+    input: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+    max_buffer: Option<usize>,
+}
+
+struct RunOutcome {
+    pid: u32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    code: Option<i32>,
+    signal: Option<String>,
+    killed: bool,
+    timed_out: bool,
+    max_buffer_exceeded: bool,
+}
+
+/// Blocking (truly synchronous) runner behind the `*Sync` APIs. It uses
+/// `std::process` + OS threads rather than `tokio::process` because it runs
+/// *inside* a host import: blocking the caller's runtime thread while tokio
+/// tasks drained the pipes would deadlock.
+fn run_command_sync(spec: RunSpec) -> Result<RunOutcome, NodeError> {
+    let (program, args) = if spec.shell {
+        shell_wrap(&spec.program, &spec.args)
+    } else {
+        (spec.program.clone(), spec.args.clone())
+    };
+    let mut command = std::process::Command::new(&program);
+    command
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if spec.input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    if let Some(cwd) = spec.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+        command.current_dir(cwd);
+    }
+    if let Some(env) = spec.env.as_ref() {
+        command.env_clear();
+        command.envs(env.iter().map(|(key, value)| (key, value)));
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| NodeError::io(error, "spawn", &program))?;
+    let pid = child.id();
+
+    // A child that fills its stdin pipe before we read it would deadlock, so
+    // feed it from its own thread — mirroring the pipe readers below. The
+    // write is bounded too: a child that never reads stdin must not pin us.
+    let (stdin_tx, stdin_rx) = std::sync::mpsc::channel();
+    let stdin_thread = spec.input.map(|input| {
+        let mut stdin = child.stdin.take();
+        std::thread::spawn(move || {
+            if let Some(stdin) = stdin.as_mut() {
+                let _ = stdin.write_all(&input);
+                let _ = stdin.flush();
+            }
+            let _ = stdin_tx.send(());
+        })
+    });
+
+    let cap = spec.max_buffer;
+    let stdout_buffer = Arc::new(PipeBuffer::new());
+    let stderr_buffer = Arc::new(PipeBuffer::new());
+    let stdout_thread = std::thread::spawn({
+        let pipe = child.stdout.take();
+        let buffer = stdout_buffer.clone();
+        move || read_pipe_blocking(pipe, cap, buffer)
+    });
+    let stderr_thread = std::thread::spawn({
+        let pipe = child.stderr.take();
+        let buffer = stderr_buffer.clone();
+        move || read_pipe_blocking(pipe, cap, buffer)
+    });
+
+    let deadline = spec.timeout.map(|timeout| Instant::now() + timeout);
+    let mut killed = false;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(_) => break None,
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            killed = true;
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().ok();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    // Both pipes are drained with a bounded wait. The direct child is gone by
+    // here, but a grandchild (`sh -c "sleep 30 &"`) can still hold the write
+    // end open: waiting for EOF would pin the host for as long as that
+    // grandchild lives. We keep whatever was captured instead — see the
+    // divergence table in `docs/NODE_BUILTINS.md`.
+    let grace = Duration::from_millis(PIPE_DRAIN_GRACE_MS);
+    let (stdout, stdout_exceeded) = stdout_buffer.take_after(grace);
+    let (stderr, stderr_exceeded) = stderr_buffer.take_after(grace);
+    if let Some(thread) = stdin_thread {
+        let _ = stdin_rx.recv_timeout(grace);
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
+    }
+    if stdout_thread.is_finished() {
+        let _ = stdout_thread.join();
+    }
+    if stderr_thread.is_finished() {
+        let _ = stderr_thread.join();
+    }
+    let (code, signal) = match status {
+        Some(status) => (status.code(), exit_signal_name(status)),
+        None => (None, None),
+    };
+    Ok(RunOutcome {
+        pid,
+        stdout,
+        stderr,
+        code,
+        signal,
+        killed,
+        timed_out,
+        max_buffer_exceeded: stdout_exceeded || stderr_exceeded,
+    })
+}
+
+/// How long a `*Sync` call keeps draining a pipe after the direct child is
+/// gone. Bounds a grandchild that inherited the pipe's write end.
+const PIPE_DRAIN_GRACE_MS: u64 = 250;
+
+/// Accumulator shared with a pipe reader thread. The reader may outlive the
+/// call (a grandchild holding the pipe), so the caller reads a snapshot
+/// rather than joining unconditionally.
+struct PipeBuffer {
+    state: std::sync::Mutex<PipeBufferState>,
+    done: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct PipeBufferState {
+    data: Vec<u8>,
+    exceeded: bool,
+    finished: bool,
+}
+
+impl PipeBuffer {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(PipeBufferState::default()),
+            done: std::sync::Condvar::new(),
+        }
+    }
+
+    fn push(&self, chunk: &[u8], cap: Option<usize>) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match cap {
+            Some(cap) => {
+                let remaining = cap.saturating_sub(state.data.len());
+                if chunk.len() > remaining {
+                    state.data.extend_from_slice(&chunk[..remaining]);
+                    state.exceeded = true;
+                } else {
+                    state.data.extend_from_slice(chunk);
+                }
+            }
+            None => state.data.extend_from_slice(chunk),
+        }
+    }
+
+    fn finish(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.finished = true;
+        self.done.notify_all();
+    }
+
+    /// Wait up to `grace` for EOF, then snapshot whatever has been captured.
+    fn take_after(&self, grace: Duration) -> (Vec<u8>, bool) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let deadline = Instant::now() + grace;
+        while !state.finished {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, _) = self
+                .done
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            state = next;
+        }
+        (state.data.clone(), state.exceeded)
+    }
+}
+
+/// Read a blocking pipe to EOF, keeping at most `cap` bytes but still draining
+/// so the child can exit. The cap flag reports whether the cap was hit.
+fn read_pipe_blocking<R: std::io::Read>(
+    pipe: Option<R>,
+    cap: Option<usize>,
+    buffer: Arc<PipeBuffer>,
+) {
+    let Some(mut pipe) = pipe else {
+        buffer.finish();
+        return;
+    };
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.push(&chunk[..read], cap),
+            Err(_) => break,
+        }
+    }
+    buffer.finish();
+}
+
+/// Build the `(program, args)` pair that runs `program args…` through the
+/// platform shell. Arguments are joined with spaces and **not** quoted, which
+/// matches Node's `shell: true` for the simple commands extensions use (and is
+/// documented as a divergence).
+fn shell_wrap(program: &str, args: &[String]) -> (String, Vec<String>) {
+    let mut command = program.to_string();
+    for arg in args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    #[cfg(windows)]
+    {
+        ("cmd.exe".to_string(), vec!["/C".to_string(), command])
+    }
+    #[cfg(not(windows))]
+    {
+        ("/bin/sh".to_string(), vec!["-c".to_string(), command])
+    }
+}
+
+fn node_arg_u64(args: &serde_json::Value, key: &str) -> Result<u64, NodeError> {
+    args.get(key)
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| NodeError::invalid(format!("missing numeric argument `{key}`")))
+}
+
+fn node_arg_str_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>, NodeError> {
+    match args.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_string).ok_or_else(|| {
+                    NodeError::invalid(format!("`{key}` must be an array of strings"))
+                })
+            })
+            .collect(),
+        Some(_) => Err(NodeError::invalid(format!(
+            "`{key}` must be an array of strings"
+        ))),
+    }
+}
+
+/// Node replaces the whole environment when `options.env` is given; a missing
+/// key is removed, and non-string values are coerced. `null` values are
+/// skipped, like Node's `undefined`.
+fn node_arg_env(args: &serde_json::Value) -> Result<Option<Vec<(String, String)>>, NodeError> {
+    match args.get("env") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Object(map)) => {
+            let mut out = Vec::with_capacity(map.len());
+            for (key, value) in map {
+                if value.is_null() {
+                    continue;
+                }
+                let value = match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                out.push((key.clone(), value));
+            }
+            Ok(Some(out))
+        }
+        Some(_) => Err(NodeError::invalid("`env` must be an object")),
+    }
+}
+
 /// Install the host imports the shim expects. Each function marshals
 /// its arguments as JSON, hands them to the host state, and returns a
 /// QuickJS-friendly value (string / Promise).
@@ -1308,12 +2067,46 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     globals.set("host_log", log_fn)?;
 
     // host_node_call(op, argsJson) — the single entry point behind the
-    // `node:*` virtual modules (fs / os / process / crypto). Returns a
-    // JSON *envelope* (`{"ok":true,"value":…}` / `{"ok":false,…}`)
-    // instead of throwing so the shim can build the `Error` object with
-    // the `code` / `syscall` / `path` fields Node extensions branch on.
-    let node_call_fn = Func::from(host_node_call_impl);
+    // `node:*` virtual modules (fs / os / process / crypto / child_process).
+    // Returns a JSON *envelope* (`{"ok":true,"value":…}` /
+    // `{"ok":false,…}`) instead of throwing so the shim can build the
+    // `Error` object with the `code` / `syscall` / `path` fields Node
+    // extensions branch on. `child_process` needs the live-child bridge, so
+    // the import closes over a clone of it.
+    let bridge = ChildBridge {
+        children: inner.children.clone(),
+        next_child: inner.next_child.clone(),
+        timeout: inner.timeout,
+    };
+    let node_call_bridge = bridge.clone();
+    let node_call_fn = Func::from(move |op: String, args_json: String| -> String {
+        host_node_call_dispatch(&op, &args_json, &node_call_bridge)
+    });
     globals.set("host_node_call", node_call_fn)?;
+
+    // host_child_read(handle, stream) -> Promise<{data, done}> — drains what
+    // the reader task has buffered so far. `data` is base64 so arbitrary
+    // binary survives the JSON envelope.
+    let read_bridge = bridge.clone();
+    let child_read_fn = move |handle: u64, stream: String| {
+        let children = read_bridge.children.clone();
+        async move { child_read_impl(handle, stream, &children).await }
+    };
+    globals.set(
+        "host_child_read",
+        Function::new(ctx.clone(), Async(child_read_fn))?,
+    )?;
+
+    // host_child_wait(handle) -> Promise<{code, signal, killed, timedOut}>
+    let wait_bridge = bridge.clone();
+    let child_wait_fn = move |handle: u64| {
+        let children = wait_bridge.children.clone();
+        async move { child_wait_impl(handle, &children).await }
+    };
+    globals.set(
+        "host_child_wait",
+        Function::new(ctx.clone(), Async(child_wait_fn))?,
+    )?;
 
     // Async host imports below return a JS Promise. Each one sends a
     // UiRequest on the channel and awaits the response oneshot. The
@@ -1460,10 +2253,18 @@ async fn ui_worker(
 /// result envelope. Never panics: malformed JSON is reported as
 /// `EINVAL` so a bad shim call surfaces as a normal JS error instead of
 /// taking the host down.
-fn host_node_call_impl(op: String, args_json: String) -> String {
+///
+/// `child_process.*` ops carry live handles and so need the bridge; every
+/// other `node:*` op goes to the stateless [`node_call`] table.
+fn host_node_call_dispatch(op: &str, args_json: &str, bridge: &ChildBridge) -> String {
     let args: serde_json::Value =
-        serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
-    match node_call(&op, &args) {
+        serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
+    let result = if op.starts_with("child_process.") {
+        child_process_call(op, &args, bridge)
+    } else {
+        node_call(op, &args)
+    };
+    match result {
         Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
         Err(err) => serde_json::json!({
             "ok": false,

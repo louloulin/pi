@@ -440,20 +440,50 @@ fn node_globals_are_installed_and_unsupported_builtins_are_reported() {
         // observes.
         let err = host
             .load(
-                entry_at("child_process", "/tmp/pi_node_builtins/child_process.mjs"),
+                entry_at("zlib", "/tmp/pi_node_builtins/zlib.mjs"),
                 r#"
-                    import { execSync } from "node:child_process";
+                    import { gzipSync } from "node:zlib";
                     export default function (pi) {
                         pi.appendEntry("loaded", { ok: true });
                     }
                 "#,
             )
             .await
-            .expect_err("node:child_process is not bridged yet");
+            .expect_err("node:zlib is not bridged yet");
         let message = err.to_string();
-        assert!(message.contains("node:child_process"), "{message}");
+        assert!(message.contains("node:zlib"), "{message}");
         assert!(message.contains("node:fs"), "{message}");
         assert!(message.contains("node:fs/promises"), "{message}");
+
+        // `node:child_process` is bridged now (LUM-1110), so the same import
+        // has to load instead of failing.
+        host.load(
+            entry_at("child_process", "/tmp/pi_node_builtins/child_process.mjs"),
+            r#"
+                import { execSync } from "node:child_process";
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "child_process_probe",
+                        label: "child process probe",
+                        description: "imports node:child_process",
+                        parameters: { type: "object" },
+                        execute: () => ({
+                            content: [{ type: "text", text: execSync("printf ok", { encoding: "utf8" }) }],
+                            details: { ok: true },
+                        }),
+                    });
+                }
+            "#,
+        )
+        .await
+        .expect("node:child_process is bridged");
+
+        let outcome = host
+            .execute_tool("child_process_probe", "{}")
+            .await
+            .expect("execute child_process probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+        assert_eq!(outcome.details.expect("details")["ok"], true);
     });
 }
 
@@ -682,7 +712,11 @@ fn node_specifiers(source: &str) -> std::collections::BTreeSet<String> {
     let mut found = std::collections::BTreeSet::new();
     let bytes = source.as_bytes();
     for (index, _) in source.match_indices("node:") {
-        let Some(quote) = index.checked_sub(1).map(|i| bytes[i]).filter(|b| *b == b'"' || *b == b'\'') else {
+        let Some(quote) = index
+            .checked_sub(1)
+            .map(|i| bytes[i])
+            .filter(|b| *b == b'"' || *b == b'\'')
+        else {
             continue;
         };
         let rest = &source[index + "node:".len()..];
@@ -713,12 +747,7 @@ fn upstream_node_imports_are_all_bridged_or_documented() {
     /// Builtins the upstream examples reach for that are not bridged yet.
     /// Every entry must appear in `docs/NODE_BUILTINS.md` under
     /// "Not bridged", and must *not* be in the shim's map.
-    const KNOWN_UNBRIDGED: [&str; 4] = [
-        "node:child_process",
-        "node:module",
-        "node:readline",
-        "node:zlib",
-    ];
+    const KNOWN_UNBRIDGED: [&str; 3] = ["node:module", "node:readline", "node:zlib"];
 
     fn shim_specifiers() -> BTreeSet<String> {
         let shim = include_str!("../runtime/pi-ext-shim.mjs");
@@ -754,7 +783,10 @@ fn upstream_node_imports_are_all_bridged_or_documented() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut scanned_files = 0usize;
     let mut upstream = BTreeSet::new();
-    for dir in [".pi/extensions", "packages/coding-agent/examples/extensions"] {
+    for dir in [
+        ".pi/extensions",
+        "packages/coding-agent/examples/extensions",
+    ] {
         let dir = root.join(dir);
         if !dir.is_dir() {
             continue;

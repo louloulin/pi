@@ -20,6 +20,9 @@
 //   - `host_ui_input(title, placeholder)`— return Promise<string|null>
 //   - `host_ui_select(title, optionsJson)`— return Promise<string|null>
 //   - `host_log(level, message)`         — surface a log line
+//   - `host_child_read(handle, stream)` — return Promise<{data,done}> for a
+//     `node:child_process` pipe (see `child_process.spawn`)
+//   - `host_child_wait(handle)`          — return Promise<{code,signal,…}>
 //
 // Internal entry points exposed on `globalThis._pi_host`:
 //   - `_pi_dispatch(eventJson)`   — deliver an `ExtensionEvent` payload
@@ -42,7 +45,8 @@
 //         the extension's file path; it backs `import.meta.url` and is
 //         used for readable error messages.
 //   - `host_node_call(op, argsJson)` — the single bridge behind the
-//     `node:*` virtual modules (fs / os / buffer / crypto / process).
+//     `node:*` virtual modules (fs / os / buffer / crypto / process /
+//     child_process).
 //     Returns a JSON envelope, never throws; see the `node:*` section
 //     near the bottom of this file.
 
@@ -3485,6 +3489,718 @@ const __pi_util_module = (() => {
   return Object.freeze(mod);
 })();
 
+// ---------------------------------------------------------------------------
+// `node:child_process` — `exec` / `execFile` / `execSync` / `execFileSync` /
+// `spawn` / `spawnSync`, backed by the `child_process.*` host ops (see
+// `src/host.rs`). The buffered host op is the primitive: the callback and
+// promise forms run it and schedule their result on the microtask queue,
+// while `spawn` gets a live handle that a reader task per pipe keeps filled.
+//
+// Divergences from Node, deliberate and mirrored in `docs/NODE_BUILTINS.md`:
+//   * every child is bounded by the host per-call timeout (5 s normally,
+//     300 s in interactive mode). When it fires the child is killed and
+//     `exit` / `close` report `signal: "SIGKILL"`; `kill()` also always
+//     sends SIGKILL and ignores its signal argument.
+//   * `spawn` pipes are fully buffered on the host side, so the child never
+//     sees backpressure and `maxBuffer` does not apply to `spawn`.
+//   * `stdio: "inherit"` is approximated by replaying captured output
+//     through `process.stdout` / `process.stderr` when the child exits.
+//   * writing to `child.stdin` is not supported (`spawn`'s stdin is
+//     `/dev/null`); `detached` and `fork` are not supported either.
+//   * there is no implicit 1 MiB `maxBuffer` default.
+// ---------------------------------------------------------------------------
+
+const __pi_child_process_module = (() => {
+  const BufferCtor = __pi_buffer_module.Buffer;
+  const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
+
+  // -------------------------------------------------------------------------
+  // Minimal event emitter — `child` and its stdio streams are EventEmitters.
+  // -------------------------------------------------------------------------
+
+  class Emitter {
+    constructor() {
+      this._listeners = Object.create(null);
+    }
+
+    on(type, listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError('The "listener" argument must be of type function');
+      }
+      const key = String(type);
+      (this._listeners[key] || (this._listeners[key] = [])).push(listener);
+      return this;
+    }
+
+    once(type, listener) {
+      const self = this;
+      function wrapper(...args) {
+        self.off(type, wrapper);
+        listener.apply(self, args);
+      }
+      wrapper.listener = listener;
+      return this.on(type, wrapper);
+    }
+
+    off(type, listener) {
+      const key = String(type);
+      const list = this._listeners[key];
+      if (!list) return this;
+      if (listener === undefined) {
+        delete this._listeners[key];
+        return this;
+      }
+      this._listeners[key] = list.filter(
+        (item) => item !== listener && item.listener !== listener,
+      );
+      return this;
+    }
+
+    addListener(type, listener) {
+      return this.on(type, listener);
+    }
+
+    removeListener(type, listener) {
+      return this.off(type, listener);
+    }
+
+    removeAllListeners(type) {
+      if (type === undefined) this._listeners = Object.create(null);
+      else delete this._listeners[String(type)];
+      return this;
+    }
+
+    listeners(type) {
+      return (this._listeners[String(type)] || []).slice();
+    }
+
+    listenerCount(type) {
+      return (this._listeners[String(type)] || []).length;
+    }
+
+    emit(type, ...args) {
+      const key = String(type);
+      const list = this._listeners[key];
+      if (!list || list.length === 0) {
+        // Node's EventEmitter rethrows an unhandled `error` event.
+        if (key === "error") {
+          const error = args[0];
+          throw error instanceof Error ? error : new Error(String(error));
+        }
+        return false;
+      }
+      for (const listener of list.slice()) listener.apply(this, args);
+      return true;
+    }
+  }
+
+  /** The `child.stdout` / `child.stderr` shape: the Readable subset the
+   *  examples use (`on("data")` / `on("end")` / `setEncoding`). Chunks that
+   *  arrive before the first `data` listener are buffered, so attaching the
+   *  listener a tick after `spawn` cannot lose output. */
+  class ReadableLike extends Emitter {
+    constructor() {
+      super();
+      this.__buffer = [];
+      this.__ended = false;
+      this.__encoding = null;
+    }
+
+    setEncoding(encoding) {
+      this.__encoding = normalizeEncoding(encoding);
+      return this;
+    }
+
+    resume() {
+      this.__flush();
+      return this;
+    }
+
+    pause() {
+      return this;
+    }
+
+    read() {
+      return this.__buffer.length === 0 ? null : this.__buffer.shift();
+    }
+
+    on(type, listener) {
+      super.on(type, listener);
+      if (String(type) === "data") this.__flush();
+      return this;
+    }
+
+    addListener(type, listener) {
+      return this.on(type, listener);
+    }
+
+    __push(bytes) {
+      const value = this.__encoding == null ? bytes : bytes.toString(this.__encoding);
+      if (this.listenerCount("data") > 0) this.emit("data", value);
+      else this.__buffer.push(value);
+    }
+
+    __flush() {
+      while (this.__buffer.length > 0) this.emit("data", this.__buffer.shift());
+    }
+
+    __end() {
+      if (this.__ended) return;
+      this.__ended = true;
+      this.__flush();
+      this.emit("end");
+      this.emit("close");
+    }
+  }
+
+  /** Stands in for `child.stdin`. The host does not bridge a child's stdin,
+   *  so writing fails loudly instead of silently dropping bytes. */
+  class WritableLike extends Emitter {
+    write() {
+      throw new Error(
+        "pi extension host: writing to a child process stdin is not supported",
+      );
+    }
+
+    end() {
+      return this;
+    }
+
+    destroy() {
+      return this;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Options / encodings
+  // -------------------------------------------------------------------------
+
+  function normalizeEncoding(encoding) {
+    if (encoding === null) return null;
+    const name = String(encoding).toLowerCase();
+    if (name === "buffer") return null;
+    // `Buffer.from("", enc)` validates the name exactly like `toString` does.
+    try {
+      BufferCtor.from("", name);
+    } catch (_error) {
+      const error = new TypeError("Unknown encoding: " + encoding);
+      error.code = "ERR_UNKNOWN_ENCODING";
+      throw error;
+    }
+    if (name === "utf-8") return "utf8";
+    if (name === "ucs2" || name === "ucs-2" || name === "utf-16le") return "utf16le";
+    if (name === "binary" || name === "ascii") return "latin1";
+    return name;
+  }
+
+  /** Node lets `options` be a bare encoding string (`exec(cmd, "utf8", cb)`). */
+  function normalizeOptions(options) {
+    if (options === undefined || options === null) return undefined;
+    if (typeof options === "string") return { encoding: options };
+    if (typeof options !== "object") {
+      throw new TypeError('The "options" argument must be an object or a string');
+    }
+    return options;
+  }
+
+  function optionEncoding(options, fallback) {
+    if (options == null || options.encoding === undefined) {
+      return normalizeEncoding(fallback);
+    }
+    return normalizeEncoding(options.encoding);
+  }
+
+  function encodeResult(bytes, encoding) {
+    return encoding == null ? bytes : bytes.toString(encoding);
+  }
+
+  function normalizeArgs(args) {
+    if (args === undefined || args === null) return [];
+    if (!Array.isArray(args)) {
+      throw new TypeError('The "args" argument must be an array of strings');
+    }
+    return args.map((arg) => String(arg));
+  }
+
+  function normalizeStdio(options) {
+    const raw = options == null ? undefined : options.stdio;
+    const defaults = { stdin: "ignore", stdout: "pipe", stderr: "pipe" };
+    if (raw === undefined || raw === null || raw === "pipe") return defaults;
+    if (raw === "ignore") return { stdin: "ignore", stdout: "ignore", stderr: "ignore" };
+    if (raw === "inherit") {
+      return { stdin: "inherit", stdout: "inherit", stderr: "inherit" };
+    }
+    if (Array.isArray(raw)) {
+      return {
+        stdin: stdioEntry(raw[0], "ignore"),
+        stdout: stdioEntry(raw[1], "pipe"),
+        stderr: stdioEntry(raw[2], "pipe"),
+      };
+    }
+    throw new Error(
+      "pi extension host: unsupported `stdio` option " + JSON.stringify(raw),
+    );
+  }
+
+  function stdioEntry(value, fallback) {
+    if (value === undefined || value === null) return fallback;
+    if (value === "pipe" || value === "ignore" || value === "inherit") return value;
+    throw new Error(
+      'pi extension host: `stdio` entries must be "pipe", "ignore" or "inherit" (got ' +
+        JSON.stringify(value) +
+        '); streams and "ipc" are not supported',
+    );
+  }
+
+  function buildRequest(program, args, options, defaultShell) {
+    if (typeof program !== "string" || program.length === 0) {
+      throw new TypeError('The "file" argument must be a non-empty string');
+    }
+    const opts = options == null ? {} : options;
+    const request = {
+      program: program,
+      args: normalizeArgs(args),
+      shell: opts.shell === undefined ? defaultShell : Boolean(opts.shell),
+    };
+    if (typeof opts.cwd === "string" && opts.cwd.length > 0) request.cwd = opts.cwd;
+    if (opts.env != null) {
+      if (typeof opts.env !== "object") {
+        throw new TypeError('The "env" argument must be an object');
+      }
+      const env = {};
+      for (const key of Object.keys(opts.env)) {
+        const value = opts.env[key];
+        if (value === undefined) continue;
+        env[key] = value === null ? null : String(value);
+      }
+      request.env = env;
+    }
+    if (typeof opts.timeout === "number" && opts.timeout > 0) request.timeoutMs = opts.timeout;
+    if (typeof opts.maxBuffer === "number" && opts.maxBuffer > 0) {
+      request.maxBuffer = opts.maxBuffer;
+    }
+    if (opts.input != null) {
+      const bytes =
+        typeof opts.input === "string"
+          ? BufferCtor.from(opts.input, "utf8")
+          : BufferCtor.from(opts.input);
+      request.input = bytes.toString("base64");
+    }
+    return request;
+  }
+
+  function runSync(request) {
+    return __pi_node_call("child_process.runSync", request);
+  }
+
+  function toBytes(base64) {
+    return BufferCtor.from(typeof base64 === "string" ? base64 : "", "base64");
+  }
+
+  /** `stdio: "inherit"` best effort: the captured bytes are replayed through
+   *  the host's log-backed `process.stdout` / `process.stderr`. */
+  function writeThrough(name, bytes) {
+    if (bytes.length === 0) return;
+    const stream = __pi_process_module[name];
+    if (stream && typeof stream.write === "function") {
+      stream.write(bytes.toString("utf8"));
+    }
+  }
+
+  function describeCommand(request) {
+    if (request.shell || request.args.length === 0) return request.program;
+    return request.program + " " + request.args.join(" ");
+  }
+
+  function decorateSpawnError(error, request) {
+    if (request) {
+      error.spawnargs = [request.program].concat(request.args);
+      if (error.syscall === undefined) error.syscall = "spawn " + request.program;
+    }
+    if (error.status === undefined) error.status = null;
+    if (error.signal === undefined) error.signal = null;
+    return error;
+  }
+
+  function makeMaxBufferError() {
+    const error = new Error("stdout maxBuffer length exceeded");
+    error.code = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+    error.killed = false;
+    return error;
+  }
+
+  function makeExecError(request, outcome, stdoutBytes, stderrBytes, encoding, fromSync) {
+    const commandLine = describeCommand(request);
+    const stderrText = stderrBytes.toString("utf8");
+    const error = new Error(
+      "Command failed: " + commandLine + (stderrText ? "\n" + stderrText : ""),
+    );
+    const failedBySignal = outcome.killed || outcome.timedOut || outcome.code === null;
+    // Node reports a timeout as `ETIMEDOUT` (with `status: null`) for the whole
+    // `exec*` family, including `execSync`.
+    error.code = outcome.timedOut ? "ETIMEDOUT" : failedBySignal ? null : outcome.code;
+    error.killed = Boolean(outcome.killed || outcome.timedOut);
+    error.signal = outcome.signal === null ? null : outcome.signal;
+    error.cmd = commandLine;
+    error.stdout = encodeResult(stdoutBytes, encoding);
+    error.stderr = encodeResult(stderrBytes, encoding);
+    if (fromSync) {
+      // `execSync` / `execFileSync` additionally expose the `spawnSync` shape.
+      error.status = outcome.code === null ? null : outcome.code;
+      error.output = [null, error.stdout, error.stderr];
+      error.pid = outcome.pid;
+    }
+    return error;
+  }
+
+  // -------------------------------------------------------------------------
+  // Buffered (one-shot) forms — the source of truth for `exec*` / `*Sync`
+  // -------------------------------------------------------------------------
+
+  function spawnSyncImpl(file, args, options) {
+    const stdio = normalizeStdio(options);
+    const encoding = optionEncoding(options, null);
+    let request;
+    let outcome;
+    try {
+      request = buildRequest(file, args, options, false);
+      outcome = runSync(request);
+    } catch (error) {
+      // A spawn failure (ENOENT / EACCES / …) is a *value* for `spawnSync`.
+      return {
+        error: decorateSpawnError(error, request),
+        status: null,
+        signal: null,
+        output: null,
+        pid: 0,
+        stdout: undefined,
+        stderr: undefined,
+      };
+    }
+
+    const stdoutBytes = toBytes(outcome.stdout);
+    const stderrBytes = toBytes(outcome.stderr);
+    if (stdio.stdout === "inherit") writeThrough("stdout", stdoutBytes);
+    if (stdio.stderr === "inherit") writeThrough("stderr", stderrBytes);
+    const stdout = stdio.stdout === "pipe" ? encodeResult(stdoutBytes, encoding) : null;
+    const stderr = stdio.stderr === "pipe" ? encodeResult(stderrBytes, encoding) : null;
+    const result = {
+      status: outcome.code === null ? null : outcome.code,
+      signal: outcome.signal === null ? null : outcome.signal,
+      output: [null, stdout, stderr],
+      pid: outcome.pid,
+      stdout: stdout,
+      stderr: stderr,
+    };
+    if (outcome.maxBufferExceeded) {
+      // Node reports ENOBUFS for `spawnSync` and ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+      // for the `exec*` family; keep that split.
+      const error = new Error("spawnSync " + request.program + " ENOBUFS");
+      error.code = "ENOBUFS";
+      error.errno = -105;
+      error.syscall = "spawnSync " + request.program;
+      result.error = error;
+    } else if (outcome.timedOut) {
+      const error = new Error("spawnSync " + request.program + " ETIMEDOUT");
+      error.code = "ETIMEDOUT";
+      error.syscall = "spawnSync " + request.program;
+      result.error = error;
+    }
+    return result;
+  }
+
+  function execSyncImpl(program, args, options, defaultShell) {
+    const encoding = optionEncoding(options, null);
+    const request = buildRequest(program, args, options, defaultShell);
+    let outcome;
+    try {
+      outcome = runSync(request);
+    } catch (error) {
+      throw decorateSpawnError(error, request);
+    }
+    const stdoutBytes = toBytes(outcome.stdout);
+    const stderrBytes = toBytes(outcome.stderr);
+    if (outcome.maxBufferExceeded) throw makeMaxBufferError();
+    if (outcome.code !== 0 || outcome.killed || outcome.timedOut) {
+      throw makeExecError(request, outcome, stdoutBytes, stderrBytes, encoding, true);
+    }
+    return encodeResult(stdoutBytes, encoding);
+  }
+
+  function execImpl(program, args, options, callback, defaultShell) {
+    if (typeof options === "function") {
+      callback = options;
+      options = undefined;
+    }
+    if (typeof callback !== "function") {
+      throw new TypeError('The "callback" argument must be of type function');
+    }
+    const stdio = normalizeStdio(options);
+    const encoding = optionEncoding(options, "utf8");
+    let request;
+    let outcome;
+    try {
+      request = buildRequest(program, args, options, defaultShell);
+      outcome = runSync(request);
+    } catch (error) {
+      const spawnError = decorateSpawnError(error, request);
+      __pi_schedule(() => callback(spawnError, "", ""));
+      return;
+    }
+    const stdoutBytes = toBytes(outcome.stdout);
+    const stderrBytes = toBytes(outcome.stderr);
+    if (stdio.stdout === "inherit") writeThrough("stdout", stdoutBytes);
+    if (stdio.stderr === "inherit") writeThrough("stderr", stderrBytes);
+    const stdout = encodeResult(stdoutBytes, encoding);
+    const stderr = encodeResult(stderrBytes, encoding);
+    if (outcome.maxBufferExceeded) {
+      __pi_schedule(() => callback(makeMaxBufferError(), stdout, stderr));
+      return;
+    }
+    if (outcome.code !== 0 || outcome.killed || outcome.timedOut) {
+      const error = makeExecError(
+        request,
+        outcome,
+        stdoutBytes,
+        stderrBytes,
+        encoding,
+        false,
+      );
+      __pi_schedule(() => callback(error, stdout, stderr));
+      return;
+    }
+    __pi_schedule(() => callback(null, stdout, stderr));
+  }
+
+  // -------------------------------------------------------------------------
+  // `spawn` — live child
+  // -------------------------------------------------------------------------
+
+  /** Drain one host-side pipe, handing every chunk to `sink`. */
+  async function pump(handle, name, sink) {
+    for (;;) {
+      const raw = await globalThis.host_child_read(handle, name);
+      const chunk = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const bytes = toBytes(chunk && chunk.data);
+      if (bytes.length > 0) sink(bytes);
+      if (!chunk || chunk.done) return;
+    }
+  }
+
+  async function pumpStream(handle, stream, name) {
+    try {
+      await pump(handle, name, (bytes) => stream.__push(bytes));
+    } catch (_error) {
+      // The handle was reaped underneath us; report EOF rather than hanging.
+    }
+    stream.__end();
+  }
+
+  class ChildProcess extends Emitter {
+    constructor(handle, pid, stdio, spawnfile) {
+      super();
+      this.pid = pid;
+      this.killed = false;
+      this.exitCode = null;
+      this.signalCode = null;
+      this.spawnfile = spawnfile;
+      this.spawnargs = [];
+      this.__handle = handle;
+      this.__stdio = stdio;
+      this.__closed = false;
+      this.stdout = stdio.stdout === "pipe" ? new ReadableLike() : null;
+      this.stderr = stdio.stderr === "pipe" ? new ReadableLike() : null;
+      this.stdin = stdio.stdin === "ignore" ? null : new WritableLike();
+    }
+
+    kill() {
+      if (this.killed || this.exitCode !== null || this.signalCode !== null) return false;
+      let killed = false;
+      try {
+        killed = Boolean(__pi_node_call("child_process.kill", { handle: this.__handle }));
+      } catch (_error) {
+        killed = false;
+      }
+      if (killed) this.killed = true;
+      return killed;
+    }
+
+    ref() {
+      return this;
+    }
+
+    unref() {
+      return this;
+    }
+
+    __start() {
+      const child = this;
+      const streamTasks = [];
+      if (child.stdout) {
+        streamTasks.push(pumpStream(child.__handle, child.stdout, "stdout"));
+      } else {
+        streamTasks.push(
+          pump(child.__handle, "stdout", (bytes) => {
+            if (child.__stdio.stdout === "inherit") writeThrough("stdout", bytes);
+          }),
+        );
+      }
+      if (child.stderr) {
+        streamTasks.push(pumpStream(child.__handle, child.stderr, "stderr"));
+      } else {
+        streamTasks.push(
+          pump(child.__handle, "stderr", (bytes) => {
+            if (child.__stdio.stderr === "inherit") writeThrough("stderr", bytes);
+          }),
+        );
+      }
+
+      const exitPromise = globalThis.host_child_wait(child.__handle).then((raw) =>
+        typeof raw === "string" ? JSON.parse(raw) : raw,
+      );
+      exitPromise
+        .then((exit) => {
+          child.exitCode = exit && exit.code !== undefined ? exit.code : null;
+          child.signalCode = exit && exit.signal !== undefined ? exit.signal : null;
+          child.emit("exit", child.exitCode, child.signalCode);
+        })
+        .catch(() => {});
+
+      Promise.all([exitPromise].concat(streamTasks))
+        .then((results) => {
+          if (child.__closed) return;
+          child.__closed = true;
+          try {
+            __pi_node_call("child_process.reap", { handle: child.__handle });
+          } catch (_error) {
+            // Already reaped / handle unknown: `close` still fires.
+          }
+          const exit = results[0] || {};
+          child.emit(
+            "close",
+            exit.code === undefined ? null : exit.code,
+            exit.signal === undefined ? null : exit.signal,
+          );
+        })
+        .catch(() => {
+          if (child.__closed) return;
+          child.__closed = true;
+          child.emit("close", null, null);
+        });
+    }
+  }
+
+  function spawnImpl(file, args, options, defaultShell) {
+    if (
+      typeof globalThis.host_child_read !== "function" ||
+      typeof globalThis.host_child_wait !== "function"
+    ) {
+      throw new Error("child_process.spawn is not available in this host build");
+    }
+    const stdio = normalizeStdio(options);
+    const request = buildRequest(file, args, options, defaultShell);
+    const started = __pi_node_call("child_process.spawn", request);
+    const child = new ChildProcess(started.handle, started.pid, stdio, request.program);
+    child.spawnargs = [request.program].concat(request.args);
+    child.__start();
+    return child;
+  }
+
+  // -------------------------------------------------------------------------
+  // Public surface
+  // -------------------------------------------------------------------------
+
+  function spawn(command, args, options) {
+    if (options === undefined && args !== null && typeof args === "object" && !Array.isArray(args)) {
+      options = args;
+      args = [];
+    }
+    return spawnImpl(command, args, normalizeOptions(options), false);
+  }
+
+  function spawnSync(command, args, options) {
+    if (options === undefined && args !== null && typeof args === "object" && !Array.isArray(args)) {
+      options = args;
+      args = [];
+    }
+    return spawnSyncImpl(command, args, normalizeOptions(options));
+  }
+
+  function exec(command, options, callback) {
+    if (typeof options === "function") {
+      callback = options;
+      options = undefined;
+    }
+    return execImpl(String(command), [], normalizeOptions(options), callback, true);
+  }
+
+  function execFile(file, args, options, callback) {
+    if (typeof args === "function") {
+      callback = args;
+      args = [];
+      options = undefined;
+    } else if (typeof options === "function") {
+      callback = options;
+      options = undefined;
+    }
+    return execImpl(file, args, normalizeOptions(options), callback, false);
+  }
+
+  function execSync(command, options) {
+    return execSyncImpl(String(command), [], normalizeOptions(options), true);
+  }
+
+  function execFileSync(file, args, options) {
+    if (options === undefined && args !== null && typeof args === "object" && !Array.isArray(args)) {
+      options = args;
+      args = [];
+    }
+    return execSyncImpl(file, args, normalizeOptions(options), false);
+  }
+
+  /** `promisify(exec)` resolves `{stdout, stderr}` and rejects with the same
+   *  error, carrying `.stdout` / `.stderr` (Node installs this hook as the
+   *  `util.promisify.custom` symbol on both functions). */
+  function promisifyExec(original) {
+    return function (...args) {
+      return new Promise((resolve, reject) => {
+        original.apply(
+          this,
+          args.concat((error, stdout, stderr) => {
+            if (error) {
+              error.stdout = stdout;
+              error.stderr = stderr;
+              reject(error);
+            } else {
+              resolve({ stdout: stdout, stderr: stderr });
+            }
+          }),
+        );
+      });
+    };
+  }
+
+  exec[PROMISIFY_CUSTOM] = promisifyExec(exec);
+  execFile[PROMISIFY_CUSTOM] = promisifyExec(execFile);
+
+  const mod = {
+    exec: exec,
+    execFile: execFile,
+    execSync: execSync,
+    execFileSync: execFileSync,
+    spawn: spawn,
+    spawnSync: spawnSync,
+    ChildProcess: ChildProcess,
+    // `fork` needs an IPC channel the host does not have; a named failure
+    // beats `undefined is not a function`.
+    fork: () => {
+      throw new Error("child_process.fork is not supported in the pi extension host");
+    },
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
 // `TextEncoder` / `TextDecoder` are globals on Node; expose them here when the
 // engine has no native implementation (QuickJS does not).
 if (typeof globalThis.TextEncoder === "undefined") globalThis.TextEncoder = __pi_util_module.TextEncoder;
@@ -3512,6 +4228,8 @@ globalThis.__pi_virtual_modules = Object.freeze({
   process: __pi_process_module,
   "node:util": __pi_util_module,
   util: __pi_util_module,
+  "node:child_process": __pi_child_process_module,
+  child_process: __pi_child_process_module,
   typebox: __pi_typebox_module,
   "@sinclair/typebox": __pi_typebox_module,
 });
