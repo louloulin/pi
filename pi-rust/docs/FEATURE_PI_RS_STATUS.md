@@ -3811,9 +3811,9 @@ Stage 21（LUM-1078）把系统提示 / 项目上下文 / skills 注入落地后
 ### 验证
 
 ```
-$ cargo clippy -p pi-extensions -p pi-coding-agent --all-targets -- -D warnings  # 0 warnings
+$ cargo clippy --workspace --all-targets -- -D warnings              # 0 warnings
 $ cargo test   -p pi-extensions         # 27 passed（host 14 为新增 1 个）
-$ cargo test   -p pi-coding-agent       # 173 lib + 各集成 target 全绿
+$ cargo test   -p pi-coding-agent       # 173 lib 全绿；集成 target 除 rpc 抖动外全绿
 ```
 
 - lib 测试 151（Stage 21）→ **169**（本轮新增 18）：prompt templates 9 个、
@@ -3822,15 +3822,29 @@ $ cargo test   -p pi-coding-agent       # 173 lib + 各集成 target 全绿
 - 新增集成用例 `tests/rpc.rs::prompt_template_expands_slash_invocations`：写一个临时
   `.md` 模板，`pi --rpc --prompt-template <path>` 发 `/greet world`，断言 `getState`
   里出现展开后的 `hello-template:world` 且原始 `/greet world` 不泄漏。
-- 本轮多次踩到文档已记录的子进程用例抖动：`tests/rpc.rs::rpc_flag_without_stdin_exits_zero`、
-  `rpc_flag_no_longer_prints_the_stage5_stub`、`print_mode.rs::sigint_or_clean_exit` 各挂过，
-  单独重跑即绿。为此给 `tests/rpc.rs` 的 harness 补上了**失败时打印子进程 stderr**
-  （`recv_line` / `recv_json` / `recv_until` 三处 panic 都带上 `--- child stderr ---`），
-  于是根因一目了然：高负载（load average ≈ 19 / 32 核）下并发 spawn 9 个 `pi --rpc`
-  时，子进程会直接 abort，`free(): double free detected in tcache 2` —— 与 LUM-1079 节
-  记录的 `rquickjs-core → async-lock → event-listener` 依赖链同一根因，5 次连跑命中 2 次；
-  `--test-threads=1` 稳定全绿。本轮**没有**用互斥锁把测试串行化来掩掉它：这是
-  `pi --rpc` 进程级可以真的 abort 的产品缺陷，留在测试里可见比变绿更有价值。
+- 本轮反复踩到文档已记录的子进程用例抖动：`tests/rpc.rs` 的 9 个用例里**随机**一个挂掉
+  （`Disconnected`），`tests/print_mode.rs::sigint_or_clean_exit` 也挂过一次。为此给
+  `tests/rpc.rs` 的 harness 补上了**失败时打印子进程 stderr**（`recv_line` / `recv_json` /
+  `recv_until` 三处 panic 都带 `--- child stderr ---`），于是根因第一次被直接抓到：
+
+  ```
+  --- child stderr ---
+  free(): double free detected in tcache 2
+  ```
+
+  也就是说 `pi --rpc` 子进程是被 glibc 堆破坏 **SIGABRT** 掉的（`status.code() == None`），
+  不是协议层 bug，也解释了 `rpc_flag_without_stdin_exits_zero` 里 `assert_eq!(status.code(), Some(0))`
+  的失败。与 LUM-1079 节记录的 `rquickjs-core → async-lock → event-listener` 依赖链同一根因。
+- 抖动定位实验（**临时本地改动，未提交**）：给 harness 的 `pi` 加上 `--no-extensions` 后连跑
+  14 次，8 个经 harness 的用例 **0 次** abort；14 次里唯一的失败来自
+  `rpc_flag_without_stdin_exits_zero`——它是唯一自己拼 `Command` 的用例，因此仍然加载扩展，
+  挂在 `assert_eq!(status.code(), Some(0))`。对照组：不加 `--no-extensions` 的 6 次连跑里
+  2 次 abort。手工压力测（每个变体 90 次：立即 EOF / `getState` / `prompt`，各 9 并发）
+  两面都是 0 次 abort，说明它需要测试套件那种启动/负载模式才触发。样本量小，只能确定
+  「问题在扩展宿主这条路径上、且早于本轮」，不能确定具体触发条件。
+- 本轮**没有**把测试串行化或加 `--no-extensions` 来把它掩掉：这是 `pi --rpc` 进程级真的会
+  被 abort 的产品缺陷（用户并发起多个 `pi --rpc` 就会撞到），留在测试里可见比变绿更有价值；
+  同时 `--test-threads=1` 也不能保证全绿（本轮实测出现过一次串行失败）。
 
 ### 与 LUM-1079（Stage 19b）的合并
 
@@ -3839,8 +3853,9 @@ push 前先把已落到 `origin/feature/pi.rs` 的 LUM-1079 三个 commit（`a8f
 Stage 20 UI 桥）合入本轮分支。冲突三处，均已在合并提交里解决：`main.rs`
 （LUM-1079 把 `load_extensions` 扩成 5 参 + `TuiUi::new` 桥接，保留其调用并把
 `build_system_prompt_for` 挪到其后）、`extensions/wiring.rs`（import 列表合并）、
-`FEATURE_PI_RS_STATUS.md`（两节按轮次顺序保留）。合并后 `cargo test --workspace`
-在 `pi-ai` / `pi-tui` / `pi-extensions` / `pi-coding-agent`（173 lib）均全绿。
+`FEATURE_PI_RS_STATUS.md`（两节按轮次顺序保留）。合并后 `cargo clippy --workspace --all-targets`
+0 warning；`cargo test --workspace` 在 `pi-ai` / `pi-tui` / `pi-extensions` / `pi-coding-agent`
+（173 lib）全绿，唯一的失败仍是上面那条扩展宿主的 SIGABRT 抖动。
 
 ### 仍未做（与上游的刻意差异，另行立项）
 
