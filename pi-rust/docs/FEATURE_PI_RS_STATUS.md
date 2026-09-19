@@ -8734,3 +8734,95 @@ LUM-1132 已记为全仓 122 文件），本轮**没有**顺手格式化它们�
 - 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节
   如实记录（基线即红，与本轮无关；本 crate `--no-deps` 零 warning）。
 
+## LUM-1137 round — keybindings 消费方：`app.rs` / `editor.rs` 全部改走 `get_keybindings()`（Stage 38 收口）+ 启动安装 + `reload` 重装
+
+Stage 38「keybindings」三段中的第三段（前两段：LUM-1132 注册表、LUM-1134 配置层）。本轮**不改默认行为**，
+只把已经实现的按键判定从硬编码和弦换成注册表查询；`set_keybindings` 之前只在注册表自己的测试里出现过，
+运行时从不安装，本轮补上这条链路。**未派发任何子任务**（issue 明确要求）。
+
+### 一、改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `pi-tui/src/editor.rs` | `handle_key` 重建为 id 驱动；新增 `matches_binding` / `legacy_key_spelling` / `matches_app_exit`；模块文档补消费方/无消费方/偏离说明 |
+| `pi-tui/src/app.rs` | `step_key` 的 Esc / Ctrl+C / PageUp / PageDown / Home / End 改由注册表解析；新增 `matches_app_key`；模块文档新增「Keybindings」节 |
+| `pi-tui/src/keybindings.rs` | 新增 `matches_with_fallback`（`app.*` 不在裸 `pi-tui` 表内时的回落） |
+| `pi-coding-agent/src/keybindings.rs` | 新增 `install_keybindings` / `install_keybindings_from` / `reload_keybindings` |
+| `pi-coding-agent/src/lib.rs` | 再导出上述三个函数 |
+| `pi-coding-agent/src/interactive.rs` | `run_interactive` 在 `setup_terminal` 成功后安装配置层表 |
+| `pi-tui/tests/keybinding_consumer.rs`（新） | 覆盖「重绑一个 chord → 新键生效、旧键失效」（editor + app 各一） |
+| `pi-coding-agent/tests/keybinding_install.rs`（新） | 覆盖「安装发布合并表 + `reload` 重装」（改文件 → reload → 注册表看到新表） |
+
+### 二、id → 行为映射（消费方）
+
+`pi-tui` 侧（`editor.rs`）：`tui.editor.jumpForward`/`jumpBackward`（含旧字节拼写）、`tui.input.copy`→`Interrupt`、
+`app.exit`（空缓冲→`Eof`，否则落 `tui.editor.deleteCharForward`）、autocomplete 的 `tui.select.cancel`/`up`/`down` +
+`tui.input.tab`/`submit`、`tui.input.tab`（无下拉时强制补全）、`tui.editor.deleteToLineStart`/`deleteToLineEnd`/
+`deleteWordBackward`/`deleteWordForward`/`deleteCharBackward`/`deleteCharForward`、`tui.editor.yank`/`yankPop`、
+`tui.editor.cursorLineStart`/`cursorLineEnd`/`cursorWordLeft`/`cursorWordRight`/`cursorUp`/`cursorDown`/`cursorLeft`/
+`cursorRight`、`tui.editor.undo`、`tui.input.submit`。
+
+`pi-tui` 侧（`app.rs`）：`app.interrupt`（忙时取消）、`app.clear`（忙时取消 / 空闲退出）、`tui.altScreen.pageUp`/
+`pageDown`/`top`/`bottom`。
+
+`pi-coding-agent` 侧：`install_keybindings_from(agent_dir)` 把 `merged_definitions`（`tui.*` 默认 + 4 条覆盖 +
+43 条 `app.*`）装进 `pi_tui::keybindings::set_keybindings`。**只在交互 TTY 路径安装**：print / RPC / 无 TTY
+在 `setup_terminal` 之前/失败分支返回，注册表保持 `pi-tui` 默认。`reload_keybindings` = `manager.reload()` +
+再次 `set_keybindings`（注册表存的是 clone，不重装则改文件不可见）。
+
+### 三、有意偏离与无消费方（都写进模块文档）
+
+1. **`app.*` 不在裸 `pi-tui` 表内**：`app.interrupt` / `app.clear` / `app.exit` 由配置层定义。裸 `pi-tui`
+   （只看 47 条 `tui.*`）遇到这些 id 时 `matches` 返回 `false`，会让独立的 editor/app 测试与旧行为改变；
+   因此 `matches_with_fallback` 在「表里没有该 id」时回落到内置和弦（`escape` / `ctrl+c` / `ctrl+d`），
+   一旦任何表定义了该 id（哪怕空列表）就完全由表决定。重绑后旧键不再触发（`keybinding_consumer.rs` 断言）。
+2. **Shift 变体保留**：注册表按修饰键精确匹配，`Shift+Up` 不是 `tui.editor.cursorUp`；重建后的
+   `handle_key` 只对 **Shift 变体**（`Shift+Enter`/箭头/Home/End）保留旧语义，裸键（`Up`/`Backspace`/`Home`…）
+   一律由 id 决定——否则重绑/解绑一个 id 后裸键仍会走旧分支，注册表就形同虚设。
+3. **`Ctrl+L` 仍硬编码**：上游 `app.model.select` 默认也是 `ctrl+l`，但语义是「打开模型选择器」，本移植里
+   `Ctrl+L` 是「清屏」，故不接 `app.model.select`（与既有行为一致）。
+4. **无消费方（id 已存在、本轮不实现）**：`app.suspend`、`app.thinking.cycle`/`save`、
+   `app.model.cycleForward`/`cycleBackward`/`select`、`app.tools.expand`、`app.thinking.toggle`、`app.session.*`、
+   `app.tree.*`、`app.models.*`、`app.message.*`、`app.clipboard.*`、`app.editor.*`，以及
+   `tui.altScreen.halfPageUp`/`halfPageDown`/`lineUp`/`lineDown`/`previousPrompt`/`nextPrompt`/`search`/
+   `searchNext`/`searchPrevious`/`searchClose`。editor 内：`tui.input.newLine`（单行编辑器无处换行，`Shift+Enter`
+   沿用既有 `Enter` 提交分支）、`tui.editor.pageUp`/`pageDown`（视口属 App）、`tui.editor.historyPrevious`/`HistoryNext`
+   （默认未绑定，`Up`/`Down` 即 `cursorUp`/`cursorDown` 驱动单行历史）。
+5. **旧字节拼写**：`keys.ts` 把 `0x1D`/`ESC 0x1D` 归一成 `ctrl+]`/`ctrl+alt+]`、`0x1F` 归一成 `ctrl+-`；
+   crossterm 解成 `Ctrl+5`/`Ctrl+Alt+5`/`Ctrl+7`/`Ctrl+_`。`legacy_key_spelling` 只在 id 当前解析出的和弦
+   恰含规范拼写时才接受这些替身（重绑 `tui.editor.undo` 到 `ctrl+z` 后 `Ctrl+7` 不再 undo）。
+6. **已知小回归（注册表精确修饰键语义）**：`Ctrl+Shift+字母`、`Ctrl+Alt+Left/Right` 这类「大写/多修饰」
+   拼写不再映射到无修饰 id（旧代码 `Char('b')|Char('B')` 通吃大小写）；`Ctrl+D` 空缓冲退出仅在
+   `app.exit` 为该 chord 时成立。
+
+### 四、验证
+
+```
+$ rustc 1.85.0 (4d91de4e4 2025-02-17)            # 复用 LUM-1131 的 target 目录以避开 overlay 磁盘上限
+$ cargo test -p pi-tui --offline                 # exit 0：506 passed / 0 failed（含新增 keybinding_consumer 1）
+$ cargo test -p pi-coding-agent --offline        # exit 0：381 passed / 0 failed（含新增 keybinding_install 1）
+$ cargo test --workspace --offline               # exit 0：0 failure（构建 + 全量跑完，无磁盘中断）
+$ cargo build --workspace --offline              # exit 0
+$ cargo clippy -p pi-tui -p pi-coding-agent --all-targets --offline  # 0 warning 落在本轮改动的文件
+$ rustfmt --edition 2021 --config skip_children=true --check <本轮 8 个文件>  # 0 diff
+```
+
+`clippy ... -- -D warnings` 的基线红与 LUM-1133/1134 记录一致（`pi-telemetry` 2 条 `needless_lifetimes`、
+`pi-tui` 既有 `autocomplete.rs:427` / `theme.rs:213`、`pi-extensions` 1 条），本轮未改这些 crate；本轮改动的
+文件本身零 warning。本轮**没有**顺手格式化仓库既有的 rustfmt 欠账（`cargo fmt --all --check` 仍报 122 文件级漂移）。
+
+### 五、合并与推送
+
+代码提交见下方补记；并 `feature/pi.rs` 为快进。
+
+### 六、frontier（本轮更新）
+
+1. ~~keybindings 注册表 / 配置层 / 消费方~~ **Stage 38（LUM-1132 + LUM-1134 + LUM-1137）本轮收口**：
+   47 条 `tui.*` + 43 条 `app.*` 的解析、覆盖、迁移、加载、**运行时安装与消费**全链路打通。
+2. **P3 `alt-screen-search.ts` / OSC-8 hyperlink / 块级 HTML**：仍需要 `app.rs` 的 buffer / 渲染钩子，可单独排。
+3. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：同上（改 `app.rs` 选择 / 渲染路径）。
+4. **P2 `fetch` 全局 / P3 provider catalog**：维持原结论（要真实 HTTP 桥 / 无上游数据源，不猜）。
+5. **新增欠账（本轮）**：`app.suspend` / `app.thinking.cycle` 等 `app.*` 与 `tui.altScreen.search*` 仍无消费方，
+   接入时按 id 直接分发即可（注册表已就绪）。既有欠账（workspace 级 `clippy -D warnings` 红、
+   `pi-rust/docs/PLAN.md` 停在 Stage 14、全仓 rustfmt 漂移、`pi-agent-core/src/tools.rs:13` 并行工具路径、
+   `pi-ai` registry 缺 `openai-codex`/`kimi-coding`）维持不动。
