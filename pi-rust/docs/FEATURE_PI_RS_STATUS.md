@@ -7435,3 +7435,18 @@ $ node --check crates/pi-extensions/runtime/pi-ext-shim.mjs            # exit 0
 
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree 9344b02a8 work/lum-1125` → tree `a1bc2fdce`（零冲突）。
+- 合并提交 `f84199158`（`Merge branch 'work/lum-1125' into feature/pi.rs`，父 `9344b02a8` +
+  工作提交 `e971aeb59`），其 tree `a1bc2fdce` 与当时的 `work/lum-1125` **完全一致**
+  ——因为切片提交后已先把 `9344b02a8` 合入工作分支，这次合并没有产生任何额外改动，也没留合并债。
+- `git push origin f84199158:refs/heads/feature/pi.rs` → `9344b02a8..f84199158`；`work/lum-1125`
+  作为新分支一并推送。
+- `git diff --stat 9344b02a8 f84199158` = 本轮 8 个文件（代码 7 + 本节文档 128 行，共 +704 / −19），
+  无其他改动；`cargo test -p pi-extensions` 在 `f84199158` 的 tree 上实测 11 suite / 77 passed。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `9344b02a8`（LUM-1125 工作分支尚未推送），因此这次合并
+  **没有覆盖任何在途工作**。
+- 本节这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`（零冲突），
+  推送后 `feature/pi.rs` 的 tree 与 `work/lum-1125` 保持一致。
