@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use pi_extensions::ExtensionEntry;
 use pi_extensions::{
-    DispatchOutcome, ExtensionCapabilities, ExtensionError, ExtensionRegistry, JsExtensionHost,
-    ScriptedUiAnswers, ScriptedUiHandler, ToolExecutionOutcome,
+    DispatchOutcome, ExtensionCapabilities, ExtensionError, ExtensionRegistry, HostOptions,
+    JsExtensionHost, ScriptedUiAnswers, ScriptedUiHandler, ToolExecutionOutcome, UiHandler,
 };
 use pi_protocol::{ExtensionEvent, Message, Role, UiLevel, UiResponse};
 use serde_json::json;
@@ -235,7 +235,9 @@ fn host_resolves_ui_input_and_select() {
             inputs: [("Name?".to_string(), "alice".to_string())]
                 .into_iter()
                 .collect(),
-            selects: [("Pick".to_string(), "b".to_string())].into_iter().collect(),
+            selects: [("Pick".to_string(), "b".to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let handler = Arc::new(ScriptedUiHandler::new(answers));
@@ -286,9 +288,7 @@ fn host_timeout_for_slow_extension() {
         "#;
         host.load(entry("spin"), source).await.expect("load");
 
-        let result = host
-            .execute_tool("spin", "{}")
-            .await;
+        let result = host.execute_tool("spin", "{}").await;
         // The pure-sync `while(true)` doesn't yield, so rquickjs-core
         // may either succeed-with-error or return an error. Either
         // way, the host must not panic.
@@ -330,7 +330,10 @@ fn bridge_implements_extension_bridge_trait() {
             counter: counter.clone(),
         };
         // Smoke: call into the bridge trait from a typed reference.
-        let outcome = host.emit_event(&ExtensionEvent::SessionEnd).await.expect("dispatch");
+        let outcome = host
+            .emit_event(&ExtensionEvent::SessionEnd)
+            .await
+            .expect("dispatch");
         assert!(!outcome.handled);
         // The CountingBridge is constructed for compile-time coverage;
         // we never invoke its deliver method here so the counter stays
@@ -393,4 +396,215 @@ fn ui_response_serde_roundtrip() {
     let json = serde_json::to_string(&resp).expect("serialize");
     let parsed: UiResponse = serde_json::from_str(&json).expect("parse");
     assert_eq!(parsed, resp);
+}
+// ---------------------------------------------------------------------------
+// UI handler async trait (LUM-1077): the handler awaits the user, so every
+// prompt path has to be `async`. These tests drive all four `UiHandler`
+// methods through the JS shim and cover the "no handler installed" fallback.
+// ---------------------------------------------------------------------------
+
+/// `UiHandler` that answers every prompt with a recognisable value so the
+/// test can prove the request reached the handler (and not a default).
+#[derive(Default)]
+struct RecordingUiHandler {
+    notifies: std::sync::Mutex<Vec<(String, UiLevel)>>,
+}
+
+#[async_trait::async_trait]
+impl UiHandler for RecordingUiHandler {
+    async fn confirm(&self, title: &str, body: &str) -> bool {
+        title == "Go?" && body == "body text"
+    }
+    async fn input(&self, title: &str, placeholder: Option<&str>) -> Option<String> {
+        Some(format!("in:{title}:{}", placeholder.unwrap_or("-")))
+    }
+    async fn select(&self, title: &str, options: &[String]) -> Option<String> {
+        options.last().map(|last| format!("{title}:{last}"))
+    }
+    async fn notify(&self, message: &str, level: UiLevel) {
+        self.notifies
+            .lock()
+            .expect("notify lock")
+            .push((message.to_string(), level));
+    }
+}
+
+#[test]
+fn async_ui_handler_resolves_all_four_paths() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let handler = Arc::new(RecordingUiHandler::default());
+        let host = JsExtensionHost::with_handler(handler.clone())
+            .await
+            .expect("host");
+        let source = r#"
+            module.exports = async function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    const ok = await ctx.ui.confirm("Go?", "body text");
+                    const text = await ctx.ui.input("Name?", "type here");
+                    const picked = await ctx.ui.select("Pick", ["a", "b"]);
+                    ctx.ui.notify("done", "warning");
+                    pi.appendEntry("ui-summary", { ok: ok, text: text, picked: picked });
+                });
+            };
+        "#;
+        host.load(entry("async-ui"), source).await.expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let log = host.log();
+        let summary = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "ui-summary")
+            .expect("ui-summary entry");
+        assert_eq!(summary.data["ok"], true, "confirm routed: {summary:?}");
+        assert_eq!(summary.data["text"], "in:Name?:type here");
+        assert_eq!(summary.data["picked"], "Pick:b");
+
+        // `notify` is fire-and-forget: the JS call returns before the
+        // worker task drains the envelope, so give it a beat.
+        let mut notifies = Vec::new();
+        for _ in 0..100 {
+            notifies = handler.notifies.lock().expect("notify lock").clone();
+            if !notifies.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            notifies.len(),
+            1,
+            "notify reaches the handler: {notifies:?}"
+        );
+        assert_eq!(notifies[0], ("done".to_string(), UiLevel::Warning));
+    });
+}
+
+#[test]
+fn missing_ui_handler_denies_without_blocking() {
+    let runtime = rt();
+    runtime.block_on(async {
+        // `JsExtensionHost::new()` installs no UI handler at all.
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = async function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    const ok = await ctx.ui.confirm("Go?", "body");
+                    const text = await ctx.ui.input("Name?", "ph");
+                    const picked = await ctx.ui.select("Pick", ["a", "b"]);
+                    ctx.ui.notify("still fine", "info");
+                    pi.appendEntry("ui-summary", { ok: ok, text: text, picked: picked });
+                });
+            };
+        "#;
+        host.load(entry("no-ui-handler"), source)
+            .await
+            .expect("load");
+        // The whole dispatch has to complete — a fallback that blocked
+        // would hang here instead of returning.
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let log = host.log();
+        let summary = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "ui-summary")
+            .expect("ui-summary entry");
+        assert_eq!(summary.data["ok"], false);
+        assert!(summary.data["text"].is_null(), "{summary:?}");
+        assert!(summary.data["picked"].is_null(), "{summary:?}");
+    });
+}
+
+#[test]
+fn tool_execute_sees_host_tool_context() {
+    let runtime = rt();
+    runtime.block_on(async {
+        // Wiring builds the host with the session's mode / hasUI so a
+        // tool's `execute(args, ctx)` reports the same `ctx.hasUI` the
+        // event handlers see.
+        let host = JsExtensionHost::with_options(HostOptions::default().with_tool_context(
+            pi_extensions::ToolContext {
+                mode: "tui".into(),
+                has_ui: true,
+                cwd: "/tmp".into(),
+            },
+        ))
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "ctx_probe",
+                    label: "Ctx probe",
+                    description: "Reports the ctx a tool execution receives.",
+                    parameters: { type: "object" },
+                    execute: function (args, ctx) {
+                        return {
+                            content: [{ type: "text", text: JSON.stringify({
+                                mode: ctx.mode, hasUI: ctx.hasUI, cwd: ctx.cwd,
+                            }) }],
+                        };
+                    },
+                });
+            };
+        "#;
+        host.load(entry("ctx-probe"), source).await.expect("load");
+        let outcome = host.execute_tool("ctx_probe", "{}").await.expect("execute");
+        let text = outcome.content[0]["text"].as_str().expect("text");
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("json");
+        assert_eq!(parsed["mode"], "tui");
+        assert_eq!(parsed["hasUI"], true);
+        assert_eq!(parsed["cwd"], "/tmp");
+    });
+}
+
+#[test]
+fn non_interactive_ui_requests_deny_and_report_via_notify() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = async function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    const ok = await ctx.ui.confirm("Go?", "body");
+                    const picked = await ctx.ui.select("Pick", ["a", "b"]);
+                    pi.appendEntry("denied", { ok: ok, picked: picked });
+                });
+            };
+        "#;
+        host.load(entry("non-interactive"), source)
+            .await
+            .expect("load");
+        // print / rpc / no-TTY: `ctx.hasUI` is false, so the shim answers
+        // immediately instead of blocking a client on a dialog nobody can
+        // render.
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("rpc"), false, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let log = host.log();
+        let denied = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "denied")
+            .expect("denied entry");
+        assert_eq!(denied.data["ok"], false);
+        assert!(denied.data["picked"].is_null(), "{denied:?}");
+
+        // …and the denial is surfaced as a warning notify rather than
+        // vanishing silently.
+        let warning = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "ui_notify")
+            .expect("deny notify");
+        assert_eq!(warning.data["level"], "warning");
+        let message = warning.data["message"].as_str().unwrap_or_default();
+        assert!(message.contains("denied"), "{message}");
+    });
 }

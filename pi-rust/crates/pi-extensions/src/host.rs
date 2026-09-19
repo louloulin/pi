@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use pi_protocol::{ExtensionEvent, ToolDefinition, UiLevel, UiRequest, UiResponse};
 use rquickjs_core::function::{Async, Func};
@@ -34,24 +35,38 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// User-supplied UI handler. The host calls these when a JS extension
 /// requests user interaction via `ctx.ui.{confirm,input,select}` or
 /// fires a `notify`.
+///
+/// The methods are `async` because an interactive handler has to
+/// *suspend* until the user answers — a key press can arrive seconds
+/// (or minutes) after the extension asks. The alternative (a sync trait
+/// plus `block_in_place` + a oneshot) would park a tokio worker thread
+/// per prompt and panic outright on a `current_thread` runtime, which
+/// is what every `pi-extensions` test uses. Awaiting keeps the
+/// `ui_worker` task cooperative and leaves the runtime free to drive
+/// the QuickJS promise the JS side is awaiting.
+///
+/// Every method has a non-interactive default (`deny` / `cancel` /
+/// no-op) so the bundled non-interactive handler only has to override
+/// [`UiHandler::notify`].
+#[async_trait]
 pub trait UiHandler: Send + Sync + 'static {
     /// Return `true` to accept, `false` to deny.
-    fn confirm(&self, title: &str, body: &str) -> bool {
+    async fn confirm(&self, title: &str, body: &str) -> bool {
         let _ = (title, body);
         false
     }
     /// Return `Some(value)` when the user supplies text, `None` to cancel.
-    fn input(&self, title: &str, placeholder: Option<&str>) -> Option<String> {
+    async fn input(&self, title: &str, placeholder: Option<&str>) -> Option<String> {
         let _ = (title, placeholder);
         None
     }
     /// Return `Some(value)` when the user picks an option, `None` to cancel.
-    fn select(&self, title: &str, options: &[String]) -> Option<String> {
+    async fn select(&self, title: &str, options: &[String]) -> Option<String> {
         let _ = (title, options);
         None
     }
     /// Surface a notification. Default impl is a no-op.
-    fn notify(&self, message: &str, level: UiLevel) {
+    async fn notify(&self, message: &str, level: UiLevel) {
         let _ = (message, level);
     }
 }
@@ -78,14 +93,20 @@ impl ScriptedUiHandler {
     }
 }
 
+#[async_trait]
 impl UiHandler for ScriptedUiHandler {
-    fn confirm(&self, title: &str, _body: &str) -> bool {
-        self.answers.lock().confirms.get(title).copied().unwrap_or(false)
+    async fn confirm(&self, title: &str, _body: &str) -> bool {
+        self.answers
+            .lock()
+            .confirms
+            .get(title)
+            .copied()
+            .unwrap_or(false)
     }
-    fn input(&self, title: &str, _placeholder: Option<&str>) -> Option<String> {
+    async fn input(&self, title: &str, _placeholder: Option<&str>) -> Option<String> {
         self.answers.lock().inputs.get(title).cloned()
     }
-    fn select(&self, title: &str, _options: &[String]) -> Option<String> {
+    async fn select(&self, title: &str, _options: &[String]) -> Option<String> {
         self.answers.lock().selects.get(title).cloned()
     }
 }
@@ -213,6 +234,35 @@ pub struct HostOptions {
     pub timeout: Option<Duration>,
     /// Optional UI handler. Defaults to [`NullUiHandler`].
     pub ui_handler: Option<Arc<dyn UiHandler>>,
+    /// Context the shim hands to a tool's `execute(args, ctx)`.
+    pub tool_context: ToolContext,
+}
+
+/// The session context an extension tool sees as its second argument.
+///
+/// Upstream calls `execute(args, ctx)` with the same `ExtensionContext`
+/// events and commands receive, so `ctx.hasUI` / `ctx.mode` decide
+/// whether `ctx.ui.confirm` can prompt. The Rust host stores it once per
+/// host (the mode never changes mid-session) instead of threading it
+/// through every [`JsExtensionHost::execute_tool`] call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolContext {
+    /// `ctx.mode` (`tui` / `print` / `rpc`).
+    pub mode: String,
+    /// `ctx.hasUI` — `true` only when a real interactive handler exists.
+    pub has_ui: bool,
+    /// `ctx.cwd`.
+    pub cwd: String,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        Self {
+            mode: "print".to_string(),
+            has_ui: false,
+            cwd: String::new(),
+        }
+    }
 }
 
 impl std::fmt::Debug for HostOptions {
@@ -223,6 +273,7 @@ impl std::fmt::Debug for HostOptions {
                 "ui_handler",
                 &self.ui_handler.as_ref().map(|_| "<dyn UiHandler>"),
             )
+            .field("tool_context", &self.tool_context)
             .finish()
     }
 }
@@ -236,6 +287,11 @@ impl HostOptions {
     /// Install a UI handler.
     pub fn with_ui_handler(mut self, handler: Arc<dyn UiHandler>) -> Self {
         self.ui_handler = Some(handler);
+        self
+    }
+    /// Set the context tool executions see.
+    pub fn with_tool_context(mut self, context: ToolContext) -> Self {
+        self.tool_context = context;
         self
     }
 }
@@ -257,6 +313,8 @@ struct Inner {
     ui_tx: mpsc::UnboundedSender<UiRequestEnvelope>,
     state: Arc<Mutex<HostState>>,
     timeout: Duration,
+    /// Context handed to tool executions (see [`ToolContext`]).
+    tool_context: ToolContext,
     /// Wall-clock nanos deadline the JS interrupt handler checks on
     /// every iteration. `u64::MAX` means "no deadline active".
     deadline_nanos: Arc<AtomicU64>,
@@ -303,6 +361,7 @@ impl JsExtensionHost {
             ui_tx,
             state,
             timeout,
+            tool_context: opts.tool_context.clone(),
             deadline_nanos: deadline_nanos.clone(),
         });
 
@@ -441,9 +500,7 @@ impl JsExtensionHost {
         )
         .await;
         // Disarm.
-        self.inner
-            .deadline_nanos
-            .store(u64::MAX, Ordering::Relaxed);
+        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
@@ -508,10 +565,8 @@ impl JsExtensionHost {
         {
             let mut s = state.lock();
             s.pending_extension = Some(entry.id.clone());
-            s.registry.register(
-                entry.clone(),
-                ExtensionCapabilities::default(),
-            );
+            s.registry
+                .register(entry.clone(), ExtensionCapabilities::default());
         }
 
         // Arm the JS interrupt handler with the call deadline.
@@ -537,9 +592,7 @@ impl JsExtensionHost {
         .await;
 
         // Disarm the interrupt deadline regardless of outcome.
-        self.inner
-            .deadline_nanos
-            .store(u64::MAX, Ordering::Relaxed);
+        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
 
         match result {
             Ok(Ok(())) => {
@@ -574,7 +627,10 @@ impl JsExtensionHost {
     /// Dispatch an [`ExtensionEvent`] to every subscribed handler in
     /// every loaded extension. Returns the dispatch summary the shim
     /// produced (number of handlers invoked, async marker, etc.).
-    pub async fn emit_event(&self, event: &ExtensionEvent) -> Result<DispatchOutcome, ExtensionError> {
+    pub async fn emit_event(
+        &self,
+        event: &ExtensionEvent,
+    ) -> Result<DispatchOutcome, ExtensionError> {
         self.emit_event_with(event, None, false, "").await
     }
 
@@ -624,9 +680,7 @@ impl JsExtensionHost {
         )
         .await;
         // Disarm.
-        self.inner
-            .deadline_nanos
-            .store(u64::MAX, Ordering::Relaxed);
+        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
@@ -673,9 +727,7 @@ impl JsExtensionHost {
         )
         .await;
         // Disarm.
-        self.inner
-            .deadline_nanos
-            .store(u64::MAX, Ordering::Relaxed);
+        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
@@ -863,14 +915,10 @@ async fn host_input_impl(
         },
         reply: tx,
     });
-    let value: Option<String> = rx
-        .await
-        .ok()
-        .flatten()
-        .and_then(|resp| match resp {
-            UiResponse::Input { value } => Some(value),
-            _ => None,
-        });
+    let value: Option<String> = rx.await.ok().flatten().and_then(|resp| match resp {
+        UiResponse::Input { value } => Some(value),
+        _ => None,
+    });
     state.lock().log.entries.push(AppendedEntry {
         custom_type: "ui_input".into(),
         data: serde_json::json!({"title": title, "value": value}),
@@ -893,14 +941,10 @@ async fn host_select_impl(
         },
         reply: tx,
     });
-    let value: Option<String> = rx
-        .await
-        .ok()
-        .flatten()
-        .and_then(|resp| match resp {
-            UiResponse::Select { value } => Some(value),
-            _ => None,
-        });
+    let value: Option<String> = rx.await.ok().flatten().and_then(|resp| match resp {
+        UiResponse::Select { value } => Some(value),
+        _ => None,
+    });
     state.lock().log.entries.push(AppendedEntry {
         custom_type: "ui_select".into(),
         data: serde_json::json!({"title": title, "options": options, "value": value}),
@@ -913,6 +957,18 @@ async fn host_select_impl(
 /// QuickJS-friendly value (string / Promise).
 fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<()> {
     let globals = ctx.globals();
+
+    // Context tool executions see. Set once here because the host's
+    // mode / hasUI / cwd never change mid-session; the shim reads it in
+    // `_pi_execute_tool` instead of the host threading it through every
+    // `execute_tool` call.
+    let tool_ctx_json = serde_json::json!({
+        "mode": inner.tool_context.mode,
+        "hasUI": inner.tool_context.has_ui,
+        "cwd": inner.tool_context.cwd,
+    })
+    .to_string();
+    globals.set("_pi_tool_ctx", tool_ctx_json)?;
 
     // host_register_tool(json)
     let state_for_tool = inner.state.clone();
@@ -940,7 +996,8 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     let state_for_entry = inner.state.clone();
     let entry_fn = Func::from(
         move |custom_type: String, data_json: String| -> rquickjs_core::Result<()> {
-            let data: serde_json::Value = serde_json::from_str(&data_json).unwrap_or(serde_json::Value::Null);
+            let data: serde_json::Value =
+                serde_json::from_str(&data_json).unwrap_or(serde_json::Value::Null);
             state_for_entry
                 .lock()
                 .log
@@ -954,7 +1011,8 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     // host_send_message(json)
     let state_for_msg = inner.state.clone();
     let msg_fn = Func::from(move |json: String| -> rquickjs_core::Result<()> {
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
         state_for_msg.lock().log.messages.push(value);
         Ok(())
     });
@@ -963,7 +1021,8 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     // host_send_user_message(json)
     let state_for_user = inner.state.clone();
     let user_msg_fn = Func::from(move |json: String| -> rquickjs_core::Result<()> {
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
         let text = match value {
             serde_json::Value::String(s) => s,
             other => other.to_string(),
@@ -1010,16 +1069,18 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     globals.set("host_ui_notify", notify_fn)?;
 
     // host_log(level, message)
-    let log_fn = Func::from(move |level: String, message: String| -> rquickjs_core::Result<()> {
-        match level.as_str() {
-            "error" => tracing::error!(target: "pi_extension", "{}", message),
-            "warn" => tracing::warn!(target: "pi_extension", "{}", message),
-            "debug" => tracing::debug!(target: "pi_extension", "{}", message),
-            "trace" => tracing::trace!(target: "pi_extension", "{}", message),
-            _ => tracing::info!(target: "pi_extension", "{}", message),
-        }
-        Ok(())
-    });
+    let log_fn = Func::from(
+        move |level: String, message: String| -> rquickjs_core::Result<()> {
+            match level.as_str() {
+                "error" => tracing::error!(target: "pi_extension", "{}", message),
+                "warn" => tracing::warn!(target: "pi_extension", "{}", message),
+                "debug" => tracing::debug!(target: "pi_extension", "{}", message),
+                "trace" => tracing::trace!(target: "pi_extension", "{}", message),
+                _ => tracing::info!(target: "pi_extension", "{}", message),
+            }
+            Ok(())
+        },
+    );
     globals.set("host_log", log_fn)?;
 
     // Async host imports below return a JS Promise. Each one sends a
@@ -1088,32 +1149,31 @@ async fn ui_worker(
         };
         let response = match &request {
             UiRequest::Notify { message, level } => {
-                handler.notify(message, *level);
+                handler.notify(message, *level).await;
                 Some(UiResponse::NotifyAck)
             }
             UiRequest::Confirm { title, body } => {
-                let accepted = handler.confirm(title, body);
+                let accepted = handler.confirm(title, body).await;
                 Some(UiResponse::Confirm { accepted })
             }
             UiRequest::Input { title, placeholder } => {
-                let value = handler.input(title, placeholder.as_deref());
+                let value = handler.input(title, placeholder.as_deref()).await;
                 value.map(|v| UiResponse::Input { value: v })
             }
             UiRequest::Select { title, options } => {
-                let value = handler.select(title, options);
+                let value = handler.select(title, options).await;
                 value.map(|v| UiResponse::Select { value: v })
             }
         };
         // Record the UI answer in the log so tests can introspect.
         if let Some(ref resp) = response {
             let entry = match (request, resp.clone()) {
-                (
-                    UiRequest::Confirm { title, .. },
-                    UiResponse::Confirm { accepted },
-                ) => AppendedEntry {
-                    custom_type: "ui_answer_confirm".into(),
-                    data: serde_json::json!({"title": title, "accepted": accepted}),
-                },
+                (UiRequest::Confirm { title, .. }, UiResponse::Confirm { accepted }) => {
+                    AppendedEntry {
+                        custom_type: "ui_answer_confirm".into(),
+                        data: serde_json::json!({"title": title, "accepted": accepted}),
+                    }
+                }
                 (UiRequest::Input { title, .. }, UiResponse::Input { value }) => AppendedEntry {
                     custom_type: "ui_answer_input".into(),
                     data: serde_json::json!({"title": title, "value": value}),

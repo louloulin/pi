@@ -159,6 +159,9 @@ fn infer_api(provider: &ProviderId, hint: Option<&str>) -> Api {
     match provider.0.as_str() {
         "anthropic" => Api::AnthropicMessages,
         "openai" => Api::OpenAiChatCompletions,
+        // Same credential as `openai`, different wire protocol — the
+        // registry ships it as its own provider id for that reason.
+        "openai-responses" | "azure-openai-responses" => Api::OpenAiResponses,
         "google" | "google-vertex" => Api::GoogleGenerativeAi,
         "bedrock" | "amazon-bedrock" => Api::BedrockConverse,
         "cohere" => Api::CohereV2,
@@ -172,6 +175,29 @@ fn infer_api(provider: &ProviderId, hint: Option<&str>) -> Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn infer_api_routes_openai_responses_providers_to_the_responses_api() {
+        // A model id under the `openai` provider stays on Chat Completions…
+        assert_eq!(
+            infer_api(&ProviderId::new("openai"), None),
+            Api::OpenAiChatCompletions
+        );
+        // …while the dedicated provider id and its Azure twin take the
+        // Responses adapter, with no per-model `api` hint required.
+        for provider in ["openai-responses", "azure-openai-responses"] {
+            assert_eq!(
+                infer_api(&ProviderId::new(provider), None),
+                Api::OpenAiResponses,
+                "provider `{provider}`"
+            );
+        }
+        // An explicit hint still wins over provider-id inference.
+        assert_eq!(
+            infer_api(&ProviderId::new("openai"), Some("openai-responses")),
+            Api::OpenAiResponses
+        );
+    }
 
     #[test]
     fn register_provider_json_loads_anthropic_envelope() {

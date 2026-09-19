@@ -80,6 +80,26 @@ function buildCtx(extra) {
  * contacting the host.
  */
 function makeUiContext(hasUI) {
+  /**
+   * Non-interactive modes (print / rpc / no TTY) answer a UI request
+   * immediately instead of blocking the caller. Emit a warning notify
+   * so the denial is visible to the user and to the extension instead
+   * of being silent — an RPC client must never see a UI request hang.
+   */
+  function reportDenied(kind, title) {
+    if (typeof globalThis.host_ui_notify !== "function") {
+      return;
+    }
+    try {
+      globalThis.host_ui_notify(
+        "ctx.ui." + kind + (title ? " (\"" + String(title) + "\")" : "") +
+          " denied: no interactive UI in this mode",
+        "warning",
+      );
+    } catch (_e) {
+      // Swallow — notify is fire-and-forget.
+    }
+  }
   return Object.freeze({
     notify(message, level) {
       if (typeof globalThis.host_ui_notify === "function") {
@@ -92,6 +112,7 @@ function makeUiContext(hasUI) {
     },
     async confirm(title, body) {
       if (!hasUI || typeof globalThis.host_ui_confirm !== "function") {
+        reportDenied("confirm", title);
         return false;
       }
       try {
@@ -103,6 +124,7 @@ function makeUiContext(hasUI) {
     },
     async input(title, placeholder) {
       if (!hasUI || typeof globalThis.host_ui_input !== "function") {
+        reportDenied("input", title);
         return null;
       }
       try {
@@ -114,6 +136,7 @@ function makeUiContext(hasUI) {
     },
     async select(title, options) {
       if (!hasUI || typeof globalThis.host_ui_select !== "function") {
+        reportDenied("select", title);
         return null;
       }
       const opts = Array.isArray(options) ? options.map((o) => String(o)) : [];
@@ -458,7 +481,19 @@ globalThis._pi_execute_tool = function _pi_execute_tool(name, argsJson) {
       details: null,
     });
   }
-  const ctx = buildCtx({ mode: "rpc", hasUI: false });
+  // The host installs `_pi_tool_ctx` (mode / hasUI / cwd) once at
+  // startup so a tool's `execute(args, ctx)` sees the same session
+  // context events and commands get — `ctx.hasUI` decides whether
+  // `ctx.ui.confirm` can prompt.
+  let toolCtx = { mode: "print", hasUI: false, cwd: "" };
+  try {
+    if (typeof globalThis._pi_tool_ctx === "string") {
+      toolCtx = JSON.parse(globalThis._pi_tool_ctx);
+    }
+  } catch (_e) {
+    // Keep the non-interactive default.
+  }
+  const ctx = buildCtx(toolCtx);
   let result;
   try {
     result = entry._exec(args, ctx);

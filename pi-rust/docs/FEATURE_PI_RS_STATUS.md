@@ -3345,6 +3345,137 @@ LUM-1075 注释的补记）。Stage 19 的代码增量由 LUM-1068 自己推。
 4. `.wasm` 扩展宿主仍未实现（`pi-extensions` 的 QuickJS 宿主目前只有 native
    路径）。
 
+## LUM-1077 round — Stage 20: 扩展 UI 交互桥（`ctx.ui.confirm/input/select` 接真实 TUI 弹窗）
+
+Stage 20 补上了 LUM-1074 留下的最后一个插件兼容缺口：JS 扩展的交互式提示在
+interactive 模式下真正弹窗等待按键，在 print / rpc / 无 TTY 模式下变成**显式**的
+deny / cancel 降级。代码增量 = `pi-tui` 的 dialog 层 + `pi-coding-agent` 的 UI 桥 +
+`pi-extensions` 的 async `UiHandler`。
+
+### 设计取舍：`UiHandler` 改成 `#[async_trait]`
+
+任务书把这列为唯一的设计不确定点（async trait vs 同步 trait + `block_in_place`）。
+结论是 **async trait**，理由：
+
+- `pi-extensions` 的集成测试跑在 **`current_thread`** runtime 上（`tests/host.rs`
+  的 `rt()`），`block_in_place` 在那里直接 panic —— 选它等于把新特性排除在测试之外；
+- 交互本身就是挂起语义：`ui_worker` await handler 时运行时仍可驱动 JS 侧的 promise，
+  不必为每个提示占住一个 worker 线程；
+- 四个方法都给了非交互默认实现（deny / cancel / no-op），所以
+  `StderrUiHandler` 只需要覆写 `notify`。
+
+```rust
+#[async_trait]
+pub trait UiHandler: Send + Sync + 'static {
+    async fn confirm(&self, title: &str, body: &str) -> bool { false }
+    async fn input(&self, title: &str, placeholder: Option<&str>) -> Option<String> { None }
+    async fn select(&self, title: &str, options: &[String]) -> Option<String> { None }
+    async fn notify(&self, message: &str, level: UiLevel) {}
+}
+```
+
+`UiRequest` / `UiResponse` 的 serde 形状一字未动（任务书要求），超时策略也留在
+调用层而不是协议层。
+
+### interactive 模式：真弹窗
+
+`pi-tui/src/dialog.rs` 是新的 modal 状态机（`Dialog` = request + reply oneshot +
+`Prompt`(input) + `Selector`(select)），`App` 增加一层 dialog overlay 与一条
+`mpsc::UnboundedReceiver<Dialog>`（dialog 类型定义在 `pi-tui`，所以没有
+`pi-extensions` 类型泄漏进 TUI）：
+
+| 请求 | 弹窗 | 按键 | 回答 |
+|------|------|------|------|
+| `ctx.ui.confirm(title, body)` | 是 | Enter / `y` 接受，`n` / Esc 拒绝 | `true` / `false` |
+| `ctx.ui.input(title, ph)` | 是 | 可编辑文本，Enter 提交 | `string` / Esc → `null` |
+| `ctx.ui.select(title, options)` | 是 | ↑↓ / `j` `k` / `g` `G` + Enter | `string` / Esc → `null` |
+| `ctx.ui.notify(msg, level)` | 否，写入 transcript | — | `NotifyAck`（fire-and-forget） |
+
+modal 打开时它独占键盘：下面的 prompt 冻结，`Ctrl+C` / `Esc` 取消的是**对话框**
+（deny / `null`）而不是本轮 turn 或整个 app（这是 dialog 优先于 selector、优先于
+`Editor` 处理的原因）。同时有两个贯穿性约定：
+
+- **ready gate**（`TuiUiBridge` 的 `AtomicBool`）：扩展加载阶段会派发
+  `session_start`，那时渲染循环还不存在 —— gate 在这个阶段关闭，请求走 stderr
+  降级（deny / cancel），绝不让 extension 卡在一个没人能回答的 modal 上；渲染循环
+  退出时再次关闭。`App::attach_ui_dialogs` / `arm` 由 interactive 入口完成。
+- **第二个请求直接拒绝**：modal 已开时到达的新 dialog 立即用其 cancel 默认值回答
+  （`App::open_dialog` 返回 `false`），extension 不会等待一个用户看不到的提示；
+  `Dialog::is_abandoned()`（reply 的 `oneshot` 已关闭）让 App 关掉宿主已经放弃的 modal。
+
+### 模式选择与 `ctx.hasUI` 一致性（任务书第 3/4 条）
+
+`wiring::load` 现在按「有没有真 handler」而不是模式名决定：`options.ui` 存在就装
+`TuiUiHandler`，否则装 `StderrUiHandler`；并且
+
+```rust
+let has_ui = options.has_ui && options.ui.is_some();
+```
+
+即 `ctx.hasUI == true` ⟺ 真的有一个能弹窗的 handler。`main.rs` 只在
+**stdin 与 stdout 都是 TTY**（`std::io::IsTerminal`）时才建桥，所以 `pi | tee`、
+测试 harness 这类管道运行会诚实地报告 `hasUI = false`，而不是承诺一个渲染不出来的 UI。
+
+非交互路径的语义（第 4 条）：`confirm → false`、`input/select → null`、
+`notify → stderr`，**并且** JS shim 在短路的同一处补一条
+`ctx.ui.<kind> ("<title>") denied: no interactive UI in this mode`（`warning`）
+通知。RPC 客户端因此不会被挂住 —— 这不是"尚未实现"，而是文档化的降级。
+
+另外修掉一个真实缺陷：`_pi_execute_tool` 里工具的 `ctx` 过去硬编码为
+`{ mode: "rpc", hasUI: false }`，工具里 `await ctx.ui.confirm(...)` 永远拿不到 UI。
+现在宿主把 `mode` / `hasUI` / `cwd` 存成 `HostOptions::tool_context` 并通过
+`globalThis._pi_tool_ctx` 暴露给工具执行路径。
+
+超时：interactive 模式把宿主超时从 `DEFAULT_TIMEOUT`（5s）提到
+`wiring::INTERACTIVE_UI_TIMEOUT`（300s）—— 扩展在等**人**，5s 显然不够；代价是
+interactive 下卡死的扩展能占用其调用方至多 5 分钟（用户可随时 Esc 取消对话框），
+非交互模式仍是 5s。
+
+### 测试
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| `pi-extensions` 单元/集成 | `tests/host.rs` | 四个 `UiHandler` 方法经 JS shim → handler 的完整往返；未装 handler 时不阻塞；`hasUI=false` 时 deny 并发出 `ui_notify` 警告；工具能看到宿主 `tool_context` |
+| `pi-tui` 状态机 | `src/dialog.rs`（12 个） | confirm 的 Enter/`y`/`n`/Esc/Ctrl+C/无关键、input 提交与取消、select 选择与取消、二次 resolve 幂等、宿主放弃后 `is_abandoned`、渲染头/正文/提示行、按宽度折行 |
+| `pi-tui` App 层 | `tests/e2e.rs` | modal 独占键盘且冻结 prompt、渲染快照带 dialog、Ctrl+C 取消对话框而不退 app、`poll_ui_dialogs` 把 notify 变成 transcript 行、并发第二个 dialog 被拒且不影响已显示的 |
+| `pi-coding-agent` e2e | `tests/extension_ui.rs` | 真 JS 扩展 + `execute_command` → 注入 Enter → `"accepted"`；工具路径同上；print 模式 → `"denied"`；`session_start` 期请求在 TUI 未起时被 deny 且没有排队 |
+
+### 验证
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings
+$ cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings
+$ cargo test   --workspace --no-fail-fast -- --test-threads=1
+                                                            # 568 passed / 0 failed / 2 ignored
+```
+
+568 = LUM-1076 在 `6d5f90495` 上记录的 543 + 本轮新增的 25 个测试
+（`dialog.rs` 12 + `pi-tui/tests/e2e.rs` 3 + `pi-extensions/tests/host.rs` 4 +
+`extension_ui.rs` 4 + `ui_bridge.rs` 2）。pi-evals fixtures 未回归。
+
+**并发运行的抖动记录（与本次改动无关，供后续 CI 参考）**：默认线程数跑全量时，
+7 次运行里 4 次全绿、3 次出现偶发失败（每次失败点不同，共 6 个不同测试：
+`cli_provider` 的 loopback capture 超时、`print_mode` 的 `sigint_or_clean_exit` /
+`binary_json_events_mode_emits_ndjson`、`rpc` 的 `Disconnected`、
+`cli_tools` 的 print mode 空输出退出）。特征都是"子进程在启动瞬间无输出退出或
+30s 内没连上 loopback"，单跑必过（`pi --print=hello --output-format=json-events`
+并发 40 次全部 exit 0），`--test-threads=1` 全量 568/0/2 全绿。判定与本次改动无关
+的依据：这些模式在无 TTY 下走的就是 trunk 同一条路径（`ui: None` →
+`StderrUiHandler` + `has_ui = false`，其余只有两次 String 克隆），且
+`cli_provider` 的同类抖动 LUM-1076 已在 trunk 上记录在案。这台机器是共享的
+（load average 15–20，cgroup 内存上限 8GiB），CI 若复现请先按并发抖动排查。
+
+### 剩余 frontier
+
+1. ~~`registerCommand` / 扩展 UI 的交互式确认~~ → 本轮完成；
+2. LUM-1068 把 `pi-protocol::rpc` 推上 `feature/pi.rs` 后 promote **LUM-1069**，
+   用 `pi-server` / `pi-client` 端到端跑通远程会话；
+3. 把 `pi-client` 接进 `pi-coding-agent` 的 `--rpc` 模式，替换 Stage 12 的内联
+   JSON-RPC 实现；若要让 RPC 客户端也支持交互，需要在 `pi-protocol::rpc` 里新增
+   UI 请求/应答消息（本轮按任务书要求只做显式 deny，不动 wire 格式）；
+4. `.wasm` 扩展宿主仍未实现；
+5. dialog 的可选增强（留给后续任务）：`select` 的过滤/搜索、`input` 的多行模式、
+   鼠标点击与滚动。
 ## LUM-1078 round — Stage 21：系统提示 / 项目上下文 / skills 注入
 
 ### 盘点结果
@@ -3485,10 +3616,144 @@ stderr 与退出信号（本轮已经给 `print_mode.rs` 补了）。
 
 `feature/pi.rs`，commit 见本轮 push（Stage 21 代码 + 本节状态文档）。
 
+## LUM-1079 round — OpenAI Responses provider 落地 + 修复 Stage 20 被回退
+
+本轮做两件事：把 `Api::OpenAiResponses` 从「有枚举、无适配器」补成真正可用的
+provider，并修掉一个**已经在 `feature/pi.rs` 上生效的回归** —— LUM-1078 的
+`c3dbcb2a8` 把 Stage 20（LUM-1077）整段回退了。
+
+### 一、OpenAI Responses provider（`pi-ai`）
+
+`pi-protocol::Api` 早就列了 `OpenAiResponses`，`models.rs::infer_api` 也认
+`"openai-responses"` 这个 hint，但 `pi-ai` 没有对应适配器，`provider.rs::build_adapter`
+对它直接 `return None` —— 走这条路线的模型在 Rust 端口里等于不可用。
+
+新增 `pi-rust/crates/pi-ai/src/providers/openai_responses.rs`（~1560 行，含测试）：
+
+- 线上形状对齐上游 `packages/ai/src/api/openai-responses.ts`：
+  `POST {base}/responses`、`store: false`、`input` 是扁平 item 列表
+  （`message` / `function_call` / `function_call_output`）、tools 是**扁平**的
+  `{type: "function", name, description, parameters}`（不是 Chat Completions 的
+  `function: {...}` 嵌套）、系统提示词作为 `system` role 的 item 而不是顶层
+  `instructions`。
+- `max_output_tokens` 统一夹到 `MIN_OUTPUT_TOKENS = 16`（端点会拒更小的值）。
+- 事件分派看 JSON 的 `type` 字段（SSE 的 `event:` 行忽略），覆盖
+  `response.output_text.delta`、`response.reasoning_summary_text.delta`、
+  `response.output_item.added`、`response.function_call_arguments.delta/.done`、
+  `response.completed` / `.incomplete` / `.failed`、`error`。
+- `ParserState` 把 text / tool call / thinking 三个索引空间分开记账：协议违规
+  的 text delta 落在 tool-call 索引上时只记一条警告，不会破坏已经攒好的参数。
+- `response.failed` 与 `error` 事件是**终结**的：发完 `Err` 后不再补一个空的
+  `Done`（这正是本轮测试抓到的 bug，见下）。
+- 推理内容按现有约定只发 `ThinkingDelta`、不落库（`pi-protocol::Content` 还没有
+  `Thinking` 变体，与 Anthropic / Google 适配器一致）。
+
+接线：
+
+- `providers/registry.rs` — 新增 `openai-responses`（`display_name = "OpenAI
+  (Responses)"`，`api_key_env = ["OPENAI_API_KEY"]`，`base_url_env =
+  ["OPENAI_BASE_URL"]`，与 `openai` 同凭据、不同协议，所以是两个 registry 条目），
+  模型目录 `gpt-5` / `gpt-5-mini` / `o4-mini`。
+- `models.rs` — `infer_api` 增加 `"openai-responses" | "azure-openai-responses" →
+  Api::OpenAiResponses`（此前只有逐模型的 `api` hint 能走到 Responses）。
+- `pi-coding-agent/src/provider.rs` — `build_adapter` 为 `OpenAiResponses`
+  构造 `OpenAiResponsesProvider`，不再返回 `None`。
+- `providers/mod.rs` — `pub mod openai_responses;`。
+
+测试：`pi-ai` 模块内 12 个（请求形状、token 夹取、工具历史 round-trip、
+文本流、工具调用参数拼接、推理不落库、incomplete→`MaxTokens`、failed / error
+事件、`[DONE]`、坏 JSON、对象安全）+ registry 的 catalog 断言；`pi-coding-agent`
+新增 2 个（同凭据注册两个适配器、缺 key 时报的是 `OPENAI_API_KEY`）+ `models.rs`
+的 `infer_api` 断言。
+
+### 二、修复 Stage 20 被 `c3dbcb2a8` 回退（回归）
+
+盘点 trunk 时发现 `/v1/responses` 之外还有个更严重的问题：`2f1d46cad` 上
+**Stage 20 的扩展 UI 交互桥整段不存在**。
+
+判定依据（可复算）：
+
+```
+$ git diff --quiet 6d5f90495 2f1d46cad -- <stage-20 路径>   # 全部“无差异”
+```
+
+即 LUM-1078 的 `c3dbcb2a8` 把 Stage-20 动过的 15 个文件里 **13 个逐字还原成
+Stage 20 之前（`6d5f90495`）的样子**，另 2 个（`main.rs`、
+`FEATURE_PI_RS_STATUS.md`）是「自己的改动 + 回退混在一起」。它自己的
+`system_prompt.rs` / `skills.rs` / `context_files.rs` 等新文件不受影响。
+LUM-1078 的交付注释里写的是「两边没有文件冲突，合并后重新全量验证通过」——
+但 `pi-tui/src/dialog.rs`、`pi-coding-agent/src/extensions/ui_bridge.rs`、
+两个 Stage-20 测试文件在它的树里已经不存在，它跑到的 614 个测试里自然也不含
+Stage 20 的用例，所以没有报警。
+
+修复方式：base = `6d5f90495`、ours = `2f1d46cad`、theirs = `74ec51b5b` 做三方合并
+（`git merge-file`），把 Stage 20 带回来、同时保留 LUM-1078 的改动：
+
+- 13 个文件直接取 `74ec51b5b` 版本（`git checkout 74ec51b5b -- <paths>`）；
+- `main.rs`、状态文档三方合并：`main.rs` **零冲突**，Stage 20 的
+  `interactive_ui_available()` + `TuiUi` 桥接与 Stage 21 的
+  `build_cli_system_prompt` 并存；文档的冲突是两轮各自在文末追加章节，按时间
+  顺序（LUM-1077 在前、LUM-1078 在后）拼接。
+
+回归的连带影响与实测：合并后的树上 Stage 20 的 4 个新文件、`pi-tui` 的
+`dialog` 模块、`pi-extensions` 的 async `UiHandler`、`pi-ext-timers`/shim 全部回来，
+`pi-coding-agent/tests/extension_ui.rs` 与 `pi-tui/tests/e2e.rs` 重新参与全量测试。
+
+### 验证（native，trunk = `2f1d46cad` + 本轮改动）
+
+```
+$ cargo clippy --workspace --all-targets -- -D warnings     # exit 0，0 warnings
+$ cargo test   --workspace --no-fail-fast -- --test-threads=1
+  → 655 passed / 0 failed / 2 ignored                       # exit 0
+```
+
+655 = LUM-1078 报的 614 + 恢复回来的 Stage 20 用例（含 `extension_ui.rs`、
+`pi-tui` e2e、`pi-extensions` host 测试），比「只保留一轮」的任何一边都多，
+说明这次合并没有丢用例。
+
+`cargo test -p pi-ai --all-targets`：61 + 10 + 10 passed / 0 failed。
+`cargo test -p pi-coding-agent --lib`：92 passed / 0 failed。
+
+### 一个测试用例层面的 bug（本轮修掉）
+
+第一次跑 `pi-ai` 的 Responses 测试时 2 个用例红：`response.failed` / `error`
+之后流里还能再收到一个 `Done { content: [], stop_reason: Stop }`，即「错误之后
+再补一个空成功」。`ParserState` 收到失败事件后没有把流标记成已终结，poll 到尾
+就补了 `Done`。修法是这两个分支直接把 `finished` 置位，跑完不再合成终态。
+
+### 并发
+
+`multica daemon status`：`active_task_count = 3`（LUM-1068 Stage 19 在跑、
+LUM-1078 收尾、本协调 run）。槽位仍满，**本轮不派发新任务**。下一轮槽位空出时
+的第一顺位是把 **LUM-1080（Stage 22，backlog）** promote 成 todo。
+
+### 剩余 frontier（本轮更新）
+
+1. ~~`Api::OpenAiResponses` 无适配器~~ → 本轮落地（Azure Responses 只是换个
+   base URL，走同一个适配器）；
+2. prompt templates + skills 的 gitignore 过滤 + 扩展工具的 prompt snippet
+   （= LUM-1080，待槽位）；
+3. LUM-1068 落地后 promote **LUM-1069**（`pi-server` / `pi-client` 端到端）；
+4. 把 `pi-client` 接进 `--rpc`，替换 Stage 12 的内联 JSON-RPC；
+5. `.wasm` 扩展宿主仍未实现。
+
+### Push status
+
+`feature/pi.rs`，本轮的 provider commit + Stage-20 恢复 commit + 本节文档 commit。
+
+### 观察（非本改动引入，供后续排查）
+
+高负载下派生 `pi` 子进程的用例仍会偶发失败（`tests/rpc.rs` 的 `Disconnected`、
+`cli_provider.rs` 的 loopback 超时），本轮用 30 次循环手工复现到 2/30，其中一次
+是子进程内 `free(): double free detected in tcache 2`（SIGABRT）、一次是
+`event-listener-5.4.2` 的 `attempt to subtract with overflow` —— 与 LUM-1078 记录
+的同一依赖链（`pi-extensions → rquickjs-core → async-lock → event-listener`）。
+`--test-threads=1` 全量跑、以及单跑该 target 都是全绿，判定为共享机器的负载抖动；
+若 CI 复现，先按并发抖动排查。
 ## LUM-1081 round — Stage 22：资源层收口（prompt templates / skills ignore / 扩展 prompt snippet）
 
 Stage 21（LUM-1078）把系统提示 / 项目上下文 / skills 注入落地后，资源层还剩三个缺口
-（见上一节的「已知限制」）。本轮按 LUM-1080 的范围把这三点补齐，仍不引入新依赖。
+（见 LUM-1078 轮的「已知限制」）。本轮按 LUM-1080 的范围把这三点补齐，仍不引入新依赖。
 
 ### 1. prompt templates（`--prompt-template` / `--no-prompt-templates` / `-np`）
 
@@ -3548,16 +3813,34 @@ Stage 21（LUM-1078）把系统提示 / 项目上下文 / skills 注入落地后
 ```
 $ cargo clippy -p pi-extensions -p pi-coding-agent --all-targets -- -D warnings  # 0 warnings
 $ cargo test   -p pi-extensions         # 27 passed（host 14 为新增 1 个）
-$ cargo test   -p pi-coding-agent       # 169 lib + 各集成 target 全绿
+$ cargo test   -p pi-coding-agent       # 173 lib + 各集成 target 全绿
 ```
 
-- lib 测试 151（Stage 21）→ **169**：prompt templates 9 个、`parse_frontmatter` 对齐 1 个、
-  CLI 别名 1 个、resource loader 3 个、skills gitignore 3 个、扩展 prompt 捕获 1 个等。
+- lib 测试 151（Stage 21）→ **169**（本轮新增 18）：prompt templates 9 个、
+  `parse_frontmatter` 对齐 1 个、CLI 别名 1 个、resource loader 3 个、skills gitignore 3 个、
+  扩展 prompt 捕获 1 个等；合入 LUM-1079 后再 +4 → **173**。
 - 新增集成用例 `tests/rpc.rs::prompt_template_expands_slash_invocations`：写一个临时
   `.md` 模板，`pi --rpc --prompt-template <path>` 发 `/greet world`，断言 `getState`
   里出现展开后的 `hello-template:world` 且原始 `/greet world` 不泄漏。
-- 本轮两次踩到文档已记录的子进程用例抖动：`tests/rpc.rs::rpc_flag_without_stdin_exits_zero`
-  与 `tests/print_mode.rs::sigint_or_clean_exit` 各挂一次，单独重跑即绿（高负载抖动）。
+- 本轮多次踩到文档已记录的子进程用例抖动：`tests/rpc.rs::rpc_flag_without_stdin_exits_zero`、
+  `rpc_flag_no_longer_prints_the_stage5_stub`、`print_mode.rs::sigint_or_clean_exit` 各挂过，
+  单独重跑即绿。为此给 `tests/rpc.rs` 的 harness 补上了**失败时打印子进程 stderr**
+  （`recv_line` / `recv_json` / `recv_until` 三处 panic 都带上 `--- child stderr ---`），
+  于是根因一目了然：高负载（load average ≈ 19 / 32 核）下并发 spawn 9 个 `pi --rpc`
+  时，子进程会直接 abort，`free(): double free detected in tcache 2` —— 与 LUM-1079 节
+  记录的 `rquickjs-core → async-lock → event-listener` 依赖链同一根因，5 次连跑命中 2 次；
+  `--test-threads=1` 稳定全绿。本轮**没有**用互斥锁把测试串行化来掩掉它：这是
+  `pi --rpc` 进程级可以真的 abort 的产品缺陷，留在测试里可见比变绿更有价值。
+
+### 与 LUM-1079（Stage 19b）的合并
+
+push 前先把已落到 `origin/feature/pi.rs` 的 LUM-1079 三个 commit（`a8f4c607b` /
+`c64eca7e4` / `7e2ffec58`：OpenAI Responses provider + 恢复被 `c3dbcb2a8` 回退掉的
+Stage 20 UI 桥）合入本轮分支。冲突三处，均已在合并提交里解决：`main.rs`
+（LUM-1079 把 `load_extensions` 扩成 5 参 + `TuiUi::new` 桥接，保留其调用并把
+`build_system_prompt_for` 挪到其后）、`extensions/wiring.rs`（import 列表合并）、
+`FEATURE_PI_RS_STATUS.md`（两节按轮次顺序保留）。合并后 `cargo test --workspace`
+在 `pi-ai` / `pi-tui` / `pi-extensions` / `pi-coding-agent`（173 lib）均全绿。
 
 ### 仍未做（与上游的刻意差异，另行立项）
 

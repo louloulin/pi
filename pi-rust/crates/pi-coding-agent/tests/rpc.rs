@@ -95,9 +95,11 @@ impl RpcHarness {
         match self.lines.recv_timeout(TIMEOUT) {
             Ok(line) => line,
             Err(err) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                panic!("timed out waiting for a stdout line from pi --rpc: {err:?}");
+                let stderr = self.finish_stderr().join("\n");
+                panic!(
+                    "timed out waiting for a stdout line from pi --rpc: {err:?}\n\
+                     --- child stderr ---\n{stderr}"
+                );
             }
         }
     }
@@ -105,8 +107,11 @@ impl RpcHarness {
     fn recv_json(&mut self) -> Value {
         let line = self.recv_line();
         serde_json::from_str(&line).unwrap_or_else(|err| {
-            let _ = self.child.kill();
-            panic!("pi --rpc wrote a non-JSON stdout line ({err}): {line}");
+            let stderr = self.finish_stderr().join("\n");
+            panic!(
+                "pi --rpc wrote a non-JSON stdout line ({err}): {line}\n\
+                 --- child stderr ---\n{stderr}"
+            );
         })
     }
 
@@ -117,17 +122,23 @@ impl RpcHarness {
     {
         let deadline = Instant::now() + TIMEOUT;
         for _ in 0..MAX_LINES {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {label} on pi --rpc stdout"
-            );
+            if Instant::now() >= deadline {
+                let stderr = self.finish_stderr().join("\n");
+                panic!(
+                    "timed out waiting for {label} on pi --rpc stdout\n\
+                     --- child stderr ---\n{stderr}"
+                );
+            }
             let value = self.recv_json();
             if predicate(&value) {
                 return value;
             }
         }
-        let _ = self.child.kill();
-        panic!("gave up waiting for {label} after {MAX_LINES} stdout lines");
+        let stderr = self.finish_stderr().join("\n");
+        panic!(
+            "gave up waiting for {label} after {MAX_LINES} stdout lines\n\
+             --- child stderr ---\n{stderr}"
+        );
     }
 
     fn wait_for_exit(&mut self) -> ExitStatus {
