@@ -7282,8 +7282,9 @@ $ ... cargo clippy --workspace --all-targets --offline -- -D warnings
 3. **P1 选区粒度与边缘体验**：双击选词 / 三击选行（上游 `:80-81` 对路径与 `kebab-case` token 有明确
    期望）、拖到视口上下边缘自动滚动、`getGraphemeCellRange` 的宽字符整格扩边。三者都在本轮新增的
    `Selection` 上增量做。
-4. **P1 `node:zlib`（已派发 LUM-1125）**：zstd 家族 + `crc32`，复用已有 `zstd = "=0.13"`
-   （`Cargo.toml:74-75`），零新依赖；gzip/deflate 因离线 registry 无 `flate2`/`miniz_oxide` 明确不覆盖。
+4. **P1 `node:zlib`（已落地，LUM-1125）**：zstd 家族 + `crc32`，复用已有 `zstd = "=0.13"`
+   （`Cargo.toml:74-75`），零新依赖；gzip/deflate 因离线 registry 无 `flate2`/`miniz_oxide` 明确不覆盖
+   ——详见下一节。缩小后的欠账（只剩 gzip/deflate）重排在 LUM-1125 的 frontier。
 5. **P2 `node:module` / `node:readline`**：与本轮派发的 LUM-1125 **同一组文件**
    （`pi-extensions/runtime/pi-ext-shim.mjs` + `src/host.rs` + `tests/node_builtins.rs` 的
    `KNOWN_UNBRIDGED`）→ 与 LUM-1125 串行排队。
@@ -7311,3 +7312,141 @@ $ ... cargo clippy --workspace --all-targets --offline -- -D warnings
   合并**没有覆盖任何在途工作**，也没留下合并债。
 - 本节定稿的这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`
   （零冲突），推送后 `feature/pi.rs` 的 tree 与 `work/lum-1124` 保持一致。
+
+## LUM-1125 round — `node:zlib` 虚拟模块（zstd 家族 + `crc32`）+ 收敛 `KNOWN_UNBRIDGED`
+
+（LUM-1124 协调轮派发的**单点切片**轮：只做 frontier 第 4 项，不碰 `node:module` / `node:readline`——
+那两项与 zlib 同一组文件，按 LUM-1124 的口径串行排在后面。）
+
+### 一、起点
+
+- 工作分支 `work/lum-1125`，起点 `origin/feature/pi.rs` @ `d57999354`（LUM-1123 滚轮 + LUM-1122
+  autocomplete）。切片提交后 `origin/feature/pi.rs` 已前进到 `9344b02a8`（LUM-1124 选区/复制落地），
+  于是先把 `origin/feature/pi.rs` **零冲突**合入工作分支，第四节的所有数字都在**合并后的树**
+  （`6e1c0107c`）上跑，而不是只在工作分支上。
+- `node:zlib` 不是假想需求，上游有三处真实调用点：
+
+| 上游调用点 | 用到的 API |
+|---|---|
+| `packages/ai/src/api/openai-codex-responses.ts:198,205` | `process.getBuiltinModule("node:zlib")` + `zstdDecompressSync` / `zstdCompressSync`（Codex 响应体的 zstd） |
+| `packages/coding-agent/test/tool-result-images.test.ts:1` | `crc32`（+ `deflateSync`，见下） |
+| `packages/coding-agent/examples/extensions/doom-overlay/wad-finder.ts:4` | `gunzipSync` |
+
+### 二、范围锁定：为什么只有 zstd + `crc32`
+
+离线 registry（`CARGO_HOME=/tmp/cargo-home`，431 个已缓存 crate）里**没有** `flate2` / `miniz_oxide`：
+
+```
+$ ls /tmp/cargo-home/registry/cache/*/ | grep -cE 'flate2|miniz_oxide'   # 0
+$ ls /tmp/cargo-home/registry/cache/*/ | grep zstd
+zstd-0.13.3.crate  zstd-safe-7.3.0.crate  zstd-sys-2.1.0+zstd.1.5.7.crate
+```
+
+而 `zstd = "=0.13"` 已在 workspace 依赖图里（`Cargo.toml:74-75`，`pi-session` 用它压 payload 列）。
+所以本轮 `zstd.workspace = true` **不往 `Cargo.lock` 加任何 crate**（只给 `pi-extensions` 加一条依赖边，
+lock 净增 1 行），`--offline` 构建照旧。gzip/deflate 没有后端可站 → **明确不覆盖**，
+`tool-result-images.test.ts` 的 `deflateSync` 与 `wad-finder.ts` 的 `gunzipSync` 继续留在 frontier。
+
+### 三、切片
+
+| File | Change |
+|------|--------|
+| `crates/pi-extensions/Cargo.toml:32-35` | `zstd.workspace = true`（注释写清"零新 crate、`--offline` 可构建"） |
+| `crates/pi-extensions/src/host.rs:2630-2637` | `node_arg_bytes`：base64 解码一个必填字节参数（shim 走 JSON，二进制按 base64 过桥） |
+| `crates/pi-extensions/src/host.rs:2853-2889` | `node_call` 的 `zlib.zstdCompress` / `zlib.zstdDecompress` / `zlib.crc32` 三个 arm（无状态，不需要 `ChildBridge`）。压缩默认 `zstd::DEFAULT_COMPRESSION_LEVEL`（=3，与 Node 同） |
+| `crates/pi-extensions/src/host.rs:3027-3074` | 纯 Rust `crc32`（反射多项式 `0xEDB88320`、`value ^ 0xFFFFFFFF` 起、末尾再 XOR）+ `zstd_error` / `zstd_error_code` |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs:2600-2665` | `__pi_zlib_module`：`zstdCompressSync`（认 `options.params[constants.ZSTD_c_compressionLevel]` 与 `options.level`）、`zstdDecompressSync`、`crc32(data[, value])`、`constants.ZSTD_c_compressionLevel = 100`；返回 `Buffer`、模块 `Object.freeze` |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs:6059-6060` | 注册 `"node:zlib"` 与裸别名 `zlib` 到 `__pi_virtual_modules` |
+| `crates/pi-extensions/tests/zlib.rs`（新增 368 行 / 4 条） | 见下 |
+| `crates/pi-extensions/tests/node_builtins.rs:750` | `KNOWN_UNBRIDGED` 三元组 → 二元组（`node:zlib` 出列，兼容性门强制"已桥接"） |
+| `crates/pi-extensions/tests/node_builtins.rs:441-458` | "unsupported import" 的样例从 `node:zlib` 换成仍不可桥的 `node:readline`（否则该测试自己就红了） |
+| `crates/pi-extensions/docs/NODE_BUILTINS.md` | 新增 `### node:zlib` 小节（支持的 API + 桥接 op）、覆盖表更新、frontier 表把整行 `node:zlib` 换成"gzip/deflate"、divergence 表加一行 |
+
+`zstdCompressSync` 的入参在 shim 里统一走 `Buffer.__toBase64`：字符串按 utf8、`Buffer` / `TypedArray` /
+`ArrayBuffer` 原样过桥，数字等非法类型由 `Buffer.from` 抛 `TypeError`（与 Node 一样不是静默压缩零字节）。
+
+**错误语义是本轮的重点**（QuickJS 里 panic 会把宿主一起带走）。`zstd` crate 把错误包成
+`io::Error`，消息是 `ZSTD_getErrorName(code)` 的**散文**而不是 Node 报的枚举名，所以
+`zstd_error_code` 做了一张散文 → `ZSTD_error_*` 的映射表（未知一律 `ZSTD_error_GENERIC`，不编造），
+测试钉住最常见的那个：非 zstd 输入 → `err.code === "ZSTD_error_prefix_unknown"`（与 Node v22.23.2 实测一致）。
+
+### 四、验证
+
+全部在**合并态**（`9344b02a8` 已合入）的树上跑：
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-extensions --offline --no-fail-fast
+  11 个 suite 共 77 passed / 0 failed       # 起点 73，+4 = tests/zlib.rs
+$ ... cargo test -p pi-tui --offline           # 20 suite 共 377 passed / 0 failed（与 LUM-1124 持平）
+$ ... cargo test -p pi-coding-agent --offline  # 15 suite 共 345 passed / 0 failed（持平）
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished，0 warnings（`vendor/rquickjs-core` 的 12 条历史告警仍在，但不进 `-D warnings` 门）
+$ rustfmt --check --edition 2021 <本轮 3 个 .rs 文件>   # 干净
+$ node --check crates/pi-extensions/runtime/pi-ext-shim.mjs            # exit 0
+```
+
+`tests/zlib.rs` 的 4 条**不是** Rust↔Rust 自洽的空转，两条跨到 Node 产物：
+
+1. `zlib_zstd_round_trips_between_rust_and_js`：JS 压 → Rust `zstd::stream::decode_all` 解（逐字节相等）；
+   Rust `zstd::stream::encode_all` 压 → JS 解；`Uint8Array` / `ArrayBuffer` 入参、空串仍出合法帧。
+2. `zlib_zstd_decodes_a_node_generated_fixture`：**Node v22.23.2 生成的**帧（payload
+   `pi-rust node:zlib interop fixture — 1234567890`，`zstdCompressSync` 输出 hex 常量）两边都解出原文，
+   保证 fixture 本身可信、且桥懂 Node 的帧格式（而不只是自家格式）。
+3. `zlib_crc32_vectors_and_module_aliases_match_node`：`crc32("") === 0`、
+   `crc32("123456789") === 3421780262`（`0xCBF43926`）、链式 `crc32("456789", crc32("123"))` 与三段链、
+   `Buffer` / `Uint8Array` 入参、无符号 `crc32("hello world") === 222957957`、fixture 的 `2412760136`；
+   顺带钉裸别名 `zlib` 与 `require("node:zlib")` 是**同一个**模块实例，以及 `gzipSync === undefined`
+   （把"gzip 没实现"这个已文档化的缺口钉成测试）。
+4. `zlib_invalid_input_throws_with_code_and_host_survives`：非 zstd 输入抛 `Error`、`code ===
+   "ZSTD_error_prefix_unknown"`，且**抛完宿主仍能用**（同一次 execute 里再压/解一串）。
+
+### 五、合并与推送
+
+- 工作分支 `work/lum-1125`，起点 `origin/feature/pi.rs` @ `d57999354`，先合入 `9344b02a8`（零冲突）。
+- 切片提交 `a6ce1b2b4`（7 files，+578 / −17，含 368 行 `tests/zlib.rs`）。
+- 合并态提交 `6e1c0107c`（`Merge branch 'feature/pi.rs' into work/lum-1125`）；第四节所有数字在此树。
+- 沿用前几轮的 `git merge-tree --write-tree` + `git commit-tree` plumbing 合进 `feature/pi.rs`
+  （非 force、不动本地 `feature/pi.rs`），工作分支一并推送。
+
+### 六、frontier（本轮更新）
+
+本轮把 LUM-1124 的第 4 项（`node:zlib`）从"待派发"变成"zstd 家族 + `crc32` 已落地"，
+欠账缩小成两件事：**gzip/deflate 缺后端**、以及**同通道的 `node:module` / `node:readline` 仍排队**。
+
+1. **P1 `settings-list` + `/settings` 子菜单**（上游 `components/settings-list.ts` 328 行 +
+   `settings-manager` 1417 行）：与 LUM-1124 一致——要动 `pi-tui/src/app.rs` / `lib.rs`，
+   等 LUM-1124 已合并落地后可开。
+2. **P1 鼠标区域派发 / 点击命中**（`components/mouse-region.ts` + `tui-alt-screen.ts:1326-1339`）：
+   LUM-1124 已铺好 `InputEvent::MouseGesture`，这是 `App` 内的增量。
+3. **P1 选区粒度与边缘体验**（双击选词 / 三击选行、边缘自动滚动、grapheme 整格扩边）：LUM-1124 新欠账。
+4. **P2 `node:module` / `node:readline`**：与 LUM-1125 **同一组文件**
+   （`pi-ext-shim.mjs` + `host.rs` + `tests/node_builtins.rs` 的 `KNOWN_UNBRIDGED`）→ LUM-1125 已合入，
+   现在是这条串行通道的**下一个**（注意 `node_arg_bytes` / base64 helper 已就位，可复用）。
+5. **P2 `node:zlib` 的 gzip/deflate（`gunzipSync` / `gzipSync` / `deflateSync` / `inflateSync`）**：
+   纯依赖问题——离线 registry 有 `flate2`/`miniz_oxide` 时再接，`host.rs` 的 `zlib.*` op 表与
+   `tests/zlib.rs` 的骨架可直接加 arm。解锁 `wad-finder.ts`（`gunzipSync`）与
+   `tool-result-images.test.ts`（`deflateSync`）。
+6. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥；同样落 `host.rs`/shim 通道。
+7. **P3 `alt-screen-search.ts`**（上游 327 行）：与 LUM-1124 的选区高亮有天然联动，需要 `app.rs` 钩子。
+8. **P3 `latex.ts`**（1394 行）与 `markdown.rs` 未覆盖子集（表格 / LaTeX / OSC-8 hyperlink / 语法高亮）。
+9. **P3 provider catalog / LUM-1090**：结论维持（无上游 `data/*.json` 事实源，不写猜测值）。
+10. **P3 旧式 X10 鼠标序列、`updateScrollbarHover`、滚动条拖拽**：等第 2 项落地后顺带。
+
+并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree 9344b02a8 work/lum-1125` → tree `a1bc2fdce`（零冲突）。
+- 合并提交 `f84199158`（`Merge branch 'work/lum-1125' into feature/pi.rs`，父 `9344b02a8` +
+  工作提交 `e971aeb59`），其 tree `a1bc2fdce` 与当时的 `work/lum-1125` **完全一致**
+  ——因为切片提交后已先把 `9344b02a8` 合入工作分支，这次合并没有产生任何额外改动，也没留合并债。
+- `git push origin f84199158:refs/heads/feature/pi.rs` → `9344b02a8..f84199158`；`work/lum-1125`
+  作为新分支一并推送。
+- `git diff --stat 9344b02a8 f84199158` = 本轮 8 个文件（代码 7 + 本节文档 128 行，共 +704 / −19），
+  无其他改动；`cargo test -p pi-extensions` 在 `f84199158` 的 tree 上实测 11 suite / 77 passed。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `9344b02a8`（LUM-1125 工作分支尚未推送），因此这次合并
+  **没有覆盖任何在途工作**。
+- 本节这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`（零冲突），
+  推送后 `feature/pi.rs` 的 tree 与 `work/lum-1125` 保持一致。

@@ -29,6 +29,10 @@ tracing.workspace = true
 parking_lot.workspace = true
 indexmap.workspace = true
 once_cell = "1"
+# `node:zlib`'s zstd family. Already in the workspace dependency graph
+# (`pi-session` compresses its payload column with it), so this adds no
+# crate to `Cargo.lock` — important for `--offline` builds.
+zstd.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

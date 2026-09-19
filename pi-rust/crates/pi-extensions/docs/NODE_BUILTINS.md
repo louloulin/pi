@@ -6,7 +6,7 @@ extensions in the wild import Node builtins directly:
 ```
 node:path (43)  node:fs (28)  node:fs/promises (18)  node:os (16)
 node:crypto (15)  node:child_process (14)  node:url (8)  node:buffer (1)
-node:util (1)
+node:util (1)  node:zlib (1)
 ```
 
 The `pi` Rust port embeds QuickJS, which has no operating-system surface
@@ -33,8 +33,8 @@ Key properties:
 
 - **One host import.** `host_node_call(op, argsJson)` is the *only*
   native entry point for all of `node:fs` / `node:os` / `node:buffer` /
-  `node:crypto` / `node:process` / `node:child_process`. Native-only, like
-  every other host import in `src/host.rs` (a `wasm32` binding would need
+  `node:crypto` / `node:zlib` / `node:process` / `node:child_process`.
+  Native-only, like every other host import in `src/host.rs` (a `wasm32` binding would need
   to reimplement the op table). `node:child_process`'s `spawn` additionally
   uses two async host imports — `host_child_read(handle, stream)` and
   `host_child_wait(handle)` — because a live child outlives the call that
@@ -105,6 +105,25 @@ iteration, `instanceof` and `Buffer.isBuffer` behave like Node.
 `randomInt([min,] max)` (rejection sampling, no modulo bias). Entropy
 comes from `/dev/urandom`; there is no fallback PRNG on purpose.
 
+### `node:zlib`
+
+Only the zstd family is bridged. The workspace already bundles
+`zstd = 0.13` (it compresses `pi-session`'s payload column); gzip/deflate
+would need `flate2` / `miniz_oxide`, and the offline registry has neither,
+so those names stay absent rather than being faked.
+
+| Node API | Bridge op | Notes |
+|---|---|---|
+| `zstdCompressSync(data[, options])` | `zlib.zstdCompress` | `data` may be a string (utf8), `Buffer`, typed array or `ArrayBuffer`; returns a `Buffer`. `options.params[constants.ZSTD_c_compressionLevel]` and `options.level` set the level; the default is zstd's 3, like Node. |
+| `zstdDecompressSync(data)` | `zlib.zstdDecompress` | Returns a `Buffer`. A non-zstd input throws an `Error` whose `code` is Node's `ZSTD_error_*` name (`ZSTD_error_prefix_unknown` for a frame with an unknown descriptor) instead of taking the host down. |
+| `crc32(data[, value])` | `zlib.crc32` | CRC-32/ISO-HDLC. Returns an unsigned 32-bit integer (`crc32("") === 0`, `crc32("123456789") === 3421780262`); the second argument continues a previous checksum, so `crc32(b, crc32(a)) === crc32(a ++ b)`. |
+| `constants.ZSTD_c_compressionLevel` | — | `100`, the `zstd.h` parameter id `openai-codex-responses.ts` passes through. |
+
+The async/callback forms (`zstdCompress` / `zstdDecompress`) and the
+stream constructors (`createZstdCompress` / `createZstdDecompress`) are
+not provided — the bridge is synchronous and nothing in the repo calls
+them.
+
 ### `node:process` (also the `process` global)
 
 `env` (snapshot object), `platform`, `arch`, `pid`, `cwd()`, `nextTick`,
@@ -174,7 +193,7 @@ absent (the failure is a plain "undefined is not a function").
 | `.pi/extensions/import-repro.ts` | `node:buffer`, `node:fs`, `node:path` | Covered; additionally needs the `fetch` global. |
 | `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; the `@earendil-works/pi-tui` module it needs is bridged as well (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
 | `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; the `@earendil-works/*` modules they need are bridged (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
-| `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | `node:child_process` is bridged (LUM-1110); still blocked on `node:readline` / `node:module` / `node:zlib`. `sandbox/index.ts` additionally needs `setTimeout` / `process.kill`, which are engine/process-contract gaps rather than builtin ones. |
+| `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | `node:child_process` (LUM-1110) and `node:zlib`'s zstd family (LUM-1125) are bridged; still blocked on `node:readline` / `node:module`, and `wad-finder.ts` additionally needs the gzip half of `node:zlib`. `sandbox/index.ts` additionally needs `setTimeout` / `process.kill`, which are engine/process-contract gaps rather than builtin ones. |
 | `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `truncated-tool.ts` | `node:child_process` (+ `node:util`) | **Unblocked**: all four now have the builtins they import. `ssh.ts`'s timed/abortable path additionally needs the `setTimeout` global (engine-level, not builtin); `AbortSignal` is available since LUM-1116. |
 | `auto-commit-on-exit.ts`, `border-status-editor.ts`, `dirty-repo-guard.ts`, `git-checkpoint.ts`, `github-issue-autocomplete.ts`, `inline-bash.ts`, `input-transform-streaming.ts`, `shutdown-command.ts` | — (shell out through the extension API) | **Unblocked**: these use `pi.exec`, which is now bridged to the Rust host (see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)); they never import `node:child_process` themselves. |
 
@@ -199,6 +218,7 @@ gaps, and every divergence.
 | `util.inspect` renders everything on one line — `breakLength` / `compact` are accepted but ignored — and boxed primitives / Promises print as `Boolean {}` / `Promise { <pending> }` instead of Node's resolved-state form. | Extensions log the output; line wrapping buys nothing here. |
 | `util.styleText` always emits ANSI codes; it does not consult `process.stdout.hasColors` (there is no TTY in the embedded engine). | Pass `{validateStream: false}` for Node-identical bytes; the codes are what the evals reporters consume. |
 | `util.TextDecoder` ignores `{stream: true}` and `fatal: true`; decoding never throws on malformed input. | Streaming would need a per-instance byte buffer; non-fatal decoding matches Node's default. |
+| `node:zlib` exposes the zstd family and `crc32` only: no gzip/deflate, no stream constructors, and the `ZSTD_error_*` code is recovered from zstd's error prose (a name the table does not know falls back to `ZSTD_error_GENERIC`). | `zstd` is the workspace's only compression backend; the `zstd` crate surfaces `ZSTD_getErrorName()` rather than the `ZSTD_ErrorCode` enum Node reports. |
 | `kill()` on a `spawn`ed child always sends SIGKILL and ignores its signal argument; a `timeout` also reports `signal: "SIGKILL"`, where Node uses SIGTERM. The error still carries `code: "ETIMEDOUT"` / `status: null` / `killed: true`, like Node. | The host owns one kill primitive; a portable per-signal path would need `libc::kill` on unix and a Windows equivalent. |
 | The buffered forms (`exec*` / `*Sync`) stop draining a pipe shortly after the direct child exits instead of waiting for EOF, so output written by a *grandchild* that inherited the pipe (`sh -c "sleep 5 & echo hi"`) is not waited for, and may be truncated. Node blocks until the pipe closes. | The reader threads are bounded so a grandchild cannot pin the host past its deadline. The direct child's own output is always captured: the reader only gives up after 250 ms of no EOF. |
 | Every `node:child_process` child is bounded by the host per-call timeout (5 s normally, 300 s in interactive mode); a child that outlives it is killed and reported as `killed` / `signal: "SIGKILL"`. | This is what stops a runaway extension from hanging `pi` — the same ceiling `pi.exec` / `host_exec` enforce. Nothing in the shim can raise it: an `options.timeout` on the buffered forms only kills the child *earlier*, where `pi.exec`'s explicit `options.timeout` raises the host ceiling for that call (LUM-1116). |
@@ -209,14 +229,17 @@ gaps, and every divergence.
 
 ## Not bridged (frontier)
 
-Importing these fails with the readable error
-`unsupported import "node:x" in pi extension: available virtual modules are …`:
+Importing these modules fails with the readable error
+`unsupported import "node:x" in pi extension: available virtual modules are …`.
+A row that names a *family* (`node:zlib` gzip/deflate, `crypto.createHash`)
+means the module imports fine but those names are absent, so the failure is a
+plain "undefined is not a function":
 
 | Builtin | Why it is missing | What it would take |
 |---|---|---|
 | `node:module` | `createRequire` would let an extension `require` arbitrary paths off disk, which the virtual-module sandbox exists to prevent. | Would need a deliberate decision to widen the sandbox, e.g. require-from-`node_modules`-only. Used by `doom-overlay/doom-engine.ts`. |
 | `node:readline` | Interactive prompting; needs streams and stdin ownership. | `readline.createInterface` over a stream bridge; the host owns stdin. Used by `git-merge-and-resolve.ts`. |
-| `node:zlib` | No compression backend in the workspace. | Add `flate2`/`miniz_oxide` and expose `gunzipSync`/`gzipSync`/`inflateRawSync`/`deflateSync`. Used by `doom-overlay/wad-finder.ts` (`gunzipSync`). |
+| `node:zlib` gzip/deflate (`gzipSync` / `gunzipSync` / `deflateSync` / `inflateSync`) | The workspace bundles no `flate2`/`miniz_oxide`, and the offline registry has neither. The zstd family *is* bridged (LUM-1125); `doom-overlay/wad-finder.ts` calls `gunzipSync`, so it stays blocked. | Add `flate2` (or `miniz_oxide`) once the registry has it, then expose `gunzipSync`/`gzipSync`/`inflateRawSync`/`deflateSync`. |
 | `node:stream` / `node:http` / `node:net` / `node:worker_threads` | No event loop integration for streams. | Substantial; probably out of scope for the QuickJS host. |
 | `crypto.createHash` / `createHmac` / `webcrypto` | No digest backend is bundled in the workspace. | Add a small SHA-256 implementation (`sha2`) or vendor a JS one. |
 | `fs.watch`, `fs.createReadStream/WriteStream` | Needs a filesystem watcher and stream plumbing. | `notify` crate + stream bridge. |
