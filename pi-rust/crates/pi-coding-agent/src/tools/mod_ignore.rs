@@ -32,7 +32,7 @@ pub const DEFAULT_IGNORE_NAMES: &[&str] = &[
 /// `true` if `name` (a single path component) should be skipped during
 /// directory walks.
 pub fn is_ignored_dir_name(name: &str) -> bool {
-    DEFAULT_IGNORE_NAMES.iter().any(|ignored| *ignored == name)
+    DEFAULT_IGNORE_NAMES.contains(&name)
 }
 
 /// Build a search root relative to `cwd`, validating that the supplied

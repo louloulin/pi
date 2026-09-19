@@ -47,7 +47,7 @@ impl From<SessionError> for io::Error {
     fn from(value: SessionError) -> Self {
         match value {
             SessionError::Io(e) => e,
-            other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+            other => io::Error::other(other.to_string()),
         }
     }
 }
