@@ -2,8 +2,8 @@
 //!
 //! Stage 4 ships the minimum command set required by the acceptance
 //! criteria: `/help`, `/clear`, `/model`, `/session`, `/exit`,
-//! `/resume`. Each is parsed into a [`SlashCommand`] variant and
-//! dispatched by `interactive.rs`.
+//! `/resume`, plus Stage 23's `/trust`. Each is parsed into a
+//! [`SlashCommand`] variant and dispatched by `interactive.rs`.
 
 /// Slash command enum — one variant per supported slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,10 @@ pub enum SlashCommand {
     Exit,
     /// `/resume` — list and pick a previous session file.
     Resume,
+    /// `/trust [yes|no]` — show or change the saved project-trust
+    /// decision. `None` shows the current state; the decision only takes
+    /// effect on the next start. Mirrors upstream `showTrustSelector`.
+    Trust(Option<bool>),
     /// Anything else, captured as the command name (without the slash).
     Unknown(String),
 }
@@ -32,7 +36,7 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         return Err(format!("not a slash command: {text:?}"));
     }
     let rest = trimmed.trim_start_matches('/');
-    let (name, _args) = match rest.find(char::is_whitespace) {
+    let (name, args) = match rest.find(char::is_whitespace) {
         Some(idx) => (&rest[..idx], rest[idx..].trim()),
         None => (rest, ""),
     };
@@ -43,9 +47,22 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "session" => SlashCommand::Session,
         "resume" => SlashCommand::Resume,
         "exit" | "quit" => SlashCommand::Exit,
+        "trust" => SlashCommand::Trust(parse_trust_decision(args)),
         other => SlashCommand::Unknown(other.to_string()),
     };
     Ok(cmd)
+}
+
+/// Parse the optional `/trust` argument.
+///
+/// `yes` / `on` / `true` trust, `no` / `off` / `false` do not, and an
+/// empty or unrecognised argument asks for the current state.
+fn parse_trust_decision(args: &str) -> Option<bool> {
+    match args.trim().to_ascii_lowercase().as_str() {
+        "yes" | "y" | "on" | "true" | "trust" => Some(true),
+        "no" | "n" | "off" | "false" | "untrust" => Some(false),
+        _ => None,
+    }
 }
 
 /// Slash-command help text rendered by `/help` and the App's status
@@ -58,6 +75,7 @@ pub fn help_text() -> String {
     out.push_str("  /model    pick a model (opens selector)\n");
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /resume   resume a previous session\n");
+    out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /exit     quit the interactive session\n");
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
@@ -83,6 +101,27 @@ mod tests {
         assert_eq!(handle_command("/exit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/resume").unwrap(), SlashCommand::Resume);
+        assert_eq!(handle_command("/trust").unwrap(), SlashCommand::Trust(None));
+    }
+
+    #[test]
+    fn parses_the_trust_argument() {
+        for yes in ["yes", "y", "on", "true", "trust"] {
+            assert_eq!(
+                handle_command(&format!("/trust {yes}")).unwrap(),
+                SlashCommand::Trust(Some(true))
+            );
+        }
+        for no in ["no", "n", "off", "false", "untrust"] {
+            assert_eq!(
+                handle_command(&format!("/trust {no}")).unwrap(),
+                SlashCommand::Trust(Some(false))
+            );
+        }
+        assert_eq!(
+            handle_command("/trust maybe").unwrap(),
+            SlashCommand::Trust(None)
+        );
     }
 
     #[test]

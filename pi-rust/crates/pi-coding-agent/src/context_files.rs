@@ -29,7 +29,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::paths::{absolute, canonicalize, strip_bom};
+use crate::paths::{absolute, canonicalize, strip_bom, CONFIG_DIR_NAME};
 
 /// File names tried in order inside a directory, most specific first.
 pub const CONTEXT_FILE_CANDIDATES: [&str; 5] = [
@@ -208,22 +208,42 @@ pub fn load_project_context_files(cwd: &Path, agent_dir: &Path) -> Vec<ContextFi
     context_files
 }
 
-/// The global `SYSTEM.md` that replaces the built-in system prompt.
+/// The `SYSTEM.md` that replaces the built-in system prompt.
 ///
-/// Only the agent-directory copy is considered. The TS side also honours
-/// a project-local `.pi/SYSTEM.md`, but only after the project has been
-/// explicitly trusted (`/trust`) — the Rust port has no trust manager
-/// yet, so accepting project-supplied system prompts would be a security
-/// regression. Tracked as a follow-up.
-pub fn discover_system_prompt_file(agent_dir: &Path) -> Option<PathBuf> {
+/// Precedence matches upstream `discoverSystemPromptFile`: a trusted
+/// project's `.pi/SYSTEM.md` wins, otherwise the agent-directory copy is
+/// used. Passing `project_trusted = false` makes a checked-in
+/// `.pi/SYSTEM.md` invisible, so a cloned repository cannot replace the
+/// system prompt before the user runs `/trust`.
+pub fn discover_system_prompt_file(
+    cwd: &Path,
+    agent_dir: &Path,
+    project_trusted: bool,
+) -> Option<PathBuf> {
+    if project_trusted {
+        let project = absolute(cwd).join(CONFIG_DIR_NAME).join("SYSTEM.md");
+        if project.is_file() {
+            return Some(project);
+        }
+    }
     let global = absolute(agent_dir).join("SYSTEM.md");
     global.is_file().then_some(global)
 }
 
-/// The global `APPEND_SYSTEM.md`, appended after the built-in prompt.
+/// The `APPEND_SYSTEM.md`, appended after the built-in prompt.
 ///
-/// Same trust caveat as [`discover_system_prompt_file`].
-pub fn discover_append_system_prompt_file(agent_dir: &Path) -> Option<PathBuf> {
+/// Same trust gate and precedence as [`discover_system_prompt_file`].
+pub fn discover_append_system_prompt_file(
+    cwd: &Path,
+    agent_dir: &Path,
+    project_trusted: bool,
+) -> Option<PathBuf> {
+    if project_trusted {
+        let project = absolute(cwd).join(CONFIG_DIR_NAME).join("APPEND_SYSTEM.md");
+        if project.is_file() {
+            return Some(project);
+        }
+    }
     let global = absolute(agent_dir).join("APPEND_SYSTEM.md");
     global.is_file().then_some(global)
 }
@@ -438,17 +458,51 @@ mod tests {
     #[test]
     fn discovers_system_prompt_files_only_when_present() {
         let temp = TempDir::new("system-md");
-        assert_eq!(discover_system_prompt_file(&temp.path), None);
-        assert_eq!(discover_append_system_prompt_file(&temp.path), None);
+        let agent = temp.path.join("agent");
+        let cwd = temp.path.join("project");
+        fs::create_dir_all(&cwd).expect("cwd");
+        assert_eq!(discover_system_prompt_file(&cwd, &agent, true), None);
+        assert_eq!(discover_append_system_prompt_file(&cwd, &agent, true), None);
 
-        temp.write("SYSTEM.md", "custom prompt");
-        temp.write("APPEND_SYSTEM.md", "appended\n");
+        fs::create_dir_all(&agent).expect("agent");
+        temp.write("agent/SYSTEM.md", "custom prompt");
+        temp.write("agent/APPEND_SYSTEM.md", "appended\n");
         assert_eq!(
-            discover_system_prompt_file(&temp.path),
-            Some(temp.path.join("SYSTEM.md"))
+            discover_system_prompt_file(&cwd, &agent, false),
+            Some(agent.join("SYSTEM.md"))
         );
 
-        let read = read_prompt_file(&temp.path.join("APPEND_SYSTEM.md")).expect("reads");
+        let read = read_prompt_file(&agent.join("APPEND_SYSTEM.md")).expect("reads");
         assert_eq!(read.trim(), "appended");
+    }
+
+    #[test]
+    fn a_trusted_project_system_md_shadows_the_global_one() {
+        let temp = TempDir::new("project-system-md");
+        let agent = temp.path.join("agent");
+        let cwd = temp.path.join("project");
+        temp.write("agent/SYSTEM.md", "global prompt");
+        temp.write("agent/APPEND_SYSTEM.md", "global append");
+        temp.write("project/.pi/SYSTEM.md", "project prompt");
+        temp.write("project/.pi/APPEND_SYSTEM.md", "project append");
+
+        assert_eq!(
+            discover_system_prompt_file(&cwd, &agent, true),
+            Some(cwd.join(".pi/SYSTEM.md"))
+        );
+        assert_eq!(
+            discover_append_system_prompt_file(&cwd, &agent, true),
+            Some(cwd.join(".pi/APPEND_SYSTEM.md"))
+        );
+
+        // Untrusted: the project files are invisible, the global ones win.
+        assert_eq!(
+            discover_system_prompt_file(&cwd, &agent, false),
+            Some(agent.join("SYSTEM.md"))
+        );
+        assert_eq!(
+            discover_append_system_prompt_file(&cwd, &agent, false),
+            Some(agent.join("APPEND_SYSTEM.md"))
+        );
     }
 }

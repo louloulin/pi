@@ -492,6 +492,40 @@ async fn run_slash_command(
                 .with_max_visible(10);
             app.open_selector(selector);
         }
+        SlashCommand::Trust(action) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let store = crate::trust::ProjectTrustStore::new(&crate::paths::agent_dir_or_default());
+            match action {
+                Some(decision) => match store.set(&cwd, Some(decision)) {
+                    Ok(()) => {
+                        let label = if decision { "trusted" } else { "untrusted" };
+                        app.info(format!(
+                            "Saved trust decision for {}: {label}. Restart pi for this to take effect.",
+                            cwd.display()
+                        ));
+                    }
+                    Err(err) => app.info(format!("/trust: {err}")),
+                },
+                None => {
+                    let has_resources = crate::trust::has_trust_requiring_project_resources(&cwd);
+                    let saved = match store.get(&cwd) {
+                        Ok(Some(true)) => "trusted",
+                        Ok(Some(false)) => "untrusted",
+                        Ok(None) => "no saved decision (defaults to untrusted)",
+                        Err(err) => {
+                            app.info(format!("/trust: {err}"));
+                            return Ok(());
+                        }
+                    };
+                    app.info(format!(
+                        "project trust for {}: {saved}; resources that require trust: {}",
+                        cwd.display(),
+                        if has_resources { "yes" } else { "no" }
+                    ));
+                    app.info("usage: /trust yes | /trust no".to_string());
+                }
+            }
+        }
         SlashCommand::Unknown(name) => {
             // A `/name` that is not a built-in may still belong to an
             // extension (`pi.registerCommand`). Run it when it does.

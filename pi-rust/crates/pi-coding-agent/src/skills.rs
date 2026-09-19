@@ -151,6 +151,11 @@ pub struct LoadSkillsOptions {
     pub skill_paths: Vec<PathBuf>,
     /// Whether the two default locations are searched.
     pub include_defaults: bool,
+    /// Whether `<cwd>/.pi/skills` may be loaded. Project skills are a
+    /// trust-requiring resource: a cloned repository must not be able to
+    /// steer the agent through a checked-in `SKILL.md` before the user
+    /// trusts the directory. `~/.pi/agent/skills` is never gated.
+    pub project_trusted: bool,
 }
 
 /// Which tool the prompt advertises for loading a skill file.
@@ -562,17 +567,19 @@ pub fn load_skills(options: &LoadSkillsOptions) -> SkillsLoadResult {
 
     if options.include_defaults {
         let user_dir = agent_dir.join("skills");
-        let project_dir = cwd.join(CONFIG_DIR_NAME).join("skills");
         add(
             load_skills_from_dir(&user_dir, SkillSource::User),
             &mut diagnostics,
             &mut collisions,
         );
-        add(
-            load_skills_from_dir(&project_dir, SkillSource::Project),
-            &mut diagnostics,
-            &mut collisions,
-        );
+        if options.project_trusted {
+            let project_dir = cwd.join(CONFIG_DIR_NAME).join("skills");
+            add(
+                load_skills_from_dir(&project_dir, SkillSource::Project),
+                &mut diagnostics,
+                &mut collisions,
+            );
+        }
     }
 
     for raw_path in &options.skill_paths {
@@ -938,6 +945,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             skill_paths: Vec::new(),
             include_defaults: true,
+            project_trusted: true,
         });
 
         assert_eq!(result.skills.len(), 2);
@@ -949,6 +957,31 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].kind, DiagnosticKind::Collision);
         assert!(result.diagnostics[0].message.contains("collision"));
+    }
+
+    #[test]
+    fn an_untrusted_project_hides_project_skills() {
+        let temp = TempDir::new("untrusted-project");
+        temp.write(
+            "agent/skills/global/SKILL.md",
+            "---\nname: global\ndescription: From the agent dir.\n---\n",
+        );
+        temp.write(
+            "project/.pi/skills/local/SKILL.md",
+            "---\nname: local\ndescription: Project-only skill.\n---\n",
+        );
+
+        let result = load_skills(&LoadSkillsOptions {
+            cwd: temp.path.join("project"),
+            agent_dir: temp.path.join("agent"),
+            skill_paths: Vec::new(),
+            include_defaults: true,
+            project_trusted: false,
+        });
+
+        assert_eq!(result.skills.len(), 1);
+        assert_eq!(result.skills[0].name, "global");
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
@@ -964,6 +997,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             skill_paths: vec![temp.path.join("extra")],
             include_defaults: false,
+            project_trusted: true,
         });
 
         assert_eq!(result.skills.len(), 1);
@@ -974,6 +1008,7 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             skill_paths: vec![PathBuf::from("/non/existent/path")],
             include_defaults: false,
+            project_trusted: true,
         });
         assert!(result.skills.is_empty());
         assert!(result.diagnostics.iter().any(|d| d.message.contains("does not exist")));

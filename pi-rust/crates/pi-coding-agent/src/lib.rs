@@ -32,6 +32,10 @@
 //! discovery + prompt formatting), [`frontmatter`] (YAML frontmatter for
 //! markdown resources), and [`system_prompt`], which assembles the whole
 //! thing into the prompt every mode sends to the model.
+//!
+//! Stage 23 wires [`trust`]: project-local `.pi` resources are only
+//! loaded once the directory is trusted, matching the upstream
+//! `core/trust-manager.ts` gate.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -57,6 +61,7 @@ pub mod system_prompt;
 pub mod text_fallback;
 pub mod tool_executor;
 pub mod tools;
+pub mod trust;
 
 pub use commands::resume::{list_resumable, resolve as resolve_resume, SessionRef};
 pub use commands::session::run as run_session_command;
@@ -73,7 +78,8 @@ pub use prompt_templates::{
     PromptTemplate, PromptTemplateDiagnostic, PromptTemplateSource, PromptTemplatesLoadResult,
 };
 pub use resource_loader::{
-    build_cli_system_prompt, load_resources, LoadedResources, ResourceLoadOptions,
+    build_cli_system_prompt, load_resources, resolve_cli_project_trust, LoadedResources,
+    ResourceLoadOptions,
 };
 pub use rpc::{
     run_rpc_server, JsonRpcError, RpcOutcome, RpcServerError, RpcServerOptions,
@@ -81,3 +87,8 @@ pub use rpc::{
 pub use skills::{load_skills, LoadSkillsOptions, Skill, SkillsLoadResult};
 pub use system_prompt::{build_system_prompt, SystemPromptOptions};
 pub use tool_executor::{default_executor, BuiltinToolExecutor, ExtensionToolExecutor};
+pub use trust::{
+    has_trust_requiring_project_resources, resolve_project_trusted, DefaultProjectTrust,
+    ProjectTrustDecision, ProjectTrustStore, ProjectTrustStoreEntry, ProjectTrustUpdate,
+    TrustError,
+};
