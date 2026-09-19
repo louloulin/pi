@@ -172,7 +172,42 @@ JS ctx.ui.confirm("Are you sure?", "rm -rf foo") ─►
 
 The shim short-circuits `ctx.ui.*` when `hasUI` is `false` on the
 event context, returning `false` / `null` without contacting the
-host — useful for batch / RPC modes.
+host. It also raises a `warning` notification naming the denied
+request, so a plugin author sees *why* the prompt never appeared
+instead of guessing. `hasUI` is therefore the honest answer to "can
+this process show a dialog?", not a mode name.
+
+#### Interactive mode (TUI)
+
+In the TUI the answer is a key press: `pi-coding-agent` installs a
+`TuiUiHandler` that turns every request into a `pi-tui` `Dialog` modal
+and awaits the `oneshot` the App resolves.
+
+| Request                        | Modal                                     | Answer                        |
+|--------------------------------|-------------------------------------------|-------------------------------|
+| `ctx.ui.confirm(title, body)`  | yes — Enter/`y` accept, `n`/Esc deny       | `true` / `false`              |
+| `ctx.ui.input(title, ph)`      | yes — text editor, Enter submits           | `string` / `null` on Esc      |
+| `ctx.ui.select(title, options)`| yes — arrow / `j` `k` / `g` `G` + Enter    | `string` / `null` on Esc      |
+| `ctx.ui.notify(msg, level)`    | no — appended to the transcript            | `NotifyAck` (fire-and-forget) |
+
+While a modal is open it owns the keyboard: the prompt underneath
+freezes and `Ctrl+C` / `Esc` cancel the *dialog* (deny / `null`)
+rather than the turn or the app. The bridge has a `ready` gate that
+is closed until the render loop starts, so a `session_start` handler
+that prompts during extension loading gets the deny default instead
+of stalling the host on a modal nobody can answer; the gate closes
+again when the loop exits. A second request arriving while a modal is
+already open is likewise denied rather than queued — an extension
+never waits on a prompt the user cannot see.
+
+#### Non-interactive modes (print / rpc / no TTY)
+
+`pi --print`, `pi rpc`, and any run whose stdin or stdout is not a
+terminal keep the stderr-backed handler: `confirm` → `false`,
+`input` / `select` → `null`, `notify` → stderr. These are deliberate,
+documented denials, never a hang — an RPC client that does not
+implement a UI protocol is not left waiting for a reply it cannot
+produce.
 
 ## Loading extensions
 
@@ -247,7 +282,11 @@ runtime can never swallow a prompt that was meant for the agent.
 ## Timeouts & isolation
 
 - Each host import and event dispatch is bounded by
-  [`DEFAULT_TIMEOUT`] (5 seconds).
+  [`DEFAULT_TIMEOUT`] (5 seconds). Interactive mode raises the ceiling
+to 300 s (`wiring::INTERACTIVE_UI_TIMEOUT`): the extension is awaiting
+a *human*, and 5 s is not enough to read a confirmation. The
+interactive `UiHandler` still answers instantly when the TUI is not
+pumping dialogs, so the wider budget only applies to a visible modal.
 - The host installs an **interrupt handler** on the QuickJS runtime
   so an infinite `while(true)` aborts at the next bytecode boundary
   once the deadline is exceeded. The interrupt fires within a few
@@ -273,7 +312,7 @@ or a Stage 4+ follow-up:
 | `pi.on(eventName, handler)`             | ✅ Supported    | Event tags are free-form strings; the host dispatches anything.        |
 | `pi.registerTool(...)` + `execute(...)` | ✅ Supported    | JSON Schema `parameters` round-trip; result shape matches TS.          |
 | `pi.registerCommand(...)`               | ✅ Supported    | Dispatched by the TUI (`/name args`) and by `pi --print "/name args"`; the JS handler runs in the host. |
-| `ctx.ui.confirm / input / select`       | ✅ Supported    | Async; the host awaits the user's `UiHandler` reply. The bundled CLI handler is non-interactive (deny/cancel). |
+| `ctx.ui.confirm / input / select`       | ✅ Supported    | Async; the host awaits the user's `UiHandler` reply. The TUI renders a real modal dialog; print / rpc / non-TTY runs deny (`false` / `null`) and report the denial through `ctx.ui.notify`. |
 | `ctx.ui.notify(...)`                    | ✅ Supported    | Fire-and-forget; logged on the `pi_extension` tracing target.          |
 | `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Persisted as session entries by the TUI and print modes; `sendUserMessage` is not re-injected as a new turn yet. |
 | `pi.appendEntry(type, data)`            | ✅ Supported    | Persisted to the session backend as `SessionEntry::Extension` (TUI JSONL + print-mode SQLite). |
