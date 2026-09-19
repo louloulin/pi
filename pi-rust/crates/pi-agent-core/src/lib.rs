@@ -14,6 +14,7 @@ mod events;
 mod hooks;
 mod queue;
 mod state;
+pub mod telemetry;
 pub mod tools;
 
 #[cfg(feature = "wasm")]
@@ -25,4 +26,5 @@ pub use events::*;
 pub use hooks::*;
 pub use queue::*;
 pub use state::*;
+pub use telemetry::{agent_error_type, api_name, stop_reason_name};
 pub use tools::*;

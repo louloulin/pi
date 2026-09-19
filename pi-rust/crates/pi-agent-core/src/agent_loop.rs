@@ -15,6 +15,7 @@ use pi_protocol::{
     AssistantMessage, AssistantMessageEvent, Content, Context as AgentContext, Message, Role,
     ToolCall, ToolResult,
 };
+use pi_telemetry::{SpanOptions, SpanRef, SpanStatus, TelemetryContextExt};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,9 @@ use crate::hooks::{
     AgentHookAdapter, AgentLoopTurnUpdate, PrepareNextTurnContext, ShouldStopAfterTurnContext,
 };
 use crate::state::{AgentConfig, AgentState};
+use crate::telemetry::{
+    attribute_name, request_error_attributes, response_attributes, span_name, tool_attributes,
+};
 use crate::tools::ToolExecutor;
 
 /// Errors the agent loop can surface to its caller.
@@ -72,6 +76,13 @@ impl From<&AgentConfig> for LoopConfig {
             thinking_level: None,
         }
     }
+}
+
+/// One assistant response plus the tool batch it triggered.
+struct TurnBatch {
+    message: AssistantMessage,
+    tool_results: Vec<ToolResult>,
+    continue_loop: bool,
 }
 
 /// Single agent turn entry point.
@@ -168,10 +179,48 @@ impl AgentLoop {
     /// `context` / `model` between turns. The per-turn outcomes are
     /// emitted via the `on_turn` callback (Stage 4 wires the public
     /// event stream).
+    ///
+    /// When [`AgentConfig::telemetry`] is set, the whole invocation runs
+    /// inside a `pi.harness.run` span so every turn / request / tool span
+    /// nests underneath it.
     pub async fn run(
         &mut self,
         prompts: Vec<Message>,
+        on_turn: impl FnMut(&TurnOutcome) + Send,
+    ) -> Result<TurnOutcome, AgentError> {
+        let root = self.config.telemetry.clone();
+        match root {
+            None => self.run_inner(prompts, on_turn, None).await,
+            Some(root) => {
+                let options = SpanOptions::new(span_name::HARNESS_RUN)
+                    .with_attribute(attribute_name::OPERATION_KIND, "run");
+                root.start_span_with(options, |span| async move {
+                    let outcome = self.run_inner(prompts, on_turn, Some(span.clone())).await;
+                    let mut attributes = pi_telemetry::SpanAttributes::new();
+                    attributes.insert(
+                        attribute_name::OPERATION_OUTCOME.to_owned(),
+                        if outcome.is_ok() {
+                            "completed"
+                        } else {
+                            "failed"
+                        }
+                        .into(),
+                    );
+                    span.set_attributes(attributes);
+                    outcome
+                })
+                .await
+            }
+        }
+    }
+
+    /// Inner loop body — `run` wraps this so telemetry can close the run span
+    /// on every `return` path.
+    async fn run_inner(
+        &mut self,
+        prompts: Vec<Message>,
         mut on_turn: impl FnMut(&TurnOutcome) + Send,
+        root: Option<SpanRef>,
     ) -> Result<TurnOutcome, AgentError> {
         // Step 1 — clone initial prompts into the state and the new-message list.
         let mut new_messages: Vec<Message> = prompts.clone();
@@ -188,6 +237,7 @@ impl AgentLoop {
 
         let mut last_completed_turn: Option<ShouldStopAfterTurnContext> = None;
         let mut has_more_tool_calls = false;
+        let mut turn_id: u64 = 0;
         // Pending messages injected at the start of the next turn
         // (analogous to the TS `pendingMessages` buffer). The first
         // turn is always allowed because we have prompts to process.
@@ -198,6 +248,7 @@ impl AgentLoop {
 
         loop {
             if has_more_tool_calls || !pending_messages.is_empty() {
+                turn_id += 1;
                 // Step 2 — call `prepare_next_turn` before the next turn
                 // if we have a previously completed turn to hand it.
                 if let Some(turn) = last_completed_turn.take() {
@@ -213,19 +264,58 @@ impl AgentLoop {
                     new_messages.push(message);
                 }
 
-                // Step 4 — stream a single assistant response.
+                // Step 4 — stream one assistant response and run the tool
+                // batch it produced. Both nest inside a single
+                // `pi.harness.turn` span when telemetry is installed.
                 // `prepare_next_turn` may have replaced the context
                 // wholesale; re-advertise the registered tools unless the
                 // hook supplied its own list.
                 if current_context.tools.is_empty() {
                     current_context.tools = self.config.tool_definitions();
                 }
-                let assistant_message = stream_assistant_response(
-                    &self.config.stream_fn,
-                    &current_context,
-                    &loop_config,
-                )
-                .await?;
+                let batch = match root.as_ref() {
+                    None => {
+                        run_turn_batch(
+                            &self.config.stream_fn,
+                            &current_context,
+                            &loop_config,
+                            self.config.tool_executor.as_ref(),
+                            &self.hooks,
+                            &self.signal,
+                            None,
+                        )
+                        .await?
+                    }
+                    Some(parent) => {
+                        let stream_fn = self.config.stream_fn.clone();
+                        let executor = self.config.tool_executor.clone();
+                        let hooks = self.hooks.clone();
+                        let signal = self.signal.clone();
+                        let context = current_context.clone();
+                        let loop_config = loop_config.clone();
+                        let options = SpanOptions::new(span_name::HARNESS_TURN)
+                            .with_attribute(attribute_name::TURN_ID, turn_id.to_string());
+                        parent
+                            .start_span_with(options, move |turn_span| async move {
+                                run_turn_batch(
+                                    &stream_fn,
+                                    &context,
+                                    &loop_config,
+                                    executor.as_ref(),
+                                    &hooks,
+                                    &signal,
+                                    Some(turn_span),
+                                )
+                                .await
+                            })
+                            .await?
+                    }
+                };
+                let TurnBatch {
+                    message: assistant_message,
+                    tool_results,
+                    continue_loop,
+                } = batch;
                 let assistant_log_message = Message {
                     role: Role::Assistant,
                     content: assistant_message.content.clone(),
@@ -234,17 +324,10 @@ impl AgentLoop {
                 current_context.messages.push(assistant_log_message.clone());
                 new_messages.push(assistant_log_message);
 
-                // Step 5 — execute any tool calls emitted by the model.
+                // Step 5 — fold the executed tool results into the context.
                 // `BeforeToolCall` may block a call, the executor may fail,
                 // and `AfterToolCall` may rewrite the result — none of which
                 // aborts the turn.
-                let (tool_results, continue_loop) = execute_tool_calls(
-                    self.config.tool_executor.as_ref(),
-                    &self.hooks,
-                    &assistant_message,
-                    &self.signal,
-                )
-                .await;
                 let mut tool_result_messages: Vec<Message> = Vec::with_capacity(tool_results.len());
                 for result in tool_results {
                     let msg = Message {
@@ -355,9 +438,77 @@ fn apply_turn_update(
     }
 }
 
+/// Run one turn: stream the assistant response, then execute the tool batch
+/// it produced. `telemetry` is the `pi.harness.turn` span the turn runs
+/// inside, if any.
+async fn run_turn_batch(
+    stream_fn: &SharedStreamFn,
+    context: &AgentContext,
+    config: &LoopConfig,
+    executor: Option<&Arc<dyn ToolExecutor>>,
+    hooks: &AgentHookAdapter,
+    signal: &CancellationToken,
+    telemetry: Option<SpanRef>,
+) -> Result<TurnBatch, AgentError> {
+    let assistant_message =
+        stream_assistant_response(stream_fn, context, config, telemetry.as_ref()).await?;
+    let (tool_results, continue_loop) = execute_tool_calls(
+        executor,
+        hooks,
+        &assistant_message,
+        signal,
+        telemetry.as_ref(),
+    )
+    .await;
+    Ok(TurnBatch {
+        message: assistant_message,
+        tool_results,
+        continue_loop,
+    })
+}
+
+/// Stream a single assistant response, wrapping it in a `pi.ai.request` span
+/// when a telemetry parent is installed.
+async fn stream_assistant_response(
+    stream_fn: &SharedStreamFn,
+    context: &AgentContext,
+    config: &LoopConfig,
+    telemetry: Option<&SpanRef>,
+) -> Result<AssistantMessage, AgentError> {
+    let Some(parent) = telemetry else {
+        return stream_assistant_events(stream_fn, context, config).await;
+    };
+    let options = SpanOptions::new(span_name::AI_REQUEST)
+        .with_attribute(attribute_name::AI_OPERATION, "stream")
+        .with_attribute(
+            attribute_name::AI_PROVIDER,
+            config.model.provider.to_string(),
+        )
+        .with_attribute(attribute_name::AI_MODEL, config.model.id.clone())
+        .with_attribute(
+            attribute_name::AI_API,
+            crate::telemetry::api_name(config.model.api),
+        )
+        .with_attribute(attribute_name::AI_STREAMING, true);
+    parent
+        .start_span_with(options, |span| async move {
+            match stream_assistant_events(stream_fn, context, config).await {
+                Ok(message) => {
+                    span.set_attributes(response_attributes(&message));
+                    Ok(message)
+                }
+                Err(error) => {
+                    span.set_attributes(request_error_attributes(&error));
+                    Err(error)
+                }
+            }
+        })
+        .await
+}
+
 /// Stream a single assistant response from the provider and fold the
 /// event stream into the final [`AssistantMessage`].
-async fn stream_assistant_response(
+async fn stream_assistant_events(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
     config: &LoopConfig,
@@ -438,6 +589,7 @@ async fn execute_tool_calls(
     hooks: &AgentHookAdapter,
     assistant_message: &AssistantMessage,
     signal: &CancellationToken,
+    telemetry: Option<&SpanRef>,
 ) -> (Vec<ToolResult>, bool) {
     let tool_calls: Vec<&ToolCall> = assistant_message
         .content
@@ -471,30 +623,74 @@ async fn execute_tool_calls(
             continue;
         }
 
-        let mut result = match executor {
-            Some(executor) => match executor.execute(call, signal.clone()).await {
-                Ok(result) => result,
-                // Executor-level failures become error results; the turn
-                // continues so the model can correct course.
-                Err(err) => ToolResult {
-                    tool_call_id: call.id.clone(),
-                    content: Box::new(Content::text(err.to_string())),
-                    is_error: true,
-                    details: None,
-                },
-            },
-            // Backward compatibility: no executor registered, so keep the
-            // Stage 2 stub result the existing loop tests assert on.
-            None => ToolResult {
-                tool_call_id: call.id.clone(),
-                content: Box::new(Content::text(format!("(stub) executed {}", call.name))),
-                is_error: false,
-                details: None,
-            },
+        let mut result = match telemetry {
+            None => call_tool(executor, hooks, call, signal).await,
+            Some(parent) => {
+                // One `pi.harness.tool` span per call, parented to the turn.
+                // Tool *arguments* and *output* are deliberately never
+                // recorded — only the name, the call id and whether the
+                // execution produced an error.
+                let options = SpanOptions::new(span_name::HARNESS_TOOL)
+                    .with_attribute(attribute_name::TOOL_NAME, call.name.clone())
+                    .with_attribute(attribute_name::TOOL_CALL_ID, call.id.clone());
+                parent
+                    .start_span_with(options, |span| async move {
+                        let result = call_tool(executor, hooks, call, signal).await;
+                        span.set_attributes(tool_attributes(&result));
+                        if result.is_error {
+                            span.set_status(SpanStatus::error(
+                                "ToolError",
+                                "tool call produced an error result",
+                            ));
+                        }
+                        Ok::<ToolResult, AgentError>(result)
+                    })
+                    .await
+                    .unwrap_or_else(|err| ToolResult {
+                        tool_call_id: call.id.clone(),
+                        content: Box::new(Content::text(err.to_string())),
+                        is_error: true,
+                        details: None,
+                    })
+            }
         };
         hooks.invoke_after_tool_call(&mut result).await;
         results.push(result);
     }
 
     (results, !all_terminate)
+}
+
+/// Execute one tool call: run the `AfterToolCall` hook, dispatch to the
+/// registered executor and convert executor-level failures into error
+/// results so the turn continues.
+async fn call_tool(
+    executor: Option<&Arc<dyn ToolExecutor>>,
+    hooks: &AgentHookAdapter,
+    call: &ToolCall,
+    signal: &CancellationToken,
+) -> ToolResult {
+    let mut result = match executor {
+        Some(executor) => match executor.execute(call, signal.clone()).await {
+            Ok(result) => result,
+            // Executor-level failures become error results; the turn
+            // continues so the model can correct course.
+            Err(err) => ToolResult {
+                tool_call_id: call.id.clone(),
+                content: Box::new(Content::text(err.to_string())),
+                is_error: true,
+                details: None,
+            },
+        },
+        // Backward compatibility: no executor registered, so keep the
+        // Stage 2 stub result the existing loop tests assert on.
+        None => ToolResult {
+            tool_call_id: call.id.clone(),
+            content: Box::new(Content::text(format!("(stub) executed {}", call.name))),
+            is_error: false,
+            details: None,
+        },
+    };
+    hooks.invoke_after_tool_call(&mut result).await;
+    result
 }

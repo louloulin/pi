@@ -404,6 +404,7 @@ async fn context_exposes_executor_definitions() {
         stream_fn: Arc::new(ScriptedStream::new(vec![text_reply("unused")])),
         model: faux_model(),
         tool_executor: Some(executor),
+        telemetry: None,
     };
     let state = AgentState {
         system_prompt: "you are pi".into(),

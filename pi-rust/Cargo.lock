@@ -1011,6 +1011,7 @@ dependencies = [
  "parking_lot",
  "pi-ai",
  "pi-protocol",
+ "pi-telemetry",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

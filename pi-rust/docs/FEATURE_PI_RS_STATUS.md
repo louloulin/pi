@@ -2245,3 +2245,99 @@ This branch (`agent/devbox1/lum-1062`) is cut from
 `origin/feature/pi.rs` at `969623ba7` (the Stage 13 `pi-telemetry`
 commit), merged back into `feature/pi.rs` before pushing, so the
 integration branch and GitHub carry the Stage 15 commit.
+
+## LUM-1063 round — Stage 16: `pi-telemetry` 接入 agent loop（span 树落地）
+
+LUM-1058（Stage 13）把 `packages/telemetry` 移植成 `pi-telemetry`，当时明确
+留下 gaps 第 1 条：**没有任何 crate 真正 emit span**。本轮（autopilot，
+2026-09-19 04:21 UTC）把 telemetry 接进 agent 主循环，这是上游
+`packages/agent/src/harness/telemetry.ts` 的 Rust 对应物，也是 LUM-1058 记录
+的唯一「自然下一阶段」。
+
+### 为什么选「实现」而不是再派发
+
+并发情况：同类 autopilot 轮 LUM-1062 在 04:11Z 交付 Stage 15（数据驱动
+provider 注册表 + OpenAI 兼容 provider 家族），以纯 fast-forward 把
+`origin/feature/pi.rs` 推到 `751bbd6e4`；`LUM-1055`（Gemini）仍挂 in_progress。
+telemetry 接入与 provider 家族（LUM-1062 已覆盖）、`packages/*` 剩余 crate
+（chord / client / server / evals）都不重叠，改动面窄、可离线测试、零新依赖，
+属于「应该直接做」而不是「再开任务」的范畴。因此本轮：自己实现 + 派发 Stage 17
+两个 todo 子任务（`pi-chord` core、`pi-evals`），并把依赖它们的 server/client
+按 stage 18/19 以 backlog 排好（详见下文「本轮派发」）。
+
+### 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `crates/pi-agent-core/src/telemetry.rs` | **新增** — span/attribute 命名常量（对齐上游 `pi.harness.*` / `pi.ai.*` 词汇表）、`api_name` / `stop_reason_name` / `agent_error_type` 映射、usage / error / tool end-attribute 构造函数、`impl IntoTelemetryError for AgentError` |
+| `crates/pi-agent-core/src/agent_loop.rs` | `run` 拆成薄 wrapper + `run_inner`；每轮抽成 `run_turn_batch`；provider 请求抽成 `stream_assistant_response`（`pi.ai.request` span）+ `stream_assistant_events`；单次工具执行抽成 `call_tool`（`pi.harness.tool` span） |
+| `crates/pi-agent-core/src/state.rs` | `AgentConfig` 新增 `telemetry: Option<Arc<dyn TelemetryContext>>`（默认 `None`，热路径零开销） |
+| `crates/pi-agent-core/src/agent.rs` | `AgentOptions` 同名字段 + `with_telemetry(...)` builder + Debug 输出 |
+| `crates/pi-agent-core/tests/telemetry.rs` | **新增** — 4 个集成测试：span 树/parentage、provider 错误 status、tool 错误 status、opt-in 等价性 |
+| `crates/pi-agent-core/Cargo.toml` | 依赖 `pi-telemetry`（workspace 内 path 依赖，无第三方新增） |
+
+### span 树（全部对齐上游命名）
+
+| span | 覆盖范围 | parent | start attrs | end attrs |
+|------|----------|--------|-------------|-----------|
+| `pi.harness.run` | 一次 `AgentLoop::run` | root / external | `pi.operation.kind=run` | `pi.operation.outcome=completed / failed` |
+| `pi.harness.turn` | 一次 assistant 回复 + 其工具批次 | `pi.harness.run` | `pi.turn.id`（1-based 字符串） | —（本 port 无 turn 级 end attrs） |
+| `pi.ai.request` | 一次 provider 请求 | `pi.harness.turn` | `pi.ai.operation=stream`、`pi.ai.provider`、`pi.ai.model`、`pi.ai.api`、`pi.ai.streaming=true` | `pi.ai.response.model`、`pi.ai.response.stop_reason`、`pi.ai.usage.{input,output,cache_read,cache_write,total}_tokens`；失败时 `pi.ai.error.type` |
+| `pi.harness.tool` | 一次工具执行 | `pi.harness.turn` | `pi.tool.name`、`pi.tool.call_id` | `pi.tool.is_error` |
+
+语义要点：
+
+- **错误语义**：provider 失败 → `pi.ai.request` 与 `pi.harness.run` 自动记 error
+  status（`IntoTelemetryError for AgentError`，class `stream` / `provider` /
+  `tool`），run span 的 `pi.operation.outcome=failed`；工具产生 `is_error` 结果时
+  `pi.harness.tool` 显式置 error status（class `ToolError`），但**不**让 run 失败
+  —— executor 级 `Err` 仍折叠为 error 结果、循环继续，与 Stage 10 的契约一致。
+- **数据策略**：只记录标识符、provider 元数据、usage 计数与错误类别；prompt /
+  completion / 工具参数 / 工具输出一律不进 span（符合 `pi-telemetry` 的
+  `AttributeValue` 数据策略注释）。
+- **`pi-protocol::Api` 无 `Display`**：刻意不改该 crate，`telemetry::api_name`
+  提供稳定 snake_case 名称（`openai_chat_completions` / `anthropic_messages` / …）。
+- **无 ambient context**：span 通过显式 `SpanRef` 手动传给 turn / request / tool，
+  因此 wasm 目标同样可用（`pi-telemetry` 不依赖 tokio，也不使用线程局部变量）。
+
+### 验证（native；本 worktree = `969623ba7` + 本轮）
+
+```
+$ cargo check   -p pi-agent-core --all-targets     # clean
+$ cargo clippy  -p pi-agent-core --all-targets     # 0 warning
+$ cargo test    -p pi-agent-core                   # 29 passed / 0 failed（含 4 个新 telemetry 测试）
+$ cargo test    --workspace                        # 351 passed / 0 failed（347 + 4）
+```
+
+### 已知限制
+
+1. **没有 exporter**：`pi-telemetry` 目前只有 `NoopTelemetry` / `MemoryTelemetry`，
+   没有 OTLP / OTel SDK adapter。接真实导出后端（`--telemetry` CLI 开关 +
+   OTel exporter）是下一阶段的事。
+2. **不是全量上游 schema**：上游 `harness/telemetry.ts` 的 `pi.lane.*` /
+   `pi.operation.id` / `pi.tool.replay` / `pi.tool.recovery` / `pi.ai.response.id` /
+   `pi.ai.http.status_code` 在本 port 没有对应概念或数据（没有 lane/调度器、
+   没有 replay/recovery 路径，`AssistantMessage` 不携带 response id），因此未 emit。
+3. **CLI 未接线**：`pi-coding-agent` 还没有 `--telemetry` 参数；安装 recorder
+   需要宿主调用 `AgentOptions::with_telemetry`。
+4. **订阅上游：本轮基于 `969623ba7` 开发，合入时 rebase 到 `751bbd6e4`
+   （LUM-1062 的 Stage 15）**，只改 `pi-agent-core` 与文档，与 provider 注册表
+   无文件级重叠。
+
+### 本轮派发（cap 内）
+
+| 任务 | Stage | 状态 | 说明 |
+|------|-------|------|------|
+| LUM-1065 `pi-chord` core | 17 | todo（立即运行） | delta 状态增量 + facets 宿主；`client` / `server` 的共同前置 |
+| LUM-1066 `pi-evals` | 17 | todo（立即运行） | 离线评测 harness，与 chord 完全独立 |
+| LUM-1067 `pi-chord` services | 18 | backlog | wire / provider / consumer / state + 宿主加载 |
+| LUM-1068 `pi-server` | 19 | backlog | 对齐 `packages/server`（复用 `pi-protocol` 的 wire 类型） |
+| LUM-1069 `pi-client` | 19 | backlog | 对齐 `packages/client`（unix transport + 订阅） |
+
+只有 Stage 17 的两个任务是 `todo`（即「同时运行」的任务数 ≤ 3：LUM-1055 收尾 +
+这两个）；stage 18/19 以 backlog 排队，由 stage barrier（前一组全部到达终态时
+唤醒父任务 LUM-981 的 assignee）逐级 promote。
+
+**Stage 16 status after this round:** telemetry 已接入 agent loop（run / turn /
+request / tool 四层 span 树），`pi-agent-core` 成为第一个 emit span 的核心
+crate；exporter、CLI 开关与上游剩余 provider 协议仍未落地。

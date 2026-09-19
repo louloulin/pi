@@ -44,6 +44,7 @@ denylist = ["wasm"]
 [dependencies]
 pi-protocol = { path = "../pi-protocol" }
 pi-ai = { path = "../pi-ai" }
+pi-telemetry = { path = "../pi-telemetry" }
 
 # Tokio feature set is target-conditional: the workspace dep pulls `full`
 # (which transitively depends on `mio`), and `mio` does not compile on

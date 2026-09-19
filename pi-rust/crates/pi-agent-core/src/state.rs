@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{Context, Message, Model, ToolDefinition};
+use pi_telemetry::TelemetryContext;
 
 use crate::tools::ToolExecutor;
 
@@ -19,6 +20,14 @@ pub struct AgentConfig {
     /// call to it. `None` keeps the Stage 2 stub behaviour so callers that
     /// predate tool execution still work.
     pub tool_executor: Option<Arc<dyn ToolExecutor>>,
+    /// Optional telemetry parent for the spans the loop emits.
+    ///
+    /// `None` (the default) records nothing and adds no work to the hot
+    /// path. When set, every [`AgentLoop::run`](crate::AgentLoop::run)
+    /// invocation emits `pi.harness.run`, each turn emits `pi.harness.turn`,
+    /// each provider call emits `pi.ai.request` and each tool call emits
+    /// `pi.harness.tool`; see [`crate::telemetry`] for the vocabulary.
+    pub telemetry: Option<Arc<dyn TelemetryContext>>,
 }
 
 impl AgentConfig {

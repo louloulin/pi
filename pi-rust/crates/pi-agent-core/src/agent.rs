@@ -4,6 +4,7 @@
 use parking_lot::Mutex;
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{Content, Message, Model};
+use pi_telemetry::TelemetryContext;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -37,6 +38,9 @@ pub struct AgentOptions {
     /// Optional tool executor. When set, the loop advertises its definitions
     /// to the model and dispatches tool calls to it.
     pub tool_executor: Option<Arc<dyn ToolExecutor>>,
+    /// Optional telemetry context. When set, the loop emits one span per run,
+    /// turn, provider request and tool execution. `None` records nothing.
+    pub telemetry: Option<Arc<dyn TelemetryContext>>,
 }
 
 impl std::fmt::Debug for AgentOptions {
@@ -57,6 +61,7 @@ impl std::fmt::Debug for AgentOptions {
                 "tool_executor",
                 &self.tool_executor.as_ref().map(|_| "…"),
             )
+            .field("telemetry", &self.telemetry.as_ref().map(|_| "…"))
             .finish()
     }
 }
@@ -71,7 +76,14 @@ impl AgentOptions {
             should_stop_after_turn: None,
             prepare_next_turn: None,
             tool_executor: None,
+            telemetry: None,
         }
+    }
+
+    /// Builder-style setter for [`telemetry`](Self::telemetry).
+    pub fn with_telemetry(mut self, telemetry: Arc<dyn TelemetryContext>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     /// Builder-style setter for [`should_stop_after_turn`](Self::should_stop_after_turn).
@@ -129,6 +141,7 @@ impl Agent {
             stream_fn: options.stream_fn.clone(),
             model: options.model.clone(),
             tool_executor: options.tool_executor.clone(),
+            telemetry: options.telemetry.clone(),
         };
         let hooks = options.hook_adapter();
         Self {
