@@ -615,25 +615,13 @@ impl JsExtensionHost {
             Ok(Ok(())) => {
                 let mut s = state.lock();
                 s.pending_extension = None;
-                let pending = std::mem::take(&mut s.registry);
-                // Fold any tools / commands that landed during this
-                // load into the matching entry's capabilities.
-                let mut new_reg = ExtensionRegistry::new();
-                for ext in pending.extensions() {
-                    let id = ext.id.clone();
-                    let mut caps = ExtensionCapabilities::default();
-                    if id == entry_clone.id {
-                        // The current load: take everything new from
-                        // the log. Commands stay in `log.commands` —
-                        // they are read back through
-                        // `registered_commands()`, so folding them
-                        // into `entries` would lose the name /
-                        // description pair.
-                        caps.tools = std::mem::take(&mut s.log.tools);
-                    }
-                    new_reg.register(ext.clone(), caps);
-                }
-                s.registry = new_reg;
+                // Fold the tools that landed during this load into this
+                // extension's registry entry. Every other entry keeps
+                // its tools: loading a second extension (a user-level
+                // one next to a project-local one, say) must not wipe
+                // the first extension's registrations.
+                let tools = std::mem::take(&mut s.log.tools);
+                s.registry.set_tools(&entry_clone.id, tools);
                 Ok(())
             }
             Ok(Err(e)) => Err(ExtensionError::Load(format!("{}: {}", entry_clone.id, e))),
