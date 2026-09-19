@@ -2,7 +2,7 @@
 //!
 //! Stage 4 ships the minimum command set required by the acceptance
 //! criteria: `/help`, `/clear`, `/model`, `/session`, `/exit`,
-//! `/resume`, plus Stage 23's `/trust`. Each is parsed into a
+//! `/resume`, plus `/trust` and `/settings`. Each is parsed into a
 //! [`SlashCommand`] variant and dispatched by `interactive.rs`.
 
 /// Slash command enum — one variant per supported slash command.
@@ -20,6 +20,9 @@ pub enum SlashCommand {
     Exit,
     /// `/resume` — list and pick a previous session file.
     Resume,
+    /// `/settings` — open the settings modal (upstream
+    /// `SettingsSelectorComponent`).
+    Settings,
     /// `/trust [yes|no]` — show or change the saved project-trust
     /// decision. `None` shows the current state; the decision only takes
     /// effect on the next start. Mirrors upstream `showTrustSelector`.
@@ -52,6 +55,7 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "model" => SlashCommand::Model,
         "session" => SlashCommand::Session,
         "resume" => SlashCommand::Resume,
+        "settings" => SlashCommand::Settings,
         "compact" => SlashCommand::Compact {
             instructions: (!args.is_empty()).then(|| args.to_string()),
         },
@@ -84,6 +88,7 @@ pub fn help_text() -> String {
     out.push_str("  /model    pick a model (opens selector)\n");
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /resume   resume a previous session\n");
+    out.push_str("  /settings show or change interface settings\n");
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
     out.push_str("  /exit     quit the interactive session\n");
@@ -113,6 +118,7 @@ mod tests {
         assert_eq!(handle_command("/exit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/resume").unwrap(), SlashCommand::Resume);
+        assert_eq!(handle_command("/settings").unwrap(), SlashCommand::Settings);
         assert_eq!(handle_command("/trust").unwrap(), SlashCommand::Trust(None));
         assert_eq!(
             handle_command("/compact").unwrap(),

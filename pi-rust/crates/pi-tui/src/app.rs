@@ -33,6 +33,7 @@ use crate::input::{InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGes
 use crate::message::{MessageItem, MessageView};
 use crate::prompt::{Prompt, PromptAction};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
+use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::write_styled_line;
 use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeError};
@@ -174,6 +175,10 @@ pub struct RenderSnapshot {
     pub prompt_placeholder: String,
     /// Buffer text the editor currently shows.
     pub prompt_buffer: String,
+    /// Whether the settings modal is currently visible.
+    pub settings_open: bool,
+    /// Rendered settings lines (when open).
+    pub settings_lines: Vec<String>,
     /// Whether the selector modal is currently visible.
     pub selector_open: bool,
     /// Selector title (when open).
@@ -214,6 +219,18 @@ pub struct App {
     /// call — no rebuild, no restart.
     theme: Theme,
     selector: Option<Selector>,
+    /// Modal settings list opened by `/settings` (upstream
+    /// `SettingsSelectorComponent`).
+    settings: Option<SettingsList>,
+    /// Value the driver must persist — the last
+    /// [`SettingsAction::ValueChanged`] the list reported. Consumed with
+    /// [`App::take_pending_setting_change`].
+    pending_setting_change: Option<(String, String)>,
+    /// Item id the driver must handle — the last
+    /// [`SettingsAction::Activated`] the list reported (upstream opens the
+    /// item's submenu). Consumed with
+    /// [`App::take_pending_setting_activation`].
+    pending_setting_activation: Option<String>,
     /// Modal requested by a JS extension (`ctx.ui.confirm` / `input` /
     /// `select`) that is waiting for a key press.
     dialog: Option<Dialog>,
@@ -290,6 +307,9 @@ impl App {
             theme: builtin_theme("dark", ColorMode::TrueColor)
                 .expect("built-in dark theme is valid"),
             selector: None,
+            settings: None,
+            pending_setting_change: None,
+            pending_setting_activation: None,
             dialog: None,
             ui_dialogs: None,
             event_rx: Some(event_rx),
@@ -360,6 +380,19 @@ impl App {
     /// not require rebuilding the App.
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+    }
+
+    /// Whether copy-on-select is on for the chat log.
+    pub fn copy_on_select(&self) -> bool {
+        self.config.copy_on_select
+    }
+
+    /// Turn copy-on-select on or off for the running session.
+    ///
+    /// The next selection release respects the new value; selections that
+    /// were already captured stay queued.
+    pub fn set_copy_on_select(&mut self, enabled: bool) {
+        self.config.copy_on_select = enabled;
     }
 
     /// Load and install a theme by name, keeping the current colour mode.
@@ -668,6 +701,90 @@ impl App {
         self.selector.as_ref()
     }
 
+    /// Open the settings modal (`/settings`).
+    ///
+    /// The list owns the keyboard until it is cancelled or the driver calls
+    /// [`App::close_settings`]. Any queued setup work from a previous
+    /// session is dropped so a stale change cannot be persisted against the
+    /// new list.
+    pub fn open_settings(&mut self, list: SettingsList) {
+        self.settings = Some(list);
+        self.pending_setting_change = None;
+        self.pending_setting_activation = None;
+    }
+
+    /// Close the settings modal and hand the list back to the driver.
+    pub fn close_settings(&mut self) -> Option<SettingsList> {
+        self.settings.take()
+    }
+
+    /// Whether the settings modal is on screen.
+    pub fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// Borrow the open settings list.
+    pub fn settings(&self) -> Option<&SettingsList> {
+        self.settings.as_ref()
+    }
+
+    /// Mutably borrow the open settings list — the driver uses it to
+    /// refresh a value it changed outside the modal.
+    pub fn settings_mut(&mut self) -> Option<&mut SettingsList> {
+        self.settings.as_mut()
+    }
+
+    /// Take the value the list asked to persist, if any.
+    ///
+    /// Returns `(id, value)` — upstream's `onChange(id, newValue)`.
+    pub fn take_pending_setting_change(&mut self) -> Option<(String, String)> {
+        self.pending_setting_change.take()
+    }
+
+    /// Take the item id the list asked the driver to open, if any.
+    ///
+    /// Returns the id of an item without `values` that was confirmed —
+    /// upstream's `submenu` hook.
+    pub fn take_pending_setting_activation(&mut self) -> Option<String> {
+        self.pending_setting_activation.take()
+    }
+
+    /// Route one key while the settings modal is open.
+    fn step_settings(&mut self, key: Key) -> StepOutcome {
+        let Some(list) = self.settings.as_mut() else {
+            return StepOutcome::Idle;
+        };
+        match list.handle_key(key) {
+            SettingsAction::None => StepOutcome::Idle,
+            SettingsAction::Changed => StepOutcome::Redraw,
+            SettingsAction::ValueChanged { id, value } => {
+                self.pending_setting_change = Some((id, value));
+                StepOutcome::Redraw
+            }
+            SettingsAction::Activated(id) => {
+                self.pending_setting_activation = Some(id);
+                StepOutcome::Redraw
+            }
+            SettingsAction::Cancelled => {
+                self.settings = None;
+                StepOutcome::Redraw
+            }
+        }
+    }
+
+    /// Route a wheel event to the open settings list. Returns `None` when
+    /// no settings modal is open, so the caller can fall through to the
+    /// transcript.
+    fn step_settings_wheel(&mut self, up: bool, alt: bool) -> Option<StepOutcome> {
+        let list = self.settings.as_mut()?;
+        let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
+        let delta = if up { -(lines as i32) } else { lines as i32 };
+        Some(match list.scroll_by(delta) {
+            SettingsAction::Changed => StepOutcome::Redraw,
+            _ => StepOutcome::Idle,
+        })
+    }
+
     /// Process a single [`InputEvent`]. Returns the outcome so the
     /// caller can decide whether to redraw.
     pub fn step(&mut self, event: InputEvent) -> StepOutcome {
@@ -681,6 +798,19 @@ impl App {
                 return StepOutcome::Idle;
             };
             return self.step_dialog(key);
+        }
+        // A settings modal owns both the keyboard and the wheel: it is the
+        // only interactive surface on screen while it is open.
+        if self.settings.is_some() {
+            if let InputEvent::Mouse { up, alt } = event {
+                if let Some(outcome) = self.step_settings_wheel(up, alt) {
+                    return outcome;
+                }
+            }
+            let InputEvent::Key(key) = event else {
+                return StepOutcome::Idle;
+            };
+            return self.step_settings(key);
         }
         // Selector gets first dibs on keys when it is open.
         if let Some(selector) = self.selector.as_mut() {
@@ -724,6 +854,10 @@ impl App {
         // which cancel the dialog instead of the turn or the App.
         if self.dialog.is_some() {
             return self.step_dialog(key);
+        }
+        // The settings modal is the next-outermost layer.
+        if self.settings.is_some() {
+            return self.step_settings(key);
         }
         // Global keys first.
         match key {
@@ -1242,6 +1376,27 @@ impl App {
             }
         }
 
+        // Settings overlay — drawn after the selector so an accidental
+        // overlap (both open) still leaves the `/settings` modal readable.
+        if let Some(settings) = &self.settings {
+            let lines = settings.render_styled_lines(area.width);
+            let start_row = area.y + 1;
+            for (offset, line) in lines.iter().enumerate() {
+                let y = start_row + offset as u16;
+                if y >= area.y + message_height {
+                    break;
+                }
+                // Blank the row first: the settings modal is the whole
+                // point of the screen while it is open.
+                for col in 0..area.width {
+                    if let Some(cell) = buf.cell_mut((area.x + col, y)) {
+                        cell.set_char(' ');
+                    }
+                }
+                write_styled_line(buf, area.x, y, area.width, line, &self.theme);
+            }
+        }
+
         // Extension dialog overlay — topmost, so it wins over the
         // selector if both are somehow open.
         if let Some(dialog) = &self.dialog {
@@ -1300,6 +1455,12 @@ impl App {
             lines,
             prompt_placeholder: self.config.prompt_placeholder.clone(),
             prompt_buffer: self.prompt.text().to_string(),
+            settings_open: self.settings_open(),
+            settings_lines: self
+                .settings
+                .as_ref()
+                .map(|settings| settings.render_lines(width))
+                .unwrap_or_default(),
             selector_open: self.selector_open(),
             selector_title: self.selector.as_ref().map(|s| s.title().to_string()),
             selector_items: self
