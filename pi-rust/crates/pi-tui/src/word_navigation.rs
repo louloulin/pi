@@ -117,11 +117,7 @@ pub fn find_word_backward(text: &str, cursor: usize) -> usize {
         // Skip inside one word-like segment, preserving ASCII
         // punctuation boundaries: stop just after the last punctuation
         // character, or move the whole segment when there is none.
-        match last
-            .char_indices()
-            .filter(|(_, c)| is_punctuation_char(*c))
-            .next_back()
-        {
+        match last.char_indices().rfind(|(_, c)| is_punctuation_char(*c)) {
             Some((idx, c)) => new_cursor -= last.len() - (idx + c.len_utf8()),
             None => new_cursor -= last.len(),
         }
