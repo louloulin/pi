@@ -8734,3 +8734,122 @@ LUM-1132 已记为全仓 122 文件），本轮**没有**顺手格式化它们�
 - 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节
   如实记录（基线即红，与本轮无关；本 crate `--no-deps` 零 warning）。
 
+
+---
+
+## LUM-1135 round — `fetch` 全局 HTTP 桥（`host_fetch` + `Headers`/`Request`/`Response`）+ 派发 Stage 39
+
+本轮由 autopilot 定时触发（LUM-1135，建单标题 `pi`，开工后按平台要求改名），是 Stage 38 合并之后的一轮：
+既收一个 frontier 切片，又按「最多 3 路并发」的口径补派后继。
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1135`，起点 `origin/feature/pi.rs @ 8b1ad7e13`（Stage 37 的补记提交）。
+- 开工时 `origin/feature/pi.rs` 已推进到 **`c880702e2`**（LUM-1133 的 Stage 37 `466144269` + LUM-1134 的
+  Stage 38 `288ec3781` 与补记 `c880702e2`），先合入（合并提交见补记），**零冲突**：那两轮只碰 `pi-tui` /
+  `pi-coding-agent`，本轮只碰 `pi-extensions`，本文档两边都是末尾追加。
+- 槽位：起手 `multica daemon status` 报 `running_task_count = 2`（LUM-1133、LUM-1134 都已进 `in_review`），
+  上限 3 路 ⇒ 收尾可补派 1 个子任务。
+- 切片选择：frontier 上唯一「自包含、不碰 `app.rs` / `host.rs` 之外的串行区、又能解除仓库自己扩展的阻塞」
+  的 P2 项是 **`fetch` 全局**。LUM-1132 / LUM-1134 两轮的 frontier 都把它记成「要真实 HTTP 桥，不在一轮内做」
+  ——本轮把它做完。
+
+### 二、本轮切片：`pi-extensions` 的 `fetch` 全局
+
+`fetch` 是扩展生态的真实依赖面：上游扩展跑在 Node/Bun 下，平台自带；仓库自己的
+`.pi/extensions/import-repro.ts`（`:222` / `:240` / `:264`）用 `fetch` + `response.ok/status/text()/json()`
+读 gist 与 issue 评论。QuickJS 不带 `fetch`，纯 JS polyfill 又碰不到网络，所以必须做宿主桥：
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-extensions/src/host.rs` | `FetchRequest`（`{id?, url, method?, headers?, body?(base64), timeout?}`）+ `default_fetch_method()` + `fetch_client()`（进程级 `OnceLock<reqwest::Client>`）+ `fetch_error_envelope()` + `sleep_until_opt()` + `host_fetch_impl()` / `run_fetch()`；注册 `host_fetch`（async `Function`）与 `host_fetch_cancel` |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | `HeadersPolyfill` / `RequestPolyfill` / `ResponsePolyfill` / `fetchPolyfill`，只在 `typeof globalThis.X === "undefined"` 时安装（不遮盖引擎自带实现） |
+| `crates/pi-extensions/tests/fetch.rs`（新，5 条用例） | 手写 HTTP/1.1 loopback 服务器（`TcpListener` 绑 `127.0.0.1:0`，零新依赖），路由 `/json`、`/missing`、`/echo`、`/slow` |
+| `crates/pi-extensions/Cargo.toml` | `reqwest.workspace = true`（与 `pi-ai` 同一个 `reqwest` 构建） |
+| `crates/pi-extensions/docs/EXTENSIONS.md` / `docs/NODE_BUILTINS.md` | Host-imports 表 + `fetch` 一节 + 兼容表 + 缺口表同步 |
+
+关键设计：
+
+- **复用 `pi-ai` 的 `reqwest` 栈**（同一 `reqwest.workspace`、同一 rustls-tls / 代理环境变量策略），
+  网络策略不会出现第二套口径；client 是进程级 `OnceLock`，不是每次调用新建。
+- **复用 `ExecBridge`** 做 fetch 的取消与超时：`id` 由 shim 从与 `pi.exec` **共用**的 `__pi_next_exec_id`
+  计数器分配，`signal` 触发时 shim 调 `host_fetch_cancel(id)`；per-call 上限抬到 `timeout + 1s`，同样 clamp 到 24h。
+- **信封协议**：成功 `{ok:true,status,statusText,url,redirected,headers,body(base64)}`，失败
+  `{ok:false,name,message}`；**host 侧永不 reject**，JS 侧的 `AbortError` / `TimeoutError` / `TypeError`
+  一律由 shim 构造，错误对象形态归 JS 所有。
+- **继承 Node 语义**：4xx / 5xx **resolve** 且 `ok === false`（不 reject）；响应头名由 `reqwest` 归一为小写。
+
+### 三、有意偏离（都写进了 `docs/EXTENSIONS.md` 的 `fetch` 一节）
+
+1. **无流式**：`Response.body` 是 `null`，没有 `ReadableStream`，body 在宿主侧先整体缓冲。
+2. **无 `FormData` / `Blob` body**；body 支持 `string` / `ArrayBuffer` / TypedArray / `URLSearchParams`。
+3. **`credentials` / `mode` / `cache` / `redirect` / `keepalive` / `referrer` 忽略**（没有浏览器同源与 cookie jar）。
+4. **网络错误消息**是 transport 文本（`reqwest` 的 message），不是浏览器那套 `TypeError: fetch failed` + `cause`。
+5. **`redirected`** 由 `finalUrl !== requestUrl` 推得，不是重定向计数。
+6. **不自动解压**：workspace 的 `reqwest` 没开 `gzip` feature，因此不发 `Accept-Encoding`，调用方拿到原始字节
+   （服务端无视该头仍压缩时，用 `node:zlib` 自己解）。
+7. **`signal` 走带外通道**（与 `pi.exec(options.signal)` 同形）；`signal` 已 aborted 时不发起请求直接拒绝。
+   非标准的 `init.timeout`（ms）以 `TimeoutError` 拒绝。
+
+`docs/NODE_BUILTINS.md` 同步：`fetch` 从「未桥接（frontier）」表移出，`.pi/extensions/import-repro.ts`
+一行从「还差 `fetch`」改为**已解封**。
+
+### 四、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home cargo check -p pi-extensions --all-targets --offline      # exit 0
+$ cargo test -p pi-extensions --offline                                                # 14 个 suite
+  passed = 100, failed = 0      # 其中 tests/fetch.rs 5 个新用例
+$ cargo test --workspace --offline                 # 合并态
+  passed = 1357, failed = 0
+$ rustfmt --edition 2021 --check crates/pi-extensions/src/host.rs crates/pi-extensions/tests/fetch.rs
+  0 diff
+```
+
+`tests/fetch.rs` 用的是**真实宿主 + 本地 loopback HTTP 服务器**（手写 HTTP/1.1 responder，零新依赖），
+5 个用例覆盖：GET 的 status / ok / statusText / 响应头 / `text()`、`json()` 与 404 的 `ok:false`、
+POST body 的 UTF-8 往返、预中止信号、以及**飞行中中止**（用 `pi.exec("sleep", "0.3")` 制造真实延迟，
+断言 `AbortError` 且耗时 < 1.5s，即真的丢掉了那个 2s 响应）。文件按 `pi_exec.rs` 的先例标 `#![cfg(unix)]`。
+
+**`-D warnings` 门的真实状态（如实记录，与 LUM-1133 / LUM-1134 同一结论）**：
+`cargo clippy --workspace --all-targets -- -D warnings` 在本分支上**仍是红的**，原因与本轮无关：
+1.85.0 工具链下实测 8 处既有 lint（`pi-telemetry` 2 条 `needless_lifetimes`、`pi-extensions`
+`deflate.rs:650` `precedence` 与 `tests/zlib_deflate.rs:55` `format_collect`（都是 LUM-1131 的代码）、
+`pi-tui` 2 条、`pi-server/src/transports/unix.rs:13` `duplicated_attributes`）。
+把它们用 `-A` 放行后，`cargo clippy -p pi-extensions --all-targets --no-deps -- -D warnings` **exit 0**
+——即本轮新增的 `host.rs` / `tests/fetch.rs` **一条 lint 都没有**。
+
+顺带记录一次环境事故：跑全量 workspace 测试时 `target/debug/incremental` 长到 1.7 G 把 50 G 盘打满
+（`No space left on device`，`pi-tui` 两个测试目标编译失败）；只删掉**属于已完成轮次自己的**
+`CARGO_TARGET_DIR` 下那个 `incremental` 目录后复跑通过，后续 cargo 调用统一带 `CARGO_INCREMENTAL=0`。
+
+### 五、合并与推送
+
+起点 `8b1ad7e13`；先落代码提交，再把 `origin/feature/pi.rs @ c880702e2` 合入（合并提交），
+然后补一个 rustfmt 收尾提交（分支已推送，不做 amend / force push）。
+`origin/feature/pi.rs` 是这些提交的祖先，因此并入是**快进、无 plumbing merge**。真实哈希与 numstat 见本节末补记。
+
+### 六、frontier（本轮更新）
+
+1. ~~P2 `fetch` 全局~~ **本轮（LUM-1135）收口**：`host_fetch` 导入 + `Headers`/`Request`/`Response`/`fetch`，
+   带取消与超时；`import-repro.ts` 已解封。（这一项在 LUM-1132 / LUM-1134 两轮的 frontier 里都被判
+   「要真实 HTTP 桥，不在一轮内做」而挂起。）
+2. **keybindings 消费方（Stage 39）**：注册表（LUM-1132）与配置层（LUM-1134）都已落地，只剩把
+   `app.rs` / `editor.rs` 里散落的硬编码和弦换成 `get_keybindings()`（含 `app.*` 动作分发）。
+   自包含、且现在没有别的轮次在写 `app.rs` —— **本轮已派发**（见补记）。
+3. **P3 `alt-screen-search.ts`**：与已落地的选区 / 高亮有天然联动，要 `app.rs` 钩子，与第 2 项同属串行区。
+4. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 ratatui `Cell` 支持链接单元
+   （0.28 不带），得改 `app.rs` 的 buffer 写入路径，与第 2、3 项串行。
+5. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径，排在后面。
+6. **质量门清偿（本轮确认清单，建议单开任务）**：`cargo clippy --workspace --all-targets -- -D warnings`
+   实测 **8 处**既有 lint（5 个 crate），`cargo fmt --all -- --check` **122 个文件**有 diff
+   （`pi-coding-agent` 49、`pi-chord` 27、`pi-server` 11、`pi-evals` 10、`pi-ai` 7、`pi-session` 5、
+   `pi-protocol` 4、`pi-extensions` 3、`pi-agent-core` 3、`pi-tui` 2、`pi-mono` 1）。都是既有项、
+   都不影响本轮，但会挡住「CI 绿」这个门 —— **本轮已作为 backlog 子任务记录**（见补记）。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉；既有欠账
+   （`settings.rs` / `tests/settings_list.rs` 的 rustfmt diff、`pi-agent-core/src/tools.rs:13` 并行工具路径、
+   `pi-ai` registry 缺 `openai-codex` / `kimi-coding`）维持不动。
+
+并发口径维持：上限 3 路；`pi-extensions/src/host.rs`、`pi-tui/src/app.rs`、`docs/FEATURE_PI_RS_STATUS.md`
+各自一次只允许一路在写（本轮只写前者与本文档）。
