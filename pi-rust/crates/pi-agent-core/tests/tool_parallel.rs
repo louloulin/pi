@@ -293,6 +293,24 @@ impl BeforeToolCall for BlockOneCall {
     }
 }
 
+/// Cancels the loop's token the first time the `BeforeToolCall` hook sees the
+/// call with `id`. Used to make the abort land *inside* a batch rather than
+/// before it starts.
+struct CancelOnCall {
+    id: String,
+    token: CancellationToken,
+}
+
+#[async_trait]
+impl BeforeToolCall for CancelOnCall {
+    async fn before_tool_call(&self, call: &ToolCall) -> BeforeToolCallDecision {
+        if call.id == self.id {
+            self.token.cancel();
+        }
+        BeforeToolCallDecision::default()
+    }
+}
+
 fn tool_results(agent: &Agent) -> Vec<ToolResult> {
     agent
         .loop_ref()
@@ -613,4 +631,129 @@ async fn single_call_batch_takes_the_parallel_path() {
 
     assert_eq!(tool_result_texts(&agent), vec!["ran fast"]);
     assert_eq!(stream.call_count(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation — upstream `executeToolCallsSequential` / `_Parallel`
+// (`packages/agent/src/agent-loop.ts:409-545`)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pre_cancelled_parallel_batch_yields_operation_aborted() {
+    // Upstream queues the first parallel call, observes the abort, and breaks;
+    // the queued call then finalizes as `Operation aborted` without ever
+    // reaching the executor.
+    let executor = Arc::new(TimingExecutor::new());
+    let stream = Arc::new(ScriptedStream::new(vec![
+        tool_call_message(&[("fast", "call-f1"), ("fast", "call-f2")]),
+        text_reply("done"),
+    ]));
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model(), stream.clone(), "you are pi")
+            .with_tool_executor(executor.clone()),
+    );
+    let token = agent.loop_ref().cancellation_token();
+    token.cancel();
+    agent.loop_mut().set_cancellation_token(token);
+
+    agent
+        .loop_mut()
+        .run(vec![text_message("go")], |_| {})
+        .await
+        .expect("loop runs");
+
+    assert!(
+        executor.windows().is_empty(),
+        "an aborted parallel call must not reach the executor"
+    );
+    let results = tool_results(&agent);
+    assert_eq!(results.len(), 1, "calls after the abort are dropped");
+    assert_eq!(results[0].tool_call_id, "call-f1");
+    assert!(results[0].is_error);
+    assert_eq!(tool_result_texts(&agent), vec!["Operation aborted"]);
+}
+
+#[tokio::test]
+async fn parallel_batch_stops_queuing_after_abort() {
+    let executor = Arc::new(TimingExecutor::new());
+    let stream = Arc::new(ScriptedStream::new(vec![
+        tool_call_message(&[
+            ("fast", "call-f1"),
+            ("fast", "call-f2"),
+            ("fast", "call-f3"),
+        ]),
+        text_reply("done"),
+    ]));
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model(), stream.clone(), "you are pi")
+            .with_tool_executor(executor.clone()),
+    );
+    let token = agent.loop_ref().cancellation_token();
+    agent.hooks_mut().before_tool_call = Some(Arc::new(CancelOnCall {
+        id: "call-f2".into(),
+        token: token.clone(),
+    }));
+    agent.loop_mut().set_cancellation_token(token);
+
+    agent
+        .loop_mut()
+        .run(vec![text_message("go")], |_| {})
+        .await
+        .expect("loop runs");
+
+    // `call-f1` was queued before the abort landed and `call-f2` observed it;
+    // both finalize as aborted, and `call-f3` is never even prepared.
+    assert!(
+        executor.windows().is_empty(),
+        "aborted calls must not reach the executor"
+    );
+    let results = tool_results(&agent);
+    assert_eq!(results.len(), 2, "call-f3 is dropped by the break");
+    assert!(results.iter().all(|result| result.is_error));
+    assert_eq!(
+        tool_result_texts(&agent),
+        vec!["Operation aborted", "Operation aborted"]
+    );
+    assert!(results
+        .iter()
+        .all(|result| result.tool_call_id != "call-f3"));
+}
+
+#[tokio::test]
+async fn sequential_batch_stops_after_the_abort_observation() {
+    // Upstream executes the call that observes the abort, then stops: the
+    // remaining calls are neither prepared nor dispatched.
+    let executor = Arc::new(DefaultModeExecutor {
+        seen: Mutex::new(Vec::new()),
+    });
+    let stream = Arc::new(ScriptedStream::new(vec![
+        tool_call_message(&[("alpha", "call-a"), ("alpha", "call-b")]),
+        text_reply("done"),
+    ]));
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model(), stream.clone(), "you are pi")
+            .with_tool_executor(executor.clone()),
+    );
+    let token = agent.loop_ref().cancellation_token();
+    agent.hooks_mut().before_tool_call = Some(Arc::new(CancelOnCall {
+        id: "call-a".into(),
+        token: token.clone(),
+    }));
+    agent.loop_mut().set_cancellation_token(token);
+
+    agent
+        .loop_mut()
+        .run(vec![text_message("go")], |_| {})
+        .await
+        .expect("loop runs");
+
+    assert_eq!(
+        *executor.seen.lock().expect("seen"),
+        vec!["alpha"],
+        "only the call that observed the abort is dispatched"
+    );
+    let results = tool_results(&agent);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].tool_call_id, "call-a");
+    assert!(!results[0].is_error);
 }
