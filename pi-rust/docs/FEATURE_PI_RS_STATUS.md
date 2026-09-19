@@ -3344,3 +3344,143 @@ LUM-1075 注释的补记）。Stage 19 的代码增量由 LUM-1068 自己推。
    JSON-RPC 实现；
 4. `.wasm` 扩展宿主仍未实现（`pi-extensions` 的 QuickJS 宿主目前只有 native
    路径）。
+
+## LUM-1078 round — Stage 21：系统提示 / 项目上下文 / skills 注入
+
+### 盘点结果
+
+3 槽已满（LUM-1068 Stage 19、LUM-1077 Stage 20、本协调 run），本轮**不再派发新任务**，
+而是由协调 run 自己推进 frontier 上体量最小、且与两个在途任务**零文件重叠**的一块：
+`pi-coding-agent` 的**资源层**。
+
+Rust 端口此前的真实缺口：
+
+- `main.rs::default_system_prompt()` 是 3 行硬编码字符串，工具说明、`AGENTS.md`、
+  skills、全局 `SYSTEM.md` 全部没有；上游 `core/system-prompt.ts` +
+  `core/resource-loader.ts` 的整条管线在 Rust 侧不存在；
+- 上游 CLI 的 `--skill` / `--no-skills` / `--no-context-files` 三个 flag 在 Rust
+  侧不存在（`cli.rs` 只有 7 个 slash 命令对应的参数面）。
+
+与在途任务的隔离：LUM-1077 改 `pi-extensions/src/host.rs`、`pi-tui/src/*`、
+`pi-coding-agent/src/extensions/wiring.rs`；LUM-1068 改 `pi-protocol/src/rpc/`、
+新增 `pi-server/`。本轮只碰 `pi-coding-agent` 的 `src/{cli,lib,main}.rs` 与新增模块，
+**没有一个和在途改动共享文件**。
+
+### 本轮改动
+
+新增 6 个模块（合计 ~2900 行，含单元测试）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `src/frontmatter.rs` | YAML frontmatter 子集解析（引号标量、块标量 `|`/`>` 含 chomping、行内注释、CRLF/BOM 归一化、flow 集合配平检查） |
+| `src/paths.rs` | `~/.pi` 路径与词法归一化：`home_dir` / `agent_dir` / `absolute` / `resolve_against` / `expand_tilde` / `strip_bom` |
+| `src/skills.rs` | Agent Skills 发现与校验 + `<available_skills>` XML 渲染 |
+| `src/context_files.rs` | `AGENTS.md` / `CLAUDE.md` 发现（全局 → 祖先目录由外向内）、git worktree 影子文件跳过、全局 `SYSTEM.md` / `APPEND_SYSTEM.md` |
+| `src/system_prompt.rs` | 系统提示组装（custom / default 两个分支）、`<project_context>` 渲染、7 个内置工具 snippet + guidelines、Pi 文档路径解析 |
+| `src/resource_loader.rs` | 把上面几块拼起来：`load_resources` → `LoadedResources::build_system_prompt`，以及 CLI 入口 `build_cli_system_prompt` |
+
+接线：
+
+- `src/cli.rs`：新增 `--skill <PATH>`（可重复）、`--no-skills`、`--no-context-files`
+  （上游的 `-ns` / `-nc` 是双字符短选项，clap 不支持，只保留长选项）；
+- `src/main.rs`：删掉 `default_system_prompt()`，改用
+  `build_cli_system_prompt(&cli)`，并且**只对 interactive / print / rpc 三个模式**
+  做资源发现（`pi list` / `pi session` 之类的纯本地子命令不再做多余 IO）；skill
+  diagnostic（重名 collision 等）打到 **stderr**，不污染 print / rpc 的 stdout 协议；
+  `InteractiveOptions::append_system_prompt` 改为传空 `Vec`，避免和已烘焙进提示词的
+  append 段重复；
+- `tests/system_prompt_resources.rs`（新增）：用记录型 `StreamFn` 断言**模型实际收到
+  的 `ctx.system_prompt` 就是组装结果**（磁盘 → 提示词 → 模型请求整条链路）；
+- `tests/print_mode.rs`：二进制冒烟用例的失败信息里补上子进程 stderr（原来只说
+  “binary exited non-zero”，排查时是盲的）。
+
+### 关键实现决策（对齐上游可观察语义）
+
+1. **`--append-system-prompt` 的位置**：把全局 `APPEND_SYSTEM.md` 与 CLI 的
+   `--append-system-prompt` 按上游顺序（loader 先、CLI 后）拼成一段，交给
+   `build_system_prompt`，位置在 `<project_context>` / `<available_skills>` /
+   `Current working directory` 之前。没有走 `InteractiveOptions` 里那套 —
+   否则三个模式要各写一份，且 interactive 的 append 会插在提示词末尾。
+2. **项目本地 `.pi/SYSTEM.md` 不加载**：上游只有在项目 `/trust` 之后才读它。Rust
+   端口还没有 trust manager，读了等于把「未信任目录可注入系统提示词」这个洞打开，
+   属于安全回退，因此显式不读，只在文档里登记为依赖 trust manager 的待办。
+3. **skills 发现规则逐条对齐**：含 `SKILL.md` 的目录是 skill root 且不再向下递归；
+   否则根目录 `*.md` 视为 skill，子目录继续找 `SKILL.md`（其散装 `.md` 忽略）。
+   搜索顺序 `~/.pi/agent/skills` → `<cwd>/.pi/skills` → `--skill` 路径，先到者胜，
+   重名后到者记 `collision` diagnostic。`name` ≤ 64 / `description` ≤ 1024，
+   与上游常量一致。
+4. **工具 snippet 落到 Rust**：`tools/defaults.rs` 里原本没有任何面向模型的描述，
+   于是把上游 7 个工具的 snippet + guidelines 常量搬进
+   `system_prompt.rs::BUILTIN_TOOL_CONTRIBUTIONS`，`Available tools:` 段只列出
+   「既有 snippet 又被选中」的工具（上游行为），一个都没有时输出 `(none)`。
+5. **不引入 `serde_yaml`**：它既不在 `Cargo.lock` 也不在本机 cargo 缓存里，装新依赖
+   需要联网且未经审核，所以手写了 YAML 子集解析器（只覆盖 frontmatter 实际用法），
+   并为每个语法特性配了单元测试。
+6. **文档段落按需出现**：`PI_PACKAGE_DIR` → `<exe_dir>/../share/pi` →
+   `<exe_dir>/../../..` 依次尝试，都解析不到就整段省略「Pi documentation」。上游是
+   写死包相对路径，Rust 端口在开发态（`pi-rust/` 同时有 `README.md` / `docs` /
+   `examples`）也能命中。
+
+### 验证（native，trunk = `878a96a77`）
+
+```
+$ cargo check  -p pi-coding-agent --all-targets                 # 0 errors, 0 warnings
+$ cargo clippy -p pi-coding-agent --all-targets -- -D warnings  # 0 warnings
+$ cargo test   -p pi-coding-agent                               # 151 lib + 5 新增集成用例，全绿
+```
+
+- `-p pi-coding-agent` lib 测试从 88 涨到 **151**（新增 63 个单元测试，覆盖
+  frontmatter 各语法分支、skills 发现/校验/渲染、context-file 祖先遍历与 worktree
+  影子跳过、提示词各段落顺序）；集成用例从 84 涨到 89（新增 5 个）。
+- 新增集成用例 `tests/system_prompt_resources.rs` 5 个，其中
+  `project_resources_reach_the_model_request` 直接断言模型请求里的 system prompt；
+- 进程级冒烟（本轮环境）：crate 目录下 **40 个并发 `pi --print=hello`**、
+  **30 个并发 `pi --rpc` + getState**，退出码全 0；临时项目里 `AGENTS.md` +
+  `.pi/skills/{demo,broken}` 跑通，重名 skill 的 collision 警告按预期出现在 stderr
+  且不阻塞本轮。
+
+### 全量 workspace 测试的抖动（本轮定位，非本改动引入）
+
+`cargo test --workspace` 在本机高负载（load average 12~18，32 核；同工作区还有
+LUM-1068 / LUM-1077 的 cargo 编译在跑）时会随机挂 1~2 个**派生 `pi` 子进程**的用例，
+且每轮挂的不是同一个：
+
+- `tests/rpc.rs::*`：`timed out waiting for a stdout line from pi --rpc: Disconnected`；
+- `tests/cli_provider.rs::anthropic_auth_token_is_an_accepted_credential`：loopback
+  capture server 30s 未收到请求（LUM-1075 / LUM-1076 已记录过的老抖动）；
+- `tests/cli_tools.rs::rpc_mode_executes_the_bash_tool_...`：子进程 panic
+  `event-listener-5.4.2/src/intrusive.rs:341: attempt to subtract with overflow`
+  —— 依赖链是 `pi-extensions → rquickjs-core → async-lock → event-listener`，
+  与 Stage 21 无关，属于上游 crate 的偶发。
+- `tests/print_mode.rs` 的 3 个二进制冒烟用例：`pi --print` 退出码非 0。
+
+判定依据：这些用例**单独重跑 3 次全绿**（`--test print_mode` 17/17 × 3、
+`--test rpc` 8/8），空载全量跑出过两次一条失败都没有的完整绿（本轮聚合计数
+`606 passed / 0 failed`，统计口径为各 test result 行的 passed 之和），而同一次
+全量跑里失败用例彼此无关；40/30 并发直接压 `pi` 二进制也是 0 失败。因此结论是
+负载下的子进程抖动（最可能是内存/调度压力导致子进程被中断），不是本轮的逻辑回归。
+后续如果要消掉它，方向是给 `rpc` / `cli_provider` 的 harness 在失败时打印子进程
+stderr 与退出信号（本轮已经给 `print_mode.rs` 补了）。
+
+### 已知限制（本轮刻意不做）
+
+- **prompt templates 没做**（`--prompt-template` / `--no-prompt-templates`，
+  上游 `loadPromptTemplates` + `expandPromptTemplate`）。没实现功能就不加 flag。
+- **skills 的 gitignore 过滤没做**：上游 `loadSkills` 会用 git check-ignore 跳过
+  被忽略的 skill 文件，Rust 端口目前一律加载（多加载不会出错，只是可能多出一条
+  提示词条目）。
+- **扩展的 `resources_discover` 钩子没接**：扩展工具目前只能出现在工具注册表里，
+  还进不了 `Available tools:` 段（`ExtensionRuntime` 没有暴露 prompt snippet）。
+- 项目本地 `.pi/SYSTEM.md`（见决策 2）、`/trust` 命令、`--system-prompt` 覆盖。
+
+### 剩余 frontier（本轮更新）
+
+1. ~~系统提示 / 项目上下文 / skills 注入~~ → **本轮已落地**；
+2. prompt templates + skills 的 gitignore 过滤（小体量，可作为下一轮 frontier）；
+3. LUM-1068 落地后 promote **LUM-1069**（`pi-server` / `pi-client` 端到端）；
+4. 把 `pi-client` 接进 `--rpc`，替换 Stage 12 的内联 JSON-RPC；
+5. `.wasm` 扩展宿主仍未实现；扩展工具的 prompt snippet 传递。
+
+### Push status
+
+`feature/pi.rs`，commit 见本轮 push（Stage 21 代码 + 本节状态文档）。
