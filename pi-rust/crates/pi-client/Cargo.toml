@@ -1,0 +1,35 @@
+[package]
+name = "pi-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Remote client SDK: connection lifecycle, request/subscription routing and byte transports (Rust port of packages/client)."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+pi-chord = { path = "../pi-chord" }
+
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+futures.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+# The end-to-end tests drive a real `pi-server` over the in-memory listener and
+# a real Unix-domain socket; `pi-server` itself pulls in `pi-chord` and
+# `pi-protocol`, which are already direct dependencies above.
+pi-server = { path = "../pi-server" }
+
+# Integration tests are separate crates, so they need their own view of the
+# protocol vocabulary and the async runtime.
+pi-protocol = { path = "../pi-protocol" }
+pi-chord = { path = "../pi-chord" }
+async-trait.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
