@@ -6,8 +6,9 @@
 that carries cancellation.
 
 This crate deliberately contains no filesystem, clock, socket or thread-pool dependency. It is
-the groundwork for Stage 18 (`pi-chord services`) and Stage 19 (`pi-server` / `pi-client`),
-which own the transport halves.
+the groundwork for Stage 19 (`pi-server` / `pi-client`), which own the concrete transports: the
+remote-service protocol here is transport-agnostic and is exercised in-process by the loopback
+transport.
 
 ## Upstream mapping
 
@@ -27,7 +28,14 @@ which own the transport halves.
 | `facets::registry` | `src/services/{handle,instances}.ts` (local half) | singleton slots, keyed instances, observers, service handles |
 | `facets::host` | `src/facets/host.ts` (`FacetKernel`, `FacetHostImpl`) | setup, validation, assembly, activation, reload, disposal |
 | `facets::loader` | `src/facets/loader.ts`, `src/api.ts` | static loaders, `combineFacetLoaders`, generation disposal |
-| `api` | `src/api.ts` | the public entry points (`createFacetHost`, `defineFacet`, ...) |
+| `services::errors` | `src/services/errors.ts` | `RemoteServiceErrorCode`, `RemoteServiceError`, `ServiceError` |
+| `services::wire` | `src/services/wire.ts` | calls, control calls, snapshots, provider updates, strict JSON parsers |
+| `services::state_codec` | `src/services/state-codec.ts` | per-subscription `Encoder`/`Decoder` registries |
+| `services::state` | `src/services/state.ts` (`ReplicatedStateMember`) | provider source listener for replicated state |
+| `services::provider` | `src/services/provider.ts` | `RemoteServiceProvider`, subscriptions, `RemoteServiceEndpoint` |
+| `services::consumer` | `src/services/consumer.ts` | bindings, facades, proxies, retained handles, keyed observations |
+| `services::handle` / `services::instances` / `services::loopback` | same names | member slots, instance directory, loopback transport |
+| `api` | `src/api.ts` | the public entry points (`createFacetHost`, `defineFacet`, `createRemoteServiceBinding`, ...) |
 
 ## When to use
 
@@ -131,6 +139,50 @@ live in-process view; `StateReplica` is a cold replica fed by a transport and it
 non-base snapshot, an update before hydration, and any sequence gap (a duplicate or reordered
 batch) by clearing itself until a fresh snapshot arrives.
 
+## Remote services
+
+A provider publishes a service implementation (methods and replicated-state members); a binding
+consumes it through a transport. The transport is a two-method trait, so a host can drive the
+protocol over anything from an in-process loopback to a socket:
+
+```rust
+use std::sync::Arc;
+use pi_chord::context::background_context;
+use pi_chord::{
+    create_loopback_service_transport, create_remote_service_binding, define_service,
+    replicated_state, RemoteServiceBindingOptions, RemoteServiceProvider, ServiceImplementation,
+    ServiceProviderEntry,
+};
+use serde_json::{json, Value};
+
+let models: pi_chord::Service<Value> = define_service("test.models").unwrap();
+let state = Arc::new(replicated_state(json!({ "revision": 0 })).unwrap());
+let provider = Arc::new(RemoteServiceProvider::new([
+    ServiceProviderEntry::singleton(&models),
+])?);
+provider.provide(&models, ServiceImplementation::new().state("state", Arc::clone(&state)))?;
+
+let transport = create_loopback_service_transport(Arc::clone(&provider));
+let binding = create_remote_service_binding(
+    RemoteServiceBindingOptions::new(transport).service(&models),
+)?;
+let proxy = binding.use_service(&models)?;
+assert_eq!(proxy.state("state")?.value()?, Some(json!({ "revision": 0 })));
+# Ok::<(), pi_chord::ServiceError>(())
+```
+
+The wire protocol is factored so a server can reuse it without the consumer:
+
+- `ServiceCall` / `parse_service_call` and the control calls (`create_service_catalogue_call`,
+  `create_service_subscribe_call`, `create_service_unsubscribe_call`,
+  `decode_service_control_call`) travel over the reserved `$chord.service` id.
+- `ServiceSubscriptionSnapshot` / `ServiceProviderUpdate<Op>` are the decoded messages;
+  `ServiceStateEncoder` / `ServiceStateDecoder` (or one-shot `encode_subscription_snapshot` /
+  `decode_wire_subscription_snapshot` / `decode_wire_provider_update`) convert them to and from
+  the interned `WireOp` vocabulary.
+- `RemoteServiceEndpoint` turns provider subscriptions into published updates and owns their
+  cleanup.
+
 ## Semantics kept exactly
 
 - **Error wording.** Messages and their classes (`unresolvable path: ...`, `unsafe path segment:
@@ -152,7 +204,8 @@ batch) by clearing itself until a fresh snapshot arrives.
 
 | Area | Upstream | Here | Why |
 | --- | --- | --- | --- |
-| `services/` transport | `RemoteServiceProvider`, `service-wire`, `loopback`, generation addressing | Facets run against a **local in-process directory** (singleton slots, keyed instances, observers) | Stage 18 owns the remote half |
+| Transport | transport methods are `async` | `RemoteServiceTransport` / `ServiceSubscription` are synchronous | `pi-chord` has no async runtime; a host that has one wraps the calls |
+| Service facade members | a `Proxy` resolves a member lazily by name | `RemoteServiceProxy::{method,state}(name)` returns a retained handle | Rust has no property-access proxy; the observable semantics (stable facade, stale-instance guard) are preserved |
 | `track` | `Proxy` records which paths changed | `Tracker::target_mut()` + `flush()` recomputes a diff | Rust has no property-access proxy; the API is the same, the cost is not |
 | `r` op | adopts the payload by reference | clones the payload | Rust values have no aliasing |
 | Handle access | `handle` is a deref proxy that throws when inactive | `ServiceHandle::get() -> Result<Arc<T>, FacetError>` | `Deref` cannot fail |
@@ -170,11 +223,11 @@ than rolled back to the previous generation.
 
 ## Out of scope
 
-- `packages/chord/src/services/` — remote provider, consumer, wire codec, state codec, loopback
-  (Stage 18).
 - `packages/chord/src/node/{bundle,package,manifest,bundle-loader}.ts` and `bundler.ts` — Node
-  bundling (Stage 18/19).
-- `createRemoteServiceBinding` and `serviceSources` in `FacetOptions`.
+  bundling has no Rust equivalent, so only the abstract parts (catalogue and manifest shapes) are
+  represented by the service catalogue and provider entries.
+- The concrete network/thread transports for `pi-server` / `pi-client` (Stage 19); this crate
+  ships the protocol and the loopback implementation only.
 
 ## Dependencies
 
@@ -201,4 +254,8 @@ Unit tests live next to each module; the `tests/` directory holds the contract s
 `delta_contract.rs` (apply order, purity, rebase, round trips, conflict errors),
 `replicated_state.rs` (hydration, ordered updates, gap detection),
 `facets.rs` (ordering, failure isolation, gating, reload, disposal),
-`facet_loader.rs` (load order, static loader, cleanup aggregation).
+`facet_loader.rs` (load order, static loader, cleanup aggregation),
+`services.rs` (request/response, error mapping, subscription lifecycle, provider/consumer
+recovery, keyed observations, loopback), and
+`service_wire.rs` (control calls, strict parsers, per-subscription state codecs, endpoint
+publish/cleanup).

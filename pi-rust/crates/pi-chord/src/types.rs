@@ -2,9 +2,8 @@
 //!
 //! This module mirrors the type surface of the upstream `packages/chord/src/types.ts` and
 //! `services/state.ts` for the parts that belong to the runtime-agnostic core layer. The
-//! remote/wire vocabulary (`RemoteServiceSource`, `RemoteServices`, `ServiceCall`,
-//! `ServiceSubscription`, `ServiceWire*`) is owned by Stage 18 (`pi-chord services`) and is only
-//! sketched here as data records.
+//! remote/wire vocabulary lives in [`crate::services`] (`parse_service_call`,
+//! `ServiceSubscriptionSnapshot`, `ServiceProviderUpdate`, ...).
 
 use std::error::Error;
 use std::fmt;
@@ -16,7 +15,6 @@ use std::sync::Arc;
 use crate::context::Context;
 use crate::delta::DeltaError;
 use crate::facets::FacetEnvironment;
-use crate::json::JsonValue;
 
 /// A boxed, sendable future with no output, used for disposals and lifecycle effects.
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -363,98 +361,27 @@ impl ServiceCatalogueEntry {
     }
 }
 
-/// The address of one service instance: service id plus the key and generation of the instance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The address of one service instance: the key and generation of the instance.
+///
+/// Upstream's `ServiceInstanceAddress` is exactly `{ key, generation }` — the service id is
+/// carried by the surrounding call, update or subscription. Matching that shape keeps the wire
+/// validators honest.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServiceInstanceAddress {
-    /// The service id.
-    pub service_id: String,
-    /// The instance key (`""` for singletons).
+    /// The instance key (`""` is never used; singletons carry no address at all).
     pub key: String,
     /// The generation the instance was created in.
     pub generation: u64,
 }
 
-/// A service requirement or provision recorded during facet setup.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServiceMemberSnapshot {
-    /// The service id.
-    pub service_id: String,
-    /// The mode the reference was recorded with.
-    pub mode: ServiceMode,
-    /// The instance key (`""` for singletons).
-    pub key: String,
-    /// The generation the reference was resolved in.
-    pub generation: u64,
-}
-
-impl ServiceMemberSnapshot {
-    /// The address of the referenced instance.
-    pub fn address(&self) -> ServiceInstanceAddress {
-        ServiceInstanceAddress {
-            service_id: self.service_id.clone(),
-            key: self.key.clone(),
-            generation: self.generation,
+impl ServiceInstanceAddress {
+    /// Creates an address.
+    pub fn new(key: impl Into<String>, generation: u64) -> Self {
+        Self {
+            key: key.into(),
+            generation,
         }
     }
-}
-
-/// A snapshot of one live service instance.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ServiceInstanceSnapshot {
-    /// The instance address.
-    pub address: ServiceInstanceAddress,
-    /// The last published replicated-state sequence, when the instance carries state.
-    pub state_sequence: Option<u64>,
-    /// The last published replicated-state value, when the instance carries state.
-    pub state_value: Option<JsonValue>,
-}
-
-/// A snapshot of one observer subscription.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServiceSubscriptionSnapshot {
-    /// The service id.
-    pub service_id: String,
-    /// The mode the subscription was recorded with.
-    pub mode: ServiceMode,
-    /// The instance key (`""` for singletons).
-    pub key: String,
-    /// The generation the subscription was recorded in.
-    pub generation: u64,
-}
-
-/// A provider-side lifecycle update about a service instance.
-///
-/// Upstream models these as the discriminated union in `services/provider.ts`.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ServiceProviderUpdate {
-    /// The instance is not available in this generation.
-    Unavailable,
-    /// A new instance was created.
-    Spawned {
-        /// The address of the new instance.
-        address: ServiceInstanceAddress,
-    },
-    /// An existing instance was replaced.
-    Replaced {
-        /// The address of the previous instance.
-        previous: ServiceInstanceAddress,
-        /// The address of the replacement.
-        address: ServiceInstanceAddress,
-    },
-    /// The instance is gone.
-    Closed {
-        /// The address of the closed instance.
-        address: ServiceInstanceAddress,
-    },
-    /// The instance published replicated state.
-    State {
-        /// The address of the instance.
-        address: ServiceInstanceAddress,
-        /// The published sequence number.
-        sequence: u64,
-        /// The delta batch that produced the new value.
-        ops: Vec<crate::delta::Op>,
-    },
 }
 
 /// Whether a replicated-state delivery is the initial snapshot or an incremental update.

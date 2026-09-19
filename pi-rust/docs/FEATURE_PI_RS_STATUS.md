@@ -2919,3 +2919,121 @@ Stage 19（LUM-1068 / LUM-1069）的前置是 Stage 18，继续 park，等 LUM-1
    WASM 扩展宿主尚未实现。
 4. `wasm32-unknown-unknown` 目标在当前环境未安装，本轮与 LUM-1071 一样只做了
    native 验证。
+
+## LUM-1067 round — Stage 18: `pi-chord services` (remote provider/consumer + wire protocol)
+
+Takes the upstream `packages/chord/src/services/**` (~2000 LOC TS) into
+`pi-chord`, so Stage 19 (`pi-server` / `pi-client`) has a wire layer to
+drive. The core layer from LUM-1065 already provided delta, context,
+replicated state and facets; this round adds the transport-agnostic
+remote-service protocol and the consumer/provider halves.
+
+### 盘点结果
+
+| 上游文件 | 行数 | Rust 落点 |
+|----------|------|-----------|
+| `services/wire.ts` | 234 | `services/wire.rs` |
+| `services/errors.ts` | 26 | `services/errors.rs` |
+| `services/state.ts` | 139 | `services/state.rs` |
+| `services/state-internals.ts` | 20 | 并入 `services/state.rs` |
+| `services/state-codec.ts` | 158 | `services/state_codec.rs` |
+| `services/provider.ts` | 586 | `services/provider.rs` |
+| `services/consumer.ts` | 660 | `services/consumer.rs` |
+| `services/instances.ts` | 147 | `services/instances.rs` |
+| `services/handle.ts` | 113 | `services/handle.rs` |
+| `services/loopback.ts` | 17 | `services/loopback.rs` |
+| `node/{manifest,package,bundle,bundle-loader}.ts` | — | 不移植（Node 打包无 Rust 等价物），只保留 catalogue/manifest 形状 |
+
+`types.rs` 里去掉了 LUM-1065 留下的服务占位类型，改为真正的
+`Service<T>` / `ServiceMode` / `ServiceCatalogueEntry` /
+`ServiceInstanceAddress`；`api.rs` 与 `services/mod.rs` 导出全部公开面。
+
+### 本轮改动
+
+| 文件 | 改动 |
+|------|------|
+| `src/services/errors.rs` | 8 个 `RemoteServiceErrorCode`、`RemoteServiceError`、统一 `ServiceError`（remote / message / aggregate，单条 cause 解包） |
+| `src/services/wire.rs` | `ServiceMemberKind`、泛型 `MemberSnapshot<O>` / `InstanceSnapshot<O>` / `SubscriptionSnapshot<O>` / `ProviderUpdate<O>`（`O = Op | WireOp`），`ServiceCall`，`$chord.service` 控制调用，严格 JSON 解析器（`parse_service_call` / `parse_service_catalogue` / `parse_service_provider_update` / `parse_wire_*`） |
+| `src/services/state_codec.rs` | 每个订阅一套 `Encoder`/`Decoder` 注册表；`ServiceStateEncoder`/`ServiceStateDecoder` + 一次性 helper；`replaced`/`unavailable` 重置、`spawned` 新增、`closed` 只丢该实例 |
+| `src/services/state.rs` | `ReplicatedStateMember`（blanket impl）+ `MemberSourceListener`：producer `publish` → provider `emit` |
+| `src/services/provider.rs` | `RemoteMethod`/`FnMethod`、`ServiceImplementation` 构建器、`RemoteServiceProvider`（`provide`/`withdraw`/`replace`/`spawn`/`invoke`/`subscribe`/`dispose`）、`RemoteSpawnHandle`、`RemoteServiceEndpoint` |
+| `src/services/consumer.rs` | `RemoteServiceBinding`、单例/键控 facade、`RemoteServiceProxy`/`KeyedServiceProxy`、带 guard 的 `RemoteStateHandle`/`RemoteMethodHandle`、键控 observation 目录 |
+| `src/services/handle.rs` / `instances.rs` / `loopback.rs` | `ServiceSlot<T>`、`InstanceDirectory<E>`、`LoopbackServiceTransport` |
+| `tests/services.rs` | 17 个集成测试（见下） |
+| `tests/service_wire.rs` | 7 个 wire 协议测试（对齐 `service-wire.test.ts`） |
+| `crates/pi-chord/README.md` | 新增 `## Remote services` 章节、映射表行、deviation 更新 |
+
+### 验证（native，`feature/pi.rs` + 本轮）
+
+```
+$ cargo test     -p pi-chord                                      # 133 / 133 pass
+$ cargo clippy   -p pi-chord --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo check    --workspace --all-targets                         # 0 errors, 0 warnings
+$ cargo check    -p pi-chord --target wasm32-unknown-unknown       # 0 errors, 0 warnings
+```
+
+133 = 75 单测（+18） + 58 集成：10 `delta_contract`、8
+`replicated_state`、11 `facets`、5 `facet_loader`、7 `service_wire`、
+17 `services`。相比 LUM-1065 的 91，`+42` 全部来自本轮。
+
+集成测试覆盖任务书要求的六类行为：
+
+- 请求/响应往返：`round_trips_calls_over_the_loopback_transport`、
+  `remote_service_endpoints_publish_and_clean_up_provider_subscriptions`。
+- 错误码映射：`maps_transport_failures_to_remote_codes`、
+  `rejects_malformed_service_values`。
+- 状态快照 + 增量：`shares_one_singleton_facade_with_replicated_state`、
+  `keeps_one_operation_codec_pair_for_one_subscription_state`、
+  `isolates_operation_dictionaries_between_states_and_subscriptions`、
+  `clears_replicated_state_after_a_duplicate_or_gap_sequence`。
+- 订阅取消：`stops_delivering_after_a_subscription_is_closed`。
+- provider/consumer 断线恢复：`keeps_facades_stable_across_withdraw_and_replace`、
+  `clears_facades_when_the_provider_and_binding_are_disposed`、
+  `rebinds_cold_replicas_across_disconnects`、
+  `buffers_updates_that_race_subscription_hydration`。
+- 键控 observation：`hydrates_keyed_state_before_observe_handlers_and_fences_reused_keys`、
+  `rejects_unsupported_keyed_members`、`defers_handles_until_the_host_activates_them`。
+
+### 关键实现决策（与上游的可观察语义一致）
+
+1. **`RemoteServiceTransport` 是同步 trait**（`invoke` 返回 `Result<JsonValue, ServiceError>`，
+   `subscribe` 返回 `Result<Arc<dyn ServiceSubscription>, ServiceError>`）。pi-chord
+   没有 async runtime，`ready`/`rebind`/`dispose` 因此是同步方法；有 runtime 的宿主自行
+   包装。这是唯一一处结构性偏差，已在 README 记录。
+2. **服务成员用名字寻址**，不用 JS `Proxy`：`RemoteServiceProxy::method(name)` /
+   `state(name)` 返回可长期持有的 handle，语义（facade 稳定、stale-instance
+   守卫、observation 关闭后拒绝）与上游一致。
+3. **`ServiceError` 统一**三种形态：remote code、纯消息、聚合；`aggregate` 在只有
+   一条 cause 时解包，和上游 `errors.length === 1 ? errors[0] : aggregate` 对齐。
+4. **provider listener 返回 `Result`**：`emit`/`activate` 聚合失败并抛出，复刻上游
+   对 rejected promise 的收集顺序（先投递活跃订阅者，再报告失败）。
+5. **`$chord.service` 控制调用**（`catalogue`/`subscribe`/`unsubscribe`）由
+   `decode_service_control_call` 识别，`RemoteServiceEndpoint` 负责订阅的建立、
+   转发与 `dispose` 时的清理。
+
+### 依赖
+
+无新增第三方依赖：仍然只有 `serde` / `serde_json` / `thiserror` /
+`parking_lot`（workspace 既有）。`parking_lot` 用于 provider/consumer 的内部
+map 与锁；`RemoteServiceProvider` 在调用回调前先克隆订阅者列表，避免重入死锁。
+
+### 已知限制
+
+1. **同步语义带来的断言差异**：上游 `use()` 后 `state.value` 暂时为
+   `undefined`（start 是 pending promise），本端口内联启动，值立即可用。
+   `services.rs` 中相关断言按同步语义书写，并在测试注释里标注。
+2. **`node/{bundle,bundle-loader}` 不移植**：Node 打包（esbuild 之类）没有 Rust
+   等价物；只保留 catalogue/manifest 的抽象形状。
+3. **wasm 只做 `check`**：`cargo check -p pi-chord --target
+   wasm32-unknown-unknown` 通过，未跑 wasm 运行时测试。
+4. 本轮只跑 `cargo test -p pi-chord`；`cargo test --workspace` 在本环境因磁盘
+   写满（`No space left on device`）未能完成链接，但 `cargo check
+   --workspace --all-targets` 全绿，且本轮只新增 `pi-chord` 内部模块，
+   不触碰其它 crate。
+
+### Push status
+
+本轮提交在 `agent/devbox1/lum-1067`，从 `origin/feature/pi.rs` 的
+`5c452b89e`（LUM-1071）切出，并 rebase 到当时的 trunk tip
+`259238468`（LUM-1072，Stage 17 插件生态接入 CLI）之上，再以 fast-forward
+方式合入 `feature/pi.rs` 并推送。
