@@ -30,6 +30,7 @@ use pi_protocol::{Model, ProviderId};
 use wasm_bindgen::prelude::*;
 
 use crate::models::Models;
+use crate::providers::anthropic::{builtin_claude_models, AnthropicProvider};
 use crate::providers::faux::FauxProvider;
 use crate::stream::StreamFn;
 
@@ -42,6 +43,13 @@ type SharedFaux = Rc<RefCell<Option<Arc<FauxProvider>>>>;
 thread_local! {
     static MODELS: RefCell<Catalog> = RefCell::new(Rc::new(RefCell::new(None)));
     static FAUX: RefCell<SharedFaux> = RefCell::new(Rc::new(RefCell::new(None)));
+    /// Whether the JS host has registered the Anthropic provider stub.
+    /// The stub seeds the catalog with the three built-in Claude
+    /// models and exposes a fake [`AnthropicProvider`] whose
+    /// `stream_simple` returns a `Malformed` error — JS hosts running
+    /// on `wasm32-unknown-unknown` cannot make outbound HTTPS calls.
+    static ANTHROPIC: RefCell<Rc<RefCell<Option<Arc<AnthropicProvider>>>>> =
+        RefCell::new(Rc::new(RefCell::new(None)));
 }
 
 /// Borrow the live catalog. Returns [`None`] when no provider has been
@@ -64,6 +72,18 @@ where
 {
     let faux = FAUX.with(|cell| cell.borrow().clone());
     let guard = faux.borrow();
+    guard.as_ref().map(f)
+}
+
+/// Borrow the registered Anthropic provider stub (if any). Returns a
+/// trait object so `pi-agent-core`'s `AgentHandle` can dispatch
+/// `claude-*` requests through it.
+pub fn with_anthropic<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&Arc<AnthropicProvider>) -> R,
+{
+    let provider = ANTHROPIC.with(|cell| cell.borrow().clone());
+    let guard = provider.borrow();
     guard.as_ref().map(f)
 }
 
@@ -153,6 +173,43 @@ pub fn register_faux_provider(responses: Option<Vec<JsValue>>) -> Result<JsValue
     Ok(summary.into())
 }
 
+/// Register an Anthropic provider stub in the global [`Models`]
+/// catalog. Seeds the three built-in Claude models (`claude-opus-4-5`,
+/// `claude-sonnet-4-5`, `claude-haiku-4-5`) and exposes an
+/// [`AnthropicProvider`] whose `stream_simple` returns a `Malformed`
+/// error — JS hosts running on `wasm32-unknown-unknown` cannot make
+/// outbound HTTPS calls. Useful for fixture-driven integration tests
+/// where the JS host wants to round-trip model lookups without going
+/// to the network.
+#[wasm_bindgen]
+pub fn register_anthropic_provider() -> Result<JsValue, JsValue> {
+    let models = builtin_claude_models();
+    let provider = Arc::new(AnthropicProvider::new("wasm-stub-key"));
+
+    let mut catalog = with_catalog(|c| c.clone()).unwrap_or_default();
+    catalog.set_provider(ProviderId::new("anthropic"), models);
+    MODELS.with(|cell| {
+        *cell.borrow().borrow_mut() = Some(catalog);
+    });
+    ANTHROPIC.with(|cell| {
+        *cell.borrow().borrow_mut() = Some(provider);
+    });
+
+    let summary = Object::new();
+    let _ = js_sys::Reflect::set(
+        &summary,
+        &JsValue::from_str("provider"),
+        &JsValue::from_str("anthropic"),
+    );
+    let model_array = js_sys::Array::from_iter(
+        builtin_claude_models()
+            .iter()
+            .map(|m| JsValue::from_str(&m.id)),
+    );
+    let _ = js_sys::Reflect::set(&summary, &JsValue::from_str("models"), &model_array);
+    Ok(summary.into())
+}
+
 /// Snapshot the registered models as a JS object.
 ///
 /// Useful for the JS host's debug overlay — the value is the same shape
@@ -188,6 +245,13 @@ pub fn list_models() -> Result<JsValue, JsValue> {
 /// provider has been registered.
 pub fn faux_stream_fn() -> Option<Arc<dyn StreamFn>> {
     with_faux(|faux| faux.clone() as Arc<dyn StreamFn>)
+}
+
+/// Public hook for `pi-agent-core`'s `AgentHandle` to fetch the
+/// registered Anthropic provider stub's [`StreamFn`] trait-object.
+/// Returns `None` when no provider has been registered.
+pub fn anthropic_stream_fn() -> Option<Arc<dyn StreamFn>> {
+    with_anthropic(|provider| provider.clone() as Arc<dyn StreamFn>)
 }
 
 #[cfg(test)]
