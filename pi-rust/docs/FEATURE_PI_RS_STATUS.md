@@ -6800,7 +6800,7 @@ frontier 重排（`pi.exec` 取消、`pi-tui` markdown 解析器、App 聊天日
 `multica daemon status` 报 `running_task_count = 4`（本 run + LUM-1120 + LUM-1121 + 1 路族外任务；
 `multica issue runs 01a0b4d6… --siblings --active` 只返回 LUM-1120/1121 两行），因此本轮不再追加派发。
 
-## LUM-1119 round — 核验 `feature/pi.rs` + 上游 `fuzzy.ts` 移植并接入 `Selector` + 槽位已满不派发
+## LUM-1119 round — 核验 `feature/pi.rs` + 上游 `fuzzy.ts` 移植并接入 `Selector` + 空槽后增派 `autocomplete`
 
 （autopilot 协调轮；开工后把 LUM-1119 的泛标题「pi」改成本轮实际内容。）
 
@@ -6809,8 +6809,8 @@ frontier 重排（`pi.exec` 取消、`pi-tui` markdown 解析器、App 聊天日
 - 开工 `multica daemon status` = `running_task_count = 4`：本 run + LUM-1120（`in_progress`）+
   LUM-1121（当时仍在跑）+ 1 路族外任务。上限 3 路，**槽位已满（且超限）→ 本轮不派发任何新任务**。
 - 收尾复查 `running_task_count = 3`：本 run + LUM-1120 + 1 路族外；LUM-1121 已收工进 `in_review`
-  并合入 `feature/pi.rs`。按「上限 3 路」的既有口径仍是满槽，故不追加派发，本轮只做核验 + 一个
-  与在途两路零文件重叠的切片。
+  并合入 `feature/pi.rs`。按「上限 3 路」的既有口径此时仍是满槽，故先不派发，本轮只做核验 + 一个
+  与在途两路零文件重叠的切片（此后读数降到 2，空出一个槽 → 见第六节补记）。
 - 进入本轮时 `origin/feature/pi.rs` = `dc7d4ae78`；切片写完后（推送前）复 fetch 发现 LUM-1121 已把
   它推进到 `9c50439dc`（`Merge branch 'work/lum-1121'`）。本轮因此把两条一起合并，**没有把
   LUM-1121 的工作覆盖掉，也没有遗留合并债**（见第六节）。
@@ -6973,6 +6973,25 @@ frontier 重排（`pi.exec` 取消、markdown 解析器与上线、App 聊天日
    语法高亮）。
 8. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 就不写猜测值）。
 
-槽位决策：开工 `running_task_count = 4`、收尾 `= 3`（上限 3），**两处都满 → 本轮不派发**，把预算
-留给正在跑的 LUM-1120 与本轮的核验/切片。并发建议维持：上限 3 路；
-`pi-extensions/src/host.rs` 与 `docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。
+槽位决策：开工 `running_task_count = 4`、收尾复查 `= 3`（上限 3）——按当时的读数两处都满，本不打算
+派发。但本章落笔后复跑一次 `multica daemon status` 已降到 **2**（本 run + LUM-1120；原先那路族外任务
+收工），因此**空出 1 个槽位 → 本轮增派一个**（下面补记），其余预算留给正在跑的 LUM-1120。并发
+建议维持：上限 3 路；`pi-extensions/src/host.rs` 与 `docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。
+
+**补记（同一轮内，本章落笔后）：**
+
+- 增派 **[Stage 33] pi-tui: autocomplete（命令补全 + `@` 文件模糊补全）并真正接进编辑器**
+  （assignee 本 agent，`--status todo` → 即刻起跑；其描述文件由本轮在 workdir 里写好后用
+  `--description-file` 提交）。选它的理由：它正好是本轮成果的直接下游（`fuzzyFilter` 的最大
+  消费方），不需要新的设计决策，且与在跑的 LUM-1120（只改 `crates/pi-extensions/**`）零文件重叠；
+  P3 的 `node:module` / `readline` / `zlib` 虽然更小，但要改 `host.rs` 的 op 表，必须与 LUM-1120
+  串行，所以**不能**在此时占用这个空槽。派发后复测 `running_task_count = 3`（满）。
+  描述里逐条写了证据（`packages/tui/src/autocomplete.ts` 826 行、`:224-276` 接口、`:278`
+  `CombinedAutocompleteProvider`、`:5/:301/:330/:736` 的 `fuzzyFilter` 消费点、
+  `packages/tui/src/components/editor.ts:309-322` 的完整补全状态）与「**必须真的被调用**」的验收
+  条款——避免重演 LUM-1117 交付渲染器却无调用方、又被 LUM-1121 补一轮接线的情况。
+- 顺便把磁盘从 88% 降到 72%：删掉 **8 个已 `in_review`** 任务的 `pi-rust/target`（LUM-1117 2.9G、
+  LUM-1107 1.7G、LUM-1109 1.3G、LUM-1108 689M、LUM-1114 555M、LUM-1113 438M、LUM-1112 436M、
+  LUM-1111 429M，共 8.4G），空闲 5.7G → 14G。这些都是**已合入 `feature/pi.rs`** 的构建产物，
+  只删 `target`，不动任何源码、提交或分支；在跑的 LUM-1120 与新的 Stage 33 worktree 的 `target`
+  一律不碰。
