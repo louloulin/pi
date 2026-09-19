@@ -9017,3 +9017,148 @@ $ rustfmt --edition 2021 --check src/app.rs src/search.rs src/lib.rs tests/alt_s
   **`pi-extensions` / `pi-coding-agent` / `pi-session` / `pi-ai` 一个文件都不在其中。**
 - 合并态复测（第五节）跑的树就是推送出去的树，26 suite / 530 passed 的数字即第五节所列。
 - 本轮**未派发任何子任务**（槽位满：`multica daemon status` → `running_task_count = 3`）。
+
+---
+
+## LUM-1139 round — `pi-agent-core` 并行工具执行（`ToolExecutionMode`）+ `after_tool_call` 双调用修复
+
+本轮由 autopilot 定时触发（LUM-1139，建单标题 `pi`，开工后按平台要求改名），与 LUM-1136 / LUM-1137
+并行推进；切片取自 `pi-agent-core` 里挂了多轮的 P1 欠账。
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1139`，起点 `origin/feature/pi.rs @ 9412e1c00`（LUM-1135 的补记提交）。
+- 开工时 `origin/feature/pi.rs` 已推进到 **`5fa1c1999`**（LUM-1136 的转录搜索覆盖层 `4ec928866`
+  + 补记 `e468c1363`），收尾前合入（合并提交见补记），**零冲突**：LUM-1136 只碰
+  `pi-tui` + 本文档末尾，本轮只碰 `pi-agent-core` / `pi-coding-agent`。
+- 槽位：现场 `multica daemon status` 报 `running_task_count = 3`（LUM-1137 正在 `in_progress`），
+  已到 3 路上限 ⇒ **本轮不派发任何子任务**；LUM-1138（质量门清偿）维持 `backlog`。
+- 切片选择：`pi-rust/crates/pi-agent-core/src/tools.rs:13` 的注释从 Stage 10 起就写着
+  「Tool calls run sequentially in this stage … the parallel path is deferred to a later stage」，
+  LUM-1133 / 1134 / 1135 三轮 frontier 的「既有欠账」里一直挂着同一项。它自包含
+  （`pi-agent-core` + 一个消费方覆盖）、不碰 `app.rs` / `host.rs` 这两个串行区，是当时唯一能整段收口的 P1。
+
+### 二、本轮切片：按 `ToolExecutionMode` 分流工具批次 + after 钩子只跑一次
+
+上游口径在 `packages/agent/src/agent-loop.ts:409`（`executeToolCalls`）：`config.toolExecution === "sequential"`
+**或**批次里任一工具声明了 `executionMode: "sequential"` → 整批串行；否则先按源序 `prepareToolCall`
+（`BeforeToolCall` + 校验），再并发执行，结果仍按源序回填（`Promise.all` + `orderedFinalizedCalls`）。
+`prepareToolCall` 返回 `immediate`（被 block）的调用**不会**走 `finalizeExecutedToolCall`，即
+`AfterToolCall` 只对「真执行过」的调用触发一次。
+
+Rust 侧的实现缺口有两处：批次永远串行；且 `call_tool` 内部与 `execute_tool_calls` 外层各调一次
+`invoke_after_tool_call`，**一次工具调用会触发两次 after 钩子**（并发运行 after 钩子本就该是幂等地
+「改写结果」，两次调用埋着结果被改写两轮的隐患）。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-agent-core/src/tools.rs` | `ToolExecutor::execution_mode(name) -> ToolExecutionMode`，**默认 `Sequential`**；模块注释从「本阶段一律串行」改为「按 `ToolExecutionMode` 分流」 |
+| `crates/pi-agent-core/src/state.rs` | `AgentConfig` 新增 `tool_execution: ToolExecutionMode`（默认 `Parallel`） |
+| `crates/pi-agent-core/src/agent.rs` | `AgentOptions` 同名字段 + `with_tool_execution(mode)` 构造器 + `Debug` 增加该字段；构造 `AgentConfig` 时透传 |
+| `crates/pi-agent-core/src/agent_loop.rs` | `LoopConfig.tool_execution`（`From<&AgentConfig>` 拷贝）；`execute_tool_calls` 拆成 `execute_batch_sequential` / `execute_batch_parallel` + `prepare_call` / `run_call` / `dispatch_tool`；`run_call` 是**唯一**调用 `invoke_after_tool_call` 的地方 |
+| `crates/pi-coding-agent/src/tool_executor.rs` | `BuiltinToolExecutor::execution_mode`（查工具声明的 `AgentTool::execution_mode()`，`None` → `Parallel`）；`ExtensionToolExecutor::execution_mode`（内置工具沿用声明，扩展工具一律 `Sequential`）+ 抽出的 `extension_execution_mode()` 便于单测 |
+| `crates/pi-agent-core/tests/tool_parallel.rs`（新，9 条） | 并发窗口重叠 / 源序回填 / 批次含 `Sequential` 工具 → 整批串行 / 配置级 `Sequential` / 默认 `Sequential` / after 钩子次数 / block 与执行互不干扰 / 单调用批次 |
+| `crates/pi-coding-agent/tests/agent_tools.rs` | 新增「同一批两条 `read` → 源序 + 真实文件内容」集成用例 |
+| `crates/pi-agent-core/tests/{telemetry,tool_execution}.rs` | 三处 `AgentConfig` 字面量补 `tool_execution` 字段 |
+
+关键设计：
+
+- **`prepare → execute → finalize` 三段式**：`prepare_call` 按源序问 `BeforeToolCall` 并产出
+  `CallPreparation::{Execute, Immediate}`（block 的调用在这里就成了结果），`run_call` 才做「派发 + after 钩子」。
+  因此两条路径共享同一套语义，唯一差别是 `run_call` 是 `await` 顺序跑还是 `futures::future::join_all` 并发跑。
+- **结果用槽位回填**：并发路径先按源序建 `Vec<Option<ToolResult>>`，执行结果带槽位下标回收，
+  再 `flatten()` 成源序结果——与上游 `orderedFinalizedCalls` 同形，也顺手挡住了「并发完成顺序影响 message log」。
+- **默认值刻意分两处**：`ToolExecutor::execution_mode` 默认 `Sequential`（不覆盖的执行器 = 旧行为，
+  mock / 宿主自己的工具不会因为升级 trait 突然并发）；`BuiltinToolExecutor` 对**未声明**的工具给
+  `Parallel`（对齐上游 `executionMode === undefined`）。两处默认值都写进了 doc。
+- **扩展工具整类串行**：`JsExtensionHost::execute_tool` 的 interrupt deadline 是宿主共享状态
+  （`arm_deadline` / `disarm_deadline`），两个扩展工具并发跑会互相踩掉 deadline，因此
+  `ExtensionToolExecutor` 把非内置工具一律报成 `Sequential`。
+
+### 三、有意偏离（都写进了对应 doc 注释）
+
+1. **trait 默认 `Sequential`（上游默认 `Parallel`）**：保守取值，理由如上；真实宿主走
+   `BuiltinToolExecutor`，其口径与上游一致。
+2. **批次不因取消而短路**：上游两条路径在 `signal?.aborted` 时 `break`（并行分支里已排队的调用会
+   直接产出 `Operation aborted` 结果）；Rust 侧仍把整批交给 executor，由 executor / `AbortLike`
+   自己决定如何失败。这是**本轮之前就有的行为**，既有测试
+   `cancelled_token_is_forwarded_to_executor` 明确断言「预取消的 token 仍要到达 executor」，
+   本轮不改（改成上游语义要同时改那条测试，属另一个切片）。
+3. **不发射逐调用事件**：`ToolExecutionStart` / `ToolExecutionEnd` 仍由 `Agent` façade 在整批结束后
+   按结果补发（`agent.rs:346`，`ToolCall.name` 为空、duration 是补发时刻的时间戳），不是真正的流式
+   事件。本轮只改批次内部调度，不动事件层；已记入 frontier。
+
+### 四、验证
+
+```
+$ rustc --version                                     # 1.98.1 (48a229cea 2026-09-01) = CI 的 dtolnay/rust-toolchain@stable
+$ export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1139 \
+         CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+$ cargo clippy -p pi-agent-core -p pi-coding-agent --all-targets --offline --no-deps -- -D warnings
+  # exit 0 —— 与本轮文件相关的 lint 一条都没有
+$ PI_PRINT_MODE_SKIP_SIGINT_TEST=1 cargo test -p pi-agent-core -p pi-coding-agent --offline
+  # exit 0：25 个 suite、422 条用例全绿
+  #   其中 pi-agent-core 8 个 suite 38 条（含新增 tests/tool_parallel.rs 9 条）
+  #   pi-coding-agent lib 239 条（含 `tool_executor::tests` 3 条）+ 16 个集成 suite + 3 条 doc-test
+$ cargo check --workspace --offline                    # exit 0（合并态，含 LUM-1136 的 pi-tui）
+$ cargo check -p pi-tui --all-targets --offline        # exit 0（合并进来的搜索覆盖层测试目标也编得过）
+```
+
+并发批次是**用真实时钟验的**，不是靠断言调用次数：`tests/tool_parallel.rs` 的执行器记录每次调用
+的 `start` / `end`，`parallel_batch_runs_concurrently` 断言两条 250ms / 10ms 的调用**窗口重叠**、
+并且完成顺序是 `fast` 先于 `slow`（串行时不可能出现）；`sequential_tool_in_batch_serializes_everything`
+与 `config_sequential_mode_overrides_parallel_tools` 反过来断言窗口不重叠。`after_tool_call` 的
+双调用回归由 `CountingAfter` 计数器锁死（两条调用的批次必须恰好 2 次，修复前是 4 次）。
+
+**一例偶发失败（既有 flake，与本轮改动无关）**：不加 `PI_PRINT_MODE_SKIP_SIGINT_TEST` 跑全套时，
+`pi-coding-agent --test print_mode::sigint_or_clean_exit` 偶发失败，报错 `unexpected exit code: None`。
+该用例 `spawn` 真实 `pi` 二进制后**固定 `sleep 50ms` 再 `kill()`**（SIGKILL 时 `ExitStatus::code()`
+就是 `None`）；本文档 `:5598` 已记录同一现象（当时 4 过 1 挂，load average 17.8）。本轮实测：
+同一个二进制连跑 6 次 **1 过 5 挂**，空载时 `pi --print=hello` 退出耗时 **32–36ms**（50ms 预算被负载吃掉），
+即失败取决于机器负载而非代码差异。该用例自身支持 `PI_PRINT_MODE_SKIP_SIGINT_TEST` 跳过。
+
+**环境记录**：起手 `/` 只剩 7.3G，且 LUM-1131 工作区的 `target/`（14G）正被另一路并发任务占用，
+因此本轮**没有**复用任何在用的 target 目录，而是把 `CARGO_TARGET_DIR` 指到
+`/tmp/pi-rust-target-lum1139` 并关掉 debuginfo 与 incremental；为腾地方只删除了两个**已交付**
+（`in_review`）轮次工作区的 `target/`（`lum-1115` 441M、`lum-1133` 1G），源码与提交一律未动。
+
+### 五、合并与推送
+
+起点 `9412e1c00`；先落代码提交，再把 `origin/feature/pi.rs @ 5fa1c1999` 合入（合并提交），
+最后补本节文档提交。`origin/feature/pi.rs` 是这些提交的祖先，因此并入是**快进、无 plumbing merge**。
+真实哈希与 numstat 见本节末补记。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `d269d338e`（8 文件）、合并提交 `5d0fc3a86`（第一父 `d269d338e`、第二父 `5fa1c1999`）、
+  本节文档提交 `__DOC__`。
+- 推送是**快进、无额外 merge**：`git push origin __PUSH__:refs/heads/feature/pi.rs` →
+  `5fa1c1999..__PUSH__`，`work/lum-1139` 作为留档分支一并推送（同哈希）。
+  `git ls-remote` 复查见下。
+- `git diff --numstat 5fa1c1999 __PUSH__`（本轮全部改动）：`__NUMSTAT__`
+- 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源，数字即第四节所列。
+- 本轮**未派发任何子任务**（`running_task_count = 3`，达上限）。
+
+### 六、frontier（本轮更新）
+
+1. ~~P1 `pi-agent-core` 并行工具路径~~ **本轮（LUM-1139）收口**：`ToolExecutionMode` 贯穿
+   `AgentConfig` / `AgentOptions` / `LoopConfig` / `ToolExecutor`，批次按模式分流，`after` 钩子
+   改为幂等的一次。LUM-1133 / 1134 / 1135 三轮 frontier 里的同一项欠账清除。
+2. **Stage 39 keybindings 消费方**：LUM-1137 正在 `in_progress`（`app.rs` / `editor.rs` 硬编码和弦
+   → `get_keybindings()`），与本轮无交集。
+3. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 ratatui `Cell` 支持链接
+   单元（0.28 不带），得改 `app.rs` 的 buffer 写入路径 —— 与第 2 项同属 `app.rs` 串行区。
+4. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径。
+5. **P2 工具批次的事件流**（本轮记入）：`ToolExecutionStart` / `ToolExecutionEnd` 目前是整批结束后
+   补发（`agent.rs:346`，`ToolCall.name` 为空、duration 是补发时刻），要真的给 TUI 用需要把事件出口
+   下移到 `agent_loop`。自包含、不碰 `app.rs` 的读路径，是个合适的下一轮切片。
+6. **P2 取消语义对齐**（本轮记入）：让两条路径在 `signal.aborted` 时停止派发剩余调用（上游行为），
+   代价是要改 `cancelled_token_is_forwarded_to_executor` 这条既有测试的口径。适合与第 5 项同轮做。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（仍 `backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的，都与本轮无关。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉（既有欠账）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-agent-core` /
+`pi-coding-agent` 与本文档）。
