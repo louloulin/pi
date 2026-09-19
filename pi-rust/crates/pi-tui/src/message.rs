@@ -89,12 +89,33 @@ pub struct MessageView {
     /// Scroll offset — lines from the bottom. `0` means pinned to the
     /// tail (latest message visible).
     scroll_from_bottom: usize,
+    /// When true, assistant bodies are rendered through
+    /// [`crate::markdown::render_markdown`] instead of the plain-text
+    /// path. Off by default so existing callers and snapshots keep their
+    /// byte-identical output.
+    markdown: bool,
 }
 
 impl MessageView {
     /// Construct an empty view.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable/disable markdown rendering for assistant bodies (builder form).
+    pub fn with_markdown(mut self, enabled: bool) -> Self {
+        self.markdown = enabled;
+        self
+    }
+
+    /// Whether assistant bodies are rendered as markdown.
+    pub fn markdown(&self) -> bool {
+        self.markdown
+    }
+
+    /// Enable/disable markdown rendering for assistant bodies in place.
+    pub fn set_markdown(&mut self, enabled: bool) {
+        self.markdown = enabled;
     }
 
     /// Number of items in the log.
@@ -238,8 +259,10 @@ impl MessageView {
     /// The visible text is identical to the plain render; the user body uses
     /// `userMessageText` (`user-message.ts:48`), the assistant body `text`, the
     /// tool body `toolOutput` (`tool-execution.ts:165`), the user/tool prefixes
-    /// `accent`/`muted`, and the streaming caret `dim`. Markdown rendering and
-    /// its `MarkdownTheme` are out of scope for this slice.
+    /// `accent`/`muted`, and the streaming caret `dim`. When markdown is
+    /// enabled (see [`MessageView::with_markdown`]) the assistant body is
+    /// rendered by [`crate::markdown::render_markdown`] instead and carries the
+    /// `mdHeading` / `mdCode` / … slots.
     pub fn render_lines_themed(&self, width: u16, styles: &SelectListStyles<'_>) -> Vec<String> {
         let theme = styles.theme();
         self.render_styled_lines(width)
@@ -283,6 +306,18 @@ impl MessageView {
                     SpanStyle::fg(ThemeColor::ToolOutput),
                 ),
             };
+
+            if self.markdown && item.role == Role::Assistant {
+                out.extend(markdown_lines(
+                    &item.text,
+                    text_width,
+                    prefix,
+                    prefix_style,
+                    item.streaming,
+                ));
+                continue;
+            }
+
             let wrapped = wrap_text(&body, text_width);
             if wrapped.is_empty() {
                 out.push(vec![StyledSpan::new(prefix, prefix_style)]);
@@ -359,6 +394,36 @@ impl MessageView {
             }
         }
     }
+}
+
+/// Render an assistant body through the markdown renderer, prepending the
+/// role prefix to every line and appending the streaming caret to the last
+/// line. A whitespace-only body falls back to a single prefixed blank line
+/// (matching the plain-text path).
+fn markdown_lines(
+    body: &str,
+    width: usize,
+    prefix: &str,
+    prefix_style: SpanStyle,
+    streaming: bool,
+) -> Vec<StyledLine> {
+    let lines = crate::markdown::render_markdown(body, width);
+    if lines.is_empty() {
+        return vec![vec![StyledSpan::new(prefix, prefix_style)]];
+    }
+    let last = lines.len() - 1;
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let mut spans: StyledLine = vec![StyledSpan::new(prefix, prefix_style)];
+            spans.extend(line);
+            if streaming && idx == last {
+                spans.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
+            }
+            spans
+        })
+        .collect()
 }
 
 /// Word-aware wrap that prefers to break at word boundaries and
