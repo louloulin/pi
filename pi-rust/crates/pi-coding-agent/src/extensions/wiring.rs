@@ -59,6 +59,22 @@ pub struct ExtensionLoadOptions {
     pub ui: Option<TuiUiBridge>,
     /// Set by `--no-extensions`: skip discovery and ship built-ins only.
     pub disabled: bool,
+    /// Whether the project directory is trusted.
+    ///
+    /// When `false`, `<cwd>/.pi/extensions` is dropped from the search
+    /// roots: a cloned repository must not be able to execute code just
+    /// because `pi` was started inside it. Global
+    /// (`~/.pi/agent/extensions`) and explicit CLI paths (`-e` /
+    /// `--extensions-dir`) are unaffected — upstream's
+    /// `loadProjectTrustExtensions` bootstrap pass keeps user-level and
+    /// temporary CLI extensions while the project-local set is gated.
+    ///
+    /// The CLI resolves this from the trust store via
+    /// [`crate::resource_loader::resolve_cli_project_trust`];
+    /// [`ExtensionLoadOptions::for_mode`] defaults to `false` (deny by
+    /// default) so a caller that forgets it cannot accidentally load a
+    /// checked-in project extension.
+    pub project_trusted: bool,
 }
 
 impl ExtensionLoadOptions {
@@ -77,6 +93,9 @@ impl ExtensionLoadOptions {
             has_ui,
             ui: None,
             disabled: false,
+            // Deny by default: the CLI sets this from the trust store
+            // before loading (see the field docs).
+            project_trusted: false,
         }
     }
 }
@@ -253,8 +272,17 @@ pub fn load(
         };
     }
 
+    let mut search = js_loader::search_paths(options.home.as_deref(), &options.cwd);
+    if !options.project_trusted {
+        // Untrusted project: `.pi/extensions` is not a search root, but
+        // the global and explicit CLI roots still are. This is the
+        // one-pass counterpart of upstream's `loadProjectTrustExtensions`
+        // bootstrap (which forces `projectTrusted = false` while it
+        // gathers user / CLI extensions).
+        search.project = None;
+    }
     let request = ExtensionLoadRequest {
-        search: js_loader::search_paths(options.home.as_deref(), &options.cwd),
+        search,
         explicit: options.explicit.clone(),
     };
     let cwd = options.cwd.display().to_string();
@@ -580,5 +608,90 @@ mod tests {
         assert!(!outcome.executor.definitions().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Minimal extension source registering one named tool.
+    fn tool_extension(name: &str) -> String {
+        format!(
+            r#"
+                module.exports = function (pi) {{
+                    pi.registerTool({{
+                        name: "{name}",
+                        label: "{name}",
+                        description: "test tool {name}",
+                        parameters: {{ type: "object" }},
+                        execute: function () {{
+                            return {{ content: [{{ type: "text", text: "{name}" }}] }};
+                        }},
+                    }});
+                }};
+            "#
+        )
+    }
+
+    /// `.pi/extensions` is a search root only for a trusted project:
+    /// an untrusted cwd drops the project-local file while the global
+    /// (`~/.pi/agent/extensions`) and explicit CLI (`-e`) files keep
+    /// loading. Trusting the project adds the local file back.
+    #[test]
+    fn project_extensions_are_gated_by_trust_while_global_and_explicit_still_load() {
+        let root = std::env::temp_dir().join(format!("pi-wiring-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let project = root.join("project");
+        let global_dir = home.join(".pi/agent/extensions");
+        let project_dir = project.join(".pi/extensions");
+        std::fs::create_dir_all(&global_dir).expect("mkdir global");
+        std::fs::create_dir_all(&project_dir).expect("mkdir project");
+
+        let global = global_dir.join("global.js");
+        std::fs::write(&global, tool_extension("global_tool")).expect("write global");
+        let local = project_dir.join("local.js");
+        std::fs::write(&local, tool_extension("local_tool")).expect("write local");
+        let explicit = root.join("explicit.js");
+        std::fs::write(&explicit, tool_extension("explicit_tool")).expect("write explicit");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut options =
+            ExtensionLoadOptions::for_mode(Some(home.clone()), project.clone(), "print", false);
+        options.explicit = vec![explicit.clone()];
+
+        // Untrusted: explicit + global load, the project-local file does not.
+        options.project_trusted = false;
+        let untrusted = load(&runtime, &options);
+        assert!(untrusted.errors.is_empty(), "errors: {:?}", untrusted.errors);
+        let mut untrusted_tools = untrusted.tools.clone();
+        untrusted_tools.sort();
+        assert_eq!(
+            untrusted_tools,
+            vec!["explicit_tool".to_string(), "global_tool".to_string()]
+        );
+        assert!(
+            !untrusted.loaded.contains(&local),
+            "untrusted project extension must not load: {:?}",
+            untrusted.loaded
+        );
+
+        // Trusted: the project-local file joins the set.
+        options.project_trusted = true;
+        let trusted = load(&runtime, &options);
+        assert!(trusted.errors.is_empty(), "errors: {:?}", trusted.errors);
+        let mut trusted_tools = trusted.tools.clone();
+        trusted_tools.sort();
+        assert_eq!(
+            trusted_tools,
+            vec![
+                "explicit_tool".to_string(),
+                "global_tool".to_string(),
+                "local_tool".to_string()
+            ]
+        );
+        assert!(trusted.loaded.contains(&local), "loaded: {:?}", trusted.loaded);
+        assert!(trusted.loaded.contains(&global), "loaded: {:?}", trusted.loaded);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

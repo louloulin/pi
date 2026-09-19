@@ -5727,3 +5727,90 @@ $ cargo test   -p pi-coding-agent --doc --offline                     # 3 passed
 一路在写；本轮与 LUM-1100/1101/1102 分属不同文件（`pi-tui` vs `pi-extensions`），合并没有冲突。
 另：LUM-1088 的 run 已挂死近一天（交互式编辑器），它的 2 个 commit 既未推也未合，占着一个槽位 ——
 建议人工清理，否则每轮盘点都要重复这条结论。
+
+## LUM-1088 round — Stage 23 收口：项目信任门接扩展加载
+
+### 为什么是这一项
+
+LUM-1085 把信任门接到了 `.pi/SYSTEM.md`、`.pi/skills`、`.pi/prompts` 与 context files，
+**唯独漏了扩展加载**：`extensions/wiring.rs` 里没有 `project_trusted` 概念，未信任目录里
+的 `.pi/extensions/*.js` 仍会被 `QuickJS` 求值。Stage 22（扩展 `promptSnippet` 进系统提示）
+与 LUM-1084（`resources_discover` 注入 skills / context files）把这条路的收益面放大之后，
+它就从一个「没接上」变成**实际可利用的信任边界缺口**：`git clone && cd && pi` 的目录只要
+带一个 `.pi/extensions/evil.js`，就能注册工具、往系统提示里塞指令、拉入额外 skill。
+
+上游的语义在 `loadProjectTrustExtensions()`：先强制 `projectTrusted = false` 跑一遍
+bootstrap，把用户级（`~/.pi/extensions`）与 CLI 临时扩展加载进来，项目本地的那组被挡在
+门外；`TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES` 里本来就有 `extensions`。Rust 侧缺的
+正是这一道过滤。本轮 3 个并发槽已满（`active_task_count = 3`），不派发新子任务，直接落地。
+
+### 上游对应实现
+
+- `packages/coding-agent/src/core/resource-loader.ts:377` `loadProjectTrustExtensions()`
+  —— 强制 `projectTrusted = false` 的 bootstrap pass。
+- `packages/coding-agent/src/core/trust-manager.ts:32`
+  —— `TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES` 含 `extensions`。
+- `discoverAndLoadExtensions` 只认 `<cwd>/.pi/extensions`（不向上找祖先目录），
+  因此 Rust 侧只门控 `cwd` 是正确的粒度。
+
+### 落地内容
+
+| 位置 | 改动 |
+|------|------|
+| `extensions/wiring.rs:77` | `ExtensionLoadOptions.project_trusted`，`for_mode` 默认 `false`（deny-by-default） |
+| `extensions/wiring.rs:276` | 未信任时把 `search.project` 置 `None`：`<cwd>/.pi/extensions` 不再是搜索根，全局与显式 CLI 根不变 |
+| `main.rs:425` | `load_extensions` 在发现前调用 `resolve_cli_project_trust(cli)`，把结果传进 `ExtensionLoadOptions` |
+| `pi-extensions/registry.rs:40` | 新增 `ExtensionRegistry::set_tools`，按 id 覆盖单一扩展的工具表 |
+| `pi-extensions/host.rs` | `JsExtensionHost::load` 成功后只把本次 `log.tools` 折进当前 id，不再重建整个 registry |
+
+最后两行是本轮顺带修掉的**既存多扩展覆盖 bug**：原实现每次 `load` 都 `take` 掉整个
+registry 再重建，除当前扩展外所有 id 的能力被重置为 default，于是**只有最后一个加载的
+扩展的工具会留下**。信任门之前的两种加载顺序（global → project）本来就该并存，接上门之后
+「可信项目 = global + project」会让它更常暴露——不修的话，`--approve` 会打开项目扩展、
+同时静默清掉用户级扩展的工具，直接违背本轮验收里「用户级扩展在两种情况下都生效」。
+
+### 与上游的刻意差异
+
+- **单 pass 而非 bootstrap 双 pass**：上游要先用 `projectTrusted = false` 加载一轮是因为它
+  的 `resolveProjectTrusted` 会消费扩展信息（扩展可以声明信任需求）。Rust 的
+  `resolve_project_trusted` 只读 `cwd` / store / override，不消费扩展结果，因此没有东西需要
+  回灌，直接在发现前解析一次即可；语义等价，少一次 `QuickJS` 求值。
+- **`/trust` 仍需重启**：与 LUM-1085 一致——交互模式 `/trust` 持久化决策后提示
+  “Restart pi for this to take effect.”，不做运行中热重载。
+- **deny-by-default 的默认值**：`for_mode` 把 `project_trusted` 默认成 `false`，任何忘记接线
+  的调用方都不可能误加载项目扩展；CLI 是唯一把它设为 `true` 的入口。
+
+### 验证
+
+```
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo test   --workspace --no-fail-fast --offline                 # 71 targets：820 passed / 0 failed / 2 ignored
+```
+
+新增 / 改写的测试：
+
+- `wiring.rs` `project_extensions_are_gated_by_trust_while_global_and_explicit_still_load`：
+  临时构造 global / project / explicit 三个扩展；未信任只加载 explicit + global，可信后
+  project 的那个（`local_tool`）加入。
+- `pi-extensions/tests/host.rs` `loading_a_second_extension_keeps_the_first_extensions_tools`：
+  锁住上面那个 registry 覆盖 bug。
+- `tests/cli_extensions.rs`：新增
+  `untrusted_project_extensions_are_skipped_but_user_extensions_load`——未信任目录里
+  `.pi/extensions` 的 `ext_echo` 不进工具表、`$HOME/.pi/agent/extensions` 的 `user_echo`
+  照常加载并执行、stderr 有 “is not trusted” 提示；原有依赖项目扩展的用例补上 `--approve`，
+  把「可信才生效」写成显式前提。
+
+本轮 workspace 全量一次通过（含此前 LUM-1083 记录的概率性闪退 target），未复现抖动。
+
+### 剩余 frontier
+
+1. `themes` 目录的信任门：`trust.rs` 已把 `themes` 列入需信任条目，`pi-tui` 的主题加载
+   尚未接项目目录，接线时直接复用同一判定（LUM-1085 遗留）。
+2. `rquickjs-core 0.9 → 0.14` 迁移（消除 LUM-1083 的宿主堆破坏），独立 run。
+3. Stage 27 自动压缩接线（LUM-1093 在跑）。
+
+### Push status
+
+`work/lum-1088`：基于 `origin/feature/pi.rs`（rebase 到 LUM-1096 的 `43b3fed20`）实现，
+改动 `wiring.rs` / `main.rs` / `pi-extensions` registry + host 与两处测试，另附本节文档，
+非 force push 到同名分支。
