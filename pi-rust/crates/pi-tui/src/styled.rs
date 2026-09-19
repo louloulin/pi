@@ -22,6 +22,12 @@ pub struct SpanStyle {
     pub bg: Option<ThemeBg>,
     /// Whether the run is rendered bold.
     pub bold: bool,
+    /// Whether the run is rendered italic.
+    pub italic: bool,
+    /// Whether the run is rendered underlined.
+    pub underline: bool,
+    /// Whether the run is rendered struck through.
+    pub strikethrough: bool,
 }
 
 impl SpanStyle {
@@ -30,6 +36,9 @@ impl SpanStyle {
         fg: None,
         bg: None,
         bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
     };
 
     /// A run with only a foreground slot.
@@ -45,7 +54,7 @@ impl SpanStyle {
         Self {
             fg: Some(fg),
             bg: Some(bg),
-            bold: false,
+            ..Self::PLAIN
         }
     }
 
@@ -55,21 +64,48 @@ impl SpanStyle {
         self
     }
 
+    /// The slots with the italic modifier applied.
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    /// The slots with the underline modifier applied.
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    /// The slots with the strikethrough modifier applied.
+    pub fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
+        self
+    }
+
     /// Render `text` as an ANSI string for this slot.
     ///
     /// A plain theme ([`ColorMode::None`]) returns `text` unchanged. The
     /// wrapping order matches upstream (`theme.fg("accent", theme.bold(text))`,
-    /// `theme.bg("selectedBg", theme.fg("accent", text))`): bold is innermost,
-    /// then the foreground, then the background.
+    /// `theme.bg("selectedBg", theme.fg("accent", text))`): the text
+    /// decorations are innermost (each uses its own reset code, so their order
+    /// is not observable), then the foreground, then the background.
     pub fn ansi(self, theme: &Theme, text: &str) -> String {
         if theme.is_plain() {
             return text.to_string();
         }
-        let mut out = if self.bold {
-            theme.bold(text)
-        } else {
-            text.to_string()
-        };
+        let mut out = text.to_string();
+        if self.bold {
+            out = theme.bold(&out);
+        }
+        if self.italic {
+            out = theme.italic(&out);
+        }
+        if self.underline {
+            out = theme.underline(&out);
+        }
+        if self.strikethrough {
+            out = theme.strikethrough(&out);
+        }
         if let Some(fg) = self.fg {
             out = theme.fg(fg, &out);
         }
@@ -94,6 +130,15 @@ impl SpanStyle {
         }
         if self.bold {
             style = style.add_modifier(Modifier::BOLD);
+        }
+        if self.italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if self.underline {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        if self.strikethrough {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         style
     }
