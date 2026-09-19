@@ -32,13 +32,14 @@ impl SessionLog {
         session_id: impl Into<String>,
     ) -> std::io::Result<Self> {
         let directory = directory.into();
+        let session_id = session_id.into();
         std::fs::create_dir_all(&directory)?;
-        let path = directory.join(format!("{}.jsonl", session_id.into()));
+        let path = directory.join(format!("{}.jsonl", session_id));
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             directory,
             file: Mutex::new(Some(BufWriter::new(file))),
-            session_id: "session".to_string(),
+            session_id,
         })
     }
 
@@ -144,6 +145,8 @@ mod tests {
         let lines: Vec<&str> = contents.trim().split('\n').collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("\"type\":\"header\""));
+        assert!(lines[0].contains("test-session"));
+        assert_eq!(log.session_id(), "test-session");
         assert!(lines[1].contains("\"type\":\"user_message\""));
         assert!(lines[2].contains("\"type\":\"assistant_message\""));
         let _ = std::fs::remove_dir_all(&dir);
