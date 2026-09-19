@@ -1584,6 +1584,132 @@ $ cargo build --workspace --all-targets                         # clean (cached,
 match the LUM-1040 prior results: 0 errors / 0 warnings / 126/126
 tests.)
 
+## LUM-1048 round — Stage 7 revision + Stage 8 + Stage 9 merged into `feature/pi.rs`
+
+LUM-1048 (2026-09-19 09:20 Asia/Shanghai, autopilot template re-run)
+broke the "verify + doc" loop for good: three completed-but-unmerged
+Stage branches were sitting on disk with their tasks already
+`in_review`, so this round integrated all three into `feature/pi.rs`
+and pushed.
+
+### Why "skip" was the wrong answer this round
+
+| Stage | Task | Branch | State found |
+|-------|------|--------|-------------|
+| 7 (rev) | LUM-1042 | `agent/devbox1/8a8831a92542` | 1664-LOC tested `AnthropicProvider` + `tests/anthropic.rs` + `fixtures/anthropic/*` + `anthropic_faux` e2e — **unmerged** |
+| 8 | LUM-1044 | `origin/agent/devbox1/lum-1044` (`4776e91c1`) | `print_mode.rs` (875) + `file_processor.rs` (561) + 13 tests, replacing the `print mode is a stub` — **unmerged** |
+| 9 | LUM-1043 | `agent/devbox1/7046ef4e9915` (`25bf64d36`) | `find` / `grep` / `ls` + `defaults.rs` + `mod_ignore.rs` + 11 tests — **unmerged** |
+
+Adding more parallel sub-issues on top of three finished-but-dangling
+branches would have produced zero forward motion. The bottleneck was
+integration, not ideation.
+
+### Integration details
+
+1. **Stage 7 revision (LUM-1042).** `feature/pi.rs` already carried an
+   *earlier, untested* Stage 7 (`b48b235cc`, 1342 LOC, no tests). The
+   LUM-1042 branch is the same adapter taken through the full acceptance
+   criteria (SSE fixtures under `fixtures/anthropic/`, `tests/anthropic.rs`
+   with 10 cases, `anthropic_faux.rs` agent-loop integration test, model
+   catalog loader `register_provider_json`, wasm feature gate). Only two
+   merge conflicts (`providers/anthropic.rs`, `examples/anthropic_stream.rs`);
+   both resolved in favour of the tested version. The three superseded flat
+   fixtures (`anthropic_{text,thinking,tool_use}.sse`) were deleted.
+2. **Stage 8 (LUM-1044).** One conflict in `main.rs`: kept `feature/pi.rs`'s
+   3-model Claude catalog while adopting Stage 8's `ExitCode`-based
+   `run_print_mode` dispatch.
+3. **Stage 9 (LUM-1043).** Its branch was cut from `main` with a flattened
+   `pi-rust` snapshot, so a git merge would have reverted Stages 7/8.
+   Applied file-by-file instead: the five new tool modules + `tools/mod.rs`
+   (7-tool bundle, `SandboxViolation` / `InvalidArgument` error variants) +
+   `tests/tools.rs` + `examples/manual_check.rs`; workspace `regex = "1"`
+   and `pi-coding-agent` `walkdir` / `regex` deps. The Stage 8 `futures`
+   dep and `tempfile` dev-dep were preserved.
+
+### Verification (native)
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo test     --workspace                                       # 221 / 221 pass
+```
+
+221 tests vs 126 at LUM-1039 — the delta is +10 `pi-ai` anthropic,
++6 `pi-agent-core` anthropic_faux, +13 `pi-coding-agent` print_mode,
++11 `pi-coding-agent` navigation tools in `tests/tools.rs`, +24 in
+`tests/tools_navigation.rs`, plus the models-catalog cases.
+
+End-to-end CLI spot checks on the merged tree:
+
+```
+$ target/debug/pi --print "hello"
+(faux) hello
+
+$ target/debug/pi --print "hello" --output-format json           # valid JSON, usage + stop_reason
+$ target/debug/pi --print "hello" --output-format json-events    # valid NDJSON
+$ cargo run -p pi-coding-agent --example manual_check -- <dir>   # find / grep / ls vs shell parity
+```
+
+The `manual_check` example confirms `find **/*.rs`, `grep '^name' Cargo.toml`
+and `ls detail/all` behave like their shell equivalents (relative paths,
+`file:line:content`, directory-first ordering, hidden-file filtering).
+
+### Concurrent-round reconciliation (LUM-1050)
+
+The LUM-1050 round ran in parallel and pushed its own Stage 8 + 9 merge
+(`b8e270fdf`) plus a doc commit (`21c598da3`) to `origin/feature/pi.rs`
+while this round was working. Merging it back produced exactly one code
+-level conflict-free result:
+
+- the Stage 8/9 files were byte-identical, so git auto-merged them;
+- `tests/tools_navigation.rs` (the extra 24-test suite from LUM-1050)
+  was kept;
+- the only real conflict was the status doc (both rounds appended a
+  section at the same offset) — both sections are preserved, LUM-1048
+  first, LUM-1050 after;
+- the merge silently duplicated the newly-added `regex` entry in
+  `[workspace.dependencies]` (`error: duplicate key`), which was caught by
+  the post-merge test run and removed.
+
+Net effect: `origin/feature/pi.rs` now carries the *tested* Stage 7
+revision, Stage 8, Stage 9, and both rounds' test suites.
+
+### Disk housekeeping
+
+The overlay was at 94% (3.0 GB free) after the builds. Removing the
+`target/` directories of the three now-merged worktrees
+(`lum-1042`, `lum-1043`, `lum-1044`) plus the stale `lum-1040`
+feature worktree freed ~12 GB → **15 GB free**, enough headroom for the
+next three concurrent builds.
+
+### LUM-981 plan — next stages
+
+LUM-981's two acceptance criteria ("基于 rust 实现 pi" / "兼容 pi 的插件生态")
+remain met, and the follow-up debt is now concrete rather than
+protocol-reconciliation-shaped.
+
+**Already dispatched and running (≤ 3 concurrent, cap saturated):**
+
+| Stage | Issue | Scope |
+|-------|-------|-------|
+| 10 | LUM-1051 | `pi-agent-core`: real `ToolExecutor` replacing the stubbed `execute_tool_calls`, driven by `pi-coding-agent`'s tool bundle |
+| 11 | LUM-1052 | `pi-coding-agent`: real `install` / `remove` / `list` / `update-models` / `list-models` / `version` (the pi-packages ecosystem surface) |
+| 12 | LUM-1053 | `pi-coding-agent`: `--rpc` JSON-RPC over stdio, reusing the print-mode event vocabulary |
+
+These were opened by the concurrent LUM-1050 round; the three run at the
+same time and all target `feature/pi.rs`, so this round does **not** open a
+fourth run.
+
+**Parked for the round after (stage 13, `backlog`, no run enqueued):**
+
+| Stage | Issue | Scope |
+|-------|-------|-------|
+| 13 | LUM-1055 | `pi-ai`: Google Gemini provider (streaming + model catalog + fixtures + `google_faux` e2e) |
+| 13 | LUM-1056 | `pi-coding-agent`: print mode on the `pi-session` SQLite store, closing LUM-1044's known limitation |
+| 13 | LUM-1057 | new `pi-telemetry` crate (the last `packages/*` with no Rust counterpart) |
+
+All three are additive and touch disjoint files, so they can run in
+parallel within the cap. `feature/pi.rs` is the integration target for each.
 ## LUM-1050 round — Stage 8 + Stage 9 landed on `feature/pi.rs`
 
 LUM-1050 (2026-09-19 01:40 UTC) picked up two task branches that were

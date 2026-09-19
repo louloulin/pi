@@ -16,6 +16,9 @@
 //! CI / scripts / containerised hosts — it streams text (or NDJSON) on
 //! stdout and never opens a TUI.
 //!
+//! Stage 11 wires [`packages`], the `pi install` / `remove` / `list` /
+//! `version` / `list-models` / `update-models` ecosystem.
+//!
 //! Stage 12 wires [`rpc`], the headless JSON-RPC 2.0 over stdio mode
 //! (`pi --rpc`) that editors and host processes drive.
 
@@ -28,6 +31,7 @@ pub mod config;
 pub mod extensions;
 pub mod file_processor;
 pub mod interactive;
+pub mod packages;
 pub mod print_mode;
 pub mod rpc;
 pub mod session_log;

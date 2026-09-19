@@ -10,6 +10,7 @@ use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
 use pi_coding_agent::file_processor::expand_prompt;
 use pi_coding_agent::interactive::{run_interactive, InteractiveOptions};
+use pi_coding_agent::packages::{commands as package_commands, PackageCommand};
 use pi_coding_agent::print_mode::{run_print_mode, PrintModeOptions};
 use pi_coding_agent::session_log::SessionLog;
 use pi_protocol::{Api, Model, ProviderId};
@@ -60,6 +61,12 @@ fn main() -> ExitCode {
         Some(Command::Print { .. }) => ModeTarget::Print,
         Some(Command::Rpc) => ModeTarget::Rpc,
         Some(Command::Session { .. }) => ModeTarget::Session,
+        Some(Command::Version { .. })
+        | Some(Command::Install { .. })
+        | Some(Command::Remove { .. })
+        | Some(Command::List { .. })
+        | Some(Command::UpdateModels)
+        | Some(Command::ListModels { .. }) => ModeTarget::Packages,
         _ => {
             if cli.print.is_some() {
                 ModeTarget::Print
@@ -190,6 +197,35 @@ fn main() -> ExitCode {
                 }
             }
         }
+        ModeTarget::Packages => {
+            let package_command = match cli.command.as_ref() {
+                Some(Command::Version { output }) => PackageCommand::Version { output: *output },
+                Some(Command::Install { spec, dir }) => PackageCommand::Install {
+                    spec: spec.clone(),
+                    dir: dir.clone(),
+                },
+                Some(Command::Remove { spec, dir }) => PackageCommand::Remove {
+                    spec: spec.clone(),
+                    dir: dir.clone(),
+                },
+                Some(Command::List { dir, output }) => PackageCommand::List {
+                    dir: dir.clone(),
+                    output: *output,
+                },
+                Some(Command::UpdateModels) => PackageCommand::UpdateModels,
+                Some(Command::ListModels { output }) => {
+                    PackageCommand::ListModels { output: *output }
+                }
+                _ => unreachable!("ModeTarget::Packages only set for package subcommands"),
+            };
+            match package_commands::run(package_command, &models) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("pi: {err}");
+                    ExitCode::from(err.exit_code())
+                }
+            }
+        }
     }
 }
 
@@ -199,6 +235,7 @@ enum ModeTarget {
     Print,
     Rpc,
     Session,
+    Packages,
 }
 
 fn default_system_prompt() -> String {
