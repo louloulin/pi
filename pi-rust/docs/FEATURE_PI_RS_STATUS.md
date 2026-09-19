@@ -8240,3 +8240,103 @@ OSC-8 hyperlink / 语法高亮 / 块级 HTML。其余维持：
 - `a994d7395` 之后 `feature/pi.rs` 上只剩文档级提交：本补记 `16698c5fe`、以及紧随其后对这句
   “最终头”措辞的修正；**代码提交到 `a994d7395` 为止，之后没有任何 `.rs` 改动**。
 
+
+## LUM-1131 round — `node:zlib` gzip/deflate 纯 Rust 实现（frontier P2 第 4 项收口）+ 派发 Stage 37
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1131`，起点 `origin/feature/pi.rs` @ `cca97f553`（LUM-1128 / Stage 35 的合并态）。
+  本轮只写 `pi-extensions`：新增 `src/deflate.rs` + `tests/zlib_deflate.rs`，`src/host.rs` 加 6 个 op 分支，
+  `runtime/pi-ext-shim.mjs` 补上 gzip/deflate 名字，`tests/zlib.rs` 把 `gzipMissing` 断言翻成正向，
+  `crates/pi-extensions/docs/NODE_BUILTINS.md` 同步。**`pi-tui` 全部文件零改动**（开工时 LUM-1130 正在写
+  `pi-tui/src/latex.rs` / `markdown.rs` / `lib.rs`，本轮不碰）。
+- 槽位：开工时 `multica daemon status` 报 `running_task_count = 2`（本轮 + LUM-1130），**本轮不派发**，
+  把第 3 槽留给在途的 LUM-1130；收尾时 LUM-1130 已 `in_review`，`work/lum-1130` = `origin/feature/pi.rs`
+  = `b7c46b746`（无未推送提交），`running_task_count = 1`（只剩本轮）→ 空出 2 槽，本轮派发 1 个
+  （见第六节），仍在「最多 3 个并发」上限内。
+- 环境：`/` 一度只剩 3.4 G（LUM-1130 的 `pi-rust/target` 涨到 18 G，link 阶段有 `Bus error` 前科）。
+  确认 LUM-1130 的工作分支与 `origin/feature/pi.rs` 同哈希、内容都已推送后，**只回收了它的 `target`
+  构建缓存**（可重建），释放到 21 G；没有删任何仓库源码、工作分支或提交。
+
+### 二、本轮切片：`node:zlib` 的 gzip/deflate 家族（零新依赖）
+
+| File | Change |
+|------|--------|
+| `crates/pi-extensions/src/deflate.rs`（新，834 行） | RFC 1951（DEFLATE）/ 1950（zlib）/ 1952（gzip）自研编解码：`BitReader` / `BitWriter`（LSB-first）、`Huffman`（puff 风格 counts/symbols，容忍 incomplete、拒绝 over-subscribed）、`inflate_raw`（stored / fixed / dynamic 三种块 + 多块流）、`deflate_raw`（level 0 → stored；1..9 → 单块 final fixed-Huffman 贪心 LZ77 + 哈希链）、`zlib_compress/decompress`（0x78 头 + Adler-32）、`gzip_compress/decompress`（`FEXTRA`/`FNAME`/`FCOMMENT`/`FHCRC` + CRC-32/ISIZE）、`crc32`（从 `host.rs` 迁入，gzip trailer 复用）、`adler32` |
+| `crates/pi-extensions/src/host.rs` | 新增 `zlib.deflate` / `zlib.inflate` / `zlib.deflateRaw` / `zlib.inflateRaw` / `zlib.gzip` / `zlib.gunzip` 六个 op 分支；`zlib_error()` 把 `ZlibError.code` 原样透出（`Z_DATA_ERROR` / `Z_BUF_ERROR` / `Z_STREAM_ERROR`），`node_arg_level()` 校验 `options.level ∈ -1..=9`（越界 `Z_STREAM_ERROR`，对齐 Node 的 `deflateInit2`）；删掉本地 `crc32` |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | `__pi_zlib_module` 补 `deflateSync` / `inflateSync` / `deflateRawSync` / `inflateRawSync` / `gzipSync` / `gunzipSync`（统一走 `codecCall`）+ `compressionLevel(options)`（越界抛 `RangeError` / `err.code = "ERR_OUT_OF_RANGE"`）+ `Z_NO_COMPRESSION` / `Z_BEST_SPEED` / `Z_BEST_COMPRESSION` / `Z_DEFAULT_COMPRESSION` 常量 |
+| `crates/pi-extensions/tests/zlib_deflate.rs`（新，608 行） | 6 条 e2e：Python fixture 解码（zlib / raw）、gzip 可选头解码、encoder golden 逐字节比对、shim 往返（含 PNG IDAT 形状的 16 K 负载）、错误形状与宿主存活 |
+| `crates/pi-extensions/tests/zlib.rs` | `gzipMissing` → `gzipPresent`（`deflateSync` / `inflateSync` / `gzipSync` / `gunzipSync` 全部在场且与 `require("node:zlib")` 同引用）+ 两个往返断言；模块文档同步 |
+| `crates/pi-extensions/docs/NODE_BUILTINS.md` | `node:zlib` 一节补齐 gzip/deflate 表 + 常量表；前沿表删掉 gzip/deflate 一行；`wad-finder.ts` 的 `gunzipSync` 阻塞解除；偏离表改写 |
+
+选它的理由：`node:zlib` 的 gzip/deflate 是 frontier 上**唯一一条「有真实上游消费者、又能在一轮内做完」**的
+P2 项——`packages/coding-agent/test/tool-result-images.test.ts:1` 用 `deflateSync` + `crc32` 拼 PNG IDAT，
+`packages/coding-agent/examples/extensions/doom-overlay/wad-finder.ts` 用 `gunzipSync` 读 WAD。
+它此前只卡在「离线 registry 没有 `flate2` / `miniz_oxide`」——本轮把这条从「等依赖」改成「自己实现」，
+不引入任何新 crate（431 个离线 crate 与 `Cargo.lock` 都查过，确实没有压缩后端）。
+
+### 三、有意偏离（都写进了模块文档与 `NODE_BUILTINS.md`）
+
+1. **编码器只输出两种块**：`level: 0` → stored；`1..9` / 默认 → **单个 final fixed-Huffman 块**，
+   不做「逐块选 fixed/dynamic」。解码器三种块全支持，所以任何解码器都能读我们的输出。
+2. **level 1..9 只改贪心哈希链的深度**（`[1]=>4 … [9]=>384`，默认 64），压缩率落后 zlib 的动态 Huffman；
+   换取的是实现可审计、无动态表头。TEXT 这种短 ASCII，默认 level 的输出与 Python `zlib.compress(TEXT, 6)`
+   **逐字节相同**（Python 对这种输入也选 fixed）。
+3. **gzip 头可复现**：`MTIME = 0`、`XFL = 0`、`OS = 0xFF`（Node 默认写当前时间与 OS）。
+4. **不实现**：async / callback 形式、stream 构造器、`unzipSync` 的自动嗅探，以及 `level` 以外的 options
+   （`windowBits` / `memLevel` / `strategy` / `dictionary` / `finishFlush`）——仓库里没有调用方。
+5. **错误码对齐 Node**：`Z_DATA_ERROR`（CRC/格式错）、`Z_BUF_ERROR`（截断）、`Z_STREAM_ERROR`（FDICT、非法
+   level）；shim 对非法 `options.level` 抛 `RangeError` + `ERR_OUT_OF_RANGE`，与 Node 的 `zlib.js` 一致。
+
+### 四、验证
+
+```
+# fixture 由 Python 3 的 zlib 1.3 生成（仓库外脚本），覆盖所有块类型与可选头
+$ python3 gen_zlib_fixtures.py   # TEXT/REPEAT/BIG/AB/LOREM/MULTI + zlib/raw/gzip 三容器
+$ ... cargo test -p pi-extensions --offline                     # 合并态
+  13 个 suite / 95 passed / 0 failed
+  （本轮 +1 suite、+11 用例：lib 0 → 5、新增 tests/zlib_deflate.rs 6 条；
+    zlib.rs 4 条不变，只是把 gzipMissing 断言翻转为正向）
+$ ... cargo test -p pi-extensions --test zlib_deflate --offline  # 6 passed
+  - 解码 Python 生成的全部 fixture（stored / fixed / dynamic / 多块 Z_SYNC_FLUSH / gzip 可选头）
+  - 编码器 golden：TEXT 默认 level = Python zlib.compress(TEXT, 6) 逐字节相同；
+    REPEAT / BIG 比 zlib 小 1 字节（25 vs 26、71 vs 72，固定 Huffman 没有动态表头），
+    且都能被 Python zlib 解回原文
+  - 错误形状：FDICT → Z_STREAM_ERROR、截断 → Z_BUF_ERROR、坏 CRC → Z_DATA_ERROR、
+    level=10 → ERR_OUT_OF_RANGE，抛错后宿主继续服务
+$ ... cargo check --workspace --all-targets --offline            # 0 error
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  exit 0（只有 vendor `rquickjs-core` 的 12 条既有 warning，不进 -D warnings 门）
+$ /tmp/rustup-home/toolchains/1.85.0-*/bin/rustfmt --edition 2021 --check \
+      crates/pi-extensions/src/deflate.rs crates/pi-extensions/src/host.rs \
+      crates/pi-extensions/tests/zlib.rs crates/pi-extensions/tests/zlib_deflate.rs
+  本轮 4 个 `.rs` 文件 0 diff（rustfmt 1.8.0）
+```
+
+合并态没有跑全 workspace 测试：`cargo test --workspace` 需要重新链接全部测试二进制（LUM-1130 那轮实测
+`target` 涨到 18 G），而此刻只剩 21 G——为避免重演「磁盘打满 → link `Bus error`」的事故，本轮只跑
+`-p pi-extensions`（本轮改动所在 crate）与 workspace 级 `check` / `clippy`；`pi-tui` 的 tree 与
+`origin/feature/pi.rs @ b7c46b746` 逐字节相同，已由 LUM-1130 那轮实测过（97 suite / 1287 passed）。
+
+### 五、合并与推送
+
+`work/lum-1131` → `feature/pi.rs`（plumbing merge，`feature/pi.rs` 被历史 worktree 占着），提交信息
+`feat(pi-extensions): node:zlib gzip/deflate 家族（纯 Rust RFC1951/1950/1952 编解码）`；真实哈希与
+合并态复测数字见本节末补记。
+
+### 六、frontier（本轮更新）
+
+1. ~~P1 鼠标区域派发 / 点击命中~~ 已由 Stage 35 / LUM-1128 收口（`cca97f553`）。
+2. **P1 选区粒度与边缘体验**（双击选词 / 三击选行 / 边缘自动滚动）：写 `app.rs`，`app.rs` 现已空闲——
+   **本轮已派发**（Stage 37，见下）。
+3. ~~P2 `node:module` / `node:readline`~~ 已落地（LUM-1129）。
+4. ~~P2 `node:zlib` gzip/deflate~~ **本轮收口**：不再等 `flate2`，改为自研 codec（`src/deflate.rs`）。
+5. **P2 `fetch` 全局**：要真实 HTTP 桥（`host.rs` 新 op + 代理/证书策略），需要架构取舍，不在一轮内做。
+6. **P3 `alt-screen-search.ts`**：要 `app.rs` 钩子。
+7. **P3 `latex.ts`**：已由 LUM-1130 落地全量移植，剩 OSC-8 hyperlink / 语法高亮 / 块级 HTML。
+8. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+9. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：等第 2 项（选区粒度）落地后再排，避免同写 `app.rs` 的选择路径。
+10. **新增欠账（本轮）**：编码器不做 dynamic Huffman（压缩率落后，已文档化）；`gzip` 头写死
+    `MTIME = 0`；`node:zlib` 仍缺 async/stream/`unzipSync`。既有欠账（LUM-1130 记的
+    `settings.rs` / `tests/settings_list.rs` rustfmt diff）维持不动。
+
