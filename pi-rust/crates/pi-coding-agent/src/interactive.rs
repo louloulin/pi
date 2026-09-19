@@ -41,6 +41,7 @@ use crate::commands::{handle_command, SlashCommand};
 use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
 };
+use crate::config::{self, ConfigSources};
 use crate::extensions::ui_bridge::TuiUi;
 use crate::extensions::wiring::ExtensionRuntime;
 use crate::prompt_templates::PromptTemplate;
@@ -51,6 +52,7 @@ use crate::tool_executor::default_executor;
 use pi_tui::app::{App, AppConfig};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::selector::{Selector, SelectorItem};
+use pi_tui::settings::{SettingItem, SettingsList};
 
 /// Result of running the interactive TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,7 +276,7 @@ async fn run_loop(
             while let Some(event) = read_event()? {
                 let translated = App::translate_event(event);
                 if let Some(action) =
-                    handle_input_event(&mut app, &agent, &options, translated).await?
+                    handle_input_event(&mut app, &agent, &mut options, translated).await?
                 {
                     match action {
                         InternalAction::Exit => break,
@@ -316,7 +318,7 @@ enum InternalAction {
 async fn handle_input_event(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
-    options: &InteractiveOptions,
+    options: &mut InteractiveOptions,
     event: InputEvent,
 ) -> anyhow::Result<Option<InternalAction>> {
     // When the selector is open (and no extension dialog is on top of
@@ -349,6 +351,11 @@ async fn handle_input_event(
     }
 
     let step_outcome = app.step(event);
+    // `/settings` hands value changes back to the driver — upstream's
+    // `onChange(id, newValue)` callback. Apply what the running session
+    // can honour, persist everything to the user settings file, and
+    // report the rest as "next launch" so nothing is silently dropped.
+    drain_settings_changes(app, options, &settings_sources());
     match step_outcome {
         pi_tui::app::StepOutcome::Idle => Ok(None),
         pi_tui::app::StepOutcome::Redraw => Ok(None),
@@ -406,7 +413,7 @@ async fn apply_selector_choice(
 async fn run_slash_command(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
-    options: &InteractiveOptions,
+    options: &mut InteractiveOptions,
     text: &str,
 ) -> anyhow::Result<()> {
     let parsed = match handle_command(text) {
@@ -540,6 +547,9 @@ async fn run_slash_command(
                 }
             }
         }
+        SlashCommand::Settings => {
+            open_settings(app, options, &settings_sources());
+        }
         SlashCommand::Compact { instructions } => {
             run_compact(app, agent, options, instructions.as_deref()).await;
         }
@@ -577,6 +587,163 @@ async fn run_slash_command(
 /// The on-screen transcript is kept as scrollback (it is the user's
 /// record of the session) and gains an info block describing what was
 /// summarized; only the model context is replaced.
+/// The `settings.json` locations for the current working directory.
+fn settings_sources() -> ConfigSources {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    ConfigSources::discover(&cwd)
+}
+
+/// Build and open the `/settings` modal (upstream
+/// `SettingsSelectorComponent`, `components/settings-selector.ts:449`).
+///
+/// The item set is the upstream one restricted to the settings this build
+/// actually consumes:
+///
+/// | item | settings.json | effect |
+/// |------|---------------|--------|
+/// | Auto-compact | `compaction.enabled` | gates auto-compaction, live |
+/// | Fullscreen copy on select | `fullscreenCopyOnSelect` | gates copy-on-select, live |
+/// | Theme | `theme` | swaps the App palette, live |
+///
+/// Upstream's other rows (steering/follow-up mode, transport,
+/// `modelThinkingLevels`, image handling, …) belong to subsystems this
+/// port does not have yet; they land with those subsystems rather than as
+/// inert rows here.
+fn open_settings(app: &mut App, options: &InteractiveOptions, sources: &ConfigSources) {
+    let ui = config::load_ui_settings(sources);
+
+    // The live palette wins over the persisted choice: the user may have
+    // switched themes from a future `/theme` command or a CLI flag that
+    // never touched `settings.json`.
+    let theme = app
+        .theme()
+        .name()
+        .map(str::to_string)
+        .or(ui.theme)
+        .unwrap_or_else(|| DEFAULT_THEME_NAME.to_string());
+
+    let items = vec![
+        SettingItem::new("autocompact", "Auto-compact")
+            .with_description("Automatically compact context when it gets too large")
+            .with_values(["true", "false"], boolean(options.compaction.enabled)),
+        SettingItem::new("fullscreen-copy-on-select", "Fullscreen copy on select")
+            .with_description(
+                "Automatically copy selected text; disable to copy selections with Ctrl+X",
+            )
+            .with_values(["true", "false"], boolean(app.copy_on_select())),
+        SettingItem::new("theme", "Theme")
+            .with_description("Color theme for the interface")
+            .with_values(["dark", "light"], theme),
+    ];
+
+    // Upstream windows the list at `min(items.length, 10)` rows.
+    let max_visible = items.len().min(10);
+    app.open_settings(SettingsList::new(items, max_visible).searchable(true));
+}
+
+/// Apply every value change the settings modal queued — upstream's
+/// `onChange` callback, which the modal only fires for a real value change
+/// (cursor moves and filter edits never reach the settings file).
+///
+/// Activations (Enter on a value-less row) have no submenu in this build;
+/// they are reported instead of being dropped.
+fn drain_settings_changes(
+    app: &mut App,
+    options: &mut InteractiveOptions,
+    sources: &ConfigSources,
+) {
+    while let Some((id, value)) = app.take_pending_setting_change() {
+        apply_setting_change(app, options, sources, &id, &value);
+    }
+    if let Some(id) = app.take_pending_setting_activation() {
+        app.info(format!(
+            "/settings: '{id}' opens a submenu that this build does not implement yet"
+        ));
+    }
+}
+
+/// Apply one `/settings` value change.
+///
+/// Called for every [`SettingsAction::ValueChanged`](pi_tui::settings::SettingsAction)
+/// the modal reports — upstream's `onChange` callback
+/// (`settings-selector.ts:830`). The change is applied to the running
+/// session where the subsystem allows it and always persisted to the user
+/// settings file; a failure to write is reported, never silent.
+fn apply_setting_change(
+    app: &mut App,
+    options: &mut InteractiveOptions,
+    sources: &ConfigSources,
+    id: &str,
+    value: &str,
+) {
+    // Each row owns one settings key and its JSON type: the booleans are
+    // stored as booleans (`core/settings-manager.ts:849,1284`), the theme
+    // as a string. A stringified `"false"` would be rejected by the
+    // loader and silently fall back to the default.
+    use serde_json::Value;
+
+    let (key, json_value, applied, note) = match id {
+        "autocompact" => {
+            let enabled = value == "true";
+            // `options` is owned by the run loop, so the toggle applies to
+            // every later `maybe_auto_compact` check — live, like upstream.
+            options.compaction.enabled = enabled;
+            (
+                "compaction.enabled",
+                Value::Bool(enabled),
+                format!("auto-compact → {value}"),
+                " (applies from the next turn)",
+            )
+        }
+        "fullscreen-copy-on-select" => {
+            let enabled = value == "true";
+            app.set_copy_on_select(enabled);
+            (
+                "fullscreenCopyOnSelect",
+                Value::Bool(enabled),
+                format!("copy on select → {value}"),
+                "",
+            )
+        }
+        "theme" => match app.set_theme_by_name(value) {
+            Ok(()) => (
+                "theme",
+                Value::String(value.to_string()),
+                format!("theme → {value}"),
+                "",
+            ),
+            Err(err) => {
+                app.info(format!("/settings: {err}"));
+                return;
+            }
+        },
+        other => {
+            app.info(format!("/settings: unknown setting {other:?}"));
+            return;
+        }
+    };
+
+    match config::save_user_setting(sources, key, json_value) {
+        Ok(path) => app.info(format!("/settings: {applied}{note} (saved to {})", path.display())),
+        Err(err) => app.info(format!(
+            "/settings: {applied}{note}, but saving to settings.json failed: {err}"
+        )),
+    }
+}
+
+/// The theme the App boots with when no choice is stored — upstream's
+/// default (`createTheme(getBuiltinThemes()["dark"])`).
+const DEFAULT_THEME_NAME: &str = "dark";
+
+/// `true` / `false` for a [`SettingItem`] value list.
+fn boolean(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 async fn run_compact(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
@@ -1171,5 +1338,220 @@ mod tests {
         };
         assert!(!maybe_auto_compact(&mut app, &agent, &options).await);
         assert_eq!(agent.lock().await.state().messages.len(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // `/settings`
+    // -----------------------------------------------------------------------
+
+    use pi_tui::input::{Key, KeyModifiers};
+
+    /// The `/settings` sources: a throwaway user file and no project file,
+    /// so the test never touches the developer's real settings.
+    fn temp_sources(dir: &std::path::Path) -> ConfigSources {
+        ConfigSources {
+            user: Some(user_settings_path(dir)),
+            project: None,
+        }
+    }
+
+    fn user_settings_path(dir: &std::path::Path) -> PathBuf {
+        dir.join(config::SETTINGS_FILE_NAME)
+    }
+
+    /// The App's rendered transcript, joined — the App exposes lines only
+    /// through a render pass.
+    fn transcript(app: &App) -> String {
+        app.render_snapshot(80, 24).lines.join("\n")
+    }
+
+    fn settings_app() -> App {
+        let agent = Agent::new(AgentOptions::new(
+            small_window_model(1_000_000),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let config = AppConfig {
+            session_id: "settings".into(),
+            ..AppConfig::default()
+        };
+        App::new(&agent, config)
+    }
+
+    /// Press one key on the App and hand whatever the modal queued to the
+    /// driver — exactly what `handle_input_event` does for every event.
+    fn press(
+        app: &mut App,
+        options: &mut InteractiveOptions,
+        sources: &ConfigSources,
+        code: KeyCode,
+    ) {
+        app.step(InputEvent::Key(Key::new(code, KeyModifiers::NONE)));
+        drain_settings_changes(app, options, sources);
+    }
+
+    #[test]
+    fn open_settings_shows_the_live_state_of_three_items() {
+        let mut app = settings_app();
+        let options = InteractiveOptions {
+            compaction: settings(false),
+            ..InteractiveOptions::default()
+        };
+        app.set_copy_on_select(false);
+
+        open_settings(&mut app, &options, &ConfigSources::default());
+
+        let settings = app.settings().expect("modal open");
+        assert_eq!(
+            values(settings),
+            vec![
+                ("autocompact".to_string(), "false".to_string()),
+                ("fullscreen-copy-on-select".to_string(), "false".to_string()),
+                ("theme".to_string(), "dark".to_string()),
+            ],
+            "upstream order, restricted to the wired settings"
+        );
+        assert!(!options.compaction.enabled);
+    }
+
+    /// `(id, current value)` for every row, in display order.
+    fn values(settings: &SettingsList) -> Vec<(String, String)> {
+        settings
+            .items()
+            .iter()
+            .map(|item| (item.id.clone(), item.current_value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn open_settings_prefers_the_live_theme_over_the_stored_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        config::save_user_setting(
+            &sources,
+            "theme",
+            serde_json::Value::String("light".to_string()),
+        )
+        .expect("seed");
+        let mut app = settings_app();
+        app.set_theme_by_name("light").expect("switch");
+
+        open_settings(&mut app, &InteractiveOptions::default(), &sources);
+        let settings = app.settings().expect("modal");
+        assert_eq!(settings.item("theme").expect("row").current_value, "light");
+    }
+
+    #[test]
+    fn cycling_a_row_applies_and_persists_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        app.set_copy_on_select(true);
+        open_settings(&mut app, &options, &sources);
+
+        // Row 1: auto-compact `true` → `false`, live from the next turn.
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+        assert!(!options.compaction.enabled, "the toggle applies live");
+
+        // Row 2: copy-on-select `true` → `false`.
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+        assert!(!app.copy_on_select());
+
+        // Row 3: theme `dark` → `light`.
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+        assert_eq!(app.theme().name(), Some("light"));
+
+        // Everything landed in the user settings file, and only the keys
+        // the modal owns.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).expect("read"))
+                .expect("json");
+        assert_eq!(parsed["theme"], serde_json::json!("light"));
+        assert_eq!(parsed["fullscreenCopyOnSelect"], serde_json::json!(false));
+        assert_eq!(parsed["compaction"]["enabled"], serde_json::json!(false));
+        let reloaded = config::load_ui_settings(&sources);
+        assert_eq!(reloaded.theme.as_deref(), Some("light"));
+        assert!(!reloaded.fullscreen_copy_on_select);
+        assert!(!config::load_compaction_settings(&sources).enabled);
+    }
+
+    #[test]
+    fn moving_the_cursor_and_filtering_persist_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions::default();
+        open_settings(&mut app, &options, &sources);
+
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Char('t'), KeyCode::Backspace] {
+            press(&mut app, &mut options, &sources, code);
+        }
+
+        assert!(
+            !user_settings_path(dir.path()).exists(),
+            "cursor moves and filter edits are not settings changes (upstream `onChange`)"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_modal_without_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions::default();
+        open_settings(&mut app, &options, &sources);
+
+        press(&mut app, &mut options, &sources, KeyCode::Esc);
+
+        assert!(!app.settings_open());
+        assert!(!user_settings_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_and_the_live_change_is_kept() {
+        // A malformed settings file must not cost the user the change they
+        // just made in the running session.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(user_settings_path(dir.path()), "{ nope").expect("seed");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions::default();
+
+        apply_setting_change(&mut app, &mut options, &sources, "theme", "light");
+
+        assert_eq!(app.theme().name(), Some("light"));
+        let rendered = transcript(&app);
+        assert!(
+            rendered.contains("saving to settings.json failed"),
+            "{rendered}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user_settings_path(dir.path())).expect("read"),
+            "{ nope",
+            "the user's file is untouched"
+        );
+    }
+
+    #[test]
+    fn an_activation_without_a_submenu_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions::default();
+        app.open_settings(pi_tui::settings::SettingsList::new(
+            vec![SettingItem::new("warnings", "Warnings")],
+            10,
+        ));
+
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        let rendered = transcript(&app);
+        assert!(rendered.contains("'warnings' opens a submenu"), "{rendered}");
     }
 }

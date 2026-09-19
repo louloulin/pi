@@ -7450,3 +7450,163 @@ $ node --check crates/pi-extensions/runtime/pi-ext-shim.mjs            # exit 0
   **没有覆盖任何在途工作**。
 - 本节这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`（零冲突），
   推送后 `feature/pi.rs` 的 tree 与 `work/lum-1125` 保持一致。
+
+## LUM-1126 round — `SettingsList` + `/settings` 全链路（frontier P1 #1 收口）+ 空槽派发鼠标区域派发 / `node:module`·`node:readline`
+
+（autopilot 协调轮；开工后把 LUM-1126 的泛标题「pi」改成本轮实际内容。）
+
+### 一、起点与槽位
+
+- 进入本轮时 `origin/feature/pi.rs` = `061c26118`（LUM-1125 `node:zlib` zstd 家族 + `crc32` 已合入，
+  其状态 `in_review`）；本工作分支 `work/lum-1126` 起点为 `9344b02a8`，随后把 `061c26118` 合入，
+  合并提交 `6115572b8`（零冲突）。
+- `multica daemon status` = `running_task_count = 1`（上限 3 路）。本轮派发 **2 路**（Stage 35 / Stage 36），
+  见第五节；余 1 槽留空（`host.rs`、`app.rs` 各只允许一路在写，见 frontier 并发口径）。
+
+### 二、本轮切片：frontier 第 1 项 `settings-list` + `/settings`
+
+LUM-1124 的 frontier 把这一项列为 **P1 第 1 项**（上游 `components/settings-list.ts` 328 行 +
+`core/settings-manager.ts` 1417 行，`config.rs` 当时只读 `compaction` 一段），阻塞理由只是
+「要动 `pi-tui/src/app.rs` / `lib.rs`，等本轮切片合并落地」。本轮把它整条做掉：
+
+**`pi-tui`（组件层，`crates/pi-tui/src/settings.rs` 新增）**
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| `SettingItem { id, label, description?, currentValue, values?, submenu? }` | `settings-list.ts:22-30` | 同名 `SettingItem`，去掉 `submenu`（见偏离 1） |
+| 过滤走同一套 `fuzzyFilter` | `settings-list.ts:158-176` | `crate::fuzzy::fuzzy_rank`（LUM-1119 成果复用），排序按得分稳定 |
+| 标签列宽 `Math.min(36, …)` | `settings-list.ts:137` | `MAX_LABEL_WIDTH = 36` + `truncate_to_width` / `pad_right` |
+| `Enter` / `Space` → `activateItem`：`(indexOf(current)+1) % values.length` 循环 | `settings-list.ts:264-291` | `SettingsList::activate`，未知当前值时从第 0 项开始（与 `indexOf === -1` 同义） |
+| 只有**真实值变化**才 `onChange(id, newValue)`（光标/过滤不动） | `settings-list.ts:282-290` | `SettingsAction::ValueChanged { id, value }` 与 `Changed` 分离，driver 只对前者落盘 |
+| `getVisibleRange` 窗口 + `(n/m)` 指示 | `settings-list.ts:256-262` | `visible_range()`（`max_visible` 由调用方给，`/settings` 传 `min(items,10)`） |
+| 描述行 / 提示行 / 值列着色 | `theme.ts:1226-1233` | `render_lines_themed` / `render_styled_lines`：选中标签 `accent`、`accent` 前缀 `→ `、值列选中 `accent` 否则 `muted`、描述与提示 `dim` |
+| 鼠标滚轮滚列表 | `settings-list.ts` 的滚轮分支 | `scroll_by(delta)`，`App` 把手势翻译过来 |
+
+**`pi-tui::App`（模态接线）**
+
+- 新增 `settings: Option<SettingsList>` + `pending_setting_change: Option<(String, String)>` +
+  `pending_setting_activation: Option<String>`；`open_settings` / `close_settings` / `settings` /
+  `settings_mut` / `take_pending_setting_change` / `take_pending_setting_activation`。
+- 输入优先级：`dialog` → **`settings`** → `selector` → 提示符/鼠标（`step` 与 `step_key` 两处都加了守卫）。
+  弹窗打开时有测试断言「可打印字符进过滤器而不是提示符」「`Ctrl+C` 被吞」。
+- 渲染：在与扩展弹窗同一层叠加，先按模态高度把被覆盖的日志行**清空**再写（`write_styled_line`），
+  所以模态下面的旧文本不会透出来；`RenderSnapshot` 增加 `settings_open` / `settings_lines` 供测试断言。
+- `copy_on_select` 进入 `App`（`copy_on_select()` / `set_copy_on_select()`），`AppConfig::copy_on_select`
+  仍是初值——`/settings` 要能**当场**改它。
+
+**`pi-coding-agent`（`/settings` 命令）**
+
+- `config.rs`：新增 `UiSettings { theme, fullscreen_copy_on_select }` + `load_ui_settings(&ConfigSources)`
+  （项目覆盖用户，非法值逐字段降级 + stderr 警告，与 `compaction` 同一套口径）；
+  `DEFAULT_FULLSCREEN_COPY_ON_SELECT = true`（上游 `?? true`，`settings-manager.ts:1280`）；
+  新增 `save_user_setting(sources, key, value)`——**点分路径写嵌套键**（`compaction.enabled`）、
+  只写**用户**文件、保留文件里其它键、原子替换（同目录临时文件 + `rename`）、无法解析的文件**拒绝覆盖**。
+- `commands/slash.rs`：新 `SlashCommand::Settings`（`/settings`）+ `/help` 一行。
+- `interactive.rs`：`/settings` 打开模态（三行：Auto-compact / Fullscreen copy on select / Theme，
+  初值取**活**状态：`options.compaction.enabled`、`app.copy_on_select()`、`app.theme().name()`；
+  持久化的 `theme` 只在活主题不可用时兜底）。每次 `app.step()` 后由 `drain_settings_changes` 消费队列：
+  `apply_setting_change` 对 `theme` / `fullscreen-copy-on-select` **立即生效**，对 `autocompact`
+  改 `options.compaction.enabled`（下一轮 `maybe_auto_compact` 即生效），三者都落盘并在 transcript
+  报告路径；写失败时报告错误但**保留**已生效的会话内改动。`handle_input_event` /
+  `run_slash_command` 因此改为 `&mut InteractiveOptions`。
+
+**刻意偏离（都写在代码注释里，不是遗漏）：**
+
+1. **`SettingItem` 没有 `submenu` 工厂字段**：Rust 的 item 是纯数据，无 `values` 的行返回
+   `SettingsAction::Activated(id)`，由 driver 决定开什么。本轮 driver 对未知 id 回一行提示
+   （`/settings: 'x' opens a submenu that this build does not implement yet`），上游的「外观子菜单」
+   等对应子系统落地时再开。
+2. **主题不做上游的 submenu，而是值循环**（`dark` / `light` 走 `App::set_theme_by_name`）。
+   上游 `theme` 项打开的是主题列表子菜单；本端口只有两个内置主题，循环即可，且省掉一层组件。
+   已知差异：活主题名不在 `values` 里（例如将来 `--theme` 载入自定义主题）时，按上游
+   `indexOf === -1` 的语义从第 0 项开始。
+3. **不做鼠标点击命中**（上游把点击行映射回 item，支持 press/click/hover）：`App` 还没有
+   component 级鼠标区域（frontier 第 2 项），所以只接滚轮。这与 LUM-1124 对选区的处理同一口径。
+4. **搜索行是纯文本** `> <filter>`：上游嵌的是完整 `Input` 组件（光标、编辑键）。本端口用可打印
+   字符 + `Backspace` 编辑过滤器，光标不可见。
+5. **`settings.json` 写法**：`serde_json::to_string_pretty`（2 空格）+ **结尾换行**，与
+   `trust.rs` 等本仓库其它 JSON 出口一致；上游 `JSON.stringify(..., null, 2)` 不带换行。
+   `save_user_setting` 是**读改写**，保留未知键（上游只回写被修改的顶层字段 + lockfile，
+   语义等价：两者都不会丢其它键）。
+6. **只做本轮接线的三条设置**。上游 `SettingsSelectorComponent`（945 行）还有 steering/follow-up
+   模式、transport、`modelThinkingLevels`、图片处理等行，对应子系统本端口还不存在；这些行随各自
+   子系统落地，而不是先摆一排空行。
+7. **`autocompact` 的即时性**：上游改的是内存里的 settings；本端口改 `options.compaction.enabled`，
+   从下一次 `maybe_auto_compact` 起生效——不需要重启，措辞上是「下一轮生效」。
+
+### 三、测试与验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  21 个 suite 共 405 passed / 0 failed      # 起点 20 / 377 → +1 suite（settings_list.rs 9 条）
+                                            # + settings.rs 19 条单元测试
+$ ... cargo test -p pi-coding-agent --offline
+  15 个 suite 共 360 passed / 0 failed      # 起点 345 → +15（config 8 + interactive 7）
+$ ... cargo test -p pi-tui -p pi-coding-agent -p pi-extensions --offline
+  47 个 suite 共 842 passed / 0 failed
+$ ... cargo check --workspace --all-targets --offline
+  0 error
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished，0 warnings
+```
+
+新增测试覆盖的**行为**（不是行数）：
+
+- `pi-tui` 单元：循环语义（未知值、单值、无 `values`）、`ValueChanged` / `Changed` / `Activated` /
+  `Cancelled` 的边界、过滤后光标落点、`visible_range` 的窗口与指示、标签截断与描述换行、
+  主题无关的单元格文本。
+- `pi-tui` e2e（`tests/settings_list.rs`，9 条）：模态独占键盘、`Enter`/`Space` 各只产生一次变化、
+  空过滤器才吃 `Space`、无 `values` 行 → 激活、`Esc` 还原提示符、重开丢弃陈旧变化、
+  叠加层覆盖日志行、滚轮只滚列表、主题不影响纯文本单元格。
+- `pi-coding-agent`：`load_ui_settings` 的项目覆盖/逐字段降级、`save_user_setting` 的创建、
+  **保留未知键**、点分路径嵌套、**拒绝覆盖非法 JSON**、标量中间段报错、无用户路径报错；
+  `/settings` 的三行初值与上游顺序一致、活主题优先、键盘循环三行后**落盘内容逐键断言**
+  （theme 字符串、`fullscreenCopyOnSelect` 布尔、`compaction.enabled` 布尔——这条测试抓到了
+  「布尔被写成字符串 `"false"`」的真实缺陷）、光标移动与过滤**不落盘**、`Esc` 不落盘、
+  写失败时报告且保留会话内改动、无 `values` 行的激活提示。
+
+### 四、合并与推送
+
+`work/lum-1126` → `feature/pi.rs`：`feature/pi.rs` 被若干历史 worktree 占着（HEAD 都停在
+`009b4179d`），按前几轮做法用 plumbing `git merge-tree --write-tree` + `git commit-tree` 合并，
+再 push 合并提交与工作分支。见文末补记的真实哈希。
+
+### 五、本轮派发（2 路）
+
+| Issue | 内容 | 落点文件 | 与在途的关系 |
+|---|---|---|---|
+| Stage 35 | 鼠标区域派发 / 点击命中（frontier 第 2 项，P1）：`components/mouse-region.ts` + `tui-alt-screen.ts:1326-1339` 的 `dispatchMouseToOverlay` → `dispatchMouseToLayout` → `clearTextSelection` | 新 `pi-tui/src/mouse_region.rs` + `app.rs` + `lib.rs` | 本轮切片已把 `InputEvent::MouseGesture` 与 `SettingsList`/`Selector` 模态铺好；`app.rs` 在本轮合并后空闲 |
+| Stage 36 | `node:module` / `node:readline`（frontier 第 4 项，P2） | `pi-extensions/runtime/pi-ext-shim.mjs` + `src/host.rs` + `tests/node_builtins.rs` | 与 LUM-1125 同一条串行通道，LUM-1125 已合入；与本轮切片零文件重叠 |
+
+**为什么只派 2 路而不是 3 路**：`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（LUM-1118 起维持的口径）。第 3 个空槽
+如果要填，候选都会撞上已派出的 `app.rs`（frontier 第 3 项选区粒度、第 7 项 `alt-screen-search.ts`，
+都写 `app.rs`）或 `lib.rs`（第 8 项 `latex.ts` 要加 `pub mod latex;`，与 Stage 35 的 `pub mod`
+同区域）；宁可空槽，不制造必然的合并冲突。
+
+### 六、frontier（本轮更新）
+
+本轮把 frontier 第 1 项（`settings-list` + `/settings`）**整条收口**，并把它从「等 `app.rs` 空闲」
+的阻塞状态里移除。剩下各项按优先级重排：
+
+1. **P1 鼠标区域派发 / 点击命中**（已派发 Stage 35）：`App` 内按矩形派发 + 点击清选区，
+   落地后 frontier 第 10 项（X10 序列、`updateScrollbarHover`、滚动条拖拽）基本顺带。
+2. **P1 选区粒度与边缘体验**（双击选词 / 三击选行、边缘自动滚动、grapheme 整格扩边）：LUM-1124 欠账，
+   写 `app.rs` → 排在 Stage 35 之后（同一文件串行）。
+3. **P2 `node:module` / `node:readline`**（已派发 Stage 36）：`node_arg_bytes` / base64 helper 已就位。
+4. **P2 `node:zlib` 的 gzip/deflate**（`gunzipSync` / `gzipSync` / `deflateSync` / `inflateSync`）：
+   纯依赖问题，离线 registry 有 `flate2` / `miniz_oxide` 时再接（`host.rs` 的 `zlib.*` op 表与
+   `tests/zlib.rs` 骨架可直接加 arm）。
+5. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥，落 `host.rs`/shim 通道。
+6. **P3 `alt-screen-search.ts`**（上游 327 行）：与选区高亮有天然联动，需要 `app.rs` 钩子。
+7. **P3 `latex.ts`**（1394 行）与 `markdown.rs` 未覆盖子集（表格 / LaTeX / OSC-8 hyperlink / 语法高亮）：
+   `markdown.rs` + `lib.rs`，与第 1、2 项不同文件面，`lib.rs` 的 `pub mod` 需错开。
+8. **P3 provider catalog / LUM-1090**：结论维持（无上游 `data/*.json` 事实源，不写猜测值）。
+9. **P3 旧式 X10 鼠标序列、`updateScrollbarHover` 悬停高亮、滚动条拖拽**：等第 1 项落地后顺带。
+10. **新增欠账（本轮）**：`/settings` 目前只有三条设置（上游 945 行的 `SettingsSelectorComponent`
+    还有 steering/follow-up 模式、transport、`modelThinkingLevels`、图片处理等），随各自子系统补；
+    以及 `settings-list` 的鼠标点击命中与搜索行内嵌 `Input`。
+
+并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
