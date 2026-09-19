@@ -1136,6 +1136,7 @@ dependencies = [
  "pi-evals",
  "pi-extensions",
  "pi-protocol",
+ "pi-server",
  "pi-telemetry",
  "serde",
  "serde_json",
@@ -1150,6 +1151,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "pi-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "pi-chord",
+ "pi-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

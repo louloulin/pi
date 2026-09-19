@@ -12,6 +12,7 @@ members = [
     "crates/pi-evals",
     "crates/pi-telemetry",
     "crates/pi-chord",
+    "crates/pi-server",
 ]
 
 [workspace.package]
