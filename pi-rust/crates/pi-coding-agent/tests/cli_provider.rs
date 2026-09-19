@@ -247,6 +247,41 @@ fn list_models_includes_the_google_catalog() {
 }
 
 #[test]
+fn list_models_reports_gemini_pricing() {
+    // JSON output carries the pricing object for models whose catalog
+    // entry declares it (Gemini), and omits it for the rest.
+    let output = pi(&["list-models", "--output", "json"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("list-models JSON");
+    let models = payload["models"].as_array().expect("models array");
+    let flash = models
+        .iter()
+        .find(|m| m["provider"] == "google" && m["id"] == "gemini-2.5-flash")
+        .expect("gemini-2.5-flash entry");
+    let pricing = &flash["pricing"];
+    assert_eq!(pricing["inputPer1M"], 0.30);
+    assert_eq!(pricing["outputPer1M"], 2.50);
+    assert_eq!(pricing["cacheReadPer1M"], 0.075);
+
+    let faux = models
+        .iter()
+        .find(|m| m["provider"] == "faux")
+        .expect("faux entry");
+    assert!(faux["pricing"].is_null(), "faux has no published pricing");
+
+    // Text output surfaces the same rates inline.
+    let text = pi(&["list-models"]);
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("google/gemini-2.5-flash "))
+        .unwrap_or_else(|| panic!("google/gemini-2.5-flash line missing:\n{stdout}"));
+    assert!(line.contains("0.30"), "pricing missing from `{line}`");
+    assert!(line.contains("2.50"), "pricing missing from `{line}`");
+}
+
+#[test]
 fn list_models_includes_the_openai_compatible_family() {
     let output = pi(&["list-models"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));

@@ -9,6 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use pi_ai::models::Models;
+use pi_ai::providers::registry::model_pricing;
 use thiserror::Error;
 
 use super::installer::{self, InstallError, RealFetcher};
@@ -132,13 +133,24 @@ fn run_list_models(models: &Models, output: OutputFormat) -> Result<(), CommandE
             let payload = serde_json::json!({
                 "models": entries
                     .iter()
-                    .map(|(provider, model)| serde_json::json!({
-                        "provider": provider,
-                        "id": model.id,
-                        "label": model.label,
-                        "contextWindow": model.context_window,
-                        "maxOutputTokens": model.max_output_tokens,
-                    }))
+                    .map(|(provider, model)| {
+                        let pricing = model_pricing(provider, &model.id).map(|p| {
+                            serde_json::json!({
+                                "inputPer1M": p.input_usd(),
+                                "outputPer1M": p.output_usd(),
+                                "cacheReadPer1M": p.cache_read_usd(),
+                                "cacheWritePer1M": p.cache_write_usd(),
+                            })
+                        });
+                        serde_json::json!({
+                            "provider": provider,
+                            "id": model.id,
+                            "label": model.label,
+                            "contextWindow": model.context_window,
+                            "maxOutputTokens": model.max_output_tokens,
+                            "pricing": pricing,
+                        })
+                    })
                     .collect::<Vec<_>>(),
             });
             println!("{}", serde_json::to_string(&payload)?);
@@ -150,9 +162,18 @@ fn run_list_models(models: &Models, output: OutputFormat) -> Result<(), CommandE
                     .as_deref()
                     .map(|label| format!("  {label}"))
                     .unwrap_or_default();
+                let pricing = model_pricing(provider, &model.id)
+                    .map(|p| {
+                        format!(
+                            "  price=$ {:.2}/$ {:.2} per 1M in/out",
+                            p.input_usd(),
+                            p.output_usd()
+                        )
+                    })
+                    .unwrap_or_default();
                 println!(
-                    "{}/{}  context={}  max_output_tokens={}{}",
-                    provider, model.id, model.context_window, model.max_output_tokens, label
+                    "{}/{}  context={}  max_output_tokens={}{}{}",
+                    provider, model.id, model.context_window, model.max_output_tokens, label, pricing
                 );
             }
         }

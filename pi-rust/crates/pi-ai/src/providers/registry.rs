@@ -25,12 +25,78 @@
 
 use pi_protocol::Api;
 
+/// Per-1M-token pricing for one model, in **micro-USD** (USD × 1e6).
+///
+/// Prices are stored as integers so [`ModelSpec`] can stay `Copy + Eq`
+/// and the whole catalog can live in a `const` table. Sub-cent prices
+/// survive the encoding: `$0.075` per 1M tokens is `75_000`. Use the
+/// `*_usd` accessors to render the published dollar figures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pricing {
+    /// Price per 1M input tokens.
+    pub input_micro_usd: u64,
+    /// Price per 1M output tokens.
+    pub output_micro_usd: u64,
+    /// Price per 1M cached input (prompt-cache read) tokens.
+    pub cache_read_micro_usd: u64,
+    /// Price per 1M cache-write tokens. `0` when the vendor does not
+    /// charge a separate cache-write rate.
+    pub cache_write_micro_usd: u64,
+}
+
+impl Pricing {
+    /// Build a pricing entry from micro-USD per-1M-token rates.
+    pub const fn micro_usd(
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) -> Self {
+        Self {
+            input_micro_usd: input,
+            output_micro_usd: output,
+            cache_read_micro_usd: cache_read,
+            cache_write_micro_usd: cache_write,
+        }
+    }
+
+    /// Input price in USD per 1M tokens.
+    pub fn input_usd(&self) -> f64 {
+        self.input_micro_usd as f64 / 1_000_000.0
+    }
+
+    /// Output price in USD per 1M tokens.
+    pub fn output_usd(&self) -> f64 {
+        self.output_micro_usd as f64 / 1_000_000.0
+    }
+
+    /// Cached-input price in USD per 1M tokens.
+    pub fn cache_read_usd(&self) -> f64 {
+        self.cache_read_micro_usd as f64 / 1_000_000.0
+    }
+
+    /// Cache-write price in USD per 1M tokens.
+    pub fn cache_write_usd(&self) -> f64 {
+        self.cache_write_micro_usd as f64 / 1_000_000.0
+    }
+
+    /// `true` when every rate is zero (e.g. a provider that does not
+    /// publish pricing).
+    pub fn is_free(&self) -> bool {
+        self.input_micro_usd == 0
+            && self.output_micro_usd == 0
+            && self.cache_read_micro_usd == 0
+            && self.cache_write_micro_usd == 0
+    }
+}
+
 /// One model in a provider's built-in catalog.
 ///
-/// The adapter only needs `id`; `label`, `context_window` and
-/// `max_output_tokens` feed `pi list-models` and the TUI. They mirror the
-/// upstream generated catalog, which is not checked into the repository,
-/// so they are curated here and may drift from the vendor's live values.
+/// The adapter only needs `id`; `label`, `context_window`,
+/// `max_output_tokens` and `pricing` feed `pi list-models` and the TUI.
+/// They mirror the upstream generated catalog, which is not checked into
+/// the repository, so they are curated here and may drift from the
+/// vendor's live values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelSpec {
     /// Model id sent on the wire (e.g. `deepseek-v4-pro`).
@@ -41,6 +107,8 @@ pub struct ModelSpec {
     pub context_window: u32,
     /// Maximum output tokens.
     pub max_output_tokens: u32,
+    /// Per-1M-token pricing when the vendor publishes it.
+    pub pricing: Option<Pricing>,
 }
 
 impl ModelSpec {
@@ -51,6 +119,7 @@ impl ModelSpec {
             label,
             context_window: 128_000,
             max_output_tokens: 32_768,
+            pricing: None,
         }
     }
 
@@ -58,6 +127,12 @@ impl ModelSpec {
     pub const fn with_limits(mut self, context_window: u32, max_output_tokens: u32) -> Self {
         self.context_window = context_window;
         self.max_output_tokens = max_output_tokens;
+        self
+    }
+
+    /// Attach per-1M-token pricing.
+    pub const fn with_pricing(mut self, pricing: Pricing) -> Self {
+        self.pricing = Some(pricing);
         self
     }
 }
@@ -93,6 +168,14 @@ impl ProviderSpec {
     /// Whether a credential is required to register an adapter.
     pub fn requires_api_key(&self) -> bool {
         !self.api_key_env.is_empty()
+    }
+
+    /// Pricing for `model_id` in this provider's catalog, if declared.
+    pub fn pricing_for(&self, model_id: &str) -> Option<Pricing> {
+        self.models
+            .iter()
+            .find(|model| model.id == model_id)
+            .and_then(|model| model.pricing)
     }
 }
 
@@ -233,10 +316,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         base_url_env: &["GEMINI_BASE_URL", "GOOGLE_BASE_URL"],
         models: &[
-            ModelSpec::new("gemini-2.5-pro", "Gemini 2.5 Pro").with_limits(1_048_576, 65_536),
-            ModelSpec::new("gemini-2.5-flash", "Gemini 2.5 Flash").with_limits(1_048_576, 65_536),
+            ModelSpec::new("gemini-2.5-pro", "Gemini 2.5 Pro")
+                .with_limits(1_048_576, 65_536)
+                .with_pricing(Pricing::micro_usd(1_250_000, 10_000_000, 312_500, 0)),
+            ModelSpec::new("gemini-2.5-flash", "Gemini 2.5 Flash")
+                .with_limits(1_048_576, 65_536)
+                .with_pricing(Pricing::micro_usd(300_000, 2_500_000, 75_000, 0)),
             ModelSpec::new("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite")
-                .with_limits(1_048_576, 65_536),
+                .with_limits(1_048_576, 65_536)
+                .with_pricing(Pricing::micro_usd(100_000, 400_000, 25_000, 0)),
         ],
     },
     ProviderSpec {
@@ -393,6 +481,12 @@ pub fn default_base_url(provider: &str) -> Option<&'static str> {
     find_provider(provider).map(|spec| spec.default_base_url)
 }
 
+/// Pricing for a `provider` / `model_id` pair, or `None` when the
+/// provider or model is unknown or publishes no pricing.
+pub fn model_pricing(provider: &str, model_id: &str) -> Option<Pricing> {
+    find_provider(provider).and_then(|spec| spec.pricing_for(model_id))
+}
+
 /// All provider ids in catalog order.
 pub fn provider_ids() -> impl Iterator<Item = &'static str> {
     BUILTIN_PROVIDERS.iter().map(|spec| spec.id)
@@ -518,5 +612,49 @@ mod tests {
         let ids: Vec<&str> = provider_ids().collect();
         assert_eq!(ids.len(), BUILTIN_PROVIDERS.len());
         assert_eq!(ids.first().copied(), Some("faux"));
+    }
+
+    #[test]
+    fn google_models_declare_pricing() {
+        let google = find_provider("google").expect("google is built in");
+
+        let flash = google
+            .pricing_for("gemini-2.5-flash")
+            .expect("gemini-2.5-flash pricing");
+        assert!((flash.input_usd() - 0.30).abs() < 1e-9);
+        assert!((flash.output_usd() - 2.50).abs() < 1e-9);
+        assert!((flash.cache_read_usd() - 0.075).abs() < 1e-9);
+        assert!(flash.cache_write_micro_usd == 0);
+        assert!(!flash.is_free());
+
+        let pro = google
+            .pricing_for("gemini-2.5-pro")
+            .expect("gemini-2.5-pro pricing");
+        assert!((pro.input_usd() - 1.25).abs() < 1e-9);
+        assert!((pro.output_usd() - 10.0).abs() < 1e-9);
+        assert!((pro.cache_read_usd() - 0.3125).abs() < 1e-9);
+
+        let lite = google
+            .pricing_for("gemini-2.5-flash-lite")
+            .expect("gemini-2.5-flash-lite pricing");
+        assert!((lite.input_usd() - 0.10).abs() < 1e-9);
+        assert!((lite.output_usd() - 0.40).abs() < 1e-9);
+
+        assert_eq!(model_pricing("google", "gemini-2.5-flash"), Some(flash));
+        assert_eq!(model_pricing("nope", "gemini-2.5-flash"), None);
+        assert_eq!(model_pricing("google", "nope"), None);
+        assert_eq!(google.pricing_for("gemini-3-pro"), None);
+    }
+
+    #[test]
+    fn priced_models_have_positive_input_and_output_rates() {
+        for spec in BUILTIN_PROVIDERS {
+            for model in spec.models {
+                if let Some(pricing) = model.pricing {
+                    assert!(pricing.input_micro_usd > 0, "{}/{}", spec.id, model.id);
+                    assert!(pricing.output_micro_usd > 0, "{}/{}", spec.id, model.id);
+                }
+            }
+        }
     }
 }
