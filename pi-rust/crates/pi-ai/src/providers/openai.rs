@@ -493,15 +493,22 @@ fn chat_message_from(msg: &Message) -> Result<ChatMessage, StreamError> {
                     _ => None,
                 })
                 .ok_or_else(|| StreamError::Malformed("tool message missing tool result".into()))?;
-            let text = msg
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    Content::Text(t) => Some(t.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
+            // The agent loop wraps every tool result in
+            // `Content::ToolResult`, so only scanning bare `Content::Text`
+            // blocks would send the model an empty `content` string: the
+            // tool would run but the model could never react to its output.
+            // Bare text blocks are still honoured for hand-built contexts.
+            let mut text = String::new();
+            for c in &msg.content {
+                match c {
+                    Content::Text(t) => text.push_str(&t.text),
+                    Content::ToolResult(r) => match &*r.content {
+                        Content::Text(t) => text.push_str(&t.text),
+                        other => text.push_str(&serde_json::to_string(other).unwrap_or_default()),
+                    },
+                    _ => {}
+                }
+            }
             Ok(ChatMessage {
                 role: "tool".into(),
                 content: Some(text),
@@ -882,6 +889,71 @@ mod tests {
             context_window: 128_000,
             max_output_tokens: 4096,
         }
+    }
+
+    #[test]
+    fn tool_result_content_reaches_the_model() {
+        // The agent loop wraps every tool result in `Content::ToolResult`,
+        // so reading only bare `Content::Text` blocks sends the model an
+        // empty `content` string and the agent can never react to real
+        // tool output.
+        let mut ctx = Context::new("you are pi");
+        ctx.messages.push(Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(pi_protocol::ToolResult {
+                tool_call_id: "call_1".into(),
+                content: Box::new(Content::text("72F and sunny")),
+                is_error: false,
+                details: None,
+            })],
+            model: None,
+        });
+        let req =
+            OpenAiProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default(), true)
+                .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize request");
+        let message = tool_message(&v);
+        assert_eq!(message["tool_call_id"], "call_1");
+        assert_eq!(
+            message["content"], "72F and sunny",
+            "the tool output must be serialized, not dropped"
+        );
+    }
+
+    #[test]
+    fn tool_result_accepts_bare_text_blocks() {
+        // Hand-built contexts (extensions, tests) may still push a plain
+        // text block under `Role::Tool`; that must keep working.
+        let mut ctx = Context::new("you are pi");
+        ctx.messages.push(Message {
+            role: Role::Tool,
+            content: vec![
+                Content::ToolResult(pi_protocol::ToolResult {
+                    tool_call_id: "call_2".into(),
+                    content: Box::new(Content::text("first")),
+                    is_error: true,
+                    details: None,
+                }),
+                Content::text("second"),
+            ],
+            model: None,
+        });
+        let req =
+            OpenAiProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default(), true)
+                .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize request");
+        assert_eq!(tool_message(&v)["content"], "firstsecond");
+    }
+
+    /// The serialized `Role::Tool` message (the request leads with the
+    /// system prompt, so the tool entry is not `messages[0]`).
+    fn tool_message(request: &serde_json::Value) -> &serde_json::Value {
+        request["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("a tool message")
     }
 
     fn ctx_with_tool() -> Context {
