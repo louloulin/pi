@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use pi_extensions::RegisteredToolPrompt;
+use pi_extensions::{DiscoveredResources, RegisteredToolPrompt};
 
 use crate::cli::Cli;
 use crate::context_files::{
@@ -140,6 +140,64 @@ impl LoadedResources {
             docs: pi_docs_paths(),
         })
     }
+
+    /// Append the skills / prompt templates an extension advertised
+    /// through the `resources_discover` event.
+    ///
+    /// Discovery runs after the extension host has loaded its plugins
+    /// (upstream `AgentSession.extendResourcesFromExtensions`), so these
+    /// paths arrive too late for [`load_resources`]'s own pass and are
+    /// folded in here instead. Loading is additive: a skill or template
+    /// already in the bundle wins over one with the same name, so an
+    /// extension cannot silently displace the project's own resources.
+    /// Paths are resolved the same way the CLI flags are — relative
+    /// entries against `cwd`.
+    pub fn extend_extension_resources(
+        &mut self,
+        cwd: &Path,
+        agent_dir: &Path,
+        resources: &DiscoveredResources,
+    ) {
+        if !resources.skill_paths.is_empty() {
+            let loaded = load_skills(&LoadSkillsOptions {
+                cwd: cwd.to_path_buf(),
+                agent_dir: agent_dir.to_path_buf(),
+                skill_paths: resources.skill_paths.clone(),
+                include_defaults: false,
+            });
+            self.diagnostics.extend(loaded.diagnostics);
+            for skill in loaded.skills {
+                if !self
+                    .skills
+                    .iter()
+                    .any(|existing| existing.name == skill.name)
+                {
+                    self.skills.push(skill);
+                }
+            }
+        }
+
+        if !resources.prompt_paths.is_empty() {
+            let loaded = load_prompt_templates(&LoadPromptTemplatesOptions {
+                cwd: cwd.to_path_buf(),
+                agent_dir: agent_dir.to_path_buf(),
+                prompt_paths: resources.prompt_paths.clone(),
+                include_defaults: false,
+            });
+            self.prompt_diagnostics.extend(loaded.diagnostics);
+            for template in loaded.templates {
+                if !self
+                    .prompt_templates
+                    .iter()
+                    .any(|existing| existing.name == template.name)
+                {
+                    self.prompt_templates.push(template);
+                }
+            }
+        }
+        // `themePaths` is deliberately unconsumed: the Rust TUI has no
+        // theme system yet, so there is nothing to resolve them into.
+    }
 }
 
 /// Load the resources for one run.
@@ -215,10 +273,22 @@ pub fn build_cli_system_prompt_with_extension_tools(
     cli: &Cli,
     extension_tools: &[RegisteredToolPrompt],
 ) -> (String, Vec<SkillDiagnostic>) {
+    build_cli_system_prompt_with_extensions(cli, extension_tools, &DiscoveredResources::default())
+}
+
+/// Like [`build_cli_system_prompt_with_extension_tools`], but also folds
+/// in the skills an extension advertised from a `resources_discover`
+/// handler.
+pub fn build_cli_system_prompt_with_extensions(
+    cli: &Cli,
+    extension_tools: &[RegisteredToolPrompt],
+    extension_resources: &DiscoveredResources,
+) -> (String, Vec<SkillDiagnostic>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let loaded = load_resources(&ResourceLoadOptions {
+    let agent_dir = agent_dir_or_default();
+    let mut loaded = load_resources(&ResourceLoadOptions {
         cwd: cwd.clone(),
-        agent_dir: agent_dir_or_default(),
+        agent_dir: agent_dir.clone(),
         skill_paths: cli.skill.clone(),
         no_skills: cli.no_skills,
         no_context_files: cli.no_context_files,
@@ -226,6 +296,12 @@ pub fn build_cli_system_prompt_with_extension_tools(
         prompt_template_paths: cli.prompt_template.clone(),
         no_prompt_templates: cli.no_prompt_templates,
     });
+    // `--no-skills` disables skill discovery outright, extension paths
+    // included: the flag is the user's "do not put skills in the prompt"
+    // switch, and a plugin must not be able to override it.
+    if !extension_resources.skill_paths.is_empty() && !cli.no_skills {
+        loaded.extend_extension_resources(&cwd, &agent_dir, extension_resources);
+    }
 
     let prompt = loaded.build_system_prompt_with_extension_tools(&cwd, extension_tools);
     (prompt, loaded.diagnostics)
@@ -236,13 +312,42 @@ pub fn build_cli_system_prompt_with_extension_tools(
 /// Kept separate from [`build_cli_system_prompt`] because templates are
 /// expanded at prompt-submission time, not baked into the system prompt.
 pub fn build_cli_prompt_templates(cli: &Cli) -> PromptTemplatesLoadResult {
+    build_cli_prompt_templates_with_extensions(cli, &DiscoveredResources::default())
+}
+
+/// Like [`build_cli_prompt_templates`], but also exposes the prompt
+/// templates an extension advertised from a `resources_discover`
+/// handler, so `/name` resolves against the union of both sources.
+pub fn build_cli_prompt_templates_with_extensions(
+    cli: &Cli,
+    extension_resources: &DiscoveredResources,
+) -> PromptTemplatesLoadResult {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    load_prompt_templates(&LoadPromptTemplatesOptions {
-        cwd,
-        agent_dir: agent_dir_or_default(),
+    let agent_dir = agent_dir_or_default();
+    let mut result = load_prompt_templates(&LoadPromptTemplatesOptions {
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
         prompt_paths: cli.prompt_template.clone(),
         include_defaults: !cli.no_prompt_templates,
-    })
+    });
+    // `--no-prompt-templates` keeps the CLI paths but drops the default
+    // directories; the same flag silences extension-provided templates
+    // for the same reason (`--no-skills` silences extension skills).
+    if !extension_resources.prompt_paths.is_empty() && !cli.no_prompt_templates {
+        let extra = load_prompt_templates(&LoadPromptTemplatesOptions {
+            cwd,
+            agent_dir,
+            prompt_paths: extension_resources.prompt_paths.clone(),
+            include_defaults: false,
+        });
+        result.diagnostics.extend(extra.diagnostics);
+        for template in extra.templates {
+            if !result.templates.iter().any(|t| t.name == template.name) {
+                result.templates.push(template);
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -483,5 +588,111 @@ mod tests {
         let (prompt, diagnostics) = build_cli_system_prompt(&cli);
         assert!(!prompt.is_empty());
         assert!(diagnostics.is_empty());
+    }
+
+    /// The whole point of Stage 23: a skill and a prompt template that
+    /// only an extension knows about land in the same bundle the CLI
+    /// flags feed, so the system prompt and `/name` lookup see them.
+    #[test]
+    fn extension_discovered_resources_extend_the_bundle() {
+        let temp = TempDir::new("ext-resources");
+        temp.write(
+            "project/.pi/skills/local/SKILL.md",
+            "---\nname: local\ndescription: Local skill.\n---\n",
+        );
+        temp.write(
+            "dynamic/skills/from-ext/SKILL.md",
+            "---\nname: from-ext\ndescription: From an extension.\n---\n",
+        );
+        temp.write("dynamic/prompts/dyn.md", "EXT TEMPLATE\n");
+
+        let mut loaded = load(&temp, "project");
+        let project = temp.path.join("project");
+        let extension_resources = DiscoveredResources {
+            skill_paths: vec![temp.path.join("dynamic/skills/from-ext/SKILL.md")],
+            prompt_paths: vec![temp.path.join("dynamic/prompts/dyn.md")],
+            theme_paths: vec![temp.path.join("dynamic/theme.json")],
+        };
+        loaded.extend_extension_resources(&project, &temp.path.join("agent"), &extension_resources);
+
+        let prompt = loaded.build_system_prompt(&absolute(&project));
+        assert!(prompt.contains("<name>local</name>"), "{prompt}");
+        assert!(prompt.contains("<name>from-ext</name>"), "{prompt}");
+        assert!(prompt.contains("From an extension."), "{prompt}");
+        assert!(
+            loaded.prompt_templates.iter().any(|t| t.name == "dyn"),
+            "extension prompt template missing: {:?}",
+            loaded.prompt_templates
+        );
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert!(
+            loaded.prompt_diagnostics.is_empty(),
+            "{:?}",
+            loaded.prompt_diagnostics
+        );
+    }
+
+    /// Loading is additive: an extension cannot silently displace the
+    /// project's own skill / template of the same name.
+    #[test]
+    fn extension_resources_never_shadow_existing_names() {
+        let temp = TempDir::new("ext-shadow");
+        temp.write(
+            "project/.pi/skills/dup/SKILL.md",
+            "---\nname: dup\ndescription: Project wins.\n---\n",
+        );
+        temp.write(
+            "dynamic/SKILL.md",
+            "---\nname: dup\ndescription: Extension loses.\n---\n",
+        );
+        temp.write("project/.pi/prompts/note.md", "PROJECT TEMPLATE\n");
+        temp.write("dynamic/note.md", "EXTENSION TEMPLATE\n");
+
+        let mut loaded = load(&temp, "project");
+        let project = temp.path.join("project");
+        loaded.extend_extension_resources(
+            &project,
+            &temp.path.join("agent"),
+            &DiscoveredResources {
+                skill_paths: vec![temp.path.join("dynamic/SKILL.md")],
+                prompt_paths: vec![temp.path.join("dynamic/note.md")],
+                theme_paths: Vec::new(),
+            },
+        );
+
+        let prompt = loaded.build_system_prompt(&absolute(&project));
+        assert!(!prompt.contains("Extension loses."), "{prompt}");
+        assert!(prompt.contains("Project wins."), "{prompt}");
+        let note = loaded
+            .prompt_templates
+            .iter()
+            .find(|t| t.name == "note")
+            .expect("project template present");
+        assert_eq!(note.content.trim(), "PROJECT TEMPLATE");
+    }
+
+    /// A path the extension advertised that does not exist is a
+    /// diagnostic, not a panic: discovery is best-effort.
+    #[test]
+    fn missing_extension_resource_path_is_a_diagnostic() {
+        let temp = TempDir::new("ext-missing");
+        let mut loaded = load(&temp, "project");
+        loaded.extend_extension_resources(
+            &temp.path.join("project"),
+            &temp.path.join("agent"),
+            &DiscoveredResources {
+                skill_paths: vec![temp.path.join("nope/SKILL.md")],
+                prompt_paths: vec![temp.path.join("nope/note.md")],
+                theme_paths: Vec::new(),
+            },
+        );
+        assert_eq!(loaded.diagnostics.len(), 1, "{:?}", loaded.diagnostics);
+        assert_eq!(
+            loaded.prompt_diagnostics.len(),
+            1,
+            "{:?}",
+            loaded.prompt_diagnostics
+        );
+        assert!(loaded.skills.is_empty());
     }
 }

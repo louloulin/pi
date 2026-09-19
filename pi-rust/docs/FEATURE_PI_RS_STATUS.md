@@ -3868,3 +3868,133 @@ Stage 20 UI 桥）合入本轮分支。冲突三处，均已在合并提交里�
 ### Push status
 
 `feature/pi.rs`，commit 见本轮 push（Stage 22 代码 + 本节状态文档）。
+
+## LUM-1084 round — Stage 23：扩展资源发现（`resources_discover`）
+
+Stage 22 的「仍未做」第一条正是这一项：扩展工具已经能进提示词，但扩展还**不能**注入
+skills / prompt templates。本轮把它补上，仍然不引入新依赖。
+
+### 1. 协议事件（`pi-protocol`）
+
+- `crates/pi-protocol/src/events.rs:126` 新增 `ExtensionEvent::ResourcesDiscover { cwd, reason }`
+  与 `:139` 的 `ResourcesDiscoverReason { Startup, Reload }`（`snake_case`；外层枚举
+  `tag = "type"`，因此线上形状是 `{"type":"resources_discover","cwd":"…","reason":"startup"}`，
+  与上游 `ResourcesDiscoverEvent` 同形：`{ type, cwd, reason }`）。
+- 加枚举变体前先确认过：全 workspace 有 11 处 `ExtensionEvent::` 引用，**全是构造**，
+  没有一处 `match` 是穷尽的，所以加变体不会破坏调用方 —— 这也是选择「加变体」而不是
+  「另起一条通道」的原因：与既有 typed-event 设计一致，且 JS 侧 `_pi_dispatch` 早就是
+  按事件名泛化分发的，**shim 一行都不用改**。
+
+### 2. 宿主：结果解析（`pi-extensions`）
+
+- `crates/pi-extensions/src/host.rs:850` 新增 `DiscoveredResources { skill_paths, prompt_paths,
+  theme_paths: Vec<PathBuf> }`，配 `absorb_value`（解析单个 handler 返回值）、
+  `from_dispatch`（汇总 `DispatchOutcome`）、`dedup`（跨 handler 去重，保留首次出现顺序，
+  对齐上游 `mergePaths` 语义）、`is_empty`；辅助函数 `collect_paths:903` / `dedup_paths:925`。
+- 解析是**容错**的：返回值不是对象、字段不是数组、数组里混入数字 / 空串 / 相对路径一律
+  忽略而不是报错；一个 handler 挂掉不影响其它 handler 的结果（`DispatchOutcome.results`
+  里能拿到什么就用什么）。
+
+### 3. 桥：从扩展拿路径（`pi-extensions/src/bridge.rs:65`）
+
+`JsExtensionBridge::discover_resources(reason) -> DiscoveredResources`：构造
+`ResourcesDiscover` 事件、`emit_event_with` 派发；`errored` / `err` 时用 `pi_extension`
+target 打 warn 并返回空集合。**发现是 best-effort**：坏扩展不能让 agent 起不来。
+
+### 4. 接线（`pi-coding-agent`）
+
+- `crates/pi-coding-agent/src/extensions/wiring.rs:136` 给 `ExtensionRuntime` 加 `resources`
+  字段（`Debug` impl 同步加 `.field("resources", …)`），`:301` 在 `session_start` 派发之后
+  调一次 `discover_resources(Startup)` 并缓存，`:175` 暴露 `resource_paths()` —— 同步访问，
+  每次进模式不再重复过一遍 JS 运行时。
+- `crates/pi-coding-agent/src/resource_loader.rs:155` 新增
+  `LoadedResources::extend_extension_resources(cwd, agent_dir, resources)`：复用现成的
+  `load_skills` / `load_prompt_templates`，`include_defaults: false`（只读扩展指过来的路径，
+  不重复扫默认目录），诊断合并进 `diagnostics` / `prompt_diagnostics`。
+  **加载是累加的**：同名 resource 已存在时项目 / 用户的那一份胜出，扩展无法静默顶掉它。
+- `:282` `build_cli_system_prompt_with_extensions(cli, extension_tools, extension_resources)`
+  与 `:321` `build_cli_prompt_templates_with_extensions(cli, extension_resources)` 成为新的
+  wrapper；旧的两个函数（`:272` / `:315`）改成委托、行为不变，避免波及既有调用方与测试。
+- `crates/pi-coding-agent/src/main.rs:126` / `:212` / `:258`：tui / print / rpc 三个模式都在
+  `load_extensions` 之后取 `resource_paths()`，再算系统提示与模板表；`:358` 新增
+  `load_prompt_templates_for`。print 模式原先在扩展加载**之前**就把模板展开成文本，
+  本轮把展开挪到加载之后（`:132` 一带），否则扩展提供的模板永远打不开。
+
+### 5. `--no-skills` / `--no-prompt-templates` 仍然是否决权
+
+两个开关同时关掉扩展提供的对应资源：用户显式关掉 skill 注入时，插件不该绕过它
+（`resource_loader.rs:282` 起按 flag 决定是否并入扩展路径）。显式 `--skill` /
+`--prompt-template <PATH>` 不受影响 —— 与上游 `resource-loader.ts` 的取舍一致。
+
+### 与上游的刻意差异（新增两条待办）
+
+- **`themePaths` 解析但不消费**（`resource_loader.rs:196` 有注释）：Rust TUI 还没有主题系统，
+  没有可落地的目标。字段照收、不报错，等主题系统落地再接。
+- **扩展加载器只认 CommonJS**：上游真实契约是 ESM（`jiti.import()`、`export default function (pi) {}`、
+  `node:path` / `node:url` 虚拟模块）。`dynamic-resources/index.ts` 里
+  `import { dirname, join } from "node:path"; export default function (pi) { pi.on("resources_discover", …) }`
+  这套写法，Rust 侧现在**不能原样加载**（`js_loader.rs` 只做简单的 TS 类型标注剥离 +
+  `module.exports = function (pi) {}` 包装）。本轮的集成用例因此写成 CommonJS 的等价体。
+  这是本阶段最大的兼容缺口，已作为 Stage 24 候选单独立项。
+
+### 验证
+
+```
+$ cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings
+$ cargo test   --workspace --no-fail-fast                  # 684 passed / 1 failed（见下）
+$ cargo test   -p pi-extensions                            # 27 passed
+$ cargo test   -p pi-coding-agent --lib                    # 176 passed
+```
+
+- 新增用例 10 个：`pi-extensions/tests/host.rs` 4 个（`discovered_resources_parses_every_handler_result`、
+  `discovered_resources_dedups_and_tolerates_garbage`、`bridge_discovers_resources_from_an_extension`、
+  `bridge_discovery_is_empty_without_a_handler`）；`pi-coding-agent` lib 3 个
+  （`extension_discovered_resources_extend_the_bundle`、`extension_resources_never_shadow_existing_names`、
+  `missing_extension_resource_path_is_a_diagnostic`）；`tests/cli_extensions.rs` 3 个
+  （`extension_discovered_resources_reach_the_model`、`no_skills_flag_suppresses_extension_discovered_skills`、
+  `extension_theme_paths_are_accepted_and_ignored`，都是真起 `pi --print` 子进程、用一个按
+  `event.cwd` 推导路径的扩展夹具，断言扩展提供的 skill 真的进了系统提示）。
+- 写用例时踩到一个自己挖的坑：`extension_theme_paths_are_accepted_and_ignored` 一开始红，
+  因为临时目录名里带 `themes` 字样，`pi: loaded 1 extension(s) [.../resources-themes-project-…]`
+  这行 stderr 把断言 `!stderr.contains("themes")` 撞掉了。改成断 `failed` / `not a markdown file`
+  这类真正的错误词，并把夹具目录改名成 `resources-t3*` 才稳。
+- **唯一失败的仍是既有的 `--rpc` 抖动**（见 LUM-1081 节）：`tests/rpc.rs` 随机一个用例
+  `Disconnected`，子进程 stderr 依然是 `event-listener-5.4.2/src/intrusive.rs:341 attempt to subtract
+  with overflow` 或 `free(): double free detected in tcache 2`，与 LUM-1083 同一根因。
+  本轮做了一次对照实验来确认**没有把它显著改坏**（因为新加了一次 `resources_discover`
+  派发，理论上会让同一条路径多暴露一次）：
+
+  | 树 | `cargo test -p pi-coding-agent --test rpc` 连跑 10 次 |
+  |----|----|
+  | `HEAD`（`d18fe9ae2`，无本轮改动） | 2/10 失败 |
+  | 本轮改动 | 4/10 失败 |
+
+  失败签名完全相同（`attempt to subtract with overflow` / `double free`）。样本量太小，
+  2/10 与 4/10 的差异不显著（Fisher 精确检验 ≈ 0.63），只能判定「同一既有缺陷，未见量级变化」，
+  但不能排除 1 倍以内的劣化。**本轮不顺手修 LUM-1083**：它需要 32 核机器上复现
+  `pi --rpc` 的竞态，且修法（显式关停握手 + 字段顺序）风险独立于 Stage 23，混在一起
+  会让这次提交难以回退。
+
+### 并发
+
+`multica daemon status`：`active_task_count = 3`，槽位仍满，**本轮不派发新子任务**，
+按 LUM-1078 / LUM-1079 / LUM-1081 的先例由协调方直接实现本阶段。
+
+### 剩余 frontier（本轮更新）
+
+1. ~~扩展 `resources_discover` 钩子~~ → 本轮落地；
+2. **ESM 扩展加载**（`export default` + `node:path` / `node:url` 虚拟模块）—— 插件生态兼容
+   的最大缺口，Stage 24 候选；
+3. 主题系统（`themePaths` 有了来源但还没有消费方）；
+4. `/trust` + 项目本地 `.pi/SYSTEM.md`；
+5. 会话压缩（`/compact`）；
+6. `.wasm` 扩展宿主；
+7. 把 `pi-client` 接进 `--rpc`，替换 Stage 12 的内联 JSON-RPC；
+8. LUM-1068 落地后 promote **LUM-1069**（`pi-server` / `pi-client` 端到端）；
+9. 修 **LUM-1083**（`pi --rpc` 扩展宿主堆破坏 / 算术溢出）。
+
+### Push status
+
+`feature/pi.rs`，commit 见本轮 push（Stage 23 代码 + 本节状态文档）。push 前先把已落到
+`origin/feature/pi.rs` 的 LUM-1082（`f3e3ea64d` / `d77318b52`：`/model`、`/resume` 的可搜索
+选择器）合入本轮分支，冲突只在 `FEATURE_PI_RS_STATUS.md` 的追加位置。

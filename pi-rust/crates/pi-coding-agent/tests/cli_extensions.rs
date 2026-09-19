@@ -797,3 +797,182 @@ fn a_throwing_extension_command_exits_nonzero() {
         stderr(&output)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stage 23: extension resource discovery
+// ---------------------------------------------------------------------------
+
+/// A JS extension that advertises extra skill / prompt / theme paths from
+/// a `resources_discover` handler — the port of upstream's
+/// `examples/extensions/dynamic-resources`.
+///
+/// Upstream derives those paths from its own file location
+/// (`import.meta.url`); without an ESM loader in the Rust port the
+/// fixture derives them from the event's `cwd` instead. Everything else
+/// — the event name, the `{ skillPaths, promptPaths, themePaths }`
+/// result shape, the "discovery happens after the extension loads"
+/// contract — is the documented upstream contract.
+const RESOURCES_EXTENSION: &str = r#"
+module.exports = function (pi) {
+  pi.on("resources_discover", function (event) {
+    return {
+      skillPaths: [event.cwd + "/dynamic/skills/dynamic-demo/SKILL.md"],
+      promptPaths: [event.cwd + "/dynamic/prompts/dyn-note.md"],
+      themePaths: [event.cwd + "/dynamic/themes/dyn.json"],
+    };
+  });
+};
+"#;
+
+/// Write the extension plus the resources it points at into a project.
+fn install_resources_fixture(project: &Path) {
+    let dir = project.join(".pi").join("extensions");
+    std::fs::create_dir_all(&dir).expect("mkdir extensions dir");
+    std::fs::write(dir.join("resources.js"), RESOURCES_EXTENSION).expect("write extension");
+
+    let skill_dir = project.join("dynamic").join("skills").join("dynamic-demo");
+    std::fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: dynamic-demo\ndescription: Advertised from an extension.\n---\n\n# Dynamic demo\n",
+    )
+    .expect("write skill");
+
+    let prompt_dir = project.join("dynamic").join("prompts");
+    std::fs::create_dir_all(&prompt_dir).expect("mkdir prompt dir");
+    std::fs::write(prompt_dir.join("dyn-note.md"), "DYNAMIC-TEMPLATE-BODY\n")
+        .expect("write prompt template");
+}
+
+/// Run print mode with a custom prompt so a `/name` template can be
+/// expanded. `run_print` always sends the same literal prompt.
+fn run_print_with_prompt(
+    server: &ModelServer,
+    sessions: &Path,
+    cwd: &Path,
+    prompt: &str,
+    extra_args: &[&str],
+) -> Output {
+    let mut cmd = pi_command(server, sessions, cwd);
+    cmd.args(["--model", "openai/gpt-4o-mini", "--print", prompt]);
+    cmd.args(extra_args);
+    cmd.arg("--session-dir").arg(sessions);
+    cmd.output().expect("failed to spawn pi")
+}
+
+/// The full path: `.pi/extensions/*.js` → QuickJS `resources_discover`
+/// → skill in the system prompt → model request. The prompt the model
+/// receives is the only place that proves discovery ran, because a
+/// project-local `.pi/skills` would have been found without it.
+#[test]
+fn extension_discovered_resources_reach_the_model() {
+    let server = ModelServer::spawn(vec![Reply::Text("done".into())]);
+    let sessions = tempdir("resources");
+    let project = tempdir("resources-project");
+    install_resources_fixture(project.path());
+
+    let output = run_print_with_prompt(
+        &server,
+        sessions.path(),
+        project.path(),
+        "/dyn-note",
+        &["--output-format", "json-events"],
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        output.status.success(),
+        "print mode failed\nstdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(bodies.len(), 1, "requests: {bodies:#?}");
+
+    let request = &bodies[0];
+    // 1. The skill the extension advertised is in the system prompt.
+    assert!(
+        request.contains("<name>dynamic-demo</name>")
+            && request.contains("Advertised from an extension."),
+        "the extension-discovered skill must reach the model:\n{request}"
+    );
+    // 2. The prompt template it advertised was expanded into the prompt.
+    assert!(
+        request.contains("DYNAMIC-TEMPLATE-BODY"),
+        "the extension-discovered prompt template must be expanded:\n{request}"
+    );
+    assert!(
+        !request.contains("/dyn-note"),
+        "`/dyn-note` must be replaced by the template body:\n{request}"
+    );
+}
+
+/// `--no-skills` is the user's switch for keeping skills out of the
+/// prompt; an extension must not be able to override it.
+#[test]
+fn no_skills_flag_suppresses_extension_discovered_skills() {
+    let server = ModelServer::spawn(vec![Reply::Text("done".into())]);
+    let sessions = tempdir("resources-noskills");
+    let project = tempdir("resources-noskills-project");
+    install_resources_fixture(project.path());
+
+    let output = run_print(
+        &server,
+        sessions.path(),
+        project.path(),
+        &["--no-skills", "--output-format", "json-events"],
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        output.status.success(),
+        "print mode failed\nstdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(bodies.len(), 1, "requests: {bodies:#?}");
+    assert!(
+        !bodies[0].contains("dynamic-demo"),
+        "`--no-skills` must drop extension-discovered skills too:\n{}",
+        bodies[0]
+    );
+}
+
+/// A `themePaths` entry is collected from the handler but nothing
+/// consumes it yet (the Rust TUI has no theme system), so it must not
+/// surface as an error or break the run.
+#[test]
+fn extension_theme_paths_are_accepted_and_ignored() {
+    let server = ModelServer::spawn(vec![Reply::Text("done".into())]);
+    let sessions = tempdir("resources-t3");
+    let project = tempdir("resources-t3-project");
+    install_resources_fixture(project.path());
+
+    let output = run_print(
+        &server,
+        sessions.path(),
+        project.path(),
+        &["--output-format", "json-events"],
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        output.status.success(),
+        "print mode failed\nstdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(bodies.len(), 1, "requests: {bodies:#?}");
+    assert!(
+        !stderr(&output).contains("theme"),
+        "an unconsumed theme path must not be reported as an error:\n{}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("failed") && !stderr(&output).contains("not a markdown file"),
+        "an unconsumed theme path must not surface a diagnostic:\n{}",
+        stderr(&output)
+    );
+}

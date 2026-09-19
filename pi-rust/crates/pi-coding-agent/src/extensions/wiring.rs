@@ -17,10 +17,11 @@ use std::time::Duration;
 
 use pi_agent_core::tools::ToolExecutor;
 use pi_extensions::{
-    CommandExecutionOutcome, ExtensionBridge, ExtensionError, ExtensionSideEffects, HostOptions,
-    JsExtensionHost, RegisteredCommand, RegisteredToolPrompt, ToolContext, UiHandler,
+    CommandExecutionOutcome, DiscoveredResources, ExtensionBridge, ExtensionError,
+    ExtensionSideEffects, HostOptions, JsExtensionHost, RegisteredCommand, RegisteredToolPrompt,
+    ToolContext, UiHandler,
 };
-use pi_protocol::{ExtensionEvent, UiLevel};
+use pi_protocol::{ExtensionEvent, ResourcesDiscoverReason, UiLevel};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
 use crate::extensions::ui_bridge::TuiUiBridge;
@@ -132,6 +133,7 @@ pub struct ExtensionRuntime {
     host: Option<JsExtensionHost>,
     commands: Vec<RegisteredCommand>,
     tool_prompts: Vec<RegisteredToolPrompt>,
+    resources: DiscoveredResources,
     mode: String,
     has_ui: bool,
     cwd: String,
@@ -143,6 +145,7 @@ impl std::fmt::Debug for ExtensionRuntime {
             .field("host", &self.host.is_some())
             .field("commands", &self.commands.len())
             .field("tool_prompts", &self.tool_prompts.len())
+            .field("resources", &self.resources)
             .field("mode", &self.mode)
             .field("has_ui", &self.has_ui)
             .finish_non_exhaustive()
@@ -165,6 +168,12 @@ impl ExtensionRuntime {
     /// tool declared a contribution.
     pub fn tool_prompts(&self) -> &[RegisteredToolPrompt] {
         &self.tool_prompts
+    }
+
+    /// Extra skill / prompt / theme paths the extensions advertised
+    /// from a `resources_discover` handler at startup.
+    pub fn resource_paths(&self) -> &DiscoveredResources {
+        &self.resources
     }
 
     /// True when `name` (without the leading `/`) is an extension
@@ -285,15 +294,23 @@ pub fn load(
         // Lifecycle event: extensions register their event handlers before
         // this fires, so `pi.on("session_start", …)` runs for every mode.
         let _ = outcome.bridge.deliver(&ExtensionEvent::SessionStart).await;
+        // Resource discovery runs once per process, right after the
+        // lifecycle event, and only for extensions that subscribed: the
+        // paths it returns extend the skill / prompt template bundle the
+        // mode builds its system prompt from.
+        let resources = outcome
+            .bridge
+            .discover_resources(ResourcesDiscoverReason::Startup)
+            .await;
         // The JS-side map is the source of truth for commands, so read
         // them back after the load (and the lifecycle dispatch) ran.
         let commands = host.registered_commands().await;
         let tool_prompts = host.registered_tool_prompts().await;
-        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands, tool_prompts))
+        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands, tool_prompts, resources))
     });
 
     match result {
-        Ok((host, outcome, commands, tool_prompts)) => {
+        Ok((host, outcome, commands, tool_prompts, resources)) => {
             let loaded: Vec<PathBuf> = outcome.entries.iter().map(|e| e.source.clone()).collect();
             let errors: Vec<(PathBuf, String)> = outcome
                 .errors
@@ -319,6 +336,7 @@ pub fn load(
                     host: Some(host),
                     commands,
                     tool_prompts,
+                    resources,
                     mode,
                     has_ui,
                     cwd,

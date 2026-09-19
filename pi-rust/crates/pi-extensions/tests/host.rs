@@ -608,3 +608,150 @@ fn non_interactive_ui_requests_deny_and_report_via_notify() {
         assert!(message.contains("denied"), "{message}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Stage 23: `resources_discover`
+// ---------------------------------------------------------------------------
+
+/// Parse the aggregate out of a `_pi_dispatch` summary. The shim returns
+/// one result per handler, so a `resources_discover` fan-out across
+/// several extensions has to be folded together.
+#[test]
+fn discovered_resources_parses_every_handler_result() {
+    let outcome = DispatchOutcome {
+        handled: true,
+        subscribers: 2,
+        results: vec![
+            json!({ "skillPaths": ["/a/SKILL.md", "/b"] }),
+            json!({ "skillPaths": ["/c/SKILL.md"], "promptPaths": ["/p/note.md"] }),
+        ],
+        errored: None,
+    };
+
+    let discovered = pi_extensions::DiscoveredResources::from_dispatch(&outcome);
+    assert_eq!(
+        discovered.skill_paths,
+        vec![
+            PathBuf::from("/a/SKILL.md"),
+            PathBuf::from("/b"),
+            PathBuf::from("/c/SKILL.md"),
+        ]
+    );
+    assert_eq!(discovered.prompt_paths, vec![PathBuf::from("/p/note.md")]);
+    assert!(discovered.theme_paths.is_empty());
+    assert!(!discovered.is_empty());
+}
+
+/// A duplicate path two handlers both advertise must survive once, and a
+/// malformed result must not cost the caller the paths its peers
+/// returned.
+#[test]
+fn discovered_resources_dedups_and_tolerates_garbage() {
+    let outcome = DispatchOutcome {
+        handled: true,
+        subscribers: 4,
+        results: vec![
+            json!({ "skillPaths": ["/shared/SKILL.md", "  ", 7, null] }),
+            json!("not-an-object"),
+            json!(null),
+            json!({
+                "skillPaths": ["/shared/SKILL.md"],
+                "themePaths": [{ "path": "/themes/one.json" }],
+            }),
+        ],
+        errored: None,
+    };
+
+    let discovered = pi_extensions::DiscoveredResources::from_dispatch(&outcome);
+    assert_eq!(
+        discovered.skill_paths,
+        vec![PathBuf::from("/shared/SKILL.md")]
+    );
+    assert_eq!(
+        discovered.theme_paths,
+        vec![PathBuf::from("/themes/one.json")]
+    );
+    assert!(discovered.prompt_paths.is_empty());
+}
+
+/// End to end through the real QuickJS host: an extension subscribes to
+/// `resources_discover` and the bridge hands the paths back to the
+/// caller, with the event carrying the session `cwd` and `reason`.
+#[test]
+fn bridge_discovers_resources_from_an_extension() {
+    use pi_extensions::JsExtensionBridge;
+    use pi_protocol::ResourcesDiscoverReason;
+
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("resources_discover", function (event) {
+                    pi.appendEntry("discover_seen", {
+                        cwd: event.cwd,
+                        reason: event.reason,
+                    });
+                    return {
+                        skillPaths: [event.cwd + "/skills/dyn/SKILL.md"],
+                        promptPaths: [event.cwd + "/prompts/dyn.md"],
+                    };
+                });
+            };
+        "#;
+        host.load(entry("discover"), source).await.expect("load");
+
+        let bridge = JsExtensionBridge::new(host.clone(), "print", false, "/work/project");
+        let discovered = bridge
+            .discover_resources(ResourcesDiscoverReason::Startup)
+            .await;
+
+        assert_eq!(
+            discovered.skill_paths,
+            vec![PathBuf::from("/work/project/skills/dyn/SKILL.md")]
+        );
+        assert_eq!(
+            discovered.prompt_paths,
+            vec![PathBuf::from("/work/project/prompts/dyn.md")]
+        );
+
+        // The handler saw the documented event fields, not the shim's
+        // internal ctx plumbing.
+        let log = host.log();
+        let seen = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "discover_seen")
+            .expect("handler ran");
+        assert_eq!(seen.data["cwd"], "/work/project");
+        assert_eq!(seen.data["reason"], "startup");
+    });
+}
+
+/// An extension with no `resources_discover` handler reports an empty
+/// bundle instead of an error — discovery must never be a load-time
+/// failure for the extensions that predate the event.
+#[test]
+fn bridge_discovery_is_empty_without_a_handler() {
+    use pi_extensions::JsExtensionBridge;
+    use pi_protocol::ResourcesDiscoverReason;
+
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            entry("no-resources"),
+            r#"module.exports = function (pi) {
+                   pi.on("session_start", function () {});
+               };"#,
+        )
+        .await
+        .expect("load");
+
+        let bridge = JsExtensionBridge::new(host, "print", false, "/tmp");
+        let discovered = bridge
+            .discover_resources(ResourcesDiscoverReason::Reload)
+            .await;
+        assert!(discovered.is_empty(), "{discovered:?}");
+    });
+}
