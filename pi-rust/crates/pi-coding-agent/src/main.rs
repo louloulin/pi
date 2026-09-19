@@ -122,9 +122,11 @@ fn new_session_id() -> String {
 fn build_default_models() -> Models {
     let mut models = Models::new();
     // Stage 4 ships the faux model + a couple of pseudo provider
-    // entries so `/model` lists something useful. Stage 1 replaces
-    // these stubs with real provider catalogues once the OpenAI /
-    // Anthropic adapters land.
+    // entries so `/model` lists something useful. Stage 7 replaces
+    // the Anthropic stub with the real `AnthropicProvider` streaming
+    // adapter; the model catalog stays inline for now (a future stage
+    // will move it into `pi-ai/src/models/catalog.json` like the TS
+    // upstream does).
     let faux = Model {
         provider: pi_protocol::ProviderId::new("faux"),
         id: "faux-model".into(),
@@ -137,21 +139,40 @@ fn build_default_models() -> Models {
         provider: pi_protocol::ProviderId::new("openai"),
         id: "gpt-4o-mini".into(),
         api: pi_protocol::Api::OpenAiChatCompletions,
-        label: Some("GPT-4o mini (stub)".into()),
+        label: Some("GPT-4o mini".into()),
         context_window: 128_000,
         max_output_tokens: 16_384,
     };
-    let anthropic = Model {
+    let anthropic_sonnet = Model {
         provider: pi_protocol::ProviderId::new("anthropic"),
-        id: "claude-3-5-sonnet-latest".into(),
+        id: "claude-sonnet-4-5".into(),
         api: pi_protocol::Api::AnthropicMessages,
-        label: Some("Claude 3.5 Sonnet (stub)".into()),
+        label: Some("Claude Sonnet 4.5".into()),
+        context_window: 200_000,
+        max_output_tokens: 8_192,
+    };
+    let anthropic_opus = Model {
+        provider: pi_protocol::ProviderId::new("anthropic"),
+        id: "claude-opus-4-5".into(),
+        api: pi_protocol::Api::AnthropicMessages,
+        label: Some("Claude Opus 4.5".into()),
+        context_window: 200_000,
+        max_output_tokens: 8_192,
+    };
+    let anthropic_haiku = Model {
+        provider: pi_protocol::ProviderId::new("anthropic"),
+        id: "claude-haiku-4-5".into(),
+        api: pi_protocol::Api::AnthropicMessages,
+        label: Some("Claude Haiku 4.5".into()),
         context_window: 200_000,
         max_output_tokens: 8_192,
     };
     models.set_provider(pi_protocol::ProviderId::new("faux"), vec![faux]);
     models.set_provider(pi_protocol::ProviderId::new("openai"), vec![openai]);
-    models.set_provider(pi_protocol::ProviderId::new("anthropic"), vec![anthropic]);
+    models.set_provider(
+        pi_protocol::ProviderId::new("anthropic"),
+        vec![anthropic_sonnet, anthropic_opus, anthropic_haiku],
+    );
     models
 }
 
