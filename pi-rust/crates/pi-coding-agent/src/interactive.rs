@@ -19,7 +19,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self as ct_event, Event as CtEvent};
+use crossterm::event::{
+    self as ct_event, DisableMouseCapture, EnableMouseCapture, Event as CtEvent,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -918,7 +920,13 @@ fn default_model(models: &Models) -> Model {
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // The alternate screen hides the terminal's own scrollback, so the App
+    // owns scrolling (`pi-tui/src/app.rs`). Mouse capture is what delivers
+    // the wheel: upstream turns it on for every alt-screen session
+    // (`packages/tui/src/tui-alt-screen.ts:168,265`, mouse sequence at
+    // `:353-362`) and so do we. Text selection by the terminal is therefore
+    // unavailable, matching upstream.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -926,7 +934,11 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -934,11 +946,11 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyho
 fn read_event() -> anyhow::Result<Option<CtEvent>> {
     match ct_event::read()? {
         event @ (CtEvent::Key(_)
+        | CtEvent::Mouse(_)
         | CtEvent::Resize(_, _)
         | CtEvent::FocusGained
         | CtEvent::FocusLost
         | CtEvent::Paste(_)) => Ok(Some(event)),
-        CtEvent::Mouse(_) => Ok(None),
     }
 }
 

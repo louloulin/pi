@@ -6995,3 +6995,167 @@ frontier 重排（`pi.exec` 取消、markdown 解析器与上线、App 聊天日
   LUM-1111 429M，共 8.4G），空闲 5.7G → 14G。这些都是**已合入 `feature/pi.rs`** 的构建产物，
   只删 `target`，不动任何源码、提交或分支；在跑的 LUM-1120 与新的 Stage 33 worktree 的 `target`
   一律不碰。
+
+## LUM-1123 round — 核验 `feature/pi.rs`（含 LUM-1120）+ 鼠标滚轮滚动（alt-screen 视口）+ 槽位满不派发
+
+（autopilot 协调轮；开工后把 LUM-1123 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 3`（本 run + LUM-1122 + 1 路族外任务），
+  上限 3 路 → **满槽，本轮不派发任何新任务**，预算全部用于核验 + 一个与在途两路零文件重叠的切片。
+- 在途/刚落地的族内任务：LUM-1120（Stage 32 `@earendil-works/*` SDK 虚拟模块）与 LUM-1121
+  （Stage 32 markdown 真正上线）均已交付并合入 `feature/pi.rs`，状态 `in_review`；LUM-1122
+  （Stage 33 `autocomplete`）仍 `in_progress`，工作分支尚未推送。
+- 进入本轮时 `origin/feature/pi.rs` = `86077604a`（`Merge branch 'feature/pi.rs' into work/lum-1120`），
+  即 LUM-1119 的 `676e3916b` + LUM-1120 的 SDK 虚拟模块。
+- 磁盘：开工 `/` 空闲 4.1G（92%，三周未清理的 worktree `target` 堆积）；按 LUM-1119 轮的同一口径
+  删掉 **3 个已 `in_review`** 任务的 `pi-rust/target`（LUM-1116 733M、LUM-1119 1.1G、LUM-1120 2.3G，
+  共 4.2G）→ 空闲 8.1G（83%）。这些都是**已合入 `feature/pi.rs`** 的构建产物，只删 `target`，
+  不动源码/提交/分支；在跑的 LUM-1122 与本轮 worktree 的 `target` 一律不碰。
+
+### 二、核验 `feature/pi.rs`
+
+在 `work/lum-1123`（起点 `origin/feature/pi.rs` @ `86077604a`）上，先在**合并态**跑门（见第四节）：
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  18 个 suite 共 331 passed / 0 failed
+$ ... cargo test -p pi-coding-agent --offline --no-fail-fast
+  15 个 suite 共 345 passed / 0 failed
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished，13 个 workspace 成员 0 warnings
+```
+
+`pi-tui` 331 = LUM-1119 轮的 323 + 本轮新增 7（`tests/mouse_scroll.rs`）+ 1（`input.rs` 单元测试）；
+`pi-coding-agent` 345 与 LUM-1119 轮持平，说明 LUM-1120 的 SDK 虚拟模块只加能力、未改动既有语义。
+`cargo clippy --workspace --all-targets` 仍会打印 `vendor/rquickjs-core` 的 12 条历史告警
+（LUM-1118 / LUM-1119 轮记录的同一批，`Cargo.toml:7` 已把它 `exclude` 出 workspace 的
+fmt/clippy/test，不在 `-D warnings` 门内），非本轮引入。
+
+### 三、本轮切片：鼠标滚轮滚动聊天日志（上游 `AltScreen.routeWheel`）
+
+候选评估先排除了三个更"显眼"的方向，避免把预算花在伪需求上：
+
+| 候选 | 结论 |
+|------|------|
+| LUM-1090 provider catalog | 前提仍不成立（上游没有可搬运的 `data/*.json` 事实源），维持既有结论，不写猜测值 |
+| `pi-ai` 图像生成 | 上游该路径在本仓库形态下无调用方（dead code），接线无验收面 |
+| `export-html` 导出 | 依赖上游 session-tree 模型，Rust 侧会话模型尚未建立对应结构，属"新设计"而非切片 |
+
+真正对齐上游、且**与 LUM-1122（`pi-tui` 的 `autocomplete.rs`/`editor.rs`/`lib.rs`/`selector.rs`）、
+LUM-1120（`pi-extensions/**`）零文件重叠**的缺口是 LUM-1118 轮就记在 frontier 里的
+**鼠标滚轮**：alt-screen 下终端自身回滚被禁用，`App` 拥有滚动，但 `interactive.rs` 里一直是
+`CtEvent::Mouse(_) => Ok(None)`（起点 `676e3916b` 的 `:941`）——事件被读出来又丢掉，且从未
+`EnableMouseCapture`，
+所以滚轮在真机上完全无响应（LUM-1118 只做了 `PageUp/PageDown/Home/End` 键路径）。
+
+上游语义（`packages/tui/src/tui-alt-screen.ts`）：
+
+- `wheelScrollLines` 默认 **1**（`:166,264`，`Math.max(1, Math.floor(...))`）；
+- Alt+滚轮乘 **5**（`ALT_WHEEL_SCROLL_MULTIPLIER = 5` @ `:75`，`getWheelScrollLines` @ `:968-971`
+  按 SGR button bit 3 判定 Alt）；
+- 滚轮路由 `routeWheel`（`:973-984`）：命中指针下的 `ScrollView` 逐个消费，剩余量给 primary；
+- 鼠标捕获对 alt-screen **默认开启**（`mouse ?? true` @ `:265`，捕获序列拼进进入串 @ `:353-362`，
+  退出时 `DISABLE_MOUSE` @ `:376`）——代价是终端自身的文本选择不可用（上游用
+  `components/mouse-region.ts` + `copyOnSelect` 自己做选择）。
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/input.rs` | 新增 `InputEvent::Mouse { up, alt }` 变体（注释写清"只建模滚轮"，其余鼠标事件仍是 `Ignored`）与 `pub const fn wheel(up, alt)` 构造器；1 条单元测试 |
+| `crates/pi-tui/src/app.rs:41,46` | `WHEEL_SCROLL_LINES = 1`、`ALT_WHEEL_SCROLL_MULTIPLIER = 5`，注释指向上游行号 |
+| `crates/pi-tui/src/app.rs:632-643` | `step()` 在「弹窗/选择器优先」之后处理滚轮：`scroll_viewport_up/down(1 或 5)`，有位移才 `Redraw`，否则 `Idle`（与 `PageUp/PageDown` 同一套钳制逻辑，`:838/:853`） |
+| `crates/pi-tui/src/app.rs:1035-1050` | `translate_event` 把 `CtMouseEventKind::ScrollUp/ScrollDown` 映射为 `InputEvent::Mouse`（`modifiers.contains(ALT)`），其余鼠标 kind 落 `Ignored` |
+| `crates/pi-coding-agent/src/interactive.rs:920-941` | `setup_terminal` 增加 `EnableMouseCapture`，`teardown_terminal` 对称 `DisableMouseCapture`；`read_event` 从 `CtEvent::Mouse(_) => Ok(None)` 改为并入放行分支——**这一步不补，滚轮仍然是死的** |
+| `crates/pi-tui/tests/mouse_scroll.rs`（新增 240 行 / 7 条） | crossterm → `InputEvent` 翻译、1 行/格、Alt×5、两端钳制、弹窗打开时忽略、不吞编辑器输入 |
+
+`wheel_moves_one_line_per_notch` 同时钉住「回到底部会重新 follow 新输出」
+（`scroll_offset() == 0` 且 `is_following()`），这正是上游 `ScrollView { follow: "end", primary: true }`
+的行为；`alt_wheel_multiplies_the_step` 断言最后一格是**钳到顶**而不是溢出成负偏移。
+
+### 四、验证
+
+```
+$ ... cargo test -p pi-tui --offline               # 18 suite：331 passed / 0 failed（含 mouse_scroll 7）
+$ ... cargo test -p pi-coding-agent --offline --no-fail-fast
+                                                   # 15 suite：345 passed / 0 failed
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings   # Finished，0 warnings
+$ rustfmt --check --edition 2021 <本轮 4 个文件>                        # 干净
+```
+
+上面的数字是在**合并态**跑的，不是只在工作分支上：`origin/feature/pi.rs` 在本轮进行中已含 LUM-1120，
+所以先在 `work/lum-1123` 里 `git merge --no-commit --no-ff origin/feature/pi.rs`（零冲突）后
+在合并树上跑完全部门，才落合并提交；`git rev-parse HEAD^{tree}` 与跑测试的那棵树一致（见第五节）。
+`cargo fmt -p pi-coding-agent -- --check` 仍有那批历史漂移（LUM-1118 轮记的 211 处，与本轮无关），
+本轮**只**保证自己碰到的 4 个文件 fmt 干净，没有顺手动全仓格式化——首轮误跑 `cargo fmt -p pi-coding-agent`
+产生的 53 文件脏 diff 已全部 `git checkout --` 还原。
+
+行为影响面：`pi-tui` 的滚轮只作用于 `App` 的聊天日志视口（`Selector`/对话框打开时按键处理路径先返回，
+滚轮同样被忽略）；`pi-coding-agent` 交互模式新增鼠标捕获，退出走 `DisableMouseCapture`，
+不会把终端的鼠标上报模式留给 shell（`teardown_terminal` 与 `EnterAlternateScreen` 同栈退出）。
+
+已知限制（写进代码注释，不再重复踩）：
+
+- 点击 / 拖拽 / 悬停仍是 `InputEvent::Ignored`——上游会把它们派发到指针下的组件
+  （`tui-alt-screen.ts:886-930`，含滚轮悬停高亮 `updateScrollbarHover`），Rust 侧还没有
+  组件级鼠标区域（`components/mouse-region.ts` 33 行）与自持文本选择；
+- 由于启用了鼠标捕获，**常规拖选不再由终端处理**（事件被上报给应用；多数终端仍支持按住
+  Shift 绕过这一层，但这不是可依赖的保证），而上游靠 `copyOnSelect` 自己实现选择与复制，
+  Rust 侧尚未实现 —— 这是本轮唯一的功能性回退面，frontier 记为下一步（第六节第 3 项）。
+- 只支持 crossterm 能解出的滚轮：SGR 之外的旧式 X10 鼠标序列不在覆盖范围；Kitty 键盘协议下的
+  滚轮与上游一致地由 crossterm 归一化处理。
+
+### 五、合并与推送
+
+- 工作分支 `work/lum-1123`，起点 `origin/feature/pi.rs` @ `86077604a`。
+- 切片提交 `a89893c66`（4 files，+340 / −5）。
+- 合并态提交 `8ee98fe3e`（`Merge branch 'feature/pi.rs' into work/lum-1123 (LUM-1120 SDK 虚拟模块)`，
+  父 `a89893c66` + `86077604a`）——**第四节的所有数字都是在这个树上跑的**。
+- 合并沿用前几轮的 `git merge-tree` + `git commit-tree` plumbing（非 force、不动本地 `feature/pi.rs`）：
+
+```
+$ git merge-tree --write-tree 86077604a work/lum-1123     # 零冲突
+$ git commit-tree <tree> -p 86077604a -p <docs 提交> \
+      -m "Merge branch 'work/lum-1123' into feature/pi.rs"
+$ git push origin <合并提交>:refs/heads/feature/pi.rs
+$ git push origin work/lum-1123                            # 新分支
+```
+
+- 核对：合并提交的 tree 与当时的 `work/lum-1123` 完全一致；`git diff --stat 86077604a origin/feature/pi.rs`
+  只含本轮 5 个文件（代码 4 + 本节文档）。
+
+### 六、frontier（本轮更新）
+
+本轮消掉了 LUM-1118 / LUM-1119 两轮记在 P3 的「鼠标滚轮」（`read_event` 丢弃 `CtEvent::Mouse`
++ 从未 `EnableMouseCapture`），同时带来一条**新的、需要显式决策的欠账**：alt-screen 下终端自持的
+常规拖选被关掉，应用必须自己实现选择/复制才对等上游。
+
+重排后（SDK 虚拟模块、markdown 上线、fuzzy、滚轮均已落地；autocomplete 在跑）：
+
+1. **P1 `pi-tui` `autocomplete`**：LUM-1122 正在做（`in_progress`）——上游
+   `packages/tui/src/autocomplete.ts` 826 行，`fuzzyFilter`（LUM-1119 落地）的最大消费方，
+   `/` 命令补全（`:330`）与 `@` 文件模糊补全（`:301`、`:736`）。
+2. **P1 `settings-list` + `/settings` 子菜单**（上游 `components/settings-list.ts` 328 行 +
+   `settings-manager` 1417 行）：Rust `config.rs` 目前只读 `compaction` 一段，`/settings` 无 UI；
+   上游这几个列表也全部走 `fuzzyFilter`，可直接复用 LUM-1119 成果。
+3. **P1 alt-screen 自持鼠标：文本选择 / 复制 / 点击派发**（上游 `components/mouse-region.ts` 33 行 +
+   `tui-alt-screen.ts:886-930` 的 target 派发与 `copyOnSelect`）——**本轮新增的欠账**。我们既然已经
+   打开鼠标捕获，就必须把「拖选复制」这一条用户路径补回来：先把 `InputEvent::Mouse` 从
+   `{up, alt}` 扩成真正的 `MouseEvent`（button / coords / press-release / drag），再让 `MessageView`
+   提供文本选区，最后接 `copyOnSelect` 到剪贴板（可用 OSC52 或 `arboard`）。它与第 1、2 项只共享
+   `app.rs`/`input.rs`，需与在写 `app.rs` 的那路串行。
+4. **P2 `node:module` / `node:readline` / `node:zlib`**：要动 `pi-extensions/src/host.rs` 的 op 表
+   （zlib 还要新依赖），与任何 `host.rs` 改动**同一文件串行**排队。
+5. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+6. **P3 `alt-screen-search.ts`**（上游 327 行，alt-screen 回看内搜索）：与滚动相邻的独立通道；
+   LUM-1118 把滚动键路径做完、本轮把滚轮做完后，它只剩「搜索命中高亮 + 跳转」两件事。
+7. **P3 `latex.ts`**（1394 行）与 `markdown.rs` 尚未覆盖的子集（表格 / LaTeX / OSC-8 hyperlink /
+   语法高亮）。
+8. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 就不写猜测值）。
+9. **P3 旧式 X10 鼠标序列、滚轮悬停高亮**（`updateScrollbarHover`）/ 滚动条拖拽：优先级低于第 3 项，
+   等第 3 项把 `InputEvent::Mouse` 扩全后基本是顺带。
+
+槽位决策：开工与收尾 `running_task_count` 均为 **3**（本 run + LUM-1122 + 1 路族外），上限 3 路 →
+**本轮不派发新任务**。并发建议维持：上限 3 路；`pi-extensions/src/host.rs`、`pi-tui/src/app.rs`
+与 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。

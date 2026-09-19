@@ -13,7 +13,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Duration;
 
-use crossterm::event::Event as CtEvent;
+use crossterm::event::{
+    Event as CtEvent, KeyModifiers as CtModifiers, MouseEventKind as CtMouseEventKind,
+};
 use parking_lot::Mutex;
 use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate};
 use pi_protocol::{Content, Message, Usage};
@@ -33,6 +35,15 @@ use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::write_styled_line;
 use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeError};
+
+/// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
+/// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
+const WHEEL_SCROLL_LINES: usize = 1;
+
+/// Alt+wheel multiplies the per-notch step by this factor, matching
+/// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
+/// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
+const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
 
 /// Configuration knobs for the App.
 #[derive(Debug, Clone)]
@@ -618,6 +629,19 @@ impl App {
             }
         }
         let InputEvent::Key(key) = event else {
+            if let InputEvent::Mouse { up, alt } = event {
+                let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
+                let changed = if up {
+                    self.scroll_viewport_up(lines)
+                } else {
+                    self.scroll_viewport_down(lines)
+                };
+                return if changed {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                };
+            }
             return StepOutcome::Idle;
         };
         self.step_key(key)
@@ -1007,6 +1031,22 @@ impl App {
     pub fn translate_event(event: CtEvent) -> InputEvent {
         match event {
             CtEvent::Key(key) => InputEvent::from(key),
+            CtEvent::Mouse(mouse) => match mouse.kind {
+                CtMouseEventKind::ScrollUp => InputEvent::Mouse {
+                    up: true,
+                    alt: mouse.modifiers.contains(CtModifiers::ALT),
+                },
+                CtMouseEventKind::ScrollDown => InputEvent::Mouse {
+                    up: false,
+                    alt: mouse.modifiers.contains(CtModifiers::ALT),
+                },
+                // Moves / clicks / drags stay unhandled until the App owns
+                // a scrollbar or text selection. Upstream dispatches those
+                // to the component under the pointer
+                // (`packages/tui/src/tui-alt-screen.ts:886-930`); we only
+                // consume the wheel today.
+                _ => InputEvent::Ignored,
+            },
             CtEvent::Resize(w, h) => InputEvent::Resize {
                 width: w,
                 height: h,

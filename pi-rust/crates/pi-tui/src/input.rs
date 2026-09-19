@@ -155,6 +155,21 @@ impl std::ops::BitOr for KeyModifiers {
 pub enum InputEvent {
     /// A key event.
     Key(Key),
+    /// A mouse-wheel notch.
+    ///
+    /// Only the wheel is modelled: it is the one mouse input the
+    /// alternate-screen [`App`](crate::App) consumes, mapping it onto the
+    /// chat-log viewport. Everything else (moves, clicks, drags) stays
+    /// [`InputEvent::Ignored`].
+    Mouse {
+        /// True when the wheel moved towards older output (up), false when
+        /// it moved towards the tail (down).
+        up: bool,
+        /// True when Alt was held. Upstream multiplies the step by the
+        /// alt-wheel multiplier in that case
+        /// (`packages/tui/src/tui-alt-screen.ts:968-971`).
+        alt: bool,
+    },
     /// Resize — the [`App`](crate::App) re-flows the layout and redraws.
     Resize {
         /// New width in columns.
@@ -217,5 +232,33 @@ impl InputEvent {
     /// Convenience constructor for a plain character.
     pub fn character(c: char) -> Self {
         InputEvent::Key(Key::char(c))
+    }
+
+    /// Convenience constructor for a wheel notch.
+    pub const fn wheel(up: bool, alt: bool) -> Self {
+        InputEvent::Mouse { up, alt }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_constructor_sets_direction_and_modifier() {
+        assert_eq!(
+            InputEvent::wheel(true, false),
+            InputEvent::Mouse {
+                up: true,
+                alt: false
+            }
+        );
+        assert_eq!(
+            InputEvent::wheel(false, true),
+            InputEvent::Mouse {
+                up: false,
+                alt: true
+            }
+        );
     }
 }
