@@ -6958,7 +6958,8 @@ frontier 重排（`pi.exec` 取消、markdown 解析器与上线、App 聊天日
 2. **P1 `pi-tui` 补 `autocomplete` 模块**（上游 `packages/tui/src/autocomplete.ts`，826 行，缺失）：
    它是 `fuzzyFilter` 的最大消费方——`/` 命令补全（`:330`）与 `@` 模糊文件补全（`:301`、`:736`
    经 `fd`，带 scoped query 与 `.gitignore` 语义）。本轮把 `fuzzyFilter` 准备好了，这是它最自然的
-   下一步；Rust 侧 `grep -ril autocomplete pi-rust/crates` 目前**零命中**。
+   下一步；`grep -ril autocomplete pi-rust/crates --include=*.rs` 目前**零命中**（只有
+   `pi-extensions/docs/NODE_BUILTINS.md` 的文档表里提到过）。
 3. **P2 `settings-list` + `/settings` 子菜单**（上游 `components/settings-list.ts` 328 行 +
    `settings-manager` 1417 行）：Rust `config.rs` 目前只读 `compaction` 一段，`/settings` 无 UI。
    上游这几个列表也全部用 `fuzzyFilter`，可直接复用本轮成果。
