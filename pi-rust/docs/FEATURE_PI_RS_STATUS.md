@@ -4086,6 +4086,13 @@ $ cargo test   -p pi-coding-agent --lib                    # 176 passed
   - **本轮没有把它改坏**：本轮的 2/75 并不高于 stage 23 之前的 6/75（方向反而是更低，样本量不足
     以谈显著性，只能说“没有证据表明劣化”）；SIGABRT 的 stderr 依旧是
     `free(): double free detected in tcache 2`，SIGSEGV 则**没有任何 stderr**。
+  - 新的诊断把根因坐实到一行：`event-listener-5.4.2/src/intrusive.rs:341` 就是
+    `self.len -= 1;` —— 侵入式链表的长度计数**下溢**，即同一个 entry 被摘链两次 / 表头已被摘掉；
+    跟 SIGABRT 的 `free(): double free` 是同一个「双重摘链」事故的两种表现（先后顺序不同，
+    前者在计数上翻车，后者在堆上翻车）。依赖链：
+    `pi-extensions → rquickjs-core (parallel) → async-lock → event-listener 5.4.2`。
+    `cargo update -p event-listener` 报告 “Locking 0 packages”，本镜像里 5.4.2 已是兼容的最新版，
+    所以“升一个小版本就完了”这条最便宜的路走不通；修法仍在 LUM-1083。
   - 换成「单个子进程 ~3% 崩溃率」就能解释全量测试里“每次都红、但红的 target 每次不同”：
     本轮三次全量跑分别红在 `rpc`、`cli_provider`、`print_mode`；`print_mode` 一个 target 就跑
     17 个子进程，P(至少一个崩) ≈ 40%，实测连跑 3 次红 1 次，对得上。也就是说**测试没有问题，
