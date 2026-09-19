@@ -7,6 +7,7 @@ use clap::Parser;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
+use pi_coding_agent::extensions::ui_bridge::TuiUi;
 use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
 use pi_coding_agent::file_processor::expand_prompt;
 use pi_coding_agent::interactive::{run_interactive, InteractiveOptions};
@@ -109,7 +110,10 @@ fn main() -> ExitCode {
 
     match target_mode {
         ModeTarget::Interactive => {
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(err) => {
                     eprintln!("pi: failed to build tokio runtime: {err}");
@@ -118,7 +122,15 @@ fn main() -> ExitCode {
             };
             // Extensions load on the same runtime that drives the agent:
             // the QuickJS host spawns its promise driver + UI worker there.
-            let loaded_extensions = load_extensions(&runtime, &cli, "tui", true);
+            //
+            // The dialog bridge only exists when *both* stdin and stdout
+            // are real terminals: a piped run (`pi | tee`, a test harness)
+            // can never answer a modal, so `ctx.hasUI` has to stay false
+            // there instead of promising a UI that cannot render.
+            let mut extension_ui = interactive_ui_available().then(TuiUi::new);
+            let ui_bridge = extension_ui.as_ref().map(|ui| ui.bridge().clone());
+            let has_ui = ui_bridge.is_some();
+            let loaded_extensions = load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge);
             let tool_executor = loaded_extensions.executor.clone();
             let extension_runtime = Arc::new(loaded_extensions.runtime.clone());
             // Interactive mode is the only path that still uses the
@@ -142,6 +154,7 @@ fn main() -> ExitCode {
                 stream_fn: stream_fn.clone(),
                 tool_executor,
                 extensions: Some(extension_runtime),
+                extension_ui: extension_ui.take(),
             };
             match runtime.block_on(run_interactive(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -184,14 +197,17 @@ fn main() -> ExitCode {
                 // for `--continue=<id>`.
                 cli.continue_.clone()
             };
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(err) => {
                     eprintln!("pi: failed to build tokio runtime: {err}");
                     return ExitCode::from(70);
                 }
             };
-            let loaded_extensions = load_extensions(&runtime, &cli, "print", false);
+            let loaded_extensions = load_extensions(&runtime, &cli, "print", false, None);
             let tool_executor = loaded_extensions.executor.clone();
             let options = PrintModeOptions {
                 prompt: expanded.text,
@@ -213,14 +229,17 @@ fn main() -> ExitCode {
         ModeTarget::Rpc => {
             // Headless JSON-RPC 2.0 over stdio. No TUI / crossterm here:
             // stdin and stdout are the transport.
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(err) => {
                     eprintln!("pi: failed to build tokio runtime: {err}");
                     return ExitCode::from(70);
                 }
             };
-            let tool_executor = load_extensions(&runtime, &cli, "rpc", false).executor;
+            let tool_executor = load_extensions(&runtime, &cli, "rpc", false, None).executor;
             let options = pi_coding_agent::rpc::RpcServerOptions {
                 model: resolved_model,
                 models,
@@ -308,11 +327,19 @@ fn home_dir() -> Option<std::path::PathBuf> {
 /// session side effects. Failures are reported on stderr and never
 /// abort the process: a broken extension leaves the built-in bundle
 /// intact.
+/// Whether this process can render an interactive dialog: both ends of
+/// the terminal have to be a TTY (stdin to receive keys, stdout to draw).
+fn interactive_ui_available() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
 fn load_extensions(
     runtime: &tokio::runtime::Runtime,
     cli: &Cli,
     mode: &str,
     has_ui: bool,
+    ui: Option<pi_coding_agent::extensions::ui_bridge::TuiUiBridge>,
 ) -> wiring::ExtensionLoadOutcome {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let options = ExtensionLoadOptions {
@@ -321,6 +348,7 @@ fn load_extensions(
         explicit: wiring::explicit_paths(&cli.extension, &cli.extensions_dir),
         mode: mode.to_string(),
         has_ui,
+        ui,
         disabled: cli.no_extensions,
     };
     let outcome = wiring::load(runtime, &options);
