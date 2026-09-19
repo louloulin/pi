@@ -23,6 +23,12 @@
 //! * `Ctrl+Y` yanks the most recent ring entry at the cursor and
 //!   `Alt+Y` cycles through older entries (`tui.editor.yank` /
 //!   `tui.editor.yankPop`).
+//! * `Ctrl+-` undoes the previous edit (`tui.editor.undo`) by restoring
+//!   a snapshot from the [`UndoStack`]. Snapshots are captured before
+//!   destructive edits, and consecutive word characters coalesce into a
+//!   single undo unit (fish-style, mirroring upstream `insertCharacter`):
+//!   one undo removes a whole typed word, while every space stays
+//!   separately undoable. Submitting (`clear`) drops the stack.
 //!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
@@ -33,6 +39,7 @@ use std::collections::VecDeque;
 
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::kill_ring::{KillDirection, KillRing};
+use crate::undo_stack::UndoStack;
 
 #[cfg(test)]
 use crate::input::KeyModifiers;
@@ -56,17 +63,36 @@ pub enum EditorAction {
 }
 
 /// The previous editing action, used to decide whether a kill
-/// accumulates into the most recent ring entry and whether `Alt+Y` is
-/// allowed to cycle a fresh yank. Mirrors upstream's `lastAction`
-/// field (`"kill"` / `"yank"` / everything else).
+/// accumulates into the most recent ring entry, whether `Alt+Y` is
+/// allowed to cycle a fresh yank, and whether a typed character
+/// coalesces into the current undo unit. Mirrors upstream's
+/// `lastAction` field (`"kill"` / `"yank"` / `"type-word"` /
+/// everything else).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastAction {
-    /// Anything that is not a kill or a yank — breaks both chains.
+    /// Anything that is not a kill, yank or word character — breaks all
+    /// three chains.
     Other,
     /// The previous action killed text, so the next kill accumulates.
     Kill,
     /// The previous action yanked text, so `Alt+Y` may cycle it.
     Yank,
+    /// The previous action typed a word character, so the next word
+    /// character joins the same undo unit instead of opening a new one.
+    TypeWord,
+}
+
+/// Editor state captured by an undo snapshot.
+///
+/// Upstream stores its multi-line `EditorState` plus the paste tables;
+/// the Rust editor is single-line, so the buffer and cursor are the
+/// whole of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorSnapshot {
+    /// Buffer contents at capture time.
+    buffer: String,
+    /// Cursor byte offset at capture time.
+    cursor: usize,
 }
 
 /// Single-line text editor with prompt history and an Emacs-style kill
@@ -88,6 +114,8 @@ pub struct Editor {
     /// Byte length of the text inserted by the most recent yank, so
     /// `Alt+Y` knows which range to replace.
     last_yank_len: usize,
+    /// Snapshots restored by `Ctrl+-` (`tui.editor.undo`).
+    undo_stack: UndoStack<EditorSnapshot>,
 }
 
 impl Default for Editor {
@@ -108,6 +136,7 @@ impl Editor {
             kill_ring: KillRing::new(),
             last_action: LastAction::Other,
             last_yank_len: 0,
+            undo_stack: UndoStack::new(),
         }
     }
 
@@ -117,23 +146,40 @@ impl Editor {
     }
 
     /// Replace the buffer (cursor is clamped to the new length).
-    /// Does **not** reset history navigation state — this method is
-    /// also called from [`history_prev`](Self::history_prev) /
-    /// [`history_next`](Self::history_next), where resetting would
-    /// trap the user at the same entry on every Up arrow.
+    ///
+    /// Mirrors upstream `setText`: when the text actually changes, the
+    /// previous state is pushed onto the undo stack (so a programmatic
+    /// replacement is undoable), history browsing is exited, and any
+    /// kill / yank / typing chain is broken.
     pub fn set_text(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if text != self.buffer {
+            self.push_undo_snapshot();
+        }
+        self.reset_history_navigation();
+        self.set_text_internal(text);
+    }
+
+    /// Set the buffer without touching the undo stack or the history
+    /// navigation state. Used by [`history_prev`](Self::history_prev) /
+    /// [`history_next`](Self::history_next), where resetting the history
+    /// index would trap the user at the same entry on every Up arrow.
+    fn set_text_internal(&mut self, text: impl Into<String>) {
         self.buffer = text.into();
         self.cursor = self.buffer.len();
         self.last_action = LastAction::Other;
     }
 
-    /// Clear the buffer without touching history.
+    /// Clear the buffer without touching history, and drop the undo
+    /// stack. Upstream clears its stack the same way when a prompt is
+    /// submitted, so `Ctrl+-` cannot resurrect an already-sent prompt.
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
         self.history_index = None;
         self.history_draft = None;
         self.last_action = LastAction::Other;
+        self.undo_stack.clear();
     }
 
     /// True when the buffer is empty.
@@ -194,11 +240,15 @@ impl Editor {
             return EditorAction::None;
         }
         if self.history_index.is_none() {
+            // Entering history browsing is undoable: `Ctrl+-` restores
+            // the draft the user was typing. Mirrors upstream
+            // `navigateHistory` capturing the state on first entry.
+            self.push_undo_snapshot();
             self.history_draft = Some(self.buffer.clone());
         }
         self.history_index = Some(next);
         let entry = self.history[next].clone();
-        self.set_text(entry);
+        self.set_text_internal(entry);
         EditorAction::Changed
     }
 
@@ -212,29 +262,43 @@ impl Editor {
         if current == 0 {
             self.history_index = None;
             let draft = self.history_draft.take().unwrap_or_default();
-            self.set_text(draft);
+            self.set_text_internal(draft);
         } else {
             self.history_index = Some(current - 1);
             let entry = self.history[current - 1].clone();
-            self.set_text(entry);
+            self.set_text_internal(entry);
         }
         EditorAction::Changed
     }
 
     /// Insert a character at the cursor.
+    ///
+    /// Undo coalescing (fish-style, see upstream `insertCharacter`): a
+    /// snapshot is captured when the previous action was not typing a
+    /// word character, or when this character is whitespace — which
+    /// makes the state *before* the space the restore point, so undoing
+    /// a space removes the space together with the word after it.
     pub fn insert_char(&mut self, c: char) -> EditorAction {
+        if c.is_whitespace() || self.last_action != LastAction::TypeWord {
+            self.push_undo_snapshot();
+        }
         self.buffer.insert(self.cursor, c);
         self.cursor += c.len_utf8();
         self.reset_history_navigation();
-        self.last_action = LastAction::Other;
+        self.last_action = LastAction::TypeWord;
         EditorAction::Changed
     }
 
     /// Insert a string at the cursor.
+    ///
+    /// Atomic for undo — one snapshot, so a single `Ctrl+-` removes the
+    /// whole string. Mirrors upstream `insertTextAtCursor`, which is the
+    /// path a bracketed paste takes.
     pub fn insert_str(&mut self, s: &str) -> EditorAction {
         if s.is_empty() {
             return EditorAction::None;
         }
+        self.push_undo_snapshot();
         self.buffer.insert_str(self.cursor, s);
         self.cursor += s.len();
         self.reset_history_navigation();
@@ -247,6 +311,7 @@ impl Editor {
         if self.cursor == 0 {
             return EditorAction::None;
         }
+        self.push_undo_snapshot();
         // Walk back one UTF-8 character.
         let prev = self.prev_char_boundary(self.cursor);
         self.buffer.replace_range(prev..self.cursor, "");
@@ -261,6 +326,7 @@ impl Editor {
         if self.cursor >= self.buffer.len() {
             return EditorAction::None;
         }
+        self.push_undo_snapshot();
         let next = self.next_char_boundary(self.cursor);
         self.buffer.replace_range(self.cursor..next, "");
         self.reset_history_navigation();
@@ -317,6 +383,7 @@ impl Editor {
         if self.cursor == 0 {
             return EditorAction::None;
         }
+        self.push_undo_snapshot();
         let killed = self.buffer[..self.cursor].to_string();
         let accumulate = self.last_action == LastAction::Kill;
         self.buffer.replace_range(..self.cursor, "");
@@ -336,6 +403,7 @@ impl Editor {
         if self.cursor >= self.buffer.len() {
             return EditorAction::None;
         }
+        self.push_undo_snapshot();
         let killed = self.buffer[self.cursor..].to_string();
         let accumulate = self.last_action == LastAction::Kill;
         self.buffer.truncate(self.cursor);
@@ -352,6 +420,7 @@ impl Editor {
         let Some(text) = self.kill_ring.peek().map(str::to_string) else {
             return EditorAction::None;
         };
+        self.push_undo_snapshot();
         self.buffer.insert_str(self.cursor, &text);
         self.cursor += text.len();
         self.last_yank_len = text.len();
@@ -368,6 +437,7 @@ impl Editor {
         if self.last_action != LastAction::Yank || self.kill_ring.len() <= 1 {
             return EditorAction::None;
         }
+        self.push_undo_snapshot();
         // Remove the text the previous yank inserted; the cursor sits at
         // its end, so the range is `cursor - last_yank_len .. cursor`.
         let start = self.cursor.saturating_sub(self.last_yank_len);
@@ -392,6 +462,35 @@ impl Editor {
     /// Number of entries in the kill ring (oldest to newest).
     pub fn kill_ring_len(&self) -> usize {
         self.kill_ring.len()
+    }
+
+    /// Undo the most recent edit (`Ctrl+-`, `tui.editor.undo`).
+    ///
+    /// Pops the most recent snapshot and restores the buffer and cursor;
+    /// history browsing is exited and the kill / yank / typing chain is
+    /// broken. No-op when the stack is empty.
+    pub fn undo(&mut self) -> EditorAction {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return EditorAction::None;
+        };
+        self.buffer = snapshot.buffer;
+        self.cursor = snapshot.cursor.min(self.buffer.len());
+        self.last_action = LastAction::Other;
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Number of undo snapshots currently available to `Ctrl+-`.
+    pub fn undo_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Capture the current buffer and cursor for `Ctrl+-`.
+    fn push_undo_snapshot(&mut self) {
+        self.undo_stack.push(&EditorSnapshot {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+        });
     }
 
     /// Process a key event. Returns the action the [`App`](crate::App)
@@ -420,6 +519,11 @@ impl Editor {
                 KeyCode::Char('e') | KeyCode::Char('E') => return self.move_end(),
                 KeyCode::Char('k') | KeyCode::Char('K') => return self.kill_to_line_end(),
                 KeyCode::Char('y') | KeyCode::Char('Y') => return self.yank(),
+                // `tui.editor.undo` is bound to `ctrl+-`. Kitty-protocol
+                // terminals send the CSI-u sequence for `-`, which lands
+                // here as `Ctrl+-`; `Ctrl+_` is accepted too because the
+                // legacy byte for both is `0x1F`.
+                KeyCode::Char('-') | KeyCode::Char('_') => return self.undo(),
                 _ => return EditorAction::None,
             }
         }
@@ -862,5 +966,262 @@ mod tests {
         assert_eq!(ed.history_prev(), EditorAction::Changed);
         assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
         assert_eq!(ed.kill_ring_len(), 2);
+    }
+
+    // -- undo --------------------------------------------------------
+
+    fn ctrl_minus() -> Key {
+        Key::new(KeyCode::Char('-'), KeyModifiers::CONTROL)
+    }
+
+    /// Type a string one character at a time, the way a terminal
+    /// delivers keystrokes. This is what exercises the fish-style
+    /// coalescing rules (a bulk `insert_str` is atomic instead).
+    fn type_chars(ed: &mut Editor, text: &str) {
+        for c in text.chars() {
+            ed.insert_char(c);
+        }
+    }
+
+    #[test]
+    fn undo_is_noop_when_the_stack_is_empty() {
+        let mut ed = Editor::new();
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::None);
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn undo_coalesces_consecutive_word_chars_into_one_unit() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+        assert_eq!(ed.text(), "hello world");
+
+        // The space captured the state *before* itself, so one undo
+        // drops the space together with the word after it.
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::None);
+    }
+
+    #[test]
+    fn undo_removes_spaces_one_at_a_time() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello  ");
+        assert_eq!(ed.text(), "hello  ");
+
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello ");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn undo_restores_backspace_and_the_cursor() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello");
+        ed.backspace();
+        assert_eq!(ed.text(), "hell");
+
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello");
+        // The snapshot carries the cursor position from before the
+        // deletion.
+        assert_eq!(ed.cursor(), 5);
+    }
+
+    #[test]
+    fn undo_restores_a_forward_delete() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello");
+        ed.move_home();
+        ed.move_right();
+        ed.delete();
+        assert_eq!(ed.text(), "hllo");
+
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello");
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn undo_restores_ctrl_u() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+        ed.move_home();
+        for _ in 0..6 {
+            ed.move_right();
+        }
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.text(), "world");
+
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 6);
+    }
+
+    #[test]
+    fn undo_restores_ctrl_k() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+        ed.move_home();
+        for _ in 0..6 {
+            ed.move_right();
+        }
+        assert_eq!(ed.handle_key(ctrl('k')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello ");
+
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 6);
+    }
+
+    #[test]
+    fn undo_restores_a_yank() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello ");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello ");
+
+        // One undo removes the yanked text …
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+        // … and the next restores what the kill removed.
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello ");
+    }
+
+    #[test]
+    fn undo_restores_a_yank_pop() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "first");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        type_chars(&mut ed, "second");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "second");
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "first");
+
+        // yank-pop pushed its own snapshot, so one undo goes back to the
+        // text the first yank inserted.
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "second");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn undo_after_insert_str_is_atomic() {
+        let mut ed = Editor::new();
+        ed.insert_str("hello world");
+        ed.move_home();
+        for _ in 0..5 {
+            ed.move_right();
+        }
+        // A bracketed paste arrives as one string insert.
+        ed.insert_str("beep boop");
+        assert_eq!(ed.text(), "hellobeep boop world");
+
+        // A single undo restores the entire pre-insert state.
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 5);
+    }
+
+    #[test]
+    fn undo_restores_the_draft_after_history_browsing() {
+        let mut ed = Editor::new();
+        ed.push_history("older");
+        type_chars(&mut ed, "draft");
+
+        assert_eq!(ed.history_prev(), EditorAction::Changed);
+        assert_eq!(ed.text(), "older");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "draft");
+        assert_eq!(ed.cursor(), 5);
+    }
+
+    #[test]
+    fn repeated_history_navigation_pushes_a_single_snapshot() {
+        let mut ed = Editor::new();
+        ed.push_history("one");
+        ed.push_history("two");
+        let before = ed.undo_len();
+
+        assert_eq!(ed.history_prev(), EditorAction::Changed);
+        assert_eq!(ed.undo_len(), before + 1);
+        assert_eq!(ed.history_prev(), EditorAction::Changed);
+        assert_eq!(ed.undo_len(), before + 1);
+    }
+
+    #[test]
+    fn cursor_only_moves_do_not_push_a_snapshot() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "abc");
+        let before = ed.undo_len();
+        ed.move_home();
+        ed.move_end();
+        ed.move_left();
+        assert_eq!(ed.undo_len(), before);
+    }
+
+    #[test]
+    fn clear_drops_the_undo_stack() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "sent");
+        assert!(ed.undo_len() > 0);
+
+        ed.clear();
+        assert_eq!(ed.undo_len(), 0);
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::None);
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn set_text_pushes_a_snapshot_only_when_the_text_changes() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "abc");
+        let before = ed.undo_len();
+
+        ed.set_text("abc");
+        assert_eq!(ed.undo_len(), before);
+
+        ed.set_text("xyz");
+        assert_eq!(ed.undo_len(), before + 1);
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "abc");
+    }
+
+    #[test]
+    fn ctrl_underscore_is_an_undo_alias() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "ab");
+        let action = ed.handle_key(Key::new(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(action, EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn undo_is_utf8_safe() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "héllo 世界");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "héllo 世界");
+        assert_eq!(ed.cursor(), "héllo 世界".len());
+
+        ed.backspace();
+        assert_eq!(ed.text(), "héllo 世");
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "héllo 世界");
     }
 }
