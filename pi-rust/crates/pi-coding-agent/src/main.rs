@@ -6,6 +6,7 @@ use std::sync::Arc;
 use clap::Parser;
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
+use pi_ai::providers::google::builtin_gemini_models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
 use pi_coding_agent::file_processor::expand_prompt;
@@ -315,6 +316,9 @@ fn build_default_models() -> Models {
         ProviderId::new("anthropic"),
         vec![anthropic_sonnet, anthropic_opus, anthropic_haiku],
     );
+    // Gemini catalog (Stage 13). Sourced from the provider module's
+    // built-in catalog so `--model google/gemini-2.5-flash` resolves.
+    models.set_provider(ProviderId::new("google"), builtin_gemini_models());
     models
 }
 
@@ -350,4 +354,24 @@ fn default_model(models: &Models) -> Model {
             context_window: 8192,
             max_output_tokens: 1024,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Acceptance: `--model google/gemini-2.5-flash` must resolve to the
+    /// Gemini provider registered in `build_default_models`.
+    #[test]
+    fn resolves_google_gemini_flash_from_default_catalog() {
+        let models = build_default_models();
+        let model = resolve_model(&models, "google/gemini-2.5-flash")
+            .expect("google/gemini-2.5-flash resolves");
+        assert_eq!(model.provider, ProviderId::new("google"));
+        assert_eq!(model.api, Api::GoogleGenerativeAi);
+        assert_eq!(model.id, "gemini-2.5-flash");
+        // Bare id and the larger sibling resolve too.
+        assert!(resolve_model(&models, "gemini-2.5-pro").is_some());
+        assert!(resolve_model(&models, "google/gemini-2.5-pro").is_some());
+    }
 }
