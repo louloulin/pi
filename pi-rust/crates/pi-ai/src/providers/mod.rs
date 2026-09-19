@@ -2,4 +2,5 @@
 
 pub mod anthropic;
 pub mod faux;
+pub mod google;
 pub mod openai;

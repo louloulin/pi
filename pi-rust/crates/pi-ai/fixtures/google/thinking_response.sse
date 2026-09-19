@@ -1,0 +1,1 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Let me reason about this.","thought":true},{"text":"The answer is 4."}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7,"thoughtsTokenCount":10,"totalTokenCount":22}}
