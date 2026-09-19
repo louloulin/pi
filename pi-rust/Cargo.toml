@@ -1,5 +1,10 @@
 [workspace]
 resolver = "2"
+# `vendor/rquickjs-core` is a path dependency (see `[patch.crates-io]` below),
+# so Cargo would otherwise pick it up as a workspace member and run
+# `fmt`/`clippy`/tests over the third-party sources. Keep it out of the
+# workspace; it is still built as a normal dependency of `pi-extensions`.
+exclude = ["vendor/rquickjs-core"]
 members = [
     "crates/pi-ai",
     "crates/pi-agent-core",
@@ -97,6 +102,19 @@ regex = "1"
 notify = "6.1"
 dirs = "5.0"
 which = "6.0"
+
+# Dependency patches
+#
+# `rquickjs-core` 0.9.0 (latest 0.9.x) double-drops the mutex lock future in
+# `WithFuture::poll` (see `vendor/rquickjs-core/PATCH.md`), which randomly kills
+# `pi --rpc` with `free(): double free detected in tcache 2` / SIGSEGV whenever
+# the QuickJS runtime mutex is contended (i.e. whenever an extension host
+# `async_with!` call races the runtime drive task). Upstream fixed it in 0.12.0
+# but 0.12+ requires `AsyncFnOnce` (MSRV 1.85) and rewrites the `async_with!`
+# API; this workspace is `rust-version = "1.75"`. We therefore keep 0.9.0 and
+# vendor a copy carrying the upstream fix verbatim.
+[patch.crates-io]
+rquickjs-core = { path = "vendor/rquickjs-core" }
 
 # Shared `[profile.release]` overrides for WASM builds — apply the
 # size-minimisation recipe from the Stage 6 plan to any wasm build done
