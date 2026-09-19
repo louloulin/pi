@@ -2839,3 +2839,83 @@ $ cargo clippy --workspace --all-targets -- -D warnings      # 0 warnings
 3. `wasm32-unknown-unknown` 目标在当前环境未安装（`rustup target list
    --installed` 为空），因此本轮只做了 `cfg` 门控的静态检查，未实跑 wasm
    build。
+
+## LUM-1072 round — Stage 17 收口（插件生态）：JS 扩展真正接入 CLI
+
+本轮（autopilot，2026-09-19 05:20Z）盘点 frontier：Stage 18（LUM-1067
+`pi-chord services`）仍在跑，Stage 19（LUM-1068 / LUM-1069）保持 backlog，
+所以不派发任何新任务，改为直接收掉 frontier 上「已有能力接不进去」的缺口 ——
+也就是 LUM-1064 章节里列为第 3 条 known gap 的**扩展生态死代码**。
+
+问题本身：`pi-extensions`（QuickJS host + shim + bridge）、
+`pi-coding-agent/src/extensions/js_loader.rs` 以及对应的测试在前几个 Stage
+全都落地了，但 `main.rs` 只解析 `-e/--extension` 从不使用，
+`--extensions-dir` 只在文档里出现、CLI 里根本没有定义。结果是用户放在
+`.pi/extensions/*.js` 里的插件对 `pi` 二进制**完全无效**，而 issue 的目标正是
+「兼容 pi 的插件生态」。
+
+实现提交：`bc60a8f1c`（`feat(pi-coding-agent): Stage 17 — wire the JS extension
+host into the CLI (LUM-1072)`）。
+
+### 本轮改动
+
+| 文件 | 改动 |
+|------|------|
+| `crates/pi-coding-agent/src/cli.rs` | `-e/--extension` 改为可重复的 `Vec<PathBuf>`（文件或目录）；新增 `--extensions-dir <DIR>`（可重复）与 `--no-extensions`（与两者互斥） |
+| `crates/pi-coding-agent/src/extensions/wiring.rs`（新增） | `ExtensionLoadOptions` / `ExtensionLoadOutcome` + `load()`：解析搜索路径 → 在**模式自己的 tokio runtime** 上建 host、加载扩展、派发 `session_start` → 组装 executor；`StderrUiHandler` 把 `ctx.ui.notify` 转发到 stderr；`explicit_paths()` 合并 `-e` 与 `--extensions-dir` |
+| `crates/pi-coding-agent/src/extensions/js_loader.rs` | 新增 `ExtensionLoadRequest` + `load_configured_extensions()`（显式路径优先、按 canonicalize 去重）；抽出 `load_candidates()` / `expand_explicit()`；`load_extensions()` 行为不变 |
+| `crates/pi-coding-agent/src/tool_executor.rs` | 新增 `ExtensionToolExecutor`：`definitions()` = 内置 7 个 + 扩展注册（重名时内置优先），`execute()` 按名字把调用路由到 `BuiltinToolExecutor` 或 `JsExtensionHost::execute_tool`，把 `ToolExecutionOutcome` 映射成 `pi_protocol::ToolResult` |
+| `crates/pi-coding-agent/src/main.rs` | 三个模式各自「先建 runtime、再加载扩展、再跑模式」（host 的 promise driver / UI worker 必须和 agent loop 同 runtime）；加载失败只在 stderr 告警、退回内置工具集，绝不阻断启动 |
+| `crates/pi-coding-agent/tests/cli_extensions.rs`（新增） | 6 个端到端测试（见下） |
+| `crates/pi-extensions/docs/EXTENSIONS.md` | 补「CLI wiring」小节：三个 flag、内置工具重名优先规则、同 runtime 约束 |
+
+`ExtensionToolExecutor` 的关键语义：扩展工具返回的 content block 若不符合
+`pi_protocol::Content` 线格式，会退化成 JSON 文本而不是被丢掉；host 级失败
+（超时 / JS 异常 / 缺 execute）作为 `is_error: true` 的**工具结果**回给模型，
+而不是让 agent loop 直接失败 —— 与内置工具的失败语义一致。
+
+### 验证
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings
+$ cargo test   --workspace                                  # 486 passed / 0 failed
+$ cargo clippy --workspace --all-targets -- -D warnings      # 0 warnings
+$ ./target/debug/pi --help                                   # -e / --extensions-dir / --no-extensions 均可见
+```
+
+486 vs LUM-1071 记录的 475：`+5` 是本轮 `wiring.rs` 单测（显式路径合并、
+`--no-extensions` 只留内置、`-e` 加载、内置重名优先、坏扩展不致命），
+`+6` 是 `tests/cli_extensions.rs`。
+
+`cli_extensions.rs` 全部走真实二进制 + loopback SSE 假 provider，每条断言都
+落在「HTTP 请求体」或「事件流」上：
+
+1. `.pi/extensions/*.js` 自动发现 → 第一个请求的 `tools` 里出现 `ext_echo`，
+   第二个请求里出现扩展 JS 里拼出来的 `ext-echoed:hello`（字符串在 JS 中拼接，
+   排除 description 造成的假阳性）。
+2. `-e <file>` 能加载项目目录之外的扩展。
+3. `--extensions-dir <dir>` 能整目录加载。
+4. `--no-extensions` 时 `ext_echo` 不在 `tools` 里、`bash` 仍在；模型调用未知
+   工具时回 `unknown tool` 错误结果且进程仍退出 0。
+5. `--no-extensions` 与 `-e` 同时给 → clap 报 `cannot be used with`，退出码 2。
+6. 扩展 `execute` 抛异常 → 异常文本回给模型，事件流是 `is_error: true`。
+
+### 并发与派发
+
+`multica daemon status` 报 `active_task_count = 3`（卡死的 LUM-1066 +
+LUM-1067 + 本 run），**3 槽已满**，因此本轮不新建任何子任务，直接自己实现。
+Stage 19（LUM-1068 / LUM-1069）的前置是 Stage 18，继续 park，等 LUM-1067 合入
+后再按 barrier 放行。
+
+### 已知限制
+
+1. 交互式 UI 仍未接：`has_ui` 在 `tui` 模式传 `true`，但 `StderrUiHandler` 对
+   `confirm/input/select` 一律返回拒绝/取消（不阻塞 TUI），只有 `notify` 会打印
+   到 stderr。真正的交互式确认需要 TUI 侧的一个 prompt 集成，属于后续工作。
+2. 只接了 **tool 注册**。`registerCommand` / `appendEntry` / `sendMessage` /
+   `setSessionName` 仍只落在 host 的 `RegistrationLog` 里，没有暴露到 TUI 命令面板、
+   session 存储或 RPC 事件。
+3. `.wasm` 扩展仍然只是搜索阶段被枚举后跳过（`js_kind_for` 只认 js/mjs/cjs/ts），
+   WASM 扩展宿主尚未实现。
+4. `wasm32-unknown-unknown` 目标在当前环境未安装，本轮与 LUM-1071 一样只做了
+   native 验证。
