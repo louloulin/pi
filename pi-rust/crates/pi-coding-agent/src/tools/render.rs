@@ -1,11 +1,12 @@
-//! Tool result renderers: presentation for `read` / `write`.
+//! Tool result renderers: presentation for `read` / `write` / `bash` /
+//! `find` / `grep` / `ls`.
 //!
-//! Rust-side first cut of the upstream `core/tools/renderers/` directory.
+//! Rust-side port of the upstream `core/tools/renderers/` directory.
 //! Upstream splits each tool's presentation (`renderCall` / `renderResult`)
 //! from its execution path so a process that only displays tool output does
 //! not have to load the execution code or its parameter schema. This module
-//! mirrors that split for the two tools whose output benefits from syntax
-//! highlighting:
+//! mirrors that split for the six tools whose output benefits from a
+//! presentation layer:
 //!
 //! * [`ReadRenderer`] renders a compact `read <path>` call summary and the
 //!   result body with a 10-line fold, delegating highlighting to
@@ -16,6 +17,14 @@
 //!   [`WriteHighlightCache`] — an upstream-faithful incremental highlighter
 //!   that highlights only the appended delta plus a bounded prefix, never the
 //!   whole file again.
+//! * [`BashRenderer`] renders `bash <command> (timeout Ns)`, keeps the *tail*
+//!   of the captured output when collapsed, folds the tool's own truncation
+//!   footer into a single warning line, and reports the wall-clock duration
+//!   from the tool's `details.elapsed_ms`.
+//! * [`FindRenderer`] / [`GrepRenderer`] / [`LsRenderer`] render the search and
+//!   listing tools: a `find <pattern> in <path>` / `grep /<pattern>/ in <path>`
+//!   / `ls <path>` call summary and a head-folded result body with the hit-limit
+//!   and truncation warnings upstream shows.
 //!
 //! Renderers emit [`StyledLine`]s (theme slots, no ANSI). The caller decides
 //! how to paint them: [`render_lines_ansi`] paints for a text terminal,
@@ -32,6 +41,9 @@
 //! wording but drop its trailing keybinding hint, because this crate has no
 //! keybinding-hint component yet; `write`'s `(N lines, M bytes)` summary has no
 //! upstream counterpart and is added here because the caller asked for it.
+//! The `bash` / `find` / `grep` / `ls` renderers likewise drop that trailing
+//! keybinding hint and, unlike upstream's component tree, never emit a leading
+//! blank line before a result body or a warning block.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -166,12 +178,15 @@ pub trait ToolRenderer: Send {
 }
 
 /// Renderer for a built-in tool name, or `None` when the tool has no
-/// presentation layer (bash / edit / find / grep / ls still render through
-/// their own paths).
+/// presentation layer (`edit` still renders through its own path).
 pub fn renderer_for(name: &str) -> Option<Box<dyn ToolRenderer>> {
     match name {
         "read" => Some(Box::new(ReadRenderer::default())),
         "write" => Some(Box::new(WriteRenderer::default())),
+        "bash" => Some(Box::new(BashRenderer)),
+        "find" => Some(Box::new(FindRenderer)),
+        "grep" => Some(Box::new(GrepRenderer)),
+        "ls" => Some(Box::new(LsRenderer)),
         _ => None,
     }
 }
@@ -638,6 +653,462 @@ impl std::fmt::Debug for WriteHighlightCache {
 }
 
 // ---------------------------------------------------------------------------
+// bash
+// ---------------------------------------------------------------------------
+
+/// Number of trailing output lines a collapsed `bash` result shows
+/// (upstream `BASH_PREVIEW_LINES`).
+///
+/// Unlike [`FIND_FOLD_LINES`] / [`GREP_FOLD_LINES`] / [`LS_FOLD_LINES`], which
+/// keep the *head* of the listing, a shell command's interesting output is at
+/// the end, so the collapsed preview keeps the tail and reports how many
+/// earlier lines were skipped.
+pub const BASH_PREVIEW_LINES: usize = 5;
+
+/// Presentation for the `bash` tool.
+///
+/// Deviation from upstream: upstream grows the elapsed-time label from a
+/// wall-clock timer kept in the render context (`startedAt` / `endedAt`,
+/// updated by a 1s interval while the call is partial). The Rust port renders a
+/// finished result only and takes the duration from the tool's own
+/// `details.elapsed_ms`, so it needs neither a timer nor an invalidation hook.
+#[derive(Debug, Default)]
+pub struct BashRenderer;
+
+impl ToolRenderer for BashRenderer {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn render_call(
+        &mut self,
+        args: &serde_json::Value,
+        _ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let command = nullable_str_arg(args, "command");
+        let timeout = args
+            .get("timeout")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|timeout| *timeout != 0);
+
+        let mut line = tool_title("bash");
+        line.push(StyledSpan::new(" ", SpanStyle::PLAIN));
+        match command.as_deref() {
+            None => line.push(StyledSpan::new(
+                "[invalid arg]",
+                SpanStyle::fg(ThemeColor::Error),
+            )),
+            Some("") => line.push(StyledSpan::new(
+                "...",
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            )),
+            Some(command) => line.push(StyledSpan::new(
+                command.to_string(),
+                SpanStyle::fg(ThemeColor::ToolTitle),
+            )),
+        }
+        if let Some(timeout) = timeout {
+            line.push(StyledSpan::new(
+                format!(" (timeout {}s)", timeout),
+                SpanStyle::fg(ThemeColor::Muted),
+            ));
+        }
+        vec![line]
+    }
+
+    fn render_result(
+        &mut self,
+        result: &ToolOutput,
+        options: &ToolRenderOptions,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let mut output = get_text_output(result, ctx.show_images).trim().to_string();
+        let truncation = truncation_from_details(result.details.as_ref(), "truncation");
+        let full_output_path = result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("full_output_path"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+
+        // The tool already appended its own `[Showing lines … Full output: …]`
+        // footer to the captured text; drop it here so the renderer's own
+        // warning block is the only one on screen (upstream does the same).
+        if let (Some(path), Some(truncation)) = (&full_output_path, &truncation) {
+            if truncation.truncated && output.ends_with(']') {
+                if let Some(footer_start) = output.rfind("\n\n[") {
+                    if output[footer_start..].contains(path) {
+                        output = output[..footer_start].trim_end().to_string();
+                    }
+                }
+            }
+        }
+
+        let mut lines: Vec<StyledLine> = Vec::new();
+        if !output.is_empty() {
+            let rendered = plain_tool_output_lines(&output);
+            if options.expanded {
+                lines.extend(rendered);
+            } else {
+                let total = rendered.len();
+                let start = total.saturating_sub(BASH_PREVIEW_LINES);
+                if start > 0 {
+                    lines.push(notice_line(format!(
+                        "... ({} earlier lines, to expand)",
+                        start
+                    )));
+                }
+                lines.extend(rendered.into_iter().skip(start));
+            }
+        }
+
+        if let Some(truncation) = &truncation {
+            let mut warnings: Vec<String> = Vec::new();
+            if let Some(path) = &full_output_path {
+                warnings.push(format!("Full output: {path}"));
+            }
+            if truncation.truncated {
+                warnings.push(match truncation.truncated_by {
+                    Some(TruncatedBy::Lines) => format!(
+                        "Truncated: showing {} of {} lines",
+                        truncation.output_lines, truncation.total_lines
+                    ),
+                    _ => format!(
+                        "Truncated: {} lines shown ({} limit)",
+                        truncation.output_lines,
+                        format_size(truncation.max_bytes)
+                    ),
+                });
+            }
+            if !warnings.is_empty() {
+                lines.push(warning_line(format!("[{}]", warnings.join(". "))));
+            }
+        } else if let Some(path) = &full_output_path {
+            lines.push(warning_line(format!("[Full output: {path}]")));
+        }
+
+        if let Some(elapsed_ms) = result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("elapsed_ms"))
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(notice_line(format!(
+                "Took {:.1}s",
+                elapsed_ms as f64 / 1000.0
+            )));
+        }
+        lines
+    }
+}
+
+// ---------------------------------------------------------------------------
+// find
+// ---------------------------------------------------------------------------
+
+/// Number of result lines a collapsed `find` listing shows (upstream `20`).
+pub const FIND_FOLD_LINES: usize = 20;
+
+/// Presentation for the `find` tool.
+#[derive(Debug, Default)]
+pub struct FindRenderer;
+
+impl ToolRenderer for FindRenderer {
+    fn name(&self) -> &str {
+        "find"
+    }
+
+    fn render_call(
+        &mut self,
+        args: &serde_json::Value,
+        _ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let pattern = nullable_str_arg(args, "pattern");
+        let raw_path = nullable_str_arg(args, "path");
+        let limit = args.get("limit").and_then(serde_json::Value::as_i64);
+
+        let mut line = tool_title("find");
+        line.push(StyledSpan::new(" ", SpanStyle::PLAIN));
+        match pattern.as_deref() {
+            None => line.push(StyledSpan::new(
+                "[invalid arg]",
+                SpanStyle::fg(ThemeColor::Error),
+            )),
+            Some(pattern) => line.push(StyledSpan::new(
+                pattern.to_string(),
+                SpanStyle::fg(ThemeColor::Accent),
+            )),
+        }
+        line.push(StyledSpan::new(
+            " in ",
+            SpanStyle::fg(ThemeColor::ToolOutput),
+        ));
+        line.push(match raw_path.as_deref() {
+            None => StyledSpan::new("[invalid arg]", SpanStyle::fg(ThemeColor::Error)),
+            Some(raw_path) => {
+                let path = if raw_path.is_empty() { "." } else { raw_path };
+                StyledSpan::new(shorten_home(path), SpanStyle::fg(ThemeColor::ToolOutput))
+            }
+        });
+        if let Some(limit) = limit {
+            line.push(StyledSpan::new(
+                format!(" (limit {})", limit),
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            ));
+        }
+        vec![line]
+    }
+
+    fn render_result(
+        &mut self,
+        result: &ToolOutput,
+        options: &ToolRenderOptions,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let output = get_text_output(result, ctx.show_images).trim().to_string();
+        let mut lines = folded_output_lines(&output, options.expanded, FIND_FOLD_LINES);
+
+        let result_limit = count_from_details(result.details.as_ref(), "resultLimitReached");
+        let truncation = truncation_from_details(result.details.as_ref(), "truncation");
+        if let Some(warnings) = limit_warnings(
+            result_limit.map(|n| format!("{n} results limit")),
+            truncation.as_ref(),
+            false,
+        ) {
+            lines.push(warning_line(format!("[Truncated: {warnings}]")));
+        }
+        lines
+    }
+}
+
+// ---------------------------------------------------------------------------
+// grep
+// ---------------------------------------------------------------------------
+
+/// Number of match lines a collapsed `grep` listing shows (upstream `15`).
+pub const GREP_FOLD_LINES: usize = 15;
+
+/// Presentation for the `grep` tool.
+#[derive(Debug, Default)]
+pub struct GrepRenderer;
+
+impl ToolRenderer for GrepRenderer {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn render_call(
+        &mut self,
+        args: &serde_json::Value,
+        _ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let pattern = nullable_str_arg(args, "pattern");
+        let raw_path = nullable_str_arg(args, "path");
+        // Upstream names this argument `glob`; this port's `grep` tool spells it
+        // `include`, so accept either spelling.
+        let glob = [
+            nullable_str_arg(args, "include"),
+            nullable_str_arg(args, "glob"),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|glob| !glob.is_empty());
+        let limit = args.get("limit").and_then(serde_json::Value::as_i64);
+
+        let mut line = tool_title("grep");
+        line.push(StyledSpan::new(" ", SpanStyle::PLAIN));
+        match pattern.as_deref() {
+            None => line.push(StyledSpan::new(
+                "[invalid arg]",
+                SpanStyle::fg(ThemeColor::Error),
+            )),
+            Some(pattern) => line.push(StyledSpan::new(
+                format!("/{}/", pattern),
+                SpanStyle::fg(ThemeColor::Accent),
+            )),
+        }
+        line.push(StyledSpan::new(
+            " in ",
+            SpanStyle::fg(ThemeColor::ToolOutput),
+        ));
+        line.push(match raw_path.as_deref() {
+            None => StyledSpan::new("[invalid arg]", SpanStyle::fg(ThemeColor::Error)),
+            Some(raw_path) => {
+                let path = if raw_path.is_empty() { "." } else { raw_path };
+                StyledSpan::new(shorten_home(path), SpanStyle::fg(ThemeColor::ToolOutput))
+            }
+        });
+        if let Some(glob) = glob {
+            line.push(StyledSpan::new(
+                format!(" ({})", glob),
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            ));
+        }
+        if let Some(limit) = limit {
+            line.push(StyledSpan::new(
+                format!(" limit {}", limit),
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            ));
+        }
+        vec![line]
+    }
+
+    fn render_result(
+        &mut self,
+        result: &ToolOutput,
+        options: &ToolRenderOptions,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let output = get_text_output(result, ctx.show_images).trim().to_string();
+        let mut lines = folded_output_lines(&output, options.expanded, GREP_FOLD_LINES);
+
+        let match_limit = count_from_details(result.details.as_ref(), "matchLimitReached");
+        let truncation = truncation_from_details(result.details.as_ref(), "truncation");
+        let lines_truncated = result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("linesTruncated"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if let Some(warnings) = limit_warnings(
+            match_limit.map(|n| format!("{n} matches limit")),
+            truncation.as_ref(),
+            lines_truncated,
+        ) {
+            lines.push(warning_line(format!("[Truncated: {warnings}]")));
+        }
+        lines
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ls
+// ---------------------------------------------------------------------------
+
+/// Number of entry lines a collapsed `ls` listing shows (upstream `20`).
+pub const LS_FOLD_LINES: usize = 20;
+
+/// Presentation for the `ls` tool.
+#[derive(Debug, Default)]
+pub struct LsRenderer;
+
+impl ToolRenderer for LsRenderer {
+    fn name(&self) -> &str {
+        "ls"
+    }
+
+    fn render_call(
+        &mut self,
+        args: &serde_json::Value,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let path = nullable_str_arg(args, "path");
+        let limit = args.get("limit").and_then(serde_json::Value::as_i64);
+
+        let mut line = tool_title("ls");
+        line.push(StyledSpan::new(" ", SpanStyle::PLAIN));
+        line.extend(render_tool_path_with_fallback(
+            path.as_deref(),
+            ctx,
+            Some("."),
+        ));
+        if let Some(limit) = limit {
+            line.push(StyledSpan::new(
+                format!(" (limit {})", limit),
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            ));
+        }
+        vec![line]
+    }
+
+    fn render_result(
+        &mut self,
+        result: &ToolOutput,
+        options: &ToolRenderOptions,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        let output = get_text_output(result, ctx.show_images).trim().to_string();
+        let mut lines = folded_output_lines(&output, options.expanded, LS_FOLD_LINES);
+
+        // Upstream's `ls` caps entries and records `entryLimitReached`; the Rust
+        // tool has no entry cap yet, so this branch only fires if one is added.
+        let entry_limit = count_from_details(result.details.as_ref(), "entryLimitReached");
+        let truncation = truncation_from_details(result.details.as_ref(), "truncation");
+        if let Some(warnings) = limit_warnings(
+            entry_limit.map(|n| format!("{n} entries limit")),
+            truncation.as_ref(),
+            false,
+        ) {
+            lines.push(warning_line(format!("[Truncated: {warnings}]")));
+        }
+        lines
+    }
+}
+
+/// Head-fold a tool's text output: the first `max_lines` lines plus a muted
+/// `... (N more lines, to expand)` hint, or every line when `expanded`.
+fn folded_output_lines(output: &str, expanded: bool, max_lines: usize) -> Vec<StyledLine> {
+    if output.is_empty() {
+        return Vec::new();
+    }
+    let rendered = plain_tool_output_lines(output);
+    let total = rendered.len();
+    let keep = if expanded { total } else { max_lines };
+    let mut lines: Vec<StyledLine> = rendered.into_iter().take(keep).collect();
+    if total > keep {
+        lines.push(notice_line(format!(
+            "... ({} more lines, to expand)",
+            total - keep
+        )));
+    }
+    lines
+}
+
+/// Build the `[Truncated: …]` warning body from a tool's hit-limit and
+/// truncation details, or `None` when nothing was cut.
+fn limit_warnings(
+    hit_limit: Option<String>,
+    truncation: Option<&TruncationResult>,
+    lines_truncated: bool,
+) -> Option<String> {
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some(hit_limit) = hit_limit {
+        warnings.push(hit_limit);
+    }
+    if let Some(truncation) = truncation.filter(|truncation| truncation.truncated) {
+        warnings.push(format!("{} limit", format_size(truncation.max_bytes)));
+    }
+    if lines_truncated {
+        warnings.push("some lines truncated".to_string());
+    }
+    (!warnings.is_empty()).then(|| warnings.join(", "))
+}
+
+/// Decode a truncation payload nested under `key` in a tool's `details`.
+fn truncation_from_details(
+    details: Option<&serde_json::Value>,
+    key: &str,
+) -> Option<TruncationResult> {
+    let value = details?.get(key)?.clone();
+    serde_json::from_value(value).ok()
+}
+
+/// A numeric `details` field (hit limits), tolerating a `null` value.
+fn count_from_details(details: Option<&serde_json::Value>, key: &str) -> Option<i64> {
+    details?.get(key)?.as_i64()
+}
+
+/// Upstream `str()`: a string argument, `Some("")` for a missing / `null`
+/// one, and `None` for any other JSON type (the `[invalid arg]` case).
+fn nullable_str_arg(args: &serde_json::Value, key: &str) -> Option<String> {
+    match args.get(key) {
+        None | Some(serde_json::Value::Null) => Some(String::new()),
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(_) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session driver
 // ---------------------------------------------------------------------------
 
@@ -831,20 +1302,34 @@ fn tool_title(name: &str) -> StyledLine {
 /// Render a tool's target path: `cwd`-relative when possible, `~`-shortened
 /// otherwise, and an error marker for a missing/non-string argument.
 fn render_tool_path(path: Option<&str>, ctx: &ToolRenderContext) -> StyledLine {
+    render_tool_path_with_fallback(path, ctx, None)
+}
+
+/// [`render_tool_path`] with an upstream-style `emptyFallback` (the `ls` tool
+/// shows `.` for an empty path where `read` / `write` show `...`).
+fn render_tool_path_with_fallback(
+    path: Option<&str>,
+    ctx: &ToolRenderContext,
+    empty_fallback: Option<&str>,
+) -> StyledLine {
     let Some(path) = path else {
         return vec![StyledSpan::new(
             "[invalid arg]",
             SpanStyle::fg(ThemeColor::Error),
         )];
     };
-    if path.is_empty() {
-        return vec![StyledSpan::new(
-            "...",
-            SpanStyle::fg(ThemeColor::ToolOutput),
-        )];
-    }
+    let value = match (path.is_empty(), empty_fallback) {
+        (false, _) => path,
+        (true, Some(fallback)) => fallback,
+        (true, None) => {
+            return vec![StyledSpan::new(
+                "...",
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            )]
+        }
+    };
     vec![StyledSpan::new(
-        display_path(path, &ctx.cwd),
+        display_path(value, &ctx.cwd),
         SpanStyle::fg(ThemeColor::Accent),
     )]
 }
@@ -1230,14 +1715,15 @@ mod tests {
     #[test]
     fn session_ignores_tools_without_renderers() {
         let mut session = ToolRenderSession::new("/work");
+        // `edit` has no presentation layer of its own yet.
         let call = ToolCall {
-            id: "call-bash".into(),
-            name: "bash".into(),
-            arguments: json!({ "command": "ls" }),
+            id: "call-edit".into(),
+            name: "edit".into(),
+            arguments: json!({ "path": "main.rs", "old_string": "a", "new_string": "b" }),
         };
         assert!(session.call(&call, false).is_empty());
         let result = ToolResult {
-            tool_call_id: "call-bash".into(),
+            tool_call_id: "call-edit".into(),
             content: Box::new(Content::text("ok")),
             is_error: false,
             details: None,
@@ -1268,6 +1754,10 @@ mod tests {
             renderer_for("read").map(|r| r.name().to_string()),
             Some("read".into())
         );
-        assert!(renderer_for("bash").is_none());
+        assert_eq!(
+            renderer_for("bash").map(|r| r.name().to_string()),
+            Some("bash".into())
+        );
+        assert!(renderer_for("edit").is_none());
     }
 }

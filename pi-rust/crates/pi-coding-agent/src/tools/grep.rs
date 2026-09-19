@@ -288,6 +288,9 @@ impl AgentTool for GrepTool {
                 "Some lines truncated to {} chars. Use read tool to see full lines",
                 GREP_MAX_LINE_LENGTH
             ));
+            // Mirror upstream's `details.linesTruncated` so the presentation
+            // layer can warn about it without re-deriving the notice text.
+            details["linesTruncated"] = serde_json::json!(true);
         }
         if !notices.is_empty() {
             text.push_str("\n[");
