@@ -50,6 +50,39 @@
 //!   `setInterval`; on a stationary pointer, redraws are what keep the
 //!   viewport moving. [`App::advance_selection_autoscroll`] is public so
 //!   tests can step the beat deterministically.
+//!
+//! # Transcript search
+//!
+//! `Ctrl+Shift+F` opens an in-transcript search overlay — the port of
+//! upstream's `AltScreenSearch*` (`packages/tui/src/alt-screen-search.ts`,
+//! wired up in `packages/tui/src/tui-alt-screen.ts:496-660,705-720`). The bar
+//! is anchored to the top-right of the message viewport, the query is matched
+//! against the **rendered** transcript, the selection starts at the first
+//! match at or after the viewport's top row, `Enter` / `Ctrl+G` and
+//! `Shift+Enter` / `Ctrl+Shift+G` step through matches with wraparound and
+//! scroll them into view, hits are highlighted in place (current = bold +
+//! reversed, others = underlined), and the bar answers mouse hover / clicks
+//! inside its own rectangle. [`crate::search`] holds the query bar, the corpus
+//! and the geometry; the App owns the state machine.
+//!
+//! Deliberate deviations, documented here rather than silently omitted:
+//!
+//! * **Columns are characters, not display cells.** [`crate::search`] returns
+//!   character-offset spans, matching the selection path above, so wide glyphs
+//!   are not widened to the display cell.
+//! * **Case folding is per-character `to_lowercase()`**, not the Unicode case
+//!   folding of upstream's `regex` `iu` flags: `pi-tui` has no `regex`
+//!   dependency and the query is matched literally.
+//! * **The corpus is already plain text.** Upstream strips terminal sequences
+//!   while building it; the lines this port indexes come from
+//!   [`MessageView::visible_lines`] and [`plain_text`], which are sequence-free
+//!   by construction.
+//! * **No cursor cell.** The bar keeps the query cursor offset (editing is
+//!   fully supported) but does not paint a reversed cell for it, and pads its
+//!   own borders, so every rendered bar line is exactly as wide as the bar.
+//! * **The overlay is anchored to the message viewport**, not the whole
+//!   terminal: the App does not own the status / prompt rows. It is painted
+//!   *last*, so an extension dialog cannot cover it.
 
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -74,13 +107,18 @@ use crate::editor::EditorAction;
 use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
+use crate::keybindings::get_keybindings;
 use crate::message::{MessageItem, MessageView};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
+use crate::search::{
+    apply_query_key, render_search_bar, search_bar_rect, SearchBar, SearchIndex, SearchMatch,
+    SearchSelectionMode,
+};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
-use crate::styled::write_styled_line;
+use crate::styled::{plain_text, write_styled_line};
 use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeError};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
@@ -354,6 +392,63 @@ fn selection_end_column(end: &SelectionPoint, len: usize) -> usize {
     }
 }
 
+/// Open transcript search state (upstream `ActiveSearch`,
+/// `packages/tui/src/tui-alt-screen.ts:500-511`).
+///
+/// The [`SearchIndex`] caches the corpus + matches, [`SearchBar`] owns the
+/// query and its caret, and the remaining fields are the selection contract
+/// `refreshSearch` implements: which match is selected, the key used to keep
+/// that match across a re-index, the row the next "first match at or after"
+/// lookup is anchored to, and how the *next* refresh should recompute the
+/// selection.
+#[derive(Debug)]
+struct SearchState {
+    /// Cached corpus + matches for the rendered transcript.
+    index: SearchIndex,
+    /// The query bar and its result counter.
+    bar: SearchBar,
+    /// Matches from the last refresh.
+    matches: Vec<SearchMatch>,
+    /// Index into [`SearchState::matches`] of the selected match.
+    selected_index: Option<usize>,
+    /// [`SearchMatch::key`] of the selected match, so a re-index keeps it.
+    selected_key: Option<String>,
+    /// Row the `Query` selection mode anchors to.
+    anchor_row: usize,
+    /// How the next refresh recomputes the selection.
+    selection_mode: SearchSelectionMode,
+}
+
+impl SearchState {
+    /// A fresh, empty search anchored to `anchor_row`.
+    fn new(anchor_row: usize) -> Self {
+        Self {
+            index: SearchIndex::new(),
+            bar: SearchBar::new(),
+            matches: Vec::new(),
+            selected_index: None,
+            selected_key: None,
+            anchor_row,
+            selection_mode: SearchSelectionMode::Query,
+        }
+    }
+}
+
+/// Result of routing a key to the open search overlay.
+///
+/// The overlay owns the keyboard while it is open, *except* for the viewport
+/// scroll chords and the process-global Ctrl+C / Ctrl+L: upstream lets those
+/// through because `shouldDeferViewportInputToOverlay` is false once the search
+/// overlay itself holds focus
+/// (`packages/tui/src/tui-alt-screen.ts:644-645,1806-1811`).
+#[derive(Debug, Clone)]
+enum SearchKeyOutcome {
+    /// The overlay consumed the key.
+    Handled(StepOutcome),
+    /// `App::step_key`'s global handling must still see the key.
+    PassThrough,
+}
+
 /// Outcome returned by [`App::step`] after each key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -403,6 +498,12 @@ pub struct RenderSnapshot {
     pub dialog_title: Option<String>,
     /// Rendered dialog lines (when open).
     pub dialog_lines: Vec<String>,
+    /// Whether the transcript search overlay is visible.
+    pub search_open: bool,
+    /// Current search query (empty while the overlay is closed).
+    pub search_query: String,
+    /// Rendered search-bar lines (when open).
+    pub search_lines: Vec<String>,
     /// Status bar snapshot.
     pub status: StatusData,
 }
@@ -488,6 +589,9 @@ pub struct App {
     /// True between a left-button press and its release, so drags extend
     /// the selection without requiring the terminal to report the button.
     selection_dragging: bool,
+    /// Open transcript search overlay, if any (upstream `activeSearch`,
+    /// `packages/tui/src/tui-alt-screen.ts:496-521`).
+    search: Option<SearchState>,
     /// Last press, kept for double / triple click detection (upstream's
     /// `lastClick`, `packages/tui/src/tui-alt-screen.ts:114-121`).
     last_click: Option<ClickTarget>,
@@ -546,6 +650,7 @@ impl App {
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             selection: None,
+            search: None,
             modal_mouse_press: None,
             selection_dragging: false,
             last_click: None,
@@ -1090,6 +1195,27 @@ impl App {
         if self.settings.is_some() {
             return self.step_settings(key);
         }
+        // The transcript search overlay owns the keyboard while it is open,
+        // except for the chords the viewport keeps for itself
+        // (`shouldDeferViewportInputToOverlay`,
+        // `packages/tui/src/tui-alt-screen.ts:644-645`).
+        if self.search.is_some() {
+            match self.step_search_key(key) {
+                SearchKeyOutcome::Handled(outcome) => return outcome,
+                SearchKeyOutcome::PassThrough => {}
+            }
+        }
+        // `tui.altScreen.search` opens the overlay; while it is open the
+        // overlay itself consumes the chord above (upstream checks the chord
+        // before it checks whether the overlay holds focus,
+        // `packages/tui/src/tui-alt-screen.ts:705-708`).
+        if get_keybindings().matches(&InputEvent::Key(key), "tui.altScreen.search") {
+            return if self.open_search() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
         // Global keys first.
         match key {
             // Esc cancels the in-flight turn, otherwise dismisses
@@ -1220,6 +1346,436 @@ impl App {
         self.exit_requested = true;
     }
 
+    // -----------------------------------------------------------------
+    // Transcript search (upstream `AltScreenSearch*`,
+    // `packages/tui/src/tui-alt-screen.ts:496-660`)
+    // -----------------------------------------------------------------
+
+    /// Whether the search overlay is open.
+    pub fn search_open(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The current search query, or `None` while the overlay is closed.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|state| state.bar.query())
+    }
+
+    /// The matches from the last refresh (empty while closed).
+    pub fn search_matches(&self) -> &[SearchMatch] {
+        self.search
+            .as_ref()
+            .map(|state| state.matches.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Index of the selected match, or `None`.
+    pub fn search_match_index(&self) -> Option<usize> {
+        self.search.as_ref().and_then(|state| state.selected_index)
+    }
+
+    /// Borrow the query bar (for tests).
+    pub fn search_bar(&self) -> Option<&SearchBar> {
+        self.search.as_ref().map(|state| &state.bar)
+    }
+
+    /// Open the search overlay, anchored to the current viewport row.
+    ///
+    /// Returns true when the state changed (i.e. it was closed). Mirrors
+    /// upstream's `toggleSearch` first half
+    /// (`packages/tui/src/tui-alt-screen.ts:496-521`).
+    pub fn open_search(&mut self) -> bool {
+        if self.search.is_some() {
+            return false;
+        }
+        let anchor = self.viewport_skip();
+        self.search = Some(SearchState::new(anchor));
+        true
+    }
+
+    /// Close the search overlay. Returns true when it was open
+    /// (`closeSearch`, `:523-529`).
+    pub fn close_search(&mut self) -> bool {
+        self.search.take().is_some()
+    }
+
+    /// Toggle the search overlay
+    /// (`Ctrl+Shift+F`, `tui.altScreen.search`).
+    pub fn toggle_search(&mut self) -> bool {
+        if self.search.is_some() {
+            self.close_search()
+        } else {
+            self.open_search()
+        }
+    }
+
+    /// Replace the query as if the reader had typed it, refreshing the
+    /// matches. Opens the overlay when it is closed.
+    pub fn set_search_query(&mut self, query: impl Into<String>) -> bool {
+        if self.search.is_none() {
+            self.open_search();
+        }
+        let query = query.into();
+        let Some(state) = self.search.as_mut() else {
+            return false;
+        };
+        if state.bar.query() == query {
+            return false;
+        }
+        state.bar.set_query(query);
+        self.search_query_changed();
+        true
+    }
+
+    /// Select the next (`1`) or previous (`-1`) match
+    /// (`navigateSearch`, `:535-540`).
+    pub fn navigate_search(&mut self, direction: i8) -> bool {
+        let Some(state) = self.search.as_mut() else {
+            return false;
+        };
+        // Upstream ignores navigation while the query is empty.
+        if state.bar.query().trim().is_empty() || state.matches.is_empty() {
+            return false;
+        }
+        state.selection_mode = if direction < 0 {
+            SearchSelectionMode::Previous
+        } else {
+            SearchSelectionMode::Next
+        };
+        let before = self.search_match_index();
+        let revealed = self.refresh_search();
+        // A step that lands on a match already on screen still changed the
+        // selection, so it still needs a redraw.
+        revealed || self.search_match_index() != before
+    }
+
+    /// Route a key to the open search overlay.
+    fn step_search_key(&mut self, key: Key) -> SearchKeyOutcome {
+        let bindings = get_keybindings();
+        let event = InputEvent::Key(key);
+        if bindings.matches(&event, "tui.altScreen.searchClose")
+            || bindings.matches(&event, "tui.altScreen.search")
+        {
+            return SearchKeyOutcome::Handled(if self.close_search() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            });
+        }
+        if bindings.matches(&event, "tui.altScreen.searchNext") {
+            return SearchKeyOutcome::Handled(if self.navigate_search(1) {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            });
+        }
+        if bindings.matches(&event, "tui.altScreen.searchPrevious") {
+            return SearchKeyOutcome::Handled(if self.navigate_search(-1) {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            });
+        }
+
+        // The viewport scroll chords and the process-global keys keep
+        // working while the bar has focus.
+        match key {
+            Key {
+                code: KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End,
+                modifiers,
+            } if modifiers.is_empty() => return SearchKeyOutcome::PassThrough,
+            Key {
+                code: KeyCode::Char('c' | 'l'),
+                modifiers,
+            } if modifiers == KeyModifiers::CONTROL => return SearchKeyOutcome::PassThrough,
+            _ => {}
+        }
+
+        let Some(state) = self.search.as_mut() else {
+            return SearchKeyOutcome::Handled(StepOutcome::Idle);
+        };
+        if apply_query_key(&mut state.bar, key) {
+            self.search_query_changed();
+            SearchKeyOutcome::Handled(StepOutcome::Redraw)
+        } else {
+            SearchKeyOutcome::Handled(StepOutcome::Idle)
+        }
+    }
+
+    /// Re-run the search against the current transcript and re-select the
+    /// match, revealing it when the selection mode asked for a jump.
+    ///
+    /// The Rust port of `refreshSearch`
+    /// (`packages/tui/src/tui-alt-screen.ts:570-641`), including its choice to
+    /// do nothing while the query is blank and to keep the selection stable
+    /// across a re-index by [`SearchMatch::key`].
+    pub fn refresh_search(&mut self) -> bool {
+        let (width, height) = self.viewport();
+        let Some(state) = self.search.as_mut() else {
+            return false;
+        };
+        let query = state.bar.query().to_string();
+        let lines: Vec<String> = if width == 0 || height == 0 {
+            Vec::new()
+        } else {
+            self.messages
+                .render_styled_lines(width)
+                .iter()
+                .map(|line| plain_text(line))
+                .collect()
+        };
+
+        if query.trim().is_empty() || lines.is_empty() {
+            state.matches.clear();
+            state.selected_index = None;
+            state.selected_key = None;
+            state.selection_mode = SearchSelectionMode::Retain;
+            state.bar.set_result(-1, 0);
+            return false;
+        }
+
+        let should_reveal = state.selection_mode != SearchSelectionMode::Retain;
+        let result = state.index.search(&lines, &query);
+        let changed = result.changed;
+        let mode = state.selection_mode;
+        let anchor_row = state.anchor_row;
+        let previous_index = state.selected_index;
+        let previous_key = state.selected_key.clone();
+        state.matches = result.matches;
+
+        if !changed && mode == SearchSelectionMode::Retain {
+            return false;
+        }
+
+        let len = state.matches.len();
+        let exact = if changed {
+            previous_key
+                .as_ref()
+                .and_then(|key| state.matches.iter().position(|m| &m.key() == key))
+        } else {
+            previous_index.filter(|index| *index < len)
+        };
+        let selected = if len == 0 {
+            None
+        } else {
+            Some(match mode {
+                SearchSelectionMode::Query => state
+                    .matches
+                    .iter()
+                    .position(|m| m.first_row().is_some_and(|row| row >= anchor_row))
+                    .unwrap_or(0),
+                SearchSelectionMode::Next => {
+                    let base = search_base_index(exact, previous_index, len);
+                    if base < 0 {
+                        0
+                    } else {
+                        ((base + 1) % len as i64) as usize
+                    }
+                }
+                SearchSelectionMode::Previous => {
+                    let base = search_base_index(exact, previous_index, len);
+                    if base < 0 {
+                        len - 1
+                    } else {
+                        ((base - 1 + len as i64) % len as i64) as usize
+                    }
+                }
+                SearchSelectionMode::Retain => exact
+                    .or_else(|| previous_index.map(|index| index.min(len - 1)))
+                    .unwrap_or(0),
+            })
+        };
+
+        state.selected_index = selected;
+        state.selected_key = selected.and_then(|index| state.matches.get(index).map(|m| m.key()));
+        state.selection_mode = SearchSelectionMode::Retain;
+        state
+            .bar
+            .set_result(selected.map(|i| i as i64).unwrap_or(-1), len);
+
+        if !should_reveal {
+            return false;
+        }
+        self.search_reveal()
+    }
+
+    /// The query changed: re-anchor the next selection under the current one
+    /// and switch to the `Query` mode (`updateSearchQuery`, `:531-543`).
+    fn search_query_changed(&mut self) {
+        let anchor = self.search_anchor_row();
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        state.anchor_row = anchor;
+        state.selection_mode = SearchSelectionMode::Query;
+        state.bar.set_result(-1, 0);
+        let _ = self.refresh_search();
+    }
+
+    /// Row the `Query` selection mode anchors to: the selected match's first
+    /// row, else the viewport top.
+    fn search_anchor_row(&self) -> usize {
+        if let Some(state) = self.search.as_ref() {
+            if let Some(row) = state
+                .selected_index
+                .and_then(|index| state.matches.get(index))
+                .and_then(|m| m.first_row())
+            {
+                return row;
+            }
+        }
+        self.viewport_skip()
+    }
+
+    /// First rendered row of the viewport the App last drew.
+    fn viewport_skip(&self) -> usize {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return 0;
+        }
+        self.messages.visible_lines(width, height).0
+    }
+
+    /// Scroll the selected match into view, a third of a page below the top
+    /// edge (`refreshSearch`'s reveal half, `:627-641`).
+    fn search_reveal(&mut self) -> bool {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let Some(state) = self.search.as_ref() else {
+            return false;
+        };
+        let (Some(first), Some(last)) = (
+            state
+                .selected_index
+                .and_then(|index| state.matches.get(index))
+                .and_then(|m| m.first_row()),
+            state
+                .selected_index
+                .and_then(|index| state.matches.get(index))
+                .and_then(|m| m.last_row()),
+        ) else {
+            return false;
+        };
+        let (visible_start, lines) = self.messages.visible_lines(width, height);
+        let visible_end = visible_start + lines.len();
+        if first >= visible_start && last < visible_end {
+            return false;
+        }
+        let page = height as usize;
+        let max = self.messages.line_count(width).saturating_sub(page);
+        let target = first.saturating_sub(page / 3).min(max);
+        self.messages.set_scroll_from_bottom(max - target);
+        true
+    }
+
+    /// Paint the search matches into the already-rendered message area.
+    ///
+    /// Non-current matches get an underline, the current one bold + reverse —
+    /// upstream's `searchMatchStyle` / `searchCurrentMatchStyle`
+    /// (`packages/tui/src/tui-alt-screen.ts:118-121`). The port keeps the
+    /// themed foreground already in the cell instead of replacing it, so a
+    /// highlighted token stays readable in any theme.
+    fn apply_search_highlight(&self, area: Rect, buf: &mut Buffer) {
+        let Some(state) = self.search.as_ref() else {
+            return;
+        };
+        if state.matches.is_empty() || area.width == 0 || area.height == 0 {
+            return;
+        }
+        let (visible_start, lines) = self.messages.visible_lines(area.width, area.height);
+        let visible_end = visible_start + lines.len();
+        for (index, search_match) in state.matches.iter().enumerate() {
+            let modifier = if Some(index) == state.selected_index {
+                Modifier::BOLD | Modifier::REVERSED
+            } else {
+                Modifier::UNDERLINED
+            };
+            for segment in &search_match.segments {
+                if segment.row < visible_start || segment.row >= visible_end {
+                    continue;
+                }
+                let row = segment.row - visible_start;
+                let text = plain_text(&lines[row]);
+                let len = text.chars().count();
+                let to = segment.end_col.min(len);
+                let from = segment.start_col.min(to);
+                let y = area.y + row as u16;
+                for col in from..to {
+                    let x = area.x + col as u16;
+                    if x >= area.x + area.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.modifier |= modifier;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Give an open search overlay the mouse first, exactly like the modal
+    /// overlays: a gesture inside the bar's rectangle is consumed by the bar
+    /// (hover clears, a press on a navigation button navigates) and never
+    /// falls through to the chat-log selection underneath
+    /// (`getSearchNavigationDirectionAt` / `handleSearchMouseEvent`,
+    /// `packages/tui/src/tui-alt-screen.ts:541-568`).
+    ///
+    /// Returns `None` when the overlay is closed, has no rectangle yet, or the
+    /// gesture landed outside it, so the caller keeps routing normally.
+    fn step_search_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        self.search.as_ref()?;
+        let (width, height) = self.viewport();
+        let (origin_x, origin_y) = self.viewport_origin();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let rect = search_bar_rect(Rect::new(origin_x, origin_y, width, height))?;
+        let inside = gesture.x >= rect.x
+            && gesture.x < rect.x + rect.width
+            && gesture.y >= rect.y
+            && gesture.y < rect.y + rect.height;
+        let (row, col) = (
+            gesture.y as i64 - rect.y as i64,
+            gesture.x as i64 - rect.x as i64,
+        );
+        let direction = if inside {
+            self.search
+                .as_ref()
+                .and_then(|state| state.bar.navigation_direction_at(rect.width, row, col))
+        } else {
+            None
+        };
+        let changed = self
+            .search
+            .as_mut()
+            .map(|state| state.bar.set_hovered(direction))
+            .unwrap_or(false);
+        if !inside {
+            // The pointer left the bar: clear any stale hover and let the
+            // gesture reach the chat log.
+            return if changed {
+                Some(StepOutcome::Redraw)
+            } else {
+                None
+            };
+        }
+        if let (Some(direction), true) = (
+            direction,
+            matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)),
+        ) {
+            if self.navigate_search(direction) {
+                return Some(StepOutcome::Redraw);
+            }
+        }
+        Some(if changed {
+            StepOutcome::Redraw
+        } else {
+            StepOutcome::Idle
+        })
+    }
+
     /// Append a free-form info line to the message view (used by
     /// slash commands to print help / errors).
     pub fn info(&mut self, text: impl Into<String>) {
@@ -1275,6 +1831,11 @@ impl App {
         // rectangles and never reach the chat log underneath.
         if self.dialog.is_some() || self.settings.is_some() || self.selector.is_some() {
             return self.step_modal_mouse_gesture(gesture);
+        }
+        // The search bar is an overlay too, but it lives alongside the chat
+        // log instead of over a modal, so it gets the same first pass.
+        if let Some(outcome) = self.step_search_mouse_gesture(&gesture) {
+            return outcome;
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
@@ -1943,7 +2504,26 @@ impl App {
     /// not tick.
     pub fn render_to_buffer(&mut self, area: Rect, buf: &mut Buffer) {
         let _ = self.advance_selection_autoscroll();
+        // Record the geometry first so the refresh below indexes the exact
+        // viewport this frame is about to paint.
+        self.record_viewport(area);
+        // Keep the search results in step with the transcript they indexed —
+        // streaming output and `/clear` both change the corpus under an open
+        // bar, which is where upstream refreshes it too (from `render`).
+        let _ = self.refresh_search();
         self.render_to_buffer_impl(area, buf);
+    }
+
+    /// Remember the message viewport's geometry as of a render: the width the
+    /// log wraps at, its height (the page size), and its top-left cell so
+    /// pointer coordinates can be mapped back into it.
+    fn record_viewport(&self, area: Rect) {
+        let message_height = area.height.saturating_sub(2);
+        self.viewport_width.store(area.width, Ordering::Relaxed);
+        self.viewport_height
+            .store(message_height, Ordering::Relaxed);
+        self.viewport_origin.0.store(area.x, Ordering::Relaxed);
+        self.viewport_origin.1.store(area.y, Ordering::Relaxed);
     }
 
     /// Paint the App without advancing the autoscroll clock.
@@ -1975,21 +2555,14 @@ impl App {
         // Record the viewport the scroll keys clamp against. Keys arrive
         // between renders, so the previous render's geometry is what they
         // see — exactly what the reader was looking at.
-        self.viewport_width.store(area.width, Ordering::Relaxed);
-        self.viewport_height
-            .store(message_height, Ordering::Relaxed);
-        self.viewport_origin
-            .0
-            .store(message_area.x, Ordering::Relaxed);
-        self.viewport_origin
-            .1
-            .store(message_area.y, Ordering::Relaxed);
+        self.record_viewport(area);
 
         self.messages
             .render_to_buffer_themed(message_area, buf, &self.theme);
         // Selection highlight goes on top of the message cells but under
         // any modal, so an open selector or dialog stays readable.
         self.apply_selection_highlight(message_area, buf);
+        self.apply_search_highlight(message_area, buf);
         self.status_bar
             .render_to_buffer_themed(&self.status_data, status_area, buf, &self.theme);
 
@@ -2068,6 +2641,24 @@ impl App {
                 }
             }
         }
+
+        // Transcript search bar — anchored to the top-right of the message
+        // area (`showOverlay(component, { anchor: "top-right", width: "40%",
+        // minWidth: 32, margin: 1 })`,
+        // `packages/tui/src/tui-alt-screen.ts:512-518`). Drawn last so the bar
+        // stays readable if an extension dialog arrives while it is open.
+        if let Some(state) = &self.search {
+            if let Some(rect) = search_bar_rect(message_area) {
+                let layout = render_search_bar(&state.bar, rect.width);
+                for (offset, line) in layout.lines.iter().enumerate() {
+                    let y = rect.y + offset as u16;
+                    if y >= rect.y + rect.height {
+                        break;
+                    }
+                    write_styled_line(buf, rect.x, y, rect.width, line, &self.theme);
+                }
+            }
+        }
     }
 
     /// Render the App into a flat snapshot (used by the snapshot tests
@@ -2122,6 +2713,19 @@ impl App {
                 .dialog
                 .as_ref()
                 .map(|d| d.render_lines(width))
+                .unwrap_or_default(),
+            search_open: self.search_open(),
+            search_query: self
+                .search
+                .as_ref()
+                .map(|state| state.bar.query().to_string())
+                .unwrap_or_default(),
+            search_lines: self
+                .search
+                .as_ref()
+                .map(|state| {
+                    crate::search::search_bar_text(&render_search_bar(&state.bar, width).lines)
+                })
                 .unwrap_or_default(),
             status: self.status_data.clone(),
         }
@@ -2196,6 +2800,20 @@ fn _keep_mutex_path() -> Arc<Mutex<()>> {
 // public method signature contract.
 #[allow(dead_code)]
 const _: EditorAction = EditorAction::None;
+
+/// Base index `next` / `previous` navigation steps from
+/// (`refreshSearch`, `packages/tui/src/tui-alt-screen.ts:614-622`): the exact
+/// match when the key still resolves, else the clamped previous selection,
+/// else `-1` so the caller wraps from the ends.
+fn search_base_index(exact: Option<usize>, previous: Option<usize>, len: usize) -> i64 {
+    if let Some(index) = exact {
+        return index as i64;
+    }
+    previous
+        .map(|index| index as i64)
+        .unwrap_or(-1)
+        .min(len as i64 - 1)
+}
 
 /// Map a crossterm mouse button onto the component-level [`MouseButton`].
 fn mouse_button(button: crossterm::event::MouseButton) -> MouseButton {
