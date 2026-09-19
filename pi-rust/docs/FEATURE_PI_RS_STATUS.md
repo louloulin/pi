@@ -6186,8 +6186,9 @@ $ cargo check  -p pi-coding-agent --offline                      # Finished（49
 ### 五、frontier（本轮更新）：空槽派发第一单
 
 本轮把空槽用于**跨 crate**的独立任务，避开前几轮「同源协调轮重复核验」的循环：
-派发 `[Stage 28] pi-coding-agent: 扩展 pi.exec 端到端集成测试`（parent LUM-981），落在
-`pi-coding-agent/tests/`，**明确禁止改** `pi-extensions/src/host.rs`（LUM-1083 在途）与 shim。
+派发 **LUM-1108**（`[Stage 28] pi-coding-agent: 扩展 pi.exec 端到端集成测试`，parent LUM-981，
+`--status todo` → 即刻起跑），落在 `pi-coding-agent/tests/`，**明确禁止改**
+`pi-extensions/src/host.rs`（LUM-1083 在途）与 shim。
 
 frontier 重排（`pi.exec` 已从「缺失 API」中划掉）：
 
