@@ -3037,3 +3037,96 @@ map 与锁；`RemoteServiceProvider` 在调用回调前先克隆订阅者列表�
 `5c452b89e`（LUM-1071）切出，并 rebase 到当时的 trunk tip
 `259238468`（LUM-1072，Stage 17 插件生态接入 CLI）之上，再以 fast-forward
 方式合入 `feature/pi.rs` 并推送。
+
+## LUM-1074 round — Stage 17 收口（插件生态 #2）：扩展 slash 命令与会话副作用落地
+
+本轮（autopilot，2026-09-19 05:40Z）盘点 frontier：Stage 18（LUM-1067
+`pi-chord services`）的 run 仍在跑、Stage 19（LUM-1068 / LUM-1069）保持
+backlog，`multica daemon status` 报 `active_task_count = 3`（3 槽全满），因此
+和 LUM-1072 一样不派发新任务，直接收掉 frontier 上的下一个「已有能力接不进去」
+缺口 —— LUM-1072 章节里 known gap 第 2 条：
+
+> 只接了 **tool 注册**。`registerCommand` / `appendEntry` / `sendMessage` /
+> `setSessionName` 仍只落在 host 的 `RegistrationLog` 里。
+
+也就是说：插件能用 `pi.registerCommand("greet", …)` 注册一个 `/greet`，但 `pi`
+二进制既不认识这个命令，也不会把插件写的会话条目存下来 —— 插件生态里「命令 +
+会话状态」这一半对用户仍然不可见。
+
+### 本轮改动
+
+| 文件 | 改动 |
+|------|------|
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | 新增 `_pi_registered_commands()` / `_pi_execute_command(name, args, ctxJson)`：把 `_pi.commands` 里的 `_handler` 真正跑起来，返回 `{handled, isError, result, error}`（JSON 安全、支持 async handler、异常与 Promise rejection 都归一成 error 字段） |
+| `crates/pi-extensions/src/host.rs` | 新增 `CommandExecutionOutcome`（`camelCase` 反序列化）与 `ExtensionSideEffects`；新增 `registered_commands()` / `execute_command(name, args, mode, has_ui, cwd)` / `drain_side_effects()`；**删掉 `load()` 里把 `log.commands` 折进 `log.entries` 的镜像 hack**，命令保留在 `log.commands` |
+| `crates/pi-coding-agent/src/extensions/wiring.rs` | 新增 `ExtensionRuntime`（`host` + `commands` + `mode`/`has_ui`/`cwd`，`empty()` / `has_command()` / `find_command()` / `execute_command()` / `drain_side_effects()`）；`load()` 在 host 建好、扩展加载完、`session_start` 派发之后读回 `registered_commands()`，放进 `ExtensionLoadOutcome.runtime` |
+| `crates/pi-coding-agent/src/main.rs` | `load_tool_executor()` → `load_extensions()`，返回完整 `ExtensionLoadOutcome`；把 `Arc<ExtensionRuntime>` 分别塞进 `InteractiveOptions.extensions` 与 `PrintModeOptions.extensions`；启动时在 stderr 列出已注册的扩展命令 |
+| `crates/pi-coding-agent/src/session_log.rs` | 新增 `append_extension(extension, kind, payload)` → `SessionEntry::Extension` |
+| `crates/pi-coding-agent/src/interactive.rs` | `InteractiveOptions.extensions`；`/help` 增加 “extension commands” 段（列在按键图例之前）；`SlashCommand::Unknown(name)` 命中扩展命令时执行 JS handler，把返回值 / 错误显示在 transcript；每轮 tick 调 `persist_extension_side_effects()`，把 `appendEntry` / `sendMessage` / `sendUserMessage` / `setSessionName` 落进 JSONL 会话并在界面上提示 |
+| `crates/pi-coding-agent/src/print_mode.rs` | `PrintModeOptions.extensions`；`pi --print "/name args"` 命中扩展命令时**完全不请求模型**，按 `text` / `json` / `json-events` 三种格式输出结果；handler 抛异常时先输出结构化结果再返回 `PrintModeError::Agent`（退出码 70）；正常回合结束前也会 drain 一次副作用 |
+| `crates/pi-coding-agent/tests/cli_extensions.rs` | `+3` 端到端测试（见下） |
+| `crates/pi-coding-agent/tests/print_mode.rs`、`crates/pi-extensions/tests/e2e.rs` | 构造 `PrintModeOptions` / 命令 fixture 的用例同步更新，命令用例改成真断言 |
+
+语义要点：
+
+* **命令只在扩展里存在时才被拦截。** `/help`、`/model` 等内置命令优先级不变；
+  未知的 `/foo` 若没有对应扩展命令，仍按原来的行为（print 模式送去问模型，
+  TUI 打印 “unknown command”）。
+* **命令执行不产生模型请求。** print 模式返回的 `PrintModeResult.turns == 0`，
+  hook 在建立 agent 之前，所以在 CI / 脚本里用扩展命令不需要 API key 之外的开销。
+* **副作用是 drain-once 语义**：host 侧累积、模式侧 `drain_`，取走即清空，
+  重复调用不会写两遍，也不会把上一轮的条目带进下一轮。
+
+### 验证
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings
+$ cargo clippy --workspace --all-targets -- -D warnings      # 0 warnings
+$ cargo test   --workspace                                  # 501 passed / 0 failed
+$ cargo test -p pi-coding-agent --test cli_extensions        # 9 passed / 0 failed
+```
+
+rebase 到 LUM-1067 的 `f3a781dc2` 之后重跑：`cargo test --workspace` →
+**543 passed / 0 failed**（543 = 本轮的 501 + Stage 18 的 42），
+`cargo clippy --workspace --all-targets -- -D warnings` → 0 warnings。
+
+`+3` 是本轮新增的 `cli_extensions.rs` 用例，全部走真实二进制：
+
+1. `pi --print "/ext_greet world"` → **loopback 假 provider 收到 0 个请求**；
+   stdout 是 `{"command":"ext_greet","result":"greeted-world","turns":0}`；
+   用 `pi_session::SessionReader` 打开 `--session` 指定的库，能读到
+   `greet-entry` / `message` / `session_name` 三类 `Extension` 条目，且
+   `greet-entry` 的 payload 里 `args == "world"`。
+2. `pi --print "/not_a_command"` → 不是扩展命令，回落到正常回合（假 provider
+   收到 1 个请求并回 `model-answered`），保证没有把普通 prompt 误拦截。
+3. `pi --print "/ext_fail"` → 扩展里 `throw` 异常时退出码 70，stdout 的 JSON
+   带 `is_error: true` 且 error 文本里有 `command-boom`，stderr 同样有。
+
+### 并发与派发
+
+本轮开发期间 `multica daemon status` 报 `active_task_count = 3`（LUM-1067 +
+本 run + 1），3 槽已满，所以没有新建子任务，直接自己实现。
+
+LUM-1067 的 Stage 18（`pi-chord services`）在本轮验证阶段合入并推送到了
+`feature/pi.rs`（`f3a781dc2`），因此本轮提交 rebase 到 `f3a781dc2` 之上再
+push，两个 Stage 的改动都保留。
+Stage 19（LUM-1068 / LUM-1069）的前置是 Stage 18，现已满足，等下一次
+coordinator 盘点时按 barrier 放行（本轮不主动派发，槽位仍满）。
+
+### Push status
+
+提交在 `agent/devbox1/25ce1e8a0909` 上，从 `origin/feature/pi.rs` 的
+`259238468`（LUM-1072）切出、rebase 到 `f3a781dc2`（LUM-1067）后 push 到
+`feature/pi.rs`。
+
+### 已知限制（本轮之后）
+
+1. `pi.sendUserMessage()` 只被持久化成会话条目并提示，**不会**真的当作新的一轮
+   输入注入 agent（需要把「队列里的用户消息」接进 `Agent::prompt` 的调度，
+   属于 TUI 队列工作）。
+2. 交互式 UI 仍未接：`confirm/input/select` 一律返回拒绝/取消，只有 `notify`
+   走 `StderrUiHandler`（LUM-1072 遗留，不变）。
+3. `.wasm` 扩展宿主未实现；WASM 扩展在搜索阶段被枚举后跳过。
+4. `--rpc` 模式没有接 `ExtensionRuntime`（命令面板 / 副作用只覆盖 TUI 与 print
+   两个模式）。
+5. `wasm32-unknown-unknown` 目标在当前环境仍未安装，本轮只做 native 验证。

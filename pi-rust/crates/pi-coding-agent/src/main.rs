@@ -101,7 +101,9 @@ fn main() -> ExitCode {
             };
             // Extensions load on the same runtime that drives the agent:
             // the QuickJS host spawns its promise driver + UI worker there.
-            let tool_executor = load_tool_executor(&runtime, &cli, "tui", true);
+            let loaded_extensions = load_extensions(&runtime, &cli, "tui", true);
+            let tool_executor = loaded_extensions.executor.clone();
+            let extension_runtime = Arc::new(loaded_extensions.runtime.clone());
             // Interactive mode is the only path that still uses the
             // legacy JSONL writer (for the `/resume` directory hint).
             // Print mode owns its SQLite session through `pi-session`,
@@ -118,6 +120,7 @@ fn main() -> ExitCode {
                 initial_prompt,
                 stream_fn: stream_fn.clone(),
                 tool_executor,
+                extensions: Some(extension_runtime),
             };
             match runtime.block_on(run_interactive(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -167,7 +170,8 @@ fn main() -> ExitCode {
                     return ExitCode::from(70);
                 }
             };
-            let tool_executor = load_tool_executor(&runtime, &cli, "print", false);
+            let loaded_extensions = load_extensions(&runtime, &cli, "print", false);
+            let tool_executor = loaded_extensions.executor.clone();
             let options = PrintModeOptions {
                 prompt: expanded.text,
                 model: resolved_model,
@@ -178,6 +182,7 @@ fn main() -> ExitCode {
                 max_turns: cli.max_turns,
                 output_format: cli.output_format,
                 tool_executor,
+                extensions: Arc::new(loaded_extensions.runtime.clone()),
             };
             match runtime.block_on(run_print_mode(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -194,7 +199,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(70);
                 }
             };
-            let tool_executor = load_tool_executor(&runtime, &cli, "rpc", false);
+            let tool_executor = load_extensions(&runtime, &cli, "rpc", false).executor;
             let options = pi_coding_agent::rpc::RpcServerOptions {
                 model: resolved_model,
                 models,
@@ -282,16 +287,19 @@ fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
-/// Load JS / TypeScript extensions for one mode and return the executor
-/// the agent loop should use. Failures are reported on stderr and never
+/// Load JS / TypeScript extensions for one mode and return the whole
+/// load outcome: the executor the agent loop should use plus the
+/// [`ExtensionRuntime`](pi_coding_agent::extensions::wiring::ExtensionRuntime)
+/// the mode uses to dispatch extension commands and persist their
+/// session side effects. Failures are reported on stderr and never
 /// abort the process: a broken extension leaves the built-in bundle
 /// intact.
-fn load_tool_executor(
+fn load_extensions(
     runtime: &tokio::runtime::Runtime,
     cli: &Cli,
     mode: &str,
     has_ui: bool,
-) -> Arc<dyn pi_agent_core::tools::ToolExecutor> {
+) -> wiring::ExtensionLoadOutcome {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let options = ExtensionLoadOptions {
         home: home_dir(),
@@ -320,7 +328,19 @@ fn load_tool_executor(
                 .join(", ")
         );
     }
-    outcome.executor
+    if !outcome.runtime.commands().is_empty() {
+        eprintln!(
+            "pi: extension commands: {}",
+            outcome
+                .runtime
+                .commands()
+                .iter()
+                .map(|c| format!("/{}", c.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    outcome
 }
 
 fn new_session_id() -> String {

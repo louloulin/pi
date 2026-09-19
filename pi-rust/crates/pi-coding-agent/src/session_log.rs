@@ -83,6 +83,22 @@ impl SessionLog {
         self.append(SessionEntry::ToolResult(result))
     }
 
+    /// Append a free-form extension entry (`pi.appendEntry`), plus the
+    /// session-metadata entries the CLI synthesises from
+    /// `pi.setSessionName` / `pi.sendMessage`.
+    pub fn append_extension(
+        &self,
+        extension: impl Into<String>,
+        kind: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> std::io::Result<()> {
+        self.append(SessionEntry::Extension {
+            extension: extension.into(),
+            kind: kind.into(),
+            payload,
+        })
+    }
+
     fn append(&self, entry: SessionEntry) -> std::io::Result<()> {
         let mut guard = self.file.lock();
         if let Some(writer) = guard.as_mut() {
@@ -126,6 +142,22 @@ mod tests {
             stop_reason: StopReason::Stop,
             usage: Usage::default(),
         }
+    }
+
+    #[test]
+    fn appends_extension_entries() {
+        let dir = env::temp_dir().join(format!("pi-session-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = SessionLog::open(&dir, "ext-session").expect("open");
+        log.append_extension("echo", "greeting", serde_json::json!({"n": 1}))
+            .expect("extension entry");
+        log.close().expect("close");
+
+        let contents = std::fs::read_to_string(dir.join("ext-session.jsonl")).expect("read");
+        assert!(contents.contains("\"type\":\"extension\""), "{contents}");
+        assert!(contents.contains("\"extension\":\"echo\""), "{contents}");
+        assert!(contents.contains("\"kind\":\"greeting\""), "{contents}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

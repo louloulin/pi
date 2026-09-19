@@ -69,6 +69,30 @@ module.exports = function (pi) {
 };
 "#;
 
+/// A JS extension that registers slash commands. The handler's return
+/// value is assembled at runtime and it records every side effect the
+/// CLI has to persist (`appendEntry`, `sendMessage`, `setSessionName`).
+const COMMANDS_EXTENSION: &str = r#"
+module.exports = function (pi) {
+  pi.registerCommand("ext_greet", {
+    description: "Greets someone",
+    handler: function (args) {
+      pi.appendEntry("greet-entry", { args: String(args) });
+      pi.setSessionName("greeted-session");
+      pi.sendMessage({ content: "greet-message:" + String(args) });
+      return "greeted-" + String(args);
+    },
+  });
+
+  pi.registerCommand("ext_fail", {
+    description: "Always throws",
+    handler: function () {
+      throw new Error("command-boom");
+    },
+  });
+};
+"#;
+
 // ---------------------------------------------------------------------------
 // Scripted OpenAI-compatible loopback server
 // ---------------------------------------------------------------------------
@@ -581,5 +605,195 @@ fn a_throwing_extension_tool_becomes_an_error_result() {
     assert!(
         events.contains("\"name\":\"ext_boom\"") && events.contains("\"is_error\":true"),
         "the failed extension call must be reported as an error result:\n{events}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Extension commands (`pi.registerCommand`)
+// ---------------------------------------------------------------------------
+
+/// Run `pi --print "<prompt>"` with an extension command fixture.
+fn run_command(
+    server: &ModelServer,
+    sessions: &Path,
+    cwd: &Path,
+    prompt: &str,
+    extension: &Path,
+    output_format: &str,
+) -> Output {
+    let flag = extension.to_string_lossy().into_owned();
+    let mut cmd = pi_command(server, sessions, cwd);
+    cmd.args([
+        "--model",
+        "openai/gpt-4o-mini",
+        "--print",
+        prompt,
+        "--extension",
+        &flag,
+        "--output-format",
+        output_format,
+        "--session",
+        "greet-1",
+    ]);
+    cmd.arg("--session-dir").arg(sessions);
+    cmd.output().expect("failed to spawn pi")
+}
+
+#[test]
+fn print_mode_extension_command_runs_without_asking_the_model() {
+    let server = ModelServer::spawn(vec![]);
+    let sessions = tempdir("cmd");
+    let project = tempdir("cmd-project");
+    let extension = project.path().join("commands.js");
+    std::fs::write(&extension, COMMANDS_EXTENSION).expect("write extension");
+
+    let output = run_command(
+        &server,
+        sessions.path(),
+        project.path(),
+        "/ext_greet world",
+        &extension,
+        "json",
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        output.status.success(),
+        "extension command failed\nstdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        bodies.is_empty(),
+        "an extension command must not touch the provider; requests: {bodies:#?}"
+    );
+
+    let payload: Value =
+        serde_json::from_str(stdout(&output).trim()).expect("stdout must be one JSON object");
+    assert_eq!(payload["command"], "ext_greet");
+    assert_eq!(payload["handled"], true);
+    assert_eq!(payload["is_error"], false);
+    assert_eq!(payload["result"], "greeted-world");
+    assert_eq!(payload["turns"], 0);
+
+    // Every side effect the handler recorded must be in the session log.
+    let db = sessions.path().join("greet-1.sqlite");
+    let reader = pi_session::SessionReader::open(&db).expect("open session database");
+    let entries = reader.iter_entries("greet-1").expect("session entries");
+    let extension_kinds: Vec<String> = entries
+        .iter()
+        .filter_map(|row| match row.entry() {
+            pi_session::SessionEntry::Extension { kind, .. } => Some(kind.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        extension_kinds.contains(&"greet-entry".to_string()),
+        "pi.appendEntry must be persisted: {extension_kinds:?}"
+    );
+    assert!(
+        extension_kinds.contains(&"message".to_string()),
+        "pi.sendMessage must be persisted: {extension_kinds:?}"
+    );
+    assert!(
+        extension_kinds.contains(&"session_name".to_string()),
+        "pi.setSessionName must be persisted: {extension_kinds:?}"
+    );
+
+    // ... and the entry's JSON payload survived the round trip.
+    let stored = entries
+        .iter()
+        .find_map(|row| match row.entry() {
+            pi_session::SessionEntry::Extension { kind, payload, .. } if kind == "greet-entry" => {
+                Some(payload.clone())
+            }
+            _ => None,
+        })
+        .expect("greet-entry payload");
+    assert_eq!(stored["args"], "world");
+}
+
+#[test]
+fn print_mode_unknown_slash_command_still_reaches_the_model() {
+    let server = ModelServer::spawn(vec![Reply::Text("model-answered".into())]);
+    let sessions = tempdir("cmd-unknown");
+    let project = tempdir("cmd-unknown-project");
+    let extension = project.path().join("commands.js");
+    std::fs::write(&extension, COMMANDS_EXTENSION).expect("write extension");
+
+    let output = run_command(
+        &server,
+        sessions.path(),
+        project.path(),
+        "/not_a_command",
+        &extension,
+        "text",
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(
+        bodies.len(),
+        1,
+        "an unknown `/name` must fall through to a normal turn: {bodies:#?}"
+    );
+    assert!(
+        stdout(&output).contains("model-answered"),
+        "the model reply must be printed:\n{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_throwing_extension_command_exits_nonzero() {
+    let server = ModelServer::spawn(vec![]);
+    let sessions = tempdir("cmd-fail");
+    let project = tempdir("cmd-fail-project");
+    let extension = project.path().join("commands.js");
+    std::fs::write(&extension, COMMANDS_EXTENSION).expect("write extension");
+
+    let output = run_command(
+        &server,
+        sessions.path(),
+        project.path(),
+        "/ext_fail",
+        &extension,
+        "json",
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        bodies.is_empty(),
+        "a failing command must not touch the provider: {bodies:#?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let payload: Value =
+        serde_json::from_str(stdout(&output).trim()).expect("stdout must be one JSON object");
+    assert_eq!(payload["is_error"], true);
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("command-boom"),
+        "the JS exception must surface in the JSON result: {payload}"
+    );
+    assert!(
+        stderr(&output).contains("command-boom"),
+        "the JS exception must surface on stderr:\n{}",
+        stderr(&output)
     );
 }

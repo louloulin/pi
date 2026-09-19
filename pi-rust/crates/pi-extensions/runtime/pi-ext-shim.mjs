@@ -26,6 +26,8 @@
 //     to subscribed handlers; returns a JSON string with the dispatch
 //     summary so the host can inspect what ran.
 //   - `_pi_registered_tools()`    — list tool names registered so far.
+//   - `_pi_registered_commands()` — list slash commands registered so far.
+//   - `_pi_execute_command(name, args, ctxJson)` — run a command handler.
 //   - `_pi_known_event_names()`   — list event names with at least one
 //     subscriber.
 //   - `_pi_load_extension(source)` — evaluate an extension source and
@@ -314,6 +316,87 @@ globalThis._pi_registered_tools = function _pi_registered_tools() {
 
 globalThis._pi_known_event_names = function _pi_known_event_names() {
   return JSON.stringify({ events: Object.keys(_pi.handlers) });
+};
+
+/**
+ * List the slash commands registered so far, in registration order.
+ * Returns a JSON string with `{ commands: [{ name, description }] }`.
+ * The host uses this as the source of truth for `/help` and for
+ * deciding whether a typed `/name` belongs to an extension.
+ */
+globalThis._pi_registered_commands = function _pi_registered_commands() {
+  const commands = [];
+  for (const cmd of _pi.commands.values()) {
+    commands.push({ name: cmd.name, description: cmd.description || "" });
+  }
+  return JSON.stringify({ commands });
+};
+
+/**
+ * Invoke a registered command handler. The upstream signature is
+ * `handler(args: string, ctx: ExtensionCommandContext)`, so the raw
+ * argument string is forwarded verbatim and the host supplies the
+ * same `ctx` shape event handlers get.
+ *
+ * Resolves to a JSON string with `{ handled, isError, result, error }`:
+ * `handled` is false when no command of that name exists (the caller
+ * can then fall through to its own "unknown command" path), and
+ * `result` carries the handler's return value normalised to JSON
+ * (`null` for `undefined`) so a command can echo text back.
+ *
+ * @param {string} name
+ * @param {string} args
+ * @param {string} ctxJson
+ */
+globalThis._pi_execute_command = function _pi_execute_command(name, args, ctxJson) {
+  const entry = _pi.commands.get(String(name));
+  if (!entry || typeof entry._handler !== "function") {
+    return JSON.stringify({ handled: false, isError: false, result: null, error: null });
+  }
+  let ctxExtra = {};
+  try {
+    ctxExtra = ctxJson ? JSON.parse(String(ctxJson)) : {};
+  } catch (_e) {
+    ctxExtra = {};
+  }
+  const ctx = buildCtx(ctxExtra);
+  const argsText = args == null ? "" : String(args);
+
+  const stringify = (isError, result, error) => {
+    let json;
+    try {
+      json = JSON.stringify({ handled: true, isError, result, error });
+    } catch (e) {
+      json = JSON.stringify({
+        handled: true,
+        isError: true,
+        result: null,
+        error: "command result is not JSON-serializable: " + (e && e.message ? e.message : String(e)),
+      });
+    }
+    return json === undefined
+      ? JSON.stringify({ handled: true, isError, result: null, error })
+      : json;
+  };
+
+  const finalize = (value) => {
+    if (value === undefined) return stringify(false, null, null);
+    if (typeof value === "function") return stringify(false, null, null);
+    return stringify(false, value, null);
+  };
+
+  let result;
+  try {
+    result = entry._handler(argsText, ctx);
+  } catch (e) {
+    return stringify(true, null, e && e.message ? e.message : String(e));
+  }
+  if (result && typeof result.then === "function") {
+    return result
+      .then(finalize)
+      .catch((e) => stringify(true, null, e && e.message ? e.message : String(e)));
+  }
+  return finalize(result);
 };
 
 /**

@@ -36,6 +36,7 @@ use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::commands::{handle_command, SlashCommand};
+use crate::extensions::wiring::ExtensionRuntime;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
@@ -87,6 +88,9 @@ pub struct InteractiveOptions {
     /// The `pi` binary passes [`default_executor`]; tests inject a
     /// scripted executor.
     pub tool_executor: Arc<dyn ToolExecutor>,
+    /// Loaded JS extensions, when any. `None` disables extension
+    /// command dispatch and side-effect persistence.
+    pub extensions: Option<Arc<ExtensionRuntime>>,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -101,6 +105,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("initial_prompt", &self.initial_prompt)
             .field("stream_fn", &"<dyn StreamFn>")
             .field("tool_executor", &"<dyn ToolExecutor>")
+            .field("extensions", &self.extensions.is_some())
             .finish()
     }
 }
@@ -117,6 +122,7 @@ impl Default for InteractiveOptions {
             initial_prompt: None,
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
             tool_executor: default_executor(),
+            extensions: None,
         }
     }
 }
@@ -201,6 +207,10 @@ async fn run_loop(
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
         app.drain_agent_events();
+        // Extensions write session entries / custom messages from
+        // event handlers; fold them into the log + transcript each
+        // tick so nothing is lost between turns.
+        persist_extension_side_effects(&mut app, &options);
 
         if app.is_exit_requested() {
             return Ok(InteractiveExit::UserExit);
@@ -349,7 +359,13 @@ async fn run_slash_command(
     };
     match parsed {
         SlashCommand::Help => {
-            app.info(crate::commands::help_text());
+            let empty = [];
+            let commands = options
+                .extensions
+                .as_ref()
+                .map(|runtime| runtime.commands())
+                .unwrap_or(empty.as_slice());
+            app.info(help_text_with_extensions(commands));
         }
         SlashCommand::Clear => {
             app.messages_mut().clear();
@@ -421,10 +437,121 @@ async fn run_slash_command(
             app.open_selector(selector);
         }
         SlashCommand::Unknown(name) => {
+            // A `/name` that is not a built-in may still belong to an
+            // extension (`pi.registerCommand`). Run it when it does.
+            let runtime = options.extensions.as_ref();
+            if let Some(runtime) = runtime.filter(|r| r.has_command(&name)) {
+                let args = extension_command_args(text);
+                match runtime.execute_command(&name, args).await {
+                    Ok(outcome) => {
+                        if let Some(text) = command_result_text(&outcome) {
+                            if !text.is_empty() {
+                                app.info(text);
+                            }
+                        }
+                        if let Some(err) = &outcome.error {
+                            app.info(format!("/{name}: {err}"));
+                        }
+                    }
+                    Err(err) => app.info(format!("/{name}: {err}")),
+                }
+                persist_extension_side_effects(app, options);
+                return Ok(());
+            }
             app.info(format!("unknown command /{name} — try /help"));
         }
     }
     Ok(())
+}
+
+/// Extract the text the user typed after the command name.
+fn extension_command_args(text: &str) -> &str {
+    let rest = text.trim().trim_start_matches('/');
+    match rest.find(char::is_whitespace) {
+        Some(idx) => rest[idx..].trim(),
+        None => "",
+    }
+}
+
+/// Render a command handler's return value as display text.
+fn command_result_text(outcome: &pi_extensions::CommandExecutionOutcome) -> Option<String> {
+    match &outcome.result {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// Splice the extension command list into the built-in help text.
+fn help_text_with_extensions(commands: &[pi_extensions::RegisteredCommand]) -> String {
+    let base = crate::commands::help_text();
+    if commands.is_empty() {
+        return base;
+    }
+    let mut section = String::from("extension commands:\n");
+    for command in commands {
+        if command.description.is_empty() {
+            section.push_str(&format!("  /{}\n", command.name));
+        } else {
+            section.push_str(&format!("  /{:<16} {}\n", command.name, command.description));
+        }
+    }
+    match base.split_once("\nkeys:") {
+        Some((head, tail)) => format!("{head}\n\n{section}\nkeys:{tail}"),
+        None => format!("{base}\n\n{section}"),
+    }
+}
+
+/// Drain the extension host's session side effects into the JSONL log
+/// and surface custom messages in the transcript.
+///
+/// The host accumulates whatever extensions recorded via
+/// `pi.appendEntry` / `pi.sendMessage` / `pi.sendUserMessage` /
+/// `pi.setSessionName`; this runs every loop tick so nothing is lost.
+fn persist_extension_side_effects(app: &mut App, options: &InteractiveOptions) {
+    let Some(runtime) = options.extensions.as_ref() else {
+        return;
+    };
+    let effects = runtime.drain_side_effects();
+    let log = options.session_log.as_ref();
+    for entry in &effects.entries {
+        if let Some(log) = log {
+            let _ = log.append_extension("extension", entry.custom_type.clone(), entry.data.clone());
+        }
+    }
+    for message in &effects.messages {
+        if let Some(log) = log {
+            let _ = log.append_extension("extension", "message", message.clone());
+        }
+        app.info(format!("[extension] {}", message_preview(message)));
+    }
+    for user_message in &effects.user_messages {
+        if let Some(log) = log {
+            let _ = log.append_extension(
+                "extension",
+                "user_message",
+                serde_json::json!(user_message),
+            );
+        }
+        app.info(format!("[extension] queued message: {user_message}"));
+    }
+    if let Some(name) = &effects.session_name {
+        if let Some(log) = log {
+            let _ = log.append_extension("extension", "session_name", serde_json::json!(name));
+        }
+        app.info(format!("[extension] session renamed to {name}"));
+    }
+}
+
+/// Human-readable form of a `pi.sendMessage` payload.
+fn message_preview(value: &serde_json::Value) -> String {
+    if let Some(text) = value.get("content").and_then(|c| c.as_str()) {
+        return text.to_string();
+    }
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    value.to_string()
 }
 
 #[allow(dead_code)]
@@ -508,4 +635,59 @@ fn _keep_keycode() -> Option<KeyCode> {
 #[allow(dead_code)]
 fn _keep_writer() -> Option<Box<dyn Write>> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_command_args_returns_text_after_the_name() {
+        assert_eq!(extension_command_args("/echo"), "");
+        assert_eq!(extension_command_args("/echo hello"), "hello");
+        assert_eq!(extension_command_args("  /echo   hi there  "), "hi there");
+    }
+
+    #[test]
+    fn help_text_lists_extension_commands_before_the_key_legend() {
+        let commands = vec![
+            pi_extensions::RegisteredCommand {
+                name: "greet".into(),
+                description: "Greets someone".into(),
+            },
+            pi_extensions::RegisteredCommand {
+                name: "bare".into(),
+                description: String::new(),
+            },
+        ];
+        let text = help_text_with_extensions(&commands);
+        assert!(text.contains("extension commands:"), "{text}");
+        assert!(text.contains("/greet"), "{text}");
+        assert!(text.contains("Greets someone"), "{text}");
+        assert!(text.contains("/bare"), "{text}");
+        let commands_at = text.find("extension commands:").expect("section");
+        let keys_at = text.find("keys:").expect("key legend");
+        assert!(commands_at < keys_at, "section order:\n{text}");
+    }
+
+    #[test]
+    fn help_text_without_commands_is_unchanged() {
+        assert_eq!(
+            help_text_with_extensions(&[]),
+            crate::commands::help_text()
+        );
+    }
+
+    #[test]
+    fn message_preview_prefers_content_then_text_then_json() {
+        assert_eq!(
+            message_preview(&serde_json::json!({"content": "hi"})),
+            "hi"
+        );
+        assert_eq!(message_preview(&serde_json::json!("plain")), "plain");
+        assert_eq!(
+            message_preview(&serde_json::json!({"other": 1})),
+            "{\"other\":1}"
+        );
+    }
 }

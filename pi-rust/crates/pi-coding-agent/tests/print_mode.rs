@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
 use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
+use pi_coding_agent::extensions::wiring::ExtensionRuntime;
 use pi_coding_agent::file_processor::expand_prompt;
 use pi_coding_agent::print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions,
@@ -67,6 +68,7 @@ fn build_options(
         max_turns,
         output_format,
         tool_executor: default_executor(),
+        extensions: Arc::new(ExtensionRuntime::empty()),
     };
     (dir, options)
 }
@@ -227,6 +229,7 @@ fn session_options(
         max_turns: 0,
         output_format: OutputFormat::Text,
         tool_executor: default_executor(),
+        extensions: Arc::new(ExtensionRuntime::empty()),
     }
 }
 

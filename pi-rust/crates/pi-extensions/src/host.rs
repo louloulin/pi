@@ -148,6 +148,44 @@ pub struct AppendedEntry {
     pub data: serde_json::Value,
 }
 
+/// Outcome of invoking an extension-registered slash command through
+/// [`JsExtensionHost::execute_command`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecutionOutcome {
+    /// `true` when a command with that name existed and its handler
+    /// ran. `false` means the name is not an extension command.
+    pub handled: bool,
+    /// `true` when the handler threw or rejected.
+    pub is_error: bool,
+    /// The handler's return value normalised to JSON (`null` for
+    /// `undefined` / non-serialisable values).
+    pub result: serde_json::Value,
+    /// Error text when `is_error` is `true`.
+    pub error: Option<String>,
+}
+
+/// Everything the host accumulated since the previous
+/// [`JsExtensionHost::drain_side_effects`] call.
+///
+/// Tool / command registrations are deliberately *not* part of this
+/// snapshot: they describe the loaded extension set and are read via
+/// [`JsExtensionHost::registered_tools`] /
+/// [`JsExtensionHost::registered_commands`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtensionSideEffects {
+    /// Entries appended via `pi.appendEntry`. UI call traces
+    /// (`ui_confirm` / `ui_notify` / …) are diagnostics only and are
+    /// dropped by [`JsExtensionHost::drain_side_effects`].
+    pub entries: Vec<AppendedEntry>,
+    /// Custom messages sent via `pi.sendMessage`.
+    pub messages: Vec<serde_json::Value>,
+    /// User messages sent via `pi.sendUserMessage`.
+    pub user_messages: Vec<String>,
+    /// Session name set via `pi.setSessionName` since the last drain.
+    pub session_name: Option<String>,
+}
+
 /// Configuration for [`JsExtensionHost::with_options`].
 #[derive(Clone, Default)]
 pub struct HostOptions {
@@ -305,6 +343,118 @@ impl JsExtensionHost {
         self.inner.state.lock().registry.tools().cloned().collect()
     }
 
+    /// List every slash command registered via `pi.registerCommand`,
+    /// across all loaded extensions, in registration order. The JS-side
+    /// `_pi.commands` map is the source of truth so a command is listed
+    /// exactly once even when several extensions register.
+    pub async fn registered_commands(&self) -> Vec<RegisteredCommand> {
+        let context = self.inner.context.clone();
+        async_with!(context => |ctx| {
+            let func: Function = ctx
+                .globals()
+                .get("_pi_registered_commands")
+                .map_err(ExtensionError::from)?;
+            let raw: String = func.call::<_, String>(()).map_err(ExtensionError::from)?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).map_err(ExtensionError::from)?;
+            let commands = parsed
+                .get("commands")
+                .cloned()
+                .map(serde_json::from_value::<Vec<RegisteredCommand>>)
+                .transpose()
+                .map_err(ExtensionError::from)?
+                .unwrap_or_default();
+            Ok::<_, ExtensionError>(commands)
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Invoke a command registered via `pi.registerCommand`.
+    ///
+    /// `args` is the raw text the user typed after the command name —
+    /// the upstream handler signature is `handler(args: string, ctx)`,
+    /// so it is forwarded verbatim. `mode` / `has_ui` / `cwd` populate
+    /// the `ctx` fields the handler reads.
+    pub async fn execute_command(
+        &self,
+        name: &str,
+        args: &str,
+        mode: &str,
+        has_ui: bool,
+        cwd: &str,
+    ) -> Result<CommandExecutionOutcome, ExtensionError> {
+        let context = self.inner.context.clone();
+        let timeout = self.inner.timeout;
+        let name = name.to_string();
+        let args = args.to_string();
+        let ctx_json = serde_json::json!({
+            "mode": mode,
+            "hasUI": has_ui,
+            "cwd": cwd,
+        })
+        .to_string();
+        // Arm interrupt deadline.
+        let deadline = Instant::now() + timeout;
+        self.inner
+            .deadline_nanos
+            .store(system_time_nanos(deadline), Ordering::Relaxed);
+        let result = tokio::time::timeout(
+            timeout,
+            async_with!(context => |ctx| {
+                let exec: Function = ctx
+                    .globals()
+                    .get("_pi_execute_command")
+                    .map_err(ExtensionError::from)?;
+                let raw_promise: MaybePromise = exec
+                    .call::<_, MaybePromise>((name, args, ctx_json))
+                    .catch(&ctx)
+                    .map_err(|e| e.throw(&ctx))?;
+                let raw: String = raw_promise
+                    .into_future()
+                    .await
+                    .map_err(ExtensionError::from)?;
+                let outcome: CommandExecutionOutcome =
+                    serde_json::from_str(&raw).map_err(ExtensionError::from)?;
+                Ok::<_, ExtensionError>(outcome)
+            }),
+        )
+        .await;
+        // Disarm.
+        self.inner
+            .deadline_nanos
+            .store(u64::MAX, Ordering::Relaxed);
+        match result {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
+            Err(_) => Err(ExtensionError::Timeout(timeout)),
+        }
+    }
+
+    /// Take (and clear) the side effects accumulated since the last
+    /// drain: appended entries, custom / user messages and the session
+    /// name. Tool and command registrations are left intact.
+    ///
+    /// UI call traces (`ui_confirm`, `ui_input`, `ui_select`,
+    /// `ui_notify`, `ui_answer_*`) are drained from the host log too but
+    /// are not returned: they are diagnostics, already surfaced through
+    /// the `UiHandler` / `pi_extension` tracing target, and persisting
+    /// them into a session would add noise the upstream format does not
+    /// have.
+    pub fn drain_side_effects(&self) -> ExtensionSideEffects {
+        let mut s = self.inner.state.lock();
+        let entries: Vec<AppendedEntry> = std::mem::take(&mut s.log.entries)
+            .into_iter()
+            .filter(|entry| !entry.custom_type.starts_with("ui_"))
+            .collect();
+        ExtensionSideEffects {
+            entries,
+            messages: std::mem::take(&mut s.log.messages),
+            user_messages: std::mem::take(&mut s.log.user_messages),
+            session_name: s.log.session_name.take(),
+        }
+    }
+
     /// Borrow the registered extensions as a snapshot.
     pub fn registered_extensions(&self) -> Vec<ExtensionEntry> {
         self.inner
@@ -384,22 +534,12 @@ impl JsExtensionHost {
                     let mut caps = ExtensionCapabilities::default();
                     if id == entry_clone.id {
                         // The current load: take everything new from
-                        // the log.
+                        // the log. Commands stay in `log.commands` —
+                        // they are read back through
+                        // `registered_commands()`, so folding them
+                        // into `entries` would lose the name /
+                        // description pair.
                         caps.tools = std::mem::take(&mut s.log.tools);
-                        let cmds = std::mem::take(&mut s.log.commands);
-                        // We keep the commands list as the cap metadata
-                        // by appending them to a custom field, but the
-                        // registry only stores tools. Commands live in
-                        // the log only for Stage 3; the agent reads
-                        // them via `JsExtensionHost::log()`.
-                        for cmd in cmds {
-                            // Best-effort mirror into the log so the
-                            // test surface keeps the old behaviour.
-                            s.log.entries.push(AppendedEntry {
-                                custom_type: "command_registered".into(),
-                                data: serde_json::json!({"name": cmd.name, "description": cmd.description}),
-                            });
-                        }
                     }
                     new_reg.register(ext.clone(), caps);
                 }

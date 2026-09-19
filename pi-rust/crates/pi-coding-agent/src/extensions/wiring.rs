@@ -15,7 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pi_agent_core::tools::ToolExecutor;
-use pi_extensions::{ExtensionBridge, HostOptions, JsExtensionHost, UiHandler};
+use pi_extensions::{
+    CommandExecutionOutcome, ExtensionBridge, ExtensionError, ExtensionSideEffects, HostOptions,
+    JsExtensionHost, RegisteredCommand, UiHandler,
+};
 use pi_protocol::{ExtensionEvent, UiLevel};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
@@ -63,6 +66,9 @@ impl ExtensionLoadOptions {
 pub struct ExtensionLoadOutcome {
     /// Built-ins plus every extension tool that was registered.
     pub executor: Arc<dyn ToolExecutor>,
+    /// Live handle to the host + the commands it registered. Modes use
+    /// it to dispatch `/name` and to drain session side effects.
+    pub runtime: ExtensionRuntime,
     /// Sources that were evaluated successfully.
     pub loaded: Vec<PathBuf>,
     /// Names of the extension tools advertised to the model (after the
@@ -79,11 +85,96 @@ pub struct ExtensionLoadOutcome {
 impl std::fmt::Debug for ExtensionLoadOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExtensionLoadOutcome")
+            .field("runtime", &self.runtime)
             .field("loaded", &self.loaded)
             .field("tools", &self.tools)
             .field("shadowed", &self.shadowed)
             .field("errors", &self.errors)
             .finish_non_exhaustive()
+    }
+}
+
+/// Live handle to the JS extension host for one process.
+///
+/// A mode uses it for two things:
+///
+/// 1. **Command dispatch** — `has_command("echo")` answers whether a
+///    typed `/echo` belongs to an extension, and `execute_command`
+///    runs the JS handler.
+/// 2. **Session side effects** — `drain_side_effects` returns whatever
+///    the extensions recorded via `pi.appendEntry` / `pi.sendMessage` /
+///    `pi.sendUserMessage` / `pi.setSessionName` since the last call,
+///    so the mode can persist it to its session store.
+///
+/// [`ExtensionRuntime::empty`] is the no-extension case: commands are an
+/// empty list and every drain yields nothing.
+#[derive(Clone, Default)]
+pub struct ExtensionRuntime {
+    host: Option<JsExtensionHost>,
+    commands: Vec<RegisteredCommand>,
+    mode: String,
+    has_ui: bool,
+    cwd: String,
+}
+
+impl std::fmt::Debug for ExtensionRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionRuntime")
+            .field("host", &self.host.is_some())
+            .field("commands", &self.commands.len())
+            .field("mode", &self.mode)
+            .field("has_ui", &self.has_ui)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExtensionRuntime {
+    /// The no-extension runtime.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Commands registered by every loaded extension, in load order.
+    pub fn commands(&self) -> &[RegisteredCommand] {
+        &self.commands
+    }
+
+    /// True when `name` (without the leading `/`) is an extension
+    /// command.
+    pub fn has_command(&self, name: &str) -> bool {
+        self.find_command(name).is_some()
+    }
+
+    /// Look up one registered command by name.
+    pub fn find_command(&self, name: &str) -> Option<&RegisteredCommand> {
+        self.commands.iter().find(|c| c.name == name)
+    }
+
+    /// Run a registered command. `args` is the raw text after the
+    /// command name, forwarded to the JS handler verbatim.
+    ///
+    /// Returns [`ExtensionError::Load`] when no host is attached (the
+    /// caller normally checks [`ExtensionRuntime::has_command`] first).
+    pub async fn execute_command(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Result<CommandExecutionOutcome, ExtensionError> {
+        let Some(host) = self.host.as_ref() else {
+            return Err(ExtensionError::Load(
+                "no extension host is attached to this runtime".into(),
+            ));
+        };
+        host.execute_command(name, args, &self.mode, self.has_ui, &self.cwd)
+            .await
+    }
+
+    /// Take (and clear) the side effects recorded since the last drain.
+    pub fn drain_side_effects(&self) -> ExtensionSideEffects {
+        self.host
+            .as_ref()
+            .map(JsExtensionHost::drain_side_effects)
+            .unwrap_or_default()
     }
 }
 
@@ -115,6 +206,7 @@ pub fn load(
     if options.disabled {
         return ExtensionLoadOutcome {
             executor: Arc::new(builtin),
+            runtime: ExtensionRuntime::empty(),
             loaded: Vec::new(),
             tools: Vec::new(),
             shadowed: Vec::new(),
@@ -128,6 +220,8 @@ pub fn load(
     };
     let cwd = options.cwd.display().to_string();
     let host_options = HostOptions::default().with_ui_handler(Arc::new(StderrUiHandler));
+    let mode = options.mode.clone();
+    let has_ui = options.has_ui;
 
     let result = runtime.block_on(async {
         let host = JsExtensionHost::with_options(host_options).await?;
@@ -142,11 +236,14 @@ pub fn load(
         // Lifecycle event: extensions register their event handlers before
         // this fires, so `pi.on("session_start", …)` runs for every mode.
         let _ = outcome.bridge.deliver(&ExtensionEvent::SessionStart).await;
-        Ok::<_, pi_extensions::ExtensionError>((host, outcome))
+        // The JS-side map is the source of truth for commands, so read
+        // them back after the load (and the lifecycle dispatch) ran.
+        let commands = host.registered_commands().await;
+        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands))
     });
 
     match result {
-        Ok((host, outcome)) => {
+        Ok((host, outcome, commands)) => {
             let loaded: Vec<PathBuf> = outcome.entries.iter().map(|e| e.source.clone()).collect();
             let errors: Vec<(PathBuf, String)> = outcome
                 .errors
@@ -154,7 +251,7 @@ pub fn load(
                 .map(|(p, e)| (p.clone(), e.to_string()))
                 .collect();
             let registered = host.registered_tools();
-            let executor = ExtensionToolExecutor::new(builtin, host, registered.clone());
+            let executor = ExtensionToolExecutor::new(builtin, host.clone(), registered.clone());
             let shadowed: Vec<String> = registered
                 .iter()
                 .map(|tool| tool.name.clone())
@@ -168,6 +265,13 @@ pub fn load(
             let executor: Arc<dyn ToolExecutor> = Arc::new(executor);
             ExtensionLoadOutcome {
                 executor,
+                runtime: ExtensionRuntime {
+                    host: Some(host),
+                    commands,
+                    mode,
+                    has_ui,
+                    cwd,
+                },
                 loaded,
                 tools,
                 shadowed,
@@ -176,6 +280,7 @@ pub fn load(
         }
         Err(err) => ExtensionLoadOutcome {
             executor: Arc::new(builtin),
+            runtime: ExtensionRuntime::empty(),
             loaded: Vec::new(),
             tools: Vec::new(),
             shadowed: Vec::new(),
@@ -226,6 +331,53 @@ mod tests {
         assert!(outcome.tools.is_empty());
         assert!(outcome.errors.is_empty());
         assert!(!outcome.executor.definitions().is_empty());
+    }
+
+    #[test]
+    fn loads_an_explicit_command_extension_onto_the_runtime() {
+        let dir = std::env::temp_dir().join(format!("pi-wiring-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("commands.js");
+        std::fs::write(
+            &file,
+            r#"
+                module.exports = function (pi) {
+                    pi.registerCommand("greet", {
+                        description: "Greets",
+                        handler: function (args) { return "hi " + String(args); },
+                    });
+                };
+            "#,
+        )
+        .expect("write extension");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut options = ExtensionLoadOptions::for_mode(None, dir.clone(), "print", false);
+        options.explicit = vec![file];
+        let outcome = load(&runtime, &options);
+
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+        let names: Vec<&str> = outcome
+            .runtime
+            .commands()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["greet"]);
+        assert!(outcome.runtime.has_command("greet"));
+        assert!(!outcome.runtime.has_command("missing"));
+
+        let executed = runtime.block_on(outcome.runtime.execute_command("greet", "world"));
+        let executed = executed.expect("execute command");
+        assert!(executed.handled, "{executed:?}");
+        assert!(!executed.is_error, "{executed:?}");
+        assert_eq!(executed.result, serde_json::json!("hi world"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

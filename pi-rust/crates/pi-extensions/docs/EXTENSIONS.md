@@ -215,6 +215,35 @@ runtime: the host spawns its promise driver and UI worker on the runtime
 it is created in, so `wiring::load` takes the runtime the mode is about
 to use instead of building its own.
 
+### Extension commands & side effects
+
+`load` also returns an `ExtensionRuntime` (in `pi-coding-agent`'s
+extensions wiring) alongside the executor. It carries the commands every
+extension registered and exposes the host for two jobs:
+
+```rust
+runtime.has_command("greet");        // is `/greet` an extension command?
+runtime.execute_command("greet", args).await;  // run the JS handler
+runtime.drain_side_effects();        // take appendEntry/sendMessage/…
+```
+
+* **Commands.** In the TUI a `/name` that no built-in owns is matched
+  against `runtime.commands()` and, on a hit, the JS handler runs with
+  the raw argument text; the return value is shown in the transcript and
+  `/help` lists every registered command. `pi --print "/name args"`
+  does the same thing but never contacts the model — the handler runs
+  before the agent is built and the result is emitted as
+  `text` / `json` / `json-events`.
+* **Side effects.** `pi.appendEntry`, `pi.sendMessage`,
+  `pi.sendUserMessage` and `pi.setSessionName` accumulate in the host and
+  are drained by the mode, which appends them to the session store
+  (`SessionEntry::Extension` in SQLite for print mode, JSONL for the
+  TUI). Draining takes them, so nothing is written twice.
+
+Unknown `/name` prompts still fall through to the previous behaviour
+(model turn in print mode, "unknown command" notice in the TUI), so the
+runtime can never swallow a prompt that was meant for the agent.
+
 ## Timeouts & isolation
 
 - Each host import and event dispatch is bounded by
@@ -243,11 +272,11 @@ or a Stage 4+ follow-up:
 | `module.exports = function (pi) { … }`  | ✅ Supported    | The shim wraps source in a CJS-shaped loader.                          |
 | `pi.on(eventName, handler)`             | ✅ Supported    | Event tags are free-form strings; the host dispatches anything.        |
 | `pi.registerTool(...)` + `execute(...)` | ✅ Supported    | JSON Schema `parameters` round-trip; result shape matches TS.          |
-| `pi.registerCommand(...)`               | ✅ Supported    | Commands are surfaced through `host.log()` for the agent to wire up.   |
-| `ctx.ui.confirm / input / select`       | ✅ Supported    | Async; the host awaits the user's `UiHandler` reply.                   |
+| `pi.registerCommand(...)`               | ✅ Supported    | Dispatched by the TUI (`/name args`) and by `pi --print "/name args"`; the JS handler runs in the host. |
+| `ctx.ui.confirm / input / select`       | ✅ Supported    | Async; the host awaits the user's `UiHandler` reply. The bundled CLI handler is non-interactive (deny/cancel). |
 | `ctx.ui.notify(...)`                    | ✅ Supported    | Fire-and-forget; logged on the `pi_extension` tracing target.          |
-| `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Logged; the agent wires them into the runtime in a later stage.        |
-| `pi.appendEntry(type, data)`            | ✅ Supported    | Logged; persistence lands in the session backend (Stage 5).            |
+| `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Persisted as session entries by the TUI and print modes; `sendUserMessage` is not re-injected as a new turn yet. |
+| `pi.appendEntry(type, data)`            | ✅ Supported    | Persisted to the session backend as `SessionEntry::Extension` (TUI JSONL + print-mode SQLite). |
 | ESM `import` statements                 | ⚠️ Partial     | `import type { … }` lines are stripped by `js_loader`; the rest fails. |
 | TypeBox parameter schemas               | ✅ Wire-only    | The JSON Schema `parameters` field is preserved verbatim.               |
 | Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI.                          |

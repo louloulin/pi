@@ -80,6 +80,41 @@ module.exports = function (pi) {
 };
 "#;
 
+/// Commands whose handlers return a value (mirrors the upstream
+/// contract loosely — upstream handlers return `Promise<void>`, the
+/// Rust host additionally surfaces a returned value for the CLI).
+const COMMAND_RESULT_JS: &str = r#"
+module.exports = function (pi) {
+    pi.registerCommand("greet", {
+        description: "Greets",
+        handler: async (args) => {
+            return "command" + "-saw:" + String(args);
+        },
+    });
+    pi.registerCommand("boom", {
+        description: "Always throws",
+        handler: async () => {
+            throw new Error("boom-from-command");
+        },
+    });
+};
+"#;
+
+/// Commands that exercise every host side-effect channel.
+const COMMAND_SIDE_EFFECTS_JS: &str = r#"
+module.exports = function (pi) {
+    pi.registerCommand("record", {
+        description: "Records side effects",
+        handler: function (args, ctx) {
+            pi.appendEntry("cmd_entry", { args: args });
+            pi.sendMessage({ customType: "cmd_message", content: "hello" });
+            pi.setSessionName("renamed-by-command");
+            ctx.ui.notify("command finished", "info");
+        },
+    });
+};
+"#;
+
 fn entry(id: &str) -> ExtensionEntry {
     ExtensionEntry {
         source: PathBuf::from(format!("/tmp/pi_extensions_e2e/{id}.js")),
@@ -156,12 +191,120 @@ fn e2e_custom_commands_extension_registers_command() {
         host.load(entry("commands"), CUSTOM_COMMANDS_JS)
             .await
             .expect("load commands");
-        // Command registrations land in the log; the registry only
-        // stores tools in Stage 3 — commands are surfaced via
-        // `host.log()` for the agent to wire up.
-        // (assertion kept loose because the log may have been folded
-        //  back into entries by the load impl.)
-        let _ = host.log();
+        // The JS-side `_pi.commands` map is the source of truth, so the
+        // name / description survive the load instead of being folded
+        // into opaque log entries.
+        let commands = host.registered_commands().await;
+        assert_eq!(commands.len(), 1, "commands: {commands:?}");
+        assert_eq!(commands[0].name, "echo");
+        assert_eq!(commands[0].description, "Echo a string");
+    });
+}
+
+#[test]
+fn e2e_registered_command_handler_runs_with_its_arguments() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(entry("commands"), COMMAND_RESULT_JS)
+            .await
+            .expect("load commands");
+
+        let outcome = host
+            .execute_command("greet", "world", "cli", false, "/tmp")
+            .await
+            .expect("execute command");
+        assert!(outcome.handled, "{outcome:?}");
+        assert!(!outcome.is_error, "{outcome:?}");
+        assert_eq!(outcome.result, serde_json::json!("command-saw:world"));
+        assert_eq!(outcome.error, None);
+    });
+}
+
+#[test]
+fn e2e_unknown_command_is_reported_as_unhandled() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(entry("commands"), COMMAND_RESULT_JS)
+            .await
+            .expect("load commands");
+        let outcome = host
+            .execute_command("missing", "", "cli", false, "/tmp")
+            .await
+            .expect("execute command");
+        assert!(!outcome.handled, "{outcome:?}");
+        assert!(!outcome.is_error, "{outcome:?}");
+    });
+}
+
+#[test]
+fn e2e_throwing_command_handler_becomes_an_error_outcome() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(entry("commands"), COMMAND_RESULT_JS)
+            .await
+            .expect("load commands");
+        let outcome = host
+            .execute_command("boom", "", "cli", false, "/tmp")
+            .await
+            .expect("execute command");
+        assert!(outcome.handled, "{outcome:?}");
+        assert!(outcome.is_error, "{outcome:?}");
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("boom-from-command")),
+            "{outcome:?}"
+        );
+    });
+}
+
+#[test]
+fn e2e_command_side_effects_are_drainable_once() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(entry("commands"), COMMAND_SIDE_EFFECTS_JS)
+            .await
+            .expect("load commands");
+        host.execute_command("record", "payload", "cli", false, "/tmp")
+            .await
+            .expect("execute command");
+
+        let effects = host.drain_side_effects();
+        assert!(
+            effects
+                .entries
+                .iter()
+                .any(|e| e.custom_type == "cmd_entry" && e.data == serde_json::json!({"args": "payload"})),
+            "entries: {:?}",
+            effects.entries
+        );
+        assert_eq!(effects.session_name.as_deref(), Some("renamed-by-command"));
+        assert!(
+            effects.messages.iter().any(|m| m["customType"] == "cmd_message"),
+            "messages: {:?}",
+            effects.messages
+        );
+        // UI call traces stay out of the drained set: they are
+        // diagnostics, not session state.
+        assert!(
+            effects
+                .entries
+                .iter()
+                .all(|e| !e.custom_type.starts_with("ui_")),
+            "entries: {:?}",
+            effects.entries
+        );
+
+        // A second drain sees nothing: side effects are consumed once.
+        let second = host.drain_side_effects();
+        assert!(second.entries.is_empty(), "{second:?}");
+        assert!(second.messages.is_empty(), "{second:?}");
+        assert!(second.session_name.is_none(), "{second:?}");
     });
 }
 

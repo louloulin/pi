@@ -59,6 +59,7 @@ use tokio::io::{AsyncWriteExt, Stdout};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
 
+use crate::extensions::wiring::ExtensionRuntime;
 use crate::file_processor::FileError;
 use crate::tool_executor::default_executor;
 
@@ -189,6 +190,12 @@ pub struct PrintModeOptions {
     /// The `pi` binary passes [`default_executor`]; passing a custom
     /// executor lets tests script tool traffic.
     pub tool_executor: Arc<dyn ToolExecutor>,
+    /// Loaded JS extensions. When a prompt is `/name args` and `name`
+    /// is an extension command (`pi.registerCommand`), print mode runs
+    /// the JS handler instead of calling the model, and persists the
+    /// handler's `pi.appendEntry` / `pi.sendMessage` side effects into
+    /// the session.
+    pub extensions: Arc<ExtensionRuntime>,
 }
 
 impl PrintModeOptions {
@@ -206,6 +213,7 @@ impl PrintModeOptions {
             max_turns: 0,
             output_format: OutputFormat::Text,
             tool_executor: default_executor(),
+            extensions: Arc::new(ExtensionRuntime::empty()),
         }
     }
 }
@@ -234,6 +242,15 @@ pub async fn run_print_mode(
     // we can fail fast on a missing / corrupt database.
     let session_writer = resolve_session(&options)?;
     let session_path = session_writer.as_ref().map(|s| s.path.clone());
+
+    // `/name args` may name an extension command (`pi.registerCommand`).
+    // Those run inside the extension host only — no model request is
+    // made and the turn counter stays at 0.
+    if let Some((name, args)) = extension_command_invocation(&options.prompt) {
+        if options.extensions.has_command(&name) {
+            return run_extension_command(&options, &name, args, session_writer, session_path).await;
+        }
+    }
 
     let agent = Arc::new(AsyncMutex::new(build_agent(&options)?));
     // Replay the stored conversation so `--continue` / `--session <id>`
@@ -362,6 +379,9 @@ pub async fn run_print_mode(
         _ => {}
     }
 
+    // Extensions may have appended entries / messages while handling
+    // agent events during the turn; persist whatever is pending.
+    persist_print_side_effects(session_writer.as_ref(), &options.extensions);
     if let Some(writer) = session_writer.as_ref() {
         writer.flush()?;
     }
@@ -911,6 +931,142 @@ fn session_error(err: pi_session::SessionError) -> PrintModeError {
     PrintModeError::Session(err.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Extension commands
+// ---------------------------------------------------------------------------
+
+/// Parse a prompt that is exactly `/name args` into its parts.
+///
+/// Returns `None` for anything that is not a lone slash-command prompt
+/// (plain text, an empty name, a path-like `/usr/bin`).
+fn extension_command_invocation(prompt: &str) -> Option<(String, &str)> {
+    let rest = prompt.trim().strip_prefix('/')?;
+    let (name, args) = match rest.find(char::is_whitespace) {
+        Some(idx) => (&rest[..idx], rest[idx..].trim()),
+        None => (rest, ""),
+    };
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some((name.to_string(), args))
+}
+
+/// Run one extension command in print mode and emit its result.
+///
+/// The shape mirrors a normal turn: `text` prints the handler's return
+/// value, `json` prints one summary object, and `json-events` prints
+/// one NDJSON line of the same content. A handler that throws is
+/// surfaced on stderr and returned as [`PrintModeError::Agent`] so the
+/// process exits non-zero — after the structured result has already
+/// been written.
+async fn run_extension_command(
+    options: &PrintModeOptions,
+    name: &str,
+    args: &str,
+    session: Option<SessionHandle>,
+    session_path: Option<PathBuf>,
+) -> Result<PrintModeResult, PrintModeError> {
+    let outcome = options
+        .extensions
+        .execute_command(name, args)
+        .await
+        .map_err(|err| {
+            PrintModeError::Agent(format!("extension command `/{name}` failed: {err}"))
+        })?;
+
+    // Persist whatever the handler recorded before we emit, so a
+    // failed command still leaves its `appendEntry` rows behind.
+    persist_print_side_effects(session.as_ref(), &options.extensions);
+
+    let text = match &outcome.result {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+
+    let mut line = match options.output_format {
+        OutputFormat::Text => text,
+        OutputFormat::Json => json!({
+            "command": name,
+            "handled": outcome.handled,
+            "is_error": outcome.is_error,
+            "result": outcome.result,
+            "error": outcome.error,
+            "turns": 0,
+        })
+        .to_string(),
+        OutputFormat::JsonEvents => json!({
+            "type": "extension_command",
+            "command": name,
+            "handled": outcome.handled,
+            "is_error": outcome.is_error,
+            "result": outcome.result,
+            "error": outcome.error,
+        })
+        .to_string(),
+    };
+
+    let mut stdout = tokio::io::stdout();
+    if !line.is_empty() {
+        line.push('\n');
+        stdout.write_all(line.as_bytes()).await?;
+    }
+    stdout.flush().await?;
+
+    if let Some(session) = session.as_ref() {
+        session.flush()?;
+    }
+
+    if outcome.is_error {
+        let reason = outcome
+            .error
+            .clone()
+            .unwrap_or_else(|| "extension command failed".into());
+        eprintln!("pi: /{name}: {reason}");
+        return Err(PrintModeError::Agent(reason));
+    }
+
+    Ok(PrintModeResult {
+        final_message: None,
+        usage: Usage::default(),
+        stop_reason: StopReason::Empty,
+        turns: 0,
+        session_path,
+    })
+}
+
+/// Persist drained extension side effects into the SQLite session.
+///
+/// The host buffer is always drained, even when session logging is off,
+/// so a later drain cannot see stale effects.
+fn persist_print_side_effects(session: Option<&SessionHandle>, runtime: &ExtensionRuntime) {
+    let effects = runtime.drain_side_effects();
+    let Some(session) = session else {
+        return;
+    };
+    let append = |kind: &str, payload: serde_json::Value| {
+        if let Err(err) = session.writer.append(SessionEntry::Extension {
+            extension: "extension".into(),
+            kind: kind.into(),
+            payload,
+        }) {
+            warn!("session: failed to append extension `{kind}` entry: {err}");
+        }
+    };
+    for entry in &effects.entries {
+        append(&entry.custom_type, entry.data.clone());
+    }
+    for message in &effects.messages {
+        append("message", message.clone());
+    }
+    for user_message in &effects.user_messages {
+        append("user_message", json!(user_message));
+    }
+    if let Some(name) = &effects.session_name {
+        append("session_name", json!(name));
+    }
+}
+
 /// Open SQLite session the driver appends to, plus the history the
 /// agent starts from.
 struct SessionHandle {
@@ -968,6 +1124,29 @@ fn classify_agent_error(err: AgentError) -> PrintModeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_command_invocation_parses_name_and_args() {
+        assert_eq!(
+            extension_command_invocation("/echo"),
+            Some(("echo".to_string(), ""))
+        );
+        assert_eq!(
+            extension_command_invocation("  /echo  hello world  "),
+            Some(("echo".to_string(), "hello world"))
+        );
+        assert_eq!(
+            extension_command_invocation("/echo\targ"),
+            Some(("echo".to_string(), "arg"))
+        );
+    }
+
+    #[test]
+    fn extension_command_invocation_ignores_non_commands() {
+        for prompt in ["hello", "/", "/usr/bin/ls", "//echo"] {
+            assert_eq!(extension_command_invocation(prompt), None, "{prompt}");
+        }
+    }
 
     #[test]
     fn output_format_display_matches_value_enum() {
