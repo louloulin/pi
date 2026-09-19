@@ -7742,3 +7742,21 @@ LUM-1128 / LUM-1129 的落地情况再排。
 
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree 00c51de11 work/lum-1127` → tree `0b6715252`（零冲突），与 `work/lum-1127`
+  的 tree **完全一致**——本轮先把 `00c51de11`（LUM-1126 的 docs 补记）合入工作分支（合并提交 `15025fd7a`），
+  因此这次合并没有产生额外改动，也没留合并债。
+- 合并提交 `f9603e753`（`Merge branch 'work/lum-1127' into feature/pi.rs`，父 `00c51de11` +
+  工作提交 `6b70d288b`）；`git push origin f9603e753:refs/heads/feature/pi.rs` → `00c51de11..f9603e753`；
+  `work/lum-1127` 作为新分支一并推送（`6b70d288b`）。
+- `git diff --stat 00c51de11 6b70d288b` = 本轮 3 个文件、+761 / −7：`pi-tui/src/markdown.rs` +368、
+  `pi-tui/tests/markdown.rs` +290（其中表格组 +12 条测试）、`pi-rust/docs/FEATURE_PI_RS_STATUS.md` +110。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `00c51de11`（LUM-1126 已合入、其状态 `in_review`），且本轮
+  **没有派发任何新 issue**（3 路槽位已满），所以既没有覆盖在途工作，也没有与 LUM-1128（`app.rs`/`lib.rs`）、
+  LUM-1129（shim/`host.rs`）产生文件重叠——本轮只动 `pi-tui/src/markdown.rs`、其测试与本节文档。
+- 被放弃的 `node:module` 切片补丁留档在本轮工作目录（**未推送**）：
+  `lum-1127-node-module-duplicate.patch`（shim + `KNOWN_UNBRIDGED` + 文档，268 行）与
+  `lum-1127-node-module-duplicate.tests.rs.patch`（`tests/node_module.rs`，411 行）。若 Stage 36 未落地，
+  下一轮可按届时 shim 现状重放这两份补丁。
