@@ -9,7 +9,7 @@ coding-agent helpers:
 @earendil-works/pi-coding-agent   defineTool / getAgentDir / parseFrontmatter / …
 @earendil-works/pi-ai             Type / StringEnum / uuidv7 / calculateCost / …
 @earendil-works/pi-agent-core     (type-only in the upstream examples)
-@earendil-works/pi-ai/compat      provider registration (gaps below)
+@earendil-works/pi-ai/compat      provider registry + event stream (gaps below)
 @earendil-works/gondolin          third-party sandbox VM (unbridged)
 ```
 
@@ -164,10 +164,9 @@ Divergences:
 
 Implemented: `Type` (the same TypeBox `Type` object as the `typebox`
 virtual module), `StringEnum(values, options)`, `uuidv7(timestampMs?)`,
-`calculateCost(model, usage)`, `contentText(content, separator?)`.
-
-Documented gap: `createAssistantMessageEventStream` — streaming needs a
-model-streaming bridge the extension host does not expose yet.
+`calculateCost(model, usage)`, `contentText(content, separator?)`, and the
+event-stream trio `EventStream`, `AssistantMessageEventStream`,
+`createAssistantMessageEventStream()`.
 
 Divergences:
 
@@ -178,14 +177,42 @@ Divergences:
 * **`Type` is re-exported, not a second TypeBox build** — `Type` and the
   `typebox` / `@sinclair/typebox` virtual modules are the same object, so
   schemas built from either compare equal.
+* **The event stream is a verbatim port of
+  `packages/ai/src/utils/event-stream.ts`.** It is pure JS (a FIFO queue
+  behind an `AsyncIterable` plus the promise the terminal event resolves),
+  so it needs no host bridge; the async iterator is hand-rolled rather
+  than an `async function*`, matching the rest of the shim.
 
-### `@earendil-works/pi-ai/compat` — documented gaps only
+### `@earendil-works/pi-ai/compat` — provider registry + builtin gaps
 
-`anthropicMessagesApi`, `openAIResponsesApi`, `registerApiProvider`,
-`streamSimple` and `createAssistantMessageEventStream` all need the
-provider/streaming bridge and throw `ERR_PI_SDK_UNIMPLEMENTED`. The
-module still *resolves*, so an extension that imports it loads; it only
-fails when it actually reaches for a provider function.
+Upstream `compat.ts` keeps a module-level `Map<Api, RegisteredApiProvider>`
+so an extension can plug its own streaming implementation in; that is
+exactly what the `custom-provider-*` examples do. The registry and the
+`AssistantMessageEventStream` factory are pure JS and are **implemented**:
+
+| Export | Notes |
+|---|---|
+| `registerApiProvider(provider, sourceId?)` | Stores `{api, stream, streamSimple}` keyed by `api`, wrapping both functions with upstream's `Mismatched api` guard. |
+| `unregisterApiProviders(sourceId)` / `getApiProvider(api)` / `getApiProviders()` | Registry maintenance, same shapes as upstream. |
+| `stream` / `streamSimple` / `complete` / `completeSimple` | Resolve the registered provider for `model.api`, stream, and (for `complete*`) await `result()`. |
+| `createAssistantMessageEventStream()` | Same factory as `@earendil-works/pi-ai`. |
+
+Documented gaps still need the host streaming bridge:
+`anthropicMessagesApi`, `openAIResponsesApi`,
+`registerBuiltInApiProviders`, `resetApiProviders`. The module resolves,
+so an extension that imports a gap only fails when it actually reaches for
+that factory.
+
+Divergences:
+
+* **No builtin provider catalogue.** Upstream `stream`/`streamSimple` first
+  look the model up in the builtin catalogue and route cloudflare models
+  through `Models`; the shim has neither, so they go straight to the
+  registry and throw `No API provider registered for api: …` when the
+  extension has not registered one.
+* **No env API-key injection.** Upstream's `withEnvApiKey` fills in
+  `options.apiKey` from the provider environment; the shim has no
+  `getEnvApiKey` bridge, so the caller must pass `apiKey` explicitly.
 
 ### `@earendil-works/pi-agent-core` — resolves, no runtime exports
 

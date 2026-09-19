@@ -5011,7 +5011,8 @@ if (typeof globalThis.TextDecoder === "undefined") globalThis.TextDecoder = __pi
 //   @earendil-works/pi-coding-agent  defineTool / getAgentDir / DynamicBorder
 //   @earendil-works/pi-ai            Type / StringEnum / uuidv7 / contentText
 //   @earendil-works/pi-agent-core    (type-only in the upstream examples)
-//   @earendil-works/pi-ai/compat     provider registration (gaps below)
+//   @earendil-works/pi-ai/compat     provider registry + event stream; the
+//                                    builtin provider factories are gaps
 //
 // The packages used to be published under the `@mariozechner/` scope, so every
 // specifier is registered under both scopes as well as the bare package name.
@@ -6319,6 +6320,205 @@ function __pi_sdk_calculate_cost(model, usage) {
   return usage.cost;
 }
 
+// --- pi-ai event stream (utils/event-stream.ts) ---------------------------
+
+// Upstream `packages/ai/src/utils/event-stream.ts` is pure JS: a FIFO queue
+// behind an `AsyncIterable`, plus a promise the terminal event resolves. It
+// needs no host bridge — the earlier "streaming needs a model-streaming
+// bridge" gap note was wrong for this class — so it is ported verbatim here.
+// The async iterator is hand-rolled (like `node:readline`) instead of an
+// `async function*`, matching how the rest of the shim targets the engine.
+class __pi_sdk_fifo_queue {
+  constructor() {
+    this.__incoming = [];
+    this.__outgoing = [];
+  }
+
+  get length() {
+    return this.__incoming.length + this.__outgoing.length;
+  }
+
+  enqueue(value) {
+    this.__incoming.push(value);
+  }
+
+  dequeue() {
+    if (this.__outgoing.length === 0) {
+      while (this.__incoming.length > 0) {
+        this.__outgoing.push(this.__incoming.pop());
+      }
+    }
+    return this.__outgoing.pop();
+  }
+}
+
+class EventStream {
+  constructor(isComplete, extractResult) {
+    this.__queue = new __pi_sdk_fifo_queue();
+    this.__waiting = new __pi_sdk_fifo_queue();
+    this.__done = false;
+    this.__isComplete = isComplete;
+    this.__extractResult = extractResult;
+    this.__finalResultPromise = new Promise((resolve) => {
+      this.__resolveFinalResult = resolve;
+    });
+  }
+
+  push(event) {
+    if (this.__done) return;
+
+    if (this.__isComplete(event)) {
+      this.__done = true;
+      this.__resolveFinalResult(this.__extractResult(event));
+    }
+
+    // Deliver to a waiting consumer, or queue it.
+    const waiter = this.__waiting.dequeue();
+    if (waiter) {
+      waiter({ value: event, done: false });
+    } else {
+      this.__queue.enqueue(event);
+    }
+  }
+
+  end(result) {
+    this.__done = true;
+    if (result !== undefined) {
+      this.__resolveFinalResult(result);
+    }
+    while (this.__waiting.length > 0) {
+      const waiter = this.__waiting.dequeue();
+      waiter({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator]() {
+    const self = this;
+    return {
+      next: () => self.__next(),
+      return: () => Promise.resolve({ done: true, value: undefined }),
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+  }
+
+  __next() {
+    if (this.__queue.length > 0) {
+      return Promise.resolve({ value: this.__queue.dequeue(), done: false });
+    }
+    if (this.__done) {
+      return Promise.resolve({ done: true, value: undefined });
+    }
+    return new Promise((resolve) => this.__waiting.enqueue(resolve));
+  }
+
+  result() {
+    return this.__finalResultPromise;
+  }
+}
+
+class AssistantMessageEventStream extends EventStream {
+  constructor() {
+    super(
+      (event) => event.type === "done" || event.type === "error",
+      (event) => {
+        if (event.type === "done") return event.message;
+        if (event.type === "error") return event.error;
+        throw new Error("Unexpected event type for final result");
+      },
+    );
+  }
+}
+
+function __pi_sdk_create_assistant_message_event_stream() {
+  return new AssistantMessageEventStream();
+}
+
+// --- pi-ai/compat provider registry (compat.ts) ---------------------------
+
+// Upstream `compat.ts` keeps a module-level `Map<Api, RegisteredApiProvider>`
+// and exposes `registerApiProvider` / `stream` / `streamSimple` so an
+// extension can plug its own streaming implementation in — that is exactly
+// what `packages/coding-agent/examples/extensions/custom-provider-*` does.
+// The registry itself is pure JS; only the *builtin* providers
+// (`anthropicMessagesApi`, `openAIResponsesApi`, …) need the host streaming
+// bridge and stay documented gaps.
+const __pi_sdk_api_providers = new Map();
+
+function __pi_sdk_wrap_api_stream(api, stream) {
+  return (model, context, options) => {
+    if (!model || model.api !== api) {
+      throw new Error("Mismatched api: " + (model && model.api) + " expected " + api);
+    }
+    return stream(model, context, options);
+  };
+}
+
+function __pi_sdk_wrap_api_stream_simple(api, streamSimple) {
+  return (model, context, options) => {
+    if (!model || model.api !== api) {
+      throw new Error("Mismatched api: " + (model && model.api) + " expected " + api);
+    }
+    return streamSimple(model, context, options);
+  };
+}
+
+function __pi_sdk_register_api_provider(provider, sourceId) {
+  if (!provider || typeof provider !== "object") {
+    throw new TypeError("registerApiProvider: provider must be an object");
+  }
+  __pi_sdk_api_providers.set(provider.api, {
+    provider: {
+      api: provider.api,
+      stream: __pi_sdk_wrap_api_stream(provider.api, provider.stream),
+      streamSimple: __pi_sdk_wrap_api_stream_simple(provider.api, provider.streamSimple),
+    },
+    sourceId: sourceId,
+  });
+}
+
+function __pi_sdk_get_api_provider(api) {
+  const entry = __pi_sdk_api_providers.get(api);
+  return entry ? entry.provider : undefined;
+}
+
+function __pi_sdk_get_api_providers() {
+  const providers = [];
+  for (const entry of __pi_sdk_api_providers.values()) providers.push(entry.provider);
+  return providers;
+}
+
+function __pi_sdk_unregister_api_providers(sourceId) {
+  for (const entry of Array.from(__pi_sdk_api_providers.entries())) {
+    if (entry[1].sourceId === sourceId) __pi_sdk_api_providers.delete(entry[0]);
+  }
+}
+
+function __pi_sdk_resolve_api_provider(api) {
+  const provider = __pi_sdk_get_api_provider(api);
+  if (!provider) {
+    throw new Error("No API provider registered for api: " + api);
+  }
+  return provider;
+}
+
+function __pi_sdk_compat_stream(model, context, options) {
+  return __pi_sdk_resolve_api_provider(model.api).stream(model, context, options);
+}
+
+function __pi_sdk_compat_stream_simple(model, context, options) {
+  return __pi_sdk_resolve_api_provider(model.api).streamSimple(model, context, options);
+}
+
+function __pi_sdk_compat_complete(model, context, options) {
+  return __pi_sdk_compat_stream(model, context, options).result();
+}
+
+function __pi_sdk_compat_complete_simple(model, context, options) {
+  return __pi_sdk_compat_stream_simple(model, context, options).result();
+}
+
 // --- module plumbing ------------------------------------------------------
 
 const __pi_sdk_manifest_data = {};
@@ -6482,29 +6682,35 @@ const __pi_sdk_pi_coding_agent = __pi_sdk_module(
 
 const __pi_sdk_stream_gap = "streaming assistant-message events need the model-streaming bridge, which the extension host does not expose yet";
 
-const __pi_sdk_pi_ai = __pi_sdk_module(
-  "@earendil-works/pi-ai",
-  {
-    StringEnum: __pi_sdk_string_enum,
-    Type: __pi_typebox_module.Type,
-    calculateCost: __pi_sdk_calculate_cost,
-    contentText: __pi_sdk_content_text,
-    uuidv7: __pi_sdk_uuid_v7,
-  },
-  {
-    createAssistantMessageEventStream: __pi_sdk_stream_gap,
-  },
-);
+const __pi_sdk_pi_ai = __pi_sdk_module("@earendil-works/pi-ai", {
+  AssistantMessageEventStream: AssistantMessageEventStream,
+  EventStream: EventStream,
+  StringEnum: __pi_sdk_string_enum,
+  Type: __pi_typebox_module.Type,
+  calculateCost: __pi_sdk_calculate_cost,
+  contentText: __pi_sdk_content_text,
+  createAssistantMessageEventStream: __pi_sdk_create_assistant_message_event_stream,
+  uuidv7: __pi_sdk_uuid_v7,
+});
 
 const __pi_sdk_pi_ai_compat = __pi_sdk_module(
   "@earendil-works/pi-ai/compat",
-  {},
+  {
+    complete: __pi_sdk_compat_complete,
+    completeSimple: __pi_sdk_compat_complete_simple,
+    createAssistantMessageEventStream: __pi_sdk_create_assistant_message_event_stream,
+    getApiProvider: __pi_sdk_get_api_provider,
+    getApiProviders: __pi_sdk_get_api_providers,
+    registerApiProvider: __pi_sdk_register_api_provider,
+    stream: __pi_sdk_compat_stream,
+    streamSimple: __pi_sdk_compat_stream_simple,
+    unregisterApiProviders: __pi_sdk_unregister_api_providers,
+  },
   {
     anthropicMessagesApi: __pi_sdk_stream_gap,
-    createAssistantMessageEventStream: __pi_sdk_stream_gap,
     openAIResponsesApi: __pi_sdk_stream_gap,
-    registerApiProvider: __pi_sdk_stream_gap,
-    streamSimple: __pi_sdk_stream_gap,
+    registerBuiltInApiProviders: __pi_sdk_stream_gap,
+    resetApiProviders: __pi_sdk_stream_gap,
   },
 );
 

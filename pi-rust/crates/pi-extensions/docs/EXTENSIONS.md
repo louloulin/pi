@@ -478,15 +478,15 @@ or a Stage 4+ follow-up:
 | `fetch` / `Headers` / `Request` / `Response` | ✅ Subset | Backed by the `host_fetch` import over the same `reqwest` stack the providers use; `body` is buffered (no streams), `signal` and a non-standard `timeout` are honoured. See the [`fetch` section](#fetch-global). |
 | `@earendil-works/pi-tui`                | ✅ Subset      | Components (`Text` / `Box` / `Container` / `Markdown` / `SelectList` / `SettingsList` / `Editor` / `Input` / …) and the ANSI geometry helpers, as free-standing renderables — no live terminal. See [`docs/SDK_MODULES.md`](SDK_MODULES.md). |
 | `@earendil-works/pi-coding-agent`       | ✅ Subset      | `defineTool`, `getAgentDir`, `parseFrontmatter`, `truncateHead`/`truncateLine`, `formatSize`, `convertToLlm`, `serializeConversation`, `withFileMutationQueue`, `VERSION`, the theme getters and the loader/border components. The `create*Tool` factories are documented gaps (need a built-in tool-invocation bridge). |
-| `@earendil-works/pi-ai`                 | ✅ Subset      | `Type`, `StringEnum`, `uuidv7`, `calculateCost`, `contentText`. `createAssistantMessageEventStream` is a documented gap (needs the streaming bridge). |
-| `@earendil-works/pi-ai/compat`          | ❌ Documented gap | Resolves, but every provider/streaming export throws `ERR_PI_SDK_UNIMPLEMENTED` until the provider bridge lands. |
+| `@earendil-works/pi-ai`                 | ✅ Subset      | `Type`, `StringEnum`, `uuidv7`, `calculateCost`, `contentText`, and the pure-JS event-stream trio (`EventStream` / `AssistantMessageEventStream` / `createAssistantMessageEventStream`). |
+| `@earendil-works/pi-ai/compat`          | ✅ Subset      | The pure-JS provider registry (`registerApiProvider` / `unregisterApiProviders` / `getApiProvider(s)` / `stream(Simple)` / `complete(Simple)`) and the event-stream factory. The builtin provider factories (`anthropicMessagesApi`, `openAIResponsesApi`, `registerBuiltInApiProviders`, `resetApiProviders`) need the host streaming bridge and stay `ERR_PI_SDK_UNIMPLEMENTED`. |
 | `@earendil-works/pi-agent-core`         | ✅ Supported   | Resolves; upstream imports here are type-only and erased. |
 | `@earendil-works/gondolin`              | ❌ Not bridged | Third-party sandbox VM (`VM`, `RealFSProvider`); throws a clear `ERR_PI_SDK_UNIMPLEMENTED`. Use the upstream Node runtime for it. |
 | Old `@mariozechner/*` scope / bare package names | ✅ Supported | Every SDK specifier is registered under `@earendil-works/<pkg>`, `@mariozechner/<pkg>` and `<pkg>`. |
 | TypeBox parameter schemas               | ✅ Wire-only    | The JSON Schema `parameters` field is preserved verbatim.               |
 | Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI. `ctx.ui.custom()` now throws `ERR_PI_UI_UNSUPPORTED` instead of returning a component nobody can render. |
 | Custom editor / footer / header / widgets | ❌ Out of scope | TUI concern (Stage 4). The `ctx.ui.set*` calls are accepted as inert no-ops (one-time warning) so extensions that configure them at load time still load. |
-| Provider registration                   | ❌ Out of scope | Stage 1 + later `pi-ai` work; `@earendil-works/pi-ai/compat` documents the gap. |
+| Provider registration                   | ⚠️ Partial     | The extension-side `@earendil-works/pi-ai/compat` registry (own `streamSimple` + event stream) works; the builtin providers and the `pi.registerProvider(...)` host bridge that would let the agent *use* an extension provider are still out of scope. |
 
 When a feature is not yet wired, the corresponding host import can be
 added in a follow-up commit without changing the JS-side shape.

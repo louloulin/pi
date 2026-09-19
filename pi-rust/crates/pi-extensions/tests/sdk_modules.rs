@@ -285,6 +285,153 @@ fn sdk_modules_load_and_exercise_the_upstream_surface() {
     });
 }
 
+/// The `pi-ai` event stream and the `pi-ai/compat` provider registry are pure
+/// JS upstream (`utils/event-stream.ts` / `compat.ts`), so the shim backs them
+/// without a host bridge. This is the surface the `custom-provider-*` upstream
+/// examples use to plug a streaming implementation in.
+#[test]
+fn pi_ai_event_stream_and_compat_registry_match_upstream() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("event-stream");
+        let host = host_with_cwd(&scratch.as_str()).await;
+
+        let source = r##"
+            import {
+                AssistantMessageEventStream, EventStream, createAssistantMessageEventStream,
+            } from "@earendil-works/pi-ai";
+            import {
+                completeSimple, getApiProvider, getApiProviders, registerApiProvider, streamSimple,
+                unregisterApiProviders,
+            } from "@earendil-works/pi-ai/compat";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "event_probe",
+                    label: "event probe",
+                    description: "exercises the pi-ai event stream + compat provider registry",
+                    parameters: { type: "object", properties: {} },
+                    execute: async () => {
+                        const captured = {};
+
+                        // Generic EventStream: completion predicate + result
+                        // extractor, async iteration, idempotent push after done.
+                        const numbers = new EventStream((n) => n >= 3, (n) => n * 10);
+                        const iterator = numbers[Symbol.asyncIterator]();
+                        const seen = [];
+                        numbers.push(1);
+                        numbers.push(2);
+                        seen.push((await iterator.next()).value);
+                        seen.push((await iterator.next()).value);
+                        numbers.push(3);
+                        numbers.push(99); // ignored: already complete
+                        seen.push((await iterator.next()).value);
+                        captured.eventDone = (await iterator.next()).done;
+                        captured.eventSeen = seen;
+                        captured.eventResult = await numbers.result();
+
+                        // `for await` drains an ended stream.
+                        const forAwaited = [];
+                        const ended = new AssistantMessageEventStream();
+                        ended.end("explicit");
+                        for await (const event of ended) forAwaited.push(event);
+                        captured.forAwaitCount = forAwaited.length;
+                        captured.forAwaitResult = await ended.result();
+
+                        // `createAssistantMessageEventStream` resolves on the
+                        // terminal event and exposes the message / error payload.
+                        const message = { role: "assistant", content: [{ type: "text", text: "hi" }] };
+                        const stream = createAssistantMessageEventStream();
+                        stream.push({ type: "text_delta", delta: "hi" });
+                        stream.push({ type: "done", reason: "stop", message: message });
+                        captured.assistantResultText = (await stream.result()).content[0].text;
+
+                        const errorStream = createAssistantMessageEventStream();
+                        errorStream.push({
+                            type: "error",
+                            reason: "error",
+                            error: { role: "assistant", errorMessage: "boom" },
+                        });
+                        captured.assistantErrorText = (await errorStream.result()).errorMessage;
+
+                        // compat registry: register, look up, stream, complete,
+                        // unregister.
+                        function makeStream() {
+                            const s = createAssistantMessageEventStream();
+                            s.push({
+                                type: "done",
+                                reason: "stop",
+                                message: { role: "assistant", content: [{ type: "text", text: "registered" }] },
+                            });
+                            return s;
+                        }
+                        registerApiProvider({ api: "shim-probe-api", stream: makeStream, streamSimple: makeStream }, "probe");
+                        const model = { id: "probe-model", provider: "probe", api: "shim-probe-api" };
+                        captured.streamText = (await streamSimple(model, { messages: [] }, {}).result()).content[0].text;
+                        captured.completeText = (await completeSimple(model, { messages: [] }, {})).content[0].text;
+                        captured.registryApi = getApiProvider("shim-probe-api").api;
+                        captured.registryCount = getApiProviders().length;
+
+                        let mismatch = null;
+                        try {
+                            getApiProvider("shim-probe-api").streamSimple(
+                                { id: "x", provider: "p", api: "other-api" },
+                                { messages: [] },
+                                {},
+                            );
+                        } catch (err) {
+                            mismatch = err.message;
+                        }
+                        captured.mismatch = mismatch;
+
+                        let missing = null;
+                        try {
+                            streamSimple({ id: "x", provider: "p", api: "nope-api" }, { messages: [] }, {});
+                        } catch (err) {
+                            missing = err.message;
+                        }
+                        captured.missing = missing;
+
+                        unregisterApiProviders("probe");
+                        captured.registryAfterUnregister = getApiProviders().length;
+
+                        return { content: [{ type: "text", text: "ok" }], details: captured };
+                    },
+                });
+            }
+        "##;
+
+        host.load(entry_at("event_probe", "/tmp/pi_sdk_modules/events.mjs"), source)
+            .await
+            .expect("load event probe extension");
+
+        let outcome = host
+            .execute_tool("event_probe", &json!({}).to_string())
+            .await
+            .expect("execute event probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+        let d = outcome.details.expect("details");
+
+        assert_eq!(d["eventSeen"], json!([1, 2, 3]));
+        assert_eq!(d["eventDone"], true);
+        assert_eq!(d["eventResult"], 30, "extractResult runs on the terminal event");
+        assert_eq!(d["forAwaitCount"], 0, "an ended stream has no pending events");
+        assert_eq!(d["forAwaitResult"], "explicit", "end(result) resolves the result");
+        assert_eq!(d["assistantResultText"], "hi");
+        assert_eq!(d["assistantErrorText"], "boom");
+        assert_eq!(d["streamText"], "registered");
+        assert_eq!(d["completeText"], "registered");
+        assert_eq!(d["registryApi"], "shim-probe-api");
+        assert_eq!(d["registryCount"], 1);
+        assert_eq!(
+            d["mismatch"], "Mismatched api: other-api expected shim-probe-api",
+            "a registered provider rejects a model from another api"
+        );
+        assert_eq!(d["missing"], "No API provider registered for api: nope-api");
+        assert_eq!(d["registryAfterUnregister"], 0);
+    });
+}
+
 /// The hard rule: a name the shim does not implement throws a named error,
 /// an unknown name throws "has no export", and the JS-internal protocol
 /// names stay `undefined` so module interop keeps working.
@@ -298,6 +445,7 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
         let source = r##"
             import * as coding from "@earendil-works/pi-coding-agent";
             import * as ai from "@earendil-works/pi-ai";
+            import * as compat from "@earendil-works/pi-ai/compat";
             import * as gondolin from "@earendil-works/gondolin";
 
             export default function (pi) {
@@ -321,8 +469,9 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                         } catch (err) {
                             captured.unknownCode = err.code;
                         }
+                        captured.streamFactoryType = typeof ai.createAssistantMessageEventStream;
                         try {
-                            ai.createAssistantMessageEventStream;
+                            compat.anthropicMessagesApi;
                         } catch (err) {
                             captured.streamCode = err.code;
                         }
@@ -381,6 +530,10 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
         assert_eq!(d["gapNamesDoc"], true);
         assert_eq!(d["unknownCode"], "ERR_PI_SDK_UNKNOWN_EXPORT");
         assert_eq!(d["streamCode"], "ERR_PI_SDK_UNIMPLEMENTED");
+        assert_eq!(
+            d["streamFactoryType"], "function",
+            "createAssistantMessageEventStream is implemented now"
+        );
         assert_eq!(d["gondolinCode"], "ERR_PI_SDK_UNIMPLEMENTED");
         assert_eq!(d["customCode"], "ERR_PI_UI_UNSUPPORTED");
         assert_eq!(d["widgetThrew"], false, "setWidget is an inert no-op");
