@@ -11300,7 +11300,7 @@ issue 要求，上游没有）；`render_result` 只在 `is_error` 时输出（�
 `969bfcee6` **快进至 `181831594`**（`git ls-remote` 复查一致：
 `181831594dc2fa9c4b305de820622dd6f8ef9aa3`），留档分支 `work/lum-1154` 一并推送。
 
-## LUM-1155 round — `pi-coding-agent` bash/find/grep/ls 工具渲染器（6 工具齐备，仅剩 `edit`）+ 派发 Stage 46 / Stage 47
+## LUM-1155 round — `pi-coding-agent` bash/find/grep/ls 工具渲染器（6 工具齐备，仅剩 `edit`）+ 派发 Stage 46 + 晋升并改写 Stage 25（LUM-1090）
 
 ### 一、本轮切片
 
@@ -11388,8 +11388,12 @@ pattern 用 `Accent`、路径与 glob/limit 用 `ToolOutput`（与上游分工�
    上游 `renderers/` 目录**只剩 `edit`**（`edit-diff.ts` 的 LCS/diff 解析是前置，体量单独立项）。
 5. **（本轮新增）`pi-ai` 未移植的 `utils/` 小件**：`estimate.ts`（token 估算）、`error-body.ts`
    （错误响应体解析）、`deferred-tools.ts` —— 互不重叠，`pi-ai/src` 内不同文件，合成一个 Stage。
-6. **（本轮新增）`--rpc` 双实现**：`pi-coding-agent/src/rpc/` 内联 JSON-RPC 与 `pi-client` 两套并存，
-   见 LUM-1090（Stage 25，`backlog`）。
+6. **（本轮新增，推翻了 LUM-1090 的原前提）** `--rpc` 那条线上**缺的是客户端，不是「接 `pi-client`」**：
+   `pi-coding-agent/src/rpc/` 是 **server** 侧（对应上游 `modes/rpc/rpc-mode.ts`），上游的客户端是
+   `modes/rpc/rpc-client.ts`（609 行，`spawn` 子进程 + 同一套 NDJSON stdio 协议，**不用** `packages/client`）；
+   而 `pi-client` 走的是 pi-server / Chord 那条线（`pi-protocol` framing + unix socket + 另一套 method 集），
+   与 `--rpc` 的编辑器协议不是同一条协议。真正的重复在 `tests/rpc.rs:27-176` 的手写 `RpcHarness`。
+   LUM-1090（Stage 25）已按此**改写范围**并从 `backlog` 晋升为 `todo`。
 
 ### 七、派发（槽位 1/3 → 3/3，上限 3 路）
 
@@ -11398,9 +11402,14 @@ pattern 用 `Accent`、路径与 glob/limit 用 `ToolOutput`（与上游分工�
 - **Stage 46 = pi-ai utils 三件（`estimate.ts` + `error-body.ts` + `deferred-tools.ts`）**：
   三个文件互不重叠、都在 `pi-ai` 内，且 `estimate` 是 LUM-1142 重试层与未来压缩策略的
   共用前置，属「可并行、无串行文件」的安全切片。
-- **Stage 47 = 晋升 LUM-1090（Stage 25，`backlog` → `todo`）**：`--rpc` 从内联 JSON-RPC 切到
-  `pi-client`，是 LUM-981 上唯一还停在 `backlog` 的 Stage；本轮只做**晋升**（改状态 + 补范围说明），
-  实现仍在 Stage 47 自己的轮次里。
+- **晋升 + 改写 LUM-1090（Stage 25，`backlog` → `todo`）**：它是 LUM-981 上唯一还停在 `backlog` 的
+  Stage，但原描述的前提经核实是错的（见 frontier 第 6 条），所以本轮不是原样晋升，而是**先改写范围**：
+  目标变为「移植 `rpc-client.ts` 得到 `rpc/client.rs`，并让 `tests/rpc.rs` 用它替掉 150 行手写
+  `RpcHarness`」，`pi-client` 明确排除在外（并写进了 issue 的「明确不做」）。
+
+派发两个 issue 后（本轮派发 `multica issue create` 得 LUM-1157 = Stage 46；`multica issue update` 把
+LUM-1090 置 `todo`），pi 项目内的在跑路数 = 本协调轮 + 2 = **3 路**，符合上限；daemon 全局
+`running_task_count` 会包含其它 workspace 的任务，不要拿它当 pi 的并发数。
 
 并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人只写
@@ -11410,7 +11419,9 @@ pattern 用 `Accent`、路径与 glob/limit 用 `ToolOutput`（与上游分工�
 环境记录：开工时磁盘只剩 **3.4G（93%）**，先删掉已 `in_review` 的 LUM-1150 检出里的
 `pi-rust/target`（11G）释放到 **15G**，本轮全程复用 **LUM-1153 检出的 `pi-rust/target`**
 （`CARGO_TARGET_DIR` 显式指向，未新建 target）。`cargo test --workspace` 会把 target 撑到
-约 **40G/50G**（结束时空闲 6.8G），已写进两个 Stage 的 issue 说明：**复用现成 target，不要新建**。
+约 **40G/50G**，跑完把 `target/debug/deps` 里的 **135 个测试可执行文件（8.9G）删掉**
+（rlib 与 fingerprint 全留），空闲从 6.8G 回到 **16G**，才够两路 Stage 并行；这条也写进了
+两个 Stage 的 issue 说明：**复用现成 target，不要新建，别跑 `cargo test --workspace`**。
 
 **已知限制**：`bash` 非零退出走 `Err(ToolError::Execution)` 且**不带 details**，所以出错时看不到
 `Took` 用量与截断告警（渲染器已按「details 为空」容错，但信息本身在工具层丢了，属 `tools/bash.rs`
