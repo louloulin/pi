@@ -86,6 +86,46 @@ async fn submit_then_drain_renders_assistant_message() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_flag_clears_and_turn_usage_is_exposed_once() {
+    let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
+        faux_model(),
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ))));
+    let config = AppConfig {
+        session_id: "usage".into(),
+        ..AppConfig::default()
+    };
+    let mut app = App::new(&*agent.lock().await, config);
+
+    assert!(!app.is_busy(), "a fresh App is idle");
+    assert!(app.take_turn_usage().is_none());
+
+    app.submit(agent.clone(), "hello".to_string());
+    // `submit` marks the turn busy synchronously, before the spawned task
+    // gets a chance to run.
+    assert!(app.is_busy(), "a submitted prompt is in flight");
+
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        app.drain_agent_events();
+        if !app.is_busy() {
+            break;
+        }
+    }
+    app.drain_agent_events();
+    assert!(!app.is_busy(), "the busy flag clears once the turn ends");
+
+    let turn = app
+        .take_turn_usage()
+        .expect("the finished turn exposes its usage");
+    assert_eq!(turn.usage, Usage::default());
+    assert!(turn.trailing.is_empty(), "faux turn has no tool results");
+    // Consumed exactly once.
+    assert!(app.take_turn_usage().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slash_command_does_not_reach_agent() {
     let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
         faux_model(),

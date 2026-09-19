@@ -36,7 +36,9 @@ use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::commands::{handle_command, SlashCommand};
-use crate::compaction::{compact, DEFAULT_COMPACTION_SETTINGS};
+use crate::compaction::{
+    compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
+};
 use crate::extensions::ui_bridge::TuiUi;
 use crate::extensions::wiring::ExtensionRuntime;
 use crate::prompt_templates::PromptTemplate;
@@ -81,6 +83,11 @@ pub struct InteractiveOptions {
     pub session_log: Option<SessionLog>,
     /// Session identifier surfaced in the status bar.
     pub session_id: String,
+    /// Compaction thresholds and the auto-compaction toggle, resolved
+    /// from `settings.json` by the caller (`config::load_compaction_settings`).
+    /// Manual `/compact` uses the token settings; the toggle only gates
+    /// the automatic trigger.
+    pub compaction: CompactionSettings,
     /// Initial prompt to submit on launch.
     pub initial_prompt: Option<String>,
     /// Prompt templates loaded from `~/.pi/agent/prompts`, `.pi/prompts`
@@ -114,6 +121,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("models", &self.models)
             .field("session_log", &self.session_log)
             .field("session_id", &self.session_id)
+            .field("compaction", &self.compaction)
             .field("initial_prompt", &self.initial_prompt)
             .field("prompt_templates", &self.prompt_templates.len())
             .field("stream_fn", &"<dyn StreamFn>")
@@ -133,6 +141,7 @@ impl Default for InteractiveOptions {
             models: Models::new(),
             session_log: None,
             session_id: String::new(),
+            compaction: DEFAULT_COMPACTION_SETTINGS,
             initial_prompt: None,
             prompt_templates: Vec::new(),
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
@@ -235,6 +244,9 @@ async fn run_loop(
         // event handlers; fold them into the log + transcript each
         // tick so nothing is lost between turns.
         persist_extension_side_effects(&mut app, &options);
+        // Stage 27: once a prompt finishes, check whether the turn that
+        // just ended pushed the context past the compaction threshold.
+        maybe_auto_compact(&mut app, &agent, &options).await;
 
         if app.is_exit_requested() {
             break;
@@ -584,11 +596,13 @@ async fn run_compact(
         return;
     }
 
+    // Manual compaction uses the configured token thresholds but ignores
+    // the auto-compaction toggle, matching upstream.
     let compaction = match compact(
         &history,
         &model,
         &options.stream_fn,
-        DEFAULT_COMPACTION_SETTINGS,
+        options.compaction,
         instructions,
     )
     .await
@@ -600,6 +614,124 @@ async fn run_compact(
         }
     };
 
+    let report = apply_compaction(agent, options, history.len(), compaction).await;
+    app.info(format!(
+        "/compact: summarized {} message(s) → kept {} ({} → {} est. tokens; {} read, {} modified)\n\n{}",
+        report.summarized(),
+        report.retained,
+        report.tokens_before,
+        report.tokens_after,
+        report.read_files,
+        report.modified_files,
+        report.summary,
+    ));
+}
+
+/// Automatic compaction: after a turn finishes, compare that turn's
+/// context size against the model's context window and summarize the
+/// prefix when it no longer fits `reserveTokens` of head-room.
+///
+/// Mirrors the threshold branch of `_checkCompaction` in
+/// `agent-session.ts`: the check runs between turns (never while a turn
+/// is in flight, hence the [`App::is_busy`] guard) and `settings.enabled`
+/// — `compaction.enabled` / `autoCompact` in `settings.json` — gates it.
+///
+/// Returns `true` when a compaction ran.
+async fn maybe_auto_compact(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &InteractiveOptions,
+) -> bool {
+    if app.is_busy() {
+        return false;
+    }
+    let Some(turn) = app.take_turn_usage() else {
+        return false;
+    };
+    let settings = options.compaction;
+    if !settings.enabled {
+        return false;
+    }
+
+    let (model, history) = {
+        let guard = agent.lock().await;
+        (guard.model().clone(), guard.state().messages.clone())
+    };
+    if history.is_empty() {
+        return false;
+    }
+
+    // Rust `Message` rows carry no provider usage, so the count comes from
+    // the `TurnEnd` event. A zero-usage turn (faux provider, or a provider
+    // error) falls back to the pure size estimate over the whole log,
+    // matching upstream `estimateContextTokens`.
+    let context_tokens = if crate::compaction::calculate_context_tokens(&turn.usage) > 0 {
+        crate::compaction::context_tokens_with_trailing(&turn.usage, &turn.trailing)
+    } else {
+        crate::compaction::estimate_context_tokens(&history)
+    };
+    if !crate::compaction::should_compact(context_tokens, model.context_window, settings) {
+        return false;
+    }
+
+    let compaction = match compact(&history, &model, &options.stream_fn, settings, None).await {
+        Ok(compaction) => compaction,
+        // The conversation already fits the retained window — nothing to do.
+        Err(CompactionError::NothingToCompact) => return false,
+        Err(err) => {
+            app.info(format!("auto-compact: {err}"));
+            return false;
+        }
+    };
+
+    // The summarization call awaited; if a new prompt slipped in meanwhile
+    // the turn in flight owns `state.messages` and must not be truncated
+    // under it. Skip this round; the next `TurnEnd` re-evaluates.
+    if app.is_busy() {
+        return false;
+    }
+
+    let report = apply_compaction(agent, options, history.len(), compaction).await;
+    app.info(format!(
+        "auto-compact: context {context_tokens} > {} window − {} reserve; summarized {} message(s) → kept {} ({} → {} est. tokens)\n\n{}",
+        model.context_window,
+        settings.reserve_tokens,
+        report.summarized(),
+        report.retained,
+        report.tokens_before,
+        report.tokens_after,
+        report.summary,
+    ));
+    true
+}
+
+/// What a completed compaction did, in the numbers both the manual and the
+/// automatic path report to the user.
+struct CompactionReport {
+    history_len: usize,
+    retained: usize,
+    tokens_before: u32,
+    tokens_after: u32,
+    read_files: usize,
+    modified_files: usize,
+    summary: String,
+}
+
+impl CompactionReport {
+    /// Number of messages replaced by the summary.
+    fn summarized(&self) -> usize {
+        self.history_len.saturating_sub(self.retained)
+    }
+}
+
+/// Persist `compaction`, swap the agent's message log for the summary plus
+/// the retained tail, and return the numbers callers render.
+async fn apply_compaction(
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &InteractiveOptions,
+    history_len: usize,
+    compaction: Compaction,
+) -> CompactionReport {
     if let Some(log) = options.session_log.as_ref() {
         let _ = log.append_compaction(
             compaction.summary.clone(),
@@ -623,12 +755,15 @@ async fn run_compact(
         guard.state_mut().messages = compacted_history;
     }
 
-    app.info(format!(
-        "/compact: summarized {} message(s) → kept {retained} ({tokens_before} → {tokens_after} est. tokens; {} read, {} modified)\n\n{summary}",
-        history.len() - retained,
+    CompactionReport {
+        history_len,
+        retained,
+        tokens_before,
+        tokens_after,
         read_files,
         modified_files,
-    ));
+        summary,
+    }
 }
 
 /// Extract the text the user typed after the command name.
@@ -870,5 +1005,159 @@ mod tests {
             message_preview(&serde_json::json!({"other": 1})),
             "{\"other\":1}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Automatic compaction (Stage 27)
+    // -----------------------------------------------------------------------
+
+    use pi_agent_core::{Agent, AgentOptions};
+    use pi_ai::providers::faux::FauxProvider;
+    use pi_protocol::{Api, Message, Model, ProviderId, Role};
+    use pi_tui::app::AppConfig;
+
+    const LONG: usize = 400;
+
+    fn small_window_model(context_window: u32) -> Model {
+        Model {
+            provider: ProviderId::new("faux"),
+            id: "faux-model".into(),
+            api: Api::Faux,
+            label: None,
+            context_window,
+            max_output_tokens: 0,
+        }
+    }
+
+    fn text_message(role: Role, text: String) -> Message {
+        Message {
+            role,
+            content: vec![pi_protocol::Content::text(text)],
+            model: None,
+        }
+    }
+
+    /// Poll the App until the submitted prompt finishes and every event
+    /// it emitted has been drained.
+    async fn drain_until_idle(app: &mut App) {
+        for _ in 0..500 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            app.drain_agent_events();
+            if !app.is_busy() {
+                // The task emits `TurnEnd` before clearing the busy flag;
+                // drain once more so the accessor sees it.
+                app.drain_agent_events();
+                return;
+            }
+        }
+        panic!("agent turn did not finish");
+    }
+
+    fn settings(enabled: bool) -> CompactionSettings {
+        CompactionSettings {
+            enabled,
+            reserve_tokens: 1024,
+            keep_recent_tokens: 100,
+        }
+    }
+
+    /// Seed `[user, assistant]` and run one more prompt, producing a
+    /// four-message history long enough to exceed a 100-token window.
+    async fn app_after_two_turns(context_window: u32) -> (App, Arc<AsyncMutex<Agent>>) {
+        let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
+            small_window_model(context_window),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ))));
+        {
+            let mut guard = agent.lock().await;
+            guard.state_mut().messages = vec![
+                text_message(Role::User, "x".repeat(LONG)),
+                text_message(Role::Assistant, "y".repeat(LONG)),
+            ];
+        }
+        let config = AppConfig {
+            session_id: "auto".into(),
+            ..AppConfig::default()
+        };
+        let mut app = App::new(&*agent.lock().await, config);
+        app.submit(agent.clone(), "z".repeat(LONG));
+        drain_until_idle(&mut app).await;
+        (app, agent)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_compaction_compacts_after_a_turn_over_the_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_log = SessionLog::open(dir.path(), "auto").expect("session log");
+        let (mut app, agent) = app_after_two_turns(100).await;
+        let options = InteractiveOptions {
+            session_log: Some(session_log),
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+
+        assert!(
+            maybe_auto_compact(&mut app, &agent, &options).await,
+            "a turn over the context window should compact"
+        );
+
+        let messages = agent.lock().await.state().messages.clone();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert!(
+            crate::compaction::extract_summary(&messages[0]).is_some(),
+            "the summary replaces the compacted prefix: {messages:?}"
+        );
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[2].role, Role::Assistant);
+
+        // The compaction was persisted as a session entry.
+        options
+            .session_log
+            .as_ref()
+            .expect("log")
+            .close()
+            .expect("close");
+        let contents = std::fs::read_to_string(dir.path().join("auto.jsonl")).expect("read log");
+        assert!(
+            contents.lines().any(|line| line.contains("\"type\":\"compaction\"")),
+            "expected a compaction entry: {contents}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_compaction_is_skipped_when_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_log = SessionLog::open(dir.path(), "auto").expect("session log");
+        let (mut app, agent) = app_after_two_turns(100).await;
+        let options = InteractiveOptions {
+            session_log: Some(session_log),
+            compaction: settings(false),
+            ..InteractiveOptions::default()
+        };
+
+        assert!(!maybe_auto_compact(&mut app, &agent, &options).await);
+
+        let messages = agent.lock().await.state().messages.clone();
+        assert_eq!(messages.len(), 4, "history must be untouched: {messages:?}");
+        options
+            .session_log
+            .as_ref()
+            .expect("log")
+            .close()
+            .expect("close");
+        let contents = std::fs::read_to_string(dir.path().join("auto.jsonl")).expect("read log");
+        assert!(!contents.contains("compaction"), "{contents}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_compaction_is_skipped_below_the_threshold() {
+        let (mut app, agent) = app_after_two_turns(1_000_000).await;
+        let options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        assert!(!maybe_auto_compact(&mut app, &agent, &options).await);
+        assert_eq!(agent.lock().await.state().messages.len(), 4);
     }
 }

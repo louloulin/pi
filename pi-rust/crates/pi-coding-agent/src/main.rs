@@ -6,6 +6,7 @@ use std::sync::Arc;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
+use pi_coding_agent::config::load_compaction_settings_default;
 use pi_coding_agent::extensions::ui_bridge::TuiUi;
 use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
 use pi_coding_agent::file_processor::expand_prompt;
@@ -150,6 +151,7 @@ fn main() -> ExitCode {
                 models,
                 session_log,
                 session_id: session_id.clone(),
+                compaction: load_compaction_settings_default(),
                 initial_prompt,
                 prompt_templates,
                 stream_fn: stream_fn.clone(),
