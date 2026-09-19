@@ -286,20 +286,20 @@ async fn invalid_arguments_surface_as_invalid_arguments_error() {
 }
 
 #[tokio::test]
-async fn standard_tools_returns_four() {
+async fn standard_tools_returns_seven() {
     let tools = standard_tools();
 
     assert_eq!(
         tools.len(),
-        4,
-        "standard_tools() must expose read, write, edit, bash (got {} tools)",
+        7,
+        "standard_tools() must expose read, write, edit, bash, find, grep, ls (got {} tools)",
         tools.len()
     );
 
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     assert_eq!(
         names,
-        vec!["read", "write", "edit", "bash"],
+        vec!["read", "write", "edit", "bash", "find", "grep", "ls"],
         "tools must be returned in declared order"
     );
 
@@ -316,15 +316,22 @@ async fn standard_tools_returns_four() {
         );
     }
 
-    // BashTool is the only one that pins its execution mode; the others
-    // fall through to the agent loop default (Parallel).
-    assert!(tools.iter().all(|t| t.execution_mode().is_some() || t.name() != "bash"));
-    let bash = tools
-        .iter()
-        .find(|t| t.name() == "bash")
-        .expect("bash in standard tools");
-    assert_eq!(
-        bash.execution_mode(),
-        Some(pi_protocol::ToolExecutionMode::Sequential)
-    );
+    // The shell / navigation tools pin Sequential; the FS-mutation tools
+    // (read/write/edit) fall through to the agent loop default
+    // (Parallel) and that's fine — they don't share state.
+    for tool in &tools {
+        match tool.name() {
+            "bash" | "find" | "grep" | "ls" => assert_eq!(
+                tool.execution_mode(),
+                Some(pi_protocol::ToolExecutionMode::Sequential),
+                "{} should declare Sequential execution",
+                tool.name()
+            ),
+            _ => assert!(
+                tool.execution_mode().is_none(),
+                "{} should default to Parallel (None)",
+                tool.name()
+            ),
+        }
+    }
 }

@@ -1,4 +1,4 @@
-//! Built-in agent tools: read, write, edit, bash.
+//! Built-in agent tools: read, write, edit, bash, find, grep, ls.
 //!
 //! Mirrors the file-mutation / shell tools exposed by
 //! `packages/coding-agent/src/core/tools` in the TypeScript implementation.
@@ -7,7 +7,7 @@
 //! explicitly with [`serde_json::json!`] so we don't pull in `schemars` —
 //! keeping the wire surface close to what the model actually sees.
 //!
-//! Native (`std::process`, `std::fs`) is gated on
+//! Native (`std::process`, `std::fs`, `walkdir`) is gated on
 //! `#[cfg(not(target_arch = "wasm32"))]` so the `wasm32-unknown-unknown`
 //! build keeps compiling for the JS-extension host.
 
@@ -17,7 +17,17 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod bash;
 #[cfg(not(target_arch = "wasm32"))]
+mod defaults;
+#[cfg(not(target_arch = "wasm32"))]
 mod edit;
+#[cfg(not(target_arch = "wasm32"))]
+mod find;
+#[cfg(not(target_arch = "wasm32"))]
+mod grep;
+#[cfg(not(target_arch = "wasm32"))]
+mod mod_ignore;
+#[cfg(not(target_arch = "wasm32"))]
+mod ls;
 #[cfg(not(target_arch = "wasm32"))]
 mod read;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,7 +36,17 @@ mod write;
 #[cfg(not(target_arch = "wasm32"))]
 pub use bash::BashTool;
 #[cfg(not(target_arch = "wasm32"))]
+pub use defaults::default_tool_bundle;
+#[cfg(not(target_arch = "wasm32"))]
 pub use edit::{EditTool, EditToolDetails};
+#[cfg(not(target_arch = "wasm32"))]
+pub use find::{FindTool, FindType};
+#[cfg(not(target_arch = "wasm32"))]
+pub use grep::GrepTool;
+#[cfg(not(target_arch = "wasm32"))]
+pub use ls::LsTool;
+#[cfg(not(target_arch = "wasm32"))]
+pub use mod_ignore::{is_ignored_dir_name, relativize_for_search, DEFAULT_IGNORE_NAMES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use read::ReadTool;
 #[cfg(not(target_arch = "wasm32"))]
@@ -124,13 +144,23 @@ pub enum ToolError {
     /// I/O or runtime failure (file not found, command exited non-zero, …).
     #[error("{0}")]
     Execution(String),
+    /// The caller asked for a path outside the workspace sandbox
+    /// (e.g. an absolute path or one that escapes via `..`). Mirrors the
+    /// sandbox checks `bash` and `read` apply for relative-path inputs.
+    #[error("sandbox violation: {0}")]
+    SandboxViolation(String),
+    /// The tool's input regex / pattern failed to compile. Used by `grep`
+    /// when `pattern` is not a valid regex.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 /// Pluggable tool the agent can invoke.
 ///
-/// All four built-in tools (`read`, `write`, `edit`, `bash`) implement this
-/// trait. Extension tools can also implement it directly, although the
-/// canonical extension path goes through `pi-extensions` + WASM.
+/// All seven built-in tools (`read`, `write`, `edit`, `bash`, `find`,
+/// `grep`, `ls`) implement this trait. Extension tools can also implement
+/// it directly, although the canonical extension path goes through
+/// `pi-extensions` + WASM.
 #[async_trait]
 pub trait AgentTool: Send + Sync {
     /// Stable identifier the model uses to call the tool (e.g. `"bash"`).
@@ -176,12 +206,13 @@ pub trait AgentTool: Send + Sync {
 /// Boxed, type-erased [`AgentTool`] used by the host's tool registry.
 pub type DynAgentTool = Arc<dyn AgentTool>;
 
-/// Built-in tool bundle: `read`, `write`, `edit`, `bash`.
+/// Built-in tool bundle: `read`, `write`, `edit`, `bash`, `find`, `grep`,
+/// `ls`.
 ///
 /// The order is the order the model sees in its system prompt and the
 /// order the host registers them. `read` leads because it is the safest
-/// tool the model uses most often; `bash` trails because it is the most
-/// dangerous.
+/// tool the model uses most often; `ls` trails because it is the most
+/// navigation-only.
 ///
 /// On `wasm32-unknown-unknown` the file / shell tools cannot run natively,
 /// so this returns an empty bundle; the JS-extension host provides
@@ -194,6 +225,9 @@ pub fn standard_tools() -> Vec<DynAgentTool> {
             Arc::new(WriteTool),
             Arc::new(EditTool),
             Arc::new(BashTool),
+            Arc::new(FindTool),
+            Arc::new(GrepTool),
+            Arc::new(LsTool),
         ]
     }
     #[cfg(target_arch = "wasm32")]

@@ -83,6 +83,11 @@ notify = "6.1"
 dirs = "5.0"
 which = "6.0"
 
+# Regex matching — required by the Stage 9 `grep` tool. `regex-automata`
+# and `regex-syntax` are already present transitively via `tracing-subscriber`,
+# so adding the top-level crate is essentially free.
+regex = "1"
+
 # Shared `[profile.release]` overrides for WASM builds — apply the
 # size-minimisation recipe from the Stage 6 plan to any wasm build done
 # with `cargo build --target wasm32-unknown-unknown --release`.
