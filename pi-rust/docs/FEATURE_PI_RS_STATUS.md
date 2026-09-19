@@ -11299,3 +11299,119 @@ issue 要求，上游没有）；`render_result` 只在 `is_error` 时输出（�
 `969bfcee6`）。`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从
 `969bfcee6` **快进至 `181831594`**（`git ls-remote` 复查一致：
 `181831594dc2fa9c4b305de820622dd6f8ef9aa3`），留档分支 `work/lum-1154` 一并推送。
+
+## LUM-1155 round — `pi-coding-agent` bash/find/grep/ls 工具渲染器（6 工具齐备，仅剩 `edit`）+ 派发 Stage 46 / Stage 47
+
+### 一、本轮切片
+
+LUM-1153（Stage 45）把 `read` / `write` 接上了 `ToolRenderer`，但 `renderer_for()` 只认这两个名字，
+`bash` / `find` / `grep` / `ls` 的 `render_call` 仍然返回空 —— 也就是 `text_fallback` 里这几类工具
+**调用行与结果行全部不打印**。本轮把上游 `core/tools/renderers/{bash,find,grep,ls}.ts` 全部移植完，
+`renderer_for()` 覆盖 6 个工具有展示层的工具；上游 `renderers/` 目录只剩 `edit`（依赖
+`edit-diff.ts` 的 diff 解析，体量另计）。
+
+### 二、改动（5 个文件，+801 / −27）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-coding-agent/src/tools/render.rs`（+526） | `BashRenderer` / `FindRenderer` / `GrepRenderer` / `LsRenderer` + `folded_output_lines` / `limit_warnings` / `truncation_from_details` / `count_from_details` / `nullable_str_arg` 五个私有助手；`render_tool_path_with_fallback`（`ls` 的空路径回落 `.`，`read`/`write` 仍回落 `...`）；`renderer_for` 扩展；模块头注释与 `renderer_registry_covers_every_renderable_tool` 等单测改写 |
+| `crates/pi-coding-agent/tests/tools_render.rs`（+281，新 7 用例） | `bash` 尾部预览 + `Took` 用时 + 截断页脚折叠、`find`/`grep`/`ls` 调用行与折叠、`[invalid arg]` 四例、空结果不打印、registry 覆盖 |
+| `crates/pi-coding-agent/src/tools/grep.rs`（+3） | `details.linesTruncated = true`（上游有、本 crate 之前没写；渲染器需要它才能出「some lines truncated」告警） |
+| `crates/pi-coding-agent/src/tools/mod.rs`（+9/−3） | re-export 4 个新渲染器 + 4 个折叠常量 |
+| `crates/pi-coding-agent/tests/print_mode.rs`（+9/−2） | `sigint_or_clean_exit` 假失败修复（见第五节） |
+
+**`bash`**：调用行 `bash <command>`（`ToolTitle` 色）+ `(timeout Ns)`（`Muted`，0/缺省不显示）；
+结果折叠保留**尾部 5 行**（`truncateToVisualLines` 语义：命令输出的重点在末尾）+ muted 的
+`... (N earlier lines, to expand)`，展开态全量。工具自己往文本尾巴上追加的
+`[Showing lines … Full output: …]` 页脚会被渲染器剥掉（判据与上游一致：非 partial + `truncation.truncated`
++ 有 `fullOutputPath` + 文本以 `]` 结尾 + 最后一段 `\n\n[` 里含该路径），再统一画一条
+`[Full output: <path>. Truncated: showing X of Y lines]`（`Warning` 色），避免同一句出现两次。
+
+**`find` / `grep`**：调用行 `find <pattern> in <path>`、`grep /<pattern>/ in <path> [(glob)] [limit N]`，
+pattern 用 `Accent`、路径与 glob/limit 用 `ToolOutput`（与上游分工一致）；路径走 `shorten_home`
+（上游 `shortenPath` 只做 `~` 收缩，不做 cwd 相对化，与 `read`/`write` 的 `renderToolPath` 不同）。
+结果折叠 20 / 15 行（头部保留），命中上限与字节截断各画一条 `[Truncated: …]`。
+
+**`ls`**：调用行 `ls <path>`，空路径回落 `.`（上游 `renderToolPath` 的 emptyFallback）；结果折叠 20 行。
+
+### 三、与上游的偏离（都在调用点写了注释）
+
+1. **不画 keybinding 提示**：`(N more lines, to expand)` 之后上游还有 `to expand` 的按键提示，
+   本 crate 没有 keybinding-hint 组件，与 LUM-1153 的 read/write 口径一致，只保留文案本体。
+2. **不输出前置空行**：上游组件树每条结果/告警前都加一个 `Text("\n")`，Rust 侧 `Vec<StyledLine>`
+   由调用方负责分隔，故本轮渲染器不产生空行。
+3. **`bash` 用时来自工具元数据**：上游用渲染上下文的 `startedAt`/`endedAt` + 1s 定时器（partial 期间
+   还要 invalidate），本 crate 只渲染**已结束**的结果，直接读 `details.elapsed_ms` 出 `Took X.Xs`，
+   因此不需要计时器，也不需要 partial 重绘钩子。
+4. **`grep` 的参数名**：上游叫 `glob`，本 crate 的 grep 工具叫 `include`，渲染器两者都收（`include` 优先）。
+5. **`ls` 的 `entryLimitReached`**：上游 ls 有条目上限；本 crate 的 ls 只有字节上限，没有条目上限，
+   该分支属防御性读取（有值才画），等将来加上限时无需再动渲染器。
+6. **JSON 字段名**沿用本 crate 的 snake_case（`full_output_path` / `elapsed_ms` / `exit_code`），
+   上游 camelCase；语义一一对应。
+
+### 四、验证
+
+- `cargo test --workspace --offline`：**113 个 test 目标，1634 passed / 0 failed / 2 ignored**
+  （ignored 是 pi-evals 既有的 `PI_EVAL_LIVE=1` 与另一条既有 ignore，非本轮引入）。
+- `cargo test -p pi-coding-agent --offline`：lib **288 passed / 0 failed**，全部集成目标绿；
+  新增 `tools_render` 共 **12 用例**（原 5 + 本轮 7）全绿。
+- `cargo clippy -p pi-coding-agent --all-targets --offline -- -D warnings`：**EXIT 0**
+  （本轮初稿触发 4 条 `default_constructed_unit_structs`，已按建议改为单元结构体直接构造；
+  另 pi-coding-agent 无其它告警）。
+- 格式：只对**叶子文件**跑 `rustfmt --edition 2021`（吸取 LUM-1153 的 `cargo fmt -p` 事故判例）：
+  `tests/tools_render.rs` 格式化后 `cargo fmt --check` 零命中；`src/tools/render.rs`、`src/tools/mod.rs`
+  的新增行零命中。`tests/print_mode.rs` / `src/tools/grep.rs` 在 `cargo fmt --check` 里仍有命中，
+  均为**本轮之前就存在**的漂移（第 421 / 452 / 476 / 507 行与 grep.rs:156），未扩大。
+- 未跑：`cargo fmt`（全量漂移见 LUM-1138）。
+
+### 五、顺带修掉的假失败：`print_mode::sigint_or_clean_exit`
+
+本轮第一次跑 `cargo test -p pi-coding-agent` 时该用例红了：
+`unexpected exit code: None`（`tests/print_mode.rs`）。它是**负载相关的假失败**，不是回归：
+
+- 用例 spawn 真 CLI（`--print=hello`），`sleep(50ms)` 后 `Child::kill()`，断言退出码 ∈ {0,130,143}；
+- `Child::kill()` 在 Unix 发的是 **SIGKILL**，进程若还在启动阶段被 SIGKILL，`status.code()` 是 `None`
+  —— 恰好落在断言之外；机器一忙（整包 17 个用例并发 spawn 子进程）就会命中。单独跑该用例 5/5 通过、
+  整包跑会红，与负载吻合。
+- 处置：把 `None` 显式列为合法结果并注释说明；同时把注释里「这是 SIGINT 回归测试」改成
+  「`kill()` 发的是 SIGKILL，故这只是 smoke（不是 1 就算过）」—— 原注释与代码不符，会让下一个人
+  继续误判。真正的 SIGINT 断言要么引 `libc::kill(pid, SIGINT)`（新增 dev 依赖），要么在 `pi-tui`
+  暴露信号句柄，属独立议题，未在本轮做。
+
+### 六、frontier（本轮更新）
+
+1. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；本轮新增行零漂移。
+2. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」，但**其「统一 RPC 路径」部分本轮已派发
+   Stage 47**（见下）。
+3. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex / oauth / images。
+4. ~~**工具渲染器**~~：`read`/`write`（LUM-1153）+ `bash`/`find`/`grep`/`ls`（本轮）齐备，
+   上游 `renderers/` 目录**只剩 `edit`**（`edit-diff.ts` 的 LCS/diff 解析是前置，体量单独立项）。
+5. **（本轮新增）`pi-ai` 未移植的 `utils/` 小件**：`estimate.ts`（token 估算）、`error-body.ts`
+   （错误响应体解析）、`deferred-tools.ts` —— 互不重叠，`pi-ai/src` 内不同文件，合成一个 Stage。
+6. **（本轮新增）`--rpc` 双实现**：`pi-coding-agent/src/rpc/` 内联 JSON-RPC 与 `pi-client` 两套并存，
+   见 LUM-1090（Stage 25，`backlog`）。
+
+### 七、派发（槽位 1/3 → 3/3，上限 3 路）
+
+开工时 `multica daemon status` 只有本人 1 路在跑，故本轮用满：
+
+- **Stage 46 = pi-ai utils 三件（`estimate.ts` + `error-body.ts` + `deferred-tools.ts`）**：
+  三个文件互不重叠、都在 `pi-ai` 内，且 `estimate` 是 LUM-1142 重试层与未来压缩策略的
+  共用前置，属「可并行、无串行文件」的安全切片。
+- **Stage 47 = 晋升 LUM-1090（Stage 25，`backlog` → `todo`）**：`--rpc` 从内联 JSON-RPC 切到
+  `pi-client`，是 LUM-981 上唯一还停在 `backlog` 的 Stage；本轮只做**晋升**（改状态 + 补范围说明），
+  实现仍在 Stage 47 自己的轮次里。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人只写
+`pi-rust/crates/pi-coding-agent/src/tools/render.rs`、`src/tools/mod.rs`、`src/tools/grep.rs`、
+`tests/tools_render.rs`、`tests/print_mode.rs` 与本文档；**未碰** `pi-tui`、`pi-ai`、`pi-extensions`。
+
+环境记录：开工时磁盘只剩 **3.4G（93%）**，先删掉已 `in_review` 的 LUM-1150 检出里的
+`pi-rust/target`（11G）释放到 **15G**，本轮全程复用 **LUM-1153 检出的 `pi-rust/target`**
+（`CARGO_TARGET_DIR` 显式指向，未新建 target）。`cargo test --workspace` 会把 target 撑到
+约 **40G/50G**（结束时空闲 6.8G），已写进两个 Stage 的 issue 说明：**复用现成 target，不要新建**。
+
+**已知限制**：`bash` 非零退出走 `Err(ToolError::Execution)` 且**不带 details**，所以出错时看不到
+`Took` 用量与截断告警（渲染器已按「details 为空」容错，但信息本身在工具层丢了，属 `tools/bash.rs`
+的既有口径）；`edit` 仍无渲染器；`ls` 无条目上限故 `entryLimitReached` 分支暂无生产者。
