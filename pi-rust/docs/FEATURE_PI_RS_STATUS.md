@@ -3344,3 +3344,135 @@ LUM-1075 注释的补记）。Stage 19 的代码增量由 LUM-1068 自己推。
    JSON-RPC 实现；
 4. `.wasm` 扩展宿主仍未实现（`pi-extensions` 的 QuickJS 宿主目前只有 native
    路径）。
+
+## LUM-1077 round — Stage 20: 扩展 UI 交互桥（`ctx.ui.confirm/input/select` 接真实 TUI 弹窗）
+
+Stage 20 补上了 LUM-1074 留下的最后一个插件兼容缺口：JS 扩展的交互式提示在
+interactive 模式下真正弹窗等待按键，在 print / rpc / 无 TTY 模式下变成**显式**的
+deny / cancel 降级。代码增量 = `pi-tui` 的 dialog 层 + `pi-coding-agent` 的 UI 桥 +
+`pi-extensions` 的 async `UiHandler`。
+
+### 设计取舍：`UiHandler` 改成 `#[async_trait]`
+
+任务书把这列为唯一的设计不确定点（async trait vs 同步 trait + `block_in_place`）。
+结论是 **async trait**，理由：
+
+- `pi-extensions` 的集成测试跑在 **`current_thread`** runtime 上（`tests/host.rs`
+  的 `rt()`），`block_in_place` 在那里直接 panic —— 选它等于把新特性排除在测试之外；
+- 交互本身就是挂起语义：`ui_worker` await handler 时运行时仍可驱动 JS 侧的 promise，
+  不必为每个提示占住一个 worker 线程；
+- 四个方法都给了非交互默认实现（deny / cancel / no-op），所以
+  `StderrUiHandler` 只需要覆写 `notify`。
+
+```rust
+#[async_trait]
+pub trait UiHandler: Send + Sync + 'static {
+    async fn confirm(&self, title: &str, body: &str) -> bool { false }
+    async fn input(&self, title: &str, placeholder: Option<&str>) -> Option<String> { None }
+    async fn select(&self, title: &str, options: &[String]) -> Option<String> { None }
+    async fn notify(&self, message: &str, level: UiLevel) {}
+}
+```
+
+`UiRequest` / `UiResponse` 的 serde 形状一字未动（任务书要求），超时策略也留在
+调用层而不是协议层。
+
+### interactive 模式：真弹窗
+
+`pi-tui/src/dialog.rs` 是新的 modal 状态机（`Dialog` = request + reply oneshot +
+`Prompt`(input) + `Selector`(select)），`App` 增加一层 dialog overlay 与一条
+`mpsc::UnboundedReceiver<Dialog>`（dialog 类型定义在 `pi-tui`，所以没有
+`pi-extensions` 类型泄漏进 TUI）：
+
+| 请求 | 弹窗 | 按键 | 回答 |
+|------|------|------|------|
+| `ctx.ui.confirm(title, body)` | 是 | Enter / `y` 接受，`n` / Esc 拒绝 | `true` / `false` |
+| `ctx.ui.input(title, ph)` | 是 | 可编辑文本，Enter 提交 | `string` / Esc → `null` |
+| `ctx.ui.select(title, options)` | 是 | ↑↓ / `j` `k` / `g` `G` + Enter | `string` / Esc → `null` |
+| `ctx.ui.notify(msg, level)` | 否，写入 transcript | — | `NotifyAck`（fire-and-forget） |
+
+modal 打开时它独占键盘：下面的 prompt 冻结，`Ctrl+C` / `Esc` 取消的是**对话框**
+（deny / `null`）而不是本轮 turn 或整个 app（这是 dialog 优先于 selector、优先于
+`Editor` 处理的原因）。同时有两个贯穿性约定：
+
+- **ready gate**（`TuiUiBridge` 的 `AtomicBool`）：扩展加载阶段会派发
+  `session_start`，那时渲染循环还不存在 —— gate 在这个阶段关闭，请求走 stderr
+  降级（deny / cancel），绝不让 extension 卡在一个没人能回答的 modal 上；渲染循环
+  退出时再次关闭。`App::attach_ui_dialogs` / `arm` 由 interactive 入口完成。
+- **第二个请求直接拒绝**：modal 已开时到达的新 dialog 立即用其 cancel 默认值回答
+  （`App::open_dialog` 返回 `false`），extension 不会等待一个用户看不到的提示；
+  `Dialog::is_abandoned()`（reply 的 `oneshot` 已关闭）让 App 关掉宿主已经放弃的 modal。
+
+### 模式选择与 `ctx.hasUI` 一致性（任务书第 3/4 条）
+
+`wiring::load` 现在按「有没有真 handler」而不是模式名决定：`options.ui` 存在就装
+`TuiUiHandler`，否则装 `StderrUiHandler`；并且
+
+```rust
+let has_ui = options.has_ui && options.ui.is_some();
+```
+
+即 `ctx.hasUI == true` ⟺ 真的有一个能弹窗的 handler。`main.rs` 只在
+**stdin 与 stdout 都是 TTY**（`std::io::IsTerminal`）时才建桥，所以 `pi | tee`、
+测试 harness 这类管道运行会诚实地报告 `hasUI = false`，而不是承诺一个渲染不出来的 UI。
+
+非交互路径的语义（第 4 条）：`confirm → false`、`input/select → null`、
+`notify → stderr`，**并且** JS shim 在短路的同一处补一条
+`ctx.ui.<kind> ("<title>") denied: no interactive UI in this mode`（`warning`）
+通知。RPC 客户端因此不会被挂住 —— 这不是"尚未实现"，而是文档化的降级。
+
+另外修掉一个真实缺陷：`_pi_execute_tool` 里工具的 `ctx` 过去硬编码为
+`{ mode: "rpc", hasUI: false }`，工具里 `await ctx.ui.confirm(...)` 永远拿不到 UI。
+现在宿主把 `mode` / `hasUI` / `cwd` 存成 `HostOptions::tool_context` 并通过
+`globalThis._pi_tool_ctx` 暴露给工具执行路径。
+
+超时：interactive 模式把宿主超时从 `DEFAULT_TIMEOUT`（5s）提到
+`wiring::INTERACTIVE_UI_TIMEOUT`（300s）—— 扩展在等**人**，5s 显然不够；代价是
+interactive 下卡死的扩展能占用其调用方至多 5 分钟（用户可随时 Esc 取消对话框），
+非交互模式仍是 5s。
+
+### 测试
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| `pi-extensions` 单元/集成 | `tests/host.rs` | 四个 `UiHandler` 方法经 JS shim → handler 的完整往返；未装 handler 时不阻塞；`hasUI=false` 时 deny 并发出 `ui_notify` 警告；工具能看到宿主 `tool_context` |
+| `pi-tui` 状态机 | `src/dialog.rs`（12 个） | confirm 的 Enter/`y`/`n`/Esc/Ctrl+C/无关键、input 提交与取消、select 选择与取消、二次 resolve 幂等、宿主放弃后 `is_abandoned`、渲染头/正文/提示行、按宽度折行 |
+| `pi-tui` App 层 | `tests/e2e.rs` | modal 独占键盘且冻结 prompt、渲染快照带 dialog、Ctrl+C 取消对话框而不退 app、`poll_ui_dialogs` 把 notify 变成 transcript 行、并发第二个 dialog 被拒且不影响已显示的 |
+| `pi-coding-agent` e2e | `tests/extension_ui.rs` | 真 JS 扩展 + `execute_command` → 注入 Enter → `"accepted"`；工具路径同上；print 模式 → `"denied"`；`session_start` 期请求在 TUI 未起时被 deny 且没有排队 |
+
+### 验证
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings
+$ cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings
+$ cargo test   --workspace --no-fail-fast -- --test-threads=1
+                                                            # 568 passed / 0 failed / 2 ignored
+```
+
+568 = LUM-1076 在 `6d5f90495` 上记录的 543 + 本轮新增的 25 个测试
+（`dialog.rs` 12 + `pi-tui/tests/e2e.rs` 3 + `pi-extensions/tests/host.rs` 4 +
+`extension_ui.rs` 4 + `ui_bridge.rs` 2）。pi-evals fixtures 未回归。
+
+**并发运行的抖动记录（与本次改动无关，供后续 CI 参考）**：默认线程数跑全量时，
+7 次运行里 4 次全绿、3 次出现偶发失败（每次失败点不同，共 6 个不同测试：
+`cli_provider` 的 loopback capture 超时、`print_mode` 的 `sigint_or_clean_exit` /
+`binary_json_events_mode_emits_ndjson`、`rpc` 的 `Disconnected`、
+`cli_tools` 的 print mode 空输出退出）。特征都是"子进程在启动瞬间无输出退出或
+30s 内没连上 loopback"，单跑必过（`pi --print=hello --output-format=json-events`
+并发 40 次全部 exit 0），`--test-threads=1` 全量 568/0/2 全绿。判定与本次改动无关
+的依据：这些模式在无 TTY 下走的就是 trunk 同一条路径（`ui: None` →
+`StderrUiHandler` + `has_ui = false`，其余只有两次 String 克隆），且
+`cli_provider` 的同类抖动 LUM-1076 已在 trunk 上记录在案。这台机器是共享的
+（load average 15–20，cgroup 内存上限 8GiB），CI 若复现请先按并发抖动排查。
+
+### 剩余 frontier
+
+1. ~~`registerCommand` / 扩展 UI 的交互式确认~~ → 本轮完成；
+2. LUM-1068 把 `pi-protocol::rpc` 推上 `feature/pi.rs` 后 promote **LUM-1069**，
+   用 `pi-server` / `pi-client` 端到端跑通远程会话；
+3. 把 `pi-client` 接进 `pi-coding-agent` 的 `--rpc` 模式，替换 Stage 12 的内联
+   JSON-RPC 实现；若要让 RPC 客户端也支持交互，需要在 `pi-protocol::rpc` 里新增
+   UI 请求/应答消息（本轮按任务书要求只做显式 deny，不动 wire 格式）；
+4. `.wasm` 扩展宿主仍未实现；
+5. dialog 的可选增强（留给后续任务）：`select` 的过滤/搜索、`input` 的多行模式、
+   鼠标点击与滚动。
