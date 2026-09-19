@@ -8133,3 +8133,110 @@ $ /tmp/rustup-home/toolchains/1.85.0-*/bin/rustfmt --edition 2021 --check \
   `pi-tui/src/app.rs` +128 / −4、`pi-tui/src/lib.rs` +2、本节文档 +175。
 - 推送时 Stage 36（LUM-1129）已在 `09bb2cb80` 落地并推送完毕，本轮推送**没有覆盖任何在途工作**；
   本轮也没有派发新 issue（frontier 第 1 项收口后 `app.rs` 空闲，下一轮由协调轮排）。
+
+## LUM-1130 round — `latex.ts` 全量移植 + markdown 块级/内联接线（frontier P3 第 7 项 LaTeX 收口）+ 槽位满未派发
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1130`，起点 `origin/feature/pi.rs` @ `09bb2cb80`（LUM-1129 的合并提交，已含
+  `node:module` / `node:readline`）。本轮只写 `pi-tui`：新增 `src/latex.rs` + `tests/latex.rs`，
+  `src/markdown.rs` / `tests/markdown.rs` 接入 LaTeX，`src/lib.rs` 加一行 `pub mod latex;`。
+  **`src/app.rs` / `host.rs` 零改动**：开工时 Stage 35（LUM-1128，鼠标区域派发）还在途，本轮不抢 `app.rs`；
+  收尾时 Stage 35 已合并推送（`cca97f553`），本轮把它合进工作分支（详情见第五节）。
+- 槽位：开工时 `multica daemon status` 报 4 路（超上限）→ 回落到 3 路（含本轮），到上限，**本轮不派发**。
+  收尾时 `running_task_count = 2`（含本轮），空出 1 槽；不过 Stage 35 刚刚收口 P1 第 1 项，本轮不去紧接着
+  派 P1 第 2 项（选区粒度）——两件事都改 `app.rs` 的鼠标路径，紧接着重排同一段代码不合理。下一轮的协调轮
+  可在核验 `cca97f553` 后派发第 2 项（`app.rs` 现已空闲）。
+- 环境事故（影响构建，记录备查）：`/` 一度 100% 满（剩 53 MB），`cc`/`rust-lld` 在 link 阶段
+  `Bus error`，误看起来像 `latex.rs` 的问题。定位后清掉 `/tmp/cargo-target`（12 GB 的**无主构建缓存**——
+  `git grep` / `/proc/*/fd` / 各 cargo 进程的 `CARGO_TARGET_DIR` 都证明没有活进程引用；不属于任何仓库、
+  可重建），释放 12 GB 后 link 恢复。**没有删任何其它工作区 / 其它轮次的 target 目录。**
+
+### 二、本轮切片：`latex.ts`（上游 1394 行）+ markdown 接线
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/latex.rs`（新） | 上游 `packages/tui/src/latex.ts` 的 Rust 移植：`render_latex` / `render_latex_with(source, display)`；15 张查表函数（`symbol` / `negated_symbol` / `blackboard` / `superscript` / `subscript` / `accent` / `is_named_operator` / `is_limit_operator` / `is_display_limit_symbol` / `is_relation_command` / `is_spacing_command` / `is_negative_spacing_command` / `is_ignored_command` / `is_size_command` / `is_plain_wrapper`）、`LatexParser`、分数/根式/矩阵/environment 布局、`normalize_output` 的正负间距 |
+| `crates/pi-tui/src/lib.rs:20` | `pub mod latex;` |
+| `crates/pi-tui/src/markdown.rs` | 块级 `Block::Latex(LatexBlock)` + `parse_latex_block`（`$$…$$` / `\[…\]`，含「开界符单独成行」「闭界符必须是本行最后一个非空白内容」「未闭合的 `$$` 只在内容像数学时才算 pending」三条上游形状）+ `starts_latex_block` 接进 `is_block_start`；内联 `try_inline_latex`（`$…$` / `$$…$$` / `\(…\)` / `\[…\]`，含 trailing-whitespace / 后随数字 / `$ALL_CAPS$name` / 反引号四条守卫与 pending 回退）；`is_special` 增加 `'$'` |
+| `crates/pi-tui/tests/latex.rs`（新，24 条） | 逐条移植上游 `packages/tui/test/latex.test.ts`（505 行、`defineCases` 全部表格 + 11 个独立 `it`） |
+| `crates/pi-tui/tests/markdown.rs` | 新增 11 条 LaTeX 接线测试（块级 display / 单行块 / `\[` / 未闭合 / 不支持命令回退原文 / 内联四种界符 / 守卫保持字面量 / 标题与列表项内），并把 `$` / `$$` / `\(` / `$$\n\frac{1}{2}` / `a $$\sum_{i=0}^n$$ b` 加进 no-panic 模糊输入表 |
+
+数据表不在 Rust 里手打：`workdir/gen_latex_tables.py`（仓库外的一次性脚本）解析上游 `latex.ts` 生成 15 个
+`#[rustfmt::skip]` 查表函数，`workdir/latex_template.rs` 是手写的手干逻辑模板，两者拼出 `src/latex.rs`。
+这样 ~260 条符号表与上游**逐字节一致**，也不会有人肉抄错；提交进仓库的只有生成结果。
+
+### 三、有意偏离（两处，都写进了模块文档）
+
+1. **宽度按字符数**（`visible_width = chars().count()`），与上游的 `visibleWidth`（East Asian Width）不同。
+   这是 crate 既有约定（`message.rs` / `selector.rs` 的 `display_width`），不引入第二套宽度语义；
+   受影响的只有 display 模式的对齐宽度。
+2. **没有 `renderLatex: false` 开关**：上游那是 `MarkdownOptions` 对象上的选项，本 crate 的 markdown API 是
+   函数式的，没有 options 载体；渲染恒开，不支持的命令回退到原文（与上游 `?? token.raw` 同路径）。
+
+### 四、验证
+
+```
+# 工作分支自身（合并 Stage 35 之前）
+$ CARGO_HOME=/tmp/cargo-home cargo test -p pi-tui --offline
+  15 个 suite / 397 passed / 0 failed（新增 tests/latex.rs 24 条、tests/markdown.rs 45 → 56 条）
+$ CARGO_HOME=/tmp/cargo-home cargo test --workspace --offline
+  全部 suite ok（0 failed）
+$ CARGO_HOME=/tmp/cargo-home cargo clippy -p pi-tui --all-targets --offline -- -D warnings
+  Finished，0 warning
+
+# 合并 origin/feature/pi.rs @ cca97f553（Stage 35）后的合并态（本节的最终口径）
+$ cargo test -p pi-tui --offline
+  23 个 suite / 471 passed / 0 failed
+$ cargo test --workspace --offline
+  97 个 suite / 1287 passed / 0 failed
+$ cargo clippy --workspace --all-targets --offline -- -D warnings
+  exit 0；只有 vendor `rquickjs-core` 的 12 条既有 warning（不进 -D warnings 门）
+$ cargo fmt -p pi-tui -- --check
+  本轮改动的 4 个文件 clean（latex.rs / markdown.rs / tests/latex.rs / tests/markdown.rs，
+  1.85 与 1.98 两版 rustfmt 都 clean）
+```
+
+已知的**本轮之外**问题（照实记）：合并前 `cargo fmt -p pi-tui --check` 在 `src/app.rs` / `src/settings.rs` /
+`tests/settings_list.rs` 上报 diff，三个文件都停在 LUM-1126 的 `86513cee4`、不是本轮改的（本轮只格式化了自己
+的 4 个文件，避免与当时在途的 Stage 35 抢 `app.rs`）。`src/app.rs` 的那处已由 Stage 35 顺手清掉，
+`settings.rs` / `tests/settings_list.rs` 两处留给后续轮次。
+
+### 五、合并与推送
+
+`work/lum-1130` → `feature/pi.rs`（plumbing merge），提交信息
+`feat(pi-tui): port latex.ts + wire LaTeX into markdown`；真实哈希与合并态复测数字见本节末的补记。
+
+### 六、frontier（本轮更新）
+
+第 7 项的 LaTeX 部分**整条收口**（`latex.ts` 1394 行全量移植 + markdown 块级/内联接线）；该项剩余
+OSC-8 hyperlink / 语法高亮 / 块级 HTML。其余维持：
+
+1. ~~P1 鼠标区域派发 / 点击命中~~ 已由 Stage 35 / LUM-1128 收口（`cca97f553`）。
+   2. **P1 选区粒度与边缘体验**（双击选词 / 三击选行 / 边缘自动滚动）：写 `app.rs`，`app.rs` 现已空闲——
+   **下一轮的首选派发项**。3. ~~P2 `node:module` / `node:readline`~~ 已落地。
+4. **P2 `node:zlib` gzip/deflate**：仍卡在离线 registry 没有 `flate2`（不许加新依赖凑接口）。
+5. **P2 `fetch` 全局**：要真实 HTTP 桥（`host.rs` 新 op + 代理/证书策略），需要架构取舍，不在一轮内做。
+6. **P3 `alt-screen-search.ts`**：要 `app.rs` 钩子。7. ~~P3 `latex.ts`~~ **本轮已落地**（剩 OSC-8 / 高亮 / HTML）。
+8. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。9. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：等第 1 项。
+10. **新增欠账（本轮）**：LaTeX 的字符宽度算法与上游 East Asian Width 不一致（文档化偏离）；
+`src/app.rs` / `src/settings.rs` / `tests/settings_list.rs` 的 rustfmt diff 待收（`app.rs` 已被 Stage 35 清掉）。
+
+**补记（推送后回填真实哈希）：**
+
+- 收尾时 `origin/feature/pi.rs` 已前进到 `cca97f553`（LUM-1128 / Stage 35 的合并 `b1930da13` + 补记），
+  先合入工作分支（合并提交 `a994d7395`，第二父 `cca97f553`）。唯一内容冲突在本文档：incoming 在 LUM-1129 节末
+  追加了它的 `补记` 块与整个 LUM-1128 节，而本轮在同一位置追加 LUM-1130 节 → 手工按时间顺序排成
+  `LUM-1129 补记 → LUM-1128 round → LUM-1130 round`；`pi-tui/src/lib.rs` 两边各加一行 `pub mod`（自动合并）。
+- 推送：`git push origin refs/heads/work/lum-1130:refs/heads/feature/pi.rs` → **快进**
+  `cca97f553..a994d7395`（工作分支已包含 `cca97f553`，再套一层空合并只会留合并债），同时推送新分支
+  `work/lum-1130` @ `a994d7395`。
+- `git diff --numstat cca97f553 a994d7395`（本轮全部改动，6 个文件、+2796 / −4）：
+  `pi-tui/src/latex.rs` +1856（新）、`pi-tui/tests/latex.rs` +458（新）、`pi-tui/src/markdown.rs` +310 / −4、
+  `pi-tui/tests/markdown.rs` +91、`pi-tui/src/lib.rs` +1、本节文档 +89。
+  **`src/app.rs` / `host.rs` 均不在其中**（第一、二节的理由）。
+- 本轮没有派发新 issue（开工时槽位已满；收尾时虽然空出 1 槽，但 Stage 35 刚改完 `app.rs` 的鼠标路径，
+  紧接的 P1 第 2 项同样写 `app.rs`，留给下一轮协调轮派发）。
+- `a994d7395` 之后 `feature/pi.rs` 上只剩文档级提交：本补记 `16698c5fe`、以及紧随其后对这句
+  “最终头”措辞的修正；**代码提交到 `a994d7395` 为止，之后没有任何 `.rs` 改动**。
+

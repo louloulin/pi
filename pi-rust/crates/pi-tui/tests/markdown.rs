@@ -341,6 +341,14 @@ fn malformed_and_streaming_input_never_panics() {
         "\\*",
         "|a|b|",
         "$$x$$",
+        "$$",
+        "$",
+        "\\(",
+        "$\\frac{1}{2}$",
+        "$$\n\\frac{1}{2}",
+        "\\(x",
+        "\\[x\\]",
+        "a $$\\sum_{i=0}^n$$ b",
         "![img](url)",
         "<div>x</div>",
         "  - a\n\n- b",
@@ -366,6 +374,89 @@ fn malformed_and_streaming_input_never_panics() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// LaTeX
+// ---------------------------------------------------------------------------
+
+#[test]
+fn latex_block_renders_in_display_mode() {
+    let lines = render_markdown("$$\n\\frac{x^2+1}{x-1}\n$$", 40);
+    assert_eq!(texts(&lines), vec!["x²+1", "────", "x-1"]);
+}
+
+#[test]
+fn bracket_latex_block_renders_in_display_mode() {
+    let lines = render_markdown("\\[\n\\sum_{i=0}^n x_i\n\\]", 40);
+    assert_eq!(texts(&lines), vec![" n", " ∑  xᵢ", "i=0"]);
+}
+
+#[test]
+fn single_line_dollar_block_is_a_display_block() {
+    let lines = render_markdown("$$x^2+1$$", 40);
+    assert_eq!(texts(&lines), vec!["x²+1"]);
+}
+
+#[test]
+fn unsupported_latex_block_falls_back_to_its_source() {
+    let lines = render_markdown("$$\n\\unknown{y}\n$$", 40);
+    assert_eq!(texts(&lines), vec!["$$", "\\unknown{y}", "$$"]);
+}
+
+#[test]
+fn unterminated_latex_blocks_stay_literal() {
+    // An unterminated `$$` only stays a block when its body looks like math.
+    let lines = render_markdown("$$\n\\frac{1}{2}", 40);
+    assert_eq!(texts(&lines), vec!["$$", "\\frac{1}{2}"]);
+    // `\[` is always pending.
+    let lines = render_markdown("\\[\nx+1", 40);
+    assert_eq!(texts(&lines), vec!["\\[", "x+1"]);
+    // `$$` with no body at all is plain text.
+    assert_eq!(texts(&render_markdown("$$", 40)), vec!["$$"]);
+}
+
+#[test]
+fn inline_dollar_latex_renders() {
+    let lines = render_markdown("value $x^2+1$ here", 40);
+    assert_eq!(texts(&lines), vec!["value x²+1 here"]);
+}
+
+#[test]
+fn inline_double_dollar_latex_renders() {
+    let lines = render_markdown("a $$x^2$$ b", 40);
+    assert_eq!(texts(&lines), vec!["a x² b"]);
+}
+
+#[test]
+fn inline_backslash_delimited_latex_renders() {
+    assert_eq!(
+        texts(&render_markdown("f \\(x\\) = 1", 40)),
+        vec!["f x = 1"]
+    );
+    assert_eq!(texts(&render_markdown("x \\[y\\] z", 40)), vec!["x y z"]);
+}
+
+#[test]
+fn dollar_latex_guards_keep_plain_dollar_text_literal() {
+    assert_eq!(
+        texts(&render_markdown("Price $5 and $6", 40)),
+        vec!["Price $5 and $6"]
+    );
+    assert_eq!(texts(&render_markdown("$HOME$foo", 40)), vec!["$HOME$foo"]);
+    assert_eq!(texts(&render_markdown("$ e $", 40)), vec!["$ e $"]);
+}
+
+#[test]
+fn latex_inside_headings_and_list_items_renders() {
+    assert_eq!(texts(&render_markdown("# $x^2$", 40)), vec!["x²"]);
+    assert_eq!(texts(&render_markdown("- $a_i$", 40)), vec!["- aᵢ"]);
+}
+
+#[test]
+fn unsupported_inline_latex_falls_back_to_its_source() {
+    let lines = render_markdown("a $\\unknown{y}$ b", 40);
+    assert_eq!(texts(&lines), vec!["a $\\unknown{y}$ b"]);
 }
 
 // ---------------------------------------------------------------------------

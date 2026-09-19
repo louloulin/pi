@@ -18,6 +18,7 @@ pub mod editor;
 pub mod fuzzy;
 pub mod input;
 pub mod kill_ring;
+pub mod latex;
 pub mod markdown;
 pub mod message;
 pub mod mouse_region;
