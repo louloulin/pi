@@ -8111,3 +8111,25 @@ $ /tmp/rustup-home/toolchains/1.85.0-*/bin/rustfmt --edition 2021 --check \
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
 
+**补记（推送后回填真实哈希）：**
+
+- 推送前复查：`origin/feature/pi.rs` 已从 `c7dec41bc` 前进到 `fdbd14cac`（LUM-1127 的 `ffe2a68cf` +
+  LUM-1129 的 `09bb2cb80` + 其 docs 补记）。首次 `git push origin 21eeb1f0c:refs/heads/feature/pi.rs`
+  被 GitHub 以 `Updates were rejected because a pushed branch tip is behind its remote counterpart` 拒绝
+  （**非 force，远端一个提交都没被覆盖**）。
+- 基于新 tip 重做：`git merge-tree --write-tree fdbd14cac 21eeb1f0c` → tree `7fdb51456`。唯一冲突是本文档
+  尾部（两边同时在末尾追加小节），已按「`## LUM-1129 round` 之后」的顺序解决；代码零冲突。合并提交
+  `b1930da13`（`Merge branch 'work/lum-1128' into feature/pi.rs`，父 `fdbd14cac` + `21eeb1f0c`）。
+  其中 `21eeb1f0c` 是切片提交 `9d3a34f29` 与**当时**的 tip `ffe2a68cf` 的合并（第一次尝试，未被推送）。
+- 推送：`git push origin work/lum-1128:refs/heads/feature/pi.rs` → **快进** `fdbd14cac..b1930da13`
+  （工作分支已包含 `fdbd14cac`，再套一层空合并只会留合并债——同 LUM-1129 的处理）；新分支
+  `work/lum-1128` @ `b1930da13` 一并推送（本次先推的 `9d3a34f29` 即切片提交）。
+- 合并态（`b1930da13`）复测：`cargo test --workspace --offline` = **96 个 suite / 1252 passed / 0 failed**；
+  `-p pi-tui` 22 / 436、`-p pi-coding-agent` 15 / 360、`-p pi-extensions` 12 / 84；
+  `cargo check --workspace --all-targets` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均
+  `Finished` 0 warning；本轮 4 个 `.rs` 文件在 rustfmt 1.8.0 下仍 0 diff。
+- `git diff --numstat fdbd14cac b1930da13` = 本轮 5 个文件、+874 / −4：
+  `pi-tui/src/mouse_region.rs` +161（新）、`pi-tui/tests/mouse_region.rs` +408（新）、
+  `pi-tui/src/app.rs` +128 / −4、`pi-tui/src/lib.rs` +2、本节文档 +175。
+- 推送时 Stage 36（LUM-1129）已在 `09bb2cb80` 落地并推送完毕，本轮推送**没有覆盖任何在途工作**；
+  本轮也没有派发新 issue（frontier 第 1 项收口后 `app.rs` 空闲，下一轮由协调轮排）。
