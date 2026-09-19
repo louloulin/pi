@@ -28,6 +28,10 @@ impl ExtensionSearchPaths {
     }
 
     /// List candidate extension files (`.ts`, `.js`, `.mjs`, `.wasm`).
+    ///
+    /// ESM vs CommonJS is decided per file inside the JS shim (see
+    /// `runtime/pi-ext-shim.mjs` `_pi_load_extension`), so this resolver
+    /// only has to hand every JS-family file through unchanged.
     pub fn candidates(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for dir in [&self.global, &self.project].into_iter().flatten() {

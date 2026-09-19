@@ -32,11 +32,15 @@
 //   - `_pi_execute_command(name, args, ctxJson)` — run a command handler.
 //   - `_pi_known_event_names()`   — list event names with at least one
 //     subscriber.
-//   - `_pi_load_extension(source)` — evaluate an extension source and
-//     call its default export with `pi`. The source is wrapped so a
-//     CommonJS-style `module.exports = function (pi) { ... }` works,
-//     matching how upstream pi extensions are wired (the TS source
-//     compiles to that shape).
+//   - `_pi_load_extension(source, path)` — evaluate an extension source
+//     and call its default export with `pi`. Two module formats are
+//     accepted, mirroring what upstream `jiti.import` handles:
+//       * CommonJS-style `module.exports = function (pi) { ... }`
+//         (the shape the upstream TS source compiles to), and
+//       * ESM `import { ... } from "node:path"` + `export default
+//         function (pi) { ... }` (the upstream source form). `path` is
+//         the extension's file path; it backs `import.meta.url` and is
+//         used for readable error messages.
 
 const _pi = {
   /** @type {Record<string, Array<(event: any, ctx: any) => any>>} */
@@ -531,34 +535,762 @@ globalThis._pi_execute_tool = function _pi_execute_tool(name, argsJson) {
 
 /**
  * Evaluate extension source and call its default export with `pi`.
- * The source is treated as a CommonJS-shaped module: we wrap it so
- * `module.exports = function (pi) { ... }` is the contract. This
- * matches the shape the upstream pi extensions compile to.
  *
- * Stage 3 ships only this minimal module wrapper — supporting the
- * full ESM pipeline lands in a later stage alongside TypeBox schema
- * validation.
+ * Two module formats are accepted, matching what upstream `jiti.import`
+ * handles:
  *
- * @param {string} source
+ *   1. CommonJS: `module.exports = function (pi) { ... }` — the shape
+ *      upstream TS source compiles to.
+ *   2. ESM: `import { join } from "node:path"; export default function
+ *      (pi) { ... }` — the upstream source form.
+ *
+ * The ESM branch rewrites the `import` / `export default` statements and
+ * `import.meta` references in place (see `__pi_analyze_module`) and then
+ * runs the result through the same factory wrapper. No bundler and no
+ * extra JS dependency is involved; only the `node:path` / `node:url`
+ * slice of the upstream `VIRTUAL_MODULES` map is provided.
+ *
+ * @param {string} source extension source text
+ * @param {string} [path] absolute path of the extension file; backs
+ *   `import.meta.url` and appears in error messages
  */
-globalThis._pi_load_extension = function _pi_load_extension(source) {
+globalThis._pi_load_extension = function _pi_load_extension(source, path) {
   if (typeof source !== "string") {
     throw new TypeError("_pi_load_extension: source must be a string");
   }
-  const factoryFn = new Function(
-    "module",
-    "exports",
-    "pi",
-    source +
-      "\n;return (typeof module.exports === 'function') ? module.exports : ((typeof exports === 'function') ? exports : undefined);",
-  );
+  const sourcePath = typeof path === "string" ? path : "";
+  const label = sourcePath || "<inline extension>";
+  const analysis = __pi_analyze_module(source);
+
+  let body;
+  let format;
+  if (analysis.isEsm) {
+    if (!analysis.hasDefaultExport) {
+      throw new Error(
+        label +
+          ": ESM extension must `export default` a factory function, e.g. `export default function (pi) { ... }`",
+      );
+    }
+    body =
+      "let __pi_default_export;\n" +
+      __pi_apply_edits(source, analysis.edits) +
+      "\n;return __pi_default_export;";
+    format = "esm";
+  } else {
+    body =
+      source +
+      "\n;return (typeof module.exports === 'function') ? module.exports : ((typeof exports === 'function') ? exports : undefined);";
+    format = "cjs";
+  }
+
+  let factoryFn;
+  try {
+    factoryFn = new Function("module", "exports", "pi", "__pi_import", "__pi_meta", body);
+  } catch (e) {
+    throw new Error(
+      label + ": failed to compile extension: " + (e && e.message ? e.message : String(e)),
+    );
+  }
   const module = { exports: undefined };
   const exports = {};
-  const factory = factoryFn(module, exports, pi);
+  const factory = factoryFn(module, exports, pi, __pi_import, __pi_import_meta(sourcePath));
   if (typeof factory !== "function") {
-    throw new Error("extension source did not export a factory function");
+    throw new Error(label + ": extension did not export a factory function");
   }
   factory(pi);
   _pi.loadedCount += 1;
-  return JSON.stringify({ loaded: true });
+  return JSON.stringify({ loaded: true, format: format });
 };
+
+// ---------------------------------------------------------------------------
+// ESM support.
+//
+// The embedded QuickJS runtime has no Node builtins and this shim stays
+// dependency-free, so the ESM contract is implemented as a *source
+// rewrite*: `import`/`export default`/`import.meta` are translated into
+// plain statements before the factory wrapper evaluates the module.
+//
+// The rewrite is driven by a token scan of a masked copy of the source
+// (strings, template literals, comments and regex literals are blanked),
+// so a keyword inside a string or comment is never mistaken for a
+// statement. Only the forms the upstream extension contract uses are
+// supported:
+//
+//   import "node:path";
+//   import path from "node:path";
+//   import * as path from "node:path";
+//   import { dirname, join } from "node:path";
+//   import { join as j } from "node:path";
+//   import def, { a } from "node:path";
+//   import type { Foo } from "...";           // erased (TS type-only)
+//   export default function (pi) { ... }
+//   export default (pi) => { ... }
+//   import.meta.url / import.meta.dirname / import.meta.filename
+//
+// Anything else fails with a readable error instead of running partial
+// code. The `typebox` / `@earendil-works/*` virtual modules stay out of
+// scope (separate task); importing them names the specifier and the
+// supported set.
+// ---------------------------------------------------------------------------
+
+/**
+ * The virtual modules available to ESM extensions. Mirrors the
+ * `node:path` / `node:url` slice of the upstream `VIRTUAL_MODULES` map in
+ * `packages/coding-agent/src/core/extensions/loader.ts`. Assigned at the
+ * bottom of this file, after the module objects are built.
+ */
+
+/**
+ * Resolve a rewritten `import ... from "<specifier>"`.
+ *
+ * Relative specifiers and anything outside the virtual module map fail
+ * with a readable error: silently evaluating `undefined` would surface
+ * much later as a confusing TypeError inside extension code.
+ *
+ * @param {string} specifier
+ */
+function __pi_import(specifier) {
+  const key = String(specifier);
+  const mod = globalThis.__pi_virtual_modules[key];
+  if (mod) return mod;
+  if (key.startsWith(".") || key.startsWith("/")) {
+    throw new Error(
+      'relative import "' +
+        key +
+        '" is not supported by the pi extension host: bundle the helper into the extension file',
+    );
+  }
+  throw new Error(
+    'unsupported import "' +
+      key +
+      '" in pi extension: available virtual modules are ' +
+      Object.keys(globalThis.__pi_virtual_modules).join(", "),
+  );
+}
+
+/**
+ * Build the object exposed to the rewritten code as `import.meta`.
+ *
+ * `url` is `pathToFileURL(<extension path>)` so the canonical upstream
+ * pattern `dirname(fileURLToPath(import.meta.url))` yields the
+ * extension's own directory.
+ *
+ * @param {string} path
+ */
+function __pi_import_meta(path) {
+  if (!path) {
+    return Object.freeze({ url: "", dirname: "", filename: "" });
+  }
+  let href = "";
+  try {
+    href = __pi_url_module.pathToFileURL(path).href;
+  } catch (_e) {
+    href = "file://" + path;
+  }
+  let dir = "";
+  try {
+    dir = __pi_path_module.dirname(path);
+  } catch (_e) {
+    dir = "";
+  }
+  return Object.freeze({ url: href, dirname: dir, filename: path });
+}
+
+/** Apply the analyzer's edits back-to-front so offsets stay valid. */
+function __pi_apply_edits(source, edits) {
+  let code = source;
+  for (let i = edits.length - 1; i >= 0; i--) {
+    const edit = edits[i];
+    code = code.slice(0, edit.start) + edit.text + code.slice(edit.end);
+  }
+  return code;
+}
+
+/**
+ * True when a `/` at this point starts a regex literal rather than a
+ * division. `lastCode` is the previous significant character (or "w" for
+ * an identifier, with the identifier text in `lastWord`).
+ */
+function __pi_regex_allowed(lastCode, lastWord) {
+  if (lastCode === "w") {
+    return (
+      [
+        "return",
+        "typeof",
+        "instanceof",
+        "in",
+        "of",
+        "new",
+        "delete",
+        "void",
+        "throw",
+        "case",
+        "do",
+        "else",
+        "yield",
+        "await",
+      ].indexOf(lastWord) !== -1
+    );
+  }
+  if (!lastCode) return true;
+  return "([{,;=:!&|?+-*%^~<>".indexOf(lastCode) !== -1;
+}
+
+/**
+ * Blank string / template-literal bodies, comments and regex literals
+ * while preserving every character offset. Keywords hidden in those
+ * regions therefore never reach the statement scanner.
+ *
+ * @param {string} source
+ */
+function __pi_mask_source(source) {
+  const out = source.split("");
+  const n = source.length;
+  const blank = (start, end) => {
+    for (let k = start; k < end; k++) {
+      if (source[k] !== "\n") out[k] = " ";
+    }
+  };
+  let lastCode = "";
+  let lastWord = "";
+  let i = 0;
+  while (i < n) {
+    const c = source[i];
+    // Line comment.
+    if (c === "/" && source[i + 1] === "/") {
+      const start = i;
+      while (i < n && source[i] !== "\n") i++;
+      blank(start, i);
+      continue;
+    }
+    // Block comment.
+    if (c === "/" && source[i + 1] === "*") {
+      const start = i;
+      i += 2;
+      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i = Math.min(n, i + 2);
+      blank(start, i);
+      continue;
+    }
+    // String literal: blank the body, keep the quotes.
+    if (c === "'" || c === '"') {
+      const quote = c;
+      const start = i;
+      i++;
+      while (i < n) {
+        if (source[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (source[i] === quote || source[i] === "\n") {
+          i++;
+          break;
+        }
+        i++;
+      }
+      blank(start + 1, Math.max(start + 1, i - 1));
+      lastCode = "v";
+      lastWord = "";
+      continue;
+    }
+    // Template literal: blank it whole, backticks included.
+    if (c === "`") {
+      const start = i;
+      i++;
+      while (i < n) {
+        if (source[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (source[i] === "`") {
+          i++;
+          break;
+        }
+        i++;
+      }
+      blank(start, i);
+      lastCode = "v";
+      lastWord = "";
+      continue;
+    }
+    // Regex literal (only where a value cannot precede it).
+    if (c === "/" && __pi_regex_allowed(lastCode, lastWord)) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < n) {
+        const d = source[j];
+        if (d === "\\") {
+          j += 2;
+          continue;
+        }
+        if (d === "\n") break;
+        if (d === "[") inClass = true;
+        else if (d === "]") inClass = false;
+        else if (d === "/" && !inClass) {
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        const start = i;
+        i = j + 1;
+        while (i < n && /[a-z]/i.test(source[i])) i++;
+        blank(start, i);
+        lastCode = "v";
+        lastWord = "";
+        continue;
+      }
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      const start = i;
+      i++;
+      while (i < n && /[A-Za-z0-9_$]/.test(source[i])) i++;
+      lastCode = "w";
+      lastWord = source.slice(start, i);
+      continue;
+    }
+    if (!/\s/.test(c)) {
+      lastCode = c;
+      lastWord = "";
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+/**
+ * Tokenize the masked source. Offsets point into the original source
+ * too, because masking preserves length.
+ */
+function __pi_tokenize(masked) {
+  const tokens = [];
+  const n = masked.length;
+  let i = 0;
+  while (i < n) {
+    const c = masked[i];
+    if (c === "'" || c === '"') {
+      const start = i;
+      i++;
+      while (i < n && masked[i] !== c && masked[i] !== "\n") i++;
+      if (i < n && masked[i] === c) i++;
+      tokens.push({ kind: "string", start: start, end: i });
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      const start = i;
+      i++;
+      while (i < n && /[A-Za-z0-9_$]/.test(masked[i])) i++;
+      tokens.push({ kind: "ident", start: start, end: i });
+      continue;
+    }
+    if (/[0-9]/.test(c)) {
+      const start = i;
+      i++;
+      while (i < n && /[A-Za-z0-9_.$]/.test(masked[i])) i++;
+      tokens.push({ kind: "number", start: start, end: i });
+      continue;
+    }
+    if (/\s/.test(c)) {
+      i++;
+      continue;
+    }
+    tokens.push({ kind: "punct", start: i, end: i + 1 });
+    i++;
+  }
+  return tokens;
+}
+
+/** Evaluate a JS string literal (single / double quoted, with escapes). */
+function __pi_read_string_literal(literal) {
+  const value = new Function("return (" + literal + ");")();
+  if (typeof value !== "string") {
+    throw new TypeError("module specifier must be a string literal");
+  }
+  return value;
+}
+
+/**
+ * Translate one import clause into plain statements.
+ *
+ * @param {string} clause raw text between `import` and `from`
+ * @param {string} specifier evaluated module specifier
+ */
+function __pi_import_clause(clause, specifier) {
+  const spec = JSON.stringify(specifier);
+  const text = clause.trim();
+  // `import type { Foo } from "..."` — erased by the TS compiler upstream;
+  // there is nothing to bind at runtime.
+  if (text === "type" || text.startsWith("type ") || text.startsWith("type{")) {
+    return "";
+  }
+  const entries = (inner) => {
+    const out = [];
+    for (const raw of inner.split(",")) {
+      const part = raw.trim();
+      if (!part) continue;
+      const bits = part.split(/\s+as\s+/);
+      const imported = bits[0].trim();
+      const local = (bits[1] || bits[0]).trim();
+      if (imported === "type" || imported.startsWith("type ")) continue;
+      out.push(imported === local ? imported : imported + ": " + local);
+    }
+    return out;
+  };
+  const named = (inner) => {
+    const list = entries(inner);
+    if (list.length === 0) return "__pi_import(" + spec + ");";
+    return "const { " + list.join(", ") + " } = __pi_import(" + spec + ");";
+  };
+  if (text.startsWith("{")) {
+    return named(text.slice(1, text.lastIndexOf("}")));
+  }
+  if (text.startsWith("*")) {
+    const local = text.replace(/^\*\s*as\s*/, "").trim();
+    return "const " + local + " = __pi_import(" + spec + ");";
+  }
+  const comma = text.indexOf(",");
+  if (comma === -1) {
+    return "const " + text + " = __pi_import(" + spec + ").default;";
+  }
+  const statements = [];
+  const defaultLocal = text.slice(0, comma).trim();
+  const rest = text.slice(comma + 1).trim();
+  if (defaultLocal) {
+    statements.push("const " + defaultLocal + " = __pi_import(" + spec + ").default;");
+  }
+  if (rest.startsWith("{")) {
+    statements.push(named(rest.slice(1, rest.lastIndexOf("}"))));
+  } else if (rest.startsWith("*")) {
+    const local = rest.replace(/^\*\s*as\s*/, "").trim();
+    statements.push("const " + local + " = __pi_import(" + spec + ");");
+  }
+  return statements.join(" ");
+}
+
+/**
+ * Scan the source for the ESM constructs the host supports and return
+ * the replacement edits plus a format verdict.
+ *
+ * @param {string} source
+ */
+function __pi_analyze_module(source) {
+  const masked = __pi_mask_source(source);
+  const tokens = __pi_tokenize(masked);
+  const edits = [];
+  let isEsm = false;
+  let hasDefaultExport = false;
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.kind === "punct") {
+      const ch = masked[token.start];
+      if (ch === "{" || ch === "(" || ch === "[") depth++;
+      else if (ch === "}" || ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (token.kind !== "ident") continue;
+    const word = source.slice(token.start, token.end);
+    const next = tokens[index + 1];
+    // `import.meta` — legal at any depth.
+    if (word === "import" && next && next.kind === "punct" && masked[next.start] === ".") {
+      const meta = tokens[index + 2];
+      if (meta && meta.kind === "ident" && source.slice(meta.start, meta.end) === "meta") {
+        edits.push({ start: token.start, end: meta.end, text: "__pi_meta" });
+        continue;
+      }
+    }
+    if (word === "export" && depth === 0) {
+      if (next && next.kind === "ident" && source.slice(next.start, next.end) === "default") {
+        isEsm = true;
+        hasDefaultExport = true;
+        edits.push({ start: token.start, end: next.end, text: "__pi_default_export =" });
+      }
+      continue;
+    }
+    if (word !== "import" || depth > 0) continue;
+    // Dynamic `import(...)` stays untouched (quickjs has no loader for it).
+    if (next && next.kind === "punct" && masked[next.start] === "(") continue;
+    isEsm = true;
+    // Bare side-effect import: `import "node:path";`
+    if (next && next.kind === "string") {
+      const specifier = __pi_read_string_literal(source.slice(next.start, next.end));
+      let end = next.end;
+      const semi = tokens[index + 2];
+      if (semi && semi.kind === "punct" && masked[semi.start] === ";") end = semi.end;
+      edits.push({
+        start: token.start,
+        end: end,
+        text: "__pi_import(" + JSON.stringify(specifier) + ");",
+      });
+      continue;
+    }
+    // `import <clause> from "<specifier>";`
+    let from = null;
+    let spec = null;
+    let j = index + 1;
+    while (j < tokens.length) {
+      const t = tokens[j];
+      if (t.kind === "punct" && masked[t.start] === ";") break;
+      if (t.kind === "ident" && source.slice(t.start, t.end) === "from") {
+        const candidate = tokens[j + 1];
+        if (candidate && candidate.kind === "string") {
+          from = t;
+          spec = candidate;
+          break;
+        }
+      }
+      j++;
+    }
+    if (!from || !spec) {
+      throw new SyntaxError(
+        "could not parse `import` statement at offset " + token.start + " (missing `from \"<specifier>\"`)",
+      );
+    }
+    const clause = source.slice(token.end, from.start);
+    const specifier = __pi_read_string_literal(source.slice(spec.start, spec.end));
+    let end = spec.end;
+    const semi = tokens[j + 2];
+    if (semi && semi.kind === "punct" && masked[semi.start] === ";") end = semi.end;
+    edits.push({
+      start: token.start,
+      end: end,
+      text: __pi_import_clause(clause, specifier),
+    });
+    index = j + 1;
+  }
+  return { isEsm: isEsm, hasDefaultExport: hasDefaultExport, edits: edits };
+}
+
+// ---------------------------------------------------------------------------
+// Virtual modules — the `node:path` / `node:url` slice of upstream
+// `VIRTUAL_MODULES`. POSIX semantics; the embedded host loads extensions
+// from absolute paths and the upstream examples only use `join` /
+// `dirname` / `fileURLToPath`.
+// ---------------------------------------------------------------------------
+
+const __pi_path_module = (() => {
+  const sep = "/";
+  const delimiter = ":";
+
+  function assertPath(p) {
+    if (typeof p !== "string") {
+      throw new TypeError("Path must be a string. Received " + typeof p);
+    }
+  }
+
+  function normalize(p) {
+    assertPath(p);
+    if (p === "") return ".";
+    const isAbsolute = p.charCodeAt(0) === 47; /* '/' */
+    const trailingSeparator = p.length > 1 && p.charCodeAt(p.length - 1) === 47;
+    const out = [];
+    for (const segment of p.split("/")) {
+      if (segment === "" || segment === ".") continue;
+      if (segment === "..") {
+        if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+        else if (!isAbsolute) out.push("..");
+        continue;
+      }
+      out.push(segment);
+    }
+    let result = out.join("/");
+    if (result === "") result = isAbsolute ? "/" : ".";
+    else if (isAbsolute) result = "/" + result;
+    if (trailingSeparator && result !== "/") result += "/";
+    return result;
+  }
+
+  function join(...args) {
+    if (args.length === 0) return ".";
+    let joined = "";
+    for (const arg of args) {
+      assertPath(arg);
+      if (arg.length === 0) continue;
+      joined = joined.length === 0 ? arg : joined + "/" + arg;
+    }
+    return joined.length === 0 ? "." : normalize(joined);
+  }
+
+  function resolve(...args) {
+    let resolved = "";
+    let isAbsolute = false;
+    for (let i = args.length - 1; i >= -1 && !isAbsolute; i--) {
+      const p =
+        i >= 0
+          ? args[i]
+          : typeof globalThis._pi_cwd === "string" && globalThis._pi_cwd
+            ? globalThis._pi_cwd
+            : "/";
+      assertPath(p);
+      if (p.length === 0) continue;
+      resolved = resolved.length === 0 ? p : p + "/" + resolved;
+      isAbsolute = p.charCodeAt(0) === 47;
+    }
+    return resolved.length === 0 ? "/" : normalize(resolved);
+  }
+
+  function dirname(p) {
+    assertPath(p);
+    if (p === "") return ".";
+    const rootEnd = p.charCodeAt(0) === 47 ? 1 : 0;
+    let end = -1;
+    for (let i = p.length - 1; i >= rootEnd; i--) {
+      if (p[i] === "/") {
+        end = i;
+        break;
+      }
+    }
+    if (end === -1) return rootEnd ? "/" : ".";
+    let cut = end;
+    while (cut > rootEnd && p[cut - 1] === "/") cut--;
+    if (cut === rootEnd) return p.slice(0, rootEnd) || "/";
+    return p.slice(0, cut);
+  }
+
+  function basename(p, ext) {
+    assertPath(p);
+    if (ext !== undefined && typeof ext !== "string") {
+      throw new TypeError("The 'ext' argument must be of type string");
+    }
+    let end = p.length;
+    while (end > 1 && p.charCodeAt(end - 1) === 47) end--;
+    const slash = p.lastIndexOf("/", end - 1);
+    let base = p.slice(slash === -1 ? 0 : slash + 1, end);
+    if (ext && base.endsWith(ext)) base = base.slice(0, base.length - ext.length);
+    return base;
+  }
+
+  function extname(p) {
+    assertPath(p);
+    const base = basename(p);
+    const dot = base.lastIndexOf(".");
+    return dot <= 0 ? "" : base.slice(dot);
+  }
+
+  function isAbsolute(p) {
+    assertPath(p);
+    return p.charCodeAt(0) === 47;
+  }
+
+  function relative(from, to) {
+    assertPath(from);
+    assertPath(to);
+    if (isAbsolute(from) !== isAbsolute(to)) return to;
+    const fromParts = normalize(from)
+      .split("/")
+      .filter((s) => s.length > 0);
+    const toParts = normalize(to)
+      .split("/")
+      .filter((s) => s.length > 0);
+    let i = 0;
+    while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i]) i++;
+    const parts = fromParts.slice(i).map(() => "..").concat(toParts.slice(i));
+    return parts.length === 0 ? "" : parts.join("/");
+  }
+
+  function parse(p) {
+    assertPath(p);
+    const root = p.charCodeAt(0) === 47 ? "/" : "";
+    const base = basename(p);
+    const ext = extname(p);
+    return {
+      root: root,
+      dir: dirname(p),
+      base: base,
+      ext: ext,
+      name: ext ? base.slice(0, base.length - ext.length) : base,
+    };
+  }
+
+  function format(obj) {
+    if (!obj || typeof obj !== "object") {
+      throw new TypeError("The 'pathObject' argument must be of type object");
+    }
+    const dir = obj.dir || obj.root || "";
+    const base = obj.base || (obj.name ? obj.name + (obj.ext || "") : "");
+    if (!dir) return base;
+    return dir === "/" ? "/" + base : dir + "/" + base;
+  }
+
+  const mod = {
+    sep: sep,
+    delimiter: delimiter,
+    normalize: normalize,
+    join: join,
+    resolve: resolve,
+    dirname: dirname,
+    basename: basename,
+    extname: extname,
+    isAbsolute: isAbsolute,
+    relative: relative,
+    parse: parse,
+    format: format,
+  };
+  mod.posix = mod;
+  // `import path from "node:path"` — Node's CJS interop exposes the whole
+  // module as the default export, so mirror that.
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+const __pi_url_module = (() => {
+  function fileURLToPath(input) {
+    let href;
+    if (typeof input === "string") href = input;
+    else if (input && typeof input.href === "string") href = input.href;
+    else if (input && typeof input.toString === "function") href = String(input);
+    else throw new TypeError("The 'url' argument must be of type string or an instance of URL");
+    const match = /^file:\/\/([^/?#]*)([^?#]*)/i.exec(href);
+    if (!match) throw new TypeError("The URL must be of scheme file: " + href);
+    const host = match[1];
+    let pathPart = match[2] === "" ? "/" : match[2];
+    let decoded;
+    try {
+      decoded = decodeURIComponent(pathPart);
+    } catch (_e) {
+      decoded = pathPart;
+    }
+    if (/^\/[A-Za-z]:\//.test(decoded)) decoded = decoded.slice(1);
+    if (host && host.toLowerCase() !== "localhost") return "//" + host + decoded;
+    return decoded;
+  }
+
+  function pathToFileURL(p) {
+    if (typeof p !== "string") throw new TypeError("The 'path' argument must be of type string");
+    assertAbsolute(p);
+    let normalized = p.replace(/\\/g, "/");
+    if (/^[A-Za-z]:/.test(normalized)) normalized = "/" + normalized;
+    const encoded = normalized
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    const href = "file://" + encoded;
+    return {
+      href: href,
+      toString: () => href,
+      toJSON: () => href,
+    };
+  }
+
+  function assertAbsolute(p) {
+    if (p.charCodeAt(0) !== 47 && !/^[A-Za-z]:[\\/]/.test(p)) {
+      throw new TypeError("The 'path' argument must be an absolute path");
+    }
+  }
+
+  const mod = { fileURLToPath: fileURLToPath, pathToFileURL: pathToFileURL };
+  // `import url from "node:url"` — same CJS-interop shape as `node:path`.
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+// Built last so the module objects above are initialized before they are
+// referenced (a `const` declared later in the file would otherwise throw
+// a TDZ ReferenceError here).
+globalThis.__pi_virtual_modules = Object.freeze({
+  "node:path": __pi_path_module,
+  path: __pi_path_module,
+  "node:url": __pi_url_module,
+  url: __pi_url_module,
+});

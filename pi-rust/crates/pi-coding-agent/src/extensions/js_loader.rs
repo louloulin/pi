@@ -402,4 +402,49 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Stage 25: the canonical upstream ESM extension form loads from
+    /// disk through the same candidate walk as CommonJS — `import` from a
+    /// virtual module, `export default function (pi)`, and
+    /// `import.meta.dirname` resolving to the extension's own directory.
+    #[tokio::test]
+    async fn load_extensions_loads_an_esm_extension_from_disk() {
+        use pi_protocol::ResourcesDiscoverReason;
+
+        let dir = std::env::temp_dir().join("pi_extensions_esm_e2e");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("dynamic.mjs"),
+            r#"
+                import { join } from "node:path";
+
+                export default function (pi) {
+                    pi.on("resources_discover", () => ({
+                        skillPaths: [join(import.meta.dirname, "SKILL.md")],
+                        promptPaths: [join(import.meta.dirname, "dynamic.md")],
+                    }));
+                }
+            "#,
+        )
+        .expect("write dynamic.mjs");
+
+        let paths = ExtensionSearchPaths {
+            global: None,
+            project: Some(dir.clone()),
+        };
+        let host = JsExtensionHost::new().await.expect("host");
+        let outcome = load_extensions(host, &paths, "print", false, dir.to_str().unwrap()).await;
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+        assert_eq!(outcome.entries.len(), 1, "{:?}", outcome.entries);
+
+        let discovered = outcome
+            .bridge
+            .discover_resources(ResourcesDiscoverReason::Startup)
+            .await;
+        assert_eq!(discovered.skill_paths, vec![dir.join("SKILL.md")]);
+        assert_eq!(discovered.prompt_paths, vec![dir.join("dynamic.md")]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

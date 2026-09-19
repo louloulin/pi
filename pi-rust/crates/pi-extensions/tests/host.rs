@@ -755,3 +755,287 @@ fn bridge_discovery_is_empty_without_a_handler() {
         assert!(discovered.is_empty(), "{discovered:?}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Stage 25: ESM extension loading (`import` / `export default` /
+// `import.meta` + the `node:path` / `node:url` virtual modules).
+// ---------------------------------------------------------------------------
+
+/// Build an entry whose source path is the given absolute path. The path
+/// is what `import.meta.url` / `import.meta.dirname` resolve against.
+fn entry_at(id: &str, path: &str) -> ExtensionEntry {
+    ExtensionEntry {
+        source: PathBuf::from(path),
+        id: id.to_string(),
+        label: None,
+    }
+}
+
+/// The ESM twin of upstream
+/// `packages/coding-agent/examples/extensions/dynamic-resources/index.ts`:
+/// `import { dirname, join } from "node:path"`, `import { fileURLToPath }
+/// from "node:url"`, `const baseDir = dirname(fileURLToPath(import.meta.url))`
+/// and an `export default function (pi)` factory returning the three
+/// resource collections.
+#[test]
+fn esm_extension_discovers_resources_like_upstream_example() {
+    use pi_extensions::JsExtensionBridge;
+    use pi_protocol::ResourcesDiscoverReason;
+
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            import { dirname, join } from "node:path";
+            import { fileURLToPath } from "node:url";
+
+            const baseDir = dirname(fileURLToPath(import.meta.url));
+
+            export default function (pi) {
+                pi.on("resources_discover", () => {
+                    return {
+                        skillPaths: [join(baseDir, "SKILL.md")],
+                        promptPaths: [join(baseDir, "dynamic.md")],
+                        themePaths: [join(baseDir, "dynamic.json")],
+                    };
+                });
+            }
+        "#;
+        host.load(
+            entry_at(
+                "dynamic-resources",
+                "/work/project/.pi/extensions/dynamic-resources/index.mjs",
+            ),
+            source,
+        )
+        .await
+        .expect("ESM extension should load");
+
+        let bridge = JsExtensionBridge::new(host.clone(), "print", false, "/work/project");
+        let discovered = bridge
+            .discover_resources(ResourcesDiscoverReason::Startup)
+            .await;
+
+        assert_eq!(
+            discovered.skill_paths,
+            vec![PathBuf::from(
+                "/work/project/.pi/extensions/dynamic-resources/SKILL.md"
+            )]
+        );
+        assert_eq!(
+            discovered.prompt_paths,
+            vec![PathBuf::from(
+                "/work/project/.pi/extensions/dynamic-resources/dynamic.md"
+            )]
+        );
+        assert_eq!(
+            discovered.theme_paths,
+            vec![PathBuf::from(
+                "/work/project/.pi/extensions/dynamic-resources/dynamic.json"
+            )]
+        );
+    });
+}
+
+/// `export default (pi) => { ... }` (the arrow form the issue calls out)
+/// plus aliased named imports and `import.meta.dirname`.
+#[test]
+fn esm_arrow_default_export_and_aliased_imports() {
+    use pi_extensions::JsExtensionBridge;
+    use pi_protocol::ResourcesDiscoverReason;
+
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            import { dirname as d, join as j } from "node:path";
+
+            const baseDir = import.meta.dirname;
+
+            export default (pi) => {
+                pi.on("resources_discover", () => ({
+                    skillPaths: [j(d(baseDir + "/nested/file.md"), "SKILL.md")],
+                }));
+            };
+        "#;
+        host.load(
+            entry_at("arrow-ext", "/opt/ext/arrow/index.mjs"),
+            source,
+        )
+        .await
+        .expect("arrow ESM extension should load");
+
+        let bridge = JsExtensionBridge::new(host, "print", false, "/w");
+        let discovered = bridge
+            .discover_resources(ResourcesDiscoverReason::Reload)
+            .await;
+        assert_eq!(
+            discovered.skill_paths,
+            vec![PathBuf::from("/opt/ext/arrow/nested/SKILL.md")]
+        );
+    });
+}
+
+/// Keywords inside strings and comments must not fool the source scanner.
+#[test]
+fn esm_scanner_ignores_keywords_in_strings_and_comments() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            import { join } from "node:path";
+            const decorative = "export default function (pi) {}";
+            // import { nope } from "not-a-real-module";
+            /* export default 42; */
+            export default function (pi) {
+                pi.on("session_start", () => {
+                    return { text: decorative, path: join("/a", "b") };
+                });
+            }
+        "#;
+        host.load(entry_at("scanner", "/tmp/scanner/index.mjs"), source)
+            .await
+            .expect("load");
+
+        let outcome = host
+            .emit_event(&ExtensionEvent::SessionStart)
+            .await
+            .expect("dispatch");
+        assert!(outcome.handled, "{outcome:?}");
+        assert_eq!(outcome.results[0]["path"], "/a/b");
+        assert_eq!(
+            outcome.results[0]["text"],
+            "export default function (pi) {}"
+        );
+    });
+}
+
+/// A CommonJS extension still loads after an ESM one on the same host, and
+/// both register into the shared tool registry.
+#[test]
+fn esm_and_commonjs_extensions_coexist() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            entry_at("esm-tool", "/tmp/esm-tool/index.mjs"),
+            r#"
+                import { join } from "node:path";
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "esm_tool",
+                        label: "ESM tool",
+                        description: "registered from ESM",
+                        parameters: { type: "object" },
+                        execute: () => ({
+                            content: [{ type: "text", text: join("/esm", "ok") }],
+                        }),
+                    });
+                }
+            "#,
+        )
+        .await
+        .expect("ESM load");
+
+        host.load(
+            entry("cjs-tool"),
+            r#"
+                module.exports = function (pi) {
+                    pi.registerTool({
+                        name: "cjs_tool",
+                        label: "CJS tool",
+                        description: "registered from CommonJS",
+                        parameters: { type: "object" },
+                        execute: () => ({ content: [{ type: "text", text: "cjs" }] }),
+                    });
+                };
+            "#,
+        )
+        .await
+        .expect("CJS load");
+
+        let mut names = host.registered_tool_names().await;
+        names.sort();
+        assert_eq!(names, vec!["cjs_tool".to_string(), "esm_tool".to_string()]);
+
+        let outcome = host.execute_tool("esm_tool", "{}").await.expect("execute");
+        assert_eq!(outcome.content[0]["text"], "/esm/ok");
+    });
+}
+
+/// Type-only imports are erased: they are a compile-time-only artifact and
+/// must not require the (out-of-scope) `@earendil-works/*` virtual module.
+#[test]
+fn esm_type_only_import_is_erased() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+            export default function (pi) {
+                pi.appendEntry("loaded", { ok: true });
+            }
+        "#;
+        host.load(entry_at("type-only", "/tmp/type-only/index.mjs"), source)
+            .await
+            .expect("type-only import should be erased");
+        assert_eq!(host.log().entries.len(), 1);
+    });
+}
+
+/// ESM without a default export fails with a readable, file-named error.
+#[test]
+fn esm_without_default_export_is_reported() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let err = host
+            .load(
+                entry_at("no-default", "/tmp/no-default/index.mjs"),
+                r#"
+                    import { join } from "node:path";
+                    pi.on("session_start", () => {});
+                "#,
+            )
+            .await
+            .expect_err("must reject ESM without export default");
+        let message = err.to_string();
+        assert!(message.contains("export default"), "{message}");
+        assert!(message.contains("no-default"), "{message}");
+    });
+}
+
+/// Unsupported virtual modules (and relative specifiers) name the thing
+/// that failed instead of surfacing `undefined`.
+#[test]
+fn esm_unsupported_imports_are_reported() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let err = host
+            .load(
+                entry_at("typebox-ext", "/tmp/typebox-ext/index.mjs"),
+                r#"
+                    import { Type } from "typebox";
+                    export default function (pi) {}
+                "#,
+            )
+            .await
+            .expect_err("typebox is not a supported virtual module yet");
+        let message = err.to_string();
+        assert!(message.contains("typebox"), "{message}");
+        assert!(message.contains("node:path"), "{message}");
+
+        let err = host
+            .load(
+                entry_at("relative-ext", "/tmp/relative-ext/index.mjs"),
+                r#"
+                    import { helper } from "./helper.mjs";
+                    export default function (pi) {}
+                "#,
+            )
+            .await
+            .expect_err("relative imports are unsupported");
+        assert!(err.to_string().contains("relative import"), "{err}");
+    });
+}
