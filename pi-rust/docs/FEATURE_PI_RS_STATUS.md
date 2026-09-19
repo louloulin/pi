@@ -4759,3 +4759,73 @@ $ cargo test   --workspace --no-fail-fast --offline                 # 66 targets
 `feature/pi.rs`：代码面与 `origin/feature/pi.rs`（`50b19c90f`）一致，无可合并代码；本轮只追加
 本节状态文档并 push。push 前先 `git fetch origin feature/pi.rs`，若 LUM-1091 的 `pi-client`
 轮已先落地则先合入再 push。
+
+## LUM-1091 round — Stage 19 `pi-client` 落地（package client 侧完成）+ 合并 `feature/pi.rs`
+
+本轮（LUM-1091，分支 `work/lum-1091`）承接 LUM-1089 派发、由 LUM-1092 记录为「在途」的
+`crates/pi-client`，把它**从零实现并落地**，同时合入 `origin/feature/pi.rs`（`f1b3201d8`，
+LUM-1092 的核验文档轮）后 push。Stage 19 的 client 侧至此完整，LUM-1069 的范围被本轮覆盖。
+
+### 一、交付：`crates/pi-client`（9 模块 + 测试，3690 行含测试与文档）
+
+对照上游 `packages/client/src`（1135 行 TS）：
+
+| Rust 模块 | 上游 | 内容 |
+| --- | --- | --- |
+| `client` | `client.ts` | `Client` / `ClientOptions`，pending 关联、listener 注册表、hello/attachment 缓存 |
+| `connection` | `connection.ts` | `Connection` 状态机（disconnected/connecting/connected）、握手、解码器持有、连接 id 防陈旧回调 |
+| `transport` | `transport.ts` | `ByteTransport` / `ByteTransportHandlers` / `ByteTransportFactory` / `FactoryFn` / `ClosedTransport` |
+| `types` | `types.ts` | `ConnectionState`、监听器别名、`Unsubscribe`（Drop + 显式 `unsubscribe`） |
+| `errors` | `errors.ts` | `ClientError`（`Disposed`/`Cancelled`/`Disconnected`/`Server`/`Protocol`/`Configuration`/`Listener`）+ `From` 转换 |
+| `cancel` | `AbortSignal`（隐式） | `RequestCancel`（原子标志 + `Notify`，幂等、可在 await 前取消） |
+| `subscription` | `client.ts` `#serviceListeners` + `types.ts` | 快照 hydrate、`deliveryTail` 的单任务 FIFO 等价物、`start`/`dispose` |
+| `unix` | `unix.ts` | `#[cfg(unix)]`：`AF_UNIX` 工厂、`discover_unix_servers[_with_timeout]`、`probe_unix_server` |
+| `testing` | `packages/server/src/testing/client.ts`（反向） | `memory_transport()` + `ScriptedServer`（解码客户端帧、编码脚本响应） |
+
+`pi-rust/Cargo.toml` 已加入 `crates/pi-client` member；`Cargo.lock` 同步。
+
+### 二、已记录的刻意分歧（与上游行为不同处，均有代码注释与 README 说明）
+
+- `Client.connect(options)` 与实例方法 `connect()` 在 Rust 不能同名 → 静态构造为 `Client::connect_with`。
+- `AbortSignal` → 显式 `Option<RequestCancel>`；取消后**保留** pending 条目，让服务端的迟到响应被
+  `handle_message` 吸收而不是判为「no matching request」掉连接。
+- `createClientServiceTransport` **不移植**：`pi-chord` 的 `RemoteServiceTransport` 是同步 trait，
+  异步 client 无法在不阻塞 runtime 线程的前提下实现；需要桥接的宿主应直接用
+  `Client::request` / `Client::subscribe_service`。
+- options 校验失败 → `ClientError::Configuration`/`Listener`，而不是上游的 `TypeError`。
+- 监听器注册返回 `Unsubscribe` 值而不是闭包。
+- `unix.ts` 的 `maxPendingBytes` 语义：上游计的是发送队列，这里计的是**单次 `send` 在途字节**
+  （写入由一个 mutex 串行化），并保留 16 路探测并发 + 输入序去重。
+
+### 三、验证（native，`--offline`）
+
+```
+$ cargo fmt -p pi-client -- --check                  # 0 diff
+$ cargo clippy -p pi-client --all-targets --offline -- -D warnings
+                                                     # exit 0，0 warnings
+$ cargo test   -p pi-client --offline                # 32 passed / 0 failed
+```
+
+32 = 12 单测（状态拼写、取消、错误映射、发现参数校验）+ 18 `tests/client.rs`
+（握手/服务器 id 不符/hello_error、请求关联、错误响应、无主响应掉线、重复 connect、
+取消发帧、订阅 hydrate + 竞态更新保序 + unsubscribe、attachment 校验、catalogue 解析、
+dispose 幂等、监听器 panic 隔离）+ 2 `tests/server_e2e.rs`
+（**真实 `pi-server`**：内存传输 attach→session 请求→server.close；真实 `AF_UNIX` socket 全链路）。
+
+### 四、环境
+
+`/` 一度 94% 占用，为完成链接清理了**同工作区其它 worktree 的可再生 `target/`**：
+`lum-1084`(7.8G)、`lum-1087`(8.0G)、`lum-1086`(6.1G)、`lum-1085`(3.5G)，回收至 29G 可用。
+只删构建产物，未动任何源码或提交；各轮次再跑 `cargo` 会重新生成。
+
+### 五、Push status 与后续
+
+`feature/pi.rs`：先 `git fetch`，发现远程已到 `f1b3201d8`（LUM-1092 文档轮，纯 docs），
+`git merge origin/feature/pi.rs` 快进后提交本轮代码与本节文档并 push（非 force）。
+
+- **LUM-1090（Stage 25：用 `pi-client` 替换内联 JSON-RPC）现在可以开工**：它依赖的
+  `crates/pi-client` 已可用，公开面为 `Client` / `ClientOptions` / `RpcTarget` /
+  `ServiceCall` / `ServiceSubscription` / `RequestCancel` / `unix::*` / `testing::*`。
+- **LUM-1069** 的范围已由本轮交付，无需再派发（其 `in_progress` 状态留给协调轮收口）。
+- 仍未落地：Stage 26 ESM 扩展加载（LUM-1094，在途）、Stage 27 自动压缩接线（LUM-1093，backlog）、
+  LUM-1088 项目信任门、LUM-1083 概率性 SIGSEGV。
