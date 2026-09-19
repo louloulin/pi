@@ -1404,3 +1404,64 @@ side of the protocol disagreement as canonical, rebase the
 Stage 1 / Stage 2 branches onto it, and merge. Once that's done,
 adding the Anthropic / Google / Bedrock provider bodies on top of
 the unified event protocol is a clean second pass.
+
+## LUM-1040 round (follow-up) — clean completed `target/` dirs, re-run full verification
+
+Follow-up to the LUM-1040 doc-only round above. After the user pinged
+"执行cargo。clean清理磁盘空间", this round cleaned `target/` from
+eight completed worktrees (`lum-1037 / lum-1038 / lum-1039 /
+lum-1024 / lum-1028 / lum-1029 / lum-1023 / lum-1018 / lum-1016
+/ lum-1021 / lum-995 / lum-992 / lum-993`) — the leftover build
+artifacts from prior autopilot runs that were saturating the
+`/` overlay.
+
+### Disk recovery
+
+```
+$ df -h /                 # before clean
+Filesystem      Size  Used Avail Use% Mounted on
+overlay          50G   47G     0 100% /
+
+$ df -h /                 # after clean
+Filesystem      Size  Used Avail Use% Mounted on
+overlay          50G   24G    23G  51% /
+```
+
+Freed ~23 GB by removing the 13 stale `pi-rust/target/` directories
+(0.3–3.0 GB each). Cargo verification became possible again.
+
+### Re-verification results
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings   (55.25s cold)
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings    (5.38s incremental)
+$ cargo test     --workspace                                       # 126 / 126 pass
+$ cargo build    --workspace --all-targets                         # clean (cached)
+```
+
+The 126/126 test count matches LUM-1037 / LUM-1038 / LUM-1039
+verification. No regressions. No code changes since the LUM-1040
+doc-only commit (`2626424d4`).
+
+### Push status — UNCHANGED
+
+```
+$ git rev-parse HEAD origin/feature/pi.rs
+2626424d46cb116cac1c88f7f9d6eed9706a4f95        HEAD
+2626424d46cb116cac1c88f7f9d6eed9706a4f95        origin/feature/pi.rs
+```
+
+`HEAD` is still at the LUM-1040 doc-only commit; nothing in this
+follow-up round needs to be pushed.
+
+### Round shape (this follow-up)
+
+This was a one-shot operational cleanup at the user's request —
+no source code changes, no parallel dispatches, no new sub-issues.
+The LUM-1040 doc-only commit already captured the disk-full state
+before the clean; this follow-up records the post-clean verification.
+
+Future autopilot rounds can now run `cargo check / clippy / test`
+normally on `feature/pi.rs` until the next cohort of completed
+worktrees accumulates enough build artifacts to fill the overlay
+again (currently ~23 GB free, plenty for one more cold build).
