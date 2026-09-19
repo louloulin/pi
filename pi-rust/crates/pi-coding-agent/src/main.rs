@@ -21,6 +21,10 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_target(false)
+        // Logs must never land on stdout: print mode's `json-events`
+        // feed and RPC mode both promise that stdout carries nothing
+        // but their own payloads.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = match Cli::try_parse() {
@@ -147,11 +151,32 @@ fn main() -> ExitCode {
             }
         }
         ModeTarget::Rpc => {
-            eprintln!(
-                "pi (rust) {} — rpc mode is a Stage 5 deliverable",
-                env!("CARGO_PKG_VERSION")
+            // Headless JSON-RPC 2.0 over stdio. No TUI / crossterm here:
+            // stdin and stdout are the transport.
+            let stream_fn = SharedStreamFn::from(
+                Arc::new(FauxProvider::default()) as Arc<dyn pi_ai::stream::StreamFn>,
             );
-            ExitCode::FAILURE
+            let options = pi_coding_agent::rpc::RpcServerOptions {
+                model: resolved_model,
+                models,
+                stream_fn,
+                system_prompt,
+                session_id,
+            };
+            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(err) => {
+                    eprintln!("pi: failed to build tokio runtime: {err}");
+                    return ExitCode::from(70);
+                }
+            };
+            match runtime.block_on(pi_coding_agent::rpc::run_rpc_server(options)) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("pi: rpc error: {err}");
+                    ExitCode::from(70)
+                }
+            }
         }
         ModeTarget::Session => {
             let Some(Command::Session { action }) = cli.command else {
