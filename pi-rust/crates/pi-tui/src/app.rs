@@ -10,12 +10,13 @@
 //! [`ratatui::Terminal`] and feed it events from the terminal input.
 //! See `crates/pi-coding-agent/src/interactive.rs` for the wiring.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::Event as CtEvent;
 use parking_lot::Mutex;
 use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate};
-use pi_protocol::Content;
+use pi_protocol::{Content, Message, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::sync::Arc;
@@ -52,6 +53,23 @@ impl Default for AppConfig {
             event_poll_interval: Duration::from_millis(50),
         }
     }
+}
+
+/// Provider usage reported by the most recently finished agent turn.
+///
+/// Rust [`Message`] rows carry no provider usage, and `pi-tui` cannot
+/// depend on `pi-coding-agent` (the dependency runs the other way), so
+/// the driver cannot recover the last turn's usage from the agent's
+/// message log. [`App::drain_agent_events`] records it here instead and
+/// drivers consume it with [`App::take_turn_usage`] — `pi-coding-agent`
+/// uses it to decide whether automatic compaction should run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnUsage {
+    /// Usage reported by the turn's final assistant message.
+    pub usage: Usage,
+    /// Messages that followed that assistant message in the turn (the
+    /// tool results it produced), for `context_tokens_with_trailing`.
+    pub trailing: Vec<Message>,
 }
 
 /// Outcome returned by [`App::step`] after each key event.
@@ -134,6 +152,15 @@ pub struct App {
     /// Last user-facing error surfaced by the agent loop. Rendered
     /// into the message view on the next step.
     pending_error: Option<String>,
+    /// Usage of the most recently finished turn, recorded by
+    /// [`App::drain_agent_events`] and consumed by
+    /// [`App::take_turn_usage`].
+    last_turn_usage: Option<TurnUsage>,
+    /// Shared liveness flag for the in-flight `submit` task. The task
+    /// clears it when `Agent::prompt` returns, so [`App::is_busy`]
+    /// answers "a turn is running" instead of "a turn was ever
+    /// started".
+    turn_busy: Arc<AtomicBool>,
     /// Set when the App should exit at the next opportunity. The TUI
     /// exit path checks this between key events.
     exit_requested: bool,
@@ -169,6 +196,8 @@ impl App {
             event_rx: Some(event_rx),
             cancel_token: None,
             pending_error: None,
+            last_turn_usage: None,
+            turn_busy: Arc::new(AtomicBool::new(false)),
             exit_requested: false,
         }
     }
@@ -210,7 +239,26 @@ impl App {
 
     /// Whether a background agent turn is currently in flight.
     pub fn is_busy(&self) -> bool {
-        self.cancel_token.is_some()
+        self.turn_busy.load(Ordering::SeqCst)
+    }
+
+    /// Usage of the most recently finished turn.
+    ///
+    /// Read-only peek at what [`App::take_turn_usage`] would return;
+    /// it does not consume the value, so a driver that peeks during a
+    /// render pass can still take it later.
+    pub fn last_turn_usage(&self) -> Option<&TurnUsage> {
+        self.last_turn_usage.as_ref()
+    }
+
+    /// Take the usage of the most recently finished turn.
+    ///
+    /// Returns `None` when no turn has finished since the last call.
+    /// The value is cleared so a driver reacts once per turn; a later
+    /// `TurnEnd` replaces it, so an intermediate turn is never acted on
+    /// while the prompt that produced it is still running.
+    pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
+        self.last_turn_usage.take()
     }
 
     /// Set a model override that takes effect on the next
@@ -301,10 +349,13 @@ impl App {
                 message,
                 tool_results,
             } => {
-                let _ = tool_results; // tool results already pushed by the per-tool events
                 if message.stop_reason == pi_protocol::StopReason::Error {
                     self.pending_error = Some("provider returned an error".into());
                 }
+                self.last_turn_usage = Some(TurnUsage {
+                    usage: message.usage,
+                    trailing: tool_results,
+                });
             }
             AgentEvent::UserMessage(_) => {}
             AgentEvent::Error(message) => {
@@ -324,7 +375,7 @@ impl App {
     /// subscriber channel established in [`App::new`] and are drained
     /// by [`App::drain_agent_events`].
     pub fn submit(&mut self, agent: Arc<AsyncMutex<Agent>>, text: String) {
-        if self.cancel_token.is_some() {
+        if self.turn_busy.load(Ordering::SeqCst) {
             return; // already busy
         }
         if self.event_rx.is_none() {
@@ -337,7 +388,9 @@ impl App {
         self.prompt.push_history(&text);
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
+        self.turn_busy.store(true, Ordering::SeqCst);
 
+        let busy = self.turn_busy.clone();
         let cancel_for_task = cancel.clone();
         let agent_clone = agent.clone();
         let text_clone = text.clone();
@@ -350,6 +403,7 @@ impl App {
                 let guard = agent_clone.lock().await;
                 guard.emit(AgentEvent::Error(err.to_string()));
             }
+            busy.store(false, Ordering::SeqCst);
         });
     }
 
