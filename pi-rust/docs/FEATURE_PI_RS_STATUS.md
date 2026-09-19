@@ -2518,3 +2518,130 @@ telemetry wired into the agent loop") landed first and therefore keeps the
 plain "Stage 16" label; this round is the *tool-wiring* half of the same
 frontier and is labelled accordingly. The two touch disjoint crates
 (`pi-agent-core` vs `pi-coding-agent` + the `pi-ai` OpenAI adapter).
+
+## LUM-1065 round — Stage 17: `pi-chord` core (delta + facets + context + json + types + api)
+
+Aligns the **core layer** of `packages/chord/src` so Stage 18
+(`pi-chord services`) and Stage 19 (`pi-server` / `pi-client`) have a
+port to build on. `chord` is the shared dependency of upstream
+`client` and `server`, so it lands first.
+
+### What landed
+
+New crate `crates/pi-chord` (~5.5k lines of `src/` + 1.2k of
+integration tests), added to the workspace `members` and re-exported as
+`pi_mono::chord`.
+
+| Rust module | Upstream | Lines |
+|-------------|----------|-------|
+| `src/json.rs` | `json.ts` | 183 |
+| `src/types.rs` | `types.ts` | 496 |
+| `src/api.rs` | `api.ts` | 26 |
+| `src/context/mod.rs` | `context/index.ts` | 676 |
+| `src/delta/{mod,path,op,apply,diff,codec,tracker}.rs` | `delta/index.ts` | 2305 |
+| `src/state.rs` | `services/state.ts` | 495 |
+| `src/facets/{mod,lifecycle,registry,host,loader}.rs` | `facets/{host,loader}.ts` | 1871 |
+
+`README.md` carries the per-module mapping table, the delta grammar
+table, the semantics kept exactly, and the documented deviations.
+
+Delta: paths (`Seg`/`Path`/`NonEmptyPath`, reserved-segment guard), the
+typed `Op` grammar and the interned `WireOp` grammar with separate
+validators, `apply`/`apply_immutable`, value+string `diff` with the
+overlap scan, `Encoder`/`Decoder` with `#` interning and per-batch short
+forms, and `Tracker` (`flush`/`rebase`/`discard`/`sync`,
+`replace_root`).
+
+Context: `ContextKey`, `Context` value chain, `AbortSignal` /
+`AbortController` / `AbortWait`, `with_context_value`,
+`with_abort_signal`, `without_abort_signal`, `with_cancel`, and
+`await_with_context` (manual `poll_fn` select — no `futures`/`tokio`
+dependency).
+
+Facets: `FacetLifecycle` (phases, owned effects, observations,
+activation callbacks), the local service directory (singleton slots,
+keyed instances with observers), `FacetHost` (`create_facet_host`,
+`start`, `reload`, `dispose`), `FacetEnvironment`
+(`use_service`/`provide`/`provide_many`/`observe`/`own`/`on_activate`),
+and the loaders (`create_static_facet_loader`, `combine_facet_loaders`,
+`LoadedFacetsImpl`).
+
+### Semantics kept exactly
+
+- Error wording and error classes: `unresolvable path: …`, `unsafe
+  path segment: …`, `op is not a tuple`, `unknown op verb: …`,
+  `r arity` / `p arity` / `a shape` / `t shape` / `# shape`, the
+  `Facet …` lifecycle messages, and the aggregate messages
+  (`Facet loading and cleanup failed`, `Failed to dispose loaded
+  facets`, `Failed to dispose facet generation`, `Facet generation
+  startup and cleanup failed`, `Facet reload … failed`).
+- Apply: arrays reject non-numeric segments / out-of-range indices
+  (`index > len` unsafe, `== len` appends); `a`/`t` require a string
+  leaf and count UTF-16 units; `t` clamps like `String.prototype.slice`;
+  `p` splices like `Array.prototype.splice`.
+- Wire: `previous` is per batch, ids survive across batches and `r`
+  clears them, short forms are detected by arity, an unresolved id or a
+  short form without `previous` is a path error.
+- Replicated state: published value == construction value at sequence
+  `0`; a no-op publish does not bump the sequence; `subscribe` publishes
+  first and then hydrates; a cold replica refuses a non-base snapshot,
+  an update before hydration, and any sequence gap (it clears itself).
+
+### Verification (native, on `feature/pi.rs` + this round)
+
+```
+$ cargo test     -p pi-chord                                      # 91 / 91 pass
+$ cargo clippy   -p pi-chord --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo check    --workspace --all-targets                         # 0 errors, 0 warnings
+```
+
+91 tests = 57 unit (`src/`, incl. 57 across json/delta/context) +
+34 integration (10 `delta_contract`, 8 `replicated_state`,
+11 `facets`, 5 `facet_loader`). The integration suites drive the public
+API only; async tests use `context::block_on`, the crate's park/unpark
+executor, so the crate keeps zero async-runtime dependencies.
+
+### Known limitations / documented deviations
+
+1. **`services/` is not ported** (Stage 18): no remote provider,
+   consumer, `service-wire`, loopback or generation addressing. The
+   facets kernel therefore runs against a *local* in-process service
+   directory; `FacetOptions` has no `serviceSources` and
+   `createRemoteServiceBinding` is absent.
+2. **`track` has no `Proxy`**: `Tracker::target_mut()` + a diffing
+   `flush()` replaces the JS mutation recorder. Same operations,
+   different cost (a flush walks the changed value).
+3. **`r` clones** the payload rather than adopting it (no aliasing in
+   Rust), and a batch that leaves the root unset is
+   `Err(DeltaError::Path("[]"))` instead of `undefined`.
+4. **Handles**: `ServiceHandle::get()` returns
+   `Result<Arc<T>, FacetError>` instead of a deref-gated proxy, because
+   `Deref` cannot fail. Upstream's "implementation must be an object"
+   check is dropped (the typed `provide` bound covers it) and "setup
+   must be synchronous" is structural (`Facet::setup` is not `async`).
+5. **String ops are UTF-16-corrected**: a `t` count that splits a
+   surrogate pair returns `DeltaError::NotCharAligned` rather than
+   producing a lone surrogate Rust cannot represent.
+6. **Reload after a post-cutover failure**: a reload requires an
+   identical facet shape, so a failure after the singleton rebind is
+   torn down (`abort`) rather than rolled back to the previous
+   generation; the rebind itself is not reverted.
+7. **Object key order** follows `serde_json` rather than JS insertion
+   order (the `preserve_order` feature is off, matching the rest of the
+   workspace), and `assert_json_value` additionally enforces the 512
+   depth bound.
+
+### Dependencies
+
+No new third-party dependencies: only `serde`, `serde_json`,
+`thiserror` and `parking_lot` (`=0.12`), all already used elsewhere in
+`pi-rust`. `parking_lot` is used for the mutable replicated state and
+the facet registries to match the workspace lock choice.
+
+### Push status
+
+This round is committed on `agent/devbox1/ddf6de23c30b`, cut from
+`origin/feature/pi.rs` at `751bbd6e4` (Stage 15) and rebased onto the
+branch tip as of this round (`9ff5851a4`, after the Stage 16 telemetry and
+tool-wiring commits), then fast-forwarded into `feature/pi.rs`.
+

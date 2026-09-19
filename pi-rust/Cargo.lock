@@ -1048,6 +1048,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-chord"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "pi-coding-agent"
 version = "0.1.0"
 dependencies = [
@@ -1104,6 +1114,7 @@ dependencies = [
  "anyhow",
  "pi-agent-core",
  "pi-ai",
+ "pi-chord",
  "pi-extensions",
  "pi-protocol",
  "pi-telemetry",

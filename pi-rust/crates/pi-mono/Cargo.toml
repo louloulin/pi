@@ -15,6 +15,7 @@ pi-ai = { path = "../pi-ai" }
 pi-agent-core = { path = "../pi-agent-core" }
 pi-extensions = { path = "../pi-extensions" }
 pi-telemetry = { path = "../pi-telemetry" }
+pi-chord = { path = "../pi-chord" }
 
 serde.workspace = true
 serde_json.workspace = true
