@@ -1105,6 +1105,7 @@ dependencies = [
  "pi-ai",
  "pi-extensions",
  "pi-protocol",
+ "pi-telemetry",
  "serde",
  "serde_json",
 ]
@@ -1135,6 +1136,17 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "zstd",
+]
+
+[[package]]
+name = "pi-telemetry"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

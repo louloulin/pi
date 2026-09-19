@@ -2055,3 +2055,85 @@ This branch (`agent/devbox1/lum-1060`) is cut from
 `origin/feature/pi.rs` at `bf25d926d` and merged back into
 `feature/pi.rs` before pushing, so the integration branch and GitHub
 carry the Stage 14 commit.
+
+## LUM-1058 round — Stage 13: `pi-telemetry` lands on `feature/pi.rs`
+
+LUM-1058 (2026-09-19, autopilot re-run) implemented the last unclaimed Stage 13
+item. The concurrent rounds had already landed most of the frontier by then:
+LUM-1059 merged Stage 12 (RPC) plus a clippy 1.98 cleanup, LUM-1054 delivered
+the Gemini provider (LUM-1055), LUM-1060 wired the real providers into the CLI
+(Stage 14), and LUM-1056 moved print mode onto the `pi-session` SQLite store.
+`pi-telemetry` was the only additive, disjoint piece left inside the
+3-concurrent cap, so this round opened no new task.
+
+The branch is cut from `origin/feature/pi.rs` at `a4198febe` (the LUM-1056
+merge) and pushed straight back, so this round's only delta is the crate
+itself. It carries no lint or formatting fixup: the `google.rs`
+`while_let_loop` error that the Gemini provider had reintroduced was already
+fixed by LUM-1060 (`303e25826`), and the earlier `pi-ai` / `pi-session` /
+`pi-coding-agent` lints by LUM-1059 (`f693264d4`).
+
+### What landed
+
+New crate `crates/pi-telemetry` — the Rust port of `packages/telemetry`, the
+last `packages/*` entry with no Rust counterpart:
+
+| Rust | Upstream | Contents |
+|------|----------|----------|
+| `src/context.rs`, `src/types.rs` | `index.ts` | `TelemetryContext` / `TelemetrySpan` / `SpanRef` / `SpanCallback`, `SpanOptions`, `AttributeValue`, `SpanAttributes`, `SpanStatus`, `SpanError`, `IntoTelemetryError`, plus `TelemetryContextExt::start_span_with` |
+| `src/noop.rs` | `noop.ts` | `NoopTelemetry` / `NOOP_TELEMETRY_CONTEXT` — zero-sized, reuses one inert span, retains nothing |
+| `src/memory.rs` | `memory.ts` | `MemoryTelemetry` — id / parent / `end_sequence` / attributes / events / status, detached `spans()` snapshots, automatic error status, settled-parent delegation to noop |
+| `src/testing.rs` | `testing/` | runner-independent conformance suite (6 cases in the `callback lifecycle`, `status`, `recording`, `parentage` groups) |
+| `src/schema.rs` | `index.ts` schema types | serializable `TelemetrySchemaDefinition` data + `define_telemetry_schema` identity helper |
+| `README.md` | `README.md` | contract, adapters, conformance, wasm and upstream-mapping notes |
+
+Contract notes: a span is opened around a callback and settles when the
+callback's future settles (there is no public `end()`); recording is passive
+(`add_event` / `set_attributes` / `set_status` cannot fail, and post-settlement
+calls are ignored); a failed callback records the automatic error status unless
+the callback set an explicit one, which always wins. Attributes are
+scalars/flat arrays only, in insertion order.
+
+Registration: added to the workspace `members` list and re-exported as
+`pi_mono::telemetry`. No new third-party dependency and no vendor SDK —
+`futures` / `serde` / `thiserror` / `indexmap` are already workspace
+dependencies.
+
+### Verification (native, on `feature/pi.rs` + this round)
+
+```
+$ cargo clippy --workspace --all-targets -- -D warnings          # clean
+$ cargo test   --workspace                                        # 347 / 347 pass
+$ cargo test   -p pi-telemetry                                    # 18 integration + 1 doc test
+$ cargo check  -p pi-telemetry --target wasm32-unknown-unknown    # clean
+$ cargo check  -p pi-ai -p pi-agent-core -p pi-protocol \
+      --target wasm32-unknown-unknown --features pi-agent-core/wasm   # clean (same command as rust-wasm.yml)
+$ cargo fmt    -p pi-telemetry -- --check                         # clean
+```
+
+347 tests vs 328 at the LUM-1056 tip — the delta is exactly this crate's 19
+tests.
+
+### Known gaps
+
+1. **Telemetry is not wired into pi core yet.** No crate emits spans.
+   LUM-1057's scope was the contract plus adapters plus the conformance suite;
+   installing a host adapter and instrumenting the agent turn / provider
+   request / tool call is the natural next stage.
+2. **`cargo fmt --all -- --check` still reports drift** in files that the
+   Stage 10-12 merges landed unformatted. `rust-ci.yml` does not run `fmt`, so
+   it is not a CI gate there; `scripts/ci.sh` does run it. Left alone to keep
+   this round's diff reviewable and avoid colliding with the other rounds
+   integrating into `feature/pi.rs`.
+3. **Three upstream conformance cases are not ported** — they exercise
+   JavaScript-only throw / `Proxy` semantics (`ignores failed attribute calls
+   atomically`, `ignores failed status calls atomically`, `suppresses unreadable
+   telemetry payload failures`). Rust recording methods cannot throw and
+   attribute payloads cannot be unreadable, so there is no analogue; the
+   omission is documented in `src/testing.rs`.
+4. **`futures` and `indexmap` are workspace-wide deps**, so the crate adds no
+   new third-party code to the tree — but a consumer outside this workspace
+   would need both as well.
+
+**Stage 13 status after this round:** LUM-1055 (Gemini), LUM-1056 (print mode
+on the SQLite store) and LUM-1057 (this crate) are all delivered.
