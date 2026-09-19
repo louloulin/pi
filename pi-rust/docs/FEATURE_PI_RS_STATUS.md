@@ -5026,3 +5026,90 @@ $ cargo test   -p pi-extensions --offline                           # 10 + 29 + 
 `feature/pi.rs`：先 `git fetch origin feature/pi.rs` 并 `--ff-only` 从 `0efa406b6` 前进到
 `3103c84fa`（LUM-1094 的 Stage 26），再落本轮文档提交并 push（非 force）。本轮无源码改动，
 回滚面仅本节文档。
+
+## LUM-1096 round — 核验 `feature/pi.rs` + 补全 `typebox` 虚拟模块（Stage 26 后续）+ frontier 重估
+
+本轮（autopilot，2026-09-19 18:40 CST 触发）先把 `feature/pi.rs` 核到 `2830b8682`（LUM-1095
+协调轮），在 3 槽占满、无法派发新任务的前提下，自己落地一个与在途任务零文件重叠、高价值的
+插件生态缺口：`pi-extensions` shim 的 `typebox` 虚拟模块；并把 frontier 里 LUM-1090 的
+「前提不成立」记录清楚。
+
+### 一、远程核验与槽位
+
+- 开工 `origin/feature/pi.rs = 2830b8682`（LUM-1095），本分支 `work/lum-1096` 基于它。
+- `multica daemon status`：`active_task_count = 3` / `running_task_count = 3`（本协调 run +
+  LUM-1093 Stage 27 自动压缩接线 + LUM-1088 项目信任门接扩展加载），**3 槽占满，本轮不派发
+  新任务**（沿用 3 并发上限）。
+- 再遍历 remote 分支求差集：仍只有那 5 条已判定「重复落地 / 刻意跳过」的分支，无新代码可合。
+
+### 二、frontier 重估：LUM-1090 的前提不成立
+
+LUM-1090（`[Stage 25] 用 pi-client 替换内联 JSON-RPC`）长期停在 backlog。本轮读透后判定
+**前提错误，建议重新定界**：
+
+- Rust `pi-coding-agent --rpc` 是严格的 **JSON-RPC 2.0 NDJSON stdio 服务端**
+  （`crates/pi-coding-agent/src/rpc/`，1559 行；`server.rs` 逐行读 stdin、逐行写 stdout）。
+- 而 `crates/pi-client`（LUM-1091 交付）是 `pi-protocol::rpc` 的**带帧 socket 客户端**
+  （长度前缀帧 + 连接生命周期，`client.rs` 的 `max_frame_length`）。
+- 两者**传输层不同**（NDJSON/stdio ↔ framed socket），字面目标「用 pi-client 替换内联
+  JSON-RPC」无法直接实现。真正对齐上游 `rpc-client.ts` 要的是**把 NDJSON 服务端逻辑抽出
+  一层可复用 client**，而非接入 socket 客户端。建议把 LUM-1090 重写为「抽取 NDJSON RPC client
+  并让 `--rpc` 与内联实现共用」，或标记 `wontfix / 已满足`。（本轮只在文档记录，未改 issue 状态。）
+
+其余 frontier：LUM-1083（扩展宿主 double free）仍建议走 `rquickjs-core 0.9 → 0.14` 迁移的
+独立 run；`.wasm` 宿主受环境阻塞；主题系统 / provider 家族体量大，本轮不动。
+
+### 三、本轮实现：`typebox` 虚拟模块
+
+上游 `packages/coding-agent/src/core/extensions/loader.ts` 的 `VIRTUAL_MODULES` 提供
+`typebox` / `typebox/compile` / `typebox/value` / `@sinclair/typebox*`。扩展用
+`import { Type } from "typebox"` 声明工具参数（`registerTool({ parameters })`），而 Rust 宿主
+此前只映射了 `node:path` / `node:url`，`typebox` 会以 “unsupported import” 报错 —— 插件生态
+最常用的一环缺失。
+
+本轮在 `pi-ext-shim.mjs` 内**手写 TypeBox v1 的 `Type` 子集**（不引入任何 npm / Cargo 依赖），
+产出与真 `typebox@1.3.7` **逐字节一致**的 JSON Schema：
+
+- `Object`（按 `Optional` 标记计算 `required`）、`String` / `Number` / `Integer` / `Boolean` /
+  `Null`、`Literal`、`Enum`（含 TS 数字枚举反向映射过滤）、`Array` / `Tuple`、`Union`
+  (`anyOf`) / `Intersect` (`allOf`)、`Record`（字面量键 → `properties`，模式键 →
+  `patternProperties`）、`Optional` / `Readonly` / `Partial` / `Unsafe` / `Any` / `Unknown`。
+- `Optional` / `Readonly` 用**不可枚举 Symbol** 承载，`JSON.stringify`（宿主 `registerTool`
+  路径）只看到纯 JSON Schema。
+- `Type.Literal(null)` 等无法表达的值按上游语义**在加载期抛错**，而不是产出模型无法满足的 schema。
+- 同时注册 `typebox` 与历史包名 `@sinclair/typebox` 两个 specifier。
+
+改动文件：
+
+- `pi-rust/crates/pi-extensions/runtime/pi-ext-shim.mjs`（新增 `__pi_typebox_module` +
+  注册两个 specifier + 文档注释）
+- `pi-rust/crates/pi-extensions/tests/host.rs`（3 个新用例 + 更新 unsupported-import 用例）
+
+新增测试：
+
+1. `esm_typebox_tool_parameters_reach_the_host` — `Type.Object` → 宿主 `ToolDefinition.parameters`
+   的完整 JSON Schema（`Optional` 不入 `required`）。
+2. `esm_typebox_sinclair_alias_and_enum` — `@sinclair/typebox` 别名 + `Type.Enum` / `Record`。
+3. `esm_typebox_rejects_invalid_literal` — `Type.Literal(null)` 加载期报错。
+4. `esm_unsupported_imports_are_reported` 改用仍不支持的 `@earendil-works/pi-coding-agent`
+   验证错误信息（并断言错误里列出了 `typebox`）。
+
+### 四、验证（`work/lum-1096`，native，`--offline`）
+
+```
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo test   --workspace --no-fail-fast --offline                 # 820 passed / 0 failed / 2 ignored
+$ cargo test   -p pi-extensions --test host --offline               # 32 passed（含 3 个新用例）
+```
+
+- 与真 `typebox@1.3.7` 的对照：用 Node 对同一个 schema 表达式分别跑真 TypeBox 与本 shim，
+  `JSON.stringify` 结果 `MATCH`（逐字节相等）。
+- 首次 `cargo test --workspace` 因共享盘写满（100%）触发 `ld ... Bus error`，**与本轮代码无关**；
+  清理三个已完结轮次（LUM-1092 / 1094 / 1095）的 `target/debug/incremental` 缓存后重跑通过。
+  提醒后续轮次：共享盘上先看 `df -h`。
+- 上轮记录的 `cli_provider` double free（LUM-1083）本轮未复现（概率性）。
+
+### 五、推送
+
+`work/lum-1096` → `origin/feature/pi.rs`（非 force）。回滚面：只碰 `pi-extensions` 的 shim /
+测试与本节文档，CJS 路径与既有 `node:path` / `node:url` 行为不变，可整轮 revert。
