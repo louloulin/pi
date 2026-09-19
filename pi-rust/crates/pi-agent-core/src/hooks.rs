@@ -212,6 +212,12 @@ pub struct AgentHookAdapter {
     pub should_stop_after_turn: Option<ShouldStopHookFn>,
     /// Optional `prepare_next_turn` callback.
     pub prepare_next_turn: Option<PrepareHookFn>,
+    /// Optional `before_tool_call` hook. When unset the loop allows every
+    /// tool call.
+    pub before_tool_call: Option<Arc<dyn BeforeToolCall>>,
+    /// Optional `after_tool_call` hook. When unset the loop emits the
+    /// executor's result unchanged.
+    pub after_tool_call: Option<Arc<dyn AfterToolCall>>,
 }
 
 impl std::fmt::Debug for AgentHookAdapter {
@@ -224,6 +230,14 @@ impl std::fmt::Debug for AgentHookAdapter {
             .field(
                 "prepare_next_turn",
                 &self.prepare_next_turn.as_ref().map(|_| "…"),
+            )
+            .field(
+                "before_tool_call",
+                &self.before_tool_call.as_ref().map(|_| "…"),
+            )
+            .field(
+                "after_tool_call",
+                &self.after_tool_call.as_ref().map(|_| "…"),
             )
             .finish()
     }
@@ -247,6 +261,18 @@ impl AgentHookAdapter {
         self
     }
 
+    /// Register a `before_tool_call` hook.
+    pub fn with_before_tool_call(mut self, hook: Arc<dyn BeforeToolCall>) -> Self {
+        self.before_tool_call = Some(hook);
+        self
+    }
+
+    /// Register an `after_tool_call` hook.
+    pub fn with_after_tool_call(mut self, hook: Arc<dyn AfterToolCall>) -> Self {
+        self.after_tool_call = Some(hook);
+        self
+    }
+
     /// Invoke the registered `should_stop_after_turn` hook, or return
     /// `false` when no hook is registered.
     pub async fn invoke_should_stop(&self, ctx: ShouldStopAfterTurnContext) -> bool {
@@ -265,6 +291,23 @@ impl AgentHookAdapter {
         match &self.prepare_next_turn {
             Some(hook) => hook(ctx).await,
             None => None,
+        }
+    }
+
+    /// Invoke the registered `before_tool_call` hook, or allow the call
+    /// when no hook is registered.
+    pub async fn invoke_before_tool_call(&self, call: &ToolCall) -> BeforeToolCallDecision {
+        match &self.before_tool_call {
+            Some(hook) => hook.before_tool_call(call).await,
+            None => BeforeToolCallDecision::allow(),
+        }
+    }
+
+    /// Invoke the registered `after_tool_call` hook. When no hook is
+    /// registered the result is left untouched.
+    pub async fn invoke_after_tool_call(&self, result: &mut ToolResult) {
+        if let Some(hook) = &self.after_tool_call {
+            hook.after_tool_call(result).await;
         }
     }
 }
