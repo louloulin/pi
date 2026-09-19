@@ -10729,6 +10729,7 @@ frontier 上一项：
 环境记录：本轮复用 LUM-1144 遗留的 `.../lum-1144-741c6f9bb983/.../pi-rust/target`（无独立
 `/tmp/pi-rust-target-lum1149`），删除的是**已结束**的 LUM-1148 的 `/tmp/pi-rust-target-lum1148`。
 
-补记（推送哈希）：本轮代码提交 `dc553ff79` + 合并提交 `e779c07c1` + 文档提交，
-`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `127d07439` **快进至本轮文档提交**
-（`git ls-remote` 复查一致），留档分支 `work/lum-1149` 一并推送（同哈希）。
+补记（推送哈希）：本轮代码提交 `dc553ff79` + 两次合并提交 `e779c07c1` / `4ba2f2ea6` + 文档提交
+`cb5696061`，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `1b1a6c342`
+**快进至 `cb5696061`**（`git ls-remote` 复查一致：`cb5696061f5761c866861543bbf92242d3a62449`），
+本补记提交再追加一次推送，留档分支 `work/lum-1149` 一并推送（同哈希）。
