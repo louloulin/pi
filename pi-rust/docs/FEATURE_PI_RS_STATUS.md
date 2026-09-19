@@ -10470,4 +10470,8 @@ LUM-1146 明确没碰的那块：**压缩摘要路径**（LUM-1146 的 numstat �
 环境记录：本轮使用独立 target `/tmp/pi-rust-target-lum1147`（clippy 另用
 `-clippy` 目录），`CARGO_HOME=/tmp/cargo-home`，全程未触碰他路 target 目录。
 
-补记（推送哈希）：本轮代码提交 `5be44d45a` + 合并提交 + 文档提交见下方补记。
+补记（推送哈希）：`origin/feature/pi.rs` 本轮未前进（仍 `6e420761e`，即本轮起点），
+因此**无需合并提交**（本轮提交直接快进）。本轮代码提交 `5be44d45a` + 文档提交
+`f3ca7df3c` + 本补记提交，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从
+`6e420761e` **快进至本补记提交**（`git ls-remote` 复查一致，哈希见本节末提交链），
+留档分支 `work/lum-1147` 一并推送（同哈希）。
