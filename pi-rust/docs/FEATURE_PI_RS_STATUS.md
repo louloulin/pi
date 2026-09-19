@@ -7936,3 +7936,178 @@ setPrompt, getPrompt, prompt, close, on/once/off, Symbol.asyncIterator}`。
   `docs/NODE_BUILTINS.md` +75 / −6、`tests/node_builtins.rs` +32 / −6、本节文档 +161。
 - 推送前复查 `origin/feature/pi.rs` 仍为 `ffe2a68cf`（LUM-1127 已合入、LUM-1128 的鼠标区域派发尚未推送），
   因此这次推送**没有覆盖任何在途工作**；Stage 35 只写 `pi-tui`，与本轮文件零重叠。
+
+## LUM-1128 round — Stage 35：鼠标区域派发 / 点击命中（`mouse-region.ts` + `dispatchMouseToOverlay` → 点击清选区）
+
+（Stage 35 实施轮，由 LUM-1126 协调轮派发。工作分支 `work/lum-1128`，起点 `origin/feature/pi.rs` @
+`c7dec41bc`。只做 frontier 第 1 项：把 `App` 的鼠标手势从「全局」升级成「按矩形派发给命中的模态」，
+并在点击命中时清掉文本选区。）
+
+合并时的并发情况（本轮与两路在途任务都零代码重叠，只有文档尾部同时追加）：
+
+- `origin/feature/pi.rs` 在本轮实施期间前进两次：`ffe2a68cf`（LUM-1127 的 GFM 表格）与 `fdbd14cac`
+  （LUM-1129 的 `node:module` / `node:readline`）。第一次 `git push origin <合并提交>:refs/heads/feature/pi.rs`
+  被 GitHub 拒绝（`tip is behind its remote counterpart`，非 force——没有被覆盖的提交）；随后**基于新 tip
+  `fdbd14cac` 重做合并**，最后以「工作分支快进推入 `feature/pi.rs`」的方式推送（同 LUM-1129）。
+- 代码零冲突：LUM-1127 写 `pi-tui/src/markdown.rs` + 其测试，LUM-1129 写 `pi-extensions/{runtime,tests,docs}`，
+  本轮写 `pi-tui/{app.rs,lib.rs,mouse_region.rs}` + `pi-tui/tests/mouse_region.rs`，三方面零交集。
+- 唯一冲突是本文档：两边都在文件末尾追加小节。按时间顺序把本节放在 `## LUM-1129 round` 之后。
+
+### 一、上游事实（本任务的事实源是 TS，不是 issue 描述）
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| 叠加层矩形在渲染时被记下 | `packages/tui/src/tui.ts:492`（`renderedOverlayLayouts` 声明）、`:1281`（`setOverlayLayouts`）、`:1316` | `App::mouse_regions()`：用**上一次渲染**的 `viewport` / `viewport_origin` 加各自 `render_lines(width)` 现场算，不新增缓存字段 |
+| 命中判定：屏幕格落在 `col..col+width` / `row..row+height`，**右/下边界开区间** | `tui.ts:828-834`（`screenX >= col + width` / `screenY >= row + height` → `continue`） | `MouseRegion::contains`（`x - rect.x < width`）：`rect.x + width` / `rect.y + height` 那一格不命中 |
+| 命中后把**屏幕坐标换算成层内坐标**再派发 | `tui.ts:835-836`（`x: screenX - layout.col`、`y: screenY - layout.row`） | `MouseRegion::hit` → `MouseRegionPoint { x, y }`（层内 0 基）；`capture(gesture)` 把「手势 + 局部格」绑在一起 |
+| **topmost-first**：从 `renderedOverlayLayouts` 末尾往前找第一个命中 | `tui.ts:825`（`for (let index = length - 1; index >= 0; index--)`） | `step_modal_mouse_gesture` 里的 `find_map`；矩形数组顺序 = 键盘层序（dialog → settings → selector） |
+| **命中即消费**：组件没处理也返回 `{ hit: true }` | `tui.ts:838-846` | 命中就吞掉手势，不再进聊天日志路径 |
+| `handleMouseEvent` 里 overlay 优先，只有 `!overlay.hit` 才落到 layout | `packages/tui/src/tui-alt-screen.ts:912-922`（回落判定在 `:922`） | `App::step` 把 `MouseGesture` 分流到模态键盘守卫**之前**（`app.rs:807`），因为「按矩形派发」本身就是模态优先 |
+| 按压被某个目标接住 → `clearTextSelection()`，并记下 `mousePressTarget` / `mousePressPoint` | `tui-alt-screen.ts:925-930`（清除在 `:926`） | 同格左键 release 时 `clear_selection()`（**时机不同**，见偏离第 2 条） |
+| `isClick`：按下与抬起在**同一格**才算点击 | `tui-alt-screen.ts:1312-1315` | `modal_mouse_press` 记区域局部格，release 必须与它相等（`app.rs:1181`） |
+| 点击路径同样 `clearTextSelection()` | `tui-alt-screen.ts:1330-1339`（清除在 `:1338`） | `a_click_inside_a_modal_clears_the_chat_log_selection` 钉住 |
+| 真正实现 `handleMouse` 的组件 | `components/box.ts:75`、`input.ts:229`、`select-list.ts:109`、`settings-list.ts:179`、`editor.ts:620`、`tool-execution.ts:287` | 本轮**没有**给这些组件做点击行为（见偏离第 1 条） |
+
+`components/mouse-region.ts`（整文件 33 行）本身只管回调、不改渲染：`handleMouse` 先把事件交给子组件
+（`:24` 的 `dispatchMouseEvent(this.child, event)`），没被消费才调自己的 `onMouse`（`:25-27`）；矩形与
+坐标换算都不在这个文件里，而在上面两条 `tui*.ts` 路径上。**这正是本 port 只落「矩形 + 命中换算」的
+原因**：`pi-tui` 没有组件树、没有 `handleMouse` trait（组件是 `App` 持有的普通 struct），回调那一层
+没有落点——`App` 自己就是区域持有者。
+
+### 二、切片
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-tui/src/mouse_region.rs`（新） | `MouseRegionPoint { x, y }`（层内 0 基格）与 `MouseRegion { rect }`；`new` / `rect` / `is_empty` / `contains` / `hit` / `capture` 全部 `const fn`。**没有**注册表、没有回调 trait、没有 hover 态 |
+| `crates/pi-tui/src/app.rs` | `App::mouse_regions()`（`:1106`：topmost-first 的 dialog / settings / selector 矩形，行数取各自 `render_lines(width)` 并裁到消息视口，首次渲染前为空）；`step()` 在模态守卫之前分流 `MouseGesture`（`:807`），并删掉 LUM-1124 留在非 Key 分支里的那句兜底（分流前移后它已不可达）；`step_mouse_gesture` 有模态时转 `step_modal_mouse_gesture`（`:1052`）；新增 `step_modal_mouse_gesture`（`:1162`）与 `modal_mouse_press: Option<MouseRegionPoint>`（`:282`） |
+| `crates/pi-tui/src/lib.rs` | `pub mod mouse_region;` + 重导出 `MouseRegion` / `MouseRegionPoint` |
+| `crates/pi-tui/tests/mouse_region.rs`（新） | 13 条端到端用例（见第四节） |
+
+`step_modal_mouse_gesture` 的语义按手势逐条列清：
+
+- **命中 + 左键 press**：记下区域局部格（`modal_mouse_press`），`Idle`——**不动选区**。
+- **命中 + 左键 release 且与 press 同格**：`clear_selection()` → `Redraw`；本来就没有选区时 `Idle`
+  （不无谓重绘）。**不排剪贴板请求**。
+- **命中 + 其它手势**（drag / move / 右中键）：吞掉，`Idle`。
+- **未命中任何矩形**：同样吞掉；只有左键 release 会顺手清掉 `modal_mouse_press`（按在模态上、拖出去
+  松开 → 不是 click，也不清选区）。
+- **没有模态**：`step_mouse_gesture` 原样走 LUM-1124 的聊天日志路径，并清掉可能残留的
+  `modal_mouse_press`（不变量：它只在模态打开时有值）。
+
+### 三、刻意偏离（逐条，不留空）
+
+1. **没有 `onMouse` 回调层，没有注册表，没有悬停。** 上游 `mouse-region.ts` 是「子组件优先、回调
+   兜底」的两层；这里只有一层，因为没有任何 Rust 组件消费点击（`box` / `input` / `select-list` /
+   `settings-list` 的 `handleMouse` 都还没 port）。命中后的动作由区域持有者 `App` 直接做。issue 明确
+   禁止「为凑接口造没有消费者的抽象」，所以不建 `MouseRegionRegistry` / `MouseHandler` trait。
+2. **清选区的时机：press → release。** 上游在**按压被接住**时就清（`tui-alt-screen.ts:926`），本 port
+   改成「同格左键 release」（上游 `isClick`，`:1312-1315`）。原因：Rust 侧还没有 `mousePressTarget` /
+   press-capture（没有 URL 点击、没有滚动条拖拽），press 即清会让「按在模态上 → 拖出模态 → 松开」
+   先丢掉选区；而「同格 release 才清」与上游**点击**路径（`:1330-1339`，`:1338` 清）逐字等价。
+   唯一可观测差异就是上面那一种手势，`a_click_only_commits_when_the_release_lands_on_the_press_cell`
+   把它钉住了。
+3. **点击模态不触发 `copyOnSelect`。** `clear_selection()` 不排剪贴板（上游也是两件事：复制发生在
+   `mouseup` 的 `copyOnSelect` 路径 `:1443-1462`）。`a_modal_click_never_copies_and_copy_on_select_still_copies_once`
+   断言「拖选释放复制一次 + 模态点击 0 次」。
+4. **没有 `updateScrollbarHover` / hover 高亮 / 滚动条拖拽 / URL(OSC-8) 点击。** 这些仍需要悬停态与
+   press-capture，留在 frontier 第 8 项；本轮把它们的前置（坐标 + 按键 + press/release/drag 通道）铺好了。
+5. **模态矩形不含状态栏与提示行。** 叠加层渲染时就裁在消息视口内，所以矩形下边界停在视口最后一行
+   （`a_modal_rectangle_is_clipped_to_the_message_viewport` 钉住「40 条 item 的 settings 也只在视口内命中」）。
+6. **首次渲染之前没有矩形。** `mouse_regions()` 为空（`viewport` 还是 0），于是任何手势都「未命中」，
+   但仍被模态吞掉（`there_are_no_rectangles_before_the_first_render`）。
+7. **未命中 → 吞掉，不是穿透。这是本轮唯一一处「反着上游来」的地方，且是刻意的。** 上游是
+   「overlay 未命中 → `dispatchMouseToLayout`（落到下面的日志）」；这里保持 LUM-1124 的「模态打开时
+   鼠标全部被吞」（`an_open_modal_swallows_gestures` 继续绿），因为模态期间的滚轮本来就只给模态
+   （`step_settings_wheel`），而日志不是 layout 组件、没有可派发的目标。测试里按「吞掉」的实际语义断言。
+8. **滚轮完全没动。** `InputEvent::Mouse { up, alt }` 与 `WHEEL_SCROLL_LINES` /
+   `ALT_WHEEL_SCROLL_MULTIPLIER` 原样；`tests/mouse_scroll.rs` 7 条全绿。
+9. **不做**：双击选词 / 三击选行 / 边缘自动滚动 / grapheme 整格扩边（frontier 的 P1 选区粒度项，
+   与 `app.rs` 同文件）；`alt-screen-search.ts`；X10 旧式鼠标序列。
+
+### 四、测试
+
+`tests/mouse_region.rs` 的 13 条（全部走真实 `App::step(InputEvent::MouseGesture…)` +
+`render_snapshot`）：
+
+| 用例 | 钉住的行为 |
+|---|---|
+| `the_open_modal_rectangles_describe_the_rendered_overlays` | 矩形 = 渲染出的叠加层：`y = viewport_origin.y + 1`、宽 = 视口宽、高 = `render_lines().len()` 且截到视口 |
+| `a_gesture_inside_a_modal_is_consumed_with_region_local_coordinates` | 命中消费 + 坐标换算（绝对 `(4,2)` → `MouseRegionPoint(4,2)`），且**不影响消息视口**（press + drag 后 `has_selection() == false`） |
+| `gestures_outside_every_modal_rectangle_are_still_swallowed` | 模态外（第 0 行 / 下边界外一格 / 右边界外一格）走「模态吞掉」原路径，不产生选区 |
+| `a_click_inside_a_modal_clears_the_chat_log_selection` | 先拖选出选区 → 点模态内一点 → `Redraw` + 选区被清 |
+| `a_selector_click_clears_the_chat_log_selection` | 选择器同样参与（且点击不关模态） |
+| `a_press_inside_a_modal_keeps_the_selection_until_the_release` | **press 不清选区** |
+| `a_click_only_commits_when_the_release_lands_on_the_press_cell` | 同一模态内换格松开不算点击；press 落在矩形外时 release 也不算 |
+| `the_rectangle_edges_are_exclusive` | 右/下边界外一格不命中（选区还在），**最后一个覆盖格**命中（选区被清） |
+| `a_modal_click_never_copies_and_copy_on_select_still_copies_once` | `copyOnSelect` 仍然只复制一次；模态点击 0 次剪贴板请求 |
+| `modal_rectangles_follow_the_keyboard_layer_order` | dialog → settings → selector 的层序与各自高度/宽度 |
+| `a_modal_rectangle_is_clipped_to_the_message_viewport` | 叠加层超出视口时矩形停在最后一行消息行 |
+| `there_are_no_rectangles_before_the_first_render` | 无几何时矩形为空、手势仍被吞 |
+| `a_region_can_be_built_from_a_plain_rectangle` | `MouseRegion` 的公开面（绝对格 → 层内坐标、空矩形） |
+
+`mouse_region.rs` 另有 6 条单元测试：原点格、坐标映射、右/下边界开区间、原点之前的格、空矩形永不
+命中、`capture` 给出局部格 / 未命中为 `None`。
+
+### 五、验证
+
+（下表是**工作分支 `9d3a34f29`** 上的实测值；与 LUM-1127 / LUM-1129 合并后的复测值见文末补记。）
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  22 个 suite 共 424 passed / 0 failed     # 起点 21 / 405（LUM-1126 记录，本轮复测一致）
+                                           # +1 suite / +19 测试（mouse_region 单元 6 + e2e 13）
+$ ... cargo test -p pi-coding-agent --offline
+  15 个 suite 共 360 passed / 0 failed     # 与 LUM-1126 轮持平，driver 没被带坏
+$ ... cargo test -p pi-tui -p pi-coding-agent --offline
+  37 个 suite 共 784 passed / 0 failed
+$ ... cargo check --workspace --all-targets --offline
+  Finished（0 error）
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished（0 warning）
+$ /tmp/rustup-home/toolchains/1.85.0-*/bin/rustfmt --edition 2021 --check \
+      crates/pi-tui/src/app.rs crates/pi-tui/src/lib.rs \
+      crates/pi-tui/src/mouse_region.rs crates/pi-tui/tests/mouse_region.rs
+  本轮改动的 4 个文件 0 diff（rustfmt 1.8.0）
+```
+
+一条环境事实（与前几轮记录一致）：本机默认 `rustfmt` 已是 **1.9.0-stable**，`cargo fmt --all --check`
+在 HEAD 上就报既有漂移（`settings.rs`、`tests/settings_list.rs`、`app.rs:29` 的 import 折行等），
+与本轮无关。本轮只把**自己改动的文件**用仓库时代的 `rustfmt 1.8.0`（`1.85.0` toolchain）收敛到 0 diff，
+没有顺手 `cargo fmt` 全仓库，以免制造与在途轮的冲突。
+
+### 六、合并与推送
+
+`work/lum-1128` → `feature/pi.rs`：按前几轮口径用 `git merge-tree --write-tree` +
+`git commit-tree` 的 plumbing 合并（`feature/pi.rs` 被若干历史 worktree 占着），再
+`git push origin <合并提交>:refs/heads/feature/pi.rs`，工作分支一并推送。真实哈希见文末补记。
+
+### 七、frontier（本轮更新）
+
+本轮把 frontier 第 1 项（鼠标区域派发 / 点击命中）**整条收口**，`app.rs` 随之释放，第 9 项（X10 序列 /
+`updateScrollbarHover` / 滚动条拖拽）不再被它阻塞。按落地后的现状重排：
+
+1. **P1 选区粒度与边缘体验**（双击选词 / 三击选行、边缘自动滚动、grapheme 整格扩边）：LUM-1124 欠账，
+   写 `pi-tui/src/app.rs` → `app.rs` 已随 Stage 35 收口而空闲，可直接开工。
+2. **P2 `node:zlib` 的 gzip/deflate**（`gunzipSync` / `gzipSync` / `deflateSync` / `inflateSync`）：
+   纯依赖问题，离线 registry 有 `flate2` / `miniz_oxide` 时再接（`host.rs` 的 `zlib.*` op 表与
+   `tests/zlib.rs` 骨架可直接加 arm）。
+3. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥，落 `host.rs`/shim 通道。
+4. **P3 `alt-screen-search.ts`**（上游 327 行）：与选区高亮有天然联动，需要 `app.rs` 钩子。
+5. **P3 `latex.ts`**（1394 行）与 `markdown.rs` 的剩余子集：**表格**已由 LUM-1127 落地；剩下 LaTeX、
+   OSC-8 hyperlink、语法高亮、块级 HTML——后三者的落点超出 `markdown.rs`（OSC-8 要动缓冲/样式层），
+   应按各自子系统单独立项。
+6. **P3 provider catalog / LUM-1090**：结论维持（无上游 `data/*.json` 事实源，不写猜测值）。
+7. **P3 旧式 X10 鼠标序列、`updateScrollbarHover` 悬停高亮、滚动条拖拽**（原第 9 项，本轮**不再被
+   第 1 项阻塞**）：前半（矩形命中 + 带坐标/按键/press-release-drag 的 `InputEvent`）已就位，剩下的是
+   序列解析（`interactive.rs` 的 `CtEvent::Mouse` 分支）与悬停 / 拖拽状态机——本轮刻意留白的就是
+   `mousePressTarget` 这一层。
+8. **新增欠账**：`/settings` 仍只有三条设置（上游 945 行的 `SettingsSelectorComponent` 还有
+   steering/follow-up 模式、transport、`modelThinkingLevels`、图片处理等），随各自子系统补；
+   `settings-list` 的行点击命中与搜索行内嵌 `Input`——现在链路已经通了（命中会消费手势并清选区），
+   只差列表自身的「点哪一行就选哪一行」；以及 LUM-1129 标记的 `node:readline` TTY 分支（termios +
+   窗口尺寸 op）、`registerHooks`、`createRequire` 磁盘解析三项。
+
+并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
+

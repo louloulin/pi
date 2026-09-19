@@ -29,8 +29,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dialog::{Dialog, DialogAction, DialogKind};
 use crate::editor::EditorAction;
-use crate::input::{InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
+use crate::input::{
+    InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
+};
 use crate::message::{MessageItem, MessageView};
+use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
@@ -271,6 +274,12 @@ pub struct App {
     viewport_origin: (AtomicU16, AtomicU16),
     /// Active chat-log text selection, if any.
     selection: Option<Selection>,
+    /// Region-local cell of a left press that landed inside a modal overlay,
+    /// kept until its release so only a click that starts and ends on the
+    /// same cell commits (upstream's `isClick`,
+    /// `packages/tui/src/tui-alt-screen.ts:1312-1315`). `None` whenever no
+    /// modal is on screen.
+    modal_mouse_press: Option<MouseRegionPoint>,
     /// True between a left-button press and its release, so drags extend
     /// the selection without requiring the terminal to report the button.
     selection_dragging: bool,
@@ -322,6 +331,7 @@ impl App {
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             selection: None,
+            modal_mouse_press: None,
             selection_dragging: false,
             pending_clipboard: None,
         }
@@ -791,6 +801,12 @@ impl App {
         if self.exit_requested {
             return StepOutcome::Exit;
         }
+        // Mouse gestures are routed by rectangle rather than through the
+        // keyboard's modal guard: `step_mouse_gesture` hit-tests the open
+        // modal overlays first and only reaches the chat log with no modal up.
+        if let InputEvent::MouseGesture(gesture) = event {
+            return self.step_mouse_gesture(gesture);
+        }
         // An open modal owns the keyboard: the selector and prompt stay
         // frozen underneath it.
         if self.dialog.is_some() {
@@ -826,9 +842,6 @@ impl App {
             }
         }
         let InputEvent::Key(key) = event else {
-            if let InputEvent::MouseGesture(gesture) = event {
-                return self.step_mouse_gesture(gesture);
-            }
             if let InputEvent::Mouse { up, alt } = event {
                 let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
                 let changed = if up {
@@ -1023,12 +1036,24 @@ impl App {
     /// A press and release on the same cell leaves an empty selection, so a
     /// plain click clears whatever was selected before.
     ///
+    /// With a modal on screen the gesture is hit-tested against the modal
+    /// overlays instead — see [`App::mouse_regions`] and
+    /// [`App::step_modal_mouse_gesture`].
+    ///
     /// Deviations (deliberate, documented): only character granularity is
     /// modelled — upstream adds double-click word and triple-click line
     /// selection plus drag autoscroll at the viewport edges. Gestures
     /// outside the message viewport (the prompt and status rows) are
     /// ignored.
     pub fn step_mouse_gesture(&mut self, gesture: MouseGesture) -> StepOutcome {
+        // A modal owns the mouse exactly as it owns the keyboard
+        // (`step_key`): gestures are hit-tested against the open overlays'
+        // rectangles and never reach the chat log underneath.
+        if self.dialog.is_some() || self.settings.is_some() || self.selector.is_some() {
+            return self.step_modal_mouse_gesture(gesture);
+        }
+        // No modal is up, so a modal click cannot still be pending.
+        self.modal_mouse_press = None;
         let Some(point) = self.selection_point(gesture.x, gesture.y) else {
             return StepOutcome::Idle;
         };
@@ -1064,6 +1089,105 @@ impl App {
             // Middle / right buttons and bare moves with no button held
             // are not part of the selection gesture (upstream gives the
             // right button to paste on Windows only).
+            _ => StepOutcome::Idle,
+        }
+    }
+
+    /// On-screen rectangles of the open modal overlays, topmost first.
+    ///
+    /// The Rust counterpart of upstream's `renderedOverlayLayouts`
+    /// (`packages/tui/src/tui.ts:492,824-847`): each region is the box the
+    /// modal occupied in the last render — the dialog starts at the top of
+    /// the message area, the settings list and the selector one row below it
+    /// (`App::render_to_buffer`) — in absolute terminal cells. The order is
+    /// the keyboard focus order in `step_key` (dialog → settings → selector),
+    /// so the topmost modal owns a click when overlays overlap. Empty before
+    /// the first render, when the geometry is not known yet.
+    pub fn mouse_regions(&self) -> Vec<MouseRegion> {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+        let (origin_x, origin_y) = self.viewport_origin();
+        let mut overlays: Vec<(u16, usize)> = Vec::new();
+        if let Some(dialog) = &self.dialog {
+            overlays.push((0, dialog.render_lines(width).len()));
+        }
+        if let Some(settings) = &self.settings {
+            overlays.push((1, settings.render_lines(width).len()));
+        }
+        if let Some(selector) = &self.selector {
+            overlays.push((1, selector.render_styled_lines(width).len()));
+        }
+        let mut regions = Vec::new();
+        for (top, lines) in overlays {
+            // The renderer clips an overlay to the message viewport, so the
+            // status / prompt rows can never be part of its rectangle.
+            let rows = u16::try_from(lines).unwrap_or(u16::MAX);
+            let rows = rows.min(height.saturating_sub(top));
+            if rows > 0 {
+                regions.push(MouseRegion::new(Rect::new(
+                    origin_x,
+                    origin_y + top,
+                    width,
+                    rows,
+                )));
+            }
+        }
+        regions
+    }
+
+    /// Route a gesture to the open modal overlays.
+    ///
+    /// Upstream dispatches to the topmost overlay under the pointer and only
+    /// falls back to the layout underneath when no overlay rectangle contains
+    /// the event (`packages/tui/src/tui.ts:824-847`,
+    /// `tui-alt-screen.ts:912-922`). This port swallows the gesture either
+    /// way: LUM-1124 already made an open modal own the mouse
+    /// (`tests/mouse_selection.rs::an_open_modal_swallows_gestures`) and the
+    /// chat log is not a layout component here, but a hit on a modal's
+    /// rectangle is a click *on* that modal.
+    ///
+    /// A click only counts when the left press and the left release land on
+    /// the same cell — upstream's `isClick`
+    /// (`packages/tui/src/tui-alt-screen.ts:1312-1315`) — and committing one
+    /// drops the chat-log selection, like upstream's click path
+    /// (`packages/tui/src/tui-alt-screen.ts:1330-1339`). A press on its own
+    /// does *not* clear: upstream clears once a handled press starts a
+    /// component gesture (`tui-alt-screen.ts:925-930`), but this port has no
+    /// press-capture target yet, and clearing on press would throw the
+    /// selection away even when the pointer is dragged off the modal before
+    /// releasing. A hit click never queues a clipboard request — copy-on-select
+    /// belongs to the chat log, not to a modal.
+    fn step_modal_mouse_gesture(&mut self, gesture: MouseGesture) -> StepOutcome {
+        let hit = self
+            .mouse_regions()
+            .into_iter()
+            .find_map(|region| region.capture(gesture));
+        let Some(point) = hit else {
+            // Outside every overlay rectangle the modal still swallows the
+            // gesture; a press that missed cannot become a click.
+            if matches!(gesture.kind, MouseGestureKind::Release(MouseButton::Left)) {
+                self.modal_mouse_press = None;
+            }
+            return StepOutcome::Idle;
+        };
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                self.modal_mouse_press = Some(point);
+                StepOutcome::Idle
+            }
+            MouseGestureKind::Release(MouseButton::Left) => {
+                let clicked = self.modal_mouse_press.take() == Some(point);
+                if clicked && self.has_selection() {
+                    self.clear_selection();
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                }
+            }
+            // Drags inside a modal, bare moves and the other buttons are
+            // consumed without changing anything.
             _ => StepOutcome::Idle,
         }
     }
