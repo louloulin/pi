@@ -53,7 +53,9 @@ pub use server::{run_rpc_server, RpcServerError};
 
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
+use pi_agent_core::tools::ToolExecutor;
 use pi_protocol::Model;
+use std::sync::Arc;
 
 /// Inputs for [`run_rpc_server`].
 pub struct RpcServerOptions {
@@ -68,6 +70,11 @@ pub struct RpcServerOptions {
     pub system_prompt: String,
     /// Session id reported by `getState` — opaque to this stage.
     pub session_id: String,
+    /// Tool executor the agent loop dispatches model tool calls to.
+    /// The `pi` binary passes
+    /// [`default_executor`](crate::tool_executor::default_executor);
+    /// tests inject a scripted executor.
+    pub tool_executor: Arc<dyn ToolExecutor>,
 }
 
 /// Outcome of a completed RPC session.

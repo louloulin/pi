@@ -47,6 +47,7 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use futures::FutureExt;
+use pi_agent_core::tools::ToolExecutor;
 use pi_agent_core::{Agent, AgentError, AgentEvent, AgentOptions};
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{AssistantMessage, Content, Message, Model, Role, StopReason, Usage};
@@ -59,6 +60,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
 
 use crate::file_processor::FileError;
+use crate::tool_executor::default_executor;
 
 /// Maximum size (in bytes) for any single stdout write. Keeps the
 /// pipe buffer from blocking the agent thread.
@@ -183,6 +185,10 @@ pub struct PrintModeOptions {
     pub max_turns: u32,
     /// Output format.
     pub output_format: OutputFormat,
+    /// Tool executor the agent loop dispatches model tool calls to.
+    /// The `pi` binary passes [`default_executor`]; passing a custom
+    /// executor lets tests script tool traffic.
+    pub tool_executor: Arc<dyn ToolExecutor>,
 }
 
 impl PrintModeOptions {
@@ -199,6 +205,7 @@ impl PrintModeOptions {
             session_dir: default_session_dir(),
             max_turns: 0,
             output_format: OutputFormat::Text,
+            tool_executor: default_executor(),
         }
     }
 }
@@ -570,7 +577,12 @@ fn build_agent(options: &PrintModeOptions) -> Result<Agent, PrintModeError> {
         options.model.clone(),
         options.stream_fn.clone(),
         options.system_prompt.clone(),
-    );
+    )
+    // Advertise the built-in tool schemas to the model and execute the
+    // calls it emits for real. Without this the loop falls back to the
+    // Stage 2 stub ("(stub) executed <name>") and the model sees a
+    // fabricated result for every tool call.
+    .with_tool_executor(options.tool_executor.clone());
     Ok(Agent::new(agent_options))
 }
 

@@ -21,6 +21,7 @@ use pi_coding_agent::print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions,
 };
 use pi_coding_agent::session_log::SessionLog;
+use pi_coding_agent::tool_executor::default_executor;
 use pi_protocol::{Api, AssistantMessage, Content, Message, Model, ProviderId, Role, StopReason, Usage};
 use pi_session::{SessionEntry, SessionReader};
 use tempfile::TempDir;
@@ -65,6 +66,7 @@ fn build_options(
         session_dir: dir.path().to_path_buf(),
         max_turns,
         output_format,
+        tool_executor: default_executor(),
     };
     (dir, options)
 }
@@ -224,6 +226,7 @@ fn session_options(
         session_dir: dir.path().to_path_buf(),
         max_turns: 0,
         output_format: OutputFormat::Text,
+        tool_executor: default_executor(),
     }
 }
 

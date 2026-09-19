@@ -275,11 +275,17 @@ struct Server {
 
 impl Server {
     fn new(options: RpcServerOptions, done_tx: mpsc::UnboundedSender<TurnFinished>) -> Self {
-        let agent = Agent::new(AgentOptions::new(
-            options.model.clone(),
-            options.stream_fn.clone(),
-            options.system_prompt.clone(),
-        ));
+        let agent = Agent::new(
+            AgentOptions::new(
+                options.model.clone(),
+                options.stream_fn.clone(),
+                options.system_prompt.clone(),
+            )
+            // RPC clients drive the same coding agent the TUI does, so
+            // tool calls must execute for real instead of hitting the
+            // Stage 2 stub.
+            .with_tool_executor(options.tool_executor),
+        );
         Self {
             agent: Arc::new(AsyncMutex::new(agent)),
             writer: Writer::new(),
@@ -858,6 +864,7 @@ mod tests {
                 ),
                 system_prompt: String::new(),
                 session_id: "session-test".into(),
+                tool_executor: crate::tool_executor::default_executor(),
             },
             done_tx,
         );

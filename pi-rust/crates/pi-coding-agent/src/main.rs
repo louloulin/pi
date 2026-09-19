@@ -63,6 +63,13 @@ fn main() -> ExitCode {
 
     let system_prompt = default_system_prompt();
 
+    // The built-in tool bundle (read / write / edit / bash / find / grep /
+    // ls) is shared by all three modes. Building it here — the composition
+    // root — keeps a single executor instance per process and guarantees
+    // interactive, print and RPC modes execute tool calls for real.
+    let tool_executor: Arc<dyn pi_agent_core::tools::ToolExecutor> =
+        pi_coding_agent::tool_executor::default_executor();
+
     let initial_prompt = cli.command.as_ref().and_then(|cmd| match cmd {
         Command::Print { prompt } => Some(prompt.join(" ")),
         _ => None,
@@ -106,6 +113,7 @@ fn main() -> ExitCode {
                 session_id: session_id.clone(),
                 initial_prompt,
                 stream_fn: stream_fn.clone(),
+                tool_executor: tool_executor.clone(),
             };
             let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -164,6 +172,7 @@ fn main() -> ExitCode {
                 session_dir,
                 max_turns: cli.max_turns,
                 output_format: cli.output_format,
+                tool_executor: tool_executor.clone(),
             };
             let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -186,6 +195,7 @@ fn main() -> ExitCode {
                 stream_fn,
                 system_prompt,
                 session_id,
+                tool_executor,
             };
             let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(rt) => rt,

@@ -25,6 +25,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use parking_lot::Mutex as SyncMutex;
+use pi_agent_core::tools::ToolExecutor;
 use pi_agent_core::{Agent, AgentEvent, AgentOptions};
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
@@ -37,6 +38,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::commands::{handle_command, SlashCommand};
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
+use crate::tool_executor::default_executor;
 
 use pi_tui::app::{App, AppConfig};
 use pi_tui::input::{InputEvent, KeyCode};
@@ -81,6 +83,10 @@ pub struct InteractiveOptions {
     /// [`ProviderRouter`](crate::provider::ProviderRouter) so `/model`
     /// can switch the TUI between providers live.
     pub stream_fn: SharedStreamFn,
+    /// Tool executor the agent loop dispatches model tool calls to.
+    /// The `pi` binary passes [`default_executor`]; tests inject a
+    /// scripted executor.
+    pub tool_executor: Arc<dyn ToolExecutor>,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -94,6 +100,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("session_id", &self.session_id)
             .field("initial_prompt", &self.initial_prompt)
             .field("stream_fn", &"<dyn StreamFn>")
+            .field("tool_executor", &"<dyn ToolExecutor>")
             .finish()
     }
 }
@@ -109,6 +116,7 @@ impl Default for InteractiveOptions {
             session_id: String::new(),
             initial_prompt: None,
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
+            tool_executor: default_executor(),
         }
     }
 }
@@ -127,11 +135,16 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         system_prompt.push_str(&options.append_system_prompt.join("\n"));
     }
 
-    let agent = Agent::new(AgentOptions::new(
-        resolved_model.clone(),
-        stream_fn,
-        system_prompt,
-    ));
+    let agent = Agent::new(
+        AgentOptions::new(
+            resolved_model.clone(),
+            stream_fn,
+            system_prompt,
+        )
+        // The TUI is a real coding session: tool calls must hit the
+        // filesystem / shell instead of the Stage 2 stub.
+        .with_tool_executor(options.tool_executor.clone()),
+    );
     let agent = Arc::new(AsyncMutex::new(agent));
 
     let config = AppConfig {
