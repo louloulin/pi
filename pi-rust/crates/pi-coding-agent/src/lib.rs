@@ -15,6 +15,9 @@
 //! point (`pi --print "..."`). Print mode is the canonical surface for
 //! CI / scripts / containerised hosts — it streams text (or NDJSON) on
 //! stdout and never opens a TUI.
+//!
+//! Stage 11 wires [`packages`], the `pi install` / `remove` / `list` /
+//! `version` / `list-models` / `update-models` ecosystem.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -25,6 +28,7 @@ pub mod config;
 pub mod extensions;
 pub mod file_processor;
 pub mod interactive;
+pub mod packages;
 pub mod print_mode;
 pub mod session_log;
 pub mod text_fallback;
