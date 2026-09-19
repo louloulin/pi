@@ -1005,7 +1005,8 @@ fn esm_and_commonjs_extensions_coexist() {
 }
 
 /// Type-only imports are erased: they are a compile-time-only artifact and
-/// must not require the (out-of-scope) `@earendil-works/*` virtual module.
+/// never reach the runtime module (the SDK modules exist, but a type-only
+/// import binds nothing).
 #[test]
 fn esm_type_only_import_is_erased() {
     let runtime = rt();
@@ -1201,17 +1202,38 @@ fn esm_unsupported_imports_are_reported() {
             .load(
                 entry_at("api-ext", "/tmp/api-ext/index.mjs"),
                 r#"
-                    import { defineTool } from "@earendil-works/pi-coding-agent";
+                    import { debounce } from "lodash";
                     export default function (pi) {}
                 "#,
             )
             .await
-            .expect_err("@earendil-works/* is not a supported virtual module yet");
+            .expect_err("lodash is not a supported virtual module");
         let message = err.to_string();
-        assert!(message.contains("@earendil-works/pi-coding-agent"), "{message}");
-        // The error names the supported set, now including `typebox`.
+        assert!(message.contains("lodash"), "{message}");
+        // The error names the supported set, including `typebox` and the
+        // `@earendil-works/*` SDK packages.
         assert!(message.contains("node:path"), "{message}");
         assert!(message.contains("typebox"), "{message}");
+        assert!(message.contains("@earendil-works/pi-tui"), "{message}");
+
+        // A value import of a documented SDK gap fails the load too, naming
+        // the export and its package instead of binding `undefined`.
+        let err = host
+            .load(
+                entry_at("sdk-gap-ext", "/tmp/sdk-gap-ext/index.mjs"),
+                r#"
+                    import { createReadTool } from "@earendil-works/pi-coding-agent";
+                    export default function (pi) {}
+                "#,
+            )
+            .await
+            .expect_err("a documented SDK gap must not load silently");
+        let message = err.to_string();
+        assert!(message.contains("createReadTool"), "{message}");
+        assert!(
+            message.contains("@earendil-works/pi-coding-agent"),
+            "{message}"
+        );
 
         let err = host
             .load(

@@ -106,6 +106,9 @@ back to the host invokes a host import (see below).
 | `pi.setSessionName(name)`       | `host_set_session_name(name)`   | Sets the session display name.                                       |
 | `pi.exec(command, args, opts)`  | `host_exec(command, json)`      | Runs a child process; resolves with `{ stdout, stderr, code, killed }`. `opts.signal` cancels via `host_exec_cancel(id)`. |
 | `ctx.ui.notify(msg, level)`     | `host_ui_notify(msg, level)`    | Fire-and-forget notification. `level` ∈ `info`/`warning`/`success`/`error`. |
+| `ctx.ui.theme`                  | —                               | Identity styling object (`fg` / `bg` / `bold` / … return their text); the host has no palette. |
+| `ctx.ui.custom(factory)`        | —                               | Throws `ERR_PI_UI_UNSUPPORTED`: no overlay/render channel exists to run the factory's component. |
+| `ctx.ui.setWidget` / `setStatus` / `setTitle` / `setFooter` / `setHeader` / … | — | Inert no-ops with a one-time warning notification; accepted so load-time widget configuration does not fail. See [`docs/SDK_MODULES.md`](SDK_MODULES.md). |
 | `ctx.ui.confirm(title, body)`   | `host_ui_confirm(title, body)`  | Returns `Promise<boolean>`. Resolves via `UiHandler::confirm`.       |
 | `ctx.ui.input(title, ph)`       | `host_ui_input(title, ph)`      | Returns `Promise<string | null>`. Resolves via `UiHandler::input`.   |
 | `ctx.ui.select(title, options)` | `host_ui_select(title, json)`   | Returns `Promise<string | null>`. Resolves via `UiHandler::select`.  |
@@ -190,8 +193,39 @@ are provided as virtual modules in both module formats —
 `require("node:fs")`. `node:util` is pure JS and needs no host op; the
 rest ride the single `host_node_call` bridge. The supported subset, the
 error shape and every deliberate divergence from Node are documented in
-[`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md); `node:child_process` is the
-main missing piece (needs streaming stdio + cancellation).
+[`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md). `node:child_process` is
+bridged too (`spawn` / `execFile` / `exec`, streaming stdio via
+`host_child_read` / `host_child_wait`); a live child outlives the call
+that created it, so it uses two extra async host imports.
+
+### SDK virtual modules (`@earendil-works/*`)
+
+Upstream extensions also import pi's own SDK packages. The shim ships
+them as virtual modules registered under three spellings each —
+`@earendil-works/<pkg>`, the historical `@mariozechner/<pkg>`, and the
+bare package name:
+
+```js
+import { Text, Markdown, SelectList } from "@earendil-works/pi-tui";
+import { defineTool, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { Type, StringEnum, uuidv7 } from "@earendil-works/pi-ai";
+```
+
+The components and helpers are pure JS in the shim (only `getAgentDir`
+and `uuidv7` reach the host, through `host_node_call`). Modules are
+proxies with an explicit inventory: a **value** import of a real
+upstream export the shim does not implement throws
+`ERR_PI_SDK_UNIMPLEMENTED` (naming the specifier, the export and the
+doc), and any other unknown name throws `ERR_PI_SDK_UNKNOWN_EXPORT` — a
+missing name is never silently `undefined`. `import type { … }` is
+erased by the loader, so type-only imports need no binding.
+
+The per-specifier inventory, the documented gaps (the `create*Tool`
+factories, the streaming / provider entries, the third-party `gondolin`
+sandbox) and every divergence are in
+[`docs/SDK_MODULES.md`](SDK_MODULES.md). `globalThis.__pi_sdk_manifest()`
+exposes the same inventory as JSON, and `tests/sdk_modules.rs` checks it
+against the upstream examples so a new import cannot outrun the bridge.
 
 ### Events
 
@@ -384,15 +418,22 @@ or a Stage 4+ follow-up:
 | `ctx.ui.notify(...)`                    | ✅ Supported    | Fire-and-forget; logged on the `pi_extension` tracing target.          |
 | `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Persisted as session entries by the TUI and print modes; `sendUserMessage` is not re-injected as a new turn yet. |
 | `pi.appendEntry(type, data)`            | ✅ Supported    | Persisted to the session backend as `SessionEntry::Extension` (TUI JSONL + print-mode SQLite). |
-| ESM `import` statements                 | ✅ Supported   | `import type { … }` lines are erased; value imports resolve through the virtual module map (`node:*`, `node:path`, `node:url`, `typebox`, …); anything else fails with a readable error naming the specifier. |
+| ESM `import` statements                 | ✅ Supported   | `import type { … }` lines are erased; value imports resolve through the virtual module map (`node:*`, `node:path`, `node:url`, `typebox`, `@earendil-works/*`, …); anything else fails with a readable error naming the specifier. |
 | `require("node:fs")` (CJS)             | ✅ Supported   | `require` resolves through the same virtual module map as the ESM rewrite. |
 | `node:fs` / `node:fs/promises`          | ✅ Subset      | Sync + promise + callback forms; see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md) for the op list and divergences. |
 | `node:os` / `node:buffer` / `node:crypto` / `node:process` / `node:util` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals; `node:util` is pure JS (`promisify` / `inspect` / `format` / `types` / `TextEncoder` / …) and installs `TextEncoder` / `TextDecoder` globally when the engine lacks them. |
-| `node:child_process`                    | ❌ Not bridged | Extensions that shell out through the documented `pi.exec` API work (see the `pi.exec` row); importing `node:child_process` directly still needs streaming stdio + process lifetime tied to the host deadline. |
+| `node:child_process`                    | ✅ Subset      | `spawn` / `execFile` / `exec` with streaming stdio; a live child outlives the creating call via `host_child_read` / `host_child_wait`. Extensions that only shell out should still prefer the documented `pi.exec` API. |
+| `@earendil-works/pi-tui`                | ✅ Subset      | Components (`Text` / `Box` / `Container` / `Markdown` / `SelectList` / `SettingsList` / `Editor` / `Input` / …) and the ANSI geometry helpers, as free-standing renderables — no live terminal. See [`docs/SDK_MODULES.md`](SDK_MODULES.md). |
+| `@earendil-works/pi-coding-agent`       | ✅ Subset      | `defineTool`, `getAgentDir`, `parseFrontmatter`, `truncateHead`/`truncateLine`, `formatSize`, `convertToLlm`, `serializeConversation`, `withFileMutationQueue`, `VERSION`, the theme getters and the loader/border components. The `create*Tool` factories are documented gaps (need a built-in tool-invocation bridge). |
+| `@earendil-works/pi-ai`                 | ✅ Subset      | `Type`, `StringEnum`, `uuidv7`, `calculateCost`, `contentText`. `createAssistantMessageEventStream` is a documented gap (needs the streaming bridge). |
+| `@earendil-works/pi-ai/compat`          | ❌ Documented gap | Resolves, but every provider/streaming export throws `ERR_PI_SDK_UNIMPLEMENTED` until the provider bridge lands. |
+| `@earendil-works/pi-agent-core`         | ✅ Supported   | Resolves; upstream imports here are type-only and erased. |
+| `@earendil-works/gondolin`              | ❌ Not bridged | Third-party sandbox VM (`VM`, `RealFSProvider`); throws a clear `ERR_PI_SDK_UNIMPLEMENTED`. Use the upstream Node runtime for it. |
+| Old `@mariozechner/*` scope / bare package names | ✅ Supported | Every SDK specifier is registered under `@earendil-works/<pkg>`, `@mariozechner/<pkg>` and `<pkg>`. |
 | TypeBox parameter schemas               | ✅ Wire-only    | The JSON Schema `parameters` field is preserved verbatim.               |
-| Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI.                          |
-| Custom editor / footer / header         | ❌ Out of scope | TUI concern (Stage 4).                                                 |
-| Provider registration                   | ❌ Out of scope | Stage 1 + later `pi-ai` work.                                          |
+| Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI. `ctx.ui.custom()` now throws `ERR_PI_UI_UNSUPPORTED` instead of returning a component nobody can render. |
+| Custom editor / footer / header / widgets | ❌ Out of scope | TUI concern (Stage 4). The `ctx.ui.set*` calls are accepted as inert no-ops (one-time warning) so extensions that configure them at load time still load. |
+| Provider registration                   | ❌ Out of scope | Stage 1 + later `pi-ai` work; `@earendil-works/pi-ai/compat` documents the gap. |
 
 When a feature is not yet wired, the corresponding host import can be
 added in a follow-up commit without changing the JS-side shape.
