@@ -6001,3 +6001,95 @@ $ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p pi-extensions --of
 - 板面：LUM-1088 的 run 仍挂着（未推未合，占一个槽位）；LUM-1103 已进 `feature/pi.rs`；
   LUM-1104 与 LUM-1103 是同模板重复轮（`pi-tui` 编辑器），建议人工合流。本轮**未派发**新子任务
   （`running_task_count = 4` > 上限 3）。
+
+## LUM-1106 round — 核验 `feature/pi.rs` + 编辑器 word navigation / word kill（Stage 4 后续第四切片）
+
+（autopilot 协调轮；开工后把 LUM-1106 的泛标题「pi」改名为本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 4`（上限 3；其中一路是挂了 20 小时的
+  僵尸 `cargo test -p pi-agent-core`）→ 与 LUM-1102 / LUM-1103 同结论：**不派发**新子任务，
+  改做单轮可收口的自包含切片。
+- `git fetch --all` 后逐分支核对「已提交但未合入」：`work/lum-1104` 已由它自己的 run 合入
+  `feature/pi.rs`（`b6c8e3bb0`，含 LUM-1088 信任门 + `Ctrl+7` 别名）；其余 `agent/devbox1/*`
+  都是已合并 lineage 或只差空白顺序的等价物 —— 没有新内容可合并。
+- 本轮开工分支 `work/lum-1106` 从 `17e420c06`（LUM-1105 `node:util`）起，实现后
+  `git merge origin/feature/pi.rs`（此时 `b6c8e3bb0`）：**零冲突**，只有 `editor.rs` 走了自动
+  合并（两边改的是不同 hunk：LUM-1104 改控制键分支的 `Ctrl+7`，本轮加 `Ctrl+W` 与
+  `Ctrl+Left/Right`）。
+
+### 二、本轮切片：编辑器 word navigation / word kill
+
+LUM-1103 轮 frontier 把「word kill / word move」列为 **undo 落地后性价比最高的下一个单轮切片**
+（上游 `packages/tui/src/word-navigation.ts` + `keybindings.ts` 的 `cursorWordLeft` /
+`cursorWordRight` / `deleteWordBackward` / `deleteWordForward`），本轮取用：
+
+| File | Change |
+|------|--------|
+| `pi-tui/src/word_navigation.rs`（新增） | 移植 `packages/tui/src/word-navigation.ts`：`find_word_backward` / `find_word_forward`（先跳空白、再跳标点串；word-like 片段内碰到 ASCII 标点只走到标点之后）、`is_word_like` / `is_whitespace` / `is_punctuation_char`（`utils.ts` 的 ASCII 标点集）；+18 单测（把 `packages/tui/test/word-navigation.test.ts` 的 ASCII 向量逐条搬成字节偏移） |
+| `pi-tui/src/editor.rs` | `move_word_left` / `move_word_right` / `kill_word_backward` / `kill_word_forward`；word kill 复用 kill ring 的 `Prepend` / `Append` 累积语义（`accumulate = last_action == Kill`，与 `Ctrl+U/K` 同一条链）并压一次 undo 快照；按键对齐 `keybindings.ts`：`cursorWordLeft = alt+left｜ctrl+left｜alt+b`、`cursorWordRight = alt+right｜ctrl+right｜alt+f`、`deleteWordBackward = ctrl+w｜alt+backspace`、`deleteWordForward = alt+d｜alt+delete`；`Alt` 分支从「只认 `Alt+Y`」改成完整 match；模块文档补按键表；+11 单测 |
+| `pi-tui/Cargo.toml` / `Cargo.toml` | 依赖 `unicode-segmentation = "=1.13.3"`（锁定确切版本；该 crate 本就经 `ratatui` → `unicode-truncate` 在 `Cargo.lock` 与本地 registry 里，**没有引入新包**，`--offline` 可编） |
+| `pi-tui/src/lib.rs` | 导出 `word_navigation` 模块与 `find_word_backward` / `find_word_forward` |
+| `pi-tui/tests/word_navigation.rs`（新增） | 7 个集成测试（只走 `InputEvent` / `Prompt` 公开面）：四种 chord 走遍 `git commit -m message` 的边界、word kill + `Ctrl+Y` 还原、word kill 与 line kill 的累积关系、`Ctrl+-` 撤销 word kill、多字节（`é` / `ö`）安全、`Alt+Backspace` / `Ctrl+Left` / `Alt+Delete` 经 crossterm → `InputEvent` 转换后仍可用、`Enter` 提交的是编辑后的文本 |
+
+**已知偏差**（写进模块文档，本轮不修）：上游用 `Intl.Segmenter`（ICU，带 CJK 词典），Rust
+侧用 `unicode-segmentation` 的 UAX #29 词边界 —— 纯 ASCII（字母 / 数字 / `_` / 标点）逐条一致，
+但 CJK 分组不同：ICU 认为 `你好` / `世界` 是词，UAX #29 拆成单字。因此 CJK 用例只断言
+「每步都落在字符边界、游标必然收敛到 buffer 两端」，不断言具体偏移（上游测试里
+`findWordBackward("你好世界 test", 5) === 2` 依赖 ICU 词典，无词典实现无法复现）。
+`is_word_like` 也只能用「含字母数字或 `_`」近似 `Intl.SegmentData.isWordLike`。
+未做的还有两条：`Ctrl+D`（上游 `deleteCharForward` 的别名）与 readline 式 EOF 的归属，
+以及 `ctrl+b` / `ctrl+f`（`cursorLeft/Right` 别名）、`jumpForward/jumpBackward`
+（`ctrl+]` / `ctrl+alt+]`）—— 见 frontier。
+
+### 三、验证
+
+```
+$ cargo fmt    -p pi-tui -- --check                                    # clean
+$ cargo clippy -p pi-tui --all-targets --offline -- -D warnings        # 0 warnings
+      （首轮抓到 word_navigation.rs 的 clippy::filter_next，改 `.rfind` 后干净；
+        --all-targets 会把 dev-dep `pi-ai` 与 workspace 依赖 pi-protocol / pi-agent-core 一起编过）
+$ cargo test   -p pi-tui --offline                                     # 199 passed / 0 failed
+      （150 lib + 9 e2e + 7 selector_search + 9 snapshot + 9 theme + 7 undo + 7 word_navigation + 1 doctest）
+```
+
+本轮新增 36 个测试（18 word_navigation 单测 + 11 editor 单测 + 7 集成）。分支上 161 → 197；
+再合入 LUM-1104 的 2 个用例（`Ctrl+7` 单测 + 集成）后为 199。**在合并树上复跑**
+`cargo test -p pi-tui --offline` 得 199 passed，确认 LUM-1104 的 `Ctrl+7` 别名与本轮的 word
+绑定互不干扰（两者都在 `handle_key` 的控制键 / Alt 分支里）。
+
+**没跑**的：全量 `cargo test --workspace`。本 run 的 `target` 用
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0` 压到 426M，但共享盘开工即 100%（余 784M，
+轮中最低 357M），`pi-coding-agent` 的 `rusqlite` / `quickjs` 链接阶段大概率 ENOSPC
+（LUM-1103 / LUM-1105 两轮都记录过同一现象）。本轮改动对下游只新增公开方法与按键分支、
+不改签名，`pi-coding-agent` 侧等下一次有余量的轮次复核。
+
+### 四、合并与推送
+
+- 工作分支 `work/lum-1106`：`8438dbf83`（实现，7 文件）→ `b1b5c8544`（merge
+  `origin/feature/pi.rs` @ `b6c8e3bb0`，零冲突）→ clippy 修复提交。
+- 合入 `feature/pi.rs`：`git merge --no-ff work/lum-1106`，非 force 推送。
+
+### 五、frontier（本轮更新）
+
+已完成：LUM-1103 列表的第 3 项（编辑器 word navigation / word kill）。按「插件生态兼容 >
+核心 agent 能力 > 外观」重排：
+
+1. **P1 `.wasm` 扩展宿主**：`pi-extensions` 仍只有 QuickJS(JS) 宿主；Stage 级，改 `host.rs`。
+2. **P1 LUM-1083 扩展宿主 `free(): double free`**：本轮未跑 `pi-extensions` 测试，**无新证据**
+   （LUM-1104 合入的是信任门，不是这条崩溃的修复）。
+3. **P2 编辑器剩余按键**（本轮识别，最便宜）：`ctrl+b` / `ctrl+f`（`cursorLeft/Right` 别名）、
+   `jumpForward` / `jumpBackward`（`ctrl+]` / `ctrl+alt+]` 跳到指定字符）。单文件、无新依赖，
+   比下面两项便宜得多。
+4. **P2 `pi-tui` 渲染 API 样式化**（`Span` + 主题消费方）：`theme.rs` 仍是死代码，必须与渲染
+   API 一起改 → Stage 级。
+5. **P3 `node:child_process`**：插件生态最大缺口，Stage 级且要改 `host.rs`。
+6. **P3 `Ctrl+D` 语义位置差异**：需 App 级决策（EOF vs forward-delete）。
+7. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 就不写猜测值）。
+
+并发：上限 3 路。`pi-tui/src/editor.rs` 现在被 LUM-1104（`Ctrl+7`）与本轮（word 绑定）各改
+一次、都落在 `handle_key` 附近，靠不同 hunk 自动合并成功 —— 建议该文件一次只允许一路在写。
+另：LUM-1104 / LUM-1105 / LUM-1106 是同一个 autopilot 触发产生的三路协调轮，frontier 评估
+高度重叠（三份都在重估同一批候选），建议合并为一路；LUM-1088 的 run 仍挂着占一个槽位。
+
