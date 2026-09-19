@@ -49,6 +49,128 @@
 //     child_process).
 //     Returns a JSON envelope, never throws; see the `node:*` section
 //     near the bottom of this file.
+//   - `host_exec_cancel(id)`           — cancel a running `pi.exec`; see
+//     `pi.exec` below and the `AbortController` polyfill.
+
+// ---------------------------------------------------------------------------
+// `AbortController` / `AbortSignal`
+//
+// QuickJS ships neither, so the shim installs a minimal polyfill before any
+// extension source runs. It is deliberately the subset the upstream
+// extension API needs (`packages/coding-agent/src/core/extensions/types.ts`
+// threads an `AbortSignal` through `pi.exec`, `ctx.ui.*` and the provider
+// hooks): `aborted`, `reason`, `throwIfAborted()`, `addEventListener(
+// "abort")` / `removeEventListener`, `onabort`, plus the `AbortSignal.abort()`
+// and `AbortSignal.any()` statics.
+//
+// `AbortSignal.timeout(ms)` is **not** implemented: it needs a timer, and
+// the host exposes no `setTimeout` / `node:timers` surface. It is a
+// documented gap rather than a silent one — see `docs/EXTENSIONS.md`.
+// ---------------------------------------------------------------------------
+
+/** The `AbortError` a bare `controller.abort()` rejects/throws with. */
+function makeAbortError(message) {
+  const error = new Error(message || "This operation was aborted");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  return error;
+}
+
+class AbortSignalPolyfill {
+  constructor() {
+    this.aborted = false;
+    this.reason = undefined;
+    this.onabort = null;
+    this._listeners = new Set();
+  }
+
+  addEventListener(type, listener, options) {
+    if (type !== "abort" || typeof listener !== "function") return;
+    // `{ once: true }` needs no bookkeeping: the list is emptied when the
+    // signal fires, and a signal fires at most once.
+    void options;
+    this._listeners.add(listener);
+  }
+
+  removeEventListener(type, listener) {
+    if (type !== "abort") return;
+    this._listeners.delete(listener);
+  }
+
+  throwIfAborted() {
+    if (this.aborted) {
+      throw this.reason === undefined ? makeAbortError() : this.reason;
+    }
+  }
+
+  /** @internal Fire the signal. No-op when already aborted. */
+  _fire(reason) {
+    if (this.aborted) return;
+    this.aborted = true;
+    this.reason = reason === undefined ? makeAbortError() : reason;
+    const listeners = Array.from(this._listeners);
+    this._listeners.clear();
+    const event = { type: "abort", target: this };
+    for (const listener of listeners) {
+      try {
+        listener.call(this, event);
+      } catch (_e) {
+        // DOM `dispatchEvent` isolates listener errors; so do we.
+      }
+    }
+    if (typeof this.onabort === "function") {
+      try {
+        this.onabort.call(this, event);
+      } catch (_e) {
+        // See above.
+      }
+    }
+  }
+}
+
+AbortSignalPolyfill.abort = function abort(reason) {
+  const signal = new AbortSignalPolyfill();
+  signal._fire(reason);
+  return signal;
+};
+
+AbortSignalPolyfill.any = function any(signals) {
+  const combined = new AbortSignalPolyfill();
+  for (const signal of signals == null ? [] : signals) {
+    if (!signal) continue;
+    if (signal.aborted) {
+      combined._fire(signal.reason);
+      break;
+    }
+    if (typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", () => combined._fire(signal.reason));
+    }
+  }
+  return combined;
+};
+
+class AbortControllerPolyfill {
+  constructor() {
+    this.signal = new AbortSignalPolyfill();
+  }
+
+  abort(reason) {
+    this.signal._fire(reason);
+  }
+}
+
+// Never shadow an engine-provided implementation (QuickJS has none today,
+// but a future engine bump may add one).
+if (typeof globalThis.AbortSignal === "undefined") {
+  globalThis.AbortSignal = AbortSignalPolyfill;
+}
+if (typeof globalThis.AbortController === "undefined") {
+  globalThis.AbortController = AbortControllerPolyfill;
+}
+
+// Monotonic id handshake for `pi.exec` cancellation: the shim allocates,
+// `host_exec` registers, `host_exec_cancel` addresses.
+let __pi_next_exec_id = 1;
 
 const _pi = {
   /** @type {Record<string, Array<(event: any, ctx: any) => any>>} */
@@ -285,12 +407,16 @@ const pi = Object.freeze({
    * passed verbatim (mirrors upstream `spawn(..., { shell: false })`).
    *
    * `options.cwd` defaults to the session working directory; `timeout` is
-   * in milliseconds. `options.signal` is accepted but ignored (QuickJS has
-   * no `AbortSignal`), and every call is additionally bounded by the
-   * host's per-call timeout (5 s by default, 300 s in interactive mode).
-   * Like upstream, the returned promise resolves for every outcome — a
-   * missing binary yields `{ code: 1, stderr: "…" }` rather than a
-   * rejection.
+   * in milliseconds.
+   *
+   * `options.signal` is honoured the way upstream honours it: the child is
+   * killed and the promise still resolves (never rejects) with
+   * `killed: true`. An already-aborted signal resolves immediately without
+   * spawning anything. While the call is in flight the host's own per-call
+   * timeout (5 s by default, 300 s in interactive mode) is raised to
+   * `timeout + 1 s` for this call, so an explicit `options.timeout` is the
+   * one that decides — a missing binary still yields
+   * `{ code: 1, stderr: "…" }` rather than a rejection.
    */
   async exec(command, args, options) {
     if (typeof command !== "string" || !command) {
@@ -304,13 +430,41 @@ const pi = Object.freeze({
     const cwd = typeof opts.cwd === "string" && opts.cwd ? opts.cwd : globalThis._pi_cwd;
     const timeout =
       typeof opts.timeout === "number" && opts.timeout > 0 ? opts.timeout : undefined;
+    const signal =
+      opts.signal && typeof opts.signal === "object" && typeof opts.signal.aborted === "boolean"
+        ? opts.signal
+        : undefined;
+    // Upstream spawns and immediately kills a pre-aborted signal; resolving
+    // without spawning is equivalent and cheaper (the child never exists).
+    if (signal && signal.aborted) {
+      return { stdout: "", stderr: "", code: -1, killed: true };
+    }
     if (typeof globalThis.host_exec !== "function") {
       throw new Error("pi.exec is not available in this host build");
     }
-    const raw = await globalThis.host_exec(
-      command,
-      JSON.stringify({ args: argv, cwd: cwd, timeout: timeout }),
-    );
+    // Cancellation is out of band (a signal is not JSON): the shim owns the
+    // id, `host_exec` registers it, and `host_exec_cancel` kills the child.
+    const execId = __pi_next_exec_id++;
+    let onAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onAbort = () => {
+        if (typeof globalThis.host_exec_cancel === "function") {
+          globalThis.host_exec_cancel(execId);
+        }
+      };
+      signal.addEventListener("abort", onAbort);
+    }
+    let raw;
+    try {
+      raw = await globalThis.host_exec(
+        command,
+        JSON.stringify({ id: execId, args: argv, cwd: cwd, timeout: timeout }),
+      );
+    } finally {
+      if (signal && typeof signal.removeEventListener === "function" && onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
     let result;
     try {
       result = typeof raw === "string" ? JSON.parse(raw) : raw;

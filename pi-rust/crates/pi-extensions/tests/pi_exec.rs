@@ -368,3 +368,263 @@ fn pi_exec_is_awaitable_from_event_handlers() {
         assert_eq!(entry.data["code"], json!(0));
     });
 }
+
+/// Like [`run_probe`], but forwards tool arguments (the abort / timeout
+/// probes need a scratch path).
+async fn run_probe_with(host: &JsExtensionHost, tool: &str, args: Value) -> Value {
+    let outcome = host
+        .execute_tool(tool, &args.to_string())
+        .await
+        .unwrap_or_else(|error| panic!("execute {tool}: {error}"));
+    assert!(!outcome.is_error, "{tool} reported an error: {outcome:?}");
+    outcome
+        .details
+        .unwrap_or_else(|| panic!("{tool} returned no details"))
+}
+
+/// `options.signal` cancels a child that is already running: the call
+/// returns promptly, the child is killed (`killed: true`, `code: -1`) and
+/// the process really existed *and really died*.
+///
+/// The probe uses `sh -c 'echo $$ > pid; exec sleep 5'` so the shell
+/// `exec`s into `sleep`: the pid it records is the process the host kills,
+/// with no lingering grandchild holding the stdio pipes open.
+#[test]
+fn pi_exec_abort_signal_cancels_a_running_child() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("abort");
+        let pidfile = scratch.path().join("pid");
+        let host = JsExtensionHost::new().await.expect("host");
+        load(
+            &host,
+            r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "exec_probe",
+                    label: "exec probe",
+                    description: "aborts a running pi.exec",
+                    parameters: { type: "object", properties: { marker: { type: "string" } } },
+                    execute: async (args) => {
+                        const controller = new AbortController();
+                        const slow = pi.exec(
+                            "sh",
+                            ["-c", "echo $$ > \"" + args.marker + "\"; exec sleep 5"],
+                            { signal: controller.signal },
+                        );
+                        // Let the child spawn and record its pid, then abort
+                        // while it is still sleeping.
+                        await pi.exec("sleep", ["0.4"]);
+                        controller.abort();
+                        const result = await slow;
+                        return {
+                            content: [{ type: "text", text: JSON.stringify(result) }],
+                            details: result,
+                        };
+                    },
+                });
+            };
+            "#,
+        )
+        .await;
+
+        let started = Instant::now();
+        let details = run_probe_with(&host, "exec_probe", json!({ "marker": pidfile })).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(details["killed"], json!(true), "{details}");
+        assert_eq!(details["code"], json!(-1), "{details}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the abort should beat `sleep 5` by a wide margin; took {elapsed:?}"
+        );
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap_or_else(|error| panic!("child never wrote {}: {error}", pidfile.display()));
+        let pid = pid.trim();
+        assert!(!pid.is_empty(), "empty pid file");
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .expect("run kill -0");
+        assert!(
+            !alive.success(),
+            "the child (pid {pid}) must be dead after the abort"
+        );
+    });
+}
+
+/// An already-aborted signal resolves immediately with the cancelled
+/// result and never spawns the child.
+#[test]
+fn pi_exec_pre_aborted_signal_does_not_spawn() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("pre-aborted");
+        let marker = scratch.path().join("spawned");
+        let host = JsExtensionHost::new().await.expect("host");
+        load(
+            &host,
+            r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "exec_probe",
+                    label: "exec probe",
+                    description: "calls pi.exec with an aborted signal",
+                    parameters: { type: "object", properties: { marker: { type: "string" } } },
+                    execute: async (args) => {
+                        const controller = new AbortController();
+                        controller.abort();
+                        const result = await pi.exec(
+                            "sh",
+                            ["-c", "touch \"" + args.marker + "\"; sleep 5"],
+                            { signal: controller.signal },
+                        );
+                        // A wrongly-spawned child would have created the
+                        // marker by now.
+                        await pi.exec("sleep", ["0.3"]);
+                        return {
+                            content: [{ type: "text", text: JSON.stringify(result) }],
+                            details: result,
+                        };
+                    },
+                });
+            };
+            "#,
+        )
+        .await;
+
+        let started = Instant::now();
+        let details = run_probe_with(&host, "exec_probe", json!({ "marker": marker })).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(details["killed"], json!(true), "{details}");
+        assert_eq!(details["code"], json!(-1), "{details}");
+        assert_eq!(details["stdout"], json!(""), "{details}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a pre-aborted call must not run the command; took {elapsed:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "a pre-aborted signal must not spawn the child"
+        );
+    });
+}
+
+/// An explicit `options.timeout` above the host default (5 s) is honoured:
+/// the child is killed by its own timeout instead of the host cutting the
+/// call at 5 s with `ExtensionError::Timeout`.
+#[test]
+fn pi_exec_explicit_timeout_extends_the_host_deadline() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        assert_eq!(
+            host.timeout(),
+            Duration::from_secs(5),
+            "this test proves the default ceiling is raised"
+        );
+        load(
+            &host,
+            r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "exec_probe",
+                    label: "exec probe",
+                    description: "runs pi.exec past the host default timeout",
+                    parameters: { type: "object", properties: {} },
+                    execute: async () => {
+                        const slow = await pi.exec("sleep", ["20"], { timeout: 6000 });
+                        return {
+                            content: [{ type: "text", text: JSON.stringify(slow) }],
+                            details: slow,
+                        };
+                    },
+                });
+            };
+            "#,
+        )
+        .await;
+
+        let started = Instant::now();
+        let details = run_probe(&host, "exec_probe").await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(details["killed"], json!(true), "{details}");
+        assert_eq!(details["code"], json!(-1), "{details}");
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "the host must not cut the call at its 5 s default; took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the child should die at its own 6 s timeout; took {elapsed:?}"
+        );
+    });
+}
+
+/// The `AbortController` / `AbortSignal` polyfill exposes the surface the
+/// upstream extension API uses.
+#[test]
+fn abort_controller_polyfill_matches_the_dom_subset() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        load(
+            &host,
+            r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "exec_probe",
+                    label: "exec probe",
+                    description: "probes the AbortSignal polyfill",
+                    parameters: { type: "object", properties: {} },
+                    execute: async () => {
+                        const controller = new AbortController();
+                        const fired = [];
+                        controller.signal.addEventListener("abort", () => fired.push("kept"));
+                        const removed = () => fired.push("removed");
+                        controller.signal.addEventListener("abort", removed);
+                        controller.signal.removeEventListener("abort", removed);
+                        controller.signal.onabort = () => fired.push("onabort");
+                        controller.abort("because");
+                        controller.abort(); // second abort is a no-op
+                        let thrown = null;
+                        try {
+                            controller.signal.throwIfAborted();
+                        } catch (error) {
+                            thrown = error;
+                        }
+                        const combined = AbortSignal.any([
+                            AbortSignal.abort("first"),
+                            new AbortController().signal,
+                        ]);
+                        return {
+                            content: [{ type: "text", text: "polyfill" }],
+                            details: {
+                                aborted: controller.signal.aborted,
+                                fired: fired,
+                                reason: controller.signal.reason,
+                                thrown: thrown,
+                                combinedAborted: combined.aborted,
+                                combinedReason: combined.reason,
+                                timeoutStatic: typeof AbortSignal.timeout,
+                            },
+                        };
+                    },
+                });
+            };
+            "#,
+        )
+        .await;
+
+        let details = run_probe(&host, "exec_probe").await;
+        assert_eq!(details["aborted"], json!(true));
+        assert_eq!(details["fired"], json!(["kept", "onabort"]));
+        assert_eq!(details["reason"], json!("because"));
+        assert_eq!(details["thrown"], json!("because"));
+        assert_eq!(details["combinedAborted"], json!(true));
+        assert_eq!(details["combinedReason"], json!("first"));
+        assert_eq!(details["timeoutStatic"], json!("undefined"));
+    });
+}
