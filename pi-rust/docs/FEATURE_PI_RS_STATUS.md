@@ -7297,3 +7297,17 @@ $ ... cargo clippy --workspace --all-targets --offline -- -D warnings
 
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只派发 1 路（LUM-1125）。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree d57999354 work/lum-1124` → tree `abc3eada7`（零冲突）。
+- 合并提交 `966435aef`（`Merge branch 'work/lum-1124' into feature/pi.rs`，父 `d57999354` +
+  工作提交 `51868d49c`），其 tree `abc3eada7` 与当时的 `work/lum-1124` **完全一致**。
+- `git push origin 966435aef:refs/heads/feature/pi.rs` → `d57999354..966435aef`；`work/lum-1124`
+  作为新分支一并推送。
+- `git diff --stat d57999354 966435aef` = 本轮 9 个文件（代码 8 + 本节文档 124 行，共 +1048 / −58），
+  无其他改动。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `d57999354`（LUM-1125 刚开工、工作分支尚未推送），因此这次
+  合并**没有覆盖任何在途工作**，也没留下合并债。
+- 本节定稿的这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`
+  （零冲突），推送后 `feature/pi.rs` 的 tree 与 `work/lum-1124` 保持一致。
