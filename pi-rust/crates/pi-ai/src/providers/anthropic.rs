@@ -53,6 +53,7 @@ use pi_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::json_parse::{parse_streaming_json, repair_json};
 use crate::stream::AssistantMessageEventStream;
 use crate::types::{SimpleStreamOptions, StreamError};
 use crate::StreamFn;
@@ -657,6 +658,10 @@ impl SseStream {
         if payload.is_empty() {
             return Ok(());
         }
+        // Upstream parses every frame with `parseJsonWithRepair`. Repairing
+        // once here is equivalent — `repair_json` is the identity on valid
+        // JSON — and keeps the per-event handlers from each retrying.
+        let payload = repair_json(&payload);
         match event_name.as_str() {
             "ping" => Ok(()),
             "error" => self.handle_error_event(&payload),
@@ -988,12 +993,7 @@ impl SseStream {
                 BlockKind::ToolUse(tc) => {
                     let id = tc.id.unwrap_or_default();
                     let name = tc.name.unwrap_or_default();
-                    let arguments = if tc.arguments.is_empty() {
-                        Value::Object(Default::default())
-                    } else {
-                        serde_json::from_str(&tc.arguments)
-                            .unwrap_or_else(|_| Value::String(tc.arguments.clone()))
-                    };
+                    let arguments = parse_streaming_json(Some(tc.arguments.as_str()));
                     content.push(Content::ToolCall(ToolCall { id, name, arguments }));
                 }
                 BlockKind::Text(t) => {

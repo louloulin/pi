@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod json_parse;
 pub mod models;
 pub mod providers;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,6 +19,10 @@ pub mod types;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
+pub use json_parse::{
+    close_partial_json, parse_json_with_repair, parse_streaming_json, parse_value_with_repair,
+    repair_json,
+};
 pub use models::Models;
 #[cfg(not(target_arch = "wasm32"))]
 pub use retry::{ProviderRetryPolicy, RetryStreamFn};
