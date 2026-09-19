@@ -187,8 +187,13 @@ impl AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let status_code = status.as_u16();
+            let hint = crate::retry::retry_hint_from_headers(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(classify_http_status(status_code, truncate_body(&body)));
+            return Err(classify_http_status(
+                status_code,
+                hint,
+                truncate_body(&body),
+            ));
         }
         let model_id = body.model.clone();
         let byte_stream = response.bytes_stream();
@@ -227,13 +232,12 @@ impl StreamFn for AnthropicProvider {
 /// tests share the same logic. Native-only — the wasm stub returns
 /// [`StreamError::Malformed`] before any HTTP code is involved.
 #[cfg(not(target_arch = "wasm32"))]
-fn classify_http_status(status: u16, body: String) -> StreamError {
-    match status {
-        401 | 403 => StreamError::Provider { status, body },
-        429 => StreamError::Provider { status, body },
-        500..=599 => StreamError::Provider { status, body },
-        _ => StreamError::Provider { status, body },
-    }
+fn classify_http_status(
+    status: u16,
+    hint: crate::types::ProviderRetryHint,
+    body: String,
+) -> StreamError {
+    StreamError::provider_with_hint(status, body, hint)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1403,10 +1407,15 @@ mod tests {
 
     #[test]
     fn classify_http_status_returns_provider_variant() {
-        match classify_http_status(401, "unauthorized".into()) {
-            StreamError::Provider { status, body } => {
+        let hint = crate::types::ProviderRetryHint {
+            retry_after_ms: Some(2_000),
+            should_retry: None,
+        };
+        match classify_http_status(401, hint, "unauthorized".into()) {
+            StreamError::Provider { status, body, hint } => {
                 assert_eq!(status, 401);
                 assert_eq!(body, "unauthorized");
+                assert_eq!(hint.retry_after_ms, Some(2_000));
             }
             other => panic!("expected Provider error, got {other:?}"),
         }

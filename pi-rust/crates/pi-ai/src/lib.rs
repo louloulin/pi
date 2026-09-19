@@ -10,6 +10,8 @@
 
 pub mod models;
 pub mod providers;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod retry;
 pub mod stream;
 pub mod types;
 
@@ -17,5 +19,7 @@ pub mod types;
 pub mod wasm;
 
 pub use models::Models;
+#[cfg(not(target_arch = "wasm32"))]
+pub use retry::{ProviderRetryPolicy, RetryStreamFn};
 pub use stream::{AssistantMessageEventStream, SharedStreamFn, StreamFn};
-pub use types::{AbortSignal, SimpleStreamOptions, StreamError};
+pub use types::{AbortSignal, ProviderRetryHint, SimpleStreamOptions, StreamError};

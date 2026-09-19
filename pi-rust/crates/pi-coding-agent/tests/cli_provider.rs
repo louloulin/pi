@@ -227,6 +227,130 @@ fn assert_request_path(base_url_var: &str, key_var: &str, model_arg: &str, expec
     );
 }
 
+/// Loopback server that accepts up to `max_requests` connections, reads
+/// each request head, and closes without responding. Every attempt
+/// therefore fails with a transport error, which is exactly the shape the
+/// provider retry loop exists to absorb.
+struct FlakyCapture {
+    addr: SocketAddr,
+    requests: Receiver<String>,
+}
+
+impl FlakyCapture {
+    fn spawn(max_requests: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for _ in 0..max_requests {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&chunk[..n]);
+                    if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if tx
+                    .send(String::from_utf8_lossy(&head).into_owned())
+                    .is_err()
+                {
+                    return;
+                }
+                // Dropping the stream closes it without a response.
+            }
+        });
+        Self { addr, requests: rx }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Every request head the child dialed, stopping at the first idle gap
+    /// (the child has already exited by the time this runs).
+    fn requests(&self) -> Vec<String> {
+        let mut heads = Vec::new();
+        while let Ok(head) = self.requests.recv_timeout(Duration::from_millis(1_500)) {
+            heads.push(head);
+        }
+        heads
+    }
+}
+
+/// Spawn `pi` against `capture` from a throwaway `$HOME` that holds
+/// `settings.json`.
+fn pi_with_user_settings(capture: &FlakyCapture, settings: Option<&str>) -> std::process::Output {
+    let home = tempfile::TempDir::with_prefix("pi-retry-home-").expect("tempdir");
+    if let Some(settings) = settings {
+        let agent_dir = home.path().join(".pi").join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("mkdir agent dir");
+        std::fs::write(agent_dir.join("settings.json"), settings).expect("write settings");
+    }
+    let sessions = tempfile::TempDir::with_prefix("pi-retry-session-").expect("tempdir");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pi"));
+    cmd.args(["--model", "anthropic/claude-sonnet-4-5", "--print", "hello"])
+        .arg("--session-dir")
+        .arg(sessions.path())
+        .env("HOME", home.path())
+        .env("ANTHROPIC_BASE_URL", capture.url())
+        .env("ANTHROPIC_API_KEY", "test-key");
+    for var in CREDENTIAL_VARS {
+        if var != "ANTHROPIC_API_KEY" {
+            cmd.env_remove(var);
+        }
+    }
+    for var in BASE_URL_VARS {
+        if var != "ANTHROPIC_BASE_URL" {
+            cmd.env_remove(var);
+        }
+    }
+    let output = cmd.output().expect("failed to spawn pi");
+    drop(home);
+    drop(sessions);
+    output
+}
+
+#[test]
+fn provider_retry_is_off_by_default() {
+    let capture = FlakyCapture::spawn(1);
+    let _ = pi_with_user_settings(&capture, None);
+
+    assert_eq!(
+        capture.requests().len(),
+        1,
+        "without `retry.provider` the CLI must not resent the failed request"
+    );
+}
+
+#[test]
+fn provider_retry_settings_retry_a_failed_request() {
+    let capture = FlakyCapture::spawn(3);
+    let _ = pi_with_user_settings(
+        &capture,
+        Some(r#"{"retry":{"provider":{"maxRetries":2,"maxRetryDelayMs":1000}}}"#),
+    );
+
+    let requests = capture.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "`retry.provider.maxRetries: 2` must resend twice before giving up"
+    );
+    assert!(
+        requests.iter().all(|head| head.contains("/v1/messages")),
+        "every attempt must be a real anthropic request: {requests:?}"
+    );
+}
+
 #[test]
 fn missing_anthropic_key_exits_78_and_names_the_env_var() {
     let output = pi(&["--model", "anthropic/claude-sonnet-4-5", "--print", "hello"]);

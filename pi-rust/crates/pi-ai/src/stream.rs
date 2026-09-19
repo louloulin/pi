@@ -39,3 +39,18 @@ pub trait StreamFn: Send + Sync {
 
 /// Convenience alias for an `Arc<dyn StreamFn>`.
 pub type SharedStreamFn = Arc<dyn StreamFn>;
+
+/// `Arc<T>` is itself a [`StreamFn`], so decorators such as
+/// [`crate::retry::RetryStreamFn`] can wrap a [`SharedStreamFn`] the same way
+/// they wrap a concrete adapter.
+#[async_trait]
+impl<T: StreamFn + ?Sized> StreamFn for Arc<T> {
+    async fn stream_simple(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        options: &SimpleStreamOptions,
+    ) -> Result<AssistantMessageEventStream, StreamError> {
+        (**self).stream_simple(model, ctx, options).await
+    }
+}

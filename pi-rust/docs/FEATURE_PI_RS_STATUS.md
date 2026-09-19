@@ -9452,3 +9452,159 @@ numstat 见本节末补记。
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-session` /
 `pi-coding-agent` 的 session 命令与本文档；`pi-agent-core` 留给 LUM-1141）。
 
+
+## LUM-1142 round — `pi-ai` 提供商请求重试层（`utils/provider-retry.ts` 移植）+ 槽位空出后晋升 LUM-1141
+
+本轮起点 `aa62b24d2`（LUM-1137 动手前的 `origin/feature/pi.rs`）。先落代码提交
+`37576a8b0`，再合入 `origin/feature/pi.rs @ 9d8844817`（LUM-1137 的 Stage 39
+keybindings 消费方：`app.rs` / `editor.rs` 走 `get_keybindings()`），合并提交
+`5170faacc`，最后是本轮文档提交。真实哈希与 numstat 见本节末补记。
+
+### 一、选型：为什么是 provider 请求重试
+
+盘点「上游有、Rust 侧没有」的 `pi-ai` 缺口，挑中 `packages/ai/src/utils/provider-retry.ts`
+（125 行）：
+
+- **缺口是硬的**：`pi-telemetry` 已经声明了 `pi.ai.retry` 事件，但 `pi-rust` 全局没有任何
+  重试实现——provider 遇到 429 / 5xx / 连接被掐，直接冒到 agent 循环，重试全靠人肉重发。
+- **接点是单点**：上游策略的输入是 `ProviderError {status, headers}`，在 Rust 侧正好落在
+  `StreamError::Provider` / `StreamError::Transport` 上；策略只需包在 `ProviderRouter` 的
+  adapter 外侧，四个 provider（anthropic / openai / openai-responses / google）一起受益。
+- **零串行区冲突**：只碰 `pi-ai` 与 `pi-coding-agent` 的 config / main / provider / tests，
+  不碰 `pi-tui/src/app.rs`、`pi-extensions/src/host.rs`，也不碰留给 LUM-1141 的
+  `pi-agent-core::agent_loop`。
+- **可离线验证**：退避 / 抖动 / 重试判定都是纯函数；再给 router 装一个脚本化 adapter，
+  重试、放弃、取消三条路径都能在进程内测完，另有真二进制的 end-to-end 用例。
+
+另一个候选 `packages/ai/src/utils/retry.ts`（agent 级 `retryAssistantCall`）**本轮不做**：
+它必须下沉进 `agent_loop`（LUM-1141 的同一文件），且要先移植那套错误文案正则分类器，见第四节。
+
+### 二、实现
+
+**1. `crates/pi-ai/src/retry.rs`（新增 761 行，`#[cfg(not(target_arch = "wasm32"))]`）**
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| `ProviderRetryPolicy` | `retry.rs:72` | `max_retries` + `max_retry_delay_ms`（`0` = 不限）；`DEFAULT` = 0 次重试 / 60_000ms，等价上游 `settings.retry.provider.maxRetries` 未定义 |
+| `is_retryable_provider_status` | `retry.rs:121` | `408 \| 409 \| 429 \| >=500`；`None`（无状态 = 传输失败）也算可重试 |
+| `is_retryable_provider_response` | `retry.rs:132` | `x-should-retry: true/false` 覆盖状态码判定 |
+| `is_retryable_stream_error` | `retry.rs:144` | `Transport` 可重试；`Malformed` / `Aborted` / `Io` 不重试 |
+| `provider_retry_backoff_ms` | `retry.rs:158` | 兜底退避 `min(0.5·2^n, 8) s`（含溢出保护） |
+| `apply_retry_jitter` | `retry.rs:167` | 乘 `[0.75, 1.0]`（上游 `1 - Math.random()*0.25`）；服务端给的延迟不抖动 |
+| `provider_retry_delay_ms` | `retry.rs:180` | `Retry-After-Ms` → 数字 `Retry-After`（秒）→ 兜底退避；超过 `max_retry_delay_ms` 返回 `None`（放弃） |
+| `retry_hint_from_headers` | `retry.rs:201` | 解析 `Retry-After-Ms` / `Retry-After` / `X-Should-Retry` 的唯一入口 |
+| `retry_provider_request` | `retry.rs:250` | abort 感知的循环：重试前与退避睡眠中都查 `AbortSignal`，取消即 `StreamError::Aborted` |
+| `sleep_or_abort` | `retry.rs:299` | 可被取消打断的睡眠 |
+| `RetryStreamFn` | `retry.rs:338` | 实现 `StreamFn` 的装饰器（`new` / `shared` / `policy`） |
+
+抖动不用 `rand`：时间种子的 splitmix64（`random_fraction`，`retry.rs:318`），零新依赖。
+
+**2. 错误面携带服务端重试建议**：`ProviderRetryHint { retry_after_ms, should_retry }`
+（`types.rs:158`）加入 `StreamError::Provider`，并加 `StreamError::provider` /
+`provider_with_hint`（`types.rs:202` / `types.rs:212`）两个构造器。四个 provider 在**消费
+body 之前**取响应头，避免 body 被读走后再也拿不到 header：
+`anthropic.rs:190`、`google.rs:246`、`openai.rs:139` + `:167`、`openai_responses.rs:187` + `:215`。
+anthropic / google 的 `classify_http_status` 改成直接走 `provider_with_hint`（原来的 match
+四个分支返回同一个变体，行为不变）。
+
+**3. `StreamFn for Arc<T>`**（`stream.rs:47`）：装饰器既能包具体 adapter，也能包
+`SharedStreamFn`，不必为 `dyn` 特判。
+
+**4. `pi-coding-agent` 接线**：`config.rs:183` `load_provider_retry_policy`（默认路径包装
+`config.rs:167`）只读 `retry.provider.maxRetries` / `retry.provider.maxRetryDelayMs`，坏值
+逐键告警回退；`provider.rs:228` `with_provider_retry` + `provider.rs:106` `adapt_retry`
+（策略未启用时**不包任何一层**，保证默认路径零开销与完全一致的行为）；`main.rs:68` 构造
+router 时应用。
+
+### 三、验证
+
+```
+$ cargo check --workspace --all-targets          # 干净（零 error / 零 unused）
+$ cargo clippy -p pi-ai -p pi-coding-agent --all-targets   # 零告警
+$ cargo test -p pi-ai                            # 80 + 10 + 10 通过（含 retry.rs 新增 17 个）
+$ cargo test -p pi-coding-agent --lib            # 245 通过（含 config 4 个 + provider 2 个新增）
+$ cargo test -p pi-coding-agent --test cli_provider   # 19 通过（含 2 个新增真二进制用例）
+$ cargo test --workspace                         # 1431 通过 / 0 失败（107 个测试二进制，合并态复测）
+```
+
+端到端（真 `pi` 二进制 + 回环捕获服务器，`tests/cli_provider.rs:234` `FlakyCapture`）：
+
+- `provider_retry_is_off_by_default`（`cli_provider.rs:323`）：不写 settings → 服务器只收到
+  **1** 次请求，证明默认策略没有引入任何新行为。
+- `provider_retry_settings_retry_a_failed_request`（`cli_provider.rs:335`）：`$HOME` 指向临时目录、
+  写入 `{"retry":{"provider":{"maxRetries":2,"maxRetryDelayMs":1000}}}` → 服务器收到 **3** 次
+  请求（首次 + 2 次重试），且每次都是真实的 `POST /v1/messages`。
+
+### 四、刻意未做 / 与上游的偏离
+
+1. **agent 级重试（`utils/retry.ts`）未移植**：它要改 `agent_loop`（LUM-1141 的地盘），
+   还需要那套错误文案分类器（`overloaded` / `rate.?limit` / `timed? out` / `billing` …）。
+   列为 frontier 第 2 项，**必须排在 LUM-1141 之后**（同一文件）。
+2. **`Retry-After` 的 HTTP-date 形式不解析**：上游对 `retry-after` 就是 `Number(...)`，
+   HTTP-date 同样退化成 `NaN` 而被忽略；本移植显式地只认数字（整数或小数秒），行为一致。
+3. **服务端要求延迟 > `max_retry_delay_ms` 时**：上游抛专门的
+   `Server requested Ns retry delay` 错误；本移植选择**停止重试并返回原始 provider 错误**
+   （调用方看到 429 与 body）。理由：Rust 侧没有对应错误变体，新增变体会牵动全部 match 点，
+   而「不冒睡超长」的语义一致。
+4. **`pi.ai.retry` 遥测未发射**：`pi-ai` 目前不依赖 `pi-telemetry`，上游该事件发在 agent 层；
+   等 agent 级重试移植时一并接。
+5. **默认策略 0 次重试**，所以合并前后行为完全一致——既有的 17 个 `cli_provider` 用例
+   原样通过就是这条的证据。
+
+### 五、合并与推送
+
+代码提交 `37576a8b0`（12 文件，1325+/38-），合并提交 `5170faacc`（第一父 `37576a8b0`、
+第二父 `9d8844817`），本节文档提交 `e8a5f2f2a`。`9d8844817` 是本轮提交的祖先，所以并入
+`feature/pi.rs` 是**快进、无 plumbing merge**；本轮文件与 LUM-1137 的 `pi-tui` 改动零交集，
+`git merge origin/feature/pi.rs` 无冲突。
+
+推送：`git push origin e8a5f2f2a:refs/heads/feature/pi.rs` → `9d8844817..e8a5f2f2a`（快进），
+`work/lum-1142` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查：两条 ref 都指向
+`e8a5f2f2a`。
+
+`git diff --numstat 9d8844817 37576a8b0`（本轮全部代码改动）：
+pi-rust/crates/pi-ai/src/lib.rs(+5/-1) pi-rust/crates/pi-ai/src/providers/anthropic.rs(+19/-10)
+pi-rust/crates/pi-ai/src/providers/google.rs(+19/-5) pi-rust/crates/pi-ai/src/providers/openai.rs(+12/-8)
+pi-rust/crates/pi-ai/src/providers/openai_responses.rs(+12/-8) pi-rust/crates/pi-ai/src/retry.rs(+761/-0)
+pi-rust/crates/pi-ai/src/stream.rs(+15/-0) pi-rust/crates/pi-ai/src/types.rs(+46/-1)
+pi-rust/crates/pi-coding-agent/src/config.rs(+159/-1) pi-rust/crates/pi-coding-agent/src/main.rs(+9/-2)
+pi-rust/crates/pi-coding-agent/src/provider.rs(+144/-2) pi-rust/crates/pi-coding-agent/tests/cli_provider.rs(+124/-0)
+
+合并态复测即第三节末行（`cargo test --workspace` 1431 通过 / 0 失败）——推送的 `e8a5f2f2a`
+与复测的树只差本节文档文字。
+
+### 六、派发与槽位
+
+本轮开工时 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`，
+**槽位满，不派发**（LUM-1141 维持 `backlog`）。推送完成后复查 `running = 2`（另一路收手），
+按 LUM-1140 定下的口径把 **LUM-1141 从 `backlog` 晋升为 `todo`**（会立即起跑），3 路重新填满。
+
+顺带记录环境事实：本轮构建期间根分区一度 100%（另两路工作树占 23G），为此清掉了
+`debug/incremental`、`debug/examples` 与 `/tmp/rustup-home` 下**已无活跃使用者的 1.85.0
+工具链**（1.4G；仓库未固定 rust-toolchain 版本，构建一律用 stable 1.98.1）；推送前另一路
+释放 17G，遂补跑全量 `cargo test --workspace`。`cargo fmt` 全量仍**不跑**（122 文件漂移，
+且会与刚改完的 `app.rs` / `editor.rs` 直接冲突），本轮只保证新代码的 rustfmt 口径。
+
+### 七、frontier（本轮更新）
+
+1. ~~`pi-ai` 提供商请求重试（`utils/provider-retry.ts`）~~ **本轮（LUM-1142）收口**：
+   `retry.rs` + `StreamError::Provider` 携带 hint + router 装饰器 + `settings.retry.provider`。
+2. **新入账：agent 级重试（`utils/retry.ts`）** —— 错误文案分类器 + `retryAssistantCall`
+   语义，落点在 `agent_loop`；**必须排在 LUM-1141 之后**（同一文件，避免并发写）。
+3. **P2 工具批次的事件流** = LUM-1141（Stage 40）：**本轮晋升 `todo`，已在跑**。
+4. **P2 取消语义对齐**（LUM-1139 记入，仍挂）：与第 3 项同属 `agent_loop`，必须排在 LUM-1141 之后。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要动 ratatui `Cell` 与
+   `app.rs` 写入路径；LUM-1137 本轮已合并（`9d8844817`），重新变为可动，但与任何在跑的
+   `app.rs` 任务必须串行。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择/渲染路径。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（`backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的；LUM-1137 已收手，现在可以启动。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档继续分叉（既有欠账）。
+10. **未移植的 `pi-ai` 上游模块**（下一批候选）：`utils/overflow.ts`（上下文溢出检测）、
+    `utils/estimate.ts`、`utils/json-parse.ts`，以及 bedrock / mistral / azure / vertex /
+    oauth / images 这些 provider 与 transport。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-ai` / `pi-coding-agent`
+的重试接线与本文档；`pi-agent-core` 留给 LUM-1141）。
