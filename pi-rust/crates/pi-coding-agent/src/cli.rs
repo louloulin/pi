@@ -78,19 +78,37 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Print the resolved version of pi + active providers.
-    Version,
+    Version {
+        /// Output format (`text` or `json`).
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        output: OutputFormat,
+    },
     /// Install a pi package (`npm:`, `git:`, local path, or HTTPS URL).
     Install {
         /// Package spec (see packages.md in the docs).
         spec: String,
+        /// Override the pi root used for the registry and install dir
+        /// (defaults to `$PI_HOME` or `~/.pi`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<std::path::PathBuf>,
     },
     /// Remove a pi package.
     Remove {
         /// Package spec.
         spec: String,
+        /// Override the pi root (defaults to `$PI_HOME` or `~/.pi`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<std::path::PathBuf>,
     },
     /// List installed pi packages.
-    List,
+    List {
+        /// Override the pi root (defaults to `$PI_HOME` or `~/.pi`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<std::path::PathBuf>,
+        /// Output format (`text` or `json`).
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        output: OutputFormat,
+    },
     /// Refresh the model catalog without changing installed packages.
     UpdateModels,
     /// Start an interactive session (the default when no subcommand
@@ -107,7 +125,11 @@ pub enum Command {
     Rpc,
     /// List built-in models — used by the `/model` slash command and
     /// the `--list-models` flag.
-    ListModels,
+    ListModels {
+        /// Output format (`text` or `json`).
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        output: OutputFormat,
+    },
     /// Session management subcommands (`list`, `show`, `export`,
     /// `migrate`). See [`SessionCommand`].
     Session {
