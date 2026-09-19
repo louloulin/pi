@@ -181,3 +181,31 @@ LUM-1048.
 Stage 13 stays `backlog` until the Stage 10 barrier closes, so at most three
 runs are ever in flight; `feature/pi.rs` is the integration branch for all of
 them.
+
+### Stage 13 — landed (LUM-1055 / LUM-1060-partial)
+`GoogleProvider` (streaming `streamGenerateContent?alt=sse`, Gemini 2.5
+model catalog, SSE fixtures, `google_faux` e2e) is on `feature/pi.rs`.
+Print mode's `pi-session` backend (LUM-1056) and the `pi-telemetry`
+crate (LUM-1057) remain open.
+
+### Stage 14 — CLI provider selection (LUM-1060)
+`ProviderRouter` (`pi-coding-agent/src/provider.rs`) replaces the
+hard-coded `FauxProvider` in print / RPC / interactive mode. It is a
+single `StreamFn` that dispatches on `model.provider` per call, so:
+
+* `--model anthropic/claude-sonnet-4-5` streams through
+  `AnthropicProvider`, `--model openai/gpt-4o-mini` through
+  `OpenAiProvider`, `--model google/gemini-2.5-flash` through
+  `GoogleProvider`;
+* TUI `/model` and RPC `setModel` can switch providers mid-session;
+* a remote model with no credential fails at startup with exit 78 and
+  the env var to set, instead of silently streaming from faux.
+
+Credential env vars mirror the TS upstream (`OPENAI_API_KEY`;
+`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_OAUTH_TOKEN`;
+`GEMINI_API_KEY`) plus optional `*_BASE_URL` overrides for gateways.
+The CLI catalog gains the three Gemini 2.5 entries that make the
+Stage 13 adapter reachable. Exit criterion: `crates/pi-coding-agent/tests/cli_provider.rs`
+proves each provider dials its own endpoint against a loopback capture
+server, and `cargo clippy --workspace --all-targets -- -D warnings` stays
+clean (one pre-existing `pi-ai` `while_let_loop` lint fixed).

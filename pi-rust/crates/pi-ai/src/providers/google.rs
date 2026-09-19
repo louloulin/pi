@@ -624,10 +624,7 @@ impl GoogleSseStream {
 
     fn feed(&mut self, bytes: &Bytes) -> Result<(), StreamError> {
         self.line_buffer.extend_from_slice(bytes);
-        loop {
-            let Some(end) = find_newline(&self.line_buffer) else {
-                break;
-            };
+        while let Some(end) = find_newline(&self.line_buffer) {
             let raw = self.line_buffer.drain(..end).collect::<Vec<_>>();
             // Drop the line terminator (`\n`, `\r\n`, or a stray `\r`).
             if !self.line_buffer.is_empty() {

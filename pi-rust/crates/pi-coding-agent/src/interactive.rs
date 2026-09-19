@@ -57,7 +57,10 @@ pub enum InteractiveExit {
 }
 
 /// Bundled options for [`run_interactive`].
-#[derive(Debug, Default)]
+///
+/// `Debug` and `Default` are implemented by hand because
+/// `Arc<dyn StreamFn>` implements neither; `Default` installs the faux
+/// provider so offline callers keep the pre-Stage-14 behaviour.
 pub struct InteractiveOptions {
     /// System prompt prepended to every turn.
     pub system_prompt: String,
@@ -74,11 +77,45 @@ pub struct InteractiveOptions {
     pub session_id: String,
     /// Initial prompt to submit on launch.
     pub initial_prompt: Option<String>,
+    /// Streaming adapter used for every turn. The `pi` binary passes a
+    /// [`ProviderRouter`](crate::provider::ProviderRouter) so `/model`
+    /// can switch the TUI between providers live.
+    pub stream_fn: SharedStreamFn,
+}
+
+impl std::fmt::Debug for InteractiveOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InteractiveOptions")
+            .field("system_prompt", &self.system_prompt)
+            .field("append_system_prompt", &self.append_system_prompt)
+            .field("model", &self.model)
+            .field("models", &self.models)
+            .field("session_log", &self.session_log)
+            .field("session_id", &self.session_id)
+            .field("initial_prompt", &self.initial_prompt)
+            .field("stream_fn", &"<dyn StreamFn>")
+            .finish()
+    }
+}
+
+impl Default for InteractiveOptions {
+    fn default() -> Self {
+        Self {
+            system_prompt: String::new(),
+            append_system_prompt: Vec::new(),
+            model: None,
+            models: Models::new(),
+            session_log: None,
+            session_id: String::new(),
+            initial_prompt: None,
+            stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
+        }
+    }
 }
 
 /// Entry point invoked from `main`.
 pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<InteractiveExit> {
-    let stream_fn: SharedStreamFn = Arc::new(FauxProvider::default());
+    let stream_fn: SharedStreamFn = options.stream_fn.clone();
     let resolved_model = options
         .model
         .clone()

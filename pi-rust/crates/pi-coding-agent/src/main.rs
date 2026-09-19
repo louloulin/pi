@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use clap::Parser;
 use pi_ai::models::Models;
-use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
 use pi_coding_agent::file_processor::expand_prompt;
 use pi_coding_agent::interactive::{run_interactive, InteractiveOptions};
 use pi_coding_agent::packages::{commands as package_commands, PackageCommand};
 use pi_coding_agent::print_mode::{run_print_mode, PrintModeOptions};
+use pi_coding_agent::provider::ProviderRouter;
 use pi_coding_agent::session_log::SessionLog;
 use pi_protocol::{Api, Model, ProviderId};
 
@@ -45,6 +45,18 @@ fn main() -> ExitCode {
     let resolved_model = model_override
         .clone()
         .unwrap_or_else(|| default_model(&models));
+
+    // One router per process: it dispatches on `model.provider` at stream
+    // time, so print / RPC / interactive mode all reach the real OpenAI /
+    // Anthropic / Google adapters and `/model` + `setModel` can switch
+    // providers mid-session. Fail fast when the selected model's provider
+    // has no credential instead of silently streaming from the faux one.
+    let router = ProviderRouter::from_env();
+    if let Err(err) = router.require(&resolved_model) {
+        eprintln!("pi: {err}");
+        return ExitCode::from(err.exit_code());
+    }
+    let stream_fn: SharedStreamFn = Arc::new(router);
 
     let session_dir = cli.session_dir.clone().unwrap_or_else(default_session_dir);
     let session_id = cli.resume.clone().unwrap_or_else(new_session_id);
@@ -88,6 +100,7 @@ fn main() -> ExitCode {
                 session_log,
                 session_id: session_id.clone(),
                 initial_prompt,
+                stream_fn: stream_fn.clone(),
             };
             let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -138,7 +151,7 @@ fn main() -> ExitCode {
             let options = PrintModeOptions {
                 prompt: expanded.text,
                 model: resolved_model,
-                stream_fn: SharedStreamFn::from(Arc::new(FauxProvider::default()) as Arc<dyn pi_ai::stream::StreamFn>),
+                stream_fn,
                 system_prompt,
                 session: session_target,
                 session_dir,
@@ -160,9 +173,6 @@ fn main() -> ExitCode {
         ModeTarget::Rpc => {
             // Headless JSON-RPC 2.0 over stdio. No TUI / crossterm here:
             // stdin and stdout are the transport.
-            let stream_fn = SharedStreamFn::from(
-                Arc::new(FauxProvider::default()) as Arc<dyn pi_ai::stream::StreamFn>,
-            );
             let options = pi_coding_agent::rpc::RpcServerOptions {
                 model: resolved_model,
                 models,
@@ -309,11 +319,42 @@ fn build_default_models() -> Models {
         context_window: 200_000,
         max_output_tokens: 8_192,
     };
+    // Google entries match the ids the Stage 13 `GoogleProvider` fixture
+    // tests use (`crates/pi-ai/tests/google.rs`); previously the adapter
+    // existed but no model selected it, so it was unreachable from the CLI.
+    let google_pro = Model {
+        provider: ProviderId::new("google"),
+        id: "gemini-2.5-pro".into(),
+        api: Api::GoogleGenerativeAi,
+        label: Some("Gemini 2.5 Pro".into()),
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    };
+    let google_flash = Model {
+        provider: ProviderId::new("google"),
+        id: "gemini-2.5-flash".into(),
+        api: Api::GoogleGenerativeAi,
+        label: Some("Gemini 2.5 Flash".into()),
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    };
+    let google_flash_lite = Model {
+        provider: ProviderId::new("google"),
+        id: "gemini-2.5-flash-lite".into(),
+        api: Api::GoogleGenerativeAi,
+        label: Some("Gemini 2.5 Flash Lite".into()),
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    };
     models.set_provider(ProviderId::new("faux"), vec![faux]);
     models.set_provider(ProviderId::new("openai"), vec![openai]);
     models.set_provider(
         ProviderId::new("anthropic"),
         vec![anthropic_sonnet, anthropic_opus, anthropic_haiku],
+    );
+    models.set_provider(
+        ProviderId::new("google"),
+        vec![google_pro, google_flash, google_flash_lite],
     );
     models
 }

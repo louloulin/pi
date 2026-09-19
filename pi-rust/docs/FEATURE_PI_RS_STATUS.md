@@ -1867,3 +1867,98 @@ f693264d4dd0a897012d32653bdcfc67b6dbce23
 The credential-helper lock warning (`unable to get credential storage
 lock`) is the same benign noise documented in LUM-1039; the push itself
 succeeds.
+
+## LUM-1060 round — Stage 14: real CLI provider selection
+
+LUM-1060 (2026-09-19 11:00 Asia/Shanghai, same autopilot template as
+LUM-982 / LUM-1011…LUM-1059) looked at the frontier after Stage 13 and
+found a functional hole, not another bookkeeping gap: **the CLI could not
+reach any real provider**. `main.rs` hard-coded
+`SharedStreamFn::from(Arc::new(FauxProvider::default()))` in print, RPC
+and interactive mode, so `pi --model anthropic/claude-sonnet-4-5` still
+streamed `(faux) …`, and the Stage 7 / Stage 13 adapters were dead code
+from the binary's point of view. The same bug made TUI `/model` and RPC
+`setModel` cosmetic — they swapped the model descriptor while the
+transport stayed faux. No open sub-issue covered this (LUM-1052's scope
+was the package manager, not provider selection), so this round
+implemented it instead of dispatching a fourth task.
+
+### Change — `ProviderRouter` (Stage 14)
+
+New `pi-rust/crates/pi-coding-agent/src/provider.rs` (+ ~420 LOC with
+tests) and four minimal edits:
+
+| File | Change |
+|------|--------|
+| `crates/pi-coding-agent/src/provider.rs` | **new** — `ProviderRouter: StreamFn` + `ProviderError`, env-driven adapter construction |
+| `crates/pi-coding-agent/src/main.rs` | build one router per process, validate the resolved model once, pass it to all three modes; catalog gains the three Gemini 2.5 entries |
+| `crates/pi-coding-agent/src/interactive.rs` | `InteractiveOptions::stream_fn` replaces the internal `FauxProvider` (hand-written `Debug` / `Default` for the trait object) |
+| `crates/pi-coding-agent/src/lib.rs` | export `provider::{ProviderError, ProviderRouter, api_key_env_vars, base_url_env_vars}` |
+| `crates/pi-coding-agent/tests/cli_provider.rs` | **new** — 9 process-level tests |
+| `crates/pi-ai/src/providers/google.rs` | fix the pre-existing `while_let_loop` clippy 1.98 error (one `loop`→`while let`) |
+
+`ProviderRouter` dispatches **per call on `model.provider`**, not per
+process, which is what makes `/model` and `setModel` work across
+providers. Adapters are registered from the environment:
+
+| provider | credential env vars (priority order) | adapter |
+|----------|--------------------------------------|---------|
+| `faux` | — (always registered) | `FauxProvider` |
+| `openai` | `OPENAI_API_KEY` | `OpenAiProvider` |
+| `anthropic` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN` | `AnthropicProvider` |
+| `google` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | `GoogleProvider` |
+
+Names mirror `packages/ai/src/env-api-keys.ts`; `GOOGLE_API_KEY` is a
+documented convenience fallback. Each adapter also honours an optional
+`OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GEMINI_BASE_URL` (or
+`GOOGLE_BASE_URL`) override, which is what the tests use and what makes
+local gateways usable without a catalog change.
+
+`main.rs` calls `router.require(&resolved_model)` before entering any
+mode, so a remote model with no credential exits `78` (`EX_CONFIG`) and
+prints the exact env var to set instead of quietly using faux.
+
+### Verification (native, on `feature/pi.rs` + this round)
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo test     --workspace                                       # 323 / 323 pass
+```
+
+323 tests vs 279 at LUM-1059 — the delta is the Stage 13 Google provider
+suite (merged by the concurrent LUM-1054 round) plus this round's
+`provider` unit tests (9) and `cli_provider` integration tests (9).
+
+`cli_provider.rs` proves the wiring two ways without any network or real
+key:
+
+1. **Configuration** — `--model anthropic/…` / `openai/…` / `google/…`
+   with the credential removed exits 78 and names the env var; the
+   keyless default still prints `(faux) hello`.
+2. **Wire** — with the key set and `*_BASE_URL` pointed at a loopback
+   capture server, the binary issues the provider-specific request:
+   `POST /v1/messages` (Anthropic, also via `ANTHROPIC_AUTH_TOKEN`),
+   `POST /chat/completions` (OpenAI),
+   `POST /models/gemini-2.5-flash:streamGenerateContent` (Google).
+   Before this round all three printed a faux reply without dialing.
+
+`pi list-models` now lists `google/gemini-2.5-pro`, `gemini-2.5-flash`
+and `gemini-2.5-flash-lite`.
+
+### Remaining gaps (unchanged scope, next candidates)
+
+- `pi-telemetry` crate (LUM-1057, still `todo`) — the last `packages/*`
+  without a Rust counterpart.
+- Print mode on the `pi-session` SQLite store (LUM-1056, `in_progress`).
+- No Bedrock / Azure / Cohere adapters; `ProviderRouter` reports them as
+  unsupported rather than silently degrading to faux.
+- The catalog is still inline in `main.rs::build_default_models`; the
+  upstream loads it from JSON.
+
+### Push status
+
+This branch (`agent/devbox1/lum-1060`) is cut from
+`origin/feature/pi.rs` at `bf25d926d` and merged back into
+`feature/pi.rs` before pushing, so the integration branch and GitHub
+carry the Stage 14 commit.
