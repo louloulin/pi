@@ -14,7 +14,10 @@
 //!   loaded by [`load_ui_settings`];
 //! * the provider-request retry budget (`retry.provider.maxRetries`,
 //!   `retry.provider.maxRetryDelayMs`) loaded by
-//!   [`load_provider_retry_policy`].
+//!   [`load_provider_retry_policy`];
+//! * the agent-level retry budget (`retry.enabled`, `retry.maxRetries`,
+//!   `retry.baseDelayMs`, `retry.maxAgentDelayMs`) loaded by
+//!   [`load_agent_retry_policy`].
 //!
 //! Writes go through [`save_user_setting`], which only ever touches the
 //! **user** file: upstream's `setTheme` / `setAutoCompact` /
@@ -31,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use pi_agent_core::{RetryPolicy as AgentRetryPolicy, DEFAULT_MAX_AGENT_RETRY_DELAY_MS};
 use pi_ai::ProviderRetryPolicy;
 
 use crate::compaction::{CompactionSettings, DEFAULT_COMPACTION_SETTINGS};
@@ -217,6 +221,98 @@ pub fn load_provider_retry_policy(sources: &ConfigSources) -> ProviderRetryPolic
     };
 
     ProviderRetryPolicy::with_max_retry_delay_ms(max_retries, max_retry_delay_ms)
+}
+
+/// Load the agent-level retry policy from the default locations under the
+/// current working directory.
+pub fn load_agent_retry_policy_default() -> AgentRetryPolicy {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_agent_retry_policy(&ConfigSources::discover(&cwd))
+}
+
+/// Load the agent-level retry policy from `sources`, project over user.
+///
+/// Mirrors upstream `SettingsManager.getRetrySettings()`
+/// (`core/settings-manager.ts:915-932`): `retry.enabled`,
+/// `retry.maxRetries`, `retry.baseDelayMs` and `retry.maxAgentDelayMs`, with
+/// `enabled` defaulting to `true`. The nested `retry.provider` object belongs
+/// to the provider request layer and is read by
+/// [`load_provider_retry_policy`] instead — the two budgets are independent,
+/// exactly like upstream.
+///
+/// Every problem degrades to the default for the affected key and warns on
+/// stderr, like the other loaders in this module.
+pub fn load_agent_retry_policy(sources: &ConfigSources) -> AgentRetryPolicy {
+    let defaults = AgentRetryPolicy::default();
+    let merged = merged_settings(sources);
+    let retry = merged.get("retry").and_then(Value::as_object);
+
+    AgentRetryPolicy {
+        enabled: read_agent_retry_bool(retry, "enabled", defaults.enabled),
+        max_retries: read_agent_retry_u32(retry, "maxRetries", defaults.max_retries),
+        base_delay_ms: read_agent_retry_u64(retry, "baseDelayMs", defaults.base_delay_ms),
+        // Absent means "no explicit cap": the retry loop applies
+        // `DEFAULT_MAX_AGENT_RETRY_DELAY_MS` itself, like upstream's
+        // `policy.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS`.
+        max_agent_delay_ms: retry
+            .and_then(|retry| retry.get("maxAgentDelayMs"))
+            .map(|value| match value.as_u64() {
+                Some(raw) => raw,
+                None => {
+                    warn(&format!(
+                        "retry.maxAgentDelayMs must be a non-negative integer (got {value}); \
+                         using {DEFAULT_MAX_AGENT_RETRY_DELAY_MS}"
+                    ));
+                    DEFAULT_MAX_AGENT_RETRY_DELAY_MS
+                }
+            }),
+    }
+}
+
+/// Read the `retry.enabled` toggle, warning on a malformed value.
+fn read_agent_retry_bool(retry: Option<&Map<String, Value>>, key: &str, default: bool) -> bool {
+    match retry.and_then(|retry| retry.get(key)) {
+        None => default,
+        Some(Value::Bool(value)) => *value,
+        Some(other) => {
+            warn(&format!(
+                "retry.{key} must be a boolean (got {}); using {default}",
+                json_kind(other)
+            ));
+            default
+        }
+    }
+}
+
+/// Read one non-negative integer `retry.*` key, warning on a malformed value.
+fn read_agent_retry_u64(retry: Option<&Map<String, Value>>, key: &str, default: u64) -> u64 {
+    match retry.and_then(|retry| retry.get(key)) {
+        None => default,
+        Some(value) => match value.as_u64() {
+            Some(raw) => raw,
+            None => {
+                warn(&format!(
+                    "retry.{key} must be a non-negative integer (got {value}); using {default}"
+                ));
+                default
+            }
+        },
+    }
+}
+
+/// Read the `retry.maxRetries` attempt budget. Anything above `u32::MAX` is
+/// malformed, so the default applies instead of a wrapped count.
+fn read_agent_retry_u32(retry: Option<&Map<String, Value>>, key: &str, default: u32) -> u32 {
+    let raw = read_agent_retry_u64(retry, key, u64::from(default));
+    match u32::try_from(raw) {
+        Ok(raw) => raw,
+        Err(_) => {
+            warn(&format!(
+                "retry.{key} must be a non-negative integer (got {raw}); using {default}"
+            ));
+            default
+        }
+    }
 }
 
 /// Persist one setting into the **user** settings file, creating it when
@@ -511,6 +607,14 @@ mod tests {
         })
     }
 
+    /// Load the agent-level retry policy for a test's user / project pair.
+    fn agent_retry_policy(user: Option<&Path>, project: Option<&Path>) -> AgentRetryPolicy {
+        load_agent_retry_policy(&ConfigSources {
+            user: user.map(Path::to_path_buf),
+            project: project.map(Path::to_path_buf),
+        })
+    }
+
     #[test]
     fn missing_files_yield_defaults() {
         assert_eq!(settings(None, None), DEFAULT_COMPACTION_SETTINGS);
@@ -674,6 +778,101 @@ mod tests {
             project: None,
         });
         assert_eq!(settings, UiSettings::default());
+    }
+
+    #[test]
+    fn agent_retry_defaults_match_upstream_settings() {
+        let policy = agent_retry_policy(None, None);
+        assert_eq!(
+            policy,
+            AgentRetryPolicy::default(),
+            "missing files leave the agent retry loop at upstream's defaults"
+        );
+        assert!(policy.enabled, "`retry.enabled ?? true`");
+        assert_eq!(policy.max_retries, 3);
+        assert_eq!(policy.base_delay_ms, 2_000);
+        assert_eq!(
+            policy.max_agent_delay_ms, None,
+            "an absent cap is resolved by the retry loop, not the loader"
+        );
+    }
+
+    #[test]
+    fn agent_retry_slice_is_read_project_over_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"retry":{"maxRetries":5,"baseDelayMs":500,"maxAgentDelayMs":1000}}"#,
+        );
+        let project = write(dir.path(), "project.json", r#"{"retry":{"maxRetries":1}}"#);
+
+        let resolved = agent_retry_policy(Some(&user), Some(&project));
+        assert_eq!(resolved.max_retries, 1, "project wins for maxRetries");
+        assert_eq!(
+            resolved.base_delay_ms, 500,
+            "the untouched user key falls through"
+        );
+        assert_eq!(resolved.max_agent_delay_ms, Some(1_000));
+        assert!(resolved.enabled);
+    }
+
+    #[test]
+    fn agent_retry_can_be_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(dir.path(), "user.json", r#"{"retry":{"enabled":false}}"#);
+        let resolved = agent_retry_policy(Some(&user), None);
+        assert!(!resolved.enabled);
+        // The other keys keep their upstream defaults.
+        assert_eq!(resolved.max_retries, 3);
+        assert_eq!(resolved.base_delay_ms, 2_000);
+    }
+
+    #[test]
+    fn malformed_agent_retry_values_fall_back_per_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"retry":{"enabled":"yes","maxRetries":-1,"baseDelayMs":"soon","maxAgentDelayMs":true}}"#,
+        );
+        let resolved = agent_retry_policy(Some(&user), None);
+        // Every malformed key falls back to its default; a bad explicit cap
+        // keeps the effective 60 s cap instead of reporting "unset".
+        assert_eq!(
+            resolved,
+            AgentRetryPolicy {
+                max_agent_delay_ms: Some(DEFAULT_MAX_AGENT_RETRY_DELAY_MS),
+                ..AgentRetryPolicy::default()
+            }
+        );
+
+        // A zero cap is valid and disables the backoff (upstream).
+        let zeroed = write(
+            dir.path(),
+            "zeroed.json",
+            r#"{"retry":{"baseDelayMs":0,"maxAgentDelayMs":0}}"#,
+        );
+        let resolved = agent_retry_policy(Some(&zeroed), None);
+        assert_eq!(resolved.base_delay_ms, 0);
+        assert_eq!(resolved.max_agent_delay_ms, Some(0));
+    }
+
+    #[test]
+    fn provider_retry_keys_do_not_change_the_agent_budget() {
+        // The inverse of `agent_level_retry_keys_do_not_turn_on_provider_retrying`:
+        // `retry.provider` is the provider request layer's object, so the
+        // agent-level loop keeps its defaults.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"retry":{"provider":{"maxRetries":9,"maxRetryDelayMs":1}}}"#,
+        );
+        assert_eq!(
+            agent_retry_policy(Some(&user), None),
+            AgentRetryPolicy::default()
+        );
     }
 
     #[test]

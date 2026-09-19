@@ -6,6 +6,7 @@ use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{Context, Message, Model, ToolDefinition, ToolExecutionMode};
 use pi_telemetry::TelemetryContext;
 
+use crate::retry::RetryPolicy;
 use crate::tools::ToolExecutor;
 
 /// Runtime configuration that is fixed for the lifetime of an [`Agent`](crate::Agent).
@@ -39,6 +40,19 @@ pub struct AgentConfig {
     /// each provider call emits `pi.ai.request` and each tool call emits
     /// `pi.harness.tool`; see [`crate::telemetry`] for the vocabulary.
     pub telemetry: Option<Arc<dyn TelemetryContext>>,
+    /// Agent-level retry budget for the assistant call.
+    ///
+    /// Mirrors `settings.retry` in the TypeScript build: when enabled and a
+    /// provider attempt fails with a transient error (429/5xx, transport
+    /// drop, premature stream ending — see
+    /// [`is_retryable_error_message`](crate::is_retryable_error_message)), the
+    /// loop retries the assistant call with exponential backoff, up to
+    /// `max_retries` times. Quota / billing exhaustion is never retried.
+    ///
+    /// [`RetryPolicy::default`] holds the upstream defaults (enabled, 3
+    /// retries, 2 s base, 60 s cap); [`RetryPolicy::disabled`] turns the loop
+    /// into a passthrough.
+    pub retry: RetryPolicy,
 }
 
 impl AgentConfig {

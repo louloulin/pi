@@ -105,6 +105,7 @@ async fn project_resources_reach_the_model_request() {
         output_format: OutputFormat::Text,
         tool_executor: default_executor(),
         extensions: Arc::new(ExtensionRuntime::empty()),
+        retry: pi_agent_core::RetryPolicy::disabled(),
     };
     let result = run_print_mode(options).await.expect("run");
     assert_eq!(result.turns, 1);

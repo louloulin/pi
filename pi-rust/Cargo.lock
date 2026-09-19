@@ -1012,6 +1012,7 @@ dependencies = [
  "pi-ai",
  "pi-protocol",
  "pi-telemetry",
+ "regex",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

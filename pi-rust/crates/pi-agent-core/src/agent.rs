@@ -12,6 +12,7 @@ use crate::agent_loop::{AgentLoop, EventObserver, TurnOutcome};
 use crate::events::AgentEvent;
 use crate::hooks::{AgentHookAdapter, PrepareHookFn, ShouldStopHookFn};
 use crate::queue::{MessageQueue, QueueMode};
+use crate::retry::RetryPolicy;
 use crate::state::{AgentConfig, AgentState};
 use crate::tools::ToolExecutor;
 
@@ -44,6 +45,10 @@ pub struct AgentOptions {
     /// Optional telemetry context. When set, the loop emits one span per run,
     /// turn, provider request and tool execution. `None` records nothing.
     pub telemetry: Option<Arc<dyn TelemetryContext>>,
+    /// Agent-level retry budget for the assistant call. Defaults to
+    /// [`RetryPolicy::default`] — the upstream `settings.retry` defaults
+    /// (enabled, 3 retries, 2 s base, 60 s cap).
+    pub retry: RetryPolicy,
 }
 
 impl std::fmt::Debug for AgentOptions {
@@ -66,6 +71,7 @@ impl std::fmt::Debug for AgentOptions {
             )
             .field("tool_execution", &self.tool_execution)
             .field("telemetry", &self.telemetry.as_ref().map(|_| "…"))
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -82,7 +88,17 @@ impl AgentOptions {
             tool_executor: None,
             tool_execution: ToolExecutionMode::Parallel,
             telemetry: None,
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// Builder-style setter for [`retry`](Self::retry).
+    ///
+    /// [`RetryPolicy::disabled`] turns the agent-level retry loop off,
+    /// matching `settings.retry.enabled: false` upstream.
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Builder-style setter for [`telemetry`](Self::telemetry).
@@ -157,6 +173,7 @@ impl Agent {
             tool_executor: options.tool_executor.clone(),
             tool_execution: options.tool_execution,
             telemetry: options.telemetry.clone(),
+            retry: options.retry,
         };
         let hooks = options.hook_adapter();
         Self {

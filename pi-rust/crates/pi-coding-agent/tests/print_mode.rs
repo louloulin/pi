@@ -69,6 +69,9 @@ fn build_options(
         output_format,
         tool_executor: default_executor(),
         extensions: Arc::new(ExtensionRuntime::empty()),
+        // Faux streams never fail transiently; keep the retry loop out of
+        // the way so every scripted turn is exactly one stream call.
+        retry: pi_agent_core::RetryPolicy::disabled(),
     };
     (dir, options)
 }
@@ -230,6 +233,7 @@ fn session_options(
         output_format: OutputFormat::Text,
         tool_executor: default_executor(),
         extensions: Arc::new(ExtensionRuntime::empty()),
+        retry: pi_agent_core::RetryPolicy::disabled(),
     }
 }
 
