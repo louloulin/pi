@@ -134,7 +134,12 @@ async fn spawn_server() -> String {
                     .map(|(_, body)| body.to_string())
                     .unwrap_or_default();
                 let response = match path.as_str() {
-                    "/missing" => http_response(404, "Not Found", "application/json", r#"{"error":"not found"}"#),
+                    "/missing" => http_response(
+                        404,
+                        "Not Found",
+                        "application/json",
+                        r#"{"error":"not found"}"#,
+                    ),
                     "/echo" => http_response(200, "OK", "text/plain; charset=utf-8", &body),
                     "/slow" => {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

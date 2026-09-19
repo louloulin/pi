@@ -1534,10 +1534,7 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 
 /// Body of the `host_fetch` import: perform the request and return the JSON
 /// envelope. Never rejects, so the shim always owns the JS error object.
-async fn host_fetch_impl(
-    bridge: &ExecBridge,
-    request_json: &str,
-) -> rquickjs_core::Result<String> {
+async fn host_fetch_impl(bridge: &ExecBridge, request_json: &str) -> rquickjs_core::Result<String> {
     let request: FetchRequest = match serde_json::from_str(request_json) {
         Ok(request) => request,
         Err(error) => {
