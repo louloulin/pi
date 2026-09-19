@@ -5203,3 +5203,67 @@ $ cargo test   --workspace --no-fail-fast --offline               # 见下
 
 `work/lum-1097` → `origin/feature/pi.rs`（非 force）。回滚面：只碰 `pi-tui` 的 selector 渲染与
 re-export，`Selector` 的构造 / 过滤 / 键位行为不变，可整轮 revert。
+
+## LUM-1098 round — 核验 `feature/pi.rs` + 合并 Stage 27 自动压缩（work/lum-1093）+ 派发 LUM-1083 根因修复
+
+本轮（autopilot，2026-09-19 19:20 CST 触发）核验 `feature/pi.rs`，发现**已交付但从未合入**的
+Stage 27（LUM-1093 已在 `in_review`）仍停在 `work/lum-1093` 分支上，于是本轮把它合并进
+`feature/pi.rs` 并推送；同时把 frontier 上唯一的进程级崩溃（LUM-1083）做了根因收敛并放行。
+
+### 一、核验与合并
+
+- 开工 `origin/feature/pi.rs = fff3a77e0`（LUM-1097 协调轮，含 `pi-tui` SelectList 描述列对齐）。
+- `work/lum-1093` 基于 `2830b8682`（LUM-1095），其 diff 里除 Stage 27 真实改动外，还包含
+  LUM-1096 / LUM-1097 之后的「落后项」；`git merge --no-ff` **零冲突**（两轮文件不重叠：
+  Stage 27 占 `config.rs` / `interactive.rs` / `main.rs` / `app.rs`，LUM-1097 只占
+  `selector.rs` / `lib.rs`，而 `lib.rs` 的两处追加可自动合并）。
+- 合并提交 `3bb09910e`，已推送 `feature/pi.rs`（`fff3a77e0..3bb09910e`，非 force）。
+  Stage 27 内容：`config.rs` 读 `~/.pi/agent/settings.json` + `.pi/settings.json`（项目覆盖用户）
+  的 `compaction` 切片、`interactive.rs` 回合结束后按 `should_compact` 触发、`main.rs` 接线、
+  `pi-tui/src/app.rs` 相应透传。
+- `Multica` 侧：`multica daemon status` 开工时 `running_task_count = 2`（本协调 run + LUM-1088），
+  因此本轮**有 1 个空槽**；LUM-1083 由 `backlog` 提升为 `todo`（第 3 槽），并在其描述追加
+  本轮实测证据（见下）。
+
+### 二、验证（合并结果，native，复用已完成轮次的 `target` 缓存）
+
+```
+$ cargo check   --workspace --all-targets --offline                 # 14.5s，0 errors
+$ cargo clippy  --workspace --all-targets --offline -- -D warnings   # 0 warnings
+$ cargo test    --workspace --no-fail-fast --offline                 # 835 passed / 2 failed
+```
+
+2 个失败全部是 LUM-1083 的概率性扩展宿主崩溃（`pi-coding-agent --test cli_tools` /
+`--test rpc`），单独重跑即通过。`-p pi-coding-agent` 单独跑 218 + 全绿。
+
+### 三、LUM-1083 根因收敛（本轮新增证据）
+
+LUM-1097 轮记录的「建议 0.9 → 0.14 迁移」本轮做了**反证**，并把根因锁到 host 关闭路径：
+
+1. **复现率**：把 `cargo test -p pi-coding-agent --test rpc --offline` 连跑 12 次，
+   **5/12 失败**（load average ≈ 11~16，与 issue 里「高负载下 2/6」一致）。
+2. **`event-listener` 版本不是原因**：`cargo update -p event-listener --precise 5.3.1`
+   （5.4.2 重写了 `intrusive.rs`）后连跑 20 次，**6/20 失败**，且 panic 从
+   `event-listener-5.4.2/src/intrusive.rs` 平移到 `event-listener-5.3.1/src/std.rs:228`
+   （同一条 `attempt to subtract with overflow`）→ 换版本只是换了个实现暴露同一处计数下溢。
+   该实验已 `git checkout -- pi-rust/Cargo.lock` 完全回滚，未进提交。
+3. **真正的可疑点**：`pi-rust/crates/pi-extensions/src/host.rs:384` 的
+   `tokio::spawn(runtime.drive());` —— `JoinHandle` 被**丢弃**，`Inner`（持有
+   `AsyncRuntime` / `AsyncContext`）**没有 `Drop` / shutdown 握手**。进程退出（RPC 立即 EOF
+   或 print 结束）时，tokio 运行时拆解会 drop 掉仍在驱动 QuickJS promise/job queue 的
+   driver 任务，与 `AsyncContext` / `LockArc`（`async-lock` semaphore）的析构竞争；下溢的
+   `Event::notified` 正是 async-lock 的 `LockArc` 路径。这与 issue 里
+   「`--no-extensions` 连跑 14 次 0 abort」的对照完全吻合（不开扩展就不会建这个 runtime）。
+4. 由此，0.9 → 0.14 迁移是**不必要的高风险改动**（0.10+ 已移除 `futures` / `parallel`
+   feature，`AsyncRuntime`/`AsyncContext` 需整体重写 host.rs 1305 行）；更小的修法是给
+   `JsExtensionHost` 加显式 shutdown（持有并 `abort` / `await` driver 任务后再 drop context），
+   或在 `Inner::drop` 里做顺序收口。LUM-1083 的验收（连跑 20 次 rpc 无 abort）本轮已具备
+   可复现的本地判定条件。
+
+### 四、frontier
+
+- LUM-1083：**已放行**（`backlog` → `todo`，第 3 槽），描述已补本轮证据。
+- LUM-1088（项目信任门接扩展加载）：仍在途，占扩展加载路径。
+- LUM-1090：`--rpc` NDJSON/stdio 与 `pi-client` 带帧 socket 传输层不同，**前提不成立**的结论
+  维持，建议重写定界或 `wontfix`。
+- 其余（主题系统 / provider 家族 / `.wasm` 宿主）体量大，仍不作为单轮 autopilot 目标。
