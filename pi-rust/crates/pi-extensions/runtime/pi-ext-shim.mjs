@@ -2598,19 +2598,24 @@ const __pi_crypto_module = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// `node:zlib` — the zstd family plus `crc32`, the subset the upstream repo
-// actually calls. `pi-ai` reads `process.getBuiltinModule("node:zlib")` to
-// zstd-compress Codex request bodies (`packages/ai/src/api/openai-codex-responses.ts`),
+// `node:zlib` — the subset the upstream repo actually calls, plus the raw
+// variants that sit under it. `pi-ai` reads `process.getBuiltinModule("node:zlib")`
+// to zstd-compress Codex request bodies (`packages/ai/src/api/openai-codex-responses.ts`),
 // `tool-result-images.test.ts` builds PNG chunks from `crc32` + `deflateSync`,
-// and `doom-overlay/wad-finder.ts` gunzips a downloaded WAD. Only the zstd
-// half is bridged: the workspace bundles `zstd = 0.13` (used by `pi-session`)
-// but no `flate2`/`miniz_oxide`, so gzip/deflate have no backend to stand on
-// (see docs/NODE_BUILTINS.md).
+// and `doom-overlay/wad-finder.ts` gunzips a downloaded WAD with
+// `gunzipSync`. Two backends stand behind those: `zstd = 0.13` (the
+// workspace already bundles it for `pi-session`) and a pure-Rust
+// RFC 1951/1950/1952 codec in `crates/pi-extensions/src/deflate.rs`
+// (the offline registry has no `flate2` / `miniz_oxide`, so the format is
+// implemented directly).
 //
 // `zstdCompressSync` accepts `options.params[constants.ZSTD_c_compressionLevel]`
 // like Node, because that is exactly how `openai-codex-responses.ts` requests
-// level 3. The async/callback forms (`zstdCompress`/`zstdDecompress`) are not
-// provided — the bridge is synchronous, and nothing in the repo uses them.
+// level 3. The gzip/deflate family accepts `options.level` (`-1..=9`) and
+// ignores the rest of Node's options bag — the async/callback forms
+// (`deflate` / `gzip` / …) are not provided because the bridge is
+// synchronous and nothing in the repo uses them. `unzipSync` (gzip/xz auto
+// detection) is likewise out: no upstream caller.
 // ---------------------------------------------------------------------------
 
 const __pi_zlib_module = (() => {
@@ -2652,11 +2657,76 @@ const __pi_zlib_module = (() => {
     return __pi_node_call("zlib.crc32", args).value >>> 0;
   }
 
+  /**
+   * Resolve `options.level` the way Node's options bag does. Node rejects
+   * anything outside -1..=9 with a `RangeError`; the Rust side enforces the
+   * same bound as a backstop.
+   */
+  function compressionLevel(options) {
+    if (options === undefined || options === null || typeof options !== "object") {
+      return undefined;
+    }
+    const level = options.level;
+    if (level === undefined || level === null) return undefined;
+    const numeric = Number(level);
+    if (!Number.isInteger(numeric) || numeric < -1 || numeric > 9) {
+      const error = new RangeError(
+        'The value of "options.level" is out of range. It must be >= -1 and <= 9. ' +
+          `Received ${String(level)}`,
+      );
+      error.code = "ERR_OUT_OF_RANGE";
+      throw error;
+    }
+    return numeric;
+  }
+
+  /** Shared shape for the six gzip/deflate entry points. */
+  function codecCall(op, data, options) {
+    const args = { base64: BufferCtor.__toBase64(data) };
+    const level = compressionLevel(options);
+    if (level !== undefined) args.level = level;
+    return BufferCtor.from(__pi_node_call(op, args).base64, "base64");
+  }
+
+  function deflateSync(data, options) {
+    return codecCall("zlib.deflate", data, options);
+  }
+  function inflateSync(data, options) {
+    return codecCall("zlib.inflate", data, options);
+  }
+  function deflateRawSync(data, options) {
+    return codecCall("zlib.deflateRaw", data, options);
+  }
+  function inflateRawSync(data, options) {
+    return codecCall("zlib.inflateRaw", data, options);
+  }
+  function gzipSync(data, options) {
+    return codecCall("zlib.gzip", data, options);
+  }
+  function gunzipSync(data, options) {
+    return codecCall("zlib.gunzip", data, options);
+  }
+
   const mod = {
     zstdCompressSync: zstdCompressSync,
     zstdDecompressSync: zstdDecompressSync,
+    deflateSync: deflateSync,
+    inflateSync: inflateSync,
+    deflateRawSync: deflateRawSync,
+    inflateRawSync: inflateRawSync,
+    gzipSync: gzipSync,
+    gunzipSync: gunzipSync,
     crc32: crc32,
-    constants: Object.freeze({ ZSTD_c_compressionLevel: ZSTD_c_compressionLevel }),
+    constants: Object.freeze({
+      ZSTD_c_compressionLevel: ZSTD_c_compressionLevel,
+      // Node re-exports zlib's level constants; the upstream call sites
+      // only use the zstd parameter enum, but these cost nothing and make
+      // `zlib.constants.Z_BEST_SPEED` style code work.
+      Z_NO_COMPRESSION: 0,
+      Z_BEST_SPEED: 1,
+      Z_BEST_COMPRESSION: 9,
+      Z_DEFAULT_COMPRESSION: -1,
+    }),
   };
   mod.default = mod;
   return Object.freeze(mod);

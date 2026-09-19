@@ -28,6 +28,7 @@
 
 mod api;
 mod bridge;
+mod deflate;
 mod error;
 mod host;
 mod loader;
