@@ -7,6 +7,7 @@ use clap::Parser;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
+use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
 use pi_coding_agent::file_processor::expand_prompt;
 use pi_coding_agent::interactive::{run_interactive, InteractiveOptions};
 use pi_coding_agent::packages::{commands as package_commands, PackageCommand};
@@ -63,13 +64,6 @@ fn main() -> ExitCode {
 
     let system_prompt = default_system_prompt();
 
-    // The built-in tool bundle (read / write / edit / bash / find / grep /
-    // ls) is shared by all three modes. Building it here — the composition
-    // root — keeps a single executor instance per process and guarantees
-    // interactive, print and RPC modes execute tool calls for real.
-    let tool_executor: Arc<dyn pi_agent_core::tools::ToolExecutor> =
-        pi_coding_agent::tool_executor::default_executor();
-
     let initial_prompt = cli.command.as_ref().and_then(|cmd| match cmd {
         Command::Print { prompt } => Some(prompt.join(" ")),
         _ => None,
@@ -98,6 +92,16 @@ fn main() -> ExitCode {
 
     match target_mode {
         ModeTarget::Interactive => {
+            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(err) => {
+                    eprintln!("pi: failed to build tokio runtime: {err}");
+                    return ExitCode::from(70);
+                }
+            };
+            // Extensions load on the same runtime that drives the agent:
+            // the QuickJS host spawns its promise driver + UI worker there.
+            let tool_executor = load_tool_executor(&runtime, &cli, "tui", true);
             // Interactive mode is the only path that still uses the
             // legacy JSONL writer (for the `/resume` directory hint).
             // Print mode owns its SQLite session through `pi-session`,
@@ -113,14 +117,7 @@ fn main() -> ExitCode {
                 session_id: session_id.clone(),
                 initial_prompt,
                 stream_fn: stream_fn.clone(),
-                tool_executor: tool_executor.clone(),
-            };
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    eprintln!("pi: failed to build tokio runtime: {err}");
-                    return ExitCode::from(70);
-                }
+                tool_executor,
             };
             match runtime.block_on(run_interactive(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -163,6 +160,14 @@ fn main() -> ExitCode {
                 // for `--continue=<id>`.
                 cli.continue_.clone()
             };
+            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(err) => {
+                    eprintln!("pi: failed to build tokio runtime: {err}");
+                    return ExitCode::from(70);
+                }
+            };
+            let tool_executor = load_tool_executor(&runtime, &cli, "print", false);
             let options = PrintModeOptions {
                 prompt: expanded.text,
                 model: resolved_model,
@@ -172,14 +177,7 @@ fn main() -> ExitCode {
                 session_dir,
                 max_turns: cli.max_turns,
                 output_format: cli.output_format,
-                tool_executor: tool_executor.clone(),
-            };
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    eprintln!("pi: failed to build tokio runtime: {err}");
-                    return ExitCode::from(70);
-                }
+                tool_executor,
             };
             match runtime.block_on(run_print_mode(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -189,6 +187,14 @@ fn main() -> ExitCode {
         ModeTarget::Rpc => {
             // Headless JSON-RPC 2.0 over stdio. No TUI / crossterm here:
             // stdin and stdout are the transport.
+            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(err) => {
+                    eprintln!("pi: failed to build tokio runtime: {err}");
+                    return ExitCode::from(70);
+                }
+            };
+            let tool_executor = load_tool_executor(&runtime, &cli, "rpc", false);
             let options = pi_coding_agent::rpc::RpcServerOptions {
                 model: resolved_model,
                 models,
@@ -196,13 +202,6 @@ fn main() -> ExitCode {
                 system_prompt,
                 session_id,
                 tool_executor,
-            };
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    eprintln!("pi: failed to build tokio runtime: {err}");
-                    return ExitCode::from(70);
-                }
             };
             match runtime.block_on(pi_coding_agent::rpc::run_rpc_server(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -273,10 +272,55 @@ fn default_system_prompt() -> String {
 }
 
 fn default_session_dir() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".pi").join("sessions")
+    home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".pi")
+        .join("sessions")
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Load JS / TypeScript extensions for one mode and return the executor
+/// the agent loop should use. Failures are reported on stderr and never
+/// abort the process: a broken extension leaves the built-in bundle
+/// intact.
+fn load_tool_executor(
+    runtime: &tokio::runtime::Runtime,
+    cli: &Cli,
+    mode: &str,
+    has_ui: bool,
+) -> Arc<dyn pi_agent_core::tools::ToolExecutor> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let options = ExtensionLoadOptions {
+        home: home_dir(),
+        cwd,
+        explicit: wiring::explicit_paths(&cli.extension, &cli.extensions_dir),
+        mode: mode.to_string(),
+        has_ui,
+        disabled: cli.no_extensions,
+    };
+    let outcome = wiring::load(runtime, &options);
+    for (path, reason) in &outcome.errors {
+        eprintln!("pi: extension load failed for {}: {reason}", path.display());
+    }
+    for name in &outcome.shadowed {
+        eprintln!("pi: extension tool `{name}` ignored: a built-in tool already uses that name");
+    }
+    if !outcome.loaded.is_empty() {
+        eprintln!(
+            "pi: loaded {} extension(s) [{}]",
+            outcome.loaded.len(),
+            outcome
+                .loaded
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    outcome.executor
 }
 
 fn new_session_id() -> String {

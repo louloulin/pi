@@ -191,6 +191,30 @@ println!("loaded {} extensions, {} errors", outcome.entries.len(), outcome.error
 descriptor path (Stage 0) and the JS path (Stage 3) coexist; the
 file extension decides which loader runs.
 
+### CLI wiring
+
+The `pi` binary drives the loader itself — extensions load before the
+mode starts and their tools are advertised to the model:
+
+```text
+pi                                   # discovers ~/.pi/agent/extensions + .pi/extensions
+pi -e ./my-ext.js                    # one extra file (or directory)
+pi --extensions-dir ./ext-registry   # extra directory, repeatable
+pi --no-extensions                   # built-in tool bundle only
+```
+
+`pi-coding-agent`'s `extensions::wiring::load` runs one load pass, fires
+`session_start` at every loaded extension, and wraps the host in an
+`ExtensionToolExecutor` that merges `BuiltinToolExecutor` definitions
+with `JsExtensionHost::registered_tools()`. Built-in names win on
+collision, so an extension can never silently shadow `bash` / `read` /
+`write` / `edit` / `find` / `grep` / `ls`.
+
+Both the load pass and the agent loop must run on the same tokio
+runtime: the host spawns its promise driver and UI worker on the runtime
+it is created in, so `wiring::load` takes the runtime the mode is about
+to use instead of building its own.
+
 ## Timeouts & isolation
 
 - Each host import and event dispatch is bounded by

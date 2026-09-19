@@ -57,4 +57,4 @@ pub use provider::{api_key_env_vars, base_url_env_vars, ProviderError, ProviderR
 pub use rpc::{
     run_rpc_server, JsonRpcError, RpcOutcome, RpcServerError, RpcServerOptions,
 };
-pub use tool_executor::{default_executor, BuiltinToolExecutor};
+pub use tool_executor::{default_executor, BuiltinToolExecutor, ExtensionToolExecutor};

@@ -60,6 +60,17 @@ enum CandidateResult {
     Err { path: PathBuf, error: JsLoaderError },
 }
 
+/// One extension load pass: the default search paths plus any paths the
+/// user named explicitly (`-e <file>` / `--extensions-dir <dir>`).
+#[derive(Debug, Clone, Default)]
+pub struct ExtensionLoadRequest {
+    /// Default `~/.pi/agent/extensions` + `.pi/extensions` roots.
+    pub search: ExtensionSearchPaths,
+    /// Extra files or directories named on the command line. Directories
+    /// are walked with the same rules as [`ExtensionSearchPaths`].
+    pub explicit: Vec<PathBuf>,
+}
+
 /// Enumerate JS / TS extension files under the search paths and
 /// load each one through the host. Returns the bridge + summary.
 pub async fn load_extensions(
@@ -69,16 +80,68 @@ pub async fn load_extensions(
     has_ui: bool,
     cwd: &str,
 ) -> JsLoadOutcome {
-    let candidates = paths.candidates();
+    load_candidates(host, paths.candidates(), mode, has_ui, cwd).await
+}
+
+/// Like [`load_extensions`], but also loads the files / directories the
+/// user named on the command line. Explicit candidates are loaded first
+/// and de-duplicated against the default search paths, so `-e` can point
+/// at a file that also lives in `.pi/extensions/` without evaluating it
+/// twice.
+pub async fn load_configured_extensions(
+    host: JsExtensionHost,
+    request: &ExtensionLoadRequest,
+    mode: &str,
+    has_ui: bool,
+    cwd: &str,
+) -> JsLoadOutcome {
+    let mut candidates = Vec::new();
+    for path in &request.explicit {
+        candidates.extend(expand_explicit(path));
+    }
+    candidates.extend(request.search.candidates());
+    load_candidates(host, candidates, mode, has_ui, cwd).await
+}
+
+/// Walk an explicit `-e` / `--extensions-dir` path. A file is taken as
+/// is; a directory is walked (depth 2) for extension-looking files.
+fn expand_explicit(path: &Path) -> Vec<PathBuf> {
+    if path.is_dir() {
+        walkdir::WalkDir::new(path)
+            .max_depth(2)
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().to_path_buf())
+            .filter(|entry| js_kind_for(entry).is_some())
+            .collect()
+    } else {
+        vec![path.to_path_buf()]
+    }
+}
+
+/// Load every candidate that looks like a JS / TS extension. Candidates
+/// whose extension is unknown are skipped silently; files that exist but
+/// fail to read / evaluate land in [`JsLoadOutcome::errors`].
+async fn load_candidates(
+    host: JsExtensionHost,
+    candidates: Vec<PathBuf>,
+    mode: &str,
+    has_ui: bool,
+    cwd: &str,
+) -> JsLoadOutcome {
     let bridge = JsExtensionBridge::new(host.clone(), mode.to_string(), has_ui, cwd.to_string());
     let mut entries = Vec::new();
     let mut errors = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for path in candidates {
         let kind = match js_kind_for(&path) {
             Some(k) => k,
             None => continue,
         };
+        if !seen.insert(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())) {
+            continue;
+        }
         let id = id_for_path(&path);
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,

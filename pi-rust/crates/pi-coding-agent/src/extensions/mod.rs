@@ -6,3 +6,4 @@
 //! on disk decides which one runs.
 
 pub mod js_loader;
+pub mod wiring;

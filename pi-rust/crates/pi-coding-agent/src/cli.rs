@@ -13,10 +13,23 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Path to a single extension file to load for this run only
-    /// (matches `pi -e <path>` in the TS CLI).
-    #[arg(short = 'e', long = "extension")]
-    pub extension: Vec<String>,
+    /// Path to a single extension file (or directory) to load for this
+    /// run only (matches `pi -e <path>` in the TS CLI). Repeatable.
+    #[arg(short = 'e', long = "extension", value_name = "PATH")]
+    pub extension: Vec<std::path::PathBuf>,
+
+    /// Extra directory to scan for JS / TypeScript extensions. The
+    /// default search paths (`~/.pi/agent/extensions/` and
+    /// `.pi/extensions/`) are always searched unless `--no-extensions`
+    /// is set. Repeatable.
+    #[arg(long = "extensions-dir", value_name = "DIR")]
+    pub extensions_dir: Vec<std::path::PathBuf>,
+
+    /// Disable extension loading entirely: the default search paths,
+    /// `-e` and `--extensions-dir` are all ignored, so the agent ships
+    /// only the built-in tool bundle.
+    #[arg(long = "no-extensions", conflicts_with_all = ["extension", "extensions_dir"])]
+    pub no_extensions: bool,
 
     /// Print events to stdout as JSON instead of rendering the TUI.
     ///

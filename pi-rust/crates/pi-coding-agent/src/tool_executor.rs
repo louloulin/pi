@@ -6,11 +6,13 @@
 //! `pi_agent_core::ToolExecutor`, so the loop can advertise those tools to
 //! the model and execute the calls it emits.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent_core::tools::ToolExecutor;
 use pi_agent_core::AgentError;
+use pi_extensions::JsExtensionHost;
 use pi_protocol::{Content, ToolCall, ToolDefinition, ToolResult};
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +57,164 @@ impl std::fmt::Debug for BuiltinToolExecutor {
 /// Build the default executor as the trait object the agent loop expects.
 pub fn default_executor() -> Arc<dyn ToolExecutor> {
     Arc::new(BuiltinToolExecutor::with_default_tools())
+}
+
+/// [`ToolExecutor`] that layers extension-registered tools on top of the
+/// built-in bundle.
+///
+/// The built-in tools keep their names: an extension that registers a
+/// tool under an existing name (`bash`, `read`, …) is ignored for that
+/// name so a `.pi/extensions/*.js` file can never silently shadow a core
+/// tool. Every other registered tool is advertised to the model and
+/// executed inside the embedded QuickJS host, which is what makes the pi
+/// plugin ecosystem reachable from the binary instead of only from the
+/// library tests.
+///
+/// The [`JsExtensionHost`] must outlive the executor and must be driven
+/// by the same tokio runtime that runs the agent loop (the host spawns
+/// its promise driver on the runtime it was created in).
+pub struct ExtensionToolExecutor {
+    builtin: BuiltinToolExecutor,
+    host: JsExtensionHost,
+    extension_tools: Vec<ToolDefinition>,
+}
+
+impl ExtensionToolExecutor {
+    /// Combine a built-in bundle with the tools an extension host has
+    /// registered. Extension tools whose name collides with a built-in
+    /// are dropped (see the type docs).
+    pub fn new(
+        builtin: BuiltinToolExecutor,
+        host: JsExtensionHost,
+        extension_tools: Vec<ToolDefinition>,
+    ) -> Self {
+        let mut seen: HashSet<String> = builtin
+            .tools()
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        let extension_tools = extension_tools
+            .into_iter()
+            .filter(|tool| seen.insert(tool.name.clone()))
+            .collect();
+        Self {
+            builtin,
+            host,
+            extension_tools,
+        }
+    }
+
+    /// The extension host backing this executor.
+    pub fn host(&self) -> &JsExtensionHost {
+        &self.host
+    }
+
+    /// The extension-registered tool definitions actually advertised
+    /// (i.e. after the collision filter).
+    pub fn extension_tools(&self) -> &[ToolDefinition] {
+        &self.extension_tools
+    }
+}
+
+impl std::fmt::Debug for ExtensionToolExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionToolExecutor")
+            .field(
+                "builtin",
+                &self
+                    .builtin
+                    .tools()
+                    .iter()
+                    .map(|t| t.name())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "extensions",
+                &self
+                    .extension_tools
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ExtensionToolExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = self.builtin.definitions();
+        definitions.extend(self.extension_tools.iter().cloned());
+        definitions
+    }
+
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        signal: CancellationToken,
+    ) -> Result<ToolResult, AgentError> {
+        if self
+            .builtin
+            .tools()
+            .iter()
+            .any(|tool| tool.name() == call.name)
+        {
+            return self.builtin.execute(call, signal).await;
+        }
+        if !self
+            .extension_tools
+            .iter()
+            .any(|tool| tool.name == call.name)
+        {
+            return Err(AgentError::Tool {
+                tool: call.name.clone(),
+                message: "unknown tool".to_string(),
+            });
+        }
+        if signal.is_cancelled() {
+            return Err(AgentError::Tool {
+                tool: call.name.clone(),
+                message: "operation aborted".to_string(),
+            });
+        }
+
+        let args = call.arguments.to_string();
+        match self.host.execute_tool(&call.name, &args).await {
+            Ok(outcome) => Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                content: Box::new(fold_content(content_blocks_from_json(&outcome.content))),
+                is_error: outcome.is_error,
+                details: outcome.details,
+            }),
+            // A host-level failure (timeout, JS exception, missing
+            // execute function) is reported as an error *result*, not a
+            // fatal loop error — the model gets to react to it, exactly
+            // like a built-in tool that exited non-zero.
+            Err(err) => Ok(ToolResult {
+                tool_call_id: call.id.clone(),
+                content: Box::new(Content::text(format!(
+                    "extension tool `{}` failed: {err}",
+                    call.name
+                ))),
+                is_error: true,
+                details: None,
+            }),
+        }
+    }
+}
+
+/// Decode the JSON content blocks a JS extension returned into
+/// [`Content`] values. Blocks that do not match the wire shape are kept
+/// as their JSON text so nothing an extension produced is silently
+/// dropped.
+fn content_blocks_from_json(blocks: &[serde_json::Value]) -> Vec<Content> {
+    blocks
+        .iter()
+        .map(|block| {
+            serde_json::from_value::<Content>(block.clone())
+                .unwrap_or_else(|_| Content::text(block.to_string()))
+        })
+        .collect()
 }
 
 #[async_trait]
