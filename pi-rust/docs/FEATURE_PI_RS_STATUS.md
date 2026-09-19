@@ -10973,3 +10973,8 @@ provider 与之无关但同属「大块」）。第 5 项（provider catalog）�
 **已知限制**：本轮没有跑 `cargo test --workspace`（磁盘与槽位都紧），只做了
 「整仓 `cargo check --all-targets` + `pi-tui` 全量测试 + `pi-tui` clippy」；
 其他 crate 的运行时行为本轮无改动，风险为零改动面。
+
+补记（推送哈希）：本轮代码提交 `65bdfebb4` + 文档提交 `59c0410a0`，
+`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `513cd3409` **快进至 `59c0410a0`**
+（`git ls-remote` 复查一致：`59c0410a08228215ca12108c950638cb20434f49`）；
+留档分支 `work/lum-1151` 一并推送（同哈希）。
