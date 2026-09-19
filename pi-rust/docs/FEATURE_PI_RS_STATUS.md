@@ -8606,3 +8606,115 @@ $ rustfmt 1.8.0（1.85.0 工具链）--edition 2021 --check <本轮 4 个文件>
 - 合并态复测（第五节）跑的树就是 rebase 后的工作树，与 `feature/pi.rs` 的新头 `466144269` 同源，数字即第五节所列。
 - 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节如实记录。
 
+---
+
+## LUM-1134 round — `pi-coding-agent` keybindings 配置层（`KEYBINDINGS` 覆盖表 + 旧名迁移 + `keybindings.json`）
+
+本轮由 LUM-1132 协调轮派发（Stage 38 的**配置层**），只做这一件事：把
+`packages/coding-agent/src/core/keybindings.ts`（401 行）的配置层落到 `pi-coding-agent`。
+**不碰消费方**（`app.rs` / `editor.rs` 里散落的硬编码和弦换成 `get_keybindings()`，那是 Stage 37 之后的串行项）、
+**不碰 `pi-tui`**、不加外部依赖、不派发子任务。
+
+### 一、起点与分支
+
+- 工作分支 `agent/devbox1/aa44dcc7d2f5`（`multica repo checkout` 落地），起点 `origin/feature/pi.rs @ b993f1541`
+  （含 LUM-1132 的 `pi-tui` keybindings 注册表）。
+- 开工 `git fetch` 时 `origin/feature/pi.rs` 已推进到 **`e5f5585d7`**（LUM-1133 的 Stage 37 + 补记）。
+  `git merge origin/feature/pi.rs` → 合并提交 `7019cebea`，**零冲突**：LUM-1133 只碰
+  `pi-tui/src/app.rs`、`pi-tui/tests/{selection_granularity,mouse_selection,app_theme}.rs` 与本文档，本轮只碰
+  `pi-coding-agent` 三个文件，两边在本文档都是**末尾追加**（先合入它的节，再追加本轮的节）。
+- 槽位：开工 `multica daemon status` 报 `running_task_count = 2`，本轮**未派发任何子任务**，总并发未超 3。
+
+### 二、本轮切片：`packages/coding-agent/src/core/keybindings.ts` 落到 `pi-coding-agent`
+
+选它的理由：LUM-1132 只把 `pi-tui` 那一半（`tui_default_keybindings` / `KeybindingsManager`）落了地，
+`coding-agent` 那一半在 Rust 侧**根本不存在**——`app.*` 覆盖表、Windows/WSL 默认集、旧名迁移、
+`keybindings.json` 加载与 `reload()` 全是缺口。它**整体落在一个新文件里**，与在途的 `app.rs` 零交集，
+是本轮唯一「不会撞车、又能一轮做完」的缺口。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-coding-agent/src/keybindings.rs`（新，762 行） | `Platform`（`Win32` / `Linux` / `Darwin` / `Other`）+ `Env` / `process_env` + `windows_keybindings`（`useWindowsKeybindings`）；`APP_KEYBINDING_IDS`（**43**）+ `app_default_keybindings`（**7 条平台分叉**）；`merged_definitions`（= 上游 `KEYBINDINGS`：`pi-tui` 默认表 + **4 条 `tui.*` 覆盖** + `app.*`）；`KEYBINDING_NAME_MIGRATIONS`（**59** 条）+ `migrate_keybinding_name` / `is_legacy_keybinding_name`；`RawKeybindingsConfig` + `migrate_keybindings_config`（`_with_table`）/ `order_keybindings_config` / `to_keybindings_config` / `load_raw_config` / `load_from_file`（`_with_table`）；`KeybindingsManager`（`new` / `create` / `create_with_platform` / `create_default` / `reload` / `get_effective_config` / `config_path` / `definitions` / `inner` / `into_inner` + 对 `pi-tui` 管理器的全部委托，含 `matches`） |
+| `crates/pi-coding-agent/tests/keybindings.rs`（新，486 行，20 条用例） | 平台/WSL 判定（含 `WT_SESSION` 不算 WSL、空串不算存在）；`app` 表逐条 id / 描述 / 数量；合并表顺序与 `tui.*` 描述保留；原生 Windows / WSL / darwin+linux 三套默认；迁移（改名、新名优先、`migrated` 标志、表序+字典序）；旧表暴露；类型过滤（丢数字 / 对象 / 混合数组，保留空数组、len 3）；文件加载（缺失 / 非法 JSON / 非对象 / BOM）；管理器 create / reload / matches |
+| `crates/pi-coding-agent/src/lib.rs` | +8 行（`pub mod keybindings;` + 再导出块），改动面压到最小 |
+
+### 三、上游计数勘误（以源码为准，issue 与 LUM-1132 frontier 各差 1）
+
+- `interface AppKeybindings`（`keybindings.ts:14-58`）实际 **43 个** `app.*` id（issue / LUM-1132 frontier 写 44）。
+  本实现 `APP_KEYBINDING_IDS: [&str; 43]`，测试断言 id 集合与 `app_default_keybindings` 逐条一致。
+- `KEYBINDING_NAME_MIGRATIONS`（`keybindings.ts:240-301`）实际 **59 条**（issue 写 58）。
+  本实现 `[(&str, &str); 59]`，测试断言长度。
+- 4 条 `tui.*` 覆盖与 7 条平台分叉 `app.*` 与上游逐条相同：`tui.editor.undo`（win32 `ctrl+z` / WSL `alt+z` /
+  其余 `ctrl+-`）、`tui.altScreen.previousPrompt` / `nextPrompt` / `search`；`app.suspend`（win32 无绑定）、
+  `app.model.cycleBackward`、`app.message.followUp`、`app.message.dequeue`、`app.clipboard.pasteImage`、
+  `app.tree.foldOrUp` / `app.tree.unfoldOrDown`（darwin 换和弦顺序）。
+
+### 四、有意偏离（都写进了 `keybindings.rs` 的模块文档）
+
+1. **平台是值，不是进程全局**：上游在模块加载时算一次 `useWindowsKeybindings()` 并烤进 `KEYBINDINGS`；
+   Rust 侧 `Platform` / `Env` 是定义构造器的显式参数，win32、WSL、darwin 三套默认集在任何宿主上都能
+   构造与测试，`Platform::current()` / `process_env()` 复现上游检测。
+2. **`Platform::Darwin` 而非 `"macos"`**：`std::env::consts::OS` 报 `macos`、Node 报 `darwin`，
+   `Platform::from_name` 两个名字都收；未知平台存为 `Platform::Other`，行为同非 Windows。
+3. **`Env` 值按「存在且非空」判定**：上游 `Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP)` 把空串当缺失，
+   所以 `windows_keybindings` 也要求非空；`WT_SESSION` 有意**不**作为信号。
+4. **原始配置是有序 `Vec`**：`serde_json::Map` 在未开 `preserve_order` 时是 `BTreeMap`，表达不了
+   `order_keybindings_config` 的声明序，故原文配置用 `RawKeybindingsConfig = Vec<(String, Value)>`；
+   排序本身是**集合语义**（表序优先，未知 id 再字典序），与输入文件里的键顺序无关，与上游最终
+   `orderKeybindingsConfig` 的产物一致。
+5. **`get_effective_config` 返回 `Vec<(id, keys)>`**：`pi-tui` 管理器暴露的是 `get_resolved_bindings()`
+   而非上游的 `Record<Keybinding, KeyId | KeyId[]>`，本层与之对齐。
+6. **`KeybindingsManager` 是组合而非继承**：内部持一个 `pi_tui::keybindings::KeybindingsManager`，
+   委托 `matches` / `get_keys` / `get_conflicts` 等；额外提供 `reload()` / `get_effective_config()` /
+   `config_path()`（上游有 `reload()`，`config_path` 便于调用方定位文件）。
+
+### 五、验证
+
+```
+$ rustc --version
+  1.98.1 (48a229cea 2026-09-01)      # 本沙箱 stable，等于 CI 的 dtolnay/rust-toolchain@stable
+$ CARGO_HOME=/tmp/cargo-home cargo test -p pi-coding-agent --offline          # exit 0
+  16 个 suite 共 380 passed / 0 failed      # lib 236 不变；新增 tests/keybindings.rs 20（= +1 suite / +20）
+$ ... cargo clippy -p pi-coding-agent --all-targets --offline --no-deps -- -D warnings   # exit 0
+  0 warning（本 crate 与它自己的测试）
+$ rustfmt 1.8.0（1.85.0 工具链）--edition 2021 --check <本轮 3 个文件>
+  0 diff（keybindings.rs / tests/keybindings.rs；lib.rs 用 skip_children=true 单文件校验，见下）
+```
+
+**`-D warnings` 门的真实状态（如实记录，与 LUM-1133 第五节同一结论）**：issue 里列的
+`cargo clippy --workspace --all-targets --offline -- -D warnings` 在**未改动的基线** `b993f1541` / `e5f5585d7`
+上就跑不出 exit 0——`pi-telemetry`（`memory.rs:228`、`noop.rs:37` 的 `needless_lifetimes`）在 1.85.0 与 1.98.1
+两个工具链下都报，LUM-1133 另记 `pi-server` / `pi-extensions` / `pi-tui` 的既有 lint。用
+`--no-deps` 把依赖摘掉后，`pi-coding-agent` **一条 lint 都没有**。按「只做配置层、不扩大改动面」的约束，
+本轮没有去改别的 crate 的 lint（改了也依然过不了 workspace 门），留作独立技术债。
+
+另一条如实记录：`cargo test --workspace --offline` 本轮**没能跑完**——构建到 `pi-agent-core` 时 `/` 分区
+（50 G overlay，与其它并发 worktree 共用）被打到 100%，Cargo 报 `failed to create directory
+.../.fingerprint/pi-agent-core-...`。本轮只按需清掉了自己的 `CARGO_TARGET_DIR`（`/tmp/pi-rust-target-lum1134`），
+没有回收任何别的工作区的目录；相关 crate 的测试（`pi-coding-agent`）在 workspace 构建之前已单独全绿。
+
+`lib.rs` 的 rustfmt 说明：本轮只在自己的新文件上要求 0 diff。`rustfmt --check crates/pi-coding-agent/src/lib.rs`
+会递归下钻整棵模块树，报的是仓库既有的格式化欠账（`provider` / `rpc` / `prompt_templates` 等再导出的排序，
+LUM-1132 已记为全仓 122 文件），本轮**没有**顺手格式化它们；本轮新增的 keybindings 再导出块本身 0 diff
+（用 `--config skip_children=true` 单文件校验确认）。
+
+### 六、合并与推送
+
+工作分支已把 `e5f5585d7` 合入（合并提交 `7019cebea`），因此并入 `feature/pi.rs` 是**快进**，不需要 plumbing merge。
+真实哈希与 numstat 见本节末补记。
+
+### 七、frontier（本轮更新）
+
+1. ~~keybindings 配置层~~ **本轮（Stage 38 配置层 / LUM-1134）收口**：`app.*` 覆盖表、Windows/WSL 默认集、
+   4 条 `tui.*` 覆盖、59 条旧名迁移、`keybindings.json` 加载与 `reload()` 全部落地并逐条测试。
+2. **keybindings 消费方（Stage 38 消费方）**：把 `app.rs` / `editor.rs` 里散落的硬编码和弦换成
+   `get_keybindings()`（含 `app.*` 动作分发）——同属 `app.rs` 串行区，排在 Stage 37 之后，可单独排一轮。
+3. **P3 `alt-screen-search.ts` / OSC-8 hyperlink / 块级 HTML**：都需要 `app.rs` 的 buffer / 渲染钩子，与第 2 项串行。
+4. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：同上（改 `app.rs` 选择 / 渲染路径），等前述项落地。
+5. **P2 `fetch` 全局 / P3 provider catalog**：维持原结论（要真实 HTTP 桥 / 无上游数据源，不猜）。
+6. **新增欠账（本轮）**：`cargo clippy --workspace ... -- -D warnings` 在集成分支上为红（`pi-telemetry` 2 条
+   + LUM-1133 记的若干既有 lint），建议单开一个 lint 清偿任务；`pi-rust/docs/PLAN.md` 仍停在 Stage 14，
+   与 `FEATURE_PI_RS_STATUS.md` 的事实源继续分叉。既有欠账（`settings.rs` / `tests/settings_list.rs` 的 rustfmt diff、
+   全仓 122 文件 rustfmt 漂移、`pi-agent-core/src/tools.rs:13` 并行工具路径、`pi-ai` registry 缺
+   `openai-codex` / `kimi-coding`）维持不动。
+
