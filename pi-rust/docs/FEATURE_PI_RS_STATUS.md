@@ -5534,3 +5534,101 @@ $ cargo check  --workspace --all-targets --offline        # Finished，0 error
 并发轨道建议：上限 3 路，且同一文件（尤其 `pi-extensions/src/host.rs`、
 `FEATURE_PI_RS_STATUS.md`）一次只允许一路在写；`work/lum-1099/1100/1101` 这类同触发重复
 协调轮应合并成一路，否则每轮都在做同样的核验与 frontier 重估。
+
+
+## LUM-1100 round — Stage 26 后续：`node:*` 内建虚拟模块（`fs`/`os`/`buffer`/`crypto`/`process`）+ 合并 `feature/pi.rs`
+
+本轮（autopilot，2026-09-19 19:55 CST 触发）开工时 `multica daemon status` 的
+`running_task_count` 已是 **6（上限 3）**，无空槽，因此**没有派发任何子任务**；按前几轮的
+做法改为做一轮自洽的 frontier 收口 —— 这次选的是 Stage 26（ESM 扩展加载）之后插件生态最大
+的兼容缺口：**Node 内建模块**。
+
+### 一、为什么是 `node:*`
+
+上游扩展跑在 Node 上，直接 `import` Node 内建；Stage 26 的 ESM 加载当时只虚拟化了
+`node:path` / `node:url` / `typebox`。扫描本仓库自带的扩展（兼容性的现成标尺）：
+
+```
+# packages/coding-agent/examples/extensions/ + .pi/extensions/
+node:path 14   node:fs 11   node:child_process 5   node:url 3
+node:fs/promises 2   node:os 2   node:module 1   node:readline 1
+node:util 1   node:zlib 1   node:buffer 1
+```
+
+这些文件里 `Buffer` / `process` 还被**裸用**（不 import），所以只做模块映射不够，全局也要装。
+
+### 二、实现（提交 `bf3b5469b`）
+
+- `crates/pi-extensions/src/host.rs`：新增宿主导入 `host_node_call(op, argsJson)` 作为**唯一**
+  Native 入口，覆盖 `fs.readFile|writeFile|appendFile|exists|readdir|stat|lstat|mkdir|unlink|
+  rmdir|rm|rename|copyFile|realpath`、`os.homedir|tmpdir|platform|arch|type|eol|hostname|release`、
+  `process.env|cwd|platform|arch|pid`、`crypto.randomBytes`。**错误以 JSON 信封返回**
+  （`{"ok":false,"code","message","syscall","path"}`，errno→`ENOENT`/`EACCES`/…），JS 侧还原成
+  Node 形状的 `Error`（扩展代码 `err.code === "ENOENT"` 的分支照旧可用）。base64 与
+  `/dev/urandom` 均为零新依赖手写实现；`install_imports` 顺带写入 `_pi_cwd`（来自 `ToolContext`），
+  因为 shim 里的 `process.cwd()` 没有别的来源。
+- `crates/pi-extensions/runtime/pi-ext-shim.mjs`：手写 `Buffer`（`Uint8Array` 子类 + 手写
+  utf8/latin1/utf16le/hex/base64 编解码）、`node:fs`（**sync 为准**，`promises` 与回调形态都是
+  薄封装）、`node:os`、`node:crypto`、`node:process`；`node:*` 与裸模块名两套 specifier 都注册，
+  并在名字空闲时安装 `Buffer` / `process` 全局。CJS 分支补上 `require()`，与 ESM 共用同一张
+  虚拟模块表。顺带修掉一个真实 bug：名为 `type` 的**值**导入被误当成 TS
+  `import { type Foo }` 擦除（`node:os` 正好导出 `type`）。
+- 测试 `crates/pi-extensions/tests/node_builtins.rs`（4 个）+ 文档
+  `crates/pi-extensions/docs/NODE_BUILTINS.md`（op 表、信封协议、与 Node 的全部有意差异、
+  未桥接清单、上游示例覆盖矩阵）；`docs/EXTENSIONS.md` 的宿主导入表与兼容矩阵同步更新。
+- 其中第 4 个测试是**兼容闸门**：扫描 `.pi/extensions` 与
+  `packages/coding-agent/examples/extensions` 里的 `node:*` 导入，凡未桥接者必须显式登记在
+  `KNOWN_UNBRIDGED` **且**写进 `NODE_BUILTINS.md`，反向也成立（已桥接的不得留在清单里）。
+  写完后做了反证：把 `node:zlib` 从清单删掉，测试立刻以「neither bridged nor listed」
+  （并指名 `node:zlib` 与目标文档）失败 —— 闸门非空转。
+  （第一版实现曾因 `CARGO_MANIFEST_DIR` 少退一级而**静默 skip**，已修正为 `../../..` 并复验。）
+
+### 三、验证（合并结果，native，复用 LUM-1093 轮次的 `target` 缓存）
+
+```
+$ cargo check   --workspace --all-targets --offline                # 2m26s，0 errors
+$ cargo clippy  -p pi-extensions --all-targets --offline -- -D warnings   # 0 warnings
+$ cargo test    -p pi-extensions --offline                         # 49 passed / 0 failed
+$ cargo test    -p pi-ai --offline                                 # 83 passed / 0 failed
+$ cargo test    --workspace --no-fail-fast --offline               # 844 passed / 2 failed / 2 ignored
+```
+
+2 个失败都在 `pi-coding-agent/tests/print_mode.rs`，且都属**高负载抖动**，与本轮改动无关：
+
+- `sigint_or_clean_exit`（`:429`）失败信息是 `unexpected exit code: None` —— 该测试
+  `spawn` 后固定 `sleep 50ms` 再 `kill()`，进程若在 50ms 内没跑完就被 `SIGKILL`，
+  `ExitStatus::code()` 自然是 `None`。单跑 5 次：**4 过 1 挂**（load average 17.8）。
+- `binary_json_events_mode_emits_ndjson`（`:476`）失败信息是子进程
+  `ExitStatus(unix_wait_status(139))`（SIGSEGV），即 LUM-1083 那条「扩展宿主关闭路径内存
+  破坏」家族；同一二进制在单独跑 `-p pi-coding-agent` 时该用例是过的。
+
+另外记一笔环境限制：本轮前两次跑 workspace 全量测试**因共享 target 目录 ENOSPC 失败**
+（`No space left on device`，当时磁盘 91% / 余 4.4G，另有 5 个并发 run 同时在编译），
+失败是链接阶段而非代码；等其它 run 释放后（73% / 余 13G）重跑得到上面的 844 通过。
+
+### 四、合并与推送
+
+- 开工 `origin/feature/pi.rs = 7c5519a54`（LUM-1099 轮次的 provider 补全）；本轮工作分支
+  `work/lum-1100` 基于 `b10f49088`，为不落后于 `7c5519a54`，新建
+  `work/lum-1100-merge`（起点 `7c5519a54`）后 `git merge --no-ff work/lum-1100`，**零冲突**
+  （两轮文件不重叠：provider 轮占 `pi-ai` / `pi-coding-agent` 的 provider 路径，本轮只占
+  `pi-extensions` 的 `host.rs` / `pi-ext-shim.mjs` / tests / docs）。
+- 合并提交 `69e8d6a66`（+ 本轮 status 文档提交），非 force 推送到 `feature/pi.rs`。
+
+### 五、frontier（本轮未做，按性价比排序）
+
+- `node:child_process`：**最值钱**。`interactive-shell.ts` / `ssh.ts` / `subagent/index.ts` /
+  `sandbox/index.ts` / `mac-system-theme.ts` 都卡在它；需要 `tokio::process` + 流式 stdio +
+  与宿主 deadline 联动的取消。属 Stage 级。
+- `node:util`：**最便宜**（纯 JS，无需新 op）—— `promisify` / `callbackify` 在 shim 里已有
+  内部实现，`node:fs` 的 `promises` 就是用它拼的，导出即可；`node:child_process` 落地前后都值得先做。
+- `fetch` 全局：本仓库自带的 `.pi/extensions/import-repro.ts` 就差它（要真实 HTTP 桥，
+  不是 polyfill），与 `node:https` 一起考虑。
+- `@earendil-works/pi-coding-agent` / `@earendil-works/pi-tui` 虚拟模块：pi 自己的 API，
+  与 Node 无关，单独立项。
+- 其余内建（`node:module` / `node:readline` / `node:zlib` / `node:stream` 家族）已在
+  `NODE_BUILTINS.md` 逐条登记理由与代价；兼容闸门会保证它们不会被悄悄忘掉。
+- 板面：LUM-1083（进程级崩溃根因修复）与 LUM-1088（项目信任门接扩展加载）在途；
+  LUM-1090 维持「前提不成立」结论；**LUM-1099 与本轮是同模板的重复 autopilot 轮次**，
+  它在另一 worktree 并发跑并落了 provider 补全（`7c5519a54`）—— 两轮实际没撞车，但同类重复
+  轮次建议人工合流，避免重复占槽。

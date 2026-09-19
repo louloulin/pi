@@ -41,6 +41,10 @@
 //         function (pi) { ... }` (the upstream source form). `path` is
 //         the extension's file path; it backs `import.meta.url` and is
 //         used for readable error messages.
+//   - `host_node_call(op, argsJson)` — the single bridge behind the
+//     `node:*` virtual modules (fs / os / buffer / crypto / process).
+//     Returns a JSON envelope, never throws; see the `node:*` section
+//     near the bottom of this file.
 
 const _pi = {
   /** @type {Record<string, Array<(event: any, ctx: any) => any>>} */
@@ -547,9 +551,10 @@ globalThis._pi_execute_tool = function _pi_execute_tool(name, argsJson) {
  * The ESM branch rewrites the `import` / `export default` statements and
  * `import.meta` references in place (see `__pi_analyze_module`) and then
  * runs the result through the same factory wrapper. No bundler and no
- * extra JS dependency is involved; the `node:path` / `node:url` and
- * `typebox` / `@sinclair/typebox` slice of the upstream `VIRTUAL_MODULES`
- * map is provided.
+ * extra JS dependency is involved; the `node:path` / `node:url` /
+ * `node:fs` / `node:fs/promises` / `node:os` / `node:buffer` /
+ * `node:crypto` / `node:process` and `typebox` / `@sinclair/typebox`
+ * slice of the upstream `VIRTUAL_MODULES` map is provided.
  *
  * @param {string} source extension source text
  * @param {string} [path] absolute path of the extension file; backs
@@ -586,7 +591,15 @@ globalThis._pi_load_extension = function _pi_load_extension(source, path) {
 
   let factoryFn;
   try {
-    factoryFn = new Function("module", "exports", "pi", "__pi_import", "__pi_meta", body);
+    factoryFn = new Function(
+      "module",
+      "exports",
+      "pi",
+      "__pi_import",
+      "__pi_meta",
+      "require",
+      body,
+    );
   } catch (e) {
     throw new Error(
       label + ": failed to compile extension: " + (e && e.message ? e.message : String(e)),
@@ -594,7 +607,18 @@ globalThis._pi_load_extension = function _pi_load_extension(source, path) {
   }
   const module = { exports: undefined };
   const exports = {};
-  const factory = factoryFn(module, exports, pi, __pi_import, __pi_import_meta(sourcePath));
+  // `require` is the CJS twin of the ESM `import` rewrite: upstream TS
+  // extensions compiled to CJS (`require("node:fs")`) resolve through
+  // the same virtual module map, so both module formats see the same
+  // builtin surface.
+  const factory = factoryFn(
+    module,
+    exports,
+    pi,
+    __pi_import,
+    __pi_import_meta(sourcePath),
+    __pi_require,
+  );
   if (typeof factory !== "function") {
     throw new Error(label + ": extension did not export a factory function");
   }
@@ -668,6 +692,16 @@ function __pi_import(specifier) {
       '" in pi extension: available virtual modules are ' +
       Object.keys(globalThis.__pi_virtual_modules).join(", "),
   );
+}
+
+/**
+ * CommonJS `require` — the same virtual module resolution as the ESM
+ * `import` rewrite, so both module formats reach the same builtins.
+ *
+ * @param {string} specifier
+ */
+function __pi_require(specifier) {
+  return __pi_import(specifier);
 }
 
 /**
@@ -935,7 +969,10 @@ function __pi_import_clause(clause, specifier) {
       const bits = part.split(/\s+as\s+/);
       const imported = bits[0].trim();
       const local = (bits[1] || bits[0]).trim();
-      if (imported === "type" || imported.startsWith("type ")) continue;
+      // `import { type Foo }` is erased by the TS compiler upstream, but a
+      // *value* named `type` is legal (`node:os` exports one), so only the
+      // `type Name` form is dropped.
+      if (imported.startsWith("type ")) continue;
       out.push(imported === local ? imported : imported + ": " + local);
     }
     return out;
@@ -1520,6 +1557,818 @@ const __pi_typebox_module = (() => {
   return Object.freeze(mod);
 })();
 
+// ---------------------------------------------------------------------------
+// `node:*` builtin virtual modules
+//
+// Upstream runs extensions on Node/Bun, so the examples under
+// `packages/coding-agent/examples/extensions/` import `node:fs`,
+// `node:fs/promises`, `node:os`, `node:buffer`, `node:crypto` and read
+// the `process` global directly. The embedded QuickJS runtime has no
+// operating-system surface of its own, so every call below goes through
+// the single `host_node_call(op, argsJson)` host import installed by
+// `JsExtensionHost` (native-only, like the rest of the extension host).
+//
+// The *sync* API of each module is the source of truth: the host bridge
+// is synchronous, so `node:fs/promises` and the callback forms are thin
+// wrappers over it. Deliberate divergences from Node are documented in
+// `crates/pi-extensions/docs/NODE_BUILTINS.md`:
+//
+//   - errors carry Node's `code` / `syscall` / `path` but the message
+//     text comes from Rust's `io::Error`;
+//   - `fs.mkdirSync(path, {recursive: true})` returns `undefined`
+//     instead of the first created directory;
+//   - `node:child_process`, `node:stream`, `node:http`, … and
+//     `crypto.createHash` are not provided: importing them fails with
+//     the readable "unsupported import" error that lists what exists.
+// ---------------------------------------------------------------------------
+
+/**
+ * Call a host bridge op and unwrap the JSON envelope.
+ *
+ * The Rust side returns `{"ok":true,"value":…}` or
+ * `{"ok":false,"code":…,"message":…,"syscall":…,"path":…}` and never
+ * throws, so the Node-shaped `Error` extensions branch on is built here,
+ * in one place.
+ *
+ * @param {string} op
+ * @param {object} [args]
+ */
+function __pi_node_call(op, args) {
+  const raw = globalThis.host_node_call(op, JSON.stringify(args || {}));
+  let envelope = null;
+  try {
+    envelope = JSON.parse(raw);
+  } catch (_e) {
+    throw new Error("pi extension host returned malformed JSON for `" + op + "`");
+  }
+  if (envelope && envelope.ok === true) return envelope.value;
+  const err = new Error(
+    envelope && typeof envelope.message === "string"
+      ? envelope.message
+      : "pi extension host call `" + op + "` failed",
+  );
+  if (envelope && typeof envelope.code === "string") err.code = envelope.code;
+  if (envelope && typeof envelope.syscall === "string") err.syscall = envelope.syscall;
+  if (envelope && typeof envelope.path === "string") err.path = envelope.path;
+  throw err;
+}
+
+/** Run `fn` on the microtask queue when the engine has one. */
+function __pi_schedule(fn) {
+  if (typeof queueMicrotask === "function") queueMicrotask(fn);
+  else fn();
+}
+
+// ---------------------------------------------------------------------------
+// `node:buffer` — the `Buffer` subset extensions touch: `from` / `alloc` /
+// `concat` / `byteLength` / `isBuffer` plus `toString(encoding)` and
+// `equals`. Bytes are a real `Uint8Array` subclass, so `instanceof`,
+// indexing, `length`, `slice` and iteration behave like Node's.
+// ---------------------------------------------------------------------------
+
+const __pi_buffer_module = (() => {
+  const HEX_DIGITS = "0123456789abcdef";
+  const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+  /** Map Node's encoding aliases onto the handful this subset implements. */
+  function canonicalEncoding(encoding) {
+    if (encoding === undefined || encoding === null) return "utf8";
+    const name = String(encoding).toLowerCase();
+    if (name === "utf8" || name === "utf-8") return "utf8";
+    if (name === "latin1" || name === "binary" || name === "ascii") return "latin1";
+    if (name === "hex") return "hex";
+    if (name === "base64") return "base64";
+    if (name === "base64url") return "base64url";
+    if (name === "utf16le" || name === "utf-16le" || name === "ucs2" || name === "ucs-2") {
+      return "utf16le";
+    }
+    throw new TypeError("Unknown encoding: " + encoding);
+  }
+
+  function utf8Encode(text) {
+    const out = [];
+    for (let i = 0; i < text.length; i++) {
+      let code = text.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+        const next = text.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+          i += 1;
+        }
+      }
+      if (code < 0x80) {
+        out.push(code);
+      } else if (code < 0x800) {
+        out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+      } else if (code < 0x10000) {
+        out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+      } else {
+        out.push(
+          0xf0 | (code >> 18),
+          0x80 | ((code >> 12) & 0x3f),
+          0x80 | ((code >> 6) & 0x3f),
+          0x80 | (code & 0x3f),
+        );
+      }
+    }
+    return out;
+  }
+
+  /** Build a JS string from UTF-16 code units / code points. */
+  function fromCodeUnits(units) {
+    let out = "";
+    for (let i = 0; i < units.length; i++) {
+      const code = units[i];
+      if (code > 0xffff) {
+        const rest = code - 0x10000;
+        out += String.fromCharCode(0xd800 + (rest >> 10), 0xdc00 + (rest & 0x3ff));
+      } else {
+        out += String.fromCharCode(code);
+      }
+    }
+    return out;
+  }
+
+  function utf8Decode(bytes) {
+    const units = [];
+    let i = 0;
+    while (i < bytes.length) {
+      const first = bytes[i];
+      let code = 0xfffd;
+      let size = 1;
+      if (first < 0x80) {
+        code = first;
+      } else if ((first & 0xe0) === 0xc0) {
+        size = 2;
+        if (bytes.length - i >= 2 && (bytes[i + 1] & 0xc0) === 0x80) {
+          code = ((first & 0x1f) << 6) | (bytes[i + 1] & 0x3f);
+          if (code < 0x80) code = 0xfffd;
+        }
+      } else if ((first & 0xf0) === 0xe0) {
+        size = 3;
+        if (bytes.length - i >= 3 && (bytes[i + 1] & 0xc0) === 0x80 && (bytes[i + 2] & 0xc0) === 0x80) {
+          code = ((first & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f);
+          if (code < 0x800 || (code >= 0xd800 && code <= 0xdfff)) code = 0xfffd;
+        }
+      } else if ((first & 0xf8) === 0xf0) {
+        size = 4;
+        if (
+          bytes.length - i >= 4 &&
+          (bytes[i + 1] & 0xc0) === 0x80 &&
+          (bytes[i + 2] & 0xc0) === 0x80 &&
+          (bytes[i + 3] & 0xc0) === 0x80
+        ) {
+          code =
+            ((first & 0x07) << 18) |
+            ((bytes[i + 1] & 0x3f) << 12) |
+            ((bytes[i + 2] & 0x3f) << 6) |
+            (bytes[i + 3] & 0x3f);
+          if (code < 0x10000 || code > 0x10ffff) code = 0xfffd;
+        }
+      }
+      i += size;
+      units.push(code);
+    }
+    return fromCodeUnits(units);
+  }
+
+  function hexEncode(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length; i++) {
+      out += HEX_DIGITS[bytes[i] >> 4] + HEX_DIGITS[bytes[i] & 0x0f];
+    }
+    return out;
+  }
+
+  function hexDecode(text) {
+    const clean = String(text).replace(/\s+/g, "");
+    if (clean.length % 2 !== 0) throw new TypeError("Invalid hex string");
+    const out = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < clean.length; i += 2) {
+      const byte = parseInt(clean.slice(i, i + 2), 16);
+      if (byte !== byte) throw new TypeError("Invalid hex string");
+      out[i / 2] = byte;
+    }
+    return out;
+  }
+
+  function base64Encode(bytes, urlSafe) {
+    const alphabet = urlSafe ? BASE64URL_ALPHABET : BASE64_ALPHABET;
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0 = bytes[i];
+      const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      const triple = (b0 << 16) | (b1 << 8) | b2;
+      out += alphabet[(triple >> 18) & 0x3f];
+      out += alphabet[(triple >> 12) & 0x3f];
+      out += i + 1 < bytes.length ? alphabet[(triple >> 6) & 0x3f] : urlSafe ? "" : "=";
+      out += i + 2 < bytes.length ? alphabet[triple & 0x3f] : urlSafe ? "" : "=";
+    }
+    return out;
+  }
+
+  function base64Decode(text, urlSafe) {
+    const alphabet = urlSafe ? BASE64URL_ALPHABET : BASE64_ALPHABET;
+    const clean = String(text).replace(/[\s=]+/g, "");
+    const out = [];
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < clean.length; i++) {
+      const value = alphabet.indexOf(clean[i]);
+      if (value < 0) throw new TypeError("Invalid base64 string");
+      buffer = (buffer << 6) | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out.push((buffer >> bits) & 0xff);
+      }
+    }
+    return out;
+  }
+
+  function encodeString(text, encoding) {
+    switch (canonicalEncoding(encoding)) {
+      case "utf8":
+        return utf8Encode(text);
+      case "latin1": {
+        const out = [];
+        for (let i = 0; i < text.length; i++) out.push(text.charCodeAt(i) & 0xff);
+        return out;
+      }
+      case "utf16le": {
+        const out = [];
+        for (let i = 0; i < text.length; i++) {
+          const code = text.charCodeAt(i);
+          out.push(code & 0xff, (code >> 8) & 0xff);
+        }
+        return out;
+      }
+      case "hex":
+        return Array.prototype.slice.call(hexDecode(text));
+      case "base64":
+        return base64Decode(text, false);
+      case "base64url":
+        return base64Decode(text, true);
+      default:
+        return utf8Encode(text);
+    }
+  }
+
+  function decodeBytes(bytes, encoding) {
+    switch (canonicalEncoding(encoding)) {
+      case "utf8":
+        return utf8Decode(bytes);
+      case "latin1": {
+        let out = "";
+        for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+        return out;
+      }
+      case "utf16le": {
+        let out = "";
+        for (let i = 0; i + 1 < bytes.length; i += 2) {
+          out += String.fromCharCode(bytes[i] | (bytes[i + 1] << 8));
+        }
+        return out;
+      }
+      case "hex":
+        return hexEncode(bytes);
+      case "base64":
+        return base64Encode(bytes, false);
+      case "base64url":
+        return base64Encode(bytes, true);
+      default:
+        return utf8Decode(bytes);
+    }
+  }
+
+  class Buffer extends Uint8Array {
+    static from(value, encodingOrOffset) {
+      if (typeof value === "string") {
+        return new Buffer(encodeString(value, encodingOrOffset));
+      }
+      if (value instanceof ArrayBuffer) {
+        return new Buffer(new Uint8Array(value));
+      }
+      if (value) {
+        if (value.buffer instanceof ArrayBuffer) {
+          // Any ArrayBufferView (typed array or DataView).
+          const view = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength);
+          return new Buffer(view);
+        }
+        if (Array.isArray(value) || typeof value.length === "number") {
+          const out = new Buffer(value.length >>> 0);
+          for (let i = 0; i < out.length; i++) out[i] = Number(value[i]) & 0xff;
+          return out;
+        }
+      }
+      throw new TypeError(
+        "The first argument must be a string, Buffer, ArrayBuffer, Array, or Array-like object",
+      );
+    }
+
+    static alloc(size, fill, encoding) {
+      const out = new Buffer(Number(size) >>> 0);
+      if (fill !== undefined) {
+        out.fill(typeof fill === "string" ? encodeString(fill, encoding)[0] : Number(fill) & 0xff);
+      }
+      return out;
+    }
+
+    static allocUnsafe(size) {
+      return new Buffer(Number(size) >>> 0);
+    }
+
+    static isBuffer(value) {
+      return value instanceof Buffer;
+    }
+
+    static byteLength(value, encoding) {
+      if (typeof value !== "string") return value.length;
+      return encodeString(value, encoding).length;
+    }
+
+    static concat(list, totalLength) {
+      const parts = [];
+      let total = totalLength === undefined ? 0 : Number(totalLength) >>> 0;
+      for (let i = 0; i < list.length; i++) {
+        const part = list[i] instanceof Uint8Array ? list[i] : Buffer.from(list[i]);
+        parts.push(part);
+        if (totalLength === undefined) total += part.length;
+      }
+      const out = new Buffer(total);
+      let offset = 0;
+      for (let i = 0; i < parts.length && offset < total; i++) {
+        const part = parts[i];
+        const count = Math.min(part.length, total - offset);
+        Uint8Array.prototype.set.call(
+          out,
+          Uint8Array.prototype.subarray.call(part, 0, count),
+          offset,
+        );
+        offset += count;
+      }
+      return out;
+    }
+
+    static compare(a, b) {
+      const left = a instanceof Uint8Array ? a : Buffer.from(a);
+      const right = b instanceof Uint8Array ? b : Buffer.from(b);
+      const shared = Math.min(left.length, right.length);
+      for (let i = 0; i < shared; i++) {
+        if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
+      }
+      if (left.length === right.length) return 0;
+      return left.length < right.length ? -1 : 1;
+    }
+
+    toString(encoding, start, end) {
+      const from = start === undefined ? 0 : start;
+      const to = end === undefined ? this.length : end;
+      const view = Uint8Array.prototype.subarray.call(this, from, to);
+      return decodeBytes(view, encoding);
+    }
+
+    equals(other) {
+      return Buffer.compare(this, other) === 0;
+    }
+
+    compare(other) {
+      return Buffer.compare(this, other);
+    }
+
+    slice(start, end) {
+      return Buffer.from(Uint8Array.prototype.subarray.call(this, start, end));
+    }
+
+    subarray(start, end) {
+      return Buffer.from(Uint8Array.prototype.subarray.call(this, start, end));
+    }
+
+    toJSON() {
+      return { type: "Buffer", data: Array.prototype.slice.call(this) };
+    }
+
+    /** Not part of Node's API; keeps the base64 hop off the hot path. */
+    static __toBase64(value, encoding) {
+      const buffer = typeof value === "string" ? Buffer.from(value, encoding) : Buffer.from(value);
+      return buffer.toString("base64");
+    }
+  }
+
+  const mod = {
+    Buffer: Buffer,
+    SlowBuffer: Buffer,
+    constants: Object.freeze({ MAX_LENGTH: 0x7fffffff, MAX_STRING_LENGTH: 0x1fffffe8 }),
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:fs` (+ `node:fs/promises`) — the subset the extension ecosystem
+// actually calls. Path arguments are stringified (`String(path)`), so a
+// `URL` object works as well as a path string; `Buffer` is accepted as
+// file *data* and returned from reads when no encoding is given.
+// ---------------------------------------------------------------------------
+
+const __pi_fs_module = (() => {
+  const BufferCtor = __pi_buffer_module.Buffer;
+
+  function optionEncoding(options) {
+    if (options === undefined || options === null) return null;
+    if (typeof options === "string") return options;
+    if (typeof options === "object" && options.encoding) return options.encoding;
+    return null;
+  }
+
+  function optionFlag(options) {
+    return options && typeof options === "object" && options.flag ? String(options.flag) : "r";
+  }
+
+  function readFileSync(path, options) {
+    const flag = optionFlag(options);
+    if (flag !== "r" && flag !== "rs" && flag !== "r+") {
+      throw new Error("pi extension host fs.readFileSync only supports read flags, got " + flag);
+    }
+    const result = __pi_node_call("fs.readFile", { path: String(path) });
+    const buffer = BufferCtor.from(result.base64, "base64");
+    const encoding = optionEncoding(options);
+    return encoding ? buffer.toString(encoding) : buffer;
+  }
+
+  function writeFileSync(path, data, options) {
+    __pi_node_call("fs.writeFile", {
+      path: String(path),
+      base64: BufferCtor.__toBase64(data, optionEncoding(options)),
+    });
+  }
+
+  function appendFileSync(path, data, options) {
+    __pi_node_call("fs.appendFile", {
+      path: String(path),
+      base64: BufferCtor.__toBase64(data, optionEncoding(options)),
+    });
+  }
+
+  function existsSync(path) {
+    return __pi_node_call("fs.exists", { path: String(path) }) === true;
+  }
+
+  function makeDirent(entry) {
+    return Object.freeze({
+      name: entry.name,
+      isFile: () => entry.isFile === true,
+      isDirectory: () => entry.isDirectory === true,
+      isSymbolicLink: () => entry.isSymbolicLink === true,
+      isBlockDevice: () => false,
+      isCharacterDevice: () => false,
+      isFIFO: () => false,
+      isSocket: () => false,
+    });
+  }
+
+  function readdirSync(path, options) {
+    const entries = __pi_node_call("fs.readdir", { path: String(path) });
+    const withFileTypes = options && typeof options === "object" && options.withFileTypes === true;
+    return withFileTypes ? entries.map(makeDirent) : entries.map((entry) => entry.name);
+  }
+
+  function makeStats(raw) {
+    return Object.freeze({
+      size: raw.size,
+      mode: raw.mode,
+      mtimeMs: raw.mtimeMs,
+      atimeMs: raw.atimeMs,
+      ctimeMs: raw.ctimeMs,
+      birthtimeMs: raw.birthtimeMs,
+      mtime: new Date(raw.mtimeMs),
+      atime: new Date(raw.atimeMs),
+      ctime: new Date(raw.ctimeMs),
+      birthtime: new Date(raw.birthtimeMs),
+      isFile: () => raw.isFile === true,
+      isDirectory: () => raw.isDirectory === true,
+      isSymbolicLink: () => raw.isSymbolicLink === true,
+      isBlockDevice: () => false,
+      isCharacterDevice: () => false,
+      isFIFO: () => false,
+      isSocket: () => false,
+    });
+  }
+
+  function statSync(path) {
+    return makeStats(__pi_node_call("fs.stat", { path: String(path) }));
+  }
+
+  function lstatSync(path) {
+    return makeStats(__pi_node_call("fs.lstat", { path: String(path) }));
+  }
+
+  function mkdirSync(path, options) {
+    // Node returns the first created directory for `recursive: true`;
+    // the bridge has no cheap way to know it, so this always returns
+    // `undefined` (documented divergence).
+    __pi_node_call("fs.mkdir", {
+      path: String(path),
+      recursive: !!(options && typeof options === "object" && options.recursive),
+    });
+  }
+
+  function rmSync(path, options) {
+    __pi_node_call("fs.rm", {
+      path: String(path),
+      force: !!(options && typeof options === "object" && options.force),
+      recursive: !!(options && typeof options === "object" && options.recursive),
+    });
+  }
+
+  function unlinkSync(path) {
+    __pi_node_call("fs.unlink", { path: String(path) });
+  }
+
+  function rmdirSync(path) {
+    __pi_node_call("fs.rmdir", { path: String(path) });
+  }
+
+  function renameSync(from, to) {
+    __pi_node_call("fs.rename", { from: String(from), to: String(to) });
+  }
+
+  function copyFileSync(from, to) {
+    __pi_node_call("fs.copyFile", { from: String(from), to: String(to) });
+  }
+
+  function realpathSync(path) {
+    return __pi_node_call("fs.realpath", { path: String(path) });
+  }
+
+  function accessSync(path, mode) {
+    // Only existence is checked: the bridge reports a permission error on
+    // the ops that actually need it, and `R_OK`/`W_OK` probes would need a
+    // dedicated syscall wrapper for little extension value.
+    void mode;
+    if (!existsSync(path)) {
+      const err = new Error("ENOENT: no such file or directory, access '" + String(path) + "'");
+      err.code = "ENOENT";
+      err.syscall = "access";
+      err.path = String(path);
+      throw err;
+    }
+  }
+
+  /** Wrap a sync function into Node's `(…, callback)` form. */
+  function callbackify(fn) {
+    return function () {
+      const args = Array.prototype.slice.call(arguments);
+      const callback = args.length > 0 ? args[args.length - 1] : undefined;
+      if (typeof callback !== "function") return fn.apply(null, args);
+      const rest = args.slice(0, -1);
+      let value;
+      let failure = null;
+      try {
+        value = fn.apply(null, rest);
+      } catch (err) {
+        failure = err;
+      }
+      __pi_schedule(function () {
+        if (failure) callback(failure);
+        else callback(null, value);
+      });
+      return undefined;
+    };
+  }
+
+  /** Wrap a sync function into an immediately-resolved Promise. */
+  function promisify(fn) {
+    return function () {
+      const args = arguments;
+      return new Promise(function (resolve, reject) {
+        try {
+          resolve(fn.apply(null, args));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    };
+  }
+
+  const promises = Object.freeze({
+    readFile: promisify(readFileSync),
+    writeFile: promisify(writeFileSync),
+    appendFile: promisify(appendFileSync),
+    readdir: promisify(readdirSync),
+    stat: promisify(statSync),
+    lstat: promisify(lstatSync),
+    mkdir: promisify(mkdirSync),
+    rm: promisify(rmSync),
+    unlink: promisify(unlinkSync),
+    rmdir: promisify(rmdirSync),
+    rename: promisify(renameSync),
+    copyFile: promisify(copyFileSync),
+    realpath: promisify(realpathSync),
+    access: promisify(accessSync),
+  });
+
+  const mod = {
+    readFileSync: readFileSync,
+    writeFileSync: writeFileSync,
+    appendFileSync: appendFileSync,
+    existsSync: existsSync,
+    readdirSync: readdirSync,
+    statSync: statSync,
+    lstatSync: lstatSync,
+    mkdirSync: mkdirSync,
+    rmSync: rmSync,
+    unlinkSync: unlinkSync,
+    rmdirSync: rmdirSync,
+    renameSync: renameSync,
+    copyFileSync: copyFileSync,
+    realpathSync: realpathSync,
+    accessSync: accessSync,
+    readFile: callbackify(readFileSync),
+    writeFile: callbackify(writeFileSync),
+    appendFile: callbackify(appendFileSync),
+    readdir: callbackify(readdirSync),
+    stat: callbackify(statSync),
+    lstat: callbackify(lstatSync),
+    mkdir: callbackify(mkdirSync),
+    rm: callbackify(rmSync),
+    unlink: callbackify(unlinkSync),
+    rmdir: callbackify(rmdirSync),
+    rename: callbackify(renameSync),
+    copyFile: callbackify(copyFileSync),
+    realpath: callbackify(realpathSync),
+    access: callbackify(accessSync),
+    promises: promises,
+    constants: Object.freeze({
+      F_OK: 0,
+      R_OK: 4,
+      W_OK: 2,
+      X_OK: 1,
+      COPYFILE_EXCL: 1,
+      COPYFILE_FICLONE: 2,
+      COPYFILE_FICLONE_FORCE: 4,
+    }),
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:os` — the identity values extensions read (`homedir()` for config
+// paths, `tmpdir()` for scratch files, `platform()` for shell branching).
+// ---------------------------------------------------------------------------
+
+const __pi_os_module = (() => {
+  function hostValue(op) {
+    return __pi_node_call(op, {});
+  }
+
+  const mod = {
+    EOL: "\n",
+    homedir: () => hostValue("os.homedir"),
+    tmpdir: () => hostValue("os.tmpdir"),
+    platform: () => hostValue("os.platform"),
+    arch: () => hostValue("os.arch"),
+    type: () => hostValue("os.type"),
+    release: () => hostValue("os.release"),
+    hostname: () => hostValue("os.hostname"),
+    endianness: () => "LE",
+    // `os.cpus()` / `os.totalmem()` are not bridged yet: the extension host
+    // has no reason to expose machine topology, and returning made-up
+    // numbers would be worse than a clear failure.
+    cpus: () => {
+      throw new Error("os.cpus() is not implemented in the pi extension host");
+    },
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:crypto` — `randomUUID` / `randomBytes` / `randomInt`, backed by the
+// host's OS entropy bridge. `createHash` needs a digest backend the workspace
+// does not bundle, so it fails with a readable message instead of producing
+// wrong bytes.
+// ---------------------------------------------------------------------------
+
+const __pi_crypto_module = (() => {
+  const BufferCtor = __pi_buffer_module.Buffer;
+
+  function randomBytes(size, callback) {
+    const buffer = BufferCtor.from(
+      __pi_node_call("crypto.randomBytes", { count: Number(size) >>> 0 }).base64,
+      "base64",
+    );
+    if (typeof callback === "function") {
+      __pi_schedule(function () {
+        callback(null, buffer);
+      });
+      return undefined;
+    }
+    return buffer;
+  }
+
+  function randomUint32() {
+    const bytes = randomBytes(4);
+    return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+  }
+
+  function randomUUID() {
+    const bytes = randomBytes(16);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = bytes.toString("hex");
+    return (
+      hex.slice(0, 8) +
+      "-" +
+      hex.slice(8, 12) +
+      "-" +
+      hex.slice(12, 16) +
+      "-" +
+      hex.slice(16, 20) +
+      "-" +
+      hex.slice(20)
+    );
+  }
+
+  function randomInt(min, max) {
+    if (max === undefined) {
+      max = min;
+      min = 0;
+    }
+    const range = Number(max) - Number(min);
+    if (!(range > 0)) throw new RangeError("randomInt: max must be greater than min");
+    // Rejection sampling keeps the distribution uniform (a plain modulo
+    // would favour the low end of the range).
+    const limit = Math.floor(0x100000000 / range) * range;
+    let value = randomUint32();
+    while (value >= limit) value = randomUint32();
+    return Number(min) + (value % range);
+  }
+
+  function createHash() {
+    throw new Error(
+      "crypto.createHash is not implemented in the pi extension host (no hashing backend is bundled)",
+    );
+  }
+
+  const mod = {
+    randomBytes: randomBytes,
+    randomUUID: randomUUID,
+    randomInt: randomInt,
+    createHash: createHash,
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:process` (also installed as the `process` global) — the read-only
+// environment surface extensions consult. `env` is a snapshot: writes stay in
+// JS because the bridge has no way to mutate the host process. `stdout` /
+// `stderr` route through `host_log` instead of the real process streams: the
+// `pi` process owns stdout (`--rpc` speaks JSON-RPC on it), so an extension
+// must never write raw bytes there.
+// ---------------------------------------------------------------------------
+
+const __pi_process_module = (() => {
+  function writeThroughHost(level, chunk) {
+    if (typeof globalThis.host_log === "function") {
+      globalThis.host_log(level, String(chunk));
+    }
+    return true;
+  }
+
+  const mod = {
+    env: __pi_node_call("process.env", {}) || {},
+    platform: __pi_node_call("process.platform", {}),
+    arch: __pi_node_call("process.arch", {}),
+    pid: __pi_node_call("process.pid", {}),
+    // There is no Node runtime here; the marker makes version-gated feature
+    // checks take the conservative branch.
+    version: "v0.0.0-pi-rust",
+    versions: Object.freeze({ pi: "0.1.0" }),
+    // The host sets `_pi_cwd` from the session's `ToolContext`; the
+    // bridge `process.cwd` (the daemon's own directory) is only the
+    // fallback for hosts that run without a session context.
+    cwd: () => {
+      const contextCwd = globalThis._pi_cwd;
+      if (typeof contextCwd === "string" && contextCwd.length > 0) return contextCwd;
+      return __pi_node_call("process.cwd", {});
+    },
+    nextTick: (fn, ...args) => {
+      __pi_schedule(() => fn.apply(null, args));
+    },
+    exitCode: 0,
+    stdout: { isTTY: false, write: (chunk) => writeThroughHost("info", chunk) },
+    stderr: { isTTY: false, write: (chunk) => writeThroughHost("error", chunk) },
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
 // Built last so the module objects above are initialized before they are
 // referenced (a `const` declared later in the file would otherwise throw
 // a TDZ ReferenceError here).
@@ -1528,6 +2377,29 @@ globalThis.__pi_virtual_modules = Object.freeze({
   path: __pi_path_module,
   "node:url": __pi_url_module,
   url: __pi_url_module,
+  "node:fs": __pi_fs_module,
+  fs: __pi_fs_module,
+  "node:fs/promises": __pi_fs_module.promises,
+  "fs/promises": __pi_fs_module.promises,
+  "node:os": __pi_os_module,
+  os: __pi_os_module,
+  "node:buffer": __pi_buffer_module,
+  buffer: __pi_buffer_module,
+  "node:crypto": __pi_crypto_module,
+  crypto: __pi_crypto_module,
+  "node:process": __pi_process_module,
+  process: __pi_process_module,
   typebox: __pi_typebox_module,
   "@sinclair/typebox": __pi_typebox_module,
 });
+
+// `Buffer` and `process` are Node globals, not just module exports: upstream
+// examples use them without importing (`notify.ts` reads `process.env`,
+// `subagent/index.ts` calls `Buffer.byteLength`). Only install them when
+// nothing else defined the name.
+if (typeof globalThis.Buffer === "undefined") {
+  globalThis.Buffer = __pi_buffer_module.Buffer;
+}
+if (typeof globalThis.process === "undefined") {
+  globalThis.process = __pi_process_module;
+}

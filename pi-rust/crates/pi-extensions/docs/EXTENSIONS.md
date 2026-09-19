@@ -132,6 +132,23 @@ swapped for a `wasm32` binding later without touching the shim.
 | `host_ui_input(title, placeholder)` | `(title: string, placeholder: string) => Promise<string | null>` | Async — resolves via `UiHandler::input`.                                          |
 | `host_ui_select(title, options)`    | `(title: string, optionsJson: string) => Promise<string | null>` | Async — `optionsJson` is the JSON-encoded `string[]`. Resolves via `UiHandler::select`.  |
 | `host_log(level, message)`          | `(level: string, message: string) => void` | Surface an extension-side log line on the `pi_extension` tracing target.            |
+| `host_node_call(op, argsJson)`      | `(op: string, argsJson: string) => string` | The single bridge behind the `node:*` virtual modules (fs / os / buffer / crypto / process). Returns a JSON envelope (`{"ok":true,"value":…}` or `{"ok":false,"code","message","syscall","path"}`); see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md). |
+
+`host_node_call` is the only host import that is *not* part of the
+upstream extension API: the shim uses it internally to back the Node
+builtin virtual modules, so extension code keeps importing `node:fs`
+etc. exactly as it does on Node.
+
+### Node builtin virtual modules
+
+Extensions run on Node upstream, so `node:fs`, `node:fs/promises`,
+`node:os`, `node:buffer`, `node:crypto` and `node:process` (plus the
+`Buffer` / `process` globals) are provided as virtual modules in both
+module formats — `import { readFileSync } from "node:fs"` and
+`require("node:fs")`. The supported subset, the error shape and every
+deliberate divergence from Node are documented in
+[`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md); `node:child_process` is the
+main missing piece (needs streaming stdio + cancellation).
 
 ### Events
 
@@ -316,7 +333,11 @@ or a Stage 4+ follow-up:
 | `ctx.ui.notify(...)`                    | ✅ Supported    | Fire-and-forget; logged on the `pi_extension` tracing target.          |
 | `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Persisted as session entries by the TUI and print modes; `sendUserMessage` is not re-injected as a new turn yet. |
 | `pi.appendEntry(type, data)`            | ✅ Supported    | Persisted to the session backend as `SessionEntry::Extension` (TUI JSONL + print-mode SQLite). |
-| ESM `import` statements                 | ⚠️ Partial     | `import type { … }` lines are stripped by `js_loader`; the rest fails. |
+| ESM `import` statements                 | ✅ Supported   | `import type { … }` lines are erased; value imports resolve through the virtual module map (`node:*`, `node:path`, `node:url`, `typebox`, …); anything else fails with a readable error naming the specifier. |
+| `require("node:fs")` (CJS)             | ✅ Supported   | `require` resolves through the same virtual module map as the ESM rewrite. |
+| `node:fs` / `node:fs/promises`          | ✅ Subset      | Sync + promise + callback forms; see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md) for the op list and divergences. |
+| `node:os` / `node:buffer` / `node:crypto` / `node:process` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals. |
+| `node:child_process`                    | ❌ Not bridged | Needs streaming stdio + process lifetime tied to the host deadline. Importing it reports the available modules. |
 | TypeBox parameter schemas               | ✅ Wire-only    | The JSON Schema `parameters` field is preserved verbatim.               |
 | Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI.                          |
 | Custom editor / footer / header         | ❌ Out of scope | TUI concern (Stage 4).                                                 |

@@ -1081,6 +1081,11 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     .to_string();
     globals.set("_pi_tool_ctx", tool_ctx_json)?;
 
+    // The shim falls back to this value when a `node:*` module is asked
+    // for the working directory (`process.cwd()` / `path.resolve` on a
+    // relative path); the host is the only side that knows it.
+    globals.set("_pi_cwd", inner.tool_context.cwd.clone())?;
+
     // host_register_tool(json)
     let state_for_tool = inner.state.clone();
     let tool_fn = Func::from(move |json: String| -> rquickjs_core::Result<()> {
@@ -1194,6 +1199,14 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     );
     globals.set("host_log", log_fn)?;
 
+    // host_node_call(op, argsJson) — the single entry point behind the
+    // `node:*` virtual modules (fs / os / process / crypto). Returns a
+    // JSON *envelope* (`{"ok":true,"value":…}` / `{"ok":false,…}`)
+    // instead of throwing so the shim can build the `Error` object with
+    // the `code` / `syscall` / `path` fields Node extensions branch on.
+    let node_call_fn = Func::from(host_node_call_impl);
+    globals.set("host_node_call", node_call_fn)?;
+
     // Async host imports below return a JS Promise. Each one sends a
     // UiRequest on the channel and awaits the response oneshot. The
     // helper `async fn`s defined above take the channel + state by
@@ -1302,4 +1315,480 @@ async fn ui_worker(
         }
         let _ = env.reply.send(response);
     }
+}
+
+// ---------------------------------------------------------------------------
+// `node:*` builtin bridge
+//
+// Upstream extension hosts run on Node/Bun, so the extension ecosystem
+// imports `node:fs`, `node:fs/promises`, `node:os`, `node:buffer` and
+// `node:crypto` directly (`packages/coding-agent/examples/extensions/*`
+// does across ~15 of its examples). The embedded QuickJS runtime has no
+// filesystem of its own, so the shim's virtual modules are backed by the
+// `host_node_call` import installed above: one JSON-in / JSON-out
+// function keeps the Rust surface small and makes every op unit
+// testable.
+//
+// The protocol is deliberately boring:
+//
+//   host_node_call("fs.readFile", "{\"path\":\"/x\"}")
+//     => {"ok":true,"value":{"base64":"aGk="}}
+//   host_node_call("fs.readFile", "{\"path\":\"/missing\"}")
+//     => {"ok":false,"code":"ENOENT","message":"…","syscall":"open","path":"/missing"}
+//
+// Errors are *values*, not QuickJS exceptions: Node extensions branch on
+// `err.code` (`ENOENT` / `EEXIST` / …) and turning that into a stringly
+// typed JS exception in Rust would lose the shape.
+// ---------------------------------------------------------------------------
+
+/// Decode the `args_json` payload, run the requested op and encode the
+/// result envelope. Never panics: malformed JSON is reported as
+/// `EINVAL` so a bad shim call surfaces as a normal JS error instead of
+/// taking the host down.
+fn host_node_call_impl(op: String, args_json: String) -> String {
+    let args: serde_json::Value =
+        serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
+    match node_call(&op, &args) {
+        Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+        Err(err) => serde_json::json!({
+            "ok": false,
+            "code": err.code,
+            "message": err.message,
+            "syscall": err.syscall,
+            "path": err.path,
+        })
+        .to_string(),
+    }
+}
+
+/// A Node-shaped filesystem / OS error (`code` + human message).
+struct NodeError {
+    code: String,
+    message: String,
+    syscall: Option<String>,
+    path: Option<String>,
+}
+
+impl NodeError {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            syscall: None,
+            path: None,
+        }
+    }
+
+    /// Map a Rust `io::Error` onto the Node errno string extensions
+    /// check (`ENOENT` for a missing file, `EEXIST` for an occupied
+    /// path, …) plus Node's `CODE: message, syscall 'path'` rendering.
+    fn io(err: std::io::Error, syscall: &str, path: &str) -> Self {
+        let code = errno_code(&err);
+        Self {
+            message: format!("{}: {}, {} '{}'", code, err, syscall, path),
+            code,
+            syscall: Some(syscall.to_string()),
+            path: Some(path.to_string()),
+        }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::new("EINVAL", message)
+    }
+}
+
+/// `io::Error` → POSIX errno name. The raw OS code is preferred (it is
+/// what Node reports); `ErrorKind` is the fallback for errors without
+/// one (e.g. custom `io::Error`s built by `std`).
+fn errno_code(err: &std::io::Error) -> String {
+    if let Some(raw) = err.raw_os_error() {
+        let name = match raw {
+            1 => "EPERM",
+            2 => "ENOENT",
+            5 => "EIO",
+            13 => "EACCES",
+            17 => "EEXIST",
+            20 => "ENOTDIR",
+            21 => "EISDIR",
+            22 => "EINVAL",
+            28 => "ENOSPC",
+            30 => "EROFS",
+            36 => "ENAMETOOLONG",
+            39 => "ENOTEMPTY",
+            _ => "",
+        };
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    let name = match err.kind() {
+        std::io::ErrorKind::NotFound => "ENOENT",
+        std::io::ErrorKind::PermissionDenied => "EACCES",
+        std::io::ErrorKind::AlreadyExists => "EEXIST",
+        std::io::ErrorKind::InvalidInput => "EINVAL",
+        std::io::ErrorKind::InvalidData => "EINVAL",
+        std::io::ErrorKind::UnexpectedEof => "EIO",
+        _ => "EIO",
+    };
+    name.to_string()
+}
+
+/// Read a required string argument.
+fn node_arg_str(args: &serde_json::Value, key: &str) -> Result<String, NodeError> {
+    args.get(key)
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .ok_or_else(|| NodeError::invalid(format!("missing string argument `{key}`")))
+}
+
+fn node_arg_bool(args: &serde_json::Value, key: &str) -> bool {
+    args.get(key).and_then(|value| value.as_bool()).unwrap_or(false)
+}
+
+/// System-time → milliseconds since the epoch, as Node's `Stats` reports.
+fn millis(time: std::io::Result<SystemTime>) -> f64 {
+    match time.and_then(|t| t.duration_since(UNIX_EPOCH).map_err(std::io::Error::other)) {
+        Ok(duration) => duration.as_secs_f64() * 1000.0,
+        Err(_) => 0.0,
+    }
+}
+
+fn stat_json(meta: &std::fs::Metadata) -> serde_json::Value {
+    // `mode` is a unix concept; other targets report the conventional
+    // 0o644 so extension code can still branch on "is this executable".
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        meta.mode()
+    };
+    #[cfg(not(unix))]
+    let mode = 0o100644u32;
+    let birthtime = millis(meta.created());
+    let modified = millis(meta.modified());
+    serde_json::json!({
+        "isFile": meta.is_file(),
+        "isDirectory": meta.is_dir(),
+        "isSymbolicLink": meta.file_type().is_symlink(),
+        "size": meta.len(),
+        "mode": mode,
+        "mtimeMs": modified,
+        "atimeMs": millis(meta.accessed()),
+        // Node reports the inode change time here; creation time is the
+        // closest portable stand-in (equal on filesystems that expose no
+        // birth time).
+        "ctimeMs": if birthtime > 0.0 { birthtime } else { modified },
+        "birthtimeMs": birthtime,
+    })
+}
+
+/// Dispatch one `node:*` op. Kept as a single table so the shim has one
+/// import to talk to and the ops can be unit-tested directly.
+fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, NodeError> {
+    match op {
+        // -- fs ------------------------------------------------------------
+        "fs.readFile" => {
+            let path = node_arg_str(args, "path")?;
+            let bytes = std::fs::read(&path).map_err(|e| NodeError::io(e, "open", &path))?;
+            Ok(serde_json::json!({ "base64": base64_encode(&bytes) }))
+        }
+        "fs.writeFile" | "fs.appendFile" => {
+            let path = node_arg_str(args, "path")?;
+            let payload = node_arg_str(args, "base64")?;
+            let bytes = base64_decode(&payload)
+                .ok_or_else(|| NodeError::invalid("`base64` argument is not valid base64"))?;
+            let append = op == "fs.appendFile" || node_arg_bool(args, "append");
+            if append {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| NodeError::io(e, "open", &path))?;
+                file.write_all(&bytes)
+                    .map_err(|e| NodeError::io(e, "write", &path))?;
+            } else {
+                std::fs::write(&path, &bytes).map_err(|e| NodeError::io(e, "open", &path))?;
+            }
+            Ok(serde_json::Value::Null)
+        }
+        "fs.exists" => {
+            let path = node_arg_str(args, "path")?;
+            // `existsSync` follows symlinks (a dangling link is "missing").
+            Ok(serde_json::json!(std::path::Path::new(&path).exists()))
+        }
+        "fs.readdir" => {
+            let path = node_arg_str(args, "path")?;
+            let entries =
+                std::fs::read_dir(&path).map_err(|e| NodeError::io(e, "scandir", &path))?;
+            let mut out = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| NodeError::io(e, "scandir", &path))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|e| NodeError::io(e, "stat", &path))?;
+                out.push(serde_json::json!({
+                    "name": entry.file_name().to_string_lossy(),
+                    "isFile": file_type.is_file(),
+                    "isDirectory": file_type.is_dir(),
+                    "isSymbolicLink": file_type.is_symlink(),
+                }));
+            }
+            // Node returns entries in readdir order, which is unspecified
+            // but stable per filesystem; sort by name so JS-visible order
+            // does not depend on inode layout (matches `readdirSync` on
+            // ext4 in practice and keeps tests deterministic).
+            out.sort_by(|a, b| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["name"].as_str().unwrap_or_default())
+            });
+            Ok(serde_json::Value::Array(out))
+        }
+        "fs.stat" | "fs.lstat" => {
+            let path = node_arg_str(args, "path")?;
+            let meta = if op == "fs.lstat" {
+                std::fs::symlink_metadata(&path)
+            } else {
+                std::fs::metadata(&path)
+            }
+            .map_err(|e| NodeError::io(e, "stat", &path))?;
+            Ok(stat_json(&meta))
+        }
+        "fs.mkdir" => {
+            let path = node_arg_str(args, "path")?;
+            let result = if node_arg_bool(args, "recursive") {
+                std::fs::create_dir_all(&path)
+            } else {
+                std::fs::create_dir(&path)
+            };
+            result.map_err(|e| NodeError::io(e, "mkdir", &path))?;
+            Ok(serde_json::Value::Null)
+        }
+        "fs.unlink" => {
+            let path = node_arg_str(args, "path")?;
+            std::fs::remove_file(&path).map_err(|e| NodeError::io(e, "unlink", &path))?;
+            Ok(serde_json::Value::Null)
+        }
+        "fs.rmdir" => {
+            let path = node_arg_str(args, "path")?;
+            std::fs::remove_dir(&path).map_err(|e| NodeError::io(e, "rmdir", &path))?;
+            Ok(serde_json::Value::Null)
+        }
+        "fs.rm" => {
+            let path = node_arg_str(args, "path")?;
+            let force = node_arg_bool(args, "force");
+            let recursive = node_arg_bool(args, "recursive");
+            let meta = std::fs::symlink_metadata(&path);
+            match meta {
+                Ok(meta) if meta.is_dir() => {
+                    if recursive {
+                        std::fs::remove_dir_all(&path).map_err(|e| NodeError::io(e, "rm", &path))?;
+                    } else {
+                        std::fs::remove_dir(&path).map_err(|e| NodeError::io(e, "rm", &path))?;
+                    }
+                }
+                Ok(_) => {
+                    std::fs::remove_file(&path).map_err(|e| NodeError::io(e, "rm", &path))?;
+                }
+                Err(e) if force && e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(NodeError::io(e, "rm", &path)),
+            }
+            Ok(serde_json::Value::Null)
+        }
+        "fs.rename" => {
+            let from = node_arg_str(args, "from")?;
+            let to = node_arg_str(args, "to")?;
+            std::fs::rename(&from, &to).map_err(|e| NodeError::io(e, "rename", &from))?;
+            Ok(serde_json::Value::Null)
+        }
+        "fs.copyFile" => {
+            let from = node_arg_str(args, "from")?;
+            let to = node_arg_str(args, "to")?;
+            std::fs::copy(&from, &to).map_err(|e| NodeError::io(e, "copyfile", &from))?;
+            Ok(serde_json::Value::Null)
+        }
+        "fs.realpath" => {
+            let path = node_arg_str(args, "path")?;
+            let resolved = std::fs::canonicalize(&path).map_err(|e| NodeError::io(e, "realpath", &path))?;
+            Ok(serde_json::json!(resolved.to_string_lossy()))
+        }
+
+        // -- os ------------------------------------------------------------
+        "os.homedir" => Ok(serde_json::json!(home_dir())),
+        "os.tmpdir" => Ok(serde_json::json!(tmp_dir())),
+        "os.platform" => Ok(serde_json::json!(host_platform())),
+        "os.arch" => Ok(serde_json::json!(std::env::consts::ARCH)),
+        "os.type" => Ok(serde_json::json!(host_os_type())),
+        "os.eol" => Ok(serde_json::json!(host_eol())),
+        "os.hostname" => Ok(serde_json::json!(
+            std::fs::read_to_string("/etc/hostname")
+                .map(|name| name.trim().to_string())
+                .unwrap_or_else(|_| "localhost".to_string())
+        )),
+        "os.release" => Ok(serde_json::json!(uname_release())),
+
+        // -- process -------------------------------------------------------
+        "process.env" => {
+            let mut map = serde_json::Map::new();
+            for (key, value) in std::env::vars() {
+                map.insert(key, serde_json::Value::String(value));
+            }
+            Ok(serde_json::Value::Object(map))
+        }
+        "process.cwd" => Ok(serde_json::json!(
+            std::env::current_dir()
+                .map(|dir| dir.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "/".to_string())
+        )),
+        "process.platform" => Ok(serde_json::json!(host_platform())),
+        "process.arch" => Ok(serde_json::json!(std::env::consts::ARCH)),
+        "process.pid" => Ok(serde_json::json!(std::process::id())),
+
+        // -- crypto --------------------------------------------------------
+        "crypto.randomBytes" => {
+            let count = args
+                .get("count")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| NodeError::invalid("missing numeric argument `count`"))?;
+            let mut bytes = vec![0u8; count as usize];
+            getrandom_fill(&mut bytes)?;
+            Ok(serde_json::json!({ "base64": base64_encode(&bytes) }))
+        }
+
+        other => Err(NodeError::new(
+            "ERR_UNSUPPORTED_OPERATION",
+            format!("node bridge op `{other}` is not implemented"),
+        )),
+    }
+}
+
+/// `os.platform()` / `process.platform` — Node names the platforms
+/// `linux` / `darwin` / `win32`, which differs from `std`'s
+/// `linux` / `macos` / `windows`.
+fn host_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// `os.type()` — Node's uname-style OS name.
+fn host_os_type() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "Darwin",
+        "windows" => "Windows_NT",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
+/// `os.EOL`.
+fn host_eol() -> &'static str {
+    if cfg!(windows) {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// `os.homedir()` — `$HOME`, falling back to the passwd entry via
+/// `$USER` is not available here, so `/root` is the last resort.
+fn home_dir() -> String {
+    std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .unwrap_or_else(|| "/root".to_string())
+}
+
+/// `os.tmpdir()` — `$TMPDIR`, then `/tmp`.
+fn tmp_dir() -> String {
+    std::env::var("TMPDIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string())
+}
+
+/// `os.release()` — best-effort `uname -r` value. The host is
+/// Linux-only (the embedded QuickJS host is native-only), so reading
+/// the paired `version` file is enough.
+fn uname_release() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|release| release.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Fill `out` from the OS entropy pool. `/dev/urandom` is the portable
+/// Linux source and the only one this host needs; there is no fallback
+/// PRNG on purpose — a weak `randomUUID` would be worse than an error.
+fn getrandom_fill(out: &mut [u8]) -> Result<(), NodeError> {
+    use std::io::Read;
+    let mut file = std::fs::File::open("/dev/urandom")
+        .map_err(|e| NodeError::io(e, "open", "/dev/urandom"))?;
+    file.read_exact(out)
+        .map_err(|e| NodeError::io(e, "read", "/dev/urandom"))
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 (RFC 4648, with padding). Hand-rolled to keep
+/// `pi-extensions` dependency-free: the workspace has no base64 direct
+/// dependency and the shim needs the same primitives on the JS side.
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(BASE64_ALPHABET[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(BASE64_ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(BASE64_ALPHABET[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(BASE64_ALPHABET[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Inverse of [`base64_encode`]. Returns `None` on any malformed input
+/// so the caller can raise `EINVAL` instead of silently truncating.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    let mut padding = 0usize;
+    for byte in text.bytes() {
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'\n' | b'\r' | b' ' | b'\t' => continue,
+            _ => return None,
+        };
+        if padding > 0 {
+            return None;
+        }
+        buffer = (buffer << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    (padding <= 2).then_some(out)
 }
