@@ -7159,3 +7159,17 @@ $ git push origin work/lum-1123                            # 新分支
 槽位决策：开工与收尾 `running_task_count` 均为 **3**（本 run + LUM-1122 + 1 路族外），上限 3 路 →
 **本轮不派发新任务**。并发建议维持：上限 3 路；`pi-extensions/src/host.rs`、`pi-tui/src/app.rs`
 与 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree 86077604a work/lum-1123` → tree `ca18cb3dc`（零冲突）。
+- 合并提交 `9b4364d35`（`Merge branch 'work/lum-1123' into feature/pi.rs`，父 `86077604a` +
+  本文档提交 `2ae15fd00`），其 tree `ca18cb3dc` 与当时的 `work/lum-1123` **完全一致**。
+- `git push origin 9b4364d35:refs/heads/feature/pi.rs` → `86077604a..9b4364d35`；`work/lum-1123`
+  作为新分支一并推送。
+- `git diff --stat 86077604a 9b4364d35` = 本轮 5 个文件（`interactive.rs` 20 / `app.rs` 42 /
+  `input.rs` 43 / `mouse_scroll.rs` 240 / 本节文档 164，共 +504 / −5），无其他改动。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `86077604a`（LUM-1122 还没推分支），因此这次合并
+  **没有覆盖任何在途工作**，也没留下合并债。
+- 本节定稿的这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`
+  （零冲突），推送后 `feature/pi.rs` 的 tree 与 `work/lum-1123` 保持一致。
