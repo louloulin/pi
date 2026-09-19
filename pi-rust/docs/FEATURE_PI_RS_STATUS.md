@@ -10475,3 +10475,261 @@ LUM-1146 明确没碰的那块：**压缩摘要路径**（LUM-1146 的 numstat �
 `f3ca7df3c` + 本补记提交，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从
 `6e420761e` **快进至本补记提交**（`git ls-remote` 复查一致，哈希见本节末提交链），
 留档分支 `work/lum-1147` 一并推送（同哈希）。
+
+## LUM-1148 round — `pi-coding-agent` 工具输出截断（`core/tools/truncate.ts` 移植，read / grep / find / ls / bash 五处收口）+ `bash` 大输出管道死锁修复 + 合并推送 feature/pi.rs
+
+本轮起点 `910cd6f90`（LUM-1144 合并态）。先落代码提交 `e58e3d66c`（9 文件，+1524/-72），
+再合并 `origin/feature/pi.rs @ 127d07439`（LUM-1147 的压缩摘要重试接入），合并提交 `1be7f7016`，
+`git push origin work/lum-1148:refs/heads/feature/pi.rs` → `127d07439..1be7f7016`（快进），
+`git ls-remote` 复查 `refs/heads/feature/pi.rs = 1be7f7016`。
+
+### 一、选型：为什么是 `truncate.ts` + `bash` 输出管线
+
+开工时 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`
+（LUM-1146 + LUM-1147 + 本轮）——**槽位满，本轮不派发任何新 Stage，只收自己这一片**。
+
+| 候选 | 结论 |
+|------|------|
+| `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML） | 否——OSC-8 要把转义写进 ratatui `Buffer` 的 `Cell`，而 `Cell` 只存文本；语法高亮要引 highlight.js；两者都要动当时有写方的 `pi-tui/src/app.rs` |
+| `ScrollView` 独立组件 | 否——会写成死代码（当前只有消息日志一块可滚动区，且 LUM-1144 刚落地单份几何假设） |
+| `pi-ai` 上游剩余模块 | 否——LUM-1147 正在写 `pi-ai/src/retry.rs` 与 `pi-coding-agent/{compaction,config}.rs` |
+| 质量门（全仓 `cargo fmt` 归一） | 否——必须等所有写方收手，归 LUM-1138 |
+| **`truncate.ts` + `bash` 输出管线** | **选它**：截断是工具层「输出爆上下文」的真实防线，缺口是已确认的——本轮开工前 `read.rs` 模块注释白纸黑字写着 truncation「deliberately omitted」，`bash.rs` 完全没有截断 |
+
+### 二、实现（上游 → Rust 落点）
+
+| 上游 | Rust 落点 |
+|------|-----------|
+| `truncate.ts` 常量 `DEFAULT_MAX_LINES` / `DEFAULT_MAX_BYTES` / `GREP_MAX_LINE_LENGTH` | `tools/truncate.rs:28/32/35` |
+| `TruncatedBy` / `TruncationResult` / `TruncationOptions` | `truncate.rs:41/60/96`（serde 走 snake_case） |
+| `splitLinesForCounting` / `formatSize` / `truncateHead` / `truncateTail` / `truncateLine` | `truncate.rs` 同名 snake_case 函数 + 私有 `truncate_string_to_bytes_from_end` |
+| `read.ts` 的 `offset` / `limit` 参数（含 tool schema） | `read.rs:36-45`（负数按 0 处理），限位入口 `read.rs:145` |
+| `read.ts` 三条续读提示 | `read.rs:166` / `read.rs:170` / `read.rs:185`：`[Showing lines a-b of N. Use offset=X to continue.]`、`[Showing lines a-b of N (50.0KB limit). Use offset=X to continue.]`、`[N more lines in file. Use offset=X to continue.]` |
+| `read.ts` 超长首行兜底 | `read.rs:18` 文档 + 实现同段：`[Line N is xB, exceeds 50.0KB limit. Use bash: sed -n 'Np' <path> \| head -c 51200]` |
+| `grep.ts` 行截断 + 结果块截断 | `grep.rs:487` `render_matches(&page, context == 0) -> (String, bool)`，`grep.rs:493` 走 `truncate_line`（500 字符）；整块再走 `grep.rs:273` `truncate_head(bytes_only)` |
+| `grep.ts` 两条 notice | `grep.rs:282` `50.0KB limit reached`、`grep.rs:288` `Some lines truncated to 500 chars. Use read tool to see full lines` |
+| `find.ts:277` 结果块截断 | `find.rs:234` + `find.rs:245` notice |
+| `ls.ts:139-140` 列表截断 | `ls.rs:164` + notice；短列表**不下发** details |
+| `bash.ts:316-364` `formatOutput` + `output-accumulator.ts` 落盘 | `bash.rs:213` `combine_output`、`bash.rs:243` `format_output`、`bash.rs:301` `write_full_output`（`bash.rs:311` 拼 `$TMPDIR/pi-output-<16 hex>.log`） |
+| `bash.ts` 三条 notice | `bash.rs:275` / `bash.rs:283` / `bash.rs:267`：`[Showing lines a-b of N. Full output: <path>]`、`[Showing lines a-b of N (50.0KB limit). Full output: <path>]`、`[Showing last X of line N (line is Y). Full output: <path>]` |
+
+`details` 侧统一新增 `truncation`（read / grep / find / ls）与 `full_output_path`（bash），
+沿用既有 snake_case 契约；`find` / `ls` 只在命中时才下发 details（各有一条测试锁定）。
+
+### 三、关键口径与对上游的近似
+
+1. **`TruncationResult` 字段名用 snake_case**（上游 camelCase），与 `bash.rs` 既有的
+   `exit_code` / `elapsed_ms` 保持一致，避免同一工具层出现两套命名。
+2. **`truncate_line` 按 Unicode scalar（`chars()`）计数**，上游按 UTF-16 code unit 计数：含代理对
+   （emoji 等）的长行，上游会在第 500 个 code unit 处切得更早，Rust 版不会把字符切成半个。
+3. **`bash` 用 `[stderr]` 前缀标注 stderr**，上游把两路合并后再截断；因此
+   `total_lines` / `total_bytes` 的口径是「标注后的文本」，比上游多出前缀行与一个空行。
+4. **`bash` 的末行截断提示报真实末行长度**：上游用流式计数器，末行恰好以 `\n` 收尾时会报 `0B`，
+   这里刻意报真实值（可读性优先，也更容易被测试锁定）。
+5. **`(no output)` 空输出提示没有搬**：属于渲染层，不在本轮切片。
+6. **不再需要 `OutputAccumulator` 的滚动窗口**：内存里已有全量文本时，`truncate_tail` + 落盘在
+   Completed 路径上与上游行为等价；差异只出现在「进程还活着时的中间态」，而那部分没有对外接口。
+7. **`AbortLike` 仍然只在 spawn 前轮询**：命令跑起来之后 abort 不会杀子进程（既有行为，本轮只补了
+   模块注释说明）。
+
+### 四、修掉的两个真实 bug（`bash.rs`）
+
+原实现是「`try_wait()` 报 exit 之后才 `read_to_string` 两个管道」，有两个可复现故障：
+
+1. **>64KiB 输出死锁**：子进程写满管道缓冲区（Linux 64 KiB）后阻塞在 `write`，于是永不 exit、
+   `try_wait()` 永远返回 `None`，只能等满 120s 默认超时。新增集成测试
+   `bash_truncates_by_byte_limit_and_spills_the_full_output`（`head -c 100000 /dev/zero | tr '\0' 'x'`）
+   修复前实测 **120.17s 后失败**（拿到超时错误），修复后 **2.05s 通过**。
+2. **超时路径的孙进程挂死**：`sh -c 'seq 1 3; sleep 30'` 被 kill 后，`sleep` 仍持有管道写端，
+   父进程的 `read_to_string` 会一直阻塞到它结束——工具调用被拖住 30s。新实现把读端交给独立线程 +
+   `mpsc` 通道，`DRAIN_GRACE = 500ms`（`bash.rs:324`）之后不再等待，因此**永不 join 读线程**
+   （最坏情况留下一个空闲线程，由孙进程自行结束）。
+
+放弃的方案：POSIX 进程组 kill（`setsid` + `killpg`）需要 `libc` / `unsafe`，而 `tools/mod.rs` 是
+`#![forbid(unsafe_code)]`；通道排空不需要新依赖。
+
+### 五、测试
+
+- `tools/truncate.rs` 15 条内联单测：行限 / 字节限 / 尾部截断 / 单行截断 / `bytes_only` 关闭行限 /
+  `format_size` / 边界（空内容、恰好等于上限、超长首行）。
+- `tests/tools.rs` +13：`read` 9 条（未截断不动文件、行限、字节限、`offset`、`limit`、两者组合、
+  越界 offset 报错、超长首行的 sed 兜底、`limit` 覆盖全文件时无 notice）+ `bash` 4 条（短输出内联、
+  行限截断 + 落盘、字节限截断 + 落盘、超时带部分输出）。
+- `tests/tools_navigation.rs` +5：grep 长行截断（逐字节断言首行长度）、grep 结果块 50KB、
+  find 结果块 50KB、ls 列表 50KB、ls 短列表不下发 details。
+
+### 六、验证
+
+```
+$ rustc --version                                                   # 1.98.1
+$ export CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1148
+$ cargo test  -p pi-coding-agent --offline                          # 259 lib + 17 个 target 全绿（tools 20 / tools_navigation 29）
+$ cargo build --workspace  --offline                                # Finished（零 error）
+$ cargo clippy -p pi-coding-agent --all-targets --offline -- -D warnings   # exit 0
+$ # 合并 LUM-1147 之后在 merged tree 上复跑
+$ cargo test  -p pi-coding-agent --offline                          # 271 lib + 17 个 target 全绿
+$ cargo build --workspace  --offline                                # Finished
+```
+
+`cargo clippy` 报出并已修掉 1 条新代码问题：`clippy::ptr_arg`（`tests/tools.rs` 的 helper 形参
+`&PathBuf` → `&Path`）。
+
+`cargo fmt` 口径同 LUM-1145：**没有**对既有文件跑 `cargo fmt`——全仓既有漂移归 LUM-1138；
+本轮新增的 `truncate.rs` 与每个新增 diff 块本身是 rustfmt clean 的。中途曾误跑一次
+`cargo fmt -p pi-coding-agent`，它顺手「修」了 50 个文件里既有的漂移（`mod` 重排、`assert!` 折行等），
+已逐个回退，最终 diff 只剩本轮自己的改动。
+
+**已知并发抖动（与本次改动无关）**：默认线程数下 `pi-coding-agent/tests/print_mode.rs` 的
+`sigint_or_clean_exit` 偶发失败（SIGKILL 后 `status.code()` 为 `None`，与本文档「并发运行的抖动记录」
+段落（约 3552 行）里点名的 6 个用例同源）；重跑该文件 17/17 全绿，本轮没有碰 `print_mode` 路径。
+
+### 七、合并与推送
+
+- 代码提交 `e58e3d66c`（9 文件，+1524/-72；新增 `src/tools/truncate.rs`）。
+- 合并提交 `1be7f7016`：`git merge origin/feature/pi.rs @ 127d07439`（LUM-1147 的 `compaction.rs` /
+  `interactive.rs` / 文档）**零冲突**——本轮只碰 `pi-coding-agent/src/tools/*` 与两个 `tests/` 文件，
+  与在跑的另两路（`pi-agent-core`、`pi-ai` + `compaction` / `config`）零文件交集。
+- 推送：`git push origin work/lum-1148:refs/heads/feature/pi.rs` → `127d07439..1be7f7016`（快进），
+  随后本节文字的文档提交 `add630b62` 再以快进 `1be7f7016..add630b62` 追加到同一分支；
+  `git ls-remote origin feature/pi.rs` 复查为 `add630b62`（= 本轮 `work/lum-1148` 的 tip）。
+  真实哈希链：代码 `e58e3d66c` → 合并 `1be7f7016` → 本文档 `add630b62`。
+
+### 八、frontier（本轮更新）
+
+1. **新入账：`read` 的图片分支仍未移植**。上游 `read.ts` 对 png/jpg 走 attachment；本轮只做文本截断，
+   图片分支要碰 `pi-protocol` 的附件类型与 TUI 渲染，量级另算。当前 `read.rs` 的模块注释已写明这一缺口。
+2. `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）：仍要动 `app.rs` 写入路径，随本轮收口
+   `app.rs` 无写方；启动前仍须确认没有别的在跑任务正在改它。
+3. `utils/overflow.ts`（要 `AssistantMessage.errorMessage` 字段）、`utils/estimate.ts`（已落在
+   `compaction.rs`）、bedrock / mistral / azure / vertex / oauth / images、provider catalog（LUM-1090）、
+   `PLAN.md` 停在 Stage 14 —— 均照上一节不变。
+4. **质量门清偿** = LUM-1138（`backlog`）：`cargo fmt --all -- --check` 的既有漂移仍在。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-coding-agent/src/tools/`
+（新增 `truncate.rs`，改 `read` / `grep` / `find` / `ls` / `bash` / `mod`）与两个集成测试文件，外加本文档。
+
+环境记录：本轮构建期间根分区两次撞到 100% 满。第一次全量 `cargo test --workspace` 因此在 `pi-tui` 的
+`e2e` / `selector_fuzzy` / `mouse_region` / `app_theme` 链接阶段失败（`cc` 报
+`No space left on device`，四个 target 本轮均未改动，与代码无关）；另一次连依赖 `reqwest` 的重新编译
+都起不来。处理：删掉本轮自己的 `target/debug/incremental` 与整个 `/tmp/pi-rust-target-lum1148`，并清掉
+LUM-1143 遗留的共享种子目录 `/tmp/pi-rust-target-lum1143`（5.7G；其分支已合并推送，随时可重建，
+下次播种建议改用 `/tmp/pi-rust-target-lum1147`）。此后只在与另两路隔离的 target 里跑
+`-p pi-coding-agent` 与 `cargo build --workspace`，全部通过；**全量 `cargo test --workspace`
+本轮未能跑通，是共享磁盘限制，不是代码问题**。
+
+## LUM-1149 round — `pi-tui` 自研语法高亮（`highlight.rs`：`highlight.js` 子集 + markdown 代码块接线，frontier 第 2 项之一）+ 合并推送 feature/pi.rs
+
+本轮起点 `6e420761e`（LUM-1146 合并态）。先落代码提交 `dc553ff79`，再依次合并两路已推送的
+`origin/feature/pi.rs`：`127d07439`（LUM-1147 压缩摘要接入重试，合并提交 `e779c07c1`）与
+`1b1a6c342`（LUM-1148 工具输出截断，合并提交 `4ba2f2ea6`；该路也在文末追加了自己的文档节，
+本轮按「先他路、后本轮」手工解冲突，保留两节），最后是本轮文档提交。真实推送哈希见本节末补记。
+
+### 一、选型：为什么切「语法高亮」这一刀
+
+issue 要求「分析后续哪些 feature 可规划可实现（上限 3 路并发），决定跳过还是规划+实现」。
+开工时 `multica daemon status` 为 `running_task_count = 3`（LUM-1147 `pi-coding-agent/compaction.rs`
++ LUM-1148 `pi-coding-agent/tools/*` + 本轮），**槽位满，本轮不派发任何子任务**，改为自己做
+frontier 上一项：
+
+| 候选 | 结论 |
+|------|------|
+| **P3 渲染保真之「语法高亮」（`packages/coding-agent/src/utils/syntax-highlight.ts` + `theme.ts::buildCliHighlightTheme` + `packages/tui/src/components/markdown.ts:215,523`）** | **本轮做**。它是纯渲染切片，落点 `pi-tui`，与本轮两路在跑的 `pi-coding-agent` **零文件重叠**（`pi-tui` 本轮唯一写方）；不需要新依赖（上游走 `highlight.js`，本 port 不引入，改为自研词法）；且 `pi-tui` 里 `ThemeColor::Syntax*` / `Muted` / `ToolDiffAdded` / `ToolDiffRemoved` 早已定义却**一个消费方都没有**，本项正好把这些槽位点亮。 |
+| P3 `latex.ts` 剩余之 OSC-8 hyperlink / 块级 HTML | 跳过：OSC-8 要动 `app.rs` 的写入路径与 ratatui `Cell`，而 `app.rs` 正是本轮另一路（LUM-1144 合并后）刚松手、LUM-1147 又刚改过的热点文件；块级 HTML 上游本就按纯文本渲染（`markdown.ts` 不做块级 HTML），无需移植。 |
+| P2 `ToolCallDelta` 重复建块 | 跳过：同属 `app.rs`，与上一项必须串行，本轮只能选一个。 |
+| `pi-ai` 未移植模块（`utils/overflow.ts` / `utils/estimate.ts` / mistral 等） | 跳过：`overflow.ts` 需要 `AssistantMessage.error_message` 等协议字段（`pi-protocol` 没有，45 处构造点含刚被 LUM-1147 改过的 `compaction.rs`）；mistral 是 941 行适配器；provider catalog 无上游数据源。均为「猜不如不猜」。 |
+| `pi-extensions` 的 JS 侧 `createXxxTool` 桥 | 跳过：需要跨 crate 侵入 `pi-coding-agent` 的工具注册回调，正好撞上在跑的两路。 |
+
+### 二、切片：`highlight.js` 语义的忠实子集搬进 `pi-tui`
+
+新增 `crates/pi-tui/src/highlight.rs`（2464 行，`rustfmt` 规范化后）：
+
+- **类别 → 主题槽映射**（`highlight.rs:63`，与 `theme.ts::buildCliHighlightTheme` 一一对应）：
+  `keyword`→`SyntaxKeyword`、`built_in`→`SyntaxType`、`literal`/`number`→`SyntaxNumber`、
+  `string`→`SyntaxString`、`comment`→`SyntaxComment`、`function`/`title`→`SyntaxFunction`、
+  `attr`/`variable`→`SyntaxVariable`、`tag`/`punctuation`→`SyntaxPunctuation`、
+  `meta`→`Muted`、`addition`→`ToolDiffAdded`、`deletion`→`ToolDiffRemoved`。
+- **公开 API**：`TokenKind`（14 个类别，`:34`）、`Token { kind, text }`、
+  `supports_language(&str) bool`（`:100`）、`tokenize(code, lang) -> Option<Vec<Token>>`（`:109`）、
+  `highlight_code(code, Option<lang>, base) -> Vec<StyledLine>`（`:122`）。token 只替换 `base` 的
+  前景色，保留底色/属性；**行数恒等于 `code.split('\n').count()`**（未知语言也成立，行号不会漂）。
+- **语言表**（`LANGUAGES`，`:342`）：24 个 id + 别名（`rs`/`py`/`ts`/`js`/`jsx`/`mjs`/`yml`/`sh`/`shell`/`zsh`/`rb`/`cs`/`kt`/`hpp`/`patch` …），覆盖上游 eager 注册集
+  （python/java/go/javascript/cpp/typescript/php/ruby/c/csharp/bash/rust/scala/kotlin/swift/dart/groovy/perl/lua 的可用子集）
+  加上 `getLanguageFromPath` 会产出的扩展名（json/yaml/toml/html/xml/css/sql/diff/markdown）。
+- **词法**（`scan`，`:1597`）：单遍状态化扫描，跨行支持块注释、三引号串（python/swift/scala/kotlin）、
+  JS/Go/Shell 反引号模板串、Rust `r#"…"#` 裸串（`match_string_start`，`:1954`）、
+  Rust `#[derive(..)]` 属性（整段 `meta`）、YAML/TOML 行首键（`key:` / `key =` / `[section]`）、
+  SQL 大小写不敏感关键字、Shell `$VAR` 与 `-flag`、Ruby/Perl/PHP 变量前缀、CSS `#rrggbb`、
+  以及 `diff` 专用扫描（`scan_diff`，`:2057`：`+++`/`---`/`@@` → `Muted`，`+`/`-` 行 → `ToolDiffAdded`/`ToolDiffRemoved`）
+  与 HTML/XML 专用扫描（`scan_markup`，`:2092`：标签名 `Type`、属性名 `Variable`、属性值 `String`、
+  `<!-- -->` 注释、实体 → `Literal`）。
+- **接线**（`markdown.rs:920`）：`Block::Code` 从「每行一个 `MdCodeBlock` span」改为
+  `highlight_code(&lines.join("\n"), lang, code_style)`；未分类文本仍继承 `MdCodeBlock` 底色，
+  因此视觉上仍是代码块 + 语法色，而不是整块换色。`lib.rs:19,47` 加模块与再导出。
+
+### 三、刻意偏离（全部写在代码注释里）
+
+1. **不进入子语言**：`highlight.js` 会在 `<script>`/`<style>`、模板串 `${}` 插值、YAML 内嵌块里
+   递归高亮；本 port 只做外层语言，模板串插值整段按字符串着色。
+2. **自研词法代替上游语法定义**：`highlight.js` 的每种语言是上百行语法对象，本 port 用「关键字/
+   内置类型/字面量表 + 少量状态」近似，同一 token 的分类可能与上游在边角（宏、泛型、嵌套模板）
+   不一致；这是**保真度取舍**，注释与本文均已声明。
+3. **未知 / 空 info 语言退回纯代码块色**（`highlight_code` 的 `None` 分支），与上游
+   `supportsLanguage` 拒绝时走纯文本的行为一致；`markdown` 语言支持但只按纯文本着色。
+4. **未闭合的行内串 / 注释截断到行尾**：上游会标 `illegal`，本 port 退化为「行内字符串」，
+   不会把余下整块代码染成字符串色。
+5. **`pi-coding-agent` 的 read/write 渲染器未接入**：上游 `theme.ts` 的
+   `getLanguageFromPath` 表用于工具输出按扩展名着色，落点在 `pi-coding-agent`（本轮两路正在写），
+   已记为本节 frontier 的新 follow-up。
+
+### 四、测试与验证
+
+- 新增 `crates/pi-tui/src/highlight.rs` 内 19 项单测：别名/未知语言、Rust（关键字/函数/类型/裸串/
+  属性/生命周期不误判为字符）、TypeScript（块注释与模板串跨行）、Python（三引号 + `@decorator`）、
+  Shell（shebang/`$VAR`/`-flag`）、SQL 大小写不敏感、JSON、YAML、TOML、HTML、CSS、diff ±、
+  未知语言落到纯代码块色、`base` 前景色保留、`highlight_code` 行数不变、多行串跨行保持样式。
+- 适配 `crates/pi-tui/tests/markdown.rs` 2 项断言（原先断言「整行一个 `MdCodeBlock` span」，
+  现改为断言 `fn`→`SyntaxKeyword` / `main`→`SyntaxFunction` 且未分类空白仍是 `MdCodeBlock`）。
+- 记录（`CARGO_TARGET_DIR=lum-1144 的 target`，全程 `--offline`）：
+  `cargo test -p pi-tui` 28 个 test binary 全绿（lib 256 项，含新 19 项）；
+  `cargo clippy -p pi-tui --all-targets -- -D warnings` exit 0；
+  合并后 `cargo check --workspace --all-targets` exit 0；改动文件 `cargo fmt` 后 fmt-clean。
+
+### 五、与在跑任务的关系、槽位、环境
+
+- **不派发**：开工时 `running_task_count = 3`（上限 3），推送前复查已降到 2，但本轮切片已在手，
+  不再中途补派。推送前 `feature/pi.rs` 已被两路推进（LUM-1147 `127d07439`、LUM-1148 `1b1a6c342`），
+  本轮分两次合并：代码零冲突（它们只碰 `pi-coding-agent`，本轮只碰 `pi-tui`），
+  文档尾部两处「追加自己的轮次节」按「先他路、后本轮」手工合并。
+- **LUM-1147 与 LUM-1146 撞车**：两路都做了 agent 级重试。LUM-1146 落在 `pi-agent-core`，
+  LUM-1147 落在 `pi-coding-agent` 的压缩摘要调用点，二者互补，本轮合并后共存。
+- **磁盘事故与处置（留档）**：本轮开工时根分区仅剩 1.7G。首次复用 LUM-1144 的 target 做
+  `cargo check` 后写满（`No space left on device`）。处置：确认 `/tmp/pi-rust-target-lum1148`
+  超过 20 分钟无任何写入（对应 LUM-1148 已结束）、`daemon running_task_count` 3→2 后，
+  **删除该 12G target 目录**（可再生缓存，非源码），释放后 12G 空闲；
+  LUM-1147 的 target 与 `-clippy` 目录全程未触碰。本轮无独立 target。
+
+### 六、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试**~~ 已由 LUM-1146 收口，LUM-1147 的重复实现（压缩摘要接入）已并入。
+2. **P3 渲染保真**：**语法高亮本轮（LUM-1149）收口**；同项的块级 HTML 经复核上游本就纯文本，
+   可结案；只剩 **OSC-8 hyperlink**（落点 `app.rs`，等该文件无写方）。
+3. **P2 `pi-tui` 事件流化后的 `ToolCallDelta` 重复建块**（LUM-1141 记入）：落点 `app.rs`，与第 2 项串行。
+4. **质量门清偿** = LUM-1138（`backlog`）：`cargo fmt --all -- --check` 全量漂移仍在（本轮未新增漂移）。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：`utils/overflow.ts`、`utils/estimate.ts`，以及 bedrock / mistral /
+   azure / vertex / oauth / images。
+7. **本轮新增**：`pi-coding-agent` 的 read/write 工具输出接入 `highlight_code` +
+   `theme.ts::getLanguageFromPath` 扩展名表（当前 `pi-tui` 的高亮器已就绪，只剩消费方）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-tui`
+（新增 `highlight.rs`，改动 `markdown.rs` / `lib.rs` / `tests/markdown.rs`）与本文档。
+
+环境记录：本轮复用 LUM-1144 遗留的 `.../lum-1144-741c6f9bb983/.../pi-rust/target`（无独立
+`/tmp/pi-rust-target-lum1149`），删除的是**已结束**的 LUM-1148 的 `/tmp/pi-rust-target-lum1148`。
+
+补记（推送哈希）：本轮代码提交 `dc553ff79` + 两次合并提交 `e779c07c1` / `4ba2f2ea6` + 文档提交
+`cb5696061`，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `1b1a6c342`
+**快进至 `cb5696061`**（`git ls-remote` 复查一致：`cb5696061f5761c866861543bbf92242d3a62449`），
+本补记提交再追加一次推送，留档分支 `work/lum-1149` 一并推送（同哈希）。
