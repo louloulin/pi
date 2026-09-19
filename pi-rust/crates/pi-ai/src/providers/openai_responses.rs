@@ -81,6 +81,7 @@ use pi_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::json_parse::parse_streaming_json;
 use crate::stream::AssistantMessageEventStream;
 use crate::types::{SimpleStreamOptions, StreamError};
 use crate::StreamFn;
@@ -689,14 +690,9 @@ impl ResponsesResponse {
     }
 }
 
-/// Parse an accumulated arguments string, tolerating partial JSON.
+/// Parse an accumulated arguments string, tolerating partial or malformed JSON.
 fn parse_arguments(arguments: &str) -> Value {
-    if arguments.trim().is_empty() {
-        Value::Object(Default::default())
-    } else {
-        serde_json::from_str(arguments)
-            .unwrap_or_else(|_| Value::String(arguments.to_string()))
-    }
+    parse_streaming_json(Some(arguments))
 }
 
 // ---------------------------------------------------------------------------

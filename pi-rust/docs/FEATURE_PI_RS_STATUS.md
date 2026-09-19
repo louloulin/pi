@@ -9902,3 +9902,304 @@ $ rustfmt --edition 2021 --check <本轮 3 个文件>
 并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-agent-core`（`agent.rs` /
 `agent_loop.rs` 及其新测试文件）与本文档。
+
+## LUM-1145 round — `pi-ai` 提供商 JSON 容错解析（`utils/json-parse.ts` 移植 + anthropic / openai 工具参数接入，frontier 第 10 项之一）+ 合并推送 feature/pi.rs + 派发 Stage 43
+
+本轮起点 `d68188dba`（LUM-1143 合并态）。先落代码提交 `572564fc3`，再合并
+`origin/feature/pi.rs @ c5e492852`（LUM-1141 的工具批次事件流），合并提交 `4dafee27f`，
+最后是本轮文档提交。真实回执哈希与 `git ls-remote` 复查见本轮 issue 评论。
+
+### 一、选型：为什么是 `json-parse.ts`，而不是 frontier 第 2 项（agent 级重试）
+
+开工时 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`
+（LUM-1141 + LUM-1144 + 本轮），**槽位满**。frontier 第 2 项（P2 agent 级重试）的落点是
+`agent_loop.rs`，而 LUM-1141 正在同一文件里做事件流——按串行口径它当时不可动。frontier
+第 5 / 6 项要动 `pi-tui/src/app.rs`（LUM-1144 正在写），第 8 项（质量门）要全量 `cargo fmt`
+（必须等所有写方收手）。**唯一既高价值又零冲突的自由区是 `pi-ai`**。
+
+在第 10 项（未移植的 `pi-ai` 上游模块）里逐个评估：
+
+| 候选 | 结论 |
+|------|------|
+| `utils/json-parse.ts` | **本轮选它**：纯函数、无外部依赖、能被 4 处真实工具参数收口立刻用上（不留死代码），且是「provider 输出畸形 JSON 时整条流挂掉」这个真实故障的修复 |
+| `utils/overflow.ts` | 否——它要读 `AssistantMessage.errorMessage`，而 `pi-protocol/src/events.rs:85` 的 `AssistantMessage` **没有**这个字段（上游有 `errorMessage?`）；补协议字段会波及 `pi-session` JSONL / RPC / 全仓结构体字面量，不该塞进一个 P3 切片 |
+| `utils/estimate.ts` | 否——估算逻辑实际上已经落在 `pi-coding-agent/src/compaction.rs`（`estimate_tokens` 一族），再建一份等于分叉 |
+| bedrock / mistral / azure / vertex / oauth / images | 否——都是「新建 provider」量级，不是一个切片 |
+
+### 二、实现（上游 `packages/ai/src/utils/json-parse.ts`）
+
+| 上游 | Rust 落点 |
+|------|-----------|
+| `VALID_JSON_ESCAPES`（`json-parse.ts` 顶部） | `json_parse.rs:34`（`['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']`） |
+| `repairJson`——只把**字符串内部**的裸控制字符转义、只双写**非法**转义 | `json_parse.rs:41` `repair_json` |
+| `parseJsonWithRepair<T>` | `json_parse.rs:117` `parse_json_with_repair`（先严格 `from_str`，失败才修复重试；严格路径零额外成本） |
+| （同上，Value 形态） | `json_parse.rs:132` `parse_value_with_repair` |
+| `closePartialJson` | `json_parse.rs:143` `close_partial_json`（近似实现，见第三节） |
+| `parseStreamingJson<T>` | `json_parse.rs:226` `parse_streaming_json`（永不失败，失败退化 `{}`） |
+| `anthropic-messages.ts:482` 对**每一帧** `parseJsonWithRepair(sse.data)` | `providers/anthropic.rs:662-664`：`dispatch_event` 在拼接完 `data:` 行之后、dispatch 之前先 `repair_json` |
+| anthropic 工具参数收口（`content_block_stop` 时解析累计的 `partial_json`） | `providers/anthropic.rs:996` `parse_streaming_json(Some(tc.arguments.as_str()))` |
+| `openai-completions.ts:455/644-646` `parseStreamingJson(block.partialArgs)`（**非流式的工具参数也走它**） | `providers/openai.rs:417`（`into_tool_call`）+ `openai.rs:752`（流式 `finalize`）；顺手删掉了原来「解析失败就 `Value::String(原始串)`」的兜底 |
+| `openai-responses-shared.ts:657/664/714` | `providers/openai_responses.rs:695` `parse_arguments` 改为委托 `parse_streaming_json` |
+
+**刻意不接的两处**（遵循上游）：`openai` / `google` 的 **SSE 帧**解析没有套修复——上游那两家把
+解码交给各自 SDK 的 `JSON.parse`，只有 anthropic-messages 逐帧调用 `parseJsonWithRepair`；google
+的 `functionCall.args` 到 Rust 侧本来就是已解析的 `Value`，没有字符串可修。
+
+公共导出补在 `lib.rs:23`（`parse_json_with_repair` / `parse_value_with_repair` /
+`parse_streaming_json` / `close_partial_json` / `repair_json`），风格与既有 `pub use retry::{..}` 一致。
+
+### 三、关键口径与对上游的近似（重要）
+
+1. **`parse_streaming_json` 返回 `serde_json::Value` 且永不 `Err`**：上游签名是泛型
+   `parseStreamingJson<T>` 但失败时 `return {} as T`，本质就是「不会抛」。Rust 的
+   `ToolCall.arguments` 本来就是 `Value`，因此收敛成 `Value` 比引一个泛型更能表达真实契约。
+2. **`close_partial_json` 是 npm `partial-json` 的近似，不是等价实现**：Rust 版的做法是「截到
+   最后一个结构完整的值，再补齐缺失的闭括号」（对每个候选位置逐次用 `serde_json` 校验，最长优先），
+   也就是**丢掉**未完成的尾部；npm 的 partial-json 还会把「进行中」的对象也补成一个合法值
+   （例如 `{"a":` → `{}`、`{"a": "b` → `{"a":"b"}`）。差别只出现在**流式途中**（`ToolCallDelta`
+   阶段），而所有最终收口（`content_block_stop` / `finalize`）拿到的都是完整 payload；因此它对
+   已经落地的行为零影响，`overrides` / `nested` 等 partial-json 的高级语义未移植。这条写进了
+   模块文档注释，避免后人误以为与 npm 逐字节等价。
+3. **`repair_json` 只做无损修复，不猜内容**：`\uXXXX` 里的坏 hex 会**原样放过**（因为 `'u'` 在
+   合法转义集里），与上游一致；字符串**外**的裸控制字符也不动（只有字符串内的才非法）。这两条
+   各有一条单测锁定（`invalid_unicode_escape_passes_through`、
+   `control_characters_outside_strings_are_not_escaped`）。
+
+### 四、测试
+
+- `pi-ai/src/json_parse.rs` 内联 14 条单测（`valid_json_is_left_untouched`、
+  `unicode_escapes_are_preserved`、`raw_control_characters_inside_strings_are_escaped`、
+  `control_characters_outside_strings_are_not_escaped`、`invalid_escapes_are_doubled`、
+  `trailing_backslash_is_doubled`、`invalid_unicode_escape_passes_through`、
+  `strict_parse_short_circuits_repair`、`close_partial_json_completes_open_containers`、
+  `close_partial_json_drops_the_incomplete_tail`、`close_partial_json_reports_nothing_to_recover`、
+  `close_partial_json_handles_escaped_quotes`、`parse_streaming_json_never_fails`、
+  `parse_streaming_json_parses_complete_and_partial_payloads`）。
+- 两个端到端 fixture（真实 SSE 字节流，不是构造出来的字符串）：
+  - `fixtures/anthropic/repair_required.sse`（+20）：文本 delta 里一个**裸 TAB**，
+    外加一段 `path C:\Users` 的**非法转义**；
+  - `fixtures/anthropic/tool_use_repair_required.sse`（+17）：`partial_json` 里一个**裸 0x01**。
+- `tests/anthropic.rs` 新增 2 条：`malformed_string_literals_are_repaired`（`:193`，断言修复后的
+  文本逐字节正确、且不再以 `StreamError::Malformed` 收场）、
+  `malformed_tool_arguments_are_repaired`（`:232`，断言 `ToolCall.arguments` 是解析后的对象）。
+
+### 五、验证
+
+```
+$ rustc --version                       # 1.98.1（stable；/tmp/rustup-home 工具链）
+$ export CARGO_HOME=/tmp/cargo-home CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+$ export CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1145   # 本轮独立 target，不与另两路的锁互相拖累
+$ cargo check  --workspace --all-targets --offline                    # 干净（零 error）
+$ cargo test   --workspace --offline -- --test-threads=1              # 1456 passed / 0 failed / 2 ignored（108 个 test target）
+$ cargo test   -p pi-ai --offline                                     # 116 passed / 0 failed（94 lib + 12 anthropic + 10 google）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings      # exit 0（修正见第七节第 8 项）
+$ cargo check  -p pi-ai -p pi-agent-core -p pi-protocol --target wasm32-unknown-unknown \
+                --features pi-agent-core/wasm                          # 通过（`rust-wasm.yml` 的路径过滤含 pi-ai）
+$ rustfmt --edition 2021 --check crates/pi-ai/src/json_parse.rs        # clean
+```
+
+**并发抖动记录（与本次改动无关，供后续 CI 参考）**：默认线程数跑一次 `cargo test --workspace`，
+唯一失败是 `pi-coding-agent/tests/print_mode.rs:429 sigint_or_clean_exit`（断言子进程退出码，
+拿到 `None`）。这正是本文档 3555 行已记录在案的并发抖动之一（当时点名的 6 个抖动用例里就有它），
+判据同样成立：单独跑该测试文件 `--test-threads=1` **17/17 全绿**，全量串行
+**1456 / 0 / 2 全绿**。本轮没有改 `pi-coding-agent` 的任何一行，且这个用例走的是「无 TTY 的
+print 路径」，与自己这份改动零交集。
+
+本轮**没有**对既有文件跑 `cargo fmt`：全仓 122 文件的既有漂移归 LUM-1138，这里只保证新增文件
+`json_parse.rs` 与每个新增 diff 块是 rustfmt clean 的（全部 11 个改动点逐块 `rustfmt --check` 过）。
+
+### 六、合并与推送
+
+- 代码提交 `572564fc3`（8 文件，+552/-24）。
+- 合并提交 `4dafee27f`（第一父 `572564fc3`、第二父 `c5e492852`）：`git merge origin/feature/pi.rs`
+  **零冲突**（LUM-1141 只动 `pi-agent-core` 的 `agent.rs` / `agent_loop.rs` 与新测试文件，与本轮的
+  `pi-ai` 文件零交集）。
+- 合并态复测：第五节那组命令在合并后重跑，数字即上面的 1456 / 0 / 2。
+- 推送：`git push origin HEAD:refs/heads/feature/pi.rs` → `c5e492852..4dafee27f`（快进）；
+  `work/lum-1145` 作为留档分支一并推送。真实回执哈希与 `git ls-remote` 复查见本轮 issue 评论。
+
+`git diff --numstat d68188dba 572564fc3`（本轮全部代码改动）：
+
+```
+pi-rust/crates/pi-ai/fixtures/anthropic/repair_required.sse(+20/-0)
+pi-rust/crates/pi-ai/fixtures/anthropic/tool_use_repair_required.sse(+17/-0)
+pi-rust/crates/pi-ai/src/json_parse.rs(+424/-0)
+pi-rust/crates/pi-ai/src/lib.rs(+5/-0)
+pi-rust/crates/pi-ai/src/providers/anthropic.rs(+6/-6)
+pi-rust/crates/pi-ai/src/providers/openai.rs(+3/-11)
+pi-rust/crates/pi-ai/src/providers/openai_responses.rs(+3/-7)
+pi-rust/crates/pi-ai/tests/anthropic.rs(+74/-0)
+```
+
+### 七、派发与槽位
+
+- 开工时 `running_task_count = 3`（LUM-1141 + LUM-1144 + 本轮），槽位满；推送前复查：LUM-1141
+  已收口为 `in_review`（并已并入本轮合并态），本轮自己亦将结束，`running_task_count` 回到 **2**，
+  留出 **1 个空槽**。
+- 据此以 `todo` **派发 Stage 43 = LUM-1147**（`pi-ai` + `pi-coding-agent`：agent 级重试——
+  `utils/retry.ts` 的错误文案分类器 + `retryAssistantCall` + `settings.retry` 的 agent 级四个键
+  接入），让空槽立刻被用上。它只碰 `pi-ai/src/retry.rs` 与 `pi-coding-agent/src/compaction.rs` /
+  `config.rs` / options 结构，与在跑的 LUM-1144（`pi-tui/src/app.rs`）零交集，上限 3 路不被突破。
+- **给 Stage 43 的提示**（已写进它的任务书）：`pi-ai` 目前零正则依赖，`rust-wasm.yml` 卡着
+  `.wasm` 500 KB 预算，因此上游那两张用 `new RegExp(join("|"), "i")` 的模式表要用大小写不敏感的
+  手写匹配，不要引 `regex`；同时**不要**为了拿到 `errorMessage` 去改 `pi-protocol` 的
+  `AssistantMessage`（那是 `overflow.ts` 的前置条件，属于另一个切片）。
+
+环境记录：本轮复用 `/tmp/pi-rust-target-lum1145`（由 `cp -al` 从 LUM-1139 的 target 播种，
+硬链接不额外占盘）。期间根分区一度 **100% 满**，清理了 `lum-1136` 的 9.8G 陈旧 `target` 与
+LUM-1139 的旧 target 后回到 12G 空闲；清理对象都是可复现的构建产物，未触碰任何在跑任务的 target。
+
+### 八、frontier（本轮更新）
+
+1. ~~`pi-ai` 提供商请求重试~~ **LUM-1142 收口**。
+2. **P2 agent 级重试（`utils/retry.ts`）**：错误文案分类器 + `retryAssistantCall`，落点
+   `pi-ai` + `pi-coding-agent`（上游调用点是 `compaction.ts:579 completeSummarization`）；
+   **本轮派发 Stage 43 = LUM-1147**（`todo`，已起跑）。
+3. ~~**P2 工具批次的事件流**~~ **LUM-1141 收口**（本轮合并进来）。
+4. ~~**P2 取消语义对齐**~~ **LUM-1143 收口**。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要动 ratatui `Cell` 与
+   `app.rs` 写入路径；与 Stage 42 串行。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：Stage 42 = LUM-1144（`in_progress`）。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（`backlog`）：**本轮实测修正一项口径**——`cargo clippy --workspace
+   --all-targets --offline -- -D warnings` 在 `4dafee27f` 上 **exit 0**，全部 12 条告警都来自
+   `vendor/rquickjs-core`（被 `--cap-lints allow` 降级，不参与 `-D warnings`），因此「clippy 仍是
+   红的」这个说法应以本轮实测为准予以更正；LUM-1138 真正剩下的唯一红项是
+   `cargo fmt --all -- --check`（122 文件漂移）。启动全量 `cargo fmt` 前仍需确认
+   `pi-tui/src/app.rs`（LUM-1144）与本轮之后的 `pi-ai`（Stage 43）没有写方。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档继续分叉（既有欠账）。
+10. **未移植的 `pi-ai` 上游模块**：~~`utils/json-parse.ts`~~ **本轮收口**；`utils/overflow.ts`
+    （**前置**：需要 `AssistantMessage.errorMessage`，见第一节）、`utils/estimate.ts`（已由
+    `compaction.rs` 覆盖，不建议再建一份），以及 bedrock / mistral / azure / vertex / oauth /
+    images；另有本轮新发现的小项：`utils/error-body.ts`（`formatProviderError` /
+    `normalizeProviderError`）、`utils/hash.ts`（`shortHash`）、`utils/sanitize-unicode.ts`
+    （`sanitizeSurrogates`）、`utils/text.ts`（`contentText` / `splitBom` / `stripBom`）——这四份
+    都是无依赖纯函数，适合打包成一个后续切片。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-ai`（新增 `json_parse.rs` +
+两个 fixture + `lib.rs` / 三个 provider 的收口 + `tests/anthropic.rs`）与本文档。
+
+---
+
+## LUM-1144 round — `pi-tui` 滚条渲染 / 悬停高亮 / 拖拽 + X10 鼠标序列解析（frontier 第 6 项收口）+ 合并推送 feature/pi.rs
+
+Stage 42。本轮起点 `ce44b692f`（LUM-1142 合并态），代码提交 `7b6d33615`，合并提交
+`b22371424`（第一父 `7b6d33615`、第二父 `2745e1c76` = LUM-1145 合并态），本节文档提交见
+第五节补记。
+
+### 一、范围与落点
+
+把上游的滚条三件套搬进 `pi-tui`：`packages/tui/src/layout.ts` 的
+`ScrollbarGeometry` / `getScrollbarGeometry` / `paintScrollbar`（`:44-51,280-326`）、
+`packages/tui/src/tui-alt-screen.ts` 的 `getScrollbarTargetAt` / `setScrollbarHover` /
+`updateScrollbarHover` / `scrollScrollbarToPointer` / `handleScrollbarMouseEvent` /
+`ScrollbarDrag`（`:129-138,1041-1109`），以及**遗留 X10 鼠标序列**（`:939-1000,1613-1616`）。
+
+落点只有两个文件：`app.rs`（几何 + 绘制 + 指针状态机）与 `input.rs`（原始字节解码）。
+上游按 `ScrollView` 组织（一处几何一套拖拽状态），而 `App` 只有**一块可滚动区域**——消息日志——
+所以 per-view 的查找与状态数组都塌缩成单份，这一点写进了 `app.rs` 的 `# Scrollbar` 模块文档。
+
+### 二、实现
+
+| 上游 | Rust 落点 |
+|------|-----------|
+| `ScrollbarGeometry`（`layout.ts:44-51`） | `app.rs:555`（公开类型，`lib.rs:37` 再导出） |
+| `getScrollbarGeometry`（`layout.ts:280-301`） | `App::scrollbar_geometry` `app.rs:1989` |
+| `paintScrollbar`（`layout.ts:303-326`） | `App::apply_scrollbar` `app.rs:1854`，由 `render_to_buffer_impl`（`app.rs:2930`）在 selection / search 高亮之后、状态栏与全部 overlay 之前调用 |
+| 绘制闸门 | `render_to_buffer` 传 `true`（`app.rs:2898`）、`render_snapshot` 传 `false`（`app.rs:3078`）——见第四节 |
+| `getScrollbarTargetAt`（`tui-alt-screen.ts:1041-1055`） | `App::scrollbar_geometry_at` `app.rs:2034` |
+| `updateScrollbarHover` / `setScrollbarHover`（`:1058-1064`） | `App::update_scrollbar_hover` `app.rs:2044`、字段 `scrollbar_hover`、只读口 `scrollbar_hovered()` `app.rs:1973` |
+| `scrollScrollbarToPointer`（`:1067-1078`） | `App::scroll_scrollbar_to_pointer` `app.rs:2060` |
+| `handleScrollbarMouseEvent`（`:1080-1109`） | `App::step_scrollbar_mouse_gesture` `app.rs:2098` + `ScrollbarDrag` `app.rs:576`、只读口 `scrollbar_dragging()` `app.rs:1978` |
+| 分派顺序（滚条先于选区） | `App::step_mouse_gesture` `app.rs:2188`：模态 → 搜索栏 → 滚条 → 悬停更新 → 选区 |
+| `parseSgrMouseEvent` / `isMouseSequence` + X10（`:939-1000,1613-1616`） | `input.rs:378` `parse_mouse_sequence`、`input.rs:425` `is_mouse_sequence`、`input.rs:468` `decode_mouse_report`（`lib.rs:47-49` 再导出） |
+
+要点：
+
+- **几何**：`content = messages.line_count(width)`、`max_scroll = self.max_scroll()`（沿用既有口径），
+  `thumb_height = clamp(round(track²/content), min(2, track), track)`，
+  `thumb_top = origin_y + round(scroll_top · max_thumb_top / max_scroll)`，其中
+  `scroll_top = max_scroll - resolved_scroll()`——`resolved_scroll()` 是**底部相对**、滚条是**顶部相对**，
+  这一步换算就是「底部钉住时拇指落到轨道末端」的来源。`round_div`（`app.rs:207`）对应 `Math.round`。
+- **拖拽反向映射**：`offset = max_scroll - round(top · max_scroll / max_thumb_top)`，最后经
+  `messages.set_scroll_from_bottom(offset)` 落回既有滚动 API（`0` 即重新贴尾）。没有新的偏移方案。
+- **拖拽语义**：按拇指取 `grab_offset = y - thumb_top`；按轨道取 `thumb_height / 2`（拇指居中）并
+  **立即跳转**；按下即清文本选区 / `selection_dragging` / 双击计数并停掉 autoscroll。一旦进入拖拽，
+  **所有非滚轮手势都归滚条**（对应上游 `if (this.scrollbarDrag) { … return true; }`），直到抬手。
+- **X10**：`ESC [ M` + 恰好 3 字节，`Cb` 为按钮/修饰键码 + 32、`Cx`/`Cy` 为 1-based 坐标 + 32；
+  `decode_mouse_report` 的位布局与 crossterm 0.28 的 `parse_cb`
+  （`crossterm-0.28.1/src/event/sys/unix/parse.rs:772-806`）逐位一致，SGR 的小写 `m` 则按
+  `parse_csi_sgr_mouse`（同文件 `:746`）把 press 翻成 release。驱动侧本来就走 crossterm（X10 已被其
+  `parse_csi_normal_mouse` 解出），所以这份解析器的价值是**给出无后端依赖的等价实现与测试面**，
+  并把 X10 从「碰巧能用」变成「有回归」。（水平滚轮 6/7 与 crossterm 拒绝的 8..15 归 `Ignored`，同上游
+  `routeWheel` 无消费方的口径。）
+
+### 三、验证
+
+- `cargo test -p pi-tui`：**546 通过 / 0 失败**（lib 单测 237 + 26 个集成测试文件的 303 个用例 + 6 个文档测试）。
+- 任务书点名的三个回归文件原样通过：`mouse_scroll.rs`(7)、`mouse_selection.rs`(12)、
+  `selection_granularity.rs`(12)；`app_scroll.rs`(9)、`snapshot.rs`(9)、`app_theme.rs`(5)、
+  `mouse_region.rs`(13)、`e2e.rs`(9) 亦全绿。
+- 新增 `tests/scrollbar.rs` 10 例：几何在「渲染前」与「内容不溢出」时隐藏、比例与底部钉住、滚到顶/中点/
+  底、`render_to_buffer` 与 `render_snapshot` 的绘制差异、悬停高亮（track / thumb 颜色 + bold + 字形
+  `┃`→`█`）与移开后的回落、悬停必须命中最后一列且在轨道行内、模态打开时滚条让位、轨道点击跳转、
+  拇指点击不跳转、拖到两端与中点、抬手结束拖拽、拖拽期间不产生文本选区。
+- 新增 `input.rs` 5 个单测：SGR 按钮/坐标/大写 `M` 与小写 `m`、SGR 滚轮（含 Alt 与水平滚轮）、
+  X10 全谱（按下/释放/拖拽/移动/滚轮/Alt/高位坐标）、残缺与异形序列一律拒绝、
+  `is_mouse_sequence` 与 `parse_mouse_sequence` 口径一致（含数字字段越界的用例）。
+- 合并态全量 `cargo test --workspace`：**1471 通过 / 0 失败**（本切片自身新增 15 个用例：
+  `scrollbar.rs` 10 + `input.rs` 5；其余差额来自本轮合并进来的 LUM-1141/1143/1145 用例）。
+- `cargo clippy -p pi-tui --all-targets -- -D warnings`：exit 0。
+- rustfmt：只保证新代码；`cargo fmt -p pi-tui` 会连带把 `settings.rs` / `tests/settings_list.rs` 的
+  **既有**漂移一起格式化，已把那两个文件还原，使本轮 diff 只含本切片（全量 fmt 仍归 LUM-1138）。
+
+### 四、刻意的偏差（同时写在 `app.rs` 的 `# Scrollbar` 模块文档里）
+
+1. **单滚条**：上游每 `ScrollView` 一套几何并命中指针下那一块；本移植只有消息日志一块，
+   `scrollbar_geometry` **就是**那一套几何，`getScrollViewBox` 的查找消失。将来出现第二块可滚动
+   区域（例如 diff 面板）必须把它带回来——已记为后续项。
+2. **没有 1000 ms 瞬时隐藏**：上游默认 `scrollbar: "auto"`，滚动作后在 `scrollbarHideDelayMs` 内
+   显示、悬停期间保持；本 crate **不 spawn 计时线程**，于是退成「溢出即显示、不溢出即隐藏」
+   = 上游 `"always"` 变体加一道溢出闸。悬停与拖拽行为与上游一致。
+3. **active 额外加粗**：上游只把拇指字形从 `┃` 换成 `█`，样式通道上没有可断言的变化；本移植保留
+   字形切换并给轨道+拇指加 `BOLD`，让悬停状态在 `Buffer` 上可断言（任务书要求）。
+4. **`render_snapshot` 不画条**：它是扁平的文本快照，同时是 `/transcript` 导出的后端，约 40 个调用点
+   的断言按「纯内容」写的；滚条是实时帧的交互件，只由 `render_to_buffer` 绘制。放在
+   `render_to_buffer_impl` 里靠一个显式布尔闸门控制，而不是事后补画，因此 z 序（在状态栏与所有
+   overlay 之下）仍然正确。
+
+### 五、合并与推送
+
+代码提交 `7b6d33615`（父 `ce44b692f`）4 文件 `+1182/-7`：
+`pi-rust/crates/pi-tui/src/app.rs(+380/-5)`、`pi-rust/crates/pi-tui/src/input.rs(+423/-0)`、
+`pi-rust/crates/pi-tui/src/lib.rs(+5/-2)`、`pi-rust/crates/pi-tui/tests/scrollbar.rs(+374/-0)`。
+本轮只碰 `pi-tui`，与 LUM-1141（`pi-agent-core`）、LUM-1143（`pi-agent-core`）、LUM-1145
+（`pi-ai`）零文件交集，`git merge origin/feature/pi.rs @ 2745e1c76` 无冲突，合并提交 `b22371424`。
+
+推送：`git push origin 97d709b69:refs/heads/feature/pi.rs` → `2745e1c76..97d709b69`（快进，
+含代码提交 `7b6d33615`、合并提交 `b22371424` 与上一版文档提交）；留档分支 `work/lum-1144`
+同为 `97d709b69`，`git ls-remote` 复查两条 ref 一致。此后本节文字本身又作了一次修订，
+再以快进追加推到同一分支。
+
+### 六、frontier（本轮更新）
+
+1. ~~**P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**~~ **本轮（LUM-1144）收口**。
+2. **P3 `latex.ts` 剩余**（OSC-8 hyperlink / 语法高亮 / 块级 HTML）：要动 ratatui `Cell` 与 `app.rs`
+   写入路径。随本轮收口，`app.rs` 当前无写方；启动前仍须确认没有别的在跑任务正在改它。
+3. **新入账：`app.rs` 的滚条目前只服务消息日志**。若后续出现第二块可滚动区域（diff 面板、
+   工具输出折叠区等），需要恢复上游的 `getScrollViewBox` 查找与 per-view 几何/拖拽状态；
+   当前单份几何的假设会立刻失效。
+4. **质量门清偿** = LUM-1138（`backlog`）：确认只剩 `cargo fmt --all -- --check`（122 文件漂移）；
+   `cargo clippy -p pi-tui --all-targets -- -D warnings` 本轮实测 exit 0。
+5. 其余项（provider catalog / LUM-1090、`utils/overflow.ts`、`utils/estimate.ts`、
+   bedrock/mistral/azure/vertex/oauth/images、`PLAN.md` 停在 Stage 14）照上一节不变。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-tui`
+（`src/app.rs` / `src/input.rs` / `src/lib.rs` / 新增 `tests/scrollbar.rs`）与本文档。
+
+环境记录：本轮构建期间根分区一度 100% 满（初次全量 `cargo test --workspace` 因此在
+`pi-session` / `pi-coding-agent` 的链接阶段直接失败），清掉本工作树的 `target/debug/incremental`
+（1.5G）并等另一路释放空间后补跑成功；所有被清理的对象都是可复现的构建产物。
+

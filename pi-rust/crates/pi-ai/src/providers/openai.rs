@@ -28,6 +28,7 @@ use pi_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::json_parse::parse_streaming_json;
 use crate::stream::AssistantMessageEventStream;
 use crate::types::{SimpleStreamOptions, StreamError};
 use crate::StreamFn;
@@ -413,12 +414,7 @@ fn into_tool_call(call: ChatToolCall) -> Result<ToolCall, StreamError> {
         .function
         .name
         .ok_or_else(|| StreamError::Malformed("tool_call missing function.name".into()))?;
-    let arguments = if call.function.arguments.is_empty() {
-        Value::Object(Default::default())
-    } else {
-        serde_json::from_str(&call.function.arguments)
-            .map_err(|e| StreamError::Malformed(format!("tool_call arguments JSON: {e}")))?
-    };
+    let arguments = parse_streaming_json(Some(call.function.arguments.as_str()));
     Ok(ToolCall {
         id,
         name,
@@ -753,11 +749,7 @@ impl SseStream {
         for (_idx, call) in pending {
             let id = call.id.unwrap_or_default();
             let name = call.name.unwrap_or_default();
-            let arguments = if call.arguments.is_empty() {
-                Value::Object(Default::default())
-            } else {
-                serde_json::from_str(&call.arguments).unwrap_or(Value::String(call.arguments))
-            };
+            let arguments = parse_streaming_json(Some(call.arguments.as_str()));
             self.state.content.push(Content::ToolCall(ToolCall {
                 id,
                 name,

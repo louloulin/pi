@@ -186,6 +186,80 @@ async fn tool_use_response_round_trip() {
     assert_eq!(tc.arguments["city"], "San Francisco");
 }
 
+/// A frame whose string literal holds a raw control character (or a stray
+/// backslash) is repaired instead of aborting the stream — upstream's
+/// `parseJsonWithRepair`.
+#[tokio::test]
+async fn malformed_string_literals_are_repaired() {
+    let fixture = fixtures_root().join("repair_required.sse");
+    let provider = Arc::new(FixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
+
+    let mut stream = provider
+        .stream_simple(&claude_model(), &user_context("hi"), &Default::default())
+        .await
+        .expect("stream opens");
+    let mut events = Vec::new();
+    while let Some(ev) = stream.next().await {
+        events.push(ev.expect("event ok"));
+    }
+
+    let (content, stop_reason) = events
+        .iter()
+        .find_map(|e| match e {
+            AssistantMessageEvent::Done {
+                content,
+                stop_reason,
+                ..
+            } => Some((content.clone(), *stop_reason)),
+            _ => None,
+        })
+        .expect("done event");
+    assert_eq!(stop_reason, StopReason::Stop);
+
+    let text: String = content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "raw\ttabpath C:\\Users");
+}
+
+/// Tool-call arguments accumulated from a malformed `partial_json` payload are
+/// recovered by `parseStreamingJson` rather than surfacing as a raw string.
+#[tokio::test]
+async fn malformed_tool_arguments_are_repaired() {
+    let fixture = fixtures_root().join("tool_use_repair_required.sse");
+    let provider = Arc::new(FixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
+
+    let mut stream = provider
+        .stream_simple(&claude_model(), &user_context("weather?"), &Default::default())
+        .await
+        .expect("stream opens");
+    let mut events = Vec::new();
+    while let Some(ev) = stream.next().await {
+        events.push(ev.expect("event ok"));
+    }
+
+    let content = events
+        .iter()
+        .find_map(|e| match e {
+            AssistantMessageEvent::Done { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("done event");
+    let tc = content
+        .iter()
+        .find_map(|c| match c {
+            Content::ToolCall(t) => Some(t),
+            _ => None,
+        })
+        .expect("tool call in done");
+    assert_eq!(tc.name, "get_weather");
+    assert_eq!(tc.arguments["city"], "San\u{1}Francisco");
+}
+
 /// Replay `cache_read_response.sse` and assert the cache fields
 /// populate the `Usage` payload on the trailing `Done`.
 #[tokio::test]

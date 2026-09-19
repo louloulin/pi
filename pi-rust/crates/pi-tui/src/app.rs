@@ -51,6 +51,41 @@
 //!   viewport moving. [`App::advance_selection_autoscroll`] is public so
 //!   tests can step the beat deterministically.
 //!
+//! # Scrollbar
+//!
+//! When the wrapped transcript is taller than the viewport the chat log
+//! paints a vertical scrollbar in the viewport's last column. Pointer hover
+//! highlights it, a press on the thumb starts a proportional drag that
+//! honours the grab offset, a press on the track jumps straight to that
+//! offset, and the release ends the drag. This is the port of upstream's
+//! `getScrollbarGeometry` / `paintScrollbar`
+//! (`packages/tui/src/layout.ts:44-51,280-326`) and `updateScrollbarHover` /
+//! `setScrollbarHover` / `handleScrollbarMouseEvent` /
+//! `scrollScrollbarToPointer` (`packages/tui/src/tui-alt-screen.ts:1041-1109`).
+//!
+//! Deliberate deviations, documented here rather than silently omitted:
+//!
+//! * **One scroll view.** Upstream keeps a geometry per `ScrollView` and
+//!   hit-tests the one under the pointer. The App has exactly one scrollable
+//!   region — the message log — so [`App::scrollbar_geometry`] *is* that
+//!   geometry and the upstream `getScrollViewBox` lookup collapses away. A
+//!   future multi-pane layout would have to bring the lookup back.
+//! * **No transient hide delay.** Upstream's default `scrollbar: "auto"`
+//!   reveals the bar for `scrollbarHideDelayMs` (1000 ms) after scroll
+//!   activity and keeps it while it is hovered. This crate spawns no timer
+//!   thread, so the bar is simply shown while the content overflows and
+//!   hidden when it fits — the `"always"` variant gated on overflow. Hover
+//!   and drag behave exactly as upstream.
+//! * **Active styling.** Upstream emphasises the active bar only by swapping
+//!   the thumb glyph (`┃` → `█`); there is no colour or modifier change to
+//!   observe in a `Buffer`. The port keeps the glyph swap and additionally
+//!   renders the track and thumb bold while active, so the hover state is
+//!   visible on the style channel too.
+//! * **`render_snapshot` omits the bar.** The flat snapshot backs the
+//!   `/transcript` text export, so it stays content-only; the bar is an
+//!   interaction affordance of the live frame and is painted only by
+//!   [`App::render_to_buffer`].
+//!
 //! # Keybindings
 //!
 //! The global chords in [`App::step_key`] are resolved through the
@@ -154,8 +189,8 @@ use crate::search::{
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
-use crate::styled::{plain_text, write_styled_line};
-use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeError};
+use crate::styled::{plain_text, write_styled_line, SpanStyle};
+use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeColor, ThemeError};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -165,6 +200,14 @@ const WHEEL_SCROLL_LINES: usize = 1;
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
 const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+
+/// `round(value / divisor)` for unsigned integers, matching the `Math.round`
+/// calls in upstream's scrollbar maths
+/// (`packages/tui/src/layout.ts:318-322`).
+fn round_div(value: usize, divisor: usize) -> usize {
+    debug_assert!(divisor > 0, "round_div divisor must not be zero");
+    (value + divisor / 2) / divisor
+}
 
 /// Window in which two presses on the same word count as a double click
 /// (and three as a triple click). Upstream's `DOUBLE_CLICK_INTERVAL_MS`
@@ -500,6 +543,43 @@ pub enum StepOutcome {
     Exit,
 }
 
+/// Geometry of the chat-log scrollbar, in absolute terminal cells.
+///
+/// The port of upstream's `ScrollbarGeometry`
+/// (`packages/tui/src/layout.ts:44-51`), computed by
+/// [`App::scrollbar_geometry`]. Upstream resolves it per `ScrollView` from
+/// the layout box under the pointer; this port has a single scrollable
+/// region (the message log), so one geometry covers it — see the module
+/// docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollbarGeometry {
+    /// Absolute column the bar is painted in — the viewport's right edge.
+    pub column: u16,
+    /// Absolute row of the track's first cell.
+    pub track_top: u16,
+    /// Rows the track spans; the viewport height.
+    pub track_height: u16,
+    /// Absolute row of the thumb's first cell.
+    pub thumb_top: u16,
+    /// Rows the thumb spans — at least two, at most the whole track.
+    pub thumb_height: u16,
+    /// Largest valid top-relative scroll offset (`content - viewport`).
+    pub max_scroll: usize,
+}
+
+/// In-flight scrollbar drag — upstream's `ScrollbarDrag`
+/// (`packages/tui/src/tui-alt-screen.ts:129-138`). The App has a single
+/// scroll view, so the convergence drops the view handle and keeps only the
+/// grab offset; the geometry is re-read from the current viewport on every
+/// drag event, exactly like upstream's `getScrollViewBox` lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScrollbarDrag {
+    /// Rows between the pointer and the thumb's top when the press landed.
+    /// A press on the track uses half the thumb height, so the thumb centres
+    /// on the pointer.
+    grab_offset: u16,
+}
+
 /// Snapshot of the rendered App for tests.
 #[derive(Debug, Clone)]
 pub struct RenderSnapshot {
@@ -641,6 +721,14 @@ pub struct App {
     /// Text waiting to be copied by the driver. Filled by copy-on-select;
     /// consumed with [`App::take_clipboard_request`].
     pending_clipboard: Option<String>,
+    /// True while the pointer is over the chat-log scrollbar's column and
+    /// rows (upstream's `scrollbarHover`,
+    /// `packages/tui/src/tui-alt-screen.ts:221`); drives the bar's active
+    /// rendering.
+    scrollbar_hover: bool,
+    /// In-flight scrollbar drag, if any (upstream's `scrollbarDrag`,
+    /// `packages/tui/src/tui-alt-screen.ts:129-138`).
+    scrollbar_drag: Option<ScrollbarDrag>,
 }
 
 impl App {
@@ -693,6 +781,8 @@ impl App {
             selection_autoscroll_direction: 0,
             selection_autoscroll_pointer: None,
             pending_clipboard: None,
+            scrollbar_hover: false,
+            scrollbar_drag: None,
         }
     }
 
@@ -1752,6 +1842,44 @@ impl App {
         }
     }
 
+    /// Paint the chat-log scrollbar into the message viewport's last column.
+    ///
+    /// Upstream's `paintScrollbar` / `renderScrollView`
+    /// (`packages/tui/src/layout.ts:280-326`): the track is a dim vertical
+    /// rule, the thumb a heavier block. While the bar is hovered or dragged
+    /// the thumb switches to a solid block and both parts go bold — see the
+    /// module docs on why the port adds the modifier. The bar is a no-op when
+    /// the transcript fits the viewport ([`App::scrollbar_geometry`] is
+    /// `None`).
+    fn apply_scrollbar(&self, area: Rect, buf: &mut Buffer) {
+        let Some(geometry) = self.scrollbar_geometry() else {
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let active = self.scrollbar_hover || self.scrollbar_drag.is_some();
+        let thumb_end = geometry.thumb_top.saturating_add(geometry.thumb_height);
+        for row in 0..geometry.track_height {
+            let y = geometry.track_top + row;
+            let in_thumb = y >= geometry.thumb_top && y < thumb_end;
+            let (glyph, slot) = if in_thumb {
+                (if active { '█' } else { '┃' }, ThemeColor::ScrollbarThumb)
+            } else {
+                ('│', ThemeColor::ScrollbarTrack)
+            };
+            let style = if active {
+                SpanStyle::fg(slot).bold()
+            } else {
+                SpanStyle::fg(slot)
+            };
+            if let Some(cell) = buf.cell_mut((geometry.column, y)) {
+                cell.set_char(glyph);
+                cell.set_style(style.to_style(&self.theme));
+            }
+        }
+    }
+
     /// Give an open search overlay the mouse first, exactly like the modal
     /// overlays: a gesture inside the bar's rectangle is consumed by the bar
     /// (hover clears, a press on a navigation button navigates) and never
@@ -1837,6 +1965,197 @@ impl App {
         )
     }
 
+    /// Whether the pointer currently rests on the chat-log scrollbar.
+    ///
+    /// Upstream's `scrollbarHover`
+    /// (`packages/tui/src/tui-alt-screen.ts:221`); it drives the bar's active
+    /// rendering, so the render path is the only other observer.
+    pub fn scrollbar_hovered(&self) -> bool {
+        self.scrollbar_hover
+    }
+
+    /// Whether a scrollbar drag currently owns the pointer.
+    pub fn scrollbar_dragging(&self) -> bool {
+        self.scrollbar_drag.is_some()
+    }
+
+    /// Geometry of the chat-log scrollbar, or `None` when the wrapped
+    /// transcript fits the viewport — upstream's `getScrollbarGeometry`
+    /// (`packages/tui/src/layout.ts:280-326`).
+    ///
+    /// Needs a recorded viewport ([`App::render_to_buffer`] or
+    /// [`App::render_snapshot`] at least once); before that the viewport is
+    /// zero-sized and this returns `None`.
+    pub fn scrollbar_geometry(&self) -> Option<ScrollbarGeometry> {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (origin_x, origin_y) = self.viewport_origin();
+        let content = self.messages.line_count(width);
+        let max_scroll = self.max_scroll();
+        // A bar over content that already fits would be pure noise, so the
+        // track is the whole viewport or nothing (see the module docs on the
+        // omitted transient hide delay).
+        if content <= height as usize || max_scroll == 0 {
+            return None;
+        }
+
+        let track_height = height as usize;
+        // The thumb keeps the content-to-track ratio, floored at two rows so
+        // a long transcript still has something to grab, and capped by the
+        // track itself.
+        let min_thumb = 2.min(track_height);
+        let thumb_height = round_div(track_height * track_height, content)
+            .max(min_thumb)
+            .min(track_height);
+        let max_thumb_top = track_height - thumb_height;
+        // `resolved_scroll` counts from the bottom while the bar measures
+        // from the top, so a bottom-pinned view puts the thumb at the end of
+        // the track.
+        let scroll_top = max_scroll.saturating_sub(self.resolved_scroll());
+        let thumb_top = origin_y + round_div(scroll_top * max_thumb_top, max_scroll) as u16;
+
+        Some(ScrollbarGeometry {
+            column: origin_x + width - 1,
+            track_top: origin_y,
+            track_height: height,
+            thumb_top,
+            thumb_height: thumb_height as u16,
+            max_scroll,
+        })
+    }
+
+    /// The scrollbar geometry under an absolute pointer position, or `None`
+    /// when the pointer is off the bar — upstream's `getScrollbarTargetAt`
+    /// (`packages/tui/src/tui-alt-screen.ts:1041-1055`), minus its overlay
+    /// guard: an open modal or search bar is dispatched before the scrollbar
+    /// in [`App::step_mouse_gesture`], so an overlay never reaches here.
+    fn scrollbar_geometry_at(&self, x: u16, y: u16) -> Option<ScrollbarGeometry> {
+        let geometry = self.scrollbar_geometry()?;
+        let within_track =
+            y >= geometry.track_top && y < geometry.track_top.saturating_add(geometry.track_height);
+        (x == geometry.column && within_track).then_some(geometry)
+    }
+
+    /// Aim the hover flag at a pointer position and report whether it
+    /// changed — upstream's `updateScrollbarHover`
+    /// (`packages/tui/src/tui-alt-screen.ts:1058-1064`).
+    fn update_scrollbar_hover(&mut self, x: u16, y: u16) -> bool {
+        let hovered = self.scrollbar_geometry_at(x, y).is_some();
+        let changed = hovered != self.scrollbar_hover;
+        self.scrollbar_hover = hovered;
+        changed
+    }
+
+    /// Move the scroll offset so the thumb's top lands on the pointer —
+    /// upstream's `scrollScrollbarToPointer`
+    /// (`packages/tui/src/tui-alt-screen.ts:1067-1109`). Returns whether the
+    /// view actually scrolled.
+    ///
+    /// `grab_offset` is the pointer's distance from the thumb's top, so a
+    /// drag keeps holding the same part of the thumb; a track press passes
+    /// half the thumb height to centre it (upstream's `pressedOnThumb ?
+    /// grabOffset : thumbHeight / 2`).
+    fn scroll_scrollbar_to_pointer(
+        &mut self,
+        geometry: &ScrollbarGeometry,
+        y: u16,
+        grab_offset: u16,
+    ) -> bool {
+        let track_height = geometry.track_height as usize;
+        let max_thumb_top = track_height.saturating_sub(geometry.thumb_height as usize);
+        if max_thumb_top == 0 {
+            return false;
+        }
+        let thumb_top = y.saturating_sub(geometry.track_top) as usize;
+        let top = thumb_top
+            .saturating_sub(grab_offset as usize)
+            .min(max_thumb_top);
+        // Top-relative thumb position → bottom-relative scroll offset, the
+        // inverse of [`App::scrollbar_geometry`].
+        let scroll_top =
+            round_div(top * geometry.max_scroll, max_thumb_top).min(geometry.max_scroll);
+        let offset = geometry.max_scroll - scroll_top;
+        if self.resolved_scroll() == offset {
+            return false;
+        }
+        self.messages.set_scroll_from_bottom(offset);
+        true
+    }
+
+    /// Handle a pointer gesture against the chat-log scrollbar, if it lands
+    /// there — upstream's `handleScrollbarMouseEvent`
+    /// (`packages/tui/src/tui-alt-screen.ts:1041-1109`), converged onto the
+    /// single scroll view.
+    ///
+    /// `Some` means the scrollbar consumed the gesture; `None` lets the
+    /// caller fall through to the selection path. A press on the thumb
+    /// starts a drag, a press on the track jumps straight to the pointer,
+    /// and once a drag is in flight every non-wheel gesture belongs to it
+    /// until the release — so a stray click cannot start a selection
+    /// mid-drag.
+    fn step_scrollbar_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        // A drag owns every non-wheel gesture until the button comes back up
+        // (upstream's `if (this.scrollbarDrag) { … return true; }`), so a
+        // stray press cannot start a selection mid-drag.
+        if let Some(drag) = self.scrollbar_drag {
+            return Some(match gesture.kind {
+                MouseGestureKind::Release(_) => {
+                    self.scrollbar_drag = None;
+                    StepOutcome::Idle
+                }
+                MouseGestureKind::Drag(_) => {
+                    // The geometry is recomputed from the live viewport, so a
+                    // log that grows mid-drag still maps correctly.
+                    let scrolled = self.scrollbar_geometry().is_some_and(|geometry| {
+                        self.scroll_scrollbar_to_pointer(&geometry, gesture.y, drag.grab_offset)
+                    });
+                    if scrolled {
+                        StepOutcome::Redraw
+                    } else {
+                        StepOutcome::Idle
+                    }
+                }
+                _ => StepOutcome::Idle,
+            });
+        }
+
+        let left = MouseButton::Left;
+        match gesture.kind {
+            MouseGestureKind::Press(button) if button == left => {
+                let geometry = self.scrollbar_geometry_at(gesture.x, gesture.y)?;
+                let on_thumb = gesture.y >= geometry.thumb_top
+                    && gesture.y < geometry.thumb_top.saturating_add(geometry.thumb_height);
+                let grab_offset = if on_thumb {
+                    gesture.y - geometry.thumb_top
+                } else {
+                    geometry.thumb_height / 2
+                };
+                // The bar takes the pointer: drop the text selection and the
+                // pending double-click, and cancel any drag autoscroll
+                // (upstream's `clearTextSelection()` / `stopSelectionAutoScroll()`).
+                self.selection = None;
+                self.selection_dragging = false;
+                self.stop_selection_autoscroll();
+                self.last_click = None;
+                self.scrollbar_hover = true;
+                self.scrollbar_drag = Some(ScrollbarDrag { grab_offset });
+                let scrolled = if on_thumb {
+                    false
+                } else {
+                    self.scroll_scrollbar_to_pointer(&geometry, gesture.y, grab_offset)
+                };
+                Some(if scrolled {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Feed a non-wheel mouse gesture to the App: start, extend, finish or
     /// clear the chat-log text selection.
     ///
@@ -1853,6 +2172,10 @@ impl App {
     /// top or bottom row, the gesture also arms the drag autoscroll; see
     /// [`App::advance_selection_autoscroll`] for the beat.
     ///
+    /// A gesture landing on the chat-log scrollbar is handled first and
+    /// never reaches the selection path — see
+    /// [`App::scrollbar_geometry`] and [`App::step_scrollbar_mouse_gesture`].
+    ///
     /// With a modal on screen the gesture is hit-tested against the modal
     /// overlays instead — see [`App::mouse_regions`] and
     /// [`App::step_modal_mouse_gesture`].
@@ -1867,15 +2190,48 @@ impl App {
         // (`step_key`): gestures are hit-tested against the open overlays'
         // rectangles and never reach the chat log underneath.
         if self.dialog.is_some() || self.settings.is_some() || self.selector.is_some() {
+            // A modal covers the chat log, so the bar behind it is neither
+            // hovered nor draggable while one is up (upstream's `hasOverlay()`
+            // guard in `getScrollbarTargetAt`).
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
             return self.step_modal_mouse_gesture(gesture);
         }
         // The search bar is an overlay too, but it lives alongside the chat
         // log instead of over a modal, so it gets the same first pass.
         if let Some(outcome) = self.step_search_mouse_gesture(&gesture) {
+            // The bar was consumed by the search bar's own rows.
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
             return outcome;
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
+        // The scrollbar is hit-tested before the selection path, exactly
+        // like upstream (`handleScrollbarMouseEvent` runs before
+        // `handleSelectionMouseEvent`). While a drag owns the pointer the
+        // hover flag stays set; otherwise it follows the pointer.
+        let handled = self.step_scrollbar_mouse_gesture(&gesture);
+        let hover_changed = if self.scrollbar_drag.is_some() {
+            false
+        } else {
+            self.update_scrollbar_hover(gesture.x, gesture.y)
+        };
+        let outcome = match handled {
+            Some(outcome) => outcome,
+            None => self.step_selection_mouse_gesture(&gesture),
+        };
+        if matches!(outcome, StepOutcome::Idle) && hover_changed {
+            StepOutcome::Redraw
+        } else {
+            outcome
+        }
+    }
+
+    /// Route a non-wheel gesture through the chat-log text selection: start,
+    /// extend, finish or clear it. Upstream's `handleSelectionMouseEvent`
+    /// (`packages/tui/src/tui-alt-screen.ts:1310-1420`).
+    fn step_selection_mouse_gesture(&mut self, gesture: &MouseGesture) -> StepOutcome {
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
                 self.stop_selection_autoscroll();
@@ -2548,7 +2904,7 @@ impl App {
         // streaming output and `/clear` both change the corpus under an open
         // bar, which is where upstream refreshes it too (from `render`).
         let _ = self.refresh_search();
-        self.render_to_buffer_impl(area, buf);
+        self.render_to_buffer_impl(area, buf, true);
     }
 
     /// Remember the message viewport's geometry as of a render: the width the
@@ -2564,7 +2920,14 @@ impl App {
     }
 
     /// Paint the App without advancing the autoscroll clock.
-    fn render_to_buffer_impl(&self, area: Rect, buf: &mut Buffer) {
+    ///
+    /// `scrollbar` selects whether the chat-log scrollbar overlay is painted.
+    /// [`App::render_to_buffer`] passes `true` — the live alt-screen frame
+    /// where the bar is a real pointer affordance. [`App::render_snapshot`]
+    /// passes `false`: it is a flat text snapshot (it also backs the
+    /// `/transcript` export), so it stays about content rather than screen
+    /// furniture. See the module docs.
+    fn render_to_buffer_impl(&self, area: Rect, buf: &mut Buffer, scrollbar: bool) {
         // Layout: message view fills the top, prompt the bottom row,
         // status bar the row above the prompt.
         let status_height = 1u16;
@@ -2600,6 +2963,12 @@ impl App {
         // any modal, so an open selector or dialog stays readable.
         self.apply_selection_highlight(message_area, buf);
         self.apply_search_highlight(message_area, buf);
+        // The scrollbar sits on top of the message cells but under every
+        // overlay, so an open search bar, selector or dialog stays readable
+        // (upstream paints it from the scroll view, before the overlays).
+        if scrollbar {
+            self.apply_scrollbar(message_area, buf);
+        }
         self.status_bar
             .render_to_buffer_themed(&self.status_data, status_area, buf, &self.theme);
 
@@ -2700,6 +3069,12 @@ impl App {
 
     /// Render the App into a flat snapshot (used by the snapshot tests
     /// in `tests/snapshot.rs`).
+    ///
+    /// The snapshot is text-only and deliberately omits the scrollbar
+    /// overlay (see [`App::render_to_buffer_impl`]): it backs the
+    /// `/transcript` export as well as the content assertions of the
+    /// snapshot tests, and neither wants a pointer affordance in the last
+    /// column. Use [`App::render_to_buffer`] to assert the bar.
     pub fn render_snapshot(&self, width: u16, height: u16) -> RenderSnapshot {
         let area = Rect {
             x: 0,
@@ -2708,7 +3083,7 @@ impl App {
             height,
         };
         let mut buf = Buffer::empty(area);
-        self.render_to_buffer_impl(area, &mut buf);
+        self.render_to_buffer_impl(area, &mut buf, false);
         let lines = buf
             .content()
             .chunks(width as usize)
