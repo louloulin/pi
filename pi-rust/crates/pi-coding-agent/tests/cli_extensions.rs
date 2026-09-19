@@ -69,6 +69,28 @@ module.exports = function (pi) {
 };
 "#;
 
+/// A *user-level* extension (installed under `$HOME/.pi/agent/extensions`)
+/// registering `user_echo`. The global root is never gated on project
+/// trust, so this tool must work even when the cwd is untrusted.
+const USER_ECHO_EXTENSION: &str = r#"
+module.exports = function (pi) {
+  pi.registerTool({
+    name: "user_echo",
+    label: "User echo",
+    description: "Echoes the text argument back to the model.",
+    parameters: {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+    },
+    execute: async function (args) {
+      var text = args && typeof args.text === "string" ? args.text : "";
+      return { content: [{ type: "text", text: "user-echoed:" + text }] };
+    },
+  });
+};
+"#;
+
 /// A JS extension that registers slash commands. The handler's return
 /// value is assembled at runtime and it records every side effect the
 /// CLI has to persist (`appendEntry`, `sendMessage`, `setSessionName`).
@@ -342,6 +364,16 @@ fn install_project_extension(project: &Path) -> std::path::PathBuf {
     path
 }
 
+/// Write `USER_ECHO_EXTENSION` into the global search root
+/// (`$HOME/.pi/agent/extensions/user.js`).
+fn install_user_extension(home: &Path, source: &str) -> std::path::PathBuf {
+    let dir = home.join(".pi").join("agent").join("extensions");
+    std::fs::create_dir_all(&dir).expect("mkdir user extensions dir");
+    let path = dir.join("user.js");
+    std::fs::write(&path, source).expect("write user extension");
+    path
+}
+
 fn echo_call_replies() -> Vec<Reply> {
     vec![
         Reply::ToolCall {
@@ -358,6 +390,9 @@ fn echo_call_replies() -> Vec<Reply> {
 
 #[test]
 fn project_extensions_directory_is_discovered_and_its_tool_runs() {
+    // `.pi/extensions` is project-local, so the test trusts the
+    // directory explicitly (`--approve`); the untrusted case is covered
+    // by `untrusted_project_extensions_are_skipped_but_user_extensions_load`.
     let server = ModelServer::spawn(echo_call_replies());
     let sessions = tempdir("discover");
     let project = tempdir("discover-project");
@@ -367,7 +402,9 @@ fn project_extensions_directory_is_discovered_and_its_tool_runs() {
         &server,
         sessions.path(),
         project.path(),
-        &["--output-format", "json-events"],
+        // `.pi/extensions` is project-local, so the directory has to be
+        // trusted before the gate lets its files load (`--approve`).
+        &["--approve", "--output-format", "json-events"],
     );
     let bodies = server.bodies();
     server.finish();
@@ -414,6 +451,64 @@ fn project_extensions_directory_is_discovered_and_its_tool_runs() {
             && events.contains("\"type\":\"tool_execution_end\"")
             && events.contains("\"is_error\":false"),
         "expected a successful ext_echo tool_execution_end event:\n{events}"
+    );
+}
+
+/// The trust gate on extension loading: an untrusted cwd must not load
+/// `.pi/extensions`, while the user-level (`$HOME/.pi/agent/extensions`)
+/// extension keeps working. The project extension is the same fixture as
+/// the trusted test, so the only difference is the missing `--approve`.
+#[test]
+fn untrusted_project_extensions_are_skipped_but_user_extensions_load() {
+    let server = ModelServer::spawn(vec![
+        Reply::ToolCall {
+            name: "user_echo".into(),
+            arguments: json!({"text": "hello"}),
+        },
+        Reply::Text("finished".into()),
+    ]);
+    let sessions = tempdir("untrusted");
+    let project = tempdir("untrusted-project");
+    install_project_extension(project.path());
+    install_user_extension(sessions.path(), USER_ECHO_EXTENSION);
+
+    let output = run_print(
+        &server,
+        sessions.path(),
+        project.path(),
+        &["--output-format", "json-events"],
+    );
+    let bodies = server.bodies();
+    server.finish();
+
+    assert!(
+        output.status.success(),
+        "print mode failed\nstdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(bodies.len(), 2, "requests: {bodies:#?}");
+    // The user-level tool is advertised…
+    assert!(
+        bodies[0].contains("user_echo"),
+        "a user-level extension must load regardless of project trust:\n{}",
+        bodies[0]
+    );
+    // …but the project-local one is not, and the user is told why.
+    assert!(
+        !bodies[0].contains("ext_echo"),
+        "an untrusted project's `.pi/extensions` must not be loaded:\n{}",
+        bodies[0]
+    );
+    assert!(
+        stderr(&output).contains("is not trusted"),
+        "the CLI must explain why project resources were skipped:\n{}",
+        stderr(&output)
+    );
+    assert!(
+        bodies[1].contains("user-echoed:hello"),
+        "the user-level extension must execute:\n{}",
+        bodies[1]
     );
 }
 
@@ -504,7 +599,11 @@ fn no_extensions_flag_skips_discovery() {
         &server,
         sessions.path(),
         project.path(),
-        &["--no-extensions", "--output-format", "json-events"],
+        &[
+            "--no-extensions",
+            "--output-format",
+            "json-events",
+        ],
     );
     let bodies = server.bodies();
     server.finish();
@@ -583,7 +682,7 @@ fn a_throwing_extension_tool_becomes_an_error_result() {
         &server,
         sessions.path(),
         project.path(),
-        &["--output-format", "json-events"],
+        &["--approve", "--output-format", "json-events"],
     );
     let bodies = server.bodies();
     server.finish();
@@ -876,7 +975,8 @@ fn extension_discovered_resources_reach_the_model() {
         sessions.path(),
         project.path(),
         "/dyn-note",
-        &["--output-format", "json-events"],
+        // The extension lives in `.pi/extensions`, so trust it first.
+        &["--approve", "--output-format", "json-events"],
     );
     let bodies = server.bodies();
     server.finish();
@@ -920,7 +1020,7 @@ fn no_skills_flag_suppresses_extension_discovered_skills() {
         &server,
         sessions.path(),
         project.path(),
-        &["--no-skills", "--output-format", "json-events"],
+        &["--approve", "--no-skills", "--output-format", "json-events"],
     );
     let bodies = server.bodies();
     server.finish();
@@ -953,7 +1053,7 @@ fn extension_theme_paths_are_accepted_and_ignored() {
         &server,
         sessions.path(),
         project.path(),
-        &["--output-format", "json-events"],
+        &["--approve", "--output-format", "json-events"],
     );
     let bodies = server.bodies();
     server.finish();

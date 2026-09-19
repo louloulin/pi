@@ -5728,6 +5728,176 @@ $ cargo test   -p pi-coding-agent --doc --offline                     # 3 passed
 另：LUM-1088 的 run 已挂死近一天（交互式编辑器），它的 2 个 commit 既未推也未合，占着一个槽位 ——
 建议人工清理，否则每轮盘点都要重复这条结论。
 
+## LUM-1088 round — Stage 23 收口：项目信任门接扩展加载
+
+### 为什么是这一项
+
+LUM-1085 把信任门接到了 `.pi/SYSTEM.md`、`.pi/skills`、`.pi/prompts` 与 context files，
+**唯独漏了扩展加载**：`extensions/wiring.rs` 里没有 `project_trusted` 概念，未信任目录里
+的 `.pi/extensions/*.js` 仍会被 `QuickJS` 求值。Stage 22（扩展 `promptSnippet` 进系统提示）
+与 LUM-1084（`resources_discover` 注入 skills / context files）把这条路的收益面放大之后，
+它就从一个「没接上」变成**实际可利用的信任边界缺口**：`git clone && cd && pi` 的目录只要
+带一个 `.pi/extensions/evil.js`，就能注册工具、往系统提示里塞指令、拉入额外 skill。
+
+上游的语义在 `loadProjectTrustExtensions()`：先强制 `projectTrusted = false` 跑一遍
+bootstrap，把用户级（`~/.pi/extensions`）与 CLI 临时扩展加载进来，项目本地的那组被挡在
+门外；`TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES` 里本来就有 `extensions`。Rust 侧缺的
+正是这一道过滤。本轮 3 个并发槽已满（`active_task_count = 3`），不派发新子任务，直接落地。
+
+### 上游对应实现
+
+- `packages/coding-agent/src/core/resource-loader.ts:377` `loadProjectTrustExtensions()`
+  —— 强制 `projectTrusted = false` 的 bootstrap pass。
+- `packages/coding-agent/src/core/trust-manager.ts:32`
+  —— `TRUST_REQUIRING_PROJECT_CONFIG_RESOURCES` 含 `extensions`。
+- `discoverAndLoadExtensions` 只认 `<cwd>/.pi/extensions`（不向上找祖先目录），
+  因此 Rust 侧只门控 `cwd` 是正确的粒度。
+
+### 落地内容
+
+| 位置 | 改动 |
+|------|------|
+| `extensions/wiring.rs:77` | `ExtensionLoadOptions.project_trusted`，`for_mode` 默认 `false`（deny-by-default） |
+| `extensions/wiring.rs:276` | 未信任时把 `search.project` 置 `None`：`<cwd>/.pi/extensions` 不再是搜索根，全局与显式 CLI 根不变 |
+| `main.rs:425` | `load_extensions` 在发现前调用 `resolve_cli_project_trust(cli)`，把结果传进 `ExtensionLoadOptions` |
+| `pi-extensions/registry.rs:40` | 新增 `ExtensionRegistry::set_tools`，按 id 覆盖单一扩展的工具表 |
+| `pi-extensions/host.rs` | `JsExtensionHost::load` 成功后只把本次 `log.tools` 折进当前 id，不再重建整个 registry |
+
+最后两行是本轮顺带修掉的**既存多扩展覆盖 bug**：原实现每次 `load` 都 `take` 掉整个
+registry 再重建，除当前扩展外所有 id 的能力被重置为 default，于是**只有最后一个加载的
+扩展的工具会留下**。信任门之前的两种加载顺序（global → project）本来就该并存，接上门之后
+「可信项目 = global + project」会让它更常暴露——不修的话，`--approve` 会打开项目扩展、
+同时静默清掉用户级扩展的工具，直接违背本轮验收里「用户级扩展在两种情况下都生效」。
+
+### 与上游的刻意差异
+
+- **单 pass 而非 bootstrap 双 pass**：上游要先用 `projectTrusted = false` 加载一轮是因为它
+  的 `resolveProjectTrusted` 会消费扩展信息（扩展可以声明信任需求）。Rust 的
+  `resolve_project_trusted` 只读 `cwd` / store / override，不消费扩展结果，因此没有东西需要
+  回灌，直接在发现前解析一次即可；语义等价，少一次 `QuickJS` 求值。
+- **`/trust` 仍需重启**：与 LUM-1085 一致——交互模式 `/trust` 持久化决策后提示
+  “Restart pi for this to take effect.”，不做运行中热重载。
+- **deny-by-default 的默认值**：`for_mode` 把 `project_trusted` 默认成 `false`，任何忘记接线
+  的调用方都不可能误加载项目扩展；CLI 是唯一把它设为 `true` 的入口。
+
+### 验证
+
+```
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo test   --workspace --no-fail-fast --offline                 # 71 targets：820 passed / 0 failed / 2 ignored
+```
+
+新增 / 改写的测试：
+
+- `wiring.rs` `project_extensions_are_gated_by_trust_while_global_and_explicit_still_load`：
+  临时构造 global / project / explicit 三个扩展；未信任只加载 explicit + global，可信后
+  project 的那个（`local_tool`）加入。
+- `pi-extensions/tests/host.rs` `loading_a_second_extension_keeps_the_first_extensions_tools`：
+  锁住上面那个 registry 覆盖 bug。
+- `tests/cli_extensions.rs`：新增
+  `untrusted_project_extensions_are_skipped_but_user_extensions_load`——未信任目录里
+  `.pi/extensions` 的 `ext_echo` 不进工具表、`$HOME/.pi/agent/extensions` 的 `user_echo`
+  照常加载并执行、stderr 有 “is not trusted” 提示；原有依赖项目扩展的用例补上 `--approve`，
+  把「可信才生效」写成显式前提。
+
+本轮 workspace 全量一次通过（含此前 LUM-1083 记录的概率性闪退 target），未复现抖动。
+
+### 剩余 frontier
+
+1. `themes` 目录的信任门：`trust.rs` 已把 `themes` 列入需信任条目，`pi-tui` 的主题加载
+   尚未接项目目录，接线时直接复用同一判定（LUM-1085 遗留）。
+2. `rquickjs-core 0.9 → 0.14` 迁移（消除 LUM-1083 的宿主堆破坏），独立 run。
+3. Stage 27 自动压缩接线（LUM-1093 在跑）。
+
+### Push status
+
+`work/lum-1088`：基于 `origin/feature/pi.rs`（rebase 到 LUM-1096 的 `43b3fed20`）实现，
+改动 `wiring.rs` / `main.rs` / `pi-extensions` registry + host 与两处测试，另附本节文档，
+非 force push 到同名分支。
+
+## LUM-1104 round — 核验 `feature/pi.rs` + 合入 LUM-1088 信任门（Stage 23 遗留）+ 修复旧终端上 `Ctrl+-` 失效
+
+本轮（autopilot，2026-09-19 21:20 CST 触发）开工核验 `origin/feature/pi.rs = 9c3df4d2f`
+（LUM-1103 的编辑器 undo 栈与 LUM-1100 的 `node:*` 都已在主干），开工时
+`running_task_count = 4`（本 run + LUM-1083 + LUM-1100 + LUM-1103）→ **不派发新子任务**。
+
+### 一、同源重复轮：从「重复核验」升级为「重复实现」
+
+本轮照 LUM-1102 frontier 的第 3 项（P2 编辑器 undo 栈）写完了一版完整实现：
+`pi-tui/src/undo_stack.rs` + `editor.rs` 接线 + 18 单测 + 4 集成测试，本仓全绿。收工前
+`git fetch` 才发现 LUM-1103 在同一个触发批里交付了**同一块**（`33f8336eb`）：文件、
+`UndoStack` API、`LastAction::TypeWord`、测试名几乎逐条对应，LUM-1105 的文档里也记了
+「LUM-1103 / LUM-1104 两个 worktree 里有相同未提交的 `pi-tui` 改动」。于是本地实现整份丢弃，
+只补它漏掉的一个真实缺陷（下一节）。多路同源协调轮的成本已经三次升级：LUM-1099/1101
+是重复核验，LUM-1102 是重复盘点，本轮是重复实现。
+
+### 二、本轮唯一代码切片：`Ctrl+-` 在没有 Kitty keyboard protocol 的终端上是死键
+
+LUM-1103 的绑定只接受 `Ctrl+-` / `Ctrl+_`，但按 crossterm 的
+`event/sys/unix/parse.rs`，旧终端为 `Ctrl+-` 发送的 `0x1F` 控制字节会被解成 **`Ctrl+7`**
+（该文件把 `0x1C..=0x1F` 映射到 `Ctrl+4..=Ctrl+7`）。上游 `packages/tui/src/keys.ts:1277`
+正是把同一个字节归一化成 `ctrl+-` 才让绑定生效 —— 也就是说在非 Kitty 协议终端上这个功能
+此前按不动。改动：
+
+| File | Change |
+|------|--------|
+| `pi-tui/src/editor.rs` | 控制键分支同时接受 `Ctrl+7`；注释改成可核对的行号引用（`keys.ts:1277` + crossterm 映射区间），模块文档同步更正；+1 单测 |
+| `pi-tui/tests/undo.rs` | +1 集成测试 `legacy_ctrl_seven_event_also_undoes`，走 `crossterm::event::KeyEvent → InputEvent → Editor` 的真实转换路径 |
+
+### 三、合入「已写完但从未合并」的 LUM-1088（Stage 23 收口）
+
+`mirror/work/lum-1088` 的 2 个 commit 自 LUM-1098/1099 轮起被每轮记为「在途、不合并」，
+但它的 run 早已失败、分支既未推也未合，而它修的是**信任边界缺口**（未信任目录里的
+`.pi/extensions/*.js` 会被 QuickJS 求值并发工具、进系统提示）加一个多扩展互覆盖工具表的 bug。
+本轮把它合入：
+
+- 唯一冲突在本文档（两侧都在文末追加小节）：保留全部小节，在 LUM-1105 小节之前插入 LUM-1088 小节；
+- `pi-extensions/src/host.rs` 与 LUM-1100 的 `node:*` 改动**自动合并**（不同区域），合并后
+  `loading_a_second_extension_keeps_the_first_extensions_tools` 与
+  `untrusted_project_extensions_are_skipped_but_user_extensions_load` 均通过；
+- 交付已进主干 → 把 LUM-1088 置 `in_review`（此前一直挂 `in_progress`，占着盘子）。
+
+### 四、验证（native，`target` 用本 workspace 缓存）
+
+```
+$ cargo test  -p pi-tui --offline                       # 121 lib + 9/7/9/9/7 integration，全绿
+$ cargo test  -p pi-extensions --offline                # 33 + 10 + 5 + 3 ...，全绿（含 LUM-1105 node:util）
+$ cargo test  -p pi-coding-agent --test cli_extensions   # 13 passed（含信任门用例）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo check  --workspace --all-targets --offline       # Finished
+$ cargo fmt -p pi-tui -- --check                         # clean
+```
+
+全量 `cargo test --workspace --no-fail-fast` 仍会撞上 LUM-1083 的概率性宿主堆破坏：本轮一次
+全量跑出 `cli_provider` + `rpc` 共 6 例失败，stderr 是 `free(): double free detected in tcache 2` 与 SIGSEGV，逐个单跑全部通过。与 LUM-1098/1102/1105 记录的噪声同源，不作为回归信号。
+
+另记一条环境事实：`cargo fmt --all -- --check` 在本机 rustfmt 下报出上百处**既有**格式差异
+（`pi-server` / `pi-session` / `pi-protocol` / `pi-extensions/src/bridge.rs` 等本轮未触碰的
+文件也有），即仓库整体并非 fmt-clean，各轮只保证自己动过的 crate。全仓 reformat 会与所有在途
+分支产生巨型冲突，本轮不做。
+
+### 五、frontier（本轮不派发；收工 `running_task_count = 3`）
+
+1. **P1 LUM-1083 宿主堆破坏**（`free(): double free`）：仍是唯一让所有 spawn `pi` 的集成
+   测试带上概率性失败的问题；`rquickjs-core 0.9 → 0.14` 升级或补齐宿主 shutdown 握手。
+2. **P1 `themes` 目录的信任门**（LUM-1085 遗留）：`trust.rs` 已把 `themes` 列入需信任条目，
+   而 `pi-tui/theme.rs` 已落地，接项目目录的成本比之前低。
+3. **P2 `keys.ts` 的整套 legacy 字节归一化**（本轮只补了 `0x1F` 一条）：上游还把
+   `0x00/0x08/0x09` 等归一化成 `ctrl+space` / `ctrl+h` / `ctrl+i`；Rust 侧目前散在
+   `editor.rs` 的 match 里，值得抽 `keys.rs` 归一化层并与上游同表。
+4. **P2 `.wasm` 扩展宿主**：环境仍缺 `wasm32-unknown-unknown` target + wasmtime，维持不立项。
+5. **P3 编辑器 word kill / word move**（`Ctrl+W` / `Alt+D` / `Alt+B` / `Alt+F`）：需自建分词。
+6. **P3 `node:child_process`**：`tokio::process` + 流式 stdio + 取消联动，Stage 级。
+
+并发建议（在 LUM-1099/1102/1105 结论上再加本轮证据）：**同一 autopilot 触发产生的多路协调轮，
+开工第一步必须先互相比对「本轮打算做的那一块是否已被别的轮在做/已做」**，否则重复实现一个
+切片（本轮 ~700 行）就是纯浪费。
+
+### Push status
+
+`work/lum-1104`：`ca1013510`（`Ctrl+7` 修复）、`4b8b1c137`（合 LUM-1088）、`e9f3dba59`
+（合 `origin/feature/pi.rs`）三个提交，非 force 推同名分支；再以 merge commit 把
+`feature/pi.rs` 从 `17e420c06` 快进，回滚面 = revert 该 merge commit。
 ## LUM-1105 round — Stage 26 后续：`node:util` 虚拟模块（纯 JS）+ 合并 `feature/pi.rs`
 
 （autopilot 协调轮，触发 2026-09-19 21:40 Asia/Shanghai；开工后把 LUM-1105 的泛标题「pi」

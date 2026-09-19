@@ -11,7 +11,9 @@
 //! 3. Kill / yank / yank-pop are all undoable, in reverse order.
 //! 4. Entering history browsing is undoable, restoring the draft.
 //! 5. Submitting clears the stack, so undo cannot resurrect a sent prompt.
-//! 6. `Ctrl+-` survives the `crossterm` → [`InputEvent`] conversion.
+//! 6. `Ctrl+-` survives the `crossterm` → [`InputEvent`] conversion,
+//!    including the legacy `Ctrl+7` spelling that crossterm derives from
+//!    the `0x1F` control byte a non-Kitty terminal sends.
 
 use pi_tui::backend::event::{
     KeyCode as CtKeyCode, KeyEvent as CtKeyEvent, KeyModifiers as CtModifiers,
@@ -157,6 +159,20 @@ fn ctrl_minus_survives_the_crossterm_conversion() {
     };
     assert_eq!(k, Key::new(KeyCode::Char('-'), KeyModifiers::CONTROL));
 
+    assert_eq!(ed.handle_event(event), EditorAction::Changed);
+    assert_eq!(ed.text(), "");
+}
+
+#[test]
+fn legacy_ctrl_seven_event_also_undoes() {
+    let mut ed = Editor::new();
+    type_text(&mut ed, "ab");
+
+    // Without the Kitty keyboard protocol, `Ctrl+-` arrives as the `0x1F`
+    // control byte; crossterm's parser maps `0x1C..=0x1F` onto
+    // `Ctrl+4..=Ctrl+7` (`event/sys/unix/parse.rs`), so the editor sees
+    // `Ctrl+7` and must treat it as `tui.editor.undo`.
+    let event = InputEvent::from(CtKeyEvent::new(CtKeyCode::Char('7'), CtModifiers::CONTROL));
     assert_eq!(ed.handle_event(event), EditorAction::Changed);
     assert_eq!(ed.text(), "");
 }

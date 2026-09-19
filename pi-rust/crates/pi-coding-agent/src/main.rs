@@ -419,6 +419,12 @@ fn load_extensions(
     ui: Option<pi_coding_agent::extensions::ui_bridge::TuiUiBridge>,
 ) -> wiring::ExtensionLoadOutcome {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // Resolve trust *before* discovery so an untrusted project's
+    // `.pi/extensions` is never evaluated. This is the one-pass
+    // counterpart of upstream's `loadProjectTrustExtensions` bootstrap:
+    // the Rust `resolve_project_trusted` does not consume an extension
+    // result, so there is nothing a pre-trust load pass would feed back.
+    let (project_trusted, _) = resolve_cli_project_trust(cli);
     let options = ExtensionLoadOptions {
         home: home_dir(),
         cwd,
@@ -427,6 +433,7 @@ fn load_extensions(
         has_ui,
         ui,
         disabled: cli.no_extensions,
+        project_trusted,
     };
     let outcome = wiring::load(runtime, &options);
     for (path, reason) in &outcome.errors {
