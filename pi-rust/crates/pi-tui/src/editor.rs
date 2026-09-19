@@ -18,9 +18,11 @@
 //!   the history restores it.
 //! * `Enter` returns [`EditorAction::Submit`] with the buffer text.
 //! * `Ctrl+C` returns [`EditorAction::Interrupt`].
-//! * `Ctrl+D` on an empty buffer returns [`EditorAction::Eof`]; on a
-//!   non-empty buffer it forwards the control event so the [`App`]
-//!   can decide what to do.
+//! * `Ctrl+D` is `tui.editor.deleteCharForward`'s second default
+//!   binding (`packages/tui/src/keybindings.ts:121`). On an empty
+//!   buffer it returns [`EditorAction::Eof`] so the caller can exit; on
+//!   a non-empty buffer it deletes the character at the cursor, exactly
+//!   like upstream's `custom-editor.ts:117` fall-through.
 //! * `Ctrl+U` / `Ctrl+K` kill to the start / end of the buffer and push
 //!   the killed text onto the [`KillRing`]. Because the Rust editor is
 //!   single-line, "line start" and "line end" are the buffer corners
@@ -704,11 +706,17 @@ impl Editor {
         if key.modifiers.control {
             match key.code {
                 KeyCode::Char('c') | KeyCode::Char('C') => return EditorAction::Interrupt,
+                // `tui.editor.deleteCharForward` defaults to
+                // `["delete", "ctrl+d"]` (`packages/tui/src/keybindings.ts:121`).
+                // The coding agent's custom editor only treats `Ctrl+D`
+                // as exit when the buffer is empty and otherwise falls
+                // through to the editor's delete-char-forward handler
+                // (`packages/coding-agent/src/modes/interactive/components/custom-editor.ts:117`).
                 KeyCode::Char('d') | KeyCode::Char('D') => {
                     if self.buffer.is_empty() {
                         return EditorAction::Eof;
                     }
-                    return EditorAction::None;
+                    return self.delete();
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') => return self.kill_to_line_start(),
                 KeyCode::Char('a') | KeyCode::Char('A') => return self.move_home(),
@@ -952,12 +960,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_on_non_empty_is_noop() {
+    fn ctrl_d_on_non_empty_deletes_forward() {
         let mut ed = Editor::new();
-        ed.insert_char('x');
+        ed.insert_str("xy");
+        ed.move_home();
         let action = ed.handle_key(Key::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert_eq!(action, EditorAction::None);
-        assert_eq!(ed.text(), "x");
+        assert_eq!(action, EditorAction::Changed);
+        assert_eq!(ed.text(), "y");
+        assert_eq!(ed.cursor(), 0);
     }
 
     #[test]

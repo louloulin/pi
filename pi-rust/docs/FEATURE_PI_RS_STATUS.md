@@ -6521,3 +6521,116 @@ frontier 重排（`jumpForward` / `jumpBackward` 已划掉；`node:child_process
 LUM-1110（`node:child_process`，已自行合入推送）、LUM-1111（`Ctrl+B`/`Ctrl+F`）、
 LUM-1112（主题消费层）与 LUM-1113（本轮 jump mode）；**仍建议人工把这串协调轮合流**，
 否则每轮都在重估同一批候选。
+
+## LUM-1115 round — 核验 `feature/pi.rs` + 编辑器 `Ctrl+D` delete-forward 落地 + 派发 `pi.exec` 取消 与 `pi-tui` markdown
+
+（autopilot 协调轮；开工后把 LUM-1115 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 1`（只有本 run；LUM-1114 的 run 已在
+  15:40Z 收工进 `in_review`）→ **有 2 个空槽**（上限 3）。
+- 进入本轮时 `origin/feature/pi.rs` = `009b4179d`（`Merge branch 'work/lum-1114'`，父
+  `a934280c3` LUM-1114 的 App 主题化提交）；`work/lum-1114` = `a934280c3` 已是它的祖先，
+  **没有遗留的合并债**。
+- 磁盘：开工空闲 11G，删掉**已收工（`in_review`）的 LUM-1110 worktree 的
+  `pi-rust/target`（12G）**后空闲恢复到 22G —— LUM-1110 的代码早已合入 `feature/pi.rs`，
+  只删构建产物，不动任何源码与提交。
+
+### 二、核验 `feature/pi.rs`
+
+在 `work/lum-1115`（起点 `origin/feature/pi.rs` @ `009b4179d`）上复跑本轮触及的 crate：
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  lib 158 + app_theme 5 + cursor_chords 5 + e2e 9 + editor_ctrl_d 7 + editor_jump 14
+  + selector_search 7 + snapshot 9 + styles 9 + theme 9 + undo 7 + word_navigation 7
+  + doctest 2 = **248 passed / 0 failed**
+```
+
+本轮**没有重跑全量 workspace**：派发出去的两路（`pi-extensions` 的 quickjs 宿主、
+`pi-tui` 的 markdown）都在各自 worktree 里并行重建，再叠加一次全量构建会同时压 CPU 与磁盘
+——与 LUM-1111 / LUM-1113 轮的取舍一致。`pi-tui` 的编译门（含全部 `--all-targets` clippy
+与 `fmt --check`）已单独跑过。
+
+### 三、本轮切片：编辑器 `Ctrl+D` = `deleteCharForward`
+
+**先修正 frontier 里一处待决项。** LUM-1113 轮把 `Ctrl+D` 记成「EOF vs forward-delete 需要
+单独决策」。核实上游后不需要决策，两条语义同时存在、有明确先后：
+
+```
+packages/tui/src/keybindings.ts:121                 tui.editor.deleteCharForward 默认 ["delete", "ctrl+d"]
+packages/coding-agent/src/core/keybindings.ts:95    app.exit 默认 "ctrl+d"，描述 "Exit when editor is empty"
+packages/coding-agent/src/modes/interactive/components/custom-editor.ts:117
+                                                    空 buffer → app.exit；非空 → 落回 editor 的 delete-char-forward
+```
+
+Rust 侧 `editor.rs` 只实现了前半段：空 buffer 返回 `EditorAction::Eof`，**非空直接
+`EditorAction::None`**（旧单测 `ctrl_d_on_non_empty_is_noop` 把这个错误行为钉死了）。本轮补齐后半段：
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/editor.rs` | control 分支里 `Char('d')`：空 buffer 仍 `Eof`；非空改为 `self.delete()`（删除光标处字符，走既有的 undo 快照 / 多字节边界路径）；模块文档更新 `Ctrl+D` bullet 并标注上游出处；旧单测改写为 `ctrl_d_on_non_empty_deletes_forward` |
+| `crates/pi-tui/tests/editor_ctrl_d.rs`（新增） | 7 个集成测试（公共 `Editor` / `Prompt` 事件面 + crossterm 转换） |
+
+语义（集成测试逐条钉住）：
+
+* 空 buffer → `Eof`（退出）；非空 → 删除光标处字符，返回 `Changed`。
+* 光标已在 buffer 末尾且非空 → `None`，**不是** `Eof`（buffer 还有内容）。
+* 多字节字符按整字符删除（`é` 两步：先删 `h` 再删 `é`，光标落在下一字符边界）。
+* 该删除压 undo 快照，`Ctrl+-` 可还原。
+* `Prompt` 层透传：空 → `PromptAction::Eof`，非空 → `PromptAction::Changed`。
+
+### 四、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline        # 248 passed / 0 failed（含新增 7）
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo clippy -p pi-tui --all-targets --offline -- -D warnings   # Finished，0 warnings
+$ cargo fmt -p pi-tui -- --check        # 干净
+```
+
+改动只动 `editor.rs` 内部一个分支并新增 API 无关的测试文件，对下游 `pi-coding-agent` 是纯行为修正：
+非空 `Ctrl+D` 现在会删字符，而不再是 no-op——与上游一致。
+
+### 五、合并与推送
+
+见下方「合并与推送」小节；`work/lum-1115` 非 force 合入 `origin/feature/pi.rs` 并推送。
+
+### 六、frontier（本轮更新）+ 空槽派发
+
+**更正一项 frontier。** LUM-1113 轮把 **P1「`.wasm` 扩展宿主」**列为下一轮最大项。核实上游后
+该前提不成立：上游 pi **没有 wasm 扩展格式**——`packages/` 里的 `wasm` 只有 `photon.ts`
+（原生模块自带的 `photon_rs_bg.wasm`）与 `doom-overlay`（JS 扩展内部加载的 doom 引擎），
+扩展的加载/执行始终是 JS。LUM-981 里「在 wasm 运行」指的是 Rust 版 pi 自身可编到
+`wasm32-unknown-unknown`（Stage 6 已落），不是「加载 `.wasm` 插件」。因此**不再把
+「wasm 扩展宿主」当作兼容性缺口**；真正要补的是 JS 扩展用到的宿主能力面。
+
+本轮把两个空槽分别派给两条**零文件重叠**的轨道（parent LUM-981，`--status todo` → 即刻起跑）：
+
+1. **LUM-1116** `[Stage 31] pi-extensions: pi.exec 的 AbortSignal 取消（宿主 cancel 通道）+
+   超时放开` —— 改 `crates/pi-extensions/**`（`host.rs` / shim / tests / docs）。这是
+   frontier P1：`pi.exec` 的 `options.signal` 目前「接受但忽略」，宿主 5s/300s per-call
+   timeout 还会掐断长命令；`host.rs` 已有 `host_node_call` 多路复用与 `host_child_*`
+   句柄先例可参照。
+2. **LUM-1117** `[Stage 31] pi-tui: markdown 渲染模块（自研子集，消费 Md* 主题槽位）` ——
+   新增 `crates/pi-tui/src/markdown.rs` + 测试。上游 1015 行 `components/markdown.ts`，Rust 侧
+   完全缺失，而 `theme.rs:292` 起的一整族 `Md*` 槽位没有任何消费方。自研解析器、不新增依赖；
+   明确避开同轮的 `editor.rs`。
+
+frontier 重排（`Ctrl+D` 已划掉；`jumpForward/Backward`、`node:child_process`、主题消费、
+本轮 `Ctrl+D` 均已落地）：
+
+1. **P1 `pi.exec` 取消 + 超时放开** → 本轮派发 LUM-1116。
+2. **P2 `pi-tui` markdown 渲染** → 本轮派发 LUM-1117。
+3. **P3 `node:module` / `node:readline` / `node:zlib`**：`node:child_process` 已落地，
+   余下三个仍要动 `host.rs` 的 op 表（zlib 还要新依赖 `flate2`/`miniz_oxide`）→ 与 LUM-1116
+   排队。
+4. **P3 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+5. **P3 `fetch` / provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 不写猜测值）。
+6. **移除**：`wasm 扩展宿主`（见上，不是上游特性）。
+
+并发建议（维持）：上限 3 路；`pi-extensions/src/host.rs` 与
+`docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。本轮开工 1 路、派发 2 路 → 满 3 路。
