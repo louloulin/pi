@@ -104,6 +104,7 @@ back to the host invokes a host import (see below).
 | `pi.sendMessage(message)`       | `host_send_message(json)`       | Custom messages routed back to the agent.                            |
 | `pi.sendUserMessage(text)`      | `host_send_user_message(json)`  | User messages enqueued as turn input.                                |
 | `pi.setSessionName(name)`       | `host_set_session_name(name)`   | Sets the session display name.                                       |
+| `pi.exec(command, args, opts)`  | `host_exec(command, json)`      | Runs a child process; resolves with `{ stdout, stderr, code, killed }`. |
 | `ctx.ui.notify(msg, level)`     | `host_ui_notify(msg, level)`    | Fire-and-forget notification. `level` ∈ `info`/`warning`/`success`/`error`. |
 | `ctx.ui.confirm(title, body)`   | `host_ui_confirm(title, body)`  | Returns `Promise<boolean>`. Resolves via `UiHandler::confirm`.       |
 | `ctx.ui.input(title, ph)`       | `host_ui_input(title, ph)`      | Returns `Promise<string | null>`. Resolves via `UiHandler::input`.   |
@@ -127,6 +128,7 @@ swapped for a `wasm32` binding later without touching the shim.
 | `host_send_message(json)`           | `(json: string) => void`             | Push a `CustomMessage` payload back to the agent.                                              |
 | `host_send_user_message(json)`      | `(json: string) => void`             | Push a user message (string or content array) into the queue.                                  |
 | `host_set_session_name(name)`       | `(name: string) => void`             | Set the session display name.                                                                  |
+| `host_exec(command, argsJson)`      | `(command: string, argsJson: string) => Promise<string>` | Runs `command` with `argsJson` = `{ args, cwd?, timeout? }` and returns the JSON `ExecResult` `{stdout, stderr, code, killed}`. Never rejects. |
 | `host_ui_notify(message, level)`    | `(message: string, level: string) => void` | Fire-and-forget notify. `level` ∈ `info`/`success`/`warning`/`error`.                          |
 | `host_ui_confirm(title, body)`      | `(title: string, body: string) => Promise<boolean>` | Async — resolves via `UiHandler::confirm`.                                          |
 | `host_ui_input(title, placeholder)` | `(title: string, placeholder: string) => Promise<string | null>` | Async — resolves via `UiHandler::input`.                                          |
@@ -138,6 +140,24 @@ swapped for a `wasm32` binding later without touching the shim.
 upstream extension API: the shim uses it internally to back the Node
 builtin virtual modules, so extension code keeps importing `node:fs`
 etc. exactly as it does on Node.
+
+`host_exec` is what backs `pi.exec` — the documented shell-out API every
+git-driven example extension uses (`packages/coding-agent/examples/
+extensions/{auto-commit-on-exit,dirty-repo-guard,git-checkpoint,
+git-merge-and-resolve}.ts`). The child is spawned directly (no shell) with
+`cwd` defaulting to the session working directory, so extensions that used
+`pi.exec` upstream run unmodified. Divergences from upstream `execCommand`:
+
+* `options.signal` is accepted but ignored (no `AbortSignal` in QuickJS);
+  the call is still bounded by the host per-call timeout —
+  [`DEFAULT_TIMEOUT`](../src/host.rs) (5 s) in print / RPC, 300 s in the
+  interactive TUI — so a long `git fetch` needs an interactive session or a
+  raised `HostOptions::timeout`.
+* a timeout kills with `SIGKILL` (upstream sends `SIGTERM`, then `SIGKILL`
+  after 5 s) and reports `code: -1`; Node collapses the missing exit code
+  to `0`, which would make a killed command look successful.
+* a spawn failure (`ENOENT`) reports the OS error in `stderr` with
+  `code: 1` instead of dropping the message.
 
 ### Node builtin virtual modules
 
@@ -331,6 +351,7 @@ or a Stage 4+ follow-up:
 | `pi.on(eventName, handler)`             | ✅ Supported    | Event tags are free-form strings; the host dispatches anything.        |
 | `pi.registerTool(...)` + `execute(...)` | ✅ Supported    | JSON Schema `parameters` round-trip; result shape matches TS.          |
 | `pi.registerCommand(...)`               | ✅ Supported    | Dispatched by the TUI (`/name args`) and by `pi --print "/name args"`; the JS handler runs in the host. |
+| `pi.exec(command, args, options)`        | ✅ Supported    | Spawns directly (no shell); `cwd` defaults to the session cwd; resolves with `{ stdout, stderr, code, killed }`. `signal` is ignored and every call rides the host per-call timeout (see [Host imports](#host-imports-rust--js)). |
 | `ctx.ui.confirm / input / select`       | ✅ Supported    | Async; the host awaits the user's `UiHandler` reply. The TUI renders a real modal dialog; print / rpc / non-TTY runs deny (`false` / `null`) and report the denial through `ctx.ui.notify`. |
 | `ctx.ui.notify(...)`                    | ✅ Supported    | Fire-and-forget; logged on the `pi_extension` tracing target.          |
 | `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Persisted as session entries by the TUI and print modes; `sendUserMessage` is not re-injected as a new turn yet. |
@@ -339,7 +360,7 @@ or a Stage 4+ follow-up:
 | `require("node:fs")` (CJS)             | ✅ Supported   | `require` resolves through the same virtual module map as the ESM rewrite. |
 | `node:fs` / `node:fs/promises`          | ✅ Subset      | Sync + promise + callback forms; see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md) for the op list and divergences. |
 | `node:os` / `node:buffer` / `node:crypto` / `node:process` / `node:util` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals; `node:util` is pure JS (`promisify` / `inspect` / `format` / `types` / `TextEncoder` / …) and installs `TextEncoder` / `TextDecoder` globally when the engine lacks them. |
-| `node:child_process`                    | ❌ Not bridged | Needs streaming stdio + process lifetime tied to the host deadline. Importing it reports the available modules. |
+| `node:child_process`                    | ❌ Not bridged | Extensions that shell out through the documented `pi.exec` API work (see the `pi.exec` row); importing `node:child_process` directly still needs streaming stdio + process lifetime tied to the host deadline. |
 | TypeBox parameter schemas               | ✅ Wire-only    | The JSON Schema `parameters` field is preserved verbatim.               |
 | Custom renderers (`registerMessageRenderer`, …) | ❌ Out of scope | Land in Stage 4 alongside the TUI.                          |
 | Custom editor / footer / header         | ❌ Out of scope | TUI concern (Stage 4).                                                 |

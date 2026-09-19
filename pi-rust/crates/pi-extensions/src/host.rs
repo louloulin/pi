@@ -11,6 +11,7 @@
 //! function via [`JsExtensionHost::execute_tool`].
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,6 +24,7 @@ use rquickjs_core::prelude::CatchResultExt;
 use rquickjs_core::promise::MaybePromise;
 use rquickjs_core::{async_with, Ctx, Function};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ExtensionCapabilities, ExtensionEntry};
@@ -1051,6 +1053,124 @@ async fn host_select_impl(
     Ok(value)
 }
 
+/// `pi.exec(command, args, options)` — request decoded from the JS shim.
+///
+/// Mirrors upstream `ExecOptions` (`packages/coding-agent/src/core/exec.ts`)
+/// minus `signal` (QuickJS ships no `AbortSignal`, and the host call is
+/// already bounded by [`HostOptions::timeout`]). `cwd` is filled in by the
+/// shim with the session cwd when the extension omits it.
+#[derive(Debug, Default, Deserialize)]
+struct ExecRequest {
+    /// Arguments passed to the child process, never through a shell.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Working directory; the session cwd when the extension omitted it.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Kill the child after this many milliseconds (`None` = no limit).
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
+/// Result handed back to JS — the upstream `ExecResult` shape.
+#[derive(Debug, Serialize)]
+struct ExecOutcome {
+    stdout: String,
+    stderr: String,
+    code: i32,
+    killed: bool,
+}
+
+/// Body of the `host_exec` import: run the requested command and return
+/// the `ExecResult` as JSON. Never rejects — upstream `pi.exec` resolves
+/// on every outcome and extensions branch on `code` / `killed`.
+async fn host_exec_impl(command: String, args_json: String) -> rquickjs_core::Result<String> {
+    let request: ExecRequest = serde_json::from_str(&args_json).unwrap_or_default();
+    let outcome = run_child(&command, &request).await;
+    Ok(serde_json::to_string(&outcome)
+        .unwrap_or_else(|_| r#"{"stdout":"","stderr":"","code":1,"killed":false}"#.to_string()))
+}
+
+/// Spawn `command` with `args` (no shell, like upstream `spawn(..., {shell:
+/// false})`), capture stdout / stderr and enforce `request.timeout`.
+///
+/// Divergences from upstream, both recorded in `docs/EXTENSIONS.md`:
+///
+/// * a timeout kills the child with `SIGKILL` (upstream escalates
+///   `SIGTERM` → `SIGKILL` after 5 s) and reports `code = -1`, where Node
+///   collapses the missing exit code to `0`; a killed run must never look
+///   like a success to `if (code !== 0)` callers.
+/// * a spawn failure (`ENOENT`) puts the OS error into `stderr` instead of
+///   dropping it, with `code = 1` like upstream.
+async fn run_child(command: &str, request: &ExecRequest) -> ExecOutcome {
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(&request.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // The host runtime can drop this future (outer per-call timeout);
+        // the child must never outlive the extension call.
+        .kill_on_drop(true);
+    if let Some(cwd) = request.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+        cmd.current_dir(cwd);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ExecOutcome {
+                stdout: String::new(),
+                stderr: error.to_string(),
+                code: 1,
+                killed: false,
+            }
+        }
+    };
+
+    // Drain both pipes concurrently with the wait below: a child that
+    // writes more than the OS pipe buffer (~64 KiB) would otherwise block
+    // forever on write and the host would deadlock waiting for it to exit.
+    let stdout_task = tokio::spawn(read_pipe(child.stdout.take()));
+    let stderr_task = tokio::spawn(read_pipe(child.stderr.take()));
+
+    let limit = request
+        .timeout
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis);
+    let (status, killed) = match limit {
+        Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
+            Ok(status) => (status.ok(), false),
+            Err(_elapsed) => {
+                let _ = child.start_kill();
+                (child.wait().await.ok(), true)
+            }
+        },
+        None => (child.wait().await.ok(), false),
+    };
+
+    ExecOutcome {
+        stdout: stdout_task.await.unwrap_or_default(),
+        stderr: stderr_task.await.unwrap_or_default(),
+        // `None` when the process died from a signal (or could not be
+        // reaped) — see the divergence note above.
+        code: status.and_then(|status| status.code()).unwrap_or(-1),
+        killed,
+    }
+}
+
+/// Drain one child pipe into a string, lossy-decoding UTF-8 the way
+/// Node's `data.toString()` does.
+async fn read_pipe<R>(pipe: Option<R>) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
+    let mut buffer = Vec::new();
+    let _ = pipe.read_to_end(&mut buffer).await;
+    String::from_utf8_lossy(&buffer).into_owned()
+}
+
 /// Install the host imports the shim expects. Each function marshals
 /// its arguments as JSON, hands them to the host state, and returns a
 /// QuickJS-friendly value (string / Promise).
@@ -1223,6 +1343,13 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     };
     let select_function = Function::new(ctx.clone(), Async(select_fn))?;
     globals.set("host_ui_select", select_function)?;
+
+    // host_exec(command, argsJson) -> Promise<string> — the `pi.exec`
+    // bridge. Resolves with the JSON `ExecResult`
+    // (`{stdout, stderr, code, killed}`); never rejects, like upstream.
+    let exec_fn = |command: String, args_json: String| host_exec_impl(command, args_json);
+    let exec_function = Function::new(ctx.clone(), Async(exec_fn))?;
+    globals.set("host_exec", exec_function)?;
 
     Ok(())
 }
@@ -1430,7 +1557,9 @@ fn node_arg_str(args: &serde_json::Value, key: &str) -> Result<String, NodeError
 }
 
 fn node_arg_bool(args: &serde_json::Value, key: &str) -> bool {
-    args.get(key).and_then(|value| value.as_bool()).unwrap_or(false)
+    args.get(key)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 /// System-time → milliseconds since the epoch, as Node's `Stats` reports.
@@ -1571,7 +1700,8 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
             match meta {
                 Ok(meta) if meta.is_dir() => {
                     if recursive {
-                        std::fs::remove_dir_all(&path).map_err(|e| NodeError::io(e, "rm", &path))?;
+                        std::fs::remove_dir_all(&path)
+                            .map_err(|e| NodeError::io(e, "rm", &path))?;
                     } else {
                         std::fs::remove_dir(&path).map_err(|e| NodeError::io(e, "rm", &path))?;
                     }
@@ -1598,7 +1728,8 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
         }
         "fs.realpath" => {
             let path = node_arg_str(args, "path")?;
-            let resolved = std::fs::canonicalize(&path).map_err(|e| NodeError::io(e, "realpath", &path))?;
+            let resolved =
+                std::fs::canonicalize(&path).map_err(|e| NodeError::io(e, "realpath", &path))?;
             Ok(serde_json::json!(resolved.to_string_lossy()))
         }
 
@@ -1609,11 +1740,9 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
         "os.arch" => Ok(serde_json::json!(std::env::consts::ARCH)),
         "os.type" => Ok(serde_json::json!(host_os_type())),
         "os.eol" => Ok(serde_json::json!(host_eol())),
-        "os.hostname" => Ok(serde_json::json!(
-            std::fs::read_to_string("/etc/hostname")
-                .map(|name| name.trim().to_string())
-                .unwrap_or_else(|_| "localhost".to_string())
-        )),
+        "os.hostname" => Ok(serde_json::json!(std::fs::read_to_string("/etc/hostname")
+            .map(|name| name.trim().to_string())
+            .unwrap_or_else(|_| "localhost".to_string()))),
         "os.release" => Ok(serde_json::json!(uname_release())),
 
         // -- process -------------------------------------------------------
@@ -1624,11 +1753,9 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
             }
             Ok(serde_json::Value::Object(map))
         }
-        "process.cwd" => Ok(serde_json::json!(
-            std::env::current_dir()
-                .map(|dir| dir.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/".to_string())
-        )),
+        "process.cwd" => Ok(serde_json::json!(std::env::current_dir()
+            .map(|dir| dir.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/".to_string()))),
         "process.platform" => Ok(serde_json::json!(host_platform())),
         "process.arch" => Ok(serde_json::json!(std::env::consts::ARCH)),
         "process.pid" => Ok(serde_json::json!(std::process::id())),

@@ -145,7 +145,8 @@ absent (the failure is a plain "undefined is not a function").
 | `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; additionally needs the `@earendil-works/pi-tui` module. |
 | `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; need the `@earendil-works/*` modules only. |
 | `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | Partially covered — blocked on the frontier rows below. |
-| `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts` | `node:child_process` (+ `node:util`) | `node:util` is bridged; still blocked on `node:child_process`. |
+| `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `truncated-tool.ts` | `node:child_process` (+ `node:util`) | `node:util` is bridged; still blocked on `node:child_process`. |
+| `auto-commit-on-exit.ts`, `border-status-editor.ts`, `dirty-repo-guard.ts`, `git-checkpoint.ts`, `github-issue-autocomplete.ts`, `inline-bash.ts`, `input-transform-streaming.ts`, `shutdown-command.ts` | — (shell out through the extension API) | **Unblocked**: these use `pi.exec`, which is now bridged to the Rust host (see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)); they never import `node:child_process` themselves. |
 
 The `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
 specifiers are a separate gap: they are pi's own APIs, not Node ones, and
@@ -175,7 +176,7 @@ Importing these fails with the readable error
 
 | Builtin | Why it is missing | What it would take |
 |---|---|---|
-| `node:child_process` | Needs streaming stdio + a process lifetime model that respects the host deadline. | `tokio::process`, an op for spawn/exec with buffered stdout/stderr, and cancellation. Highest-value next step: `examples/extensions/interactive-shell.ts`, `mac-system-theme.ts`, `sandbox/index.ts` and community extensions shell out. |
+| `node:child_process` | Extensions that need it import it directly (they hold a `ChildProcess` handle, not a `pi.exec` result); needs streaming stdio + a process lifetime model that respects the host deadline. | `tokio::process`, an op for spawn/exec with buffered stdout/stderr, and cancellation. Extensions that shell out through the documented `pi.exec` API are already covered by the `host_exec` bridge; the remaining examples are `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `sandbox/index.ts`, `subagent/index.ts` and `truncated-tool.ts`. |
 | `node:module` | `createRequire` would let an extension `require` arbitrary paths off disk, which the virtual-module sandbox exists to prevent. | Would need a deliberate decision to widen the sandbox, e.g. require-from-`node_modules`-only. Used by `doom-overlay/doom-engine.ts`. |
 | `node:readline` | Interactive prompting; needs streams and stdin ownership. | `readline.createInterface` over a stream bridge; the host owns stdin. Used by `git-merge-and-resolve.ts`. |
 | `node:zlib` | No compression backend in the workspace. | Add `flate2`/`miniz_oxide` and expose `gunzipSync`/`gzipSync`/`inflateRawSync`/`deflateSync`. Used by `doom-overlay/wad-finder.ts` (`gunzipSync`). |

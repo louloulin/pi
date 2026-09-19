@@ -272,6 +272,54 @@ const pi = Object.freeze({
       globalThis.host_set_session_name(String(name == null ? "" : name));
     }
   },
+
+  /**
+   * Run a command and resolve with `{ stdout, stderr, code, killed }` —
+   * the upstream `ExtensionAPI.exec` contract
+   * (`packages/coding-agent/src/core/exec.ts`). The command is spawned
+   * directly, never through a shell, so arguments with spaces / globs are
+   * passed verbatim (mirrors upstream `spawn(..., { shell: false })`).
+   *
+   * `options.cwd` defaults to the session working directory; `timeout` is
+   * in milliseconds. `options.signal` is accepted but ignored (QuickJS has
+   * no `AbortSignal`), and every call is additionally bounded by the
+   * host's per-call timeout (5 s by default, 300 s in interactive mode).
+   * Like upstream, the returned promise resolves for every outcome — a
+   * missing binary yields `{ code: 1, stderr: "…" }` rather than a
+   * rejection.
+   */
+  async exec(command, args, options) {
+    if (typeof command !== "string" || !command) {
+      throw new TypeError("pi.exec: command must be a non-empty string");
+    }
+    const argv = args == null ? [] : args;
+    if (!Array.isArray(argv) || argv.some((arg) => typeof arg !== "string")) {
+      throw new TypeError("pi.exec: args must be an array of strings");
+    }
+    const opts = options && typeof options === "object" ? options : {};
+    const cwd = typeof opts.cwd === "string" && opts.cwd ? opts.cwd : globalThis._pi_cwd;
+    const timeout =
+      typeof opts.timeout === "number" && opts.timeout > 0 ? opts.timeout : undefined;
+    if (typeof globalThis.host_exec !== "function") {
+      throw new Error("pi.exec is not available in this host build");
+    }
+    const raw = await globalThis.host_exec(
+      command,
+      JSON.stringify({ args: argv, cwd: cwd, timeout: timeout }),
+    );
+    let result;
+    try {
+      result = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (_e) {
+      throw new Error("pi extension host returned malformed JSON for `exec`");
+    }
+    return {
+      stdout: result && typeof result.stdout === "string" ? result.stdout : "",
+      stderr: result && typeof result.stderr === "string" ? result.stderr : "",
+      code: result && typeof result.code === "number" ? result.code : 0,
+      killed: Boolean(result && result.killed),
+    };
+  },
 });
 
 // Expose `pi` globally so extension source can call it without
