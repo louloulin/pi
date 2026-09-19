@@ -10589,9 +10589,10 @@ $ cargo build --workspace  --offline                                # Finished
 - 合并提交 `1be7f7016`：`git merge origin/feature/pi.rs @ 127d07439`（LUM-1147 的 `compaction.rs` /
   `interactive.rs` / 文档）**零冲突**——本轮只碰 `pi-coding-agent/src/tools/*` 与两个 `tests/` 文件，
   与在跑的另两路（`pi-agent-core`、`pi-ai` + `compaction` / `config`）零文件交集。
-- 推送：`git push origin work/lum-1148:refs/heads/feature/pi.rs` → `127d07439..1be7f7016`（快进）；
-  `git ls-remote origin feature/pi.rs` 复查为 `1be7f7016`。本节文字随后又作了一次修订，再以快进
-  追加到同一分支。
+- 推送：`git push origin work/lum-1148:refs/heads/feature/pi.rs` → `127d07439..1be7f7016`（快进），
+  随后本节文字的文档提交 `add630b62` 再以快进 `1be7f7016..add630b62` 追加到同一分支；
+  `git ls-remote origin feature/pi.rs` 复查为 `add630b62`（= 本轮 `work/lum-1148` 的 tip）。
+  真实哈希链：代码 `e58e3d66c` → 合并 `1be7f7016` → 本文档 `add630b62`。
 
 ### 八、frontier（本轮更新）
 
