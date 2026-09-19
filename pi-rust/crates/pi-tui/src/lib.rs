@@ -45,7 +45,9 @@ pub use clipboard::{base64_encode, osc52_sequence};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
-pub use highlight::{highlight_code, supports_language, tokenize, Token, TokenKind};
+pub use highlight::{
+    get_language_from_path, highlight_code, supports_language, tokenize, Token, TokenKind,
+};
 pub use hyperlink::{close_hyperlink, hyperlink, open_hyperlink, visible_width};
 pub use input::{
     is_mouse_sequence, parse_mouse_sequence, InputEvent, Key, KeyModifiers, MouseButton,

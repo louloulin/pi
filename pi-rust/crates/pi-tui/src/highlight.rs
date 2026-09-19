@@ -15,7 +15,9 @@
 //!   `addition`/`deletion` → `toolDiffAdded`/`toolDiffRemoved`, …),
 //! * the same language set as the eager registration list upstream uses
 //!   (`python`, `rust`, `typescript`, `bash`, …) plus the extensions
-//!   `getLanguageFromPath` can produce.
+//!   `getLanguageFromPath` can produce, exposed here as
+//!   [`get_language_from_path`] so callers can map a tool's file path to the
+//!   fence info string they pass to [`highlight_code`].
 //!
 //! Deliberate deviations from `highlight.js` (documented rather than silently
 //! assumed): nested sub-languages are not entered (```` ```html<script> ````,
@@ -99,6 +101,77 @@ pub struct Token {
 /// names return `false`, which callers use to keep plain code-block styling.
 pub fn supports_language(language: &str) -> bool {
     lookup(language).is_some()
+}
+
+/// Map a file path to the language identifier its extension implies.
+///
+/// Ports `getLanguageFromPath` from the upstream
+/// `coding-agent/.../theme.ts`, including the extensionless entries the table
+/// carries (`Makefile`, `Dockerfile`) and the exact lookup semantics upstream
+/// uses: take everything after the last `.`, lower-case it, and return `None`
+/// when that key is not in the table. A path with no dot at all is looked up
+/// whole, so `Makefile` resolves but `dir/Makefile` does not — the same
+/// quirk upstream has.
+///
+/// The result is the identifier `highlight_code` / `tokenize` expect, not a
+/// guarantee that this module can highlight it: callers that want to skip
+/// highlighting should check [`supports_language`] first, exactly as upstream's
+/// `highlightCode` does.
+pub fn get_language_from_path(file_path: &str) -> Option<&'static str> {
+    let ext = match file_path.rsplit_once('.') {
+        Some((_, ext)) => ext,
+        None => file_path,
+    };
+    if ext.is_empty() {
+        return None;
+    }
+    let lower = ext.to_lowercase();
+    Some(match lower.as_str() {
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "py" => "python",
+        "rb" => "ruby",
+        "rs" => "rust",
+        "go" => "go",
+        "java" => "java",
+        "kt" => "kotlin",
+        "swift" => "swift",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cs" => "csharp",
+        "php" => "php",
+        "sh" | "bash" | "zsh" => "bash",
+        "fish" => "fish",
+        "ps1" => "powershell",
+        "sql" => "sql",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" => "scss",
+        "sass" => "sass",
+        "less" => "less",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "xml" => "xml",
+        "md" | "markdown" => "markdown",
+        "dockerfile" => "dockerfile",
+        "makefile" => "makefile",
+        "cmake" => "cmake",
+        "lua" => "lua",
+        "perl" => "perl",
+        "r" => "r",
+        "scala" => "scala",
+        "clj" => "clojure",
+        "ex" | "exs" => "elixir",
+        "erl" => "erlang",
+        "hs" => "haskell",
+        "ml" => "ocaml",
+        "vim" => "vim",
+        "graphql" => "graphql",
+        "proto" => "protobuf",
+        "tf" | "hcl" => "hcl",
+        _ => return None,
+    })
 }
 
 /// Split `code` into classified [`Token`]s.
@@ -2456,5 +2529,46 @@ mod tests {
         let lines = highlight_code("plain", None, SpanStyle::PLAIN);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0][0].text, "plain");
+    }
+
+    #[test]
+    fn language_from_path_matches_upstream_table() {
+        assert_eq!(get_language_from_path("src/main.rs"), Some("rust"));
+        assert_eq!(get_language_from_path("a/b/App.tsx"), Some("typescript"));
+        assert_eq!(get_language_from_path("lib/index.mjs"), Some("javascript"));
+        assert_eq!(get_language_from_path("script.sh"), Some("bash"));
+        assert_eq!(get_language_from_path("Cargo.toml"), Some("toml"));
+        assert_eq!(get_language_from_path("ci.yaml"), Some("yaml"));
+        assert_eq!(get_language_from_path("infra.tf"), Some("hcl"));
+    }
+
+    #[test]
+    fn language_from_path_is_case_insensitive() {
+        assert_eq!(get_language_from_path("MAIN.RS"), Some("rust"));
+        assert_eq!(get_language_from_path("Makefile"), Some("makefile"));
+        assert_eq!(get_language_from_path("Dockerfile"), Some("dockerfile"));
+    }
+
+    #[test]
+    fn language_from_path_keeps_upstream_quirks_and_misses() {
+        // Upstream splits on `.` and looks the last segment up verbatim, so a
+        // directory-qualified extensionless name is a miss while the bare name
+        // resolves, and an unknown extension yields `None`.
+        assert_eq!(get_language_from_path("dir/Makefile"), None);
+        assert_eq!(get_language_from_path("notes.txt"), None);
+        assert_eq!(get_language_from_path("README"), None);
+        assert_eq!(get_language_from_path("trailing."), None);
+    }
+
+    #[test]
+    fn language_from_path_feeds_highlight_code() {
+        let path = "src/main.rs";
+        let language = get_language_from_path(path).expect("rust extension");
+        let lines = highlight_code("fn main() {}", Some(language), SpanStyle::PLAIN);
+        let keyword = lines[0]
+            .iter()
+            .find(|span| span.text == "fn")
+            .expect("keyword span");
+        assert_eq!(keyword.style.fg, Some(ThemeColor::SyntaxKeyword));
     }
 }

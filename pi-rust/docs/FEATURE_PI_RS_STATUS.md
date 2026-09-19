@@ -10874,3 +10874,107 @@ LUM-1147 的 `/tmp` target 目录。
 `git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `d27a17679` **快进至 `ecaba34d2`**
 （`git ls-remote` 复查一致：`ecaba34d266b9456435f42230c9804f202e28573`），
 留档分支 `work/lum-1150` 一并推送（同哈希）。
+
+## LUM-1151 round — 核验 feature/pi.rs + `pi-tui::get_language_from_path`（`getLanguageFromPath` 移植，frontier 第 7 项前置）+ 派发 Stage 45（LUM-1153）+ 合并推送 feature/pi.rs
+
+### 一、本轮定位：协调轮（核验 + 切片 + 派发），不与他人撞车
+
+开工时 `multica daemon status` 槽位 **2/3**（本人 LUM-1151 + 同刻创建的 LUM-1152），
+LUM-1152 是 **Stage 44**、标题 `[Stage 44] pi-tui: ToolCallDelta 重复建块修复 + OSC-8 hyperlink 渲染`，
+正好吃掉 frontier 第 2、3 两项，且落点都是 `pi-tui/src/app.rs` / `markdown.rs`。
+因此本轮**主动避开**这两个文件，只在 `pi-tui/src/highlight.rs` + `lib.rs` 上做与 Stage 44 不相交的事。
+
+### 二、核验（先证基线是绿的，再动手）
+
+- 起点：`origin/feature/pi.rs` @ `513cd3409`（LUM-1150 的文档提交，工作分支
+  `agent/devbox1/fbb70e01316c` 与之一致）。
+- `cargo check --workspace --all-targets --offline` **EXIT 0**（复用 LUM-1150 的 target，
+  源路径不同触发过一次全量 recheck；这是本轮唯一一次整仓检查）。
+- 结论：`feature/pi.rs` 在 LUM-1150 快进后的状态可编译、可测，可以直接在上面加切片。
+
+### 三、本轮切片：`getLanguageFromPath`（零新依赖，116 行含测试）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-tui/src/highlight.rs` | 新增 `pub fn get_language_from_path(&str) -> Option<&'static str>`（上游 `theme.ts::getLanguageFromPath` 的扩展名表，47 个 key：`ts/tsx→typescript`、`js/jsx/mjs/cjs→javascript`、`py→python`、`rs→rust`、`sh/bash/zsh→bash`、`tf/hcl→hcl`……），+ 4 个测试；模块头注释同步 |
+| `crates/pi-tui/src/lib.rs` | 导出 `get_language_from_path`（1 行 import 重排） |
+
+**为什么放在 `pi-tui` 而不是上游的 `coding-agent/.../theme.ts`**：Rust 移植里 `highlightCode`
+已经落在 `pi-tui/src/highlight.rs`（LUM-1149），`supports_language` 同处；把「扩展名 → 语言 id」
+放在它旁边，既不新增跨 crate 依赖，也让消费方（`pi-coding-agent` 的工具渲染器）只依赖一个 crate。
+上游的 `theme.ts` 也把两者放在同一文件，位置差异只是移植分层的既有偏离。
+
+**刻意复刻的语义（含上游的怪癖）**：上游是 `filePath.split(".").pop()?.toLowerCase()`，
+所以（a）找的是**最后一个 `.` 之后**的整段，无 `.` 时用整串；（b）因此裸 `Makefile` / `Dockerfile`
+能命中扩展名表，而 `dir/Makefile` **不命中**（整串变成 `dir/makefile`）；（c）`trailing.` 与空后缀
+返回 `None`；（d）大小写不敏感。函数文档已把这个怪癖写成契约，测试 `language_from_path_keeps_upstream_quirks_and_misses`
+钉住它。**只返回语言 id，不保证高亮器支持**——`supports_language` 才是那道闸，调用方（含 Stage 45）
+必须先校验再 `highlight_code`，与上游 `highlightCode` 一致。
+
+### 四、验证
+
+- `cargo test -p pi-tui --lib highlight::tests`：**23 passed / 0 failed**（含 4 个新增：
+  `language_from_path_matches_upstream_table` / `..._is_case_insensitive` /
+  `..._keeps_upstream_quirks_and_misses` / `..._feeds_highlight_code`）。
+- `cargo test -p pi-tui`（全 28 个 test binary + lib 260）：**全绿，EXIT 0**。
+- `cargo clippy -p pi-tui --all-targets --offline -- -D warnings`：**EXIT 0**。
+- 格式：只对改动文件跑 `rustfmt --check`（**未**跑 `cargo fmt --all`，见 LUM-1138）；
+  `highlight.rs` / `lib.rs` **零 diff**，唯一命中的 `settings.rs:186,425,476,653,662,682,698,740`
+  是**本轮之前就存在**的漂移，与本次改动无关（留给 LUM-1138）。
+
+### 五、派发：Stage 45（LUM-1153）
+
+frontier 第 7 项「`pi-coding-agent` read/write 工具输出接入 `highlight_code` + `getLanguageFromPath`」
+是本轮**唯一一条「有真实上游消费者、又不与 Stage 44 撞文件」**的项，故派发为
+**LUM-1153 `[Stage 45] pi-coding-agent: read/write 工具渲染器`**（`high`，`todo`，`stage 45`），
+并在描述里明确：消费本轮新落的 `pi_tui::get_language_from_path` + `supports_language`+`highlight_code`，
+**不碰 `pi-tui/src/app.rs` / `markdown.rs`**（Stage 44 在写），若不改 `pi-tui` 就无法接线则先退到
+print 路径并在评论留 follow-up。派发后槽位 **3/3**（本人 + LUM-1152 + LUM-1153），**已达上限、本轮不再派发**。
+
+**为什么第 7 项派发、第 6 项（mistral 等 provider）不派发**：第 7 项能把 LUM-1149 已落地但**无调用方**的
+高亮器接上真实显示路径（现在 `highlight_code` 只有 markdown 一个消费者），是「消死路」；
+mistral adapter 上游 941 行、与本次任何在飞切片都不冲突但体量等于 3~4 个 Stage，
+排在第 7 项之后，等 `pi-coding-agent` 渲染层成型再派更省（渲染层会定义工具结果的数据形状，
+provider 与之无关但同属「大块」）。第 5 项（provider catalog）仍维持「无上游数据源，不猜」不派。
+
+### 六、磁盘事故与处置（延续前几轮口径）
+
+- 继承现象：根分区 50G，本轮开工时**仅剩约 851M**（99%）。两个大 target：
+  `lum-1144.../pi-rust/target` **18G**（LUM-1144 已 `in_review`）、
+  `lum-1150.../pi-rust/target` **11G**（LUM-1150 已 `in_review`，rev 与本轮起点同为 `513cd3409`）。
+- 处置：先确认**无进程**引用 `lum-1144` 的 target（`/proc/*/cwd`、`/proc/*/environ` 均无），
+  再 `rm -rf` 该**已结束任务**的可再生构建缓存 → 空闲 **851M → 约 18.2G**。
+- 本轮构建复用 LUM-1150 的 target（不新建，避免再占 11G+）；结束后剩余约 **17.6G**。
+- 口径：删的只有「已结束/已 `in_review` 任务自己的 `target/`」，不碰在飞任务与仓库检出本身；
+  这也是前几轮（LUM-1047/LUM-1147 等）记录过的同一做法。
+
+### 七、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试**~~（LUM-1146/1147 收口）。
+2. **P3 渲染保真**：OSC-8 hyperlink —— **已派发 LUM-1152（Stage 44）**。
+3. **P2 `ToolCallDelta` 重复建块** —— **已派发 LUM-1152（Stage 44）**。
+4. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；
+   **本轮新增行零漂移**，`settings.rs` 的 8 处是既有漂移（本轮实测确认）。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：剩 bedrock / mistral / azure / vertex / oauth / images
+   （仍是 Stage 体量，等第 7 项成型后派）。
+7. **`pi-coding-agent` read/write 渲染器**：**本轮部分推进** —— 前置
+   `pi_tui::get_language_from_path` 已落地（本节三）；渲染器本体**已派发 LUM-1153（Stage 45）**。
+   收口后本项可结案。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本文档追加后立即合并 `origin/feature/pi.rs`
+再推，避免与 Stage 44/45 的文档段撞车）。本轮本人只写
+`crates/pi-tui/src/highlight.rs`、`crates/pi-tui/src/lib.rs` 与本文档。
+
+环境记录：本轮使用 **LUM-1150 检出内的 `pi-rust/target`**（`CARGO_TARGET_DIR` 显式指向），
+未新建 `/tmp` target；释放的是**已结束**的 LUM-1144 的 `pi-rust/target`。
+
+**已知限制**：本轮没有跑 `cargo test --workspace`（磁盘与槽位都紧），只做了
+「整仓 `cargo check --all-targets` + `pi-tui` 全量测试 + `pi-tui` clippy」；
+其他 crate 的运行时行为本轮无改动，风险为零改动面。
+
+补记（推送哈希）：本轮代码提交 `65bdfebb4` + 文档提交 `59c0410a0`，
+`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `513cd3409` **快进至 `59c0410a0`**
+（`git ls-remote` 复查一致：`59c0410a08228215ca12108c950638cb20434f49`）；
+留档分支 `work/lum-1151` 一并推送（同哈希）。
