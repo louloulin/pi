@@ -10203,3 +10203,132 @@ Stage 42。本轮起点 `ce44b692f`（LUM-1142 合并态），代码提交 `7b6d
 `pi-session` / `pi-coding-agent` 的链接阶段直接失败），清掉本工作树的 `target/debug/incremental`
 （1.5G）并等另一路释放空间后补跑成功；所有被清理的对象都是可复现的构建产物。
 
+
+## LUM-1146 round — `pi-agent-core` agent 级重试（`utils/retry.ts` 移植 + `settings.retry.*` 接线，frontier 第 2 项收口）+ 合并推送 feature/pi.rs
+
+本轮起点 `910cd6f90`（LUM-1144 合并态）。先落代码提交 `bbb73d083`，再合并
+`origin/feature/pi.rs @ 910cd6f90`（LUM-1144 的滚条 / X10 鼠标 + LUM-1145 的 JSON 容错解析），
+合并提交 `521f0595c`，最后是本轮文档提交。真实推送哈希见本节末补记。
+
+### 一、选型：三条候选里为什么做 agent 级重试
+
+issue 要求「分析后续哪些 feature 可规划可实现（上限 3 路并发），决定跳过还是规划+实现」。
+开工时 `multica daemon status` 为 `running_task_count = 3`（LUM-1144 `pi-tui` + LUM-1145
+`pi-ai` + 本轮），**槽位满，本轮不派发任何子任务**，改为自己做 frontier 上一项：
+
+| 候选 | 结论 |
+|------|------|
+| **P2 agent 级重试（`packages/ai/src/utils/retry.ts`，frontier 第 2 项）** | **本轮做**。落点 `pi-agent-core`（`agent_loop.rs`），该 crate 本轮**无其他写方**；上游是一个纯函数族 + 249 行测试，可一次性忠实移植；且它是 LUM-1142 提供商层重试的**上层缺口**（用户能在 `settings.json` 关掉的那一层）。 |
+| P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML） | 跳过本轮：要动 `app.rs` 写入路径与 ratatui `Cell`，而 `app.rs` 直到本轮的合并才随 LUM-1144 空出；同轮「一边合并别人刚改完的 `app.rs`、一边大改它」冲突面太大。 |
+| P3 未移植 `pi-ai` 模块（`utils/overflow.ts` / `utils/estimate.ts`） | 跳过：`overflow.ts` 需要扩 `pi-ai` 的 usage 结构，而 LUM-1145 刚在同一 crate 收手，本轮再进等于跨轮串行；`estimate.ts` 是启发式估算，缺上游权威数据源。 |
+
+### 二、切片：`retry.ts` 的语义搬进 agent 循环
+
+新增 `crates/pi-agent-core/src/retry.rs`（475 行）：
+
+- `RetryPolicy { enabled, max_retries, base_delay_ms, max_agent_delay_ms }`（`retry.rs:45`），
+  `Default` 对齐上游 `settings-manager.ts:915-932`：`enabled ?? true`、`maxRetries ?? 3`、
+  `baseDelayMs ?? 2000`，上限常量 `DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000`
+  （`retry.rs:31-37`）。
+- `retry_delay_ms(policy, attempt)`（`retry.rs:110`）：`base * 2^(attempt-1)`，用 `u128` +
+  `saturating_mul` 防溢出（替代上游的 `Number.MAX_SAFE_INTEGER` 钳位），再按
+  `max_agent_delay_ms` 截断；`base_delay_ms == 0` ⇒ 退避 0（上游同）。
+- 错误文案分类器（`retry.rs:126,143,196-232`）：两条**有序**正则、大小写不敏感、`OnceLock`
+  各编译一次。**先**匹配不可重试的额度 / 计费类（`GoUsageLimitError|FreeUsageLimitError|
+  Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|
+  billing`），**再**匹配瞬时故障类（`overloaded|rate.?limit|too many requests|429|500|502|503|
+  504|524|service.?unavailable|...|connection.?refused|other side closed|terminated|
+  websocket.?closed|ended without|stream ended before message_stop|
+  http2 request did not get a response|ResourceExhausted` 等）。与 `pi-ai` 的 provider 层重试
+  各持一份、互不依赖。
+- `is_retryable_agent_error(&AgentError)`（`retry.rs:251`）经 `retryable_message_text`
+  （`retry.rs:236`）分类：`Provider(_)` / `Stream(_)` 看文案，**`Tool { .. }` 永远不重试**
+  （工具失败是模型自己参数决定的确定性结果，不是提供商抖动）。
+- `RetryCallbacks`（`retry.rs:260-290`）：上游回调可以是 async，Rust 侧为
+  `Arc<dyn Fn + Send + Sync>` 同步回调（要 await 的宿主自己转 channel），`Debug` 手写。
+- `retry_assistant_call(produce, policy, fallback, signal, callbacks)`：`enabled = false`
+  只调用一次；已取消（`signal`）不重试；不可重试错误**一次都不重试且不触发任何回调**
+  （对齐上游 `insufficient_quota` 的断言）；瞬时错误最多重试 `max_retries` 次，退避 sleep
+  可被 abort 打断。
+
+接线（**`AgentEvent` 形状一个字节没改**，LUM-1141 冻结的 9 种变体原样）：
+
+| 层 | 落点 |
+|----|------|
+| `LoopConfig` | 新增 `retry: RetryPolicy`（`agent_loop.rs:87`），`From<&AgentConfig>` 透传（`:96`） |
+| agent 循环 | 新增 `stream_assistant_response_with_retry`（`agent_loop.rs:574`），`run_turn_batch` 的助手调用改走它（`:548`）；**每次重试各自开一个 `pi.ai.request` span**（比在 span 内重试更贴近上游的 per-attempt 语义） |
+| `AgentConfig` / `AgentOptions` | 各加 `retry` 字段（`state.rs:55` / `agent.rs:51`）+ `with_retry_policy`（`agent.rs:99`） |
+| 设置读取 | `config::load_agent_retry_policy` / `_default`（`config.rs:228,245`）：读 `retry.enabled|maxRetries|baseDelayMs|maxAgentDelayMs`，项目覆盖用户、逐字段回退 + stderr 告警；与 `retry.provider` 同一套规则但**两个对象互不影响**（双向隔离各有用例） |
+| 消费方 | `InteractiveOptions.retry`（`interactive.rs:120`）、`PrintModeOptions.retry`（`print_mode.rs:201`），`main.rs:166,253` 用 `load_agent_retry_policy_default()` 填充，建 agent 处 `.with_retry_policy(..)`（`interactive.rs:186` / `print_mode.rs:612`） |
+
+### 三、刻意偏离（全部写在代码注释里）
+
+1. **重试点在「助手调用」而不是「session」**：上游 `agent-session.ts` 的
+   `auto_retry_start`/`auto_retry_end` 依赖 `AssistantMessage.errorMessage`，语义是「把出错消息
+   留在上下文里再重新提示」；`pi-protocol` 的 `AssistantMessage` 没有该字段，Rust 循环在提供商
+   失败时是 `Err(AgentError)` 直接返回。因此本轮把重试下沉到提供商调用层，**session 级
+   `auto_retry_start/end` 事件与重新提示留作 follow-up**（`RetryCallbacks` 已导出，循环目前传
+   `None`，接上即可，无需再动事件形状）。
+2. **`Ok(message)` + `StopReason::Error` 不重试**：上游能读 `errorMessage` 分类，Rust 侧协议
+   没带出文案，宁可漏重试也不误重试。
+3. **退避期间被中止**：返回 `Ok(aborted AssistantMessage)`（`model.id` + 空内容 +
+   `StopReason::Aborted`），上游会复用失败响应的内容；差异记在 `retry.rs:451`。
+4. **模块落在 `pi-agent-core` 而不是 `pi-ai`**：上游把 `retry.ts` 放在 `packages/ai`，但它唯一
+   的消费方是 agent 循环；放 `pi-agent-core` 既避开与 LUM-1145 抢 `pi-ai`，也不让 `pi-ai`
+   反向依赖 agent 的错误类型。
+
+### 四、测试与验证
+
+- 新增 `crates/pi-agent-core/tests/retry.rs`（790 行，28 项）：分类器向量镜像上游
+  `retry.test.ts`（`insufficient_quota` 不重试、`terminated` 重试到上限共 4 次调用、
+  `baseDelayMs:0`）、退避上限（base 10 / cap 15 ⇒ `[10,15,15,15]`；`base=2000, attempt=6
+  ⇒ 60000`）、`retry_assistant_call` 的通话数与「不可重试时零回调」，以及 7 项 `Agent` 级循环测试
+  （重试后恢复、流中途失败重启、额度类不重试、预算耗尽、`enabled=false`、每次调用重置预算、
+  退避期间中止）。
+- `crates/pi-coding-agent/src/config.rs` 增 5 项单测（默认值 / 项目覆盖用户 / 可关闭 / 逐字段
+  回退 / 与 `retry.provider` 双向隔离）。
+- 既有 fixture 两处适配：`tests/telemetry.rs`（`Malformed("connection refused")` 属可重试文案）
+  与 `tests/print_mode.rs`、`tests/system_prompt_resources.rs` 的 `PrintModeOptions` 字面量显式
+  给 `RetryPolicy::disabled()`，避免脚本化 faux 流被重试放大成多倍调用与秒级等待。
+- 全绿记录（`CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1143`，`--offline`）：合并后
+  `cargo check --workspace --all-targets` exit 0；`cargo test -p pi-agent-core` 75 项全过
+  （含新 28 项）；`cargo test -p pi-coding-agent --test print_mode --test
+  system_prompt_resources` 17 + 5 全过；`cargo clippy -p pi-agent-core -p pi-coding-agent
+  --all-targets -- -D warnings` exit 0；本轮每个改动文件 `rustfmt --check` 的 diff 数与 HEAD
+  相同（仓库整体 fmt 漂移是 LUM-1138 的欠账，本轮**没有新增漂移**）。
+
+### 五、与在跑任务的关系、槽位
+
+- **不派发**：开工与推送前两次复查 `running_task_count` 都是 3（本轮 + 另两路），上限已满，
+  本轮只做自己的切片。
+- **合并零冲突**：LUM-1144 只碰 `pi-tui`，LUM-1145 只碰 `pi-ai`，与本轮 `pi-agent-core` /
+  `pi-coding-agent` 零文件重叠；`docs/FEATURE_PI_RS_STATUS.md` 各自追加一节。
+- **给后续轮的口径**：`agent_loop.rs` 本轮收手后无写方；`retry.rs` 是新增文件，任何「重试
+  语义」改动（session 级 `auto_retry_*`、`errorMessage` 上提）都应落在这里。`pi-ai` 的
+  provider 层重试（LUM-1142）与本层是**独立预算**，调参时别指望一个覆盖另一个。
+
+### 六、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试（`utils/retry.ts`）**~~ **本轮（LUM-1146）收口**（含 `settings.retry.*`
+   接线；session 级 `auto_retry_start/end` 与 `pi-protocol::AssistantMessage.errorMessage` 是
+   两个明确的 follow-up）。
+2. **P3 `latex.ts` 剩余**（OSC-8 hyperlink / 语法高亮 / 块级 HTML）：`app.rs` 随 LUM-1144 合并后
+   当前无写方，是本项最便宜的入口；启动前仍须确认没有在跑任务正在改它。
+3. **P2 `pi-tui` 事件流化后的 `ToolCallDelta` 重复建块**（LUM-1141 记入）：流式 delta 之后
+   才暴露的渲染问题，落点 `app.rs`，与第 2 项同一文件、必须串行。
+4. **质量门清偿** = LUM-1138（`backlog`）：只剩 `cargo fmt --all -- --check`（122 文件漂移）。
+   `pi-agent-core` / `pi-coding-agent`（本轮）、`pi-tui`（LUM-1144）、`pi-ai`（LUM-1145）均已
+   收手，启动全量 `cargo fmt` 前只剩确认这三处无在写方。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：`utils/overflow.ts`、`utils/estimate.ts`（`utils/json-parse.ts`
+   已由 LUM-1145 收口），以及 bedrock / mistral / azure / vertex / oauth / images。
+7. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档继续分叉（既有欠账）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-agent-core`
+（`retry.rs` / `agent.rs` / `agent_loop.rs` / `state.rs` / `lib.rs` 及其测试）与
+`pi-coding-agent`（`config.rs` / `interactive.rs` / `print_mode.rs` / `main.rs` 的接线）以及本文档。
+
+环境记录：本轮复用 `/tmp/pi-rust-target-lum1143`（LUM-1145 占用
+`/tmp/pi-rust-target-lum1145`、LUM-1144 亦有独立 target），全程未触碰他路 target 目录；
+根分区在合并复测期间维持 8G 空闲。
