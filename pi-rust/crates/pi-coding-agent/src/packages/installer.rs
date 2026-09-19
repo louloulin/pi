@@ -248,9 +248,11 @@ pub fn copy_dir_recursive(source: &Path, dest: &Path) -> io::Result<()> {
 /// own extension.
 pub fn collect_extensions(package_root: &Path) -> Vec<PathBuf> {
     if package_root.is_file() {
-        return is_extension(package_root)
-            .then(|| vec![package_root.to_path_buf()])
-            .unwrap_or_default();
+        return if is_extension(package_root) {
+            vec![package_root.to_path_buf()]
+        } else {
+            Vec::new()
+        };
     }
     let extensions_dir = package_root.join("extensions");
     if !extensions_dir.is_dir() {

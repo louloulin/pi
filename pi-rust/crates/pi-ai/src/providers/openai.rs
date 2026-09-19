@@ -585,10 +585,7 @@ impl SseStream {
         self.line_buffer.extend_from_slice(bytes);
         // Split into lines on `\n` or `\r\n`. Carriage returns without
         // a following newline terminate a line too (per the SSE spec).
-        loop {
-            let Some(rel_end) = find_newline(&self.line_buffer) else {
-                break;
-            };
+        while let Some(rel_end) = find_newline(&self.line_buffer) {
             let raw = self.line_buffer.drain(..rel_end).collect::<Vec<_>>();
             // Pop the line ending (handles `\n`, `\r\n`, or a stray `\r`).
             if !self.line_buffer.is_empty() {

@@ -589,10 +589,7 @@ impl SseStream {
 
     fn feed(&mut self, bytes: &Bytes) -> Result<(), StreamError> {
         self.line_buffer.extend_from_slice(bytes);
-        loop {
-            let Some(rel_end) = find_newline(&self.line_buffer) else {
-                break;
-            };
+        while let Some(rel_end) = find_newline(&self.line_buffer) {
             let raw = self.line_buffer.drain(..rel_end).collect::<Vec<_>>();
             // Pop the line ending (handles `\n`, `\r\n`, or a stray `\r`).
             if !self.line_buffer.is_empty() {
