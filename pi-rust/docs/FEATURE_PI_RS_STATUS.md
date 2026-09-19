@@ -9003,5 +9003,17 @@ $ rustfmt --edition 2021 --check src/app.rs src/search.rs src/lib.rs tests/alt_s
 
 **补记（推送后回填真实哈希）：**
 
-- 代码提交 `4ec928866`（4 个文件、+2188 / −10），本节文档提交 `43b8d10de`（+130 行）。
-- 本轮**未派发任何子任务**（槽位满：`running_task_count = 3`）。
+- 代码提交 `4ec928866`（4 个文件）、本节文档提交 `e468c1363`（+130 行）；两者都在
+  rebase 后的工作分支上，起点 `9412e1c00`。
+- `origin/feature/pi.rs` 在推送时刻仍是 `9412e1c00`（本轮第二次 `git fetch` 确认没有新推进），
+  所以本次并入是**快进、无 merge 提交、无 plumbing**：
+  `git push origin HEAD:refs/heads/feature/pi.rs` → `9412e1c00..e468c1363`（首次推送打了
+  `unable to get credential storage lock in 1000 ms` 的提示，但 ref 已更新，事上为成功）；
+  `work/lum-1136` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `e468c13631362791de447ba5b9cf69438aca45e8`。
+- `git diff --numstat 9412e1c00 e468c1363`（本轮全部改动，5 个文件、**+2318 / −10**）：
+  `pi-tui/src/search.rs` +1100（新）、`pi-tui/tests/alt_screen_search.rs` +454（新）、
+  `pi-tui/src/app.rs` +628/−10、`pi-tui/src/lib.rs` +6、本节文档 +130。
+  **`pi-extensions` / `pi-coding-agent` / `pi-session` / `pi-ai` 一个文件都不在其中。**
+- 合并态复测（第五节）跑的树就是推送出去的树，26 suite / 530 passed 的数字即第五节所列。
+- 本轮**未派发任何子任务**（槽位满：`multica daemon status` → `running_task_count = 3`）。
