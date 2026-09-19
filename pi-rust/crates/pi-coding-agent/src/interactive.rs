@@ -37,6 +37,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::commands::{handle_command, SlashCommand};
 use crate::extensions::wiring::ExtensionRuntime;
+use crate::prompt_templates::PromptTemplate;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
@@ -80,6 +81,11 @@ pub struct InteractiveOptions {
     pub session_id: String,
     /// Initial prompt to submit on launch.
     pub initial_prompt: Option<String>,
+    /// Prompt templates loaded from `~/.pi/agent/prompts`, `.pi/prompts`
+    /// and `--prompt-template` paths. A `/<name> [args]` submission whose
+    /// name matches one of these expands into the template body before
+    /// it is sent to the model.
+    pub prompt_templates: Vec<PromptTemplate>,
     /// Streaming adapter used for every turn. The `pi` binary passes a
     /// [`ProviderRouter`](crate::provider::ProviderRouter) so `/model`
     /// can switch the TUI between providers live.
@@ -103,6 +109,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("session_log", &self.session_log)
             .field("session_id", &self.session_id)
             .field("initial_prompt", &self.initial_prompt)
+            .field("prompt_templates", &self.prompt_templates.len())
             .field("stream_fn", &"<dyn StreamFn>")
             .field("tool_executor", &"<dyn ToolExecutor>")
             .field("extensions", &self.extensions.is_some())
@@ -120,6 +127,7 @@ impl Default for InteractiveOptions {
             session_log: None,
             session_id: String::new(),
             initial_prompt: None,
+            prompt_templates: Vec::new(),
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
             tool_executor: default_executor(),
             extensions: None,
@@ -310,8 +318,23 @@ async fn handle_input_event(
         pi_tui::app::StepOutcome::Redraw => Ok(None),
         pi_tui::app::StepOutcome::Submitted(text) => {
             if text.starts_with('/') {
-                run_slash_command(app, agent, options, &text).await?;
-                Ok(None)
+                // Prompt templates take precedence over built-in slash
+                // commands, mirroring the TS CLI: `/<name>` expands to
+                // the template body when a template with that name was
+                // loaded, otherwise the text falls through to the
+                // built-in / extension command dispatch.
+                if let Some((template, args)) =
+                    crate::prompt_templates::find_prompt_template(&text, &options.prompt_templates)
+                {
+                    let parsed = crate::prompt_templates::parse_command_args(&args);
+                    let expanded =
+                        crate::prompt_templates::substitute_args(&template.content, &parsed);
+                    app.submit(agent.clone(), expanded);
+                    Ok(None)
+                } else {
+                    run_slash_command(app, agent, options, &text).await?;
+                    Ok(None)
+                }
             } else {
                 app.submit(agent.clone(), text);
                 Ok(None)
@@ -365,7 +388,11 @@ async fn run_slash_command(
                 .as_ref()
                 .map(|runtime| runtime.commands())
                 .unwrap_or(empty.as_slice());
-            app.info(help_text_with_extensions(commands));
+            let help = append_prompt_templates(
+                help_text_with_extensions(commands),
+                &options.prompt_templates,
+            );
+            app.info(help);
         }
         SlashCommand::Clear => {
             app.messages_mut().clear();
@@ -479,6 +506,25 @@ fn command_result_text(outcome: &pi_extensions::CommandExecutionOutcome) -> Opti
         serde_json::Value::Null => None,
         serde_json::Value::String(text) => Some(text.clone()),
         other => Some(other.to_string()),
+    }
+}
+
+/// Splice the loaded prompt template list into the help text.
+fn append_prompt_templates(base: String, templates: &[PromptTemplate]) -> String {
+    if templates.is_empty() {
+        return base;
+    }
+    let mut section = String::from("prompt templates:\n");
+    for template in templates {
+        if template.description.is_empty() {
+            section.push_str(&format!("  /{}\n", template.name));
+        } else {
+            section.push_str(&format!("  /{:<16} {}\n", template.name, template.description));
+        }
+    }
+    match base.split_once("\nkeys:") {
+        Some((head, tail)) => format!("{head}\n\n{section}\nkeys:{tail}"),
+        None => format!("{base}\n\n{section}"),
     }
 }
 

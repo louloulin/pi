@@ -3,7 +3,6 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::Parser;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
@@ -13,7 +12,9 @@ use pi_coding_agent::interactive::{run_interactive, InteractiveOptions};
 use pi_coding_agent::packages::{commands as package_commands, PackageCommand};
 use pi_coding_agent::print_mode::{run_print_mode, PrintModeOptions};
 use pi_coding_agent::provider::ProviderRouter;
-use pi_coding_agent::resource_loader::build_cli_system_prompt;
+use pi_coding_agent::resource_loader::{
+    build_cli_prompt_templates, build_cli_system_prompt_with_extension_tools,
+};
 use pi_coding_agent::session_log::SessionLog;
 use pi_protocol::{Api, Model, ProviderId};
 
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_with_aliases() {
         Ok(cli) => cli,
         Err(err) => {
             // `clap`'s error type already prints to stdout/stderr as
@@ -84,22 +85,26 @@ fn main() -> ExitCode {
         }
     };
 
-    // Only the three agent modes talk to a model, so only they pay for
-    // resource discovery (and only they can report skill diagnostics).
-    let system_prompt = match target_mode {
+    // Prompt templates are expanded at submission time, not baked into
+    // the system prompt, so they are loaded alongside it for every agent
+    // mode. `--no-prompt-templates` / `-np` skips default discovery while
+    // still honouring explicit `--prompt-template` paths.
+    let prompt_templates = match target_mode {
         ModeTarget::Interactive | ModeTarget::Print | ModeTarget::Rpc => {
-            let (prompt, diagnostics) = build_cli_system_prompt(&cli);
-            for diagnostic in &diagnostics {
+            let loaded = build_cli_prompt_templates(&cli);
+            for diagnostic in &loaded.diagnostics {
                 match diagnostic.path.as_deref() {
-                    Some(path) => {
-                        eprintln!("pi: skill {} ({})", diagnostic.message, path.display())
-                    }
-                    None => eprintln!("pi: skill {}", diagnostic.message),
+                    Some(path) => eprintln!(
+                        "pi: prompt template {} ({})",
+                        diagnostic.message,
+                        path.display()
+                    ),
+                    None => eprintln!("pi: prompt template {}", diagnostic.message),
                 }
             }
-            prompt
+            loaded.templates
         }
-        ModeTarget::Session | ModeTarget::Packages => String::new(),
+        ModeTarget::Session | ModeTarget::Packages => Vec::new(),
     };
 
     let initial_prompt = cli.command.as_ref().and_then(|cmd| match cmd {
@@ -119,6 +124,8 @@ fn main() -> ExitCode {
             // Extensions load on the same runtime that drives the agent:
             // the QuickJS host spawns its promise driver + UI worker there.
             let loaded_extensions = load_extensions(&runtime, &cli, "tui", true);
+            let system_prompt =
+                build_system_prompt_for(&cli, loaded_extensions.runtime.tool_prompts());
             let tool_executor = loaded_extensions.executor.clone();
             let extension_runtime = Arc::new(loaded_extensions.runtime.clone());
             // Interactive mode is the only path that still uses the
@@ -139,6 +146,7 @@ fn main() -> ExitCode {
                 session_log,
                 session_id: session_id.clone(),
                 initial_prompt,
+                prompt_templates: prompt_templates.clone(),
                 stream_fn: stream_fn.clone(),
                 tool_executor,
                 extensions: Some(extension_runtime),
@@ -157,7 +165,8 @@ fn main() -> ExitCode {
             let prompt_raw = initial_prompt
                 .or_else(|| cli.print.clone())
                 .unwrap_or_default();
-            // Expand `@file` tokens and pipe stdin in.
+            // Expand `@file` tokens and pipe stdin in, then expand a
+            // matching `/name` prompt template into the final prompt.
             let stdin = match pi_coding_agent::read_stdin_if_piped() {
                 Ok(value) => value,
                 Err(err) => {
@@ -172,6 +181,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(err.exit_code());
                 }
             };
+            let prompt_text = pi_coding_agent::expand_prompt_template(
+                &expanded.text,
+                &prompt_templates,
+            );
             // `--continue` / `--session` interact: a bare `--continue`
             // (`None` payload) attaches the most recent session, while
             // `--continue=<id>` and `--session <id>` attach that exact
@@ -192,9 +205,11 @@ fn main() -> ExitCode {
                 }
             };
             let loaded_extensions = load_extensions(&runtime, &cli, "print", false);
+            let system_prompt =
+                build_system_prompt_for(&cli, loaded_extensions.runtime.tool_prompts());
             let tool_executor = loaded_extensions.executor.clone();
             let options = PrintModeOptions {
-                prompt: expanded.text,
+                prompt: prompt_text,
                 model: resolved_model,
                 stream_fn,
                 system_prompt,
@@ -220,13 +235,17 @@ fn main() -> ExitCode {
                     return ExitCode::from(70);
                 }
             };
-            let tool_executor = load_extensions(&runtime, &cli, "rpc", false).executor;
+            let loaded_extensions = load_extensions(&runtime, &cli, "rpc", false);
+            let system_prompt =
+                build_system_prompt_for(&cli, loaded_extensions.runtime.tool_prompts());
+            let tool_executor = loaded_extensions.executor.clone();
             let options = pi_coding_agent::rpc::RpcServerOptions {
                 model: resolved_model,
                 models,
                 stream_fn,
                 system_prompt,
                 session_id,
+                prompt_templates: prompt_templates.clone(),
                 tool_executor,
             };
             match runtime.block_on(pi_coding_agent::rpc::run_rpc_server(options)) {
@@ -288,6 +307,23 @@ enum ModeTarget {
     Rpc,
     Session,
     Packages,
+}
+
+/// Build the system prompt for one agent mode, folding in the prompt
+/// contributions declared by the mode's extension tools and reporting
+/// any skill diagnostics on stderr.
+fn build_system_prompt_for(
+    cli: &Cli,
+    extension_tools: &[pi_extensions::RegisteredToolPrompt],
+) -> String {
+    let (prompt, diagnostics) = build_cli_system_prompt_with_extension_tools(cli, extension_tools);
+    for diagnostic in &diagnostics {
+        match diagnostic.path.as_deref() {
+            Some(path) => eprintln!("pi: skill {} ({})", diagnostic.message, path.display()),
+            None => eprintln!("pi: skill {}", diagnostic.message),
+        }
+    }
+    prompt
 }
 
 fn default_session_dir() -> std::path::PathBuf {

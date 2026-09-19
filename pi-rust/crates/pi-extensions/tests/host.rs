@@ -75,6 +75,56 @@ fn host_collects_tool_registration_via_shim() {
 }
 
 #[test]
+fn host_collects_tool_prompt_contributions() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "search",
+                    label: "Search",
+                    description: "Search the web",
+                    parameters: { type: "object" },
+                    promptSnippet: "Search the web for a query",
+                    promptGuidelines: ["Prefer search for current facts", 42, "Cite sources"],
+                    execute: function () { return { content: [], details: null }; },
+                });
+                pi.registerTool({
+                    name: "plain",
+                    label: "Plain",
+                    description: "No prompt contribution",
+                    parameters: { type: "object" },
+                    execute: function () { return { content: [], details: null }; },
+                });
+            };
+        "#;
+        host.load(entry("tool_prompts"), source)
+            .await
+            .expect("load should succeed");
+
+        let prompts = host.registered_tool_prompts().await;
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        assert_eq!(prompts[0].name, "search");
+        assert_eq!(
+            prompts[0].snippet.as_deref(),
+            Some("Search the web for a query")
+        );
+        // Non-string entries in `promptGuidelines` are dropped.
+        assert_eq!(
+            prompts[0].guidelines,
+            vec![
+                "Prefer search for current facts".to_string(),
+                "Cite sources".to_string()
+            ]
+        );
+        assert_eq!(prompts[1].name, "plain");
+        assert!(prompts[1].snippet.is_none());
+        assert!(prompts[1].guidelines.is_empty());
+    });
+}
+
+#[test]
 fn host_executes_registered_tool() {
     let runtime = rt();
     runtime.block_on(async {

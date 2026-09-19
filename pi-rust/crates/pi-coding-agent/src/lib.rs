@@ -47,6 +47,7 @@ pub mod interactive;
 pub mod packages;
 pub mod paths;
 pub mod print_mode;
+pub mod prompt_templates;
 pub mod provider;
 pub mod resource_loader;
 pub mod rpc;
@@ -67,6 +68,10 @@ pub use print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions, PrintModeResult,
 };
 pub use provider::{api_key_env_vars, base_url_env_vars, ProviderError, ProviderRouter};
+pub use prompt_templates::{
+    expand_prompt_template, find_prompt_template, load_prompt_templates, LoadPromptTemplatesOptions,
+    PromptTemplate, PromptTemplateDiagnostic, PromptTemplateSource, PromptTemplatesLoadResult,
+};
 pub use resource_loader::{
     build_cli_system_prompt, load_resources, LoadedResources, ResourceLoadOptions,
 };

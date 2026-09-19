@@ -17,7 +17,7 @@ use std::sync::Arc;
 use pi_agent_core::tools::ToolExecutor;
 use pi_extensions::{
     CommandExecutionOutcome, ExtensionBridge, ExtensionError, ExtensionSideEffects, HostOptions,
-    JsExtensionHost, RegisteredCommand, UiHandler,
+    JsExtensionHost, RegisteredCommand, RegisteredToolPrompt, UiHandler,
 };
 use pi_protocol::{ExtensionEvent, UiLevel};
 
@@ -112,6 +112,7 @@ impl std::fmt::Debug for ExtensionLoadOutcome {
 pub struct ExtensionRuntime {
     host: Option<JsExtensionHost>,
     commands: Vec<RegisteredCommand>,
+    tool_prompts: Vec<RegisteredToolPrompt>,
     mode: String,
     has_ui: bool,
     cwd: String,
@@ -122,6 +123,7 @@ impl std::fmt::Debug for ExtensionRuntime {
         f.debug_struct("ExtensionRuntime")
             .field("host", &self.host.is_some())
             .field("commands", &self.commands.len())
+            .field("tool_prompts", &self.tool_prompts.len())
             .field("mode", &self.mode)
             .field("has_ui", &self.has_ui)
             .finish_non_exhaustive()
@@ -137,6 +139,13 @@ impl ExtensionRuntime {
     /// Commands registered by every loaded extension, in load order.
     pub fn commands(&self) -> &[RegisteredCommand] {
         &self.commands
+    }
+
+    /// `promptSnippet` / `promptGuidelines` contributions declared by
+    /// extension tools, in registration order. Empty when no extension
+    /// tool declared a contribution.
+    pub fn tool_prompts(&self) -> &[RegisteredToolPrompt] {
+        &self.tool_prompts
     }
 
     /// True when `name` (without the leading `/`) is an extension
@@ -239,11 +248,12 @@ pub fn load(
         // The JS-side map is the source of truth for commands, so read
         // them back after the load (and the lifecycle dispatch) ran.
         let commands = host.registered_commands().await;
-        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands))
+        let tool_prompts = host.registered_tool_prompts().await;
+        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands, tool_prompts))
     });
 
     match result {
-        Ok((host, outcome, commands)) => {
+        Ok((host, outcome, commands, tool_prompts)) => {
             let loaded: Vec<PathBuf> = outcome.entries.iter().map(|e| e.source.clone()).collect();
             let errors: Vec<(PathBuf, String)> = outcome
                 .errors
@@ -268,6 +278,7 @@ pub fn load(
                 runtime: ExtensionRuntime {
                     host: Some(host),
                     commands,
+                    tool_prompts,
                     mode,
                     has_ui,
                     cwd,

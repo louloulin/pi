@@ -38,6 +38,7 @@ use super::error::JsonRpcError;
 use super::events::agent_event_to_json;
 use super::protocol::{parse_incoming, Incoming, Response, JSONRPC_VERSION};
 use super::{RpcOutcome, RpcServerOptions};
+use crate::prompt_templates::{expand_prompt_template, PromptTemplate};
 
 /// Errors that terminate the RPC server.
 #[derive(Debug, Error)]
@@ -267,6 +268,7 @@ struct Server {
     shared: Arc<SharedState>,
     models: Arc<Models>,
     session_id: String,
+    prompt_templates: Vec<PromptTemplate>,
     done_tx: mpsc::UnboundedSender<TurnFinished>,
     generation: u64,
     current: Option<TurnTask>,
@@ -292,6 +294,7 @@ impl Server {
             shared: Arc::new(SharedState::new(options.model)),
             models: Arc::new(options.models),
             session_id: options.session_id,
+            prompt_templates: options.prompt_templates,
             done_tx,
             generation: 0,
             current: None,
@@ -406,7 +409,8 @@ impl Server {
 
         self.generation += 1;
         let generation = self.generation;
-        self.current = Some(self.spawn_turn(generation, id, parsed.text));
+        let expanded = expand_prompt_template(&parsed.text, &self.prompt_templates);
+        self.current = Some(self.spawn_turn(generation, id, expanded));
         Ok(())
     }
 
@@ -864,6 +868,7 @@ mod tests {
                 ),
                 system_prompt: String::new(),
                 session_id: "session-test".into(),
+                prompt_templates: Vec::new(),
                 tool_executor: crate::tool_executor::default_executor(),
             },
             done_tx,

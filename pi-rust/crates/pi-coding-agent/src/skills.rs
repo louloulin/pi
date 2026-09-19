@@ -15,16 +15,27 @@
 //! - otherwise the directory's own `*.md` children load as skills, and
 //!   subdirectories are searched for `SKILL.md` (their loose `.md` files
 //!   are ignored);
+//! - candidates git reports as ignored are skipped.
 //! - the first name wins on collision, later ones report a diagnostic.
 //!
-//! Deliberate omissions from the TS implementation, both low-risk for the
-//! current resource formats: per-directory `.gitignore` / `.ignore` /
-//! `.fdignore` filtering, and the extension-registered `resources_discover`
-//! hook. Neither affects which default-location skills load.
+//! The TS side builds its own matcher from `.gitignore` / `.ignore` /
+//! `.fdignore` files via the `ignore` npm package. The Rust port instead
+//! asks `git check-ignore` once per discovered directory tree — a single
+//! subprocess for the whole tree. Two consequences are deliberate: git's
+//! own configuration (`$GIT_DIR/info/exclude`, `core.excludesFile`, the
+//! index) participates, while `.ignore` / `.fdignore` do not; and outside
+//! a git work tree nothing is ignored. Ignoring is advisory throughout —
+//! when `git` is missing or the command fails, every candidate still
+//! loads.
+//!
+//! Still missing compared to the TS implementation: the
+//! `resources_discover` extension hook.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::frontmatter::parse_frontmatter;
 use crate::paths::{absolute, expand_tilde};
@@ -213,10 +224,133 @@ pub fn validate_skill_description(description: &str) -> Vec<String> {
 
 /// Load every skill from `dir` (see the module docs for the walk rules).
 pub fn load_skills_from_dir(dir: &Path, source: SkillSource) -> SkillsLoadResult {
-    load_skills_from_dir_internal(dir, source, true)
+    // Git reads `.gitignore` files itself while descending, so one
+    // `check-ignore --stdin` call covers the whole tree. Candidates are
+    // enumerated with the same structural pruning as the walk below (dot
+    // entries, `node_modules`, and “a `SKILL.md` makes its directory the
+    // skill root”), so the batch never misses a path the walk would test.
+    let mut candidates = Vec::new();
+    collect_skill_candidates(dir, &mut candidates);
+    let ignored = git_ignored_paths(dir, &candidates);
+
+    load_skills_from_dir_internal(dir, source, true, &ignored)
 }
 
-fn load_skills_from_dir_internal(dir: &Path, source: SkillSource, include_root_files: bool) -> SkillsLoadResult {
+/// Every path [`load_skills_from_dir_internal`] may inspect under `dir`,
+/// in the order it walks them.
+fn collect_skill_candidates(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut entry_paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    entry_paths.sort();
+
+    if dir.join(SKILL_FILE_NAME).is_file() {
+        out.push(dir.join(SKILL_FILE_NAME));
+        return;
+    }
+
+    for path in entry_paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+
+        out.push(path.clone());
+        if metadata.is_dir() {
+            collect_skill_candidates(&path, out);
+        }
+    }
+}
+
+/// Paths git reports as ignored, resolved by a single
+/// `git -C <root> check-ignore --stdin -z` invocation.
+///
+/// Every failure mode — `git` absent, `root` outside a work tree, a write
+/// or wait error — yields an empty set, so ignore handling can only ever
+/// narrow, never break, discovery. `git check-ignore` exits 1 when no
+/// path matched and 0 otherwise, which is why the exit status is not
+/// treated as an error.
+fn git_ignored_paths(root: &Path, candidates: &[PathBuf]) -> HashSet<PathBuf> {
+    let relative: Vec<(PathBuf, String)> = candidates
+        .iter()
+        .filter_map(|path| {
+            let rel = path.strip_prefix(root).ok()?;
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if rel.is_empty() {
+                return None;
+            }
+            Some((path.clone(), rel))
+        })
+        .collect();
+    if relative.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut child = match Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return HashSet::new(),
+    };
+
+    let payload: Vec<u8> = relative
+        .iter()
+        .flat_map(|(_, rel)| rel.as_bytes().iter().copied().chain(std::iter::once(0)))
+        .collect();
+    let wrote = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(&payload).is_ok())
+        .unwrap_or(false);
+    if !wrote {
+        let _ = child.wait();
+        return HashSet::new();
+    }
+
+    let Ok(output) = child.wait_with_output() else {
+        return HashSet::new();
+    };
+    if !output.status.success() {
+        return HashSet::new();
+    }
+
+    let reported: HashSet<String> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    if reported.is_empty() {
+        return HashSet::new();
+    }
+
+    relative
+        .into_iter()
+        .filter(|(_, rel)| reported.contains(rel))
+        .map(|(path, _)| path)
+        .collect()
+}
+
+fn load_skills_from_dir_internal(
+    dir: &Path,
+    source: SkillSource,
+    include_root_files: bool,
+    ignored: &HashSet<PathBuf>,
+) -> SkillsLoadResult {
     let mut result = SkillsLoadResult::default();
 
     let Ok(entries) = fs::read_dir(dir) else {
@@ -231,11 +365,13 @@ fn load_skills_from_dir_internal(dir: &Path, source: SkillSource, include_root_f
     // A `SKILL.md` directly in `dir` makes `dir` itself the skill root.
     let marker = dir.join(SKILL_FILE_NAME);
     if marker.is_file() {
-        let loaded = load_skill_from_file(&marker, source);
-        if let Some(skill) = loaded.skill {
-            result.skills.push(skill);
+        if !ignored.contains(&marker) {
+            let loaded = load_skill_from_file(&marker, source);
+            if let Some(skill) = loaded.skill {
+                result.skills.push(skill);
+            }
+            result.diagnostics.extend(loaded.diagnostics);
         }
-        result.diagnostics.extend(loaded.diagnostics);
         return result;
     }
 
@@ -253,8 +389,12 @@ fn load_skills_from_dir_internal(dir: &Path, source: SkillSource, include_root_f
             continue;
         };
 
+        if ignored.contains(&path) {
+            continue;
+        }
+
         if metadata.is_dir() {
-            let nested = load_skills_from_dir_internal(&path, source, false);
+            let nested = load_skills_from_dir_internal(&path, source, false, ignored);
             result.skills.extend(nested.skills);
             result.diagnostics.extend(nested.diagnostics);
             continue;
@@ -593,6 +733,27 @@ mod tests {
         load_skills_from_dir(dir, SkillSource::Path)
     }
 
+    fn git_available() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
     #[test]
     fn loads_a_valid_skill() {
         let temp = TempDir::new("valid");
@@ -881,6 +1042,67 @@ mod tests {
         assert_eq!(result.skills.len(), 1);
         assert!(result.skills[0].disable_model_invocation);
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn git_ignored_skill_files_are_skipped() {
+        if !git_available() {
+            eprintln!("skipping: git is not installed");
+            return;
+        }
+
+        let temp = TempDir::new("gitignore");
+        temp.write("project/.gitignore", "ignored/\nloose.md\n");
+        temp.write("project/kept/SKILL.md", "---\nname: kept\ndescription: Kept.\n---\n");
+        temp.write(
+            "project/ignored/SKILL.md",
+            "---\nname: ignored\ndescription: Ignored.\n---\n",
+        );
+        temp.write(
+            "project/loose.md",
+            "---\nname: loose\ndescription: Loose.\n---\n",
+        );
+        run_git(&temp.path.join("project"), &["init", "-q", "."]);
+
+        let result = load(&temp.path.join("project"));
+        let names: Vec<&str> = result.skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, vec!["kept"], "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn skills_load_normally_outside_a_git_work_tree() {
+        if !git_available() {
+            eprintln!("skipping: git is not installed");
+            return;
+        }
+
+        let temp = TempDir::new("no-git");
+        temp.write("project/.gitignore", "ignored/\n");
+        temp.write("project/kept/SKILL.md", "---\nname: kept\ndescription: Kept.\n---\n");
+        temp.write(
+            "project/ignored/SKILL.md",
+            "---\nname: ignored\ndescription: Ignored.\n---\n",
+        );
+
+        // No `git init`: the ignore rules are inert rather than an error.
+        let result = load(&temp.path.join("project"));
+        let mut names: Vec<&str> = result.skills.iter().map(|skill| skill.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["ignored", "kept"]);
+    }
+
+    #[test]
+    fn git_ignored_paths_are_empty_without_git() {
+        // A directory that is not a work tree must never yield ignores, so
+        // discovery keeps working on machines without git.
+        let temp = TempDir::new("ignore-empty");
+        temp.write("project/SKILL.md", "---\nname: only\ndescription: Only.\n---\n");
+        let candidates = vec![
+            temp.path.join("project/SKILL.md"),
+            temp.path.join("project/nested/SKILL.md"),
+        ];
+        assert!(git_ignored_paths(&temp.path.join("project"), &candidates).is_empty());
+        assert!(git_ignored_paths(&temp.path.join("project"), &[]).is_empty());
     }
 
     #[test]

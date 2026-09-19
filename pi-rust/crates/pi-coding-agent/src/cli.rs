@@ -71,6 +71,18 @@ pub struct Cli {
     #[arg(long = "no-context-files")]
     pub no_context_files: bool,
 
+    /// Load a prompt template file or directory for this run only. The
+    /// default locations (`~/.pi/agent/prompts` and `.pi/prompts`) are
+    /// always searched unless `--no-prompt-templates` is set.
+    /// Repeatable. Mirrors `pi --prompt-template`.
+    #[arg(long = "prompt-template", value_name = "PATH")]
+    pub prompt_template: Vec<std::path::PathBuf>,
+
+    /// Disable prompt template discovery and loading
+    /// (`--no-prompt-templates`, `-np` in the TS CLI).
+    #[arg(long = "no-prompt-templates")]
+    pub no_prompt_templates: bool,
+
     /// Path to a session directory. Defaults to `~/.pi/sessions/`.
     #[arg(long, value_name = "PATH")]
     pub session_dir: Option<std::path::PathBuf>,
@@ -102,6 +114,45 @@ pub struct Cli {
     /// `0` disables the cap.
     #[arg(long, value_name = "N", default_value_t = 0u32)]
     pub max_turns: u32,
+}
+
+impl Cli {
+    /// Parse `std::env::args_os()`, normalising the multi-character short
+    /// flags the TS CLI accepts but clap cannot express on its own
+    /// (`-np` → `--no-prompt-templates`).
+    pub fn parse_with_aliases() -> Self {
+        Self::parse_from(std::env::args_os().map(normalize_arg))
+    }
+
+    /// Same as [`Self::parse_with_aliases`] but returns clap's error
+    /// instead of exiting, so the caller can control the exit code.
+    pub fn try_parse_with_aliases() -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::env::args_os().map(normalize_arg))
+    }
+}
+
+/// Rewrite TS-only short flags into their long form.
+fn normalize_arg(arg: std::ffi::OsString) -> std::ffi::OsString {
+    if arg == "-np" {
+        std::ffi::OsString::from("--no-prompt-templates")
+    } else {
+        arg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn ts_short_prompt_template_flags_are_normalised() {
+        assert_eq!(
+            normalize_arg(OsString::from("-np")),
+            OsString::from("--no-prompt-templates")
+        );
+        assert_eq!(normalize_arg(OsString::from("--print")), OsString::from("--print"));
+    }
 }
 
 /// Subcommands — mirrors `pi <subcommand>` in the TS CLI.

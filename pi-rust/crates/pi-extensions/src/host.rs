@@ -137,6 +137,26 @@ pub struct RegisteredCommand {
     pub description: String,
 }
 
+/// System-prompt contribution declared by a tool registered via
+/// `pi.registerTool`.
+///
+/// `promptSnippet` becomes the tool's line in the prompt's
+/// `Available tools` list; `promptGuidelines` are appended to the
+/// `Guidelines` section. Both are optional, so a tool that declares
+/// neither simply stays out of the prompt while remaining callable
+/// through the tool registry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredToolPrompt {
+    /// Tool name (`pi.registerTool` `name`).
+    pub name: String,
+    /// One-line summary, or `None` when the extension declared none.
+    #[serde(default)]
+    pub snippet: Option<String>,
+    /// Extra guideline bullets contributed by the tool.
+    #[serde(default)]
+    pub guidelines: Vec<String>,
+}
+
 /// One entry written to the host's log, either via `pi.appendEntry`
 /// or as a side-effect trace from a UI call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,6 +703,32 @@ impl JsExtensionHost {
                 })
                 .unwrap_or_default();
             Ok::<_, ExtensionError>(names)
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// List the prompt contributions of every tool registered via
+    /// `pi.registerTool`, in registration order. Used to describe
+    /// extension tools in the system prompt.
+    pub async fn registered_tool_prompts(&self) -> Vec<RegisteredToolPrompt> {
+        let context = self.inner.context.clone();
+        async_with!(context => |ctx| {
+            let func: Function = ctx
+                .globals()
+                .get("_pi_registered_tool_prompts")
+                .map_err(ExtensionError::from)?;
+            let raw: String = func.call::<_, String>(()).map_err(ExtensionError::from)?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).map_err(ExtensionError::from)?;
+            let tools = parsed
+                .get("tools")
+                .cloned()
+                .map(serde_json::from_value::<Vec<RegisteredToolPrompt>>)
+                .transpose()
+                .map_err(ExtensionError::from)?
+                .unwrap_or_default();
+            Ok::<_, ExtensionError>(tools)
         })
         .await
         .unwrap_or_default()

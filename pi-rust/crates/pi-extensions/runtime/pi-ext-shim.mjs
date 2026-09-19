@@ -26,6 +26,8 @@
 //     to subscribed handlers; returns a JSON string with the dispatch
 //     summary so the host can inspect what ran.
 //   - `_pi_registered_tools()`    — list tool names registered so far.
+//   - `_pi_registered_tool_prompts()` — list each tool's `promptSnippet`
+//     / `promptGuidelines` contribution for the system prompt.
 //   - `_pi_registered_commands()` — list slash commands registered so far.
 //   - `_pi_execute_command(name, args, ctxJson)` — run a command handler.
 //   - `_pi_known_event_names()`   — list event names with at least one
@@ -167,11 +169,18 @@ const pi = Object.freeze({
       throw new TypeError("pi.registerTool: definition.execute must be a function");
     }
     const paramsJson = JSON.stringify(parameters);
+    const promptSnippet =
+      typeof definition.promptSnippet === "string" ? definition.promptSnippet : undefined;
+    const promptGuidelines = Array.isArray(definition.promptGuidelines)
+      ? definition.promptGuidelines.filter((line) => typeof line === "string")
+      : [];
     _pi.tools.set(name, {
       name,
       label,
       description,
       parameters: paramsJson,
+      promptSnippet,
+      promptGuidelines,
       _exec: definition.execute,
     });
     if (typeof globalThis.host_register_tool === "function") {
@@ -312,6 +321,25 @@ globalThis._pi_registered_tools = function _pi_registered_tools() {
   const names = [];
   for (const name of _pi.tools.keys()) names.push(name);
   return JSON.stringify({ tools: names });
+};
+
+/**
+ * List the prompt contributions (snippet + guidelines) of every tool
+ * registered so far. Returns a JSON string with
+ * `{ tools: [{ name, snippet, guidelines }] }`; `snippet` is `null` when
+ * the extension did not declare `promptSnippet`. The host uses this to
+ * describe extension tools in the system prompt.
+ */
+globalThis._pi_registered_tool_prompts = function _pi_registered_tool_prompts() {
+  const tools = [];
+  for (const tool of _pi.tools.values()) {
+    tools.push({
+      name: tool.name,
+      snippet: typeof tool.promptSnippet === "string" ? tool.promptSnippet : null,
+      guidelines: Array.isArray(tool.promptGuidelines) ? tool.promptGuidelines : [],
+    });
+  }
+  return JSON.stringify({ tools });
 };
 
 globalThis._pi_known_event_names = function _pi_known_event_names() {

@@ -57,6 +57,8 @@ use pi_agent_core::tools::ToolExecutor;
 use pi_protocol::Model;
 use std::sync::Arc;
 
+use crate::prompt_templates::PromptTemplate;
+
 /// Inputs for [`run_rpc_server`].
 pub struct RpcServerOptions {
     /// Model the agent starts with. `setModel` may switch it later.
@@ -75,6 +77,10 @@ pub struct RpcServerOptions {
     /// [`default_executor`](crate::tool_executor::default_executor);
     /// tests inject a scripted executor.
     pub tool_executor: Arc<dyn ToolExecutor>,
+    /// Prompt templates loaded at startup. A `prompt` request whose text
+    /// is `/<name> [args]` and matches a template is expanded into the
+    /// template body before the turn starts.
+    pub prompt_templates: Vec<PromptTemplate>,
 }
 
 /// Outcome of a completed RPC session.

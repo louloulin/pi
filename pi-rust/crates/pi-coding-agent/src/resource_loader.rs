@@ -23,12 +23,18 @@
 
 use std::path::{Path, PathBuf};
 
+use pi_extensions::RegisteredToolPrompt;
+
 use crate::cli::Cli;
 use crate::context_files::{
     discover_append_system_prompt_file, discover_system_prompt_file, load_project_context_files,
     read_prompt_file, ContextFile,
 };
 use crate::paths::agent_dir_or_default;
+use crate::prompt_templates::{
+    load_prompt_templates, LoadPromptTemplatesOptions, PromptTemplate, PromptTemplateDiagnostic,
+    PromptTemplatesLoadResult,
+};
 use crate::skills::{
     load_skills, LoadSkillsOptions, Skill, SkillDiagnostic,
 };
@@ -52,6 +58,11 @@ pub struct ResourceLoadOptions {
     /// `--append-system-prompt` segments, appended after
     /// `~/.pi/agent/APPEND_SYSTEM.md`.
     pub append_system_prompt: Vec<String>,
+    /// Extra prompt template files / directories (`--prompt-template`).
+    pub prompt_template_paths: Vec<PathBuf>,
+    /// `--no-prompt-templates`: skip `~/.pi/agent/prompts` and
+    /// `.pi/prompts` discovery (explicit paths still load).
+    pub no_prompt_templates: bool,
 }
 
 /// Everything the system prompt is built from.
@@ -65,21 +76,57 @@ pub struct LoadedResources {
     pub context_files: Vec<ContextFile>,
     /// Loaded skills.
     pub skills: Vec<Skill>,
+    /// Loaded prompt templates (`/<name>` invocations).
+    pub prompt_templates: Vec<PromptTemplate>,
     /// Non-fatal skill problems worth reporting on stderr.
     pub diagnostics: Vec<SkillDiagnostic>,
+    /// Non-fatal prompt template problems worth reporting on stderr.
+    pub prompt_diagnostics: Vec<PromptTemplateDiagnostic>,
 }
 
 impl LoadedResources {
     /// Assemble the system prompt for `cwd`.
     pub fn build_system_prompt(&self, cwd: &Path) -> String {
+        self.build_system_prompt_with_extension_tools(cwd, &[])
+    }
+
+    /// Assemble the system prompt for `cwd`, folding in the
+    /// `promptSnippet` / `promptGuidelines` contributions declared by
+    /// extension-registered tools.
+    ///
+    /// Extension tools appear in the `Available tools` list only when
+    /// they declared a non-empty `promptSnippet`; their guidelines are
+    /// appended to the tool-derived ones.
+    pub fn build_system_prompt_with_extension_tools(
+        &self,
+        cwd: &Path,
+        extension_tools: &[RegisteredToolPrompt],
+    ) -> String {
         // The prompt describes exactly the tools the agent can call: the
-        // built-in bundle in registration order. Extension tools are
-        // advertised to the model through the tool registry itself.
-        let selected_tools: Vec<String> = crate::tools::default_tool_bundle()
+        // built-in bundle in registration order, plus every extension
+        // tool that declared a prompt contribution.
+        let mut selected_tools: Vec<String> = crate::tools::default_tool_bundle()
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
-        let (tool_snippets, prompt_guidelines) = builtin_prompt_contributions(&selected_tools);
+        let (mut tool_snippets, mut prompt_guidelines) =
+            builtin_prompt_contributions(&selected_tools);
+
+        for tool in extension_tools {
+            if let Some(snippet) = tool.snippet.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                tool_snippets.insert(tool.name.clone(), snippet.to_string());
+            }
+            prompt_guidelines.extend(
+                tool.guidelines
+                    .iter()
+                    .map(|line| line.trim())
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string),
+            );
+            if !selected_tools.contains(&tool.name) {
+                selected_tools.push(tool.name.clone());
+            }
+        }
 
         build_system_prompt(&SystemPromptOptions {
             custom_prompt: self.custom_prompt.clone(),
@@ -135,13 +182,22 @@ pub fn load_resources(options: &ResourceLoadOptions) -> LoadedResources {
     append_segments.extend(options.append_system_prompt.iter().cloned());
     append_segments.retain(|segment| !segment.is_empty());
 
+    let prompt_templates = load_prompt_templates(&LoadPromptTemplatesOptions {
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+        prompt_paths: options.prompt_template_paths.clone(),
+        include_defaults: !options.no_prompt_templates,
+    });
+
     LoadedResources {
         custom_prompt,
         append_system_prompt: (!append_segments.is_empty())
             .then(|| append_segments.join("\n\n")),
         context_files,
         skills,
+        prompt_templates: prompt_templates.templates,
         diagnostics,
+        prompt_diagnostics: prompt_templates.diagnostics,
     }
 }
 
@@ -150,6 +206,15 @@ pub fn load_resources(options: &ResourceLoadOptions) -> LoadedResources {
 /// Returns the prompt plus the diagnostics the caller should report; the
 /// loader itself never writes to stderr.
 pub fn build_cli_system_prompt(cli: &Cli) -> (String, Vec<SkillDiagnostic>) {
+    build_cli_system_prompt_with_extension_tools(cli, &[])
+}
+
+/// Like [`build_cli_system_prompt`], but also folds in the prompt
+/// contributions declared by extension-registered tools.
+pub fn build_cli_system_prompt_with_extension_tools(
+    cli: &Cli,
+    extension_tools: &[RegisteredToolPrompt],
+) -> (String, Vec<SkillDiagnostic>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let loaded = load_resources(&ResourceLoadOptions {
         cwd: cwd.clone(),
@@ -158,10 +223,26 @@ pub fn build_cli_system_prompt(cli: &Cli) -> (String, Vec<SkillDiagnostic>) {
         no_skills: cli.no_skills,
         no_context_files: cli.no_context_files,
         append_system_prompt: cli.append_system_prompt.clone(),
+        prompt_template_paths: cli.prompt_template.clone(),
+        no_prompt_templates: cli.no_prompt_templates,
     });
 
-    let prompt = loaded.build_system_prompt(&cwd);
+    let prompt = loaded.build_system_prompt_with_extension_tools(&cwd, extension_tools);
     (prompt, loaded.diagnostics)
+}
+
+/// Load the prompt templates selected by CLI flags.
+///
+/// Kept separate from [`build_cli_system_prompt`] because templates are
+/// expanded at prompt-submission time, not baked into the system prompt.
+pub fn build_cli_prompt_templates(cli: &Cli) -> PromptTemplatesLoadResult {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_prompt_templates(&LoadPromptTemplatesOptions {
+        cwd,
+        agent_dir: agent_dir_or_default(),
+        prompt_paths: cli.prompt_template.clone(),
+        include_defaults: !cli.no_prompt_templates,
+    })
 }
 
 #[cfg(test)]
@@ -304,6 +385,74 @@ mod tests {
 
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(loaded.skills[0].name, "extra-skill");
+    }
+
+    #[test]
+    fn extension_tool_prompts_are_folded_into_the_system_prompt() {
+        use pi_extensions::RegisteredToolPrompt;
+
+        let temp = TempDir::new("ext-prompts");
+        let loaded = load(&temp, "project");
+        let cwd = absolute(&temp.path.join("project"));
+
+        let tools = vec![
+            RegisteredToolPrompt {
+                name: "custom_search".to_string(),
+                snippet: Some("Search the web".to_string()),
+                guidelines: vec!["Cite sources".to_string(), "   ".to_string()],
+            },
+            RegisteredToolPrompt {
+                name: "silent_tool".to_string(),
+                snippet: None,
+                guidelines: Vec::new(),
+            },
+        ];
+
+        let prompt = loaded.build_system_prompt_with_extension_tools(&cwd, &tools);
+        assert!(prompt.contains("- custom_search: Search the web"), "{prompt}");
+        assert!(prompt.contains("- Cite sources"), "{prompt}");
+        // A tool with no snippet stays callable but out of the prompt.
+        assert!(!prompt.contains("silent_tool"), "{prompt}");
+    }
+
+    #[test]
+    fn project_prompt_templates_load_and_no_prompt_templates_disables_defaults() {
+        let temp = TempDir::new("prompt-templates");
+        temp.write(
+            "project/.pi/prompts/greet.md",
+            "---\ndescription: Greet someone.\n---\nHi $1",
+        );
+
+        let loaded = load_resources(&ResourceLoadOptions {
+            cwd: temp.path.join("project"),
+            agent_dir: temp.path.join("agent"),
+            ..Default::default()
+        });
+        assert_eq!(loaded.prompt_templates.len(), 1, "{:?}", loaded.prompt_diagnostics);
+        assert_eq!(loaded.prompt_templates[0].name, "greet");
+        assert_eq!(loaded.prompt_templates[0].description, "Greet someone.");
+
+        let disabled = load_resources(&ResourceLoadOptions {
+            cwd: temp.path.join("project"),
+            agent_dir: temp.path.join("agent"),
+            no_prompt_templates: true,
+            ..Default::default()
+        });
+        assert!(disabled.prompt_templates.is_empty());
+    }
+
+    #[test]
+    fn cli_prompt_template_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "pi",
+            "--prompt-template",
+            "/tmp/prompts",
+            "--no-prompt-templates",
+        ])
+        .expect("parses");
+
+        assert_eq!(cli.prompt_template, vec![PathBuf::from("/tmp/prompts")]);
+        assert!(cli.no_prompt_templates);
     }
 
     #[test]

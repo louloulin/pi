@@ -240,6 +240,49 @@ async fn prompt_returns_response_and_streams_events() {
     assert_eq!(status.code(), Some(0), "stdin EOF must exit 0");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_template_expands_slash_invocations() {
+    // `--prompt-template` loads a markdown template; a `prompt` whose
+    // text is `/greet <arg>` must reach the agent as the expanded body,
+    // proving RPC mode shares the prompt-template pipeline with the TUI.
+    let dir = tempfile::TempDir::with_prefix("pi-rpc-prompts-").expect("tempdir");
+    let template = dir.path().join("greet.md");
+    std::fs::write(
+        &template,
+        "---\ndescription: Greet someone.\n---\nhello-template:$1",
+    )
+    .expect("write template");
+
+    let mut h = RpcHarness::spawn(&[
+        "--rpc",
+        "--prompt-template",
+        template.to_str().expect("utf-8 path"),
+    ]);
+    h.send_json(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "prompt",
+        "params": {"text": "/greet world"},
+    }));
+    let _ = h.recv_until(|v| is_response_with_result(v, 1), "prompt response");
+
+    h.send_json(json!({"jsonrpc": "2.0", "id": 2, "method": "getState"}));
+    let state = h.recv_until(|v| is_response_with_result(v, 2), "getState response");
+    let serialized = state.to_string();
+    assert!(
+        serialized.contains("hello-template:world"),
+        "template body was not expanded into the prompt: {serialized}"
+    );
+    assert!(
+        !serialized.contains("/greet world"),
+        "the raw slash invocation leaked into the transcript: {serialized}"
+    );
+
+    h.close_stdin();
+    let status = h.wait_for_exit();
+    assert_eq!(status.code(), Some(0));
+}
+
 #[test]
 fn get_state_without_prompt_returns_empty_state() {
     let mut h = RpcHarness::spawn(&["--rpc"]);
