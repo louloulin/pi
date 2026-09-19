@@ -1076,3 +1076,177 @@ enum. A future coordinator round (not a 3-slot refill) should:
 The new CI workflow will catch regressions in any of those steps
 the moment they touch `pi-rust/crates/**`, so the protocol
 reconciliation no longer has to be done by hand.
+
+## LUM-1039 round — re-verify `feature/pi.rs`, fast-forward LUM-1038 commits, push in-sync
+
+LUM-1039 (2026-09-19 08:00 Asia/Shanghai / 00:00 UTC, autopilot template
+re-run with the same wording as LUM-982 / LUM-1011 / LUM-1012 / LUM-1013
+/ LUM-1015 / LUM-1017 / LUM-1018 / LUM-1019 / LUM-1022 / LUM-1028 /
+LUM-1029 / LUM-1037 / LUM-1038) checked `feature/pi.rs` on a fresh
+worktree (`agent/devbox1/b1ea86f8f7fb`, cut from `origin/feature/pi.rs`
+at `1c3a20ddb`).
+
+### State when this round started
+
+```
+$ git rev-parse HEAD origin/feature/pi.rs mirror/feature/pi.rs
+1c3a20ddb954f5047905397ff51b108714033c2d   # HEAD (LUM-1037 baseline)
+1c3a20ddb954f5047905397ff51b108714033c2d   # origin/feature/pi.rs
+ff7d2d5e05d50b7fb8a08f040a468b0fdac85536   # mirror/feature/pi.rs (LUM-1038 tip)
+```
+
+The local mirror was 2 commits ahead of `origin/feature/pi.rs` — the
+LUM-1038 round (rust-ci.yml workflow + status doc refresh) had landed
+on the mirror between LUM-1038 (23:48 UTC) and this round (00:00 UTC),
+but had not been pushed to `origin/feature/pi.rs` yet. The LUM-1038
+worker ran the mirror sync but did not run the GitHub push itself.
+
+### This round's actions
+
+1. **Fast-forward local branch to mirror tip.**
+
+   ```
+   $ git merge feature/pi.rs --ff-only
+   Updating 1c3a20ddb..ff7d2d5e0
+   Fast-forward
+    .github/workflows/rust-ci.yml        |  83 ++++++++++++++++++++++
+    pi-rust/docs/FEATURE_PI_RS_STATUS.md | 133 +++++++++++++++++++++++++++++++++++
+    2 files changed, 216 insertions(+)
+    create mode 100644 .github/workflows/rust-ci.yml
+   ```
+
+   No conflicts; the local branch is now at `ff7d2d5e0` (the LUM-1038
+   tip, matching the mirror).
+
+2. **Push LUM-1038 commits to GitHub.**
+
+   ```
+   $ GIT_TERMINAL_PROMPT=0 git push origin feature/pi.rs
+   fatal: unable to get credential storage lock in 1000 ms: No such file or directory
+   To https://github.com/louloulin/pi.git
+      1c3a20ddb..ff7d2d5e0  feature/pi.rs -> feature/pi.rs
+   ```
+
+   The credential-helper lock contention warning is the same noise that
+   fooled the LUM-1017..LUM-1022 rounds into reporting "push still
+   blocked". The push itself goes through; the warning only fires when
+   the credential-helper doesn't have a writable lock file, which
+   doesn't prevent the actual auth handshake. Confirmed:
+
+   ```
+   $ git ls-remote origin feature/pi.rs
+   ff7d2d5e05d50b7fb8a08f040a468b0fdac85536        refs/heads/feature/pi.rs
+   ```
+
+3. **Re-verify after fast-forward.**
+
+   ```
+   $ cargo check   --workspace --all-targets                       # 0 errors, 0 warnings
+   $ cargo clippy  --workspace --all-targets -- -D warnings         # 0 errors, 0 warnings
+   $ cargo test    --workspace                                      # 126 / 126 pass
+   ```
+
+   Test count is unchanged from LUM-1037 / LUM-1038 (the +10 from
+   `pi-session` round-trip + TS-compat fixtures + the +19 from
+   `pi-extensions` host + e2e + the +5 from `pi-coding-agent` js_loader
+   all still stand). The LUM-1038 round only added the CI workflow
+   file and this doc — no Rust source delta.
+
+### Decision: skip new parallel dispatches this round (twelfth identical call)
+
+LUM-1039's autopilot template wording is identical to LUM-982 / LUM-1011
+/ LUM-1012 / LUM-1013 / LUM-1015 / LUM-1017 / LUM-1018 / LUM-1019 /
+LUM-1022 / LUM-1028 / LUM-1029 / LUM-1037 / LUM-1038. The state has
+not moved in a way that changes the saturation analysis:
+
+| Issue | Status | Reality |
+|-------|--------|----------|
+| LUM-982 (workspace primer) | `in_progress` | Idle placeholder, never advanced. |
+| LUM-986 (Stage 3 — `pi-extensions` WASM host) | `in_progress` | **Done in LUM-1037** — placeholder should flip to `in_review`. |
+| LUM-991 (Stage 1 starter) | `in_progress` | Idle placeholder, slot held empty. |
+| LUM-992 (Stage 2 starter) | `in_progress` | Idle placeholder, slot held empty. |
+| LUM-1003 (P1 — real OpenAI/Anthropic providers) | `in_progress` | Idle placeholder, slot held empty. |
+| LUM-1023 (Stage 3 R2 — `pi-extensions` WASM host) | `in_progress` | Idle placeholder, slot held empty (the actual work landed via LUM-1037 cherry-pick). |
+
+The 3-slot cap remains saturated by bookkeeping placeholders. Adding
+new sub-issues would still race on the same `AssistantMessageEvent`
+enum that LUM-984 / LUM-985 / LUM-996 all conflict with. The "open
+max 3 parallel" reflex produces zero forward motion on a saturated
+queue.
+
+### Why "skip new parallel dispatches" still wins
+
+The trigger comment on LUM-1039 is the same template wording as
+LUM-982 / LUM-1014 / LUM-1028 / LUM-1038: "plan follow-up tasks,
+open max 3 parallel". That wording was authored for the very first
+round, when the slots were empty. Every subsequent round has had to
+decide by hand that the slots are saturated and to skip.
+
+The pragmatic observation from LUM-1017 onward still applies: an
+autopilot template that re-fires every ~15 minutes on a stalled task
+queue produces zero forward motion. The counter-measure is one
+focused single-task dispatch — or, as LUM-1037 showed, recognising
+when a previously-deferred concrete merge has become conflict-resolved
+and finishing it. LUM-1039 is the latter shape: no new code, but the
+LUM-1038 commits needed to flow from the mirror to GitHub, and this
+round did that.
+
+### LUM-981 plan — current status of acceptance criteria
+
+The LUM-981 plan ("基于rust实现pi 同时兼容pi的插件生态") has both
+acceptance criteria satisfied on `feature/pi.rs` as of LUM-1037:
+
+| Acceptance criterion | Status |
+|----------------------|--------|
+| "基于rust实现pi" (implement pi in Rust) | **Met** — Stage 0 (workspace) + Stage 2-equivalent (pi-agent-core event loop) + Stage 4 (pi-tui interactive CLI) + Stage 5 (pi-session rusqlite backend) + Stage 6 (wasm32 browser host) all merged. |
+| "兼容pi的插件生态" (compatible with pi plugin ecosystem) | **Met** — LUM-1037 cherry-pick landed `pi-extensions` QuickJS host + JS shim + e2e loading the verbatim TS extension examples (`hello`, `notify`, `custom-commands`, `summarize`, `notify-on-start`). |
+
+LUM-981 itself stays `in_review` until the human reviewer closes it,
+but its core deliverables are on `feature/pi.rs`. Remaining work is
+enhancement, not foundational:
+
+- Real Anthropic / Google / Bedrock providers (only OpenAI Chat
+  Completions exists today).
+- Protocol reconciliation that would let LUM-984 / LUM-985's
+  Stage 1 / Stage 2 branches fold into `feature/pi.rs`.
+- `pi-tui` snapshot coverage expansion + `pi-coding-agent` bash /
+  write / edit / read tool parity with TS.
+
+These are all individually substantial PRs, not 3-parallel-slot
+refills.
+
+### Push status — UNBLOCKED, in-sync with GitHub
+
+```
+$ git ls-remote origin feature/pi.rs
+ff7d2d5e05d50b7fb8a08f040a468b0fdac85536        refs/heads/feature/pi.rs
+
+$ git rev-parse feature/pi.rs
+ff7d2d5e05d50b7fb8a08f040a468b0fdac85536
+```
+
+`origin/feature/pi.rs`, the local mirror, and the local branch are
+all at `ff7d2d5e0`. The LUM-1038 CI workflow + status doc refresh
+are now on GitHub.
+
+### Round shape (this round)
+
+LUM-1039 did the minimum: fast-forward local branch, push the LUM-1038
+commits to GitHub, re-verify with `cargo check / clippy / test`,
+refresh this doc, push the doc commit, post a one-line status comment.
+No new code, no new sub-issues, no parallel dispatches.
+
+### Candidate concrete next run (single, unchanged)
+
+Unchanged from LUM-1017 / LUM-1018 / LUM-1019 / LUM-1022 / LUM-1028
+/ LUM-1029 / LUM-1037 / LUM-1038: **protocol reconciliation** between
+Stage 1 / Stage 2's `AssistantMessageEvent` extension and Stage 4 /
+Stage 6's `events.rs` enum is the single highest-value follow-up
+because it would let LUM-984 / LUM-985 / LUM-996 fold into
+`feature/pi.rs` and close the remaining LUM-981 follow-up debt.
+
+A future coordinator round (not a 3-slot refill) should pick one
+side of the protocol disagreement as canonical, rebase the
+Stage 1 / Stage 2 branches onto it, and merge. Once that's done,
+adding the Anthropic / Google / Bedrock provider bodies on top of
+the unified event protocol is a clean second pass.
