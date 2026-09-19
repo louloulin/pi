@@ -4052,7 +4052,7 @@ target 打 warn 并返回空集合。**发现是 best-effort**：坏扩展不能
 
 ```
 $ cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings
-$ cargo test   --workspace --no-fail-fast                  # 684 passed / 1 failed（见下）
+$ cargo test   --workspace --no-fail-fast                  # 705 passed / 1 failed / 2 ignored（63 targets，见下）
 $ cargo test   -p pi-extensions                            # 27 passed
 $ cargo test   -p pi-coding-agent --lib                    # 176 passed
 ```
@@ -4069,22 +4069,34 @@ $ cargo test   -p pi-coding-agent --lib                    # 176 passed
   因为临时目录名里带 `themes` 字样，`pi: loaded 1 extension(s) [.../resources-themes-project-…]`
   这行 stderr 把断言 `!stderr.contains("themes")` 撞掉了。改成断 `failed` / `not a markdown file`
   这类真正的错误词，并把夹具目录改名成 `resources-t3*` 才稳。
-- **唯一失败的仍是既有的 `--rpc` 抖动**（见 LUM-1081 节）：`tests/rpc.rs` 随机一个用例
-  `Disconnected`，子进程 stderr 依然是 `event-listener-5.4.2/src/intrusive.rs:341 attempt to subtract
-  with overflow` 或 `free(): double free detected in tcache 2`，与 LUM-1083 同一根因。
-  本轮做了一次对照实验来确认**没有把它显著改坏**（因为新加了一次 `resources_discover`
-  派发，理论上会让同一条路径多暴露一次）：
+- **全量测试里唯一失败的仍是既有的子进程崩溃抖动**（LUM-1083 / LUM-1081 节），本轮把它
+  彻底测清楚了。加量前先问的是：多了一次 `resources_discover` 派发，会不会让这条本就不稳的
+  路径更容易崩？为此不再依赖测试套件本身（它的抖动混了负载、端口、超时多种因素），而是
+  直接对一个 loopback 采集服务器起 `pi` 子进程，记录**退出码**与**是否真的发过请求**：
 
-  | 树 | `cargo test -p pi-coding-agent --test rpc` 连跑 10 次 |
-  |----|----|
-  | `HEAD`（`d18fe9ae2`，无本轮改动） | 2/10 失败 |
-  | 本轮改动 | 4/10 失败 |
+  ```
+  loopback 探针：（远程 provider 报错时会正常 dial 后 exit 70）
 
-  失败签名完全相同（`attempt to subtract with overflow` / `double free`）。样本量太小，
-  2/10 与 4/10 的差异不显著（Fisher 精确检验 ≈ 0.63），只能判定「同一既有缺陷，未见量级变化」，
-  但不能排除 1 倍以内的劣化。**本轮不顺手修 LUM-1083**：它需要 32 核机器上复现
-  `pi --rpc` 的竞态，且修法（显式关停握手 + 字段顺序）风险独立于 Stage 23，混在一起
-  会让这次提交难以回退。
+  d77318b52（Stage 23 之前）            75 次：6 次未 dial —— 4×SIGSEGV(-11)、2×SIGABRT(-6)
+  本轮（Stage 23）                       75 次：2 次未 dial —— 1×SIGSEGV(-11)、1×SIGABRT(-6)
+  本轮 + --no-extensions                 50 次：0 次未 dial
+  ```
+
+  - **崩溃发生在扩展宿主这条路径上**：`--no-extensions` 50 次零崩溃，与 LUM-1081 的判断一致。
+  - **本轮没有把它改坏**：本轮的 2/75 并不高于 stage 23 之前的 6/75（方向反而是更低，样本量不足
+    以谈显著性，只能说“没有证据表明劣化”）；SIGABRT 的 stderr 依旧是
+    `free(): double free detected in tcache 2`，SIGSEGV 则**没有任何 stderr**。
+  - 换成「单个子进程 ~3% 崩溃率」就能解释全量测试里“每次都红、但红的 target 每次不同”：
+    本轮三次全量跑分别红在 `rpc`、`cli_provider`、`print_mode`；`print_mode` 一个 target 就跑
+    17 个子进程，P(至少一个崩) ≈ 40%，实测连跑 3 次红 1 次，对得上。也就是说**测试没有问题，
+    是 `pi` 进程真的会崩**，这也解释了 CI 为何会偶发变红。
+  - 顺带修正了 LUM-1081 的一个误判：`tests/cli_provider.rs` 报的 “provider never dialed the
+    loopback capture server: Timeout” **不是超时，而是子进程根本没起来**（同一个崩溃，退出码 -6/-11），
+    旧断言只是又等了 30 秒才报错、且不打印子进程 stderr。既然本轮靠它定位，就顺手把
+    `cli_provider.rs` 的 `request_head` 改成接收子进程 `Output`，panic 里直接带出 exit code /
+    signal / stderr（test-only 改动，是 LUM-1081 给 `rpc.rs` 加 stderr 的同类收尾）。
+- **本轮不顺手修 LUM-1083**：修法（显式关停握手 + 字段顺序）风险独立于 Stage 23，混在一起
+  会让这次提交难以回退；先把本轮结论补进那张单子。
 
 ### 并发
 
