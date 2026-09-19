@@ -148,6 +148,76 @@ impl std::ops::BitOr for KeyModifiers {
     }
 }
 
+/// Mouse button a gesture is performed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    /// Primary (usually left) button.
+    Left,
+    /// Middle button / wheel click.
+    Middle,
+    /// Secondary (usually right) button.
+    Right,
+    /// Any button crossterm reports that we do not model.
+    Other,
+}
+
+/// The gesture a non-wheel mouse event carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseGestureKind {
+    /// A button went down.
+    Press(MouseButton),
+    /// A button came back up.
+    Release(MouseButton),
+    /// Motion while a button is held.
+    Drag(MouseButton),
+    /// Motion with no button held.
+    Move,
+}
+
+/// A non-wheel mouse event: what happened, where, with which modifiers.
+///
+/// Coordinates are 0-based terminal cells measured from the top-left of
+/// the screen — the same space `crossterm` reports and the same space the
+/// [`App`](crate::App) renders into. The widget kit treats the wheel
+/// separately (upstream routes it through `parseWheelEvent` /
+/// `routeWheel`), which is why [`InputEvent::Mouse`] stays wheel-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseGesture {
+    /// What happened.
+    pub kind: MouseGestureKind,
+    /// Column, from the left edge of the terminal.
+    pub x: u16,
+    /// Row, from the top edge of the terminal.
+    pub y: u16,
+    /// True when Alt was held.
+    pub alt: bool,
+}
+
+impl MouseGesture {
+    /// Convenience constructor.
+    pub const fn new(kind: MouseGestureKind, x: u16, y: u16, alt: bool) -> Self {
+        Self { kind, x, y, alt }
+    }
+
+    /// Convenience constructor for a left-button press, the gesture that
+    /// starts a chat-log text selection.
+    pub const fn left_press(x: u16, y: u16) -> Self {
+        Self::new(MouseGestureKind::Press(MouseButton::Left), x, y, false)
+    }
+
+    /// Convenience constructor for a left-button drag — extends an active
+    /// selection.
+    pub const fn left_drag(x: u16, y: u16) -> Self {
+        Self::new(MouseGestureKind::Drag(MouseButton::Left), x, y, false)
+    }
+
+    /// Convenience constructor for a left-button release — finalises the
+    /// selection (and, with copy-on-select on, copies it).
+    pub const fn left_release(x: u16, y: u16) -> Self {
+        Self::new(MouseGestureKind::Release(MouseButton::Left), x, y, false)
+    }
+}
+
 /// Component-level input event. New variants can be added without
 /// breaking the [`From`] conversions below — unknown crossterm events
 /// collapse into [`InputEvent::Ignored`].
@@ -157,10 +227,11 @@ pub enum InputEvent {
     Key(Key),
     /// A mouse-wheel notch.
     ///
-    /// Only the wheel is modelled: it is the one mouse input the
-    /// alternate-screen [`App`](crate::App) consumes, mapping it onto the
-    /// chat-log viewport. Everything else (moves, clicks, drags) stays
-    /// [`InputEvent::Ignored`].
+    /// The wheel has its own variant (upstream routes it through
+    /// `routeWheel`, not through the component mouse dispatch): the
+    /// alternate-screen [`App`](crate::App) maps it onto the chat-log
+    /// viewport, one line per notch with an Alt multiplier of five
+    /// (`packages/tui/src/tui-alt-screen.ts:968-984`).
     Mouse {
         /// True when the wheel moved towards older output (up), false when
         /// it moved towards the tail (down).
@@ -170,6 +241,9 @@ pub enum InputEvent {
         /// (`packages/tui/src/tui-alt-screen.ts:968-971`).
         alt: bool,
     },
+    /// A non-wheel mouse gesture (press / release / drag / move) at an
+    /// absolute terminal cell.
+    MouseGesture(MouseGesture),
     /// Resize — the [`App`](crate::App) re-flows the layout and redraws.
     Resize {
         /// New width in columns.
@@ -177,8 +251,9 @@ pub enum InputEvent {
         /// New height in rows.
         height: u16,
     },
-    /// Anything we cannot map to a component-level event (mouse moves,
-    /// focus reports, …). Components treat it as a no-op.
+    /// Anything we cannot map to a component-level event (focus reports,
+    /// scrollbar-less horizontal wheel, …). Components treat it as a
+    /// no-op.
     Ignored,
 }
 
@@ -238,11 +313,38 @@ impl InputEvent {
     pub const fn wheel(up: bool, alt: bool) -> Self {
         InputEvent::Mouse { up, alt }
     }
+
+    /// Convenience constructor for a non-wheel mouse gesture.
+    pub const fn gesture(gesture: MouseGesture) -> Self {
+        InputEvent::MouseGesture(gesture)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gesture_constructors_pin_button_coordinates_and_alt() {
+        assert_eq!(
+            InputEvent::gesture(MouseGesture::left_press(3, 7)),
+            InputEvent::MouseGesture(MouseGesture {
+                kind: MouseGestureKind::Press(MouseButton::Left),
+                x: 3,
+                y: 7,
+                alt: false,
+            })
+        );
+        assert_eq!(
+            MouseGesture::left_drag(4, 8).kind,
+            MouseGestureKind::Drag(MouseButton::Left)
+        );
+        assert_eq!(
+            MouseGesture::left_release(4, 8).kind,
+            MouseGestureKind::Release(MouseButton::Left)
+        );
+        assert!(MouseGesture::new(MouseGestureKind::Move, 1, 2, true).alt);
+    }
 
     #[test]
     fn wheel_constructor_sets_direction_and_modifier() {
