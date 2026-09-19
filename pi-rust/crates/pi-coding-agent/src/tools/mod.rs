@@ -31,6 +31,8 @@ mod ls;
 #[cfg(not(target_arch = "wasm32"))]
 mod read;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod truncate;
+#[cfg(not(target_arch = "wasm32"))]
 mod write;
 
 #[cfg(not(target_arch = "wasm32"))]

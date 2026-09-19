@@ -43,6 +43,10 @@ use walkdir::WalkDir;
 
 use super::find::GlobMatcher;
 use super::mod_ignore::{relativize_for_search, to_posix_relative, DEFAULT_IGNORE_NAMES};
+use super::truncate::{
+    format_size, truncate_head, truncate_line, TruncationOptions, DEFAULT_MAX_BYTES,
+    GREP_MAX_LINE_LENGTH,
+};
 use super::{AbortLike, AgentTool, ToolError, ToolOutput};
 use pi_protocol::ToolExecutionMode;
 
@@ -93,6 +97,8 @@ impl AgentTool for GrepTool {
          N lines before/after each match. `limit` caps results (default \
          100); `offset` skips the first N matches. Binary files (those \
          containing a NUL byte in the first 8 KiB) are skipped silently. \
+         Long match lines are truncated to 500 chars, and the whole result \
+         block is truncated to 50KB. \
          `path` must be relative to cwd and may not contain '..'."
     }
 
@@ -260,12 +266,28 @@ impl AgentTool for GrepTool {
             return Ok(ToolOutput::text(text));
         }
 
-        let mut text = render_matches(&page);
+        let (mut text, lines_truncated) = render_matches(&page, context == 0);
+        // Byte-limit the rendered block. There is no line limit here because
+        // the match limit already capped the row count
+        // (`grep.ts:281-282`).
+        let truncation = truncate_head(&text, TruncationOptions::bytes_only(DEFAULT_MAX_BYTES));
+        text = truncation.content.clone();
         let mut notices: Vec<String> = Vec::new();
         let mut details = serde_json::json!({});
         if limit_reached && parsed.limit.is_some() {
             notices.push(format!("{} matches limit reached", effective_limit));
             details["matchLimitReached"] = serde_json::json!(effective_limit);
+        }
+        if truncation.truncated {
+            notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));
+            details["truncation"] = serde_json::to_value(&truncation)
+                .map_err(|e| ToolError::Execution(format!("details encode: {}", e)))?;
+        }
+        if lines_truncated {
+            notices.push(format!(
+                "Some lines truncated to {} chars. Use read tool to see full lines",
+                GREP_MAX_LINE_LENGTH
+            ));
         }
         if !notices.is_empty() {
             text.push_str("\n[");
@@ -455,16 +477,30 @@ fn strip_cr(line: &str) -> String {
 /// Render the matches to the wire format expected by the model:
 /// `<relpath>:<line>:<content>` for matches, `<relpath>-<line>-<content>`
 /// for context lines.
-fn render_matches(matches: &[Match]) -> String {
+/// Render the match list, optionally truncating each line to
+/// [`GREP_MAX_LINE_LENGTH`]. Upstream only truncates in the
+/// `context === 0` case (with context it renders whole blocks), so the
+/// caller passes `truncate_lines = context == 0`.
+///
+/// Returns the rendered text plus whether any line was cut, which drives the
+/// `Some lines truncated to 500 chars` notice.
+fn render_matches(matches: &[Match], truncate_lines: bool) -> (String, bool) {
     let mut out = String::new();
+    let mut any_truncated = false;
     for m in matches {
         let sep = if m.is_match { ':' } else { '-' };
-        out.push_str(&format!("{}{}{}{}{}\n", m.file, sep, m.line, sep, m.text));
+        let (text, was_truncated) = if truncate_lines {
+            truncate_line(&m.text, GREP_MAX_LINE_LENGTH)
+        } else {
+            (m.text.clone(), false)
+        };
+        any_truncated |= was_truncated;
+        out.push_str(&format!("{}{}{}{}{}\n", m.file, sep, m.line, sep, text));
     }
     while out.ends_with('\n') {
         out.pop();
     }
-    out
+    (out, any_truncated)
 }
 
 /// Decide whether a `walkdir` entry should be skipped (same logic as
