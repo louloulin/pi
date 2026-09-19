@@ -14,19 +14,28 @@ pub mod app;
 pub mod dialog;
 pub mod editor;
 pub mod input;
+pub mod kill_ring;
 pub mod message;
 pub mod prompt;
 pub mod selector;
 pub mod status;
+pub mod theme;
 
 pub use app::{App, AppConfig, RenderSnapshot};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction};
 pub use input::{InputEvent, Key, KeyModifiers};
+pub use kill_ring::{KillDirection, KillRing};
 pub use message::{MessageItem, MessageView};
 pub use prompt::{Prompt, PromptAction};
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use status::{StatusBar, StatusData};
+pub use theme::{
+    available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,
+    default_theme_name, is_light_theme, load_theme, load_theme_from_path, parse_auto_theme_setting,
+    resolve_theme_setting, ColorMode, ColorValue, TerminalTheme, Theme, ThemeBg, ThemeColor,
+    ThemeController, ThemeError, ThemeJson,
+};
 
 /// Re-export of the underlying terminal backend so binaries can pin a
 /// single version of `crossterm`.
