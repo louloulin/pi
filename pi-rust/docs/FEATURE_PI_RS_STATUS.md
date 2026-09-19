@@ -6921,14 +6921,30 @@ $ cargo fmt -p pi-tui -- --check                                     # 干净
 - 切片提交 `c72b950a8`（4 files, +642 / −33）。
 - 合并态提交 `98a30ad3b`（`Merge branch 'feature/pi.rs' into work/lum-1119 (LUM-1121 markdown)`，
   父 `c72b950a8` + `9c50439dc`）——测试就是在这个树上跑的。
-- 本轮文档提交（本节）在其之后；最终用 `git merge-tree --write-tree 9c50439dc work/lum-1119`
-  + `git commit-tree` 生成以 `feature/pi.rs` 为第一父的合并提交推上去，`work/lum-1119` 分支一并推送。
-  实际结果：`git merge-tree --write-tree 9c50439dc work/lum-1119` → tree `fbb47e489`（零冲突），
-  `git commit-tree` 得合并提交 `bc791835a`（父 `9c50439dc` + `072c81187`）；
-  `git push origin bc791835a:refs/heads/feature/pi.rs` → `9c50439dc..bc791835a`，
-  `git push origin work/lum-1119`（新分支）。
-- 核对：合并后 `origin/feature/pi.rs` 的 tree 与 `work/lum-1119` **完全一致**（都是 `fbb47e489`）；
-  `git diff --stat 9c50439dc origin/feature/pi.rs` 只含本轮 5 个文件（+796 / −33）。
+- 本轮文档提交 `072c81187`；随后为了把真实哈希记回本节，又追加了 docs 提交 `4cc36a0e3` 与
+  （本节最终定稿的）这条提交。
+- 合并（全程 `git merge-tree` + `git commit-tree` plumbing，非 force、不动本地 `feature/pi.rs`）：
+
+```
+$ git merge-tree --write-tree 9c50439dc work/lum-1119          # 零冲突 → tree fbb47e489
+$ git commit-tree fbb47e489 -p 9c50439dc -p 072c81187 \
+      -m "Merge branch 'work/lum-1119' into feature/pi.rs"     # bc791835a
+$ git push origin bc791835a:refs/heads/feature/pi.rs           # 9c50439dc..bc791835a
+$ git merge-tree --write-tree bc791835a work/lum-1119          # tree 2a7329777
+$ git commit-tree 2a7329777 -p bc791835a -p 4cc36a0e3 \
+      -m "Merge branch 'work/lum-1119' into feature/pi.rs"     # 77ca3d612
+$ git push origin 77ca3d612:refs/heads/feature/pi.rs           # bc791835a..77ca3d612
+$ git push origin work/lum-1119                                # 新分支
+```
+
+- 核对：`77ca3d612` 的 tree `2a7329777` 与当时的 `work/lum-1119` **完全一致**；合并进来的除了本轮
+  5 个文件，还完整保留 LUM-1121 的 markdown 上线（`work/lum-1121` 已是 `9c50439dc` 的父）。
+- `git diff --stat 9c50439dc origin/feature/pi.rs` 只含本轮 5 个文件：代码 4 个
+  （`fuzzy.rs` 419 / `selector.rs` 124 / `selector_fuzzy.rs` 130 / `lib.rs` 2，共 +642 / −33）
+  + 本节文档。
+- 本节定稿的这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`
+  （零冲突），因此推送后 `feature/pi.rs` 的 tree 与 `work/lum-1119` 始终一致；`work/lum-1119`
+  也一并推送。
 
 ### 六、frontier（本轮更新）+ 槽位决策
 
