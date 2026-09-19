@@ -4954,3 +4954,75 @@ $ cargo test   --workspace --no-fail-fast --offline                # 本轮 0 fa
 （LUM-1091 的 `pi-client` + LUM-1092 文档轮），再落本轮提交 push 到 `origin/feature/pi.rs`。
 回滚面：只碰 `pi-extensions`（shim / host / loader / tests）与 `pi-coding-agent` 的一个
 loader 用例，CJS 路径行为不变，可整轮 revert。
+
+## LUM-1095 round — 核验 `feature/pi.rs`（含 LUM-1094 Stage 26）+ 派发 Stage 27 / Stage 23 收口
+
+本轮（autopilot，2026-09-19 10:20Z 触发）先核验远程，再按 3 槽上限把两个 backlog 项
+推进为在途任务。
+
+### 一、远程核验：`0efa406b6 → 3103c84fa`（Stage 26 ESM 扩展加载）
+
+- 开工时 `origin/feature/pi.rs = 0efa406b6`；本轮第一次 fetch 后变为 `3103c84fa`
+  （LUM-1094 Stage 26：ESM 扩展契约）。本分支已 `--ff-only` 跟随。
+- 再次遍历全部 remote 分支求差集，`ahead > 0` 仍是那 5 条文档早已判定「重复落地 /
+  刻意跳过」的分支（`9f0097e10886` +2、`e3a55b14fe9d` +1、`lum-1020` +1、
+  `lum-1023` +1、`lum-1058` +2），**没有需要合并的代码**。
+- LUM-1094 的提交直接推到 `origin/feature/pi.rs`，无需二次合并；本轮只在其上追加本节文档。
+
+### 二、在途盘点与槽位
+
+- 开工时 `multica daemon status`：`active_task_count = 2`（本协调 run + LUM-1094）。
+- LUM-1094 于 `10:24:39Z` 收口（`in_review`，推 `3103c84fa`）。随后空出槽位，本轮共
+  派发 2 个新任务，派发后 `active = 3`（本 run + LUM-1093 + LUM-1088），达到上限。
+- **LUM-1069（`[Stage 19] pi-client`，`in_progress`）确认是空转任务**：其范围已由 LUM-1091
+  的 `crates/pi-client`（`08e90510b`，已在 `origin/feature/pi.rs`）完整交付，且无活跃 run。
+  本轮把它置为 `in_review` 收口（LUM-1092 记录的「留给收口轮」）。
+
+### 三、验证（`3103c84fa`，native，`--offline`）
+
+```
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo test   --workspace --no-fail-fast --offline                 # 816 passed / 1 failed / 2 ignored
+$ cargo test   -p pi-extensions --offline                           # 10 + 29 + 3 passed
+```
+
+- 唯一失败是 `pi-coding-agent --test cli_provider` 的
+  `anthropic_model_dials_the_anthropic_messages_endpoint`：子进程
+  `signal: Some(6)`、stderr `free(): double free detected in tcache 2` —— 仍是 LUM-1083
+  记录的扩展宿主堆破坏；`--test-threads=1` 复跑该 target **15/15 全绿**。
+- 与本轮改动无因果关系：本轮只改文档、只改 issue 状态，未碰任何 crate 代码。
+- LUM-1094 新增的 10 个 ESM 用例 + 29 个 host 用例全绿。
+
+### 四、LUM-1083 的新线索（推翻「无新版可升」的旧结论）
+
+文档此前多处记「`event-listener` 无可升小版本」，但本轮核到：
+
+| crate | 现状 | 上游 |
+|-------|------|------|
+| `rquickjs-core` | 0.9.0 | **0.14.0**（0.10/0.11/0.12/0.13/0.14 都在） |
+| `event-listener` | 5.4.2 | 5.4.2（确为最新） |
+
+`cargo tree -p pi-extensions -i event-listener` 显示**唯一路径**是
+`rquickjs-core 0.9.0 → async-lock 3.4.2 → event-listener 5.4.2`；而 `rquickjs-core 0.14.0`
+的依赖表里**已经没有 `async-lock`（也没有 `rquickjs` facade）**，说明 0.9→0.14 之间 async
+集成被重写过。**升级 `rquickjs-core` 到 0.14 可能是消除这串崩溃的路径**，但 0.14 的 feature
+集里没有 `futures` / `parallel`（`AsyncRuntime` API 有变动），是一次需要迁移扩展宿主 async
+代码的独立任务，不适合在协调轮里顺手做。留给后续专门 run。
+
+### 五、派发
+
+| 任务 | 动作 | 说明 |
+|------|------|------|
+| **LUM-1093 `[Stage 27]` 自动压缩接线** | backlog → `in_progress`（启动） | Stage 24 收口项：`should_compact` / `context_tokens_with_trailing` 已落库无调用点，`settings.json` 的 `compaction.*` / `autoCompact` 未接。零硬依赖、与在途任务文件面不重叠 |
+| **LUM-1088 项目信任门接扩展加载** | backlog → `in_progress`（启动） | 上游 `loadProjectTrustExtensions` 的 bootstrap pass 未移植，未信任目录里的 `.pi/extensions/*` 仍会被加载；插件生态的信任边界缺口，自包含 |
+| LUM-1090 `[Stage 25]` 用 `pi-client` 替换内联 JSON-RPC | 保持 backlog | `crates/pi-client` 已落地，依赖解除；等槽位 |
+| LUM-1083 `--rpc` 概率性 SIGABRT | 保持 backlog | 新增 `rquickjs-core → 0.14` 升级线索（见第四节），需独立迁移 run |
+| LUM-1069 `[Stage 19]` pi-client | `in_progress` → `in_review` | 范围已由 LUM-1091 交付，收口空转任务 |
+
+`.wasm` 扩展宿主仍受环境阻塞（缺 `wasm32-unknown-unknown` target + `wasmtime`），不立项。
+
+### Push status
+
+`feature/pi.rs`：先 `git fetch origin feature/pi.rs` 并 `--ff-only` 从 `0efa406b6` 前进到
+`3103c84fa`（LUM-1094 的 Stage 26），再落本轮文档提交并 push（非 force）。本轮无源码改动，
+回滚面仅本节文档。
