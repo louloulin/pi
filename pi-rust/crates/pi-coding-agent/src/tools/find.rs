@@ -10,8 +10,8 @@
 //! model actually emits:
 //!
 //! - `*`  — any sequence of characters except `/`
-//! - `**` — any sequence of characters including `/` (must be a whole
-//!          path segment, i.e. surrounded by `/` or at the ends)
+//! - `**` — any sequence of characters including `/` (must be a whole path
+//!   segment, i.e. surrounded by `/` or at the ends)
 //! - `?`  — any single character except `/`
 //! - everything else is a literal
 //!

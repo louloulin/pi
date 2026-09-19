@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use futures::FutureExt;
-use pi_agent_core::{Agent, AgentError, AgentEvent, AgentOptions, AssistantMessageUpdate};
+use pi_agent_core::{Agent, AgentError, AgentEvent, AgentOptions};
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{AssistantMessage, Content, Message, Model, Role, StopReason, Usage};
 use serde::{Deserialize, Serialize};
@@ -448,129 +448,32 @@ impl EventEmitter {
         event: AgentEvent,
         stdout: &mut Stdout,
     ) -> Result<EventKind, PrintModeError> {
+        // `TurnEnd` bumps the counter *before* serialization so the
+        // emitted `turn` field counts the turn that just finished — the
+        // contract the RPC mode shares.
+        if matches!(&event, AgentEvent::TurnEnd { .. }) {
+            self.turn_count += 1;
+        }
+
+        // Serialization lives in `rpc::events` so print mode and RPC mode
+        // cannot drift apart.
+        for payload in crate::rpc::events::agent_event_to_json(&event, self.turn_count) {
+            self.observe(payload, stdout).await?;
+        }
+
         match event {
-            AgentEvent::TurnStart => {
-                self.observe(json!({"type": "turn_start"}), stdout)
-                    .await?;
-            }
-            AgentEvent::MessageStart { model } => {
-                self.observe(json!({"type": "message_start", "model": model}), stdout)
-                    .await?;
-            }
-            AgentEvent::MessageUpdate(update) => {
-                let payload = match update {
-                    AssistantMessageUpdate::TextDelta { delta } => {
-                        self.text_buffer.push_str(&delta);
-                        json!({
-                            "type": "message_update",
-                            "assistantMessageEvent": {
-                                "type": "text_delta",
-                                "delta": delta,
-                            }
-                        })
-                    }
-                    AssistantMessageUpdate::ThinkingDelta { delta } => json!({
-                        "type": "message_update",
-                        "assistantMessageEvent": {
-                            "type": "thinking_delta",
-                            "delta": delta,
-                        }
-                    }),
-                    AssistantMessageUpdate::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta,
-                    } => json!({
-                        "type": "message_update",
-                        "assistantMessageEvent": {
-                            "type": "toolcall_delta",
-                            "index": index,
-                            "id": id,
-                            "name": name,
-                            "arguments_delta": arguments_delta,
-                        }
-                    }),
-                };
-                self.observe(payload, stdout).await?;
-            }
-            AgentEvent::MessageEnd { message } => {
-                let usage = message.usage;
-                let stop_reason = message.stop_reason;
-                let payload = json!({
-                    "type": "message_end",
-                    "stop_reason": stop_reason,
-                    "usage": usage,
-                });
-                self.observe(payload.clone(), stdout).await?;
-                return Ok(EventKind::Message(message.clone()));
-            }
-            AgentEvent::ToolExecutionStart { call } => {
-                let payload = json!({
-                    "type": "tool_execution_start",
-                    "id": call.id,
-                    "name": call.name,
-                    "arguments": call.arguments,
-                });
-                self.observe(payload, stdout).await?;
-            }
-            AgentEvent::ToolExecutionUpdate {
-                tool_call_id,
-                delta,
-            } => {
-                let payload = json!({
-                    "type": "tool_execution_update",
-                    "tool_call_id": tool_call_id,
-                    "delta": delta,
-                });
-                self.observe(payload, stdout).await?;
-            }
-            AgentEvent::ToolExecutionEnd { result, duration_ms } => {
-                let payload = json!({
-                    "type": "tool_execution_end",
-                    "tool_call_id": result.tool_call_id,
-                    "is_error": result.is_error,
-                    "duration_ms": duration_ms,
-                });
-                self.observe(payload, stdout).await?;
-                if let Some(detail) = result.details {
-                    let payload = json!({
-                        "type": "tool_execution_end_details",
-                        "tool_call_id": result.tool_call_id,
-                        "details": detail,
-                    });
-                    self.observe(payload, stdout).await?;
-                }
-            }
-            AgentEvent::TurnEnd { message, tool_results } => {
-                self.turn_count += 1;
-                let payload = json!({
-                    "type": "turn_end",
-                    "turn": self.turn_count,
-                    "usage": message.usage,
-                    "stop_reason": message.stop_reason,
-                    "tool_results": tool_results.len(),
-                });
-                self.observe(payload, stdout).await?;
-                let kind = EventKind::TurnBoundary;
+            AgentEvent::MessageEnd { message } => Ok(EventKind::Message(message)),
+            AgentEvent::TurnEnd { message, .. } => {
                 if self.output_format == OutputFormat::Json {
                     self.json_events.push(json!({
                         "usage": message.usage,
                         "stop_reason": message.stop_reason,
                     }));
                 }
-                return Ok(kind);
+                Ok(EventKind::TurnBoundary)
             }
-            AgentEvent::UserMessage(msg) => {
-                self.observe(json!({"type": "user_message", "message": msg}), stdout)
-                    .await?;
-            }
-            AgentEvent::Error(message) => {
-                let payload = json!({"type": "error", "message": message});
-                self.observe(payload, stdout).await?;
-            }
+            _ => Ok(EventKind::Quiet),
         }
-        Ok(EventKind::Quiet)
     }
 
     async fn observe(

@@ -294,7 +294,7 @@ fn read_file_for_prompt(path: &Path) -> Result<FileRead, FileError> {
     })?;
     if let Some(mime) = detect_image_mime(path, &bytes) {
         use std::io::Write;
-        let mut buf = Vec::with_capacity(((bytes.len() + 2) / 3) * 4);
+        let mut buf = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
         // Base64 encode the image bytes inline (the agent loop
         // already understands the `ImageContent` shape).
         let mut enc = base64::EncoderWriter::new(&mut buf, &BASE64_TABLE);
