@@ -1,10 +1,12 @@
-//! `node:zlib` virtual module tests — LUM-1125.
+//! `node:zlib` virtual module tests — LUM-1125, extended in LUM-1131.
 //!
 //! The zstd family plus `crc32` is what the upstream repository actually
 //! calls: `packages/ai/src/api/openai-codex-responses.ts` zstd-compresses
 //! Codex request bodies, `packages/ai/test/openai-codex-stream.test.ts`
 //! decompresses captured bodies, `tool-result-images.test.ts` builds PNG
 //! chunks from `crc32`, and `doom-overlay/wad-finder.ts` gunzips a WAD.
+//! LUM-1131 added the gzip/deflate half of the module (pure-Rust codec, no
+//! `flate2`); `tests/zlib_deflate.rs` holds the interop fixtures.
 //!
 //! These tests drive the real host ([`JsExtensionHost::execute_tool`]) the
 //! same way `tests/node_builtins.rs` does, and — crucially — cross-check
@@ -220,7 +222,7 @@ fn zlib_zstd_decodes_a_node_generated_fixture() {
 }
 
 /// `crc32` vectors from Node, including the chained second-argument form,
-/// plus the bare `zlib` alias and the absence of the gzip/deflate family.
+/// plus the bare `zlib` alias and the gzip/deflate family added in LUM-1131.
 #[test]
 fn zlib_crc32_vectors_and_module_aliases_match_node() {
     let runtime = rt();
@@ -230,7 +232,7 @@ fn zlib_crc32_vectors_and_module_aliases_match_node() {
         // The bare alias is exercised here (the other tests import
         // `node:zlib`), and `require()` must resolve to the same module.
         let source = r#"
-            import { crc32, constants, gzipSync, zstdCompressSync } from "zlib";
+            import { crc32, constants, deflateSync, gunzipSync, gzipSync, inflateSync, zstdCompressSync } from "zlib";
             import { Buffer } from "node:buffer";
 
             const viaRequire = require("node:zlib");
@@ -258,8 +260,15 @@ fn zlib_crc32_vectors_and_module_aliases_match_node() {
                                     viaRequire.zstdCompressSync === zstdCompressSync &&
                                     viaRequire.crc32 === crc32,
                                 compressionLevelConstant: constants.ZSTD_c_compressionLevel,
-                                gzipMissing: typeof gzipSync === "undefined" &&
-                                    typeof viaRequire.gunzipSync === "undefined",
+                                noCompressionConstant: constants.Z_NO_COMPRESSION,
+                                gzipPresent:
+                                    typeof deflateSync === "function" &&
+                                    typeof inflateSync === "function" &&
+                                    typeof gzipSync === "function" &&
+                                    typeof gunzipSync === "function" &&
+                                    viaRequire.gunzipSync === gunzipSync,
+                                deflateRoundTrip: inflateSync(deflateSync("round trip")).toString("utf8"),
+                                gzipRoundTrip: gunzipSync(gzipSync("round trip")).toString("utf8"),
                             },
                         };
                     },
@@ -296,8 +305,12 @@ fn zlib_crc32_vectors_and_module_aliases_match_node() {
         assert_eq!(details["fixture"], NODE_FIXTURE_CRC32);
         assert_eq!(details["sameModuleViaRequire"], true);
         assert_eq!(details["compressionLevelConstant"], 100);
-        // Documented gap: no flate2 backend, so gzip/deflate stay absent.
-        assert_eq!(details["gzipMissing"], true);
+        assert_eq!(details["noCompressionConstant"], 0);
+        // LUM-1131: the gzip/deflate family is bridged too (it used to be a
+        // documented gap — no `flate2`/`miniz_oxide` in the offline registry).
+        assert_eq!(details["gzipPresent"], true);
+        assert_eq!(details["deflateRoundTrip"], "round trip");
+        assert_eq!(details["gzipRoundTrip"], "round trip");
     });
 }
 

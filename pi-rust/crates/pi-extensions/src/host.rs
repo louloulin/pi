@@ -30,6 +30,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::api::{ExtensionCapabilities, ExtensionEntry};
+use crate::deflate::{self, crc32};
 use crate::error::ExtensionError;
 use crate::registry::ExtensionRegistry;
 use crate::shim::SHIM_SOURCE;
@@ -2852,11 +2853,12 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
 
         // -- zlib ------------------------------------------------------------
         //
-        // `node:zlib`'s zstd family is the one compression backend the
-        // workspace already bundles (`zstd = 0.13`, used by `pi-session`),
-        // so it is the one the bridge exposes. gzip/deflate would need
-        // `flate2`/`miniz_oxide`, which the offline registry does not have
-        // (see docs/NODE_BUILTINS.md).
+        // Two compression backends: the zstd family (the workspace already
+        // bundles `zstd = 0.13` for `pi-session`) and the gzip/deflate
+        // family (the pure-Rust RFC 1951/1950/1952 codec in
+        // `crate::deflate` — the offline registry has no `flate2` /
+        // `miniz_oxide`). `crc32` is shared by the shim and the gzip
+        // trailer.
         "zlib.zstdCompress" => {
             let bytes = node_arg_bytes(args, "base64")?;
             // Node's default for `zstdCompressSync` is zstd's default (3).
@@ -2875,6 +2877,39 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
             let bytes = node_arg_bytes(args, "base64")?;
             let decoded = zstd::stream::decode_all(std::io::Cursor::new(bytes))
                 .map_err(|e| zstd_error(&e))?;
+            Ok(serde_json::json!({ "base64": base64_encode(&decoded) }))
+        }
+        "zlib.deflate" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let level = node_arg_level(args)?;
+            let compressed = deflate::zlib_compress(&bytes, level);
+            Ok(serde_json::json!({ "base64": base64_encode(&compressed) }))
+        }
+        "zlib.inflate" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let decoded = deflate::zlib_decompress(&bytes).map_err(zlib_error)?;
+            Ok(serde_json::json!({ "base64": base64_encode(&decoded) }))
+        }
+        "zlib.deflateRaw" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let level = node_arg_level(args)?;
+            let compressed = deflate::deflate_raw(&bytes, level);
+            Ok(serde_json::json!({ "base64": base64_encode(&compressed) }))
+        }
+        "zlib.inflateRaw" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let decoded = deflate::inflate_raw(&bytes).map_err(zlib_error)?;
+            Ok(serde_json::json!({ "base64": base64_encode(&decoded) }))
+        }
+        "zlib.gzip" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let level = node_arg_level(args)?;
+            let compressed = deflate::gzip_compress(&bytes, level);
+            Ok(serde_json::json!({ "base64": base64_encode(&compressed) }))
+        }
+        "zlib.gunzip" => {
+            let bytes = node_arg_bytes(args, "base64")?;
+            let decoded = deflate::gzip_decompress(&bytes).map_err(zlib_error)?;
             Ok(serde_json::json!({ "base64": base64_encode(&decoded) }))
         }
         "zlib.crc32" => {
@@ -3025,25 +3060,25 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
     (padding <= 2).then_some(out)
 }
 
-/// CRC-32/ISO-HDLC (`CRC-32 IEEE 802.3`), the checksum Node's
-/// `zlib.crc32` returns: polynomial `0xEDB88320` (reflected), initial
-/// value `0xFFFFFFFF`, final XOR.
-///
-/// `value` is Node's second argument — the *finalised* CRC of the bytes
-/// processed so far — so `crc32(b, crc32(a)) == crc32(a ++ b)`. Node also
-/// returns an unsigned 32-bit integer (`crc32("123456789") ===
-/// 3421780262`), hence the `u32` return type rather than `i32`.
-fn crc32(bytes: &[u8], value: u32) -> u32 {
-    const POLYNOMIAL: u32 = 0xEDB8_8320;
-    let mut crc = value ^ 0xFFFF_FFFF;
-    for &byte in bytes {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (POLYNOMIAL & mask);
-        }
+/// Build the `NodeError` for a failed gzip/deflate call. The codec already
+/// reports Node's `Z_DATA_ERROR` / `Z_BUF_ERROR` / `Z_STREAM_ERROR` names.
+fn zlib_error(err: deflate::ZlibError) -> NodeError {
+    NodeError::new(err.code, err.message)
+}
+
+/// Read Node's optional `options.level`. `-1` is `Z_DEFAULT_COMPRESSION`;
+/// anything outside `-1..=9` is a `Z_STREAM_ERROR` (the shim raises Node's
+/// `RangeError` before reaching here, this is the Rust-side backstop).
+fn node_arg_level(args: &serde_json::Value) -> Result<Option<i32>, NodeError> {
+    match args.get("level") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .and_then(|level| i32::try_from(level).ok())
+            .filter(|level| (-1..=9).contains(level))
+            .map(Some)
+            .ok_or_else(|| NodeError::new("Z_STREAM_ERROR", "invalid compression level")),
     }
-    crc ^ 0xFFFF_FFFF
 }
 
 /// Build the `NodeError` for a failed zstd call. The `zstd` crate wraps
