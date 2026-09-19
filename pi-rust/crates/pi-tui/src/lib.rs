@@ -34,7 +34,7 @@ pub mod theme;
 pub mod undo_stack;
 pub mod word_navigation;
 
-pub use app::{App, AppConfig, RenderSnapshot};
+pub use app::{App, AppConfig, RenderSnapshot, ScrollbarGeometry};
 pub use autocomplete::{
     ArgumentCompletions, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
     CombinedAutocompleteProvider, CompletionResult, SlashCommand,
@@ -43,7 +43,10 @@ pub use clipboard::{base64_encode, osc52_sequence};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
-pub use input::{InputEvent, Key, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
+pub use input::{
+    is_mouse_sequence, parse_mouse_sequence, InputEvent, Key, KeyModifiers, MouseButton,
+    MouseGesture, MouseGestureKind,
+};
 pub use keybindings::{
     get_keybindings, key_matches, parse_key_id, reset_keybindings, set_keybindings,
     tui_default_keybindings, KeybindingConflict, KeybindingDefinition, KeybindingsConfig,
