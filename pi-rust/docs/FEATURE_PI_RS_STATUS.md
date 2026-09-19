@@ -7760,3 +7760,164 @@ LUM-1128 / LUM-1129 的落地情况再排。
   `lum-1127-node-module-duplicate.patch`（shim + `KNOWN_UNBRIDGED` + 文档，268 行）与
   `lum-1127-node-module-duplicate.tests.rs.patch`（`tests/node_module.rs`，411 行）。若 Stage 36 未落地，
   下一轮可按届时 shim 现状重放这两份补丁。
+
+## LUM-1129 round — `node:module` / `node:readline` 虚拟模块（frontier P2 第 3 项收口，`KNOWN_UNBRIDGED` 清空）
+
+（LUM-1126 派发的 Stage 36；LUM-1127 核查到本任务后**主动放弃了自己那份重复的 `node:module` 切片**，
+本轮是该模块的唯一实现，不存在两套并存。）
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1129`，起点 `origin/feature/pi.rs` @ `c7dec41bc`（LUM-1126 的合并提交）。
+  开工后 `origin/feature/pi.rs` 前进到 `f9603e753`（LUM-1127 的 GFM 表格 + docs），先合入工作分支
+  （合并提交 `7bc482efa`，**零冲突**：LUM-1127 只动 `pi-tui/src/markdown.rs` / 其测试 / 文档）。
+  下文所有数字都在合并后的树上跑。
+- 与 Stage 35（LUM-1128，鼠标区域派发）零文件重叠：本轮只写
+  `pi-extensions/{runtime/pi-ext-shim.mjs, tests/, docs/}` 与本节文档。
+- **`crates/pi-extensions/src/host.rs` 本轮零改动**（理由见第四节），因此也没有占用「`host.rs` 一次只允许
+  一路在写」这条并发约束。
+
+### 二、范围锁定：上游真实消费者的锚点
+
+不是照 Node 文档铺一遍，而是先 grep 出这两个模块**实际被用到的子集**：
+
+| 上游调用点 | 用到的 API | 本轮语义 |
+|---|---|---|
+| `packages/chord/src/node/bundle-loader.ts:3,177,180,206` | `createRequire(modulePath)`（**传路径**）、`isBuiltin(specifier)` / `isBuiltin(target)` | `createRequire` 接受任意字符串（路径或 `file://` URL）；`isBuiltin` 无 `node:` 前缀也认 |
+| `packages/coding-agent/src/core/extensions/loader.ts:76`、`utils/photon.ts:21`、`tui/src/native-module-path.ts:5`、`tui/src/native-platform.ts:5` | `createRequire(import.meta.url)` | 接受 `URL` 与字符串两种形态 |
+| `tui/src/native-module-path.ts:15` | `moduleRequire.resolve("@earendil-works/pi-tui")` 包在 `try`/`catch` 里 | 解不到抛 `MODULE_NOT_FOUND`，被 `catch` 吞掉（与本 host 的 SDK 虚拟模块可解） |
+| `tui/test/native-platform.test.ts:3,59,85` | `createRequire` + `new Module(path)` + `module.exports = …` + `require.cache[path] = module` | `Module` 真实存在；`require.cache` **就是** `Module._cache`，`require()` 会查它 |
+| `examples/extensions/doom-overlay/doom-engine.ts:6,64` | `createRequire(doomJsPath)` 交给 Emscripten 的 CJS blob（其内部 `require("fs")` / `require("path")`） | 内置模块能取到；blob 自己 `require` 本地 `doom.js` 仍受沙箱限制（见缺口） |
+| `ai/test/lazy-module-load.test.ts:19`、`experimental/source-resolver.ts:2` | `registerHooks` | **不做**，记为缺口（要改宿主的模块解析管线） |
+| `core/tools/grep.ts:169,179,219`、`core/tools/find.ts:217,228,235` | `createInterface({ input: child.stdout })` + `rl.on("line")` + `rl.close()` | 流输入 + 逐行事件 + 关闭，全支持 |
+| `examples/rpc-extension-ui.ts:521` | `readline.createInterface({ input: agent.stdout!, terminal: false })` + `on("line")` | 同上（`spawn` 产物，LUM-1110 已桥） |
+| `examples/extensions/git-merge-and-resolve.ts:16,34,37` | `createInterface({ input: createReadStream(…) })` + `for await (const line of rl)` | 异步迭代支持；`fs.createReadStream` 仍未桥（见缺口） |
+| `core/session-manager.ts:698`、`core/main.ts:283`、`ai/src/cli.ts:48,96`、`examples/rpc-example.ts:46` | `createInterface({ input: process.stdin, crlfDelay: Infinity })` / `question` | `crlfDelay` 语义由「挂起 CR」等价覆盖；`process.stdin` 未桥 → 走 UI 对话框分支（第四节） |
+
+`builtinModules` 在上游**没有**真实消费者（`git grep builtinModules` 只命中我们自己的 shim）；它按 Node 的
+对称性提供，文档里如实标注为「无上游调用点」。
+
+### 三、切片
+
+| File | Change |
+|------|--------|
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs:3777-3858` | `Emitter` 从 `__pi_child_process_module` 提到模块作用域（`child.stdout`/`child.stderr` 仍用同一份实现，行为不变），供 readline 的 `Interface` 复用 —— 不再有两份 listener 表 |
+| `…pi-ext-shim.mjs:4492-4635` | `__pi_module_module`：`createRequire(from)`（字符串 / `URL` / `{href}`，其余抛 `ERR_INVALID_ARG_TYPE`）、`Module`（`_cache` / `createRequire` / `isBuiltin` / 只读 `builtinModules`）、模块级 `createRequire` / `Module` / `isBuiltin` / `builtinModules`（懒取、冻结） |
+| `…pi-ext-shim.mjs:4640-4928` | `__pi_readline_module`：`Interface extends Emitter`、`createInterface(input, [output], [terminal])`（含 Node 的旧位置参数形态）、`question` / `write` / `pause` / `resume` / `setPrompt` / `getPrompt` / `prompt` / `close` / `[Symbol.asyncIterator]` |
+| `…pi-ext-shim.mjs:6507-6510` | 注册 `"node:module"`、`module`、`"node:readline"`、`readline` 四个 specifier |
+| `crates/pi-extensions/tests/node_builtins.rs:441-462` | 「未桥接必须失败」的样例从 `node:readline` 换成仍不可桥的 `node:stream`（断言消息里带 `node:stream`） |
+| `crates/pi-extensions/tests/node_builtins.rs:464-470` | 正向加载 `node:module` + `node:readline`（`host.load` 返回 `Result<(), _>`，无 outcome 绑定） |
+| `crates/pi-extensions/tests/node_builtins.rs:779` | `KNOWN_UNBRIDGED: [&str; 2]` → `[&str; 0]`：兼容性门禁现在要求**每个上游 import 都已桥接或已文档化**，`node:stream` 是唯一剩下的「已文档化」缺口 |
+| `crates/pi-extensions/tests/node_module_readline.rs`（新，498 行 / 7 条） | 见第五节 |
+| `crates/pi-extensions/docs/NODE_BUILTINS.md:193-249` | `### node:module` 与 `### node:readline` 两节（支持的成员、错误码、缺口）；`:9` 的头部清单加两行；「有些模块是纯 JS」属性 |
+| `…NODE_BUILTINS.md:258-260, 293-295, 308` | 覆盖表把这三个 example 行拆开重写、新增 `rpc-extension-ui.ts` 行（**builtin 层面已解锁**）与 host 侧 readline 用法说明；divergence 表加 3 行（`crlfDelay` 即时切分、无 `input` 走 UI/`terminal: true` 抛错、`builtinModules` 只反映已桥集合 + `createRequire` 不碰磁盘）；`Not bridged` 表把 `node:module` 那行收窄成「磁盘解析 / `registerHooks` / `findSourceMap`」 |
+
+### 四、关键决策：为什么 `host.rs` 一个 op 分支都不加（而不是"忘了"）
+
+任务书写的是「Rust 侧 `host.rs` 加对应 op 分支（**无状态路径优先**；确实需要 `ChildBridge`/会话状态时才引入，
+并在文档里说明为什么）」。本轮的结论是**两个模块都不需要新 op**，这不是省事，而是这两件事的宿主能力边界：
+
+1. **`node:module` 全是纯解析逻辑**：`createRequire` / `isBuiltin` / `builtinModules` 的答案就是
+   `globalThis.__pi_virtual_modules` 这张表，它在引擎内；`Module` + `require.cache` 是内存里的一张对象表。
+   宿主**没有**一份「已桥接模块清单」可供查询（权威来源就是 shim 这张表），为它造一个 op 只能是空壳。
+   先例是 `node:util`（同样标为 "Pure JS — no host op"）。
+2. **`node:readline` 里唯一涉及宿主的是"问一个问题"**：没有 `input` 流时，`question()` 复用**已桥接的**
+   `host_ui_input(title, placeholder)`——就是 `ctx.ui.input` 走的那条通道，本轮没有给它加参数、也没有改它的
+   语义（未动 `host.rs`）。流输入路径完全不碰宿主：它消费的是 `node:child_process` 已经交到 JS 手里的
+   `child.stdout`（LUM-1110）。
+3. **真正需要 op 的那个分支，任务书要求的是"抛错"而不是"实现"**：TTY 原始模式要宿主的 termios/窗口尺寸能力，
+   而扩展宿主没有 TTY、stdin 也归宿主；把 `terminal: true` 做成一个假 promise 或空壳 op 都违反
+   「不留假 promise 悬挂」。所以它抛 `ERR_READLINE_TTY_UNSUPPORTED`，并在
+   `docs/NODE_BUILTINS.md` 的 divergence/缺口表里写明「这个分支将来要 op（termios + 尺寸 + 原始按键流），
+   不是本轮的遗漏」。
+
+一句话：**本轮把「需要宿主能力」的边界收缩到已有的 `host_ui_input`，因此 `host.rs` 零改动**
+（`git status` 可验证），并发上也不与 Stage 35 / frontier 的 `fetch`（那是真要写 `host.rs`）抢文件。
+
+### 五、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-extensions --offline --no-fail-fast
+  12 个 suite 共 84 passed / 0 failed      # 起点 77 → +7（tests/node_module_readline.rs）
+  （逐 suite：child_process 7、e2e 10、host 33、loader 3、node_builtins 5、node_module_readline 7、
+    pi_exec 10、rquickjs_contention 1、sdk_modules 4、zlib 4）
+$ ... cargo clippy -p pi-extensions --all-targets --offline -- -D warnings
+  Finished，0 warning（仅 vendor `rquickjs-core` 既有 12 条，不进 `-D warnings` 门）
+$ ... cargo check --workspace --all-targets --offline
+  Finished，exit 0
+$ node --check crates/pi-extensions/runtime/pi-ext-shim.mjs    # exit 0
+$ rustfmt --check --edition 2021 crates/pi-extensions/tests/{node_module_readline,node_builtins}.rs   # clean
+```
+
+`tests/node_module_readline.rs` 的 7 条（全部走真实 host：`ExtensionHost` + 临时目录里的 `.mjs` 入口）：
+
+1. `node_module_create_require_resolves_bridged_builtins`：`createRequire(import.meta.url)` 拿到
+   `node:buffer` / `node:fs` / `node:zlib` 等已桥模块，并**真的调用** `require("node:zlib").crc32("123456789")
+   === 3421780262`（LUM-1125 的 op，走的是 createRequire 的返回值而不是直接 import）；
+2. `node_module_unresolvable_specifiers_throw_real_errors`：解不到的裸名/相对路径抛 `Error` 且
+   `code === "MODULE_NOT_FOUND"`、`requireStack[0]` 是 `import.meta.url` 那个 `file://` URL（与 Node 形状一致），
+   host 不崩、后续代码继续跑；
+3. `node_module_and_require_cache_share_one_store`：`new Module(path)` + `require.cache[path] = module`
+   之后 `require(path)` 返回它的 `exports`——复刻上游 `tui/test/native-platform.test.ts:85` 的 mock 手法；
+4. `node_module_builtin_helpers_describe_the_bridged_set`：`builtinModules` 含 `fs`/`module`/`readline`/`path`/`zlib`、
+   **不含** `stream`；`isBuiltin("node:fs")` / `isBuiltin("fs")` / `isBuiltin("node:zlib")` 为真、
+   `isBuiltin("node:stream")` 为假（文档化的 divergence）、SDK 虚拟模块可被 `require` 但不算 builtin；
+5. `node_readline_lines_questions_and_iteration`：`\n` / `\r\n` / 孤立 `\r` / 跨 chunk 的 CRLF / 尾行无换行 五种切分、
+   `question()` 走流、`for await` 迭代、`close()` 后迭代结束、`write` / `setPrompt` / `pause` / `resume` 不抛；
+6. `node_readline_unsupported_branches_throw`：`terminal: true` → `ERR_READLINE_TTY_UNSUPPORTED`、
+   非流 `input` → `ERR_INVALID_ARG_TYPE`、无 `input` 且宿主无 UI → `ERR_READLINE_NO_INPUT`、
+   `close()` 之后 `question()` → `ERR_USE_AFTER_CLOSE`（四条都是真 `Error` + `code`，不是挂起的 promise）；
+7. `node_readline_question_without_input_uses_the_ui_dialog`：`has_ui: true` + `mode: "tui"` 时，
+   `question("Pick: ")` 经 `host_ui_input` 走 `ScriptedUiHandler`，返回脚本里的答案（并且答案里的换行被当成
+   行尾、`null`（用户取消）被原样返回）。
+
+回归：`tests/zlib.rs` 4 条、`tests/child_process.rs` 7 条（`Emitter` 提层后的事件流）全绿。
+
+### 六、覆盖成员与缺口（照抄进 `docs/NODE_BUILTINS.md`）
+
+**`node:module` 已覆盖**：`createRequire`、`Module`（`_cache` / `createRequire` / `isBuiltin` / `builtinModules`）、
+`isBuiltin`、`builtinModules`、`require` / `require.resolve` / `require.cache` / `require.main`（`undefined`）。
+
+**`node:module` 缺口**：磁盘解析全套（`_load` / `_resolveFilename` / `require(<真实路径>)` / `node_modules` 搜索）、
+`registerHooks` / `register`（上游 `ai/test/lazy-module-load.test.ts:19`、`experimental/source-resolver.ts:2`）、
+`findSourceMap` / `SourceMap`、`syncBuiltinESMExports`、`Module.prototype` 的 loader 相关方法、
+`require.resolve` 返回的是 **specifier 而不是文件路径**（divergence；上游 `native-module-path.ts` 把它喂给
+`dirname()` 时拿到的路径形态与 Node 不同，但那条路径在沙箱里本来就不可用）。
+
+**`node:readline` 已覆盖**：`createInterface`（流输入 + 空 `input`）、`Interface#{question, write, pause, resume,
+setPrompt, getPrompt, prompt, close, on/once/off, Symbol.asyncIterator}`。
+
+**`node:readline` 缺口**：TTY/原始模式（`terminal: true`、`cursorTo`、`clearLine`、`moveCursor`、`clearScreenDown`）、
+`readline/promises`、`Interface#{history, completer, terminal, getCursorPos, line, cursor}` 的完整语义、
+`crlfDelay` / `historySize` 等 options 只被部分采用、按键级别的事件（`keypress`）。这些要么需要宿主 TTY 能力
+（将来要 op），要么上游没有任何调用点（`readline/promises` 在上游 0 命中）。
+
+### 七、frontier（本轮更新）
+
+第 3 项（P2 `node:module` / `node:readline`）**整条收口**，`KNOWN_UNBRIDGED` 现已为空——上游
+`packages/**` 与 `pi-rust/` 里出现的每个 `node:*` import 都做到了「已桥接或已文档化」。
+剩下各项按优先级维持，并把两条**明确不做**的原因再写清楚：
+
+1. **P1 鼠标区域派发 / 点击命中**（在途 Stage 35 / LUM-1128）。
+2. **P1 选区粒度与边缘体验**（双击选词 / 三击选行、边缘自动滚动、grapheme 整格扩边）：写 `app.rs`，排在 Stage 35 之后。
+3. ~~P2 `node:module` / `node:readline`~~ —— **本轮已落地**（`node:module` / `node:readline` 全桥，含 bare alias）。
+   剩余缺口已缩到「CJS 磁盘解析 / `registerHooks` / TTY 原始模式」这三类，见第六节与 `docs/NODE_BUILTINS.md`。
+4. **P2 `node:zlib` 的 gzip/deflate**（`gunzipSync` / `gzipSync` / `deflateSync` / `inflateSync`）：**排在后面
+   的唯一原因是依赖**——离线 registry（`/tmp/cargo-home`，431 个缓存 crate）里没有 `flate2` / `miniz_oxide`，
+   而本轮纪律禁止「加新依赖凑接口」。等有后端时按现成的 `zlib.*` op 表加 arm 即可（`node_arg_bytes` /
+   base64 helper 已就位）；在那之前 `wad-finder.ts` 与 `tool-result-images.test.ts` 的 `deflateSync` 留在缺口表。
+5. **P2 `fetch` 全局**：**排在后面的唯一原因是它要真实 HTTP 桥**（TLS、代理、重定向、streaming body、
+   `AbortSignal`、超时），不是虚拟模块的纯 JS 活；落点是 `host.rs` 的新 op + shim 的 `fetch`/`Headers`/`Response`
+   对象，且必须与宿主既有的网络层共用策略（代理/证书），否则会出现「两套 HTTP 语义」。上游只有
+   `.pi/extensions/import-repro.ts` 依赖它，因此优先级低于已经能跑的模块。
+6. **P3 `alt-screen-search.ts`**（上游 327 行）：需要 `app.rs` 钩子。
+7. **P3 `latex.ts`（1394 行）与 `markdown.rs` 的剩余子集**：表格已由 LUM-1127 落地；剩下 LaTeX、
+   OSC-8 hyperlink、语法高亮、块级 HTML。
+8. **P3 provider catalog / LUM-1090**：结论维持（无上游 `data/*.json` 事实源，不写猜测值）。
+9. **P3 旧式 X10 鼠标序列、`updateScrollbarHover` 悬停高亮、滚动条拖拽**：等第 1 项落地后顺带。
+10. **新增欠账（本轮）**：`node:readline` 的 TTY 分支要一个 termios/尺寸 op 才算完；`readline/promises`、
+    `registerHooks`、`createRequire` 的磁盘解析三条各自独立（都不该混在虚拟模块轮里做）。
+
+并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮 `host.rs` 零改动，未占用）。
