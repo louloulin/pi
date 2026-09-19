@@ -435,7 +435,11 @@ async fn run_slash_command(
             if items.is_empty() {
                 app.info("/model: no models available".to_string());
             } else {
-                let selector = Selector::new("Pick a model", items);
+                // Upstream `/model` is searchable and windows at 10 rows
+                // (`model-selector.ts`: `maxVisible = 10`).
+                let selector = Selector::new("Pick a model", items)
+                    .searchable(true)
+                    .with_max_visible(10);
                 app.open_selector(selector);
             }
         }
@@ -482,7 +486,10 @@ async fn run_slash_command(
                     SelectorItem::new(value, label).with_description(r.display())
                 })
                 .collect::<Vec<_>>();
-            let selector = Selector::new("Pick a session to resume", items);
+            let selector = Selector::new("Pick a session to resume", items)
+                .searchable(true)
+                // Upstream `session-selector.ts`: `maxVisible = 10`.
+                .with_max_visible(10);
             app.open_selector(selector);
         }
         SlashCommand::Unknown(name) => {
