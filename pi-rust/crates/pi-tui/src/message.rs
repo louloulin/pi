@@ -8,6 +8,7 @@
 //! lines into a `ratatui::buffer::Buffer` for snapshot tests.
 
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
 use crate::styled::{
     plain_text, themed_text, write_styled_line, SpanStyle, StyledLine, StyledSpan,
@@ -83,17 +84,44 @@ impl MessageItem {
 /// Conversation log rendered by the TUI. Holds an ordered list of
 /// [`MessageItem`] entries and supports incremental updates so the
 /// TUI redraws only the tail while the assistant streams.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct MessageView {
     items: Vec<MessageItem>,
     /// Scroll offset — lines from the bottom. `0` means pinned to the
     /// tail (latest message visible).
     scroll_from_bottom: usize,
+    /// True once the reader scrolled away from the tail. While detached,
+    /// appended items and streaming deltas must not move the viewport —
+    /// otherwise scrolling back to read earlier output would be
+    /// impossible during a long turn. Upstream calls this
+    /// "follow the tail" and flips it in `alt-screen` scroll handling
+    /// (`packages/tui/src/keybindings.ts:160-165`).
+    detached: bool,
+    /// Width of the most recent [`MessageView::render_styled_lines`] call.
+    /// Together with `last_render_lines` it lets an append work out how many
+    /// lines it added, so a detached viewport can stay anchored to the text
+    /// the reader is looking at.
+    last_render_width: AtomicU16,
+    /// Line count of the most recent render (`0` before the first one).
+    last_render_lines: AtomicUsize,
     /// When true, assistant bodies are rendered through
     /// [`crate::markdown::render_markdown`] instead of the plain-text
     /// path. Off by default so existing callers and snapshots keep their
     /// byte-identical output.
     markdown: bool,
+}
+
+impl Clone for MessageView {
+    fn clone(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            scroll_from_bottom: self.scroll_from_bottom,
+            detached: self.detached,
+            last_render_width: AtomicU16::new(self.last_render_width.load(Ordering::Relaxed)),
+            last_render_lines: AtomicUsize::new(self.last_render_lines.load(Ordering::Relaxed)),
+            markdown: self.markdown,
+        }
+    }
 }
 
 impl MessageView {
@@ -136,13 +164,37 @@ impl MessageView {
     /// Append a finalized message to the log.
     pub fn push(&mut self, item: MessageItem) {
         self.items.push(item);
-        self.scroll_from_bottom = 0;
+        self.repin_if_following();
     }
 
     /// Drop every item from the log. `/clear` uses this.
     pub fn clear(&mut self) {
         self.items.clear();
         self.scroll_from_bottom = 0;
+        self.detached = false;
+    }
+
+    /// Re-pin to the tail unless the reader scrolled away.
+    ///
+    /// A detached viewport measures its scroll offset from the tail, so an
+    /// append would otherwise slide the visible text upwards by exactly the
+    /// number of lines it added. Add that many lines back so the reader keeps
+    /// looking at the same content while the turn streams on.
+    fn repin_if_following(&mut self) {
+        if !self.detached {
+            self.scroll_from_bottom = 0;
+            return;
+        }
+        let width = self.last_render_width.load(Ordering::Relaxed);
+        let before = self.last_render_lines.load(Ordering::Relaxed);
+        if before == 0 {
+            // Nothing rendered yet, so there is no viewport to anchor.
+            return;
+        }
+        let after = self.render_styled_lines(width).len();
+        self.scroll_from_bottom = self
+            .scroll_from_bottom
+            .saturating_add(after.saturating_sub(before));
     }
 
     /// Append a text delta to the trailing assistant block. If the
@@ -159,7 +211,7 @@ impl MessageView {
                 self.items.push(item);
             }
         }
-        self.scroll_from_bottom = 0;
+        self.repin_if_following();
     }
 
     /// Start a new streaming assistant block — used when the TUI sees
@@ -168,7 +220,7 @@ impl MessageView {
         let mut item = MessageItem::assistant_streaming();
         let _ = write!(item.text, "[{model}]");
         self.items.push(item);
-        self.scroll_from_bottom = 0;
+        self.repin_if_following();
     }
 
     /// Finalize the trailing streaming assistant block — converts the
@@ -218,30 +270,77 @@ impl MessageView {
         self.scroll_from_bottom == 0
     }
 
+    /// Whether the viewport follows the tail: new items and streaming
+    /// deltas re-pin it to the bottom. False once the reader scrolled
+    /// away (see [`MessageView::set_following`]).
+    pub fn is_following(&self) -> bool {
+        !self.detached
+    }
+
+    /// Follow or stop following the tail.
+    ///
+    /// `false` keeps the current viewport where it is while the log keeps
+    /// growing; `true` snaps back to the tail immediately. The App drives
+    /// this from its scroll keys.
+    pub fn set_following(&mut self, following: bool) {
+        self.detached = !following;
+        if following {
+            self.scroll_from_bottom = 0;
+        }
+    }
+
     /// Scroll up by one line (away from the tail).
     pub fn scroll_up(&mut self) {
         self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(1);
+        self.detached = true;
     }
 
     /// Scroll down by one line (toward the tail).
     pub fn scroll_down(&mut self) {
         self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(1);
+        self.detached = self.scroll_from_bottom != 0;
     }
 
     /// Pin to the tail.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_from_bottom = 0;
+        self.detached = false;
     }
 
     /// Pin to the head.
+    ///
+    /// Uses [`usize::MAX`] as "scrolled to the very top" sentinel, which
+    /// the render path clamps against the real line count. Callers that
+    /// need to scroll back down from here should prefer
+    /// [`MessageView::set_scroll_from_bottom`] with a count computed from
+    /// [`MessageView::line_count`].
     pub fn scroll_to_top(&mut self) {
         self.scroll_from_bottom = usize::MAX;
+        self.detached = true;
     }
 
     /// Current scroll offset (lines from the bottom). `0` means
     /// pinned.
     pub fn scroll_offset(&self) -> usize {
         self.scroll_from_bottom
+    }
+
+    /// Set the scroll offset explicitly (lines back from the tail).
+    ///
+    /// `0` re-attaches the viewport to the tail; any other value detaches
+    /// it. Used by the App, which clamps the value against the real line
+    /// count for the current width.
+    pub fn set_scroll_from_bottom(&mut self, offset: usize) {
+        self.scroll_from_bottom = offset;
+        self.detached = offset != 0;
+    }
+
+    /// Number of rendered lines at `width`.
+    ///
+    /// The App uses this to clamp scrolling and to size a page (one
+    /// viewport height) without duplicating the layout.
+    pub fn line_count(&self, width: u16) -> usize {
+        self.render_styled_lines(width).len()
     }
 
     /// Render the log into a flat vector of pre-wrapped lines,
@@ -338,6 +437,8 @@ impl MessageView {
         if out.is_empty() {
             out.push(Vec::new());
         }
+        self.last_render_width.store(width, Ordering::Relaxed);
+        self.last_render_lines.store(out.len(), Ordering::Relaxed);
         out
     }
 

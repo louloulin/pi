@@ -90,6 +90,8 @@ pub fn help_text() -> String {
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
     out.push_str("  Up / Down   navigate prompt history\n");
+    out.push_str("  PgUp/PgDn   scroll the chat log one page\n");
+    out.push_str("  Home / End  jump to the start / end of the chat log\n");
     out.push_str("  Ctrl+C      abort the current turn (or exit on idle)\n");
     out.push_str("  Ctrl+D      exit on an empty prompt\n");
     out.push_str("  Ctrl+L      clear the screen\n");
@@ -142,6 +144,16 @@ mod tests {
                 instructions: Some("keep the API notes".into())
             }
         );
+    }
+
+    #[test]
+    fn help_text_documents_scroll_keys() {
+        // The fullscreen App owns the scrollback (alternate screen), so the
+        // legend has to name the scroll bindings
+        // (`tui.altScreen.pageUp` / `pageDown` / `top` / `bottom`).
+        let text = help_text();
+        assert!(text.contains("PgUp/PgDn"), "{text}");
+        assert!(text.contains("Home / End"), "{text}");
     }
 
     #[test]

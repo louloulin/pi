@@ -10,7 +10,7 @@
 //! [`ratatui::Terminal`] and feed it events from the terminal input.
 //! See `crates/pi-coding-agent/src/interactive.rs` for the wiring.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossterm::event::Event as CtEvent;
@@ -170,6 +170,13 @@ pub struct App {
     /// Set when the App should exit at the next opportunity. The TUI
     /// exit path checks this between key events.
     exit_requested: bool,
+    /// Width of the message viewport as of the last render. Scroll keys use
+    /// it to wrap the log exactly like the renderer does, so a "page" is a
+    /// real screenful.
+    viewport_width: AtomicU16,
+    /// Height of the message viewport as of the last render; the page size
+    /// for `PageUp` / `PageDown`.
+    viewport_height: AtomicU16,
 }
 
 impl App {
@@ -207,6 +214,8 @@ impl App {
             last_turn_usage: None,
             turn_busy: Arc::new(AtomicBool::new(false)),
             exit_requested: false,
+            viewport_width: AtomicU16::new(0),
+            viewport_height: AtomicU16::new(0),
         }
     }
 
@@ -630,6 +639,55 @@ impl App {
                 self.messages.clear();
                 return StepOutcome::Redraw;
             }
+            // Fullscreen chat-log scrolling. Upstream deliberately shadows
+            // the bare editor bindings for these chords in fullscreen mode
+            // (`packages/tui/src/keybindings.ts:159-165,208-209`: "These
+            // intentionally shadow the unmodified editor bindings in
+            // fullscreen mode"); `Ctrl+A` / `Ctrl+E` still reach the editor
+            // for start / end of line.
+            Key {
+                code: KeyCode::PageUp,
+                modifiers,
+            } if modifiers.is_empty() => {
+                let page = self.message_page();
+                return if self.scroll_viewport_up(page) {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                };
+            }
+            Key {
+                code: KeyCode::PageDown,
+                modifiers,
+            } if modifiers.is_empty() => {
+                let page = self.message_page();
+                return if self.scroll_viewport_down(page) {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                };
+            }
+            // `tui.altScreen.top` / `tui.altScreen.bottom`.
+            Key {
+                code: KeyCode::Home,
+                modifiers,
+            } if modifiers.is_empty() => {
+                return if self.scroll_viewport_to_top() {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                };
+            }
+            Key {
+                code: KeyCode::End,
+                modifiers,
+            } if modifiers.is_empty() => {
+                return if self.scroll_viewport_to_bottom() {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                };
+            }
             _ => {}
         }
 
@@ -683,6 +741,99 @@ impl App {
         self.messages.push_info(text);
     }
 
+    /// Size of the message viewport as of the last render — `(0, 0)`
+    /// before the first one.
+    pub fn viewport(&self) -> (u16, u16) {
+        (
+            self.viewport_width.load(Ordering::Relaxed),
+            self.viewport_height.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Lines per page — one message-viewport height, but never zero so a
+    /// key press before the first render is still a no-op instead of a
+    /// panic.
+    fn message_page(&self) -> usize {
+        let (_, height) = self.viewport();
+        height.max(1) as usize
+    }
+
+    /// Largest valid scroll offset for the viewport the App last rendered.
+    fn max_scroll(&self) -> usize {
+        let (width, height) = self.viewport();
+        if height == 0 {
+            return 0;
+        }
+        self.messages
+            .line_count(width)
+            .saturating_sub(height as usize)
+    }
+
+    /// Current scroll offset, resolving `MessageView::scroll_to_top`'s
+    /// `usize::MAX` sentinel against the last rendered viewport so it can
+    /// be scrolled back down from.
+    fn resolved_scroll(&self) -> usize {
+        let max = self.max_scroll();
+        match self.messages.scroll_offset() {
+            usize::MAX => max,
+            offset => offset.min(max),
+        }
+    }
+
+    /// Scroll the chat log up (towards older output) by `lines`. Returns
+    /// true when the viewport actually moved, so the caller can skip a
+    /// redraw.
+    ///
+    /// Mirrors `tui.altScreen.pageUp` / `lineUp`
+    /// (`packages/tui/src/keybindings.ts:160-176`) — the fullscreen TUI
+    /// owns the scrollback because the alternate screen hides the
+    /// terminal's own.
+    pub fn scroll_viewport_up(&mut self, lines: usize) -> bool {
+        let next = self
+            .resolved_scroll()
+            .saturating_add(lines.max(1))
+            .min(self.max_scroll());
+        if next == self.resolved_scroll() {
+            return false;
+        }
+        self.messages.set_scroll_from_bottom(next);
+        true
+    }
+
+    /// Scroll the chat log down (towards the tail) by `lines`. Reaching
+    /// the tail re-attaches the viewport to new output. Returns true when
+    /// the viewport actually moved.
+    pub fn scroll_viewport_down(&mut self, lines: usize) -> bool {
+        let current = self.resolved_scroll();
+        if current == 0 {
+            return false;
+        }
+        // `set_scroll_from_bottom(0)` also re-attaches to the tail.
+        self.messages
+            .set_scroll_from_bottom(current.saturating_sub(lines.max(1)));
+        true
+    }
+
+    /// Jump the chat log to the oldest line — `tui.altScreen.top`.
+    pub fn scroll_viewport_to_top(&mut self) -> bool {
+        let max = self.max_scroll();
+        if max == 0 || (self.resolved_scroll() == max && !self.messages.is_following()) {
+            return false;
+        }
+        self.messages.set_scroll_from_bottom(max);
+        true
+    }
+
+    /// Jump the chat log back to the tail — `tui.altScreen.bottom`. New
+    /// output pins the viewport again.
+    pub fn scroll_viewport_to_bottom(&mut self) -> bool {
+        if self.messages.scroll_offset() == 0 {
+            return false;
+        }
+        self.messages.scroll_to_bottom();
+        true
+    }
+
     /// Render the App into a `Buffer` at the given area.
     pub fn render_to_buffer(&self, area: Rect, buf: &mut Buffer) {
         // Layout: message view fills the top, prompt the bottom row,
@@ -708,6 +859,13 @@ impl App {
             width: area.width,
             height: prompt_height,
         };
+
+        // Record the viewport the scroll keys clamp against. Keys arrive
+        // between renders, so the previous render's geometry is what they
+        // see — exactly what the reader was looking at.
+        self.viewport_width.store(area.width, Ordering::Relaxed);
+        self.viewport_height
+            .store(message_height, Ordering::Relaxed);
 
         self.messages
             .render_to_buffer_themed(message_area, buf, &self.theme);
