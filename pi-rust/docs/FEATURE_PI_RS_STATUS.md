@@ -11096,3 +11096,112 @@ crossterm 后端直接 `Print(cell.symbol())` 原样写终端。因此本轮把*
 `git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `222ea4fc3` **快进至 `c6787d1f8`**
 （`git ls-remote` 复查一致：`c6787d1f831f387cd020191d40dfc6676ec33de0`），
 留档分支 `work/lum-1152` 一并推送（同哈希）。
+
+## LUM-1154 round — pi-extensions：移植 pi-ai 事件流 + pi-ai/compat provider 注册表（纯 JS，兼容插件生态）+ 槽位空出但磁盘/冲突不派发
+
+### 一、本轮定位：协调轮（核验 + 切片），槽位 2/3 但主动不派发
+
+开工时 `multica daemon status` 槽位 **2/3**：本人 LUM-1154 + **LUM-1153（Stage 45
+`pi-coding-agent` read/write 工具渲染器，`in_progress`）**；LUM-1152（Stage 44）已
+`in_review`。空出 1 槽，但**本轮不派发**，理由三条且都在开工时成立：
+
+1. **磁盘**：根分区 50G，开工仅剩 **5.9G**；在飞 LUM-1153 的 `pi-rust/target` 已
+   4.5G、会继续长，LUM-1152 收尾留下 7.4G、LUM-1150 留下 11G。再起一个 run
+   就要再建/复用第二份 target，磁盘风险大于收益（LUM-1151 已记录过 851M 事故）。
+2. **frontier 无「又值又安全」项**：第 4 项（`cargo fmt` 漂移，LUM-1138）跨所有文件，
+   必与在飞 Stage 45 撞；第 5 项（provider catalog）维持「无上游数据源，不猜」；
+   第 6 项（bedrock/mistral/azure/vertex/oauth/images）是 Stage 体量，文档自己写明
+   「等第 7 项成型后派」，而第 7 项（Stage 45）此刻仍在飞。
+3. 因此本轮把算力用在**自己可做、且不与任何在飞切片撞文件**的一刀上。
+
+起点：`origin/feature/pi.rs` @ **`f44dcb3d7`**（LUM-1152 文档提交）。本人检出分支
+`agent/devbox1/9594ddd68225` 先 `git merge --ff-only origin/feature/pi.rs`
+快进到该 tip，确认基线是绿的再动手。
+
+### 二、本轮切片：`pi-extensions` 的 `pi-ai` 事件流 + `pi-ai/compat` provider 注册表
+
+**为什么这一刀不是死路，而且正好回答 LUM-1154 的题目（兼容 pi 插件生态）**：
+
+- 上游 `packages/coding-agent/examples/extensions/custom-provider-gitlab-duo`
+  与 `custom-provider-anthropic` 这两个**真实扩展**就 import
+  `createAssistantMessageEventStream` / `registerApiProvider` / `streamSimple`，
+  并用「自己 push 事件 + 注册 provider」的方式接第三方模型。Rust 宿主此前把这些
+  全部当缺口，两个例子无法加载到这一步。
+- 上游 `packages/ai/src/utils/event-stream.ts` 与 `compat.ts` 的注册表**都是纯 JS**：
+  `EventStream` 是 FifoQueue + `AsyncIterable` + 终端事件 resolve 的 promise，
+  注册表是模块级 `Map<Api, RegisteredApiProvider>`。二者**不需要宿主流桥**。
+  旧文档把 `createAssistantMessageEventStream` 记成「needs a model-streaming
+  bridge」是**误判**——本轮按原样移植即可，无需任何 host import。
+- 真正需要宿主桥的是**内置 provider 工厂**（`anthropicMessagesApi` /
+  `openAIResponsesApi` / `registerBuiltInApiProviders` / `resetApiProviders`）以及
+  `pi.registerProvider(...)`（宿主把扩展 provider 接进模型运行时）。这些仍留缺口。
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | 新增两节：`__pi_sdk_fifo_queue` + `EventStream` + `AssistantMessageEventStream` + `__pi_sdk_create_assistant_message_event_stream`；compat 注册表 `__pi_sdk_api_providers` + `registerApiProvider` / `unregisterApiProviders` / `getApiProvider` / `getApiProviders` / `stream` / `streamSimple` / `complete` / `completeSimple`（含上游 `wrapStream` 的 `Mismatched api` 守卫）。注册两模块的实现/缺口清单；文件头 specifier 注释同步 |
+| `crates/pi-extensions/tests/sdk_modules.rs` | 新增 `pi_ai_event_stream_and_compat_registry_match_upstream`（+140 行）；`sdk_gaps_and_unknown_exports_throw_named_errors` 的流缺口断言改用 `compat.anthropicMessagesApi`，并断言 `typeof ai.createAssistantMessageEventStream === "function"` |
+| `crates/pi-extensions/docs/SDK_MODULES.md` | `pi-ai` 一节补事件流三件套并记偏离；`pi-ai/compat` 一节从「documented gaps only」改写为「registry implemented + builtin gaps」，含两处偏离 |
+| `crates/pi-extensions/docs/EXTENSIONS.md` | 能力表两行同步：`pi-ai` / `pi-ai/compat` 由缺口改 `✅ Subset`；Provider registration 行由「Out of scope」改 `⚠️ Partial` |
+
+**刻意复刻的语义（与上游逐条对齐）**：`push` 命中 `isComplete` 时先 resolve
+最终结果、再投递；完成后 `push` 直接丢弃；`end(result)` 用显式 result resolve，
+并唤醒所有 waiter 为 `done: true`；`result()` 只 resolve 一次。终端谓词与取值器是
+`done → event.message`、`error → event.error`，其它类型抛
+`Unexpected event type for final result`。注册表按 `api` 覆盖式写入，`stream` /
+`streamSimple` 查不到就抛 `No API provider registered for api: …`（上游同文案），
+`wrapStream` 对 `model.api !== api` 抛 `Mismatched api: <got> expected <want>`。
+
+**与上游的偏离（已写进文档）**：
+
+- **手写异步迭代器**：不用 `async function*`，与 shim 其它部分（`node:readline`）
+  一致，避免依赖引擎的 async-generator 支持面。
+- **无内置模型目录 / cloudflare 路由**：上游 `stream`/`streamSimple` 先查
+  builtin catalogue 再回落到注册表，shim 直接走注册表。
+- **无 env API key 注入**（上游 `withEnvApiKey`）：宿主没有 `getEnvApiKey` 桥，
+  调用方须显式传 `apiKey`。
+
+### 三、验证（复用 LUM-1152 已结束任务的 `target`，未新建）
+
+- `node --check crates/pi-extensions/runtime/pi-ext-shim.mjs`：**OK**（先证 JS 语法）。
+- `cargo test -p pi-extensions --offline`（`CARGO_TARGET_DIR` 指向
+  `lum-1152.../pi-rust/target`）：**101 passed / 0 failed / 0 ignored**，全 12 个
+  test binary + lib 全绿；新增用例
+  `pi_ai_event_stream_and_compat_registry_match_upstream` 与改后的
+  `sdk_gaps_and_unknown_exports_throw_named_errors` 均通过。
+- `cargo clippy -p pi-extensions --all-targets --offline -- -D warnings`：**EXIT 0**
+  （仅 vendored `rquickjs-core` 的既有告警，非本轮引入）。
+- 格式：只对改动文件跑 `rustfmt --check`（`/tmp/rustup-home/.../rustfmt`），
+  `tests/sdk_modules.rs` **零 diff**；`pi-ext-shim.mjs` 是 JS 不适用 rustfmt。
+- 未跑整仓 `cargo check --workspace`：本轮只改 `pi-extensions` 的**运行时 JS 字符串**
+  + 文档 + 测试，没有任何 Rust 依赖图变化；且基线是刚 fast-forward 到
+  `f44dcb3d7` 的 `pi-extensions` 自身全量测试与 clippy。
+
+### 四、frontier（本轮更新）
+
+1. ~~P2 agent 级重试~~（LUM-1146/1147 收口）。
+2. ~~P3 OSC-8 hyperlink~~（LUM-1152 收口）。
+3. ~~P2 `ToolCallDelta` 重复建块~~（LUM-1152 收口）。
+4. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；本轮新增
+   Rust 行零漂移。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex / oauth /
+   images（Stage 体量）。
+7. **`pi-coding-agent` read/write 渲染器**：**已派发 LUM-1153（Stage 45）在飞**。
+8. **（本轮新增）扩展 provider 链路**：扩展侧 `pi-ai/compat` 注册表 + 事件流
+   **本轮已落地**；剩余两段是 `pi-ai` 内置 provider 工厂（第 6 项同源）与
+   **`pi.registerProvider(...)` 宿主桥**（`pi-extensions/src/host.rs` +
+   `pi-coding-agent` 模型运行时，串行文件，须单独立项）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人只写
+`crates/pi-extensions/runtime/pi-ext-shim.mjs`、`crates/pi-extensions/tests/sdk_modules.rs`、
+`crates/pi-extensions/docs/SDK_MODULES.md`、`crates/pi-extensions/docs/EXTENSIONS.md`
+与本文档，**未碰** `pi-extensions/src/host.rs`（串行）与 Stage 45 的
+`pi-coding-agent`。
+
+环境记录：本轮使用 **LUM-1152 检出内的 `pi-rust/target`**（已 `in_review`，
+`CARGO_TARGET_DIR` 显式指向），未新建 `/tmp` target，也未删除任何 target。
+
+**已知限制**：未跑 `cargo test --workspace`；`pi-ai/compat` 的内置 provider 工厂与
+`pi.registerProvider` 宿主桥仍未实现，所以 `custom-provider-*` 例子仍只能用到
+「扩展自己注册 + 自己调用」这一半。
