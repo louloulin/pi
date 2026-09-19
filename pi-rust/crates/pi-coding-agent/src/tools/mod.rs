@@ -31,6 +31,8 @@ mod ls;
 #[cfg(not(target_arch = "wasm32"))]
 mod read;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod render;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod truncate;
 #[cfg(not(target_arch = "wasm32"))]
 mod write;
@@ -51,6 +53,13 @@ pub use ls::LsTool;
 pub use mod_ignore::{is_ignored_dir_name, relativize_for_search, DEFAULT_IGNORE_NAMES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use read::ReadTool;
+#[cfg(not(target_arch = "wasm32"))]
+pub use render::{
+    get_text_output, render_lines_ansi, render_lines_plain, renderer_for, ReadRenderer,
+    ToolRenderContext, ToolRenderOptions, ToolRenderSession, ToolRenderer, WriteHighlightCache,
+    WriteHighlightStats, WriteRenderer, READ_FOLD_LINES, WRITE_FOLD_LINES,
+    WRITE_PARTIAL_FULL_HIGHLIGHT_LINES,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use write::WriteTool;
 
