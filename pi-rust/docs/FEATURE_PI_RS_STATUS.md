@@ -8220,5 +8220,21 @@ OSC-8 hyperlink / 语法高亮 / 块级 HTML。其余维持：
 6. **P3 `alt-screen-search.ts`**：要 `app.rs` 钩子。7. ~~P3 `latex.ts`~~ **本轮已落地**（剩 OSC-8 / 高亮 / HTML）。
 8. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。9. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：等第 1 项。
 10. **新增欠账（本轮）**：LaTeX 的字符宽度算法与上游 East Asian Width 不一致（文档化偏离）；
-`src/app.rs` / `src/settings.rs` / `tests/settings_list.rs` 的 rustfmt diff 待收。
+`src/app.rs` / `src/settings.rs` / `tests/settings_list.rs` 的 rustfmt diff 待收（`app.rs` 已被 Stage 35 清掉）。
+
+**补记（推送后回填真实哈希）：**
+
+- 收尾时 `origin/feature/pi.rs` 已前进到 `cca97f553`（LUM-1128 / Stage 35 的合并 `b1930da13` + 补记），
+  先合入工作分支（合并提交 `a994d7395`，第二父 `cca97f553`）。唯一内容冲突在本文档：incoming 在 LUM-1129 节末
+  追加了它的 `补记` 块与整个 LUM-1128 节，而本轮在同一位置追加 LUM-1130 节 → 手工按时间顺序排成
+  `LUM-1129 补记 → LUM-1128 round → LUM-1130 round`；`pi-tui/src/lib.rs` 两边各加一行 `pub mod`（自动合并）。
+- 推送：`git push origin refs/heads/work/lum-1130:refs/heads/feature/pi.rs` → **快进**
+  `cca97f553..a994d7395`（工作分支已包含 `cca97f553`，再套一层空合并只会留合并债），同时推送新分支
+  `work/lum-1130` @ `a994d7395`。
+- `git diff --numstat cca97f553 a994d7395`（本轮全部改动，6 个文件、+2796 / −4）：
+  `pi-tui/src/latex.rs` +1856（新）、`pi-tui/tests/latex.rs` +458（新）、`pi-tui/src/markdown.rs` +310 / −4、
+  `pi-tui/tests/markdown.rs` +91、`pi-tui/src/lib.rs` +1、本节文档 +89。
+  **`src/app.rs` / `host.rs` 均不在其中**（第一、二节的理由）。
+- 本轮没有派发新 issue（开工时槽位已满；收尾时虽然空出 1 槽，但 Stage 35 刚改完 `app.rs` 的鼠标路径，
+  紧接的 P1 第 2 项同样写 `app.rs`，留给下一轮协调轮派发）。
 
