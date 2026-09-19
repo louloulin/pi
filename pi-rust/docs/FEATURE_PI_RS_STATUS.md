@@ -7610,3 +7610,24 @@ $ ... cargo clippy --workspace --all-targets --offline -- -D warnings
 
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree 061c26118 work/lum-1126` → tree `05923d69b`（零冲突），与 `work/lum-1126`
+  当时的 tree **完全一致**——本轮切片提交后已先把 `061c26118` 合入工作分支（合并提交 `6115572b8`），
+  这次合并没有产生任何额外改动，也没留合并债。
+- 合并提交 `c7dec41bc`（`Merge branch 'work/lum-1126' into feature/pi.rs`，父 `061c26118` +
+  工作提交 `2a2e47278`）；`git push origin c7dec41bc:refs/heads/feature/pi.rs` → `061c26118..c7dec41bc`；
+  `work/lum-1126` 作为新分支一并推送。
+- `git diff --stat 061c26118 c7dec41bc` = 本轮 8 个文件（代码 7 + 本节文档 160 行，共 +2189 / −15）：
+  `pi-tui/src/settings.rs` 836 行新文件、`pi-tui/tests/settings_list.rs` 254 行新文件、
+  `pi-tui/src/app.rs` +161、`pi-tui/src/lib.rs` +2、`pi-coding-agent/src/config.rs` +395、
+  `pi-coding-agent/src/interactive.rs` +388、`pi-coding-agent/src/commands/slash.rs` +8。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `061c26118`（LUM-1125 已合入并处于 `in_review`），因此这次合并
+  **没有覆盖任何在途工作**。
+- 本轮派发两个 issue：**LUM-1128**（Stage 35，鼠标区域派发 / 点击命中，`pi-tui`）与
+  **LUM-1129**（Stage 36，`node:module` / `node:readline`，`pi-extensions`）。派发时
+  `running_task_count = 3`（本 run + 两路新任务），正好到上限；两路之间零文件重叠
+  （`app.rs`/`lib.rs` vs `host.rs`/shim/tests）。
+- 本节这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`（零冲突），
+  推送后 `feature/pi.rs` 的 tree 与 `work/lum-1126` 保持一致。
