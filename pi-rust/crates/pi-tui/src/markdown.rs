@@ -23,6 +23,9 @@
 //!   same character and at least the opening length) with the language tag
 //!   echoed on the border. An unclosed fence runs to the end of the input.
 //! * Block quotes (`>`), including nested block content.
+//! * GFM tables: a header row, a `---` delimiter row and any number of body
+//!   rows, rendered as a box-drawing grid with width-aware cell wrapping
+//!   (upstream `renderTable` in `components/markdown.ts:839-1015`).
 //! * Horizontal rules (`---`, `***`, `___`) capped at 80 columns.
 //!
 //! Inline level:
@@ -32,11 +35,19 @@
 //!
 //! # Deliberately not covered (degrade to plain text, never panic)
 //!
-//! Tables, LaTeX (upstream `renderLatex`), terminal images / OSC-8 hyperlinks,
-//! syntax highlighting, block HTML and the `transform` hooks are separate
-//! subsystems. A link whose target is not a plain `[label](url)` is emitted as
-//! its literal text, and the link URL is always rendered inline
-//! (`MdLinkUrl`) because hyperlink capability detection is not ported.
+//! LaTeX (upstream `renderLatex`), terminal images / OSC-8 hyperlinks, syntax
+//! highlighting, block HTML and the `transform` hooks are separate subsystems.
+//! A link whose target is not a plain `[label](url)` is emitted as its literal
+//! text, and the link URL is always rendered inline (`MdLinkUrl`) because
+//! hyperlink capability detection is not ported.
+//!
+//! Table *alignment* (`:---:`) is parsed and validated but not rendered —
+//! upstream's `renderTable` ignores `token.align` too, so a centred column is
+//! left-aligned here exactly as it is there. A `|` inside an inline code span
+//! still splits a row (marked splits it the same way). A table too narrow to
+//! hold its borders replays the raw source line by line (upstream wraps
+//! `token.raw` as a single string), and a body row without a pipe ends the
+//! table rather than being absorbed as a row.
 //!
 //! # Width convention
 //!
@@ -56,7 +67,7 @@
 //! assert_eq!(plain_text(&lines[2]), "body bold");
 //! ```
 
-use crate::styled::{SpanStyle, StyledLine, StyledSpan};
+use crate::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::{Theme, ThemeColor};
 
 /// Indentation applied to the body of a fenced code block (upstream
@@ -123,6 +134,8 @@ enum Block {
     Code { lang: String, lines: Vec<String> },
     /// A block quote, holding the recursively parsed inner blocks.
     Quote(Vec<Block>),
+    /// A GFM table.
+    Table(TableBlock),
     /// A list.
     List(ListBlock),
     /// A horizontal rule.
@@ -154,6 +167,19 @@ struct Marker {
     /// Columns from the line start to the item content (marker + padding).
     prefix_len: usize,
     content: String,
+}
+
+/// A parsed GFM table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TableBlock {
+    /// Header cells, one per column.
+    header: Vec<String>,
+    /// Body rows, normalised to `header.len()` cells (padded / truncated the
+    /// way marked normalises them).
+    rows: Vec<Vec<String>>,
+    /// The raw source lines, replayed verbatim when the table is too narrow to
+    /// lay out (upstream falls back to `token.raw` the same way).
+    raw: Vec<String>,
 }
 
 /// A recognised fenced-code opener.
@@ -212,6 +238,14 @@ fn parse_blocks(lines: &[String]) -> Vec<Block> {
         if parse_hr(line) {
             blocks.push(Block::Hr);
             i += 1;
+            continue;
+        }
+
+        // A table must be the first line of its block, exactly like GFM: a
+        // header row sitting inside a paragraph does not start one.
+        if let Some((table, next)) = parse_table(lines, i) {
+            blocks.push(Block::Table(table));
+            i = next;
             continue;
         }
 
@@ -352,6 +386,104 @@ fn skip_blanks(lines: &[String], from: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Parse a GFM table starting at `lines[start]` (the header row).
+///
+/// Returns the table and the index of the first unconsumed line. The header row
+/// must be followed by a delimiter row with the same number of cells, and the
+/// body ends at the first blank line, block start, or line without a pipe.
+fn parse_table(lines: &[String], start: usize) -> Option<(TableBlock, usize)> {
+    let header_line = lines.get(start)?.as_str();
+    if !header_line.contains('|') || is_block_start(header_line) {
+        return None;
+    }
+    let delimiter = lines.get(start + 1)?;
+    let columns = parse_delimiter_row(delimiter)?;
+    let header = split_table_row(header_line);
+    if header.is_empty() || header.len() != columns {
+        return None;
+    }
+
+    let mut raw = vec![lines[start].clone(), lines[start + 1].clone()];
+    let mut rows = Vec::new();
+    let mut i = start + 2;
+    while let Some(line) = lines.get(i) {
+        if line.trim().is_empty() || !line.contains('|') || is_block_start(line) {
+            break;
+        }
+        let mut cells = split_table_row(line);
+        cells.resize(header.len(), String::new());
+        cells.truncate(header.len());
+        rows.push(cells);
+        raw.push(line.clone());
+        i += 1;
+    }
+
+    Some((TableBlock { header, rows, raw }, i))
+}
+
+/// Number of columns in a delimiter row (`| --- | :-: |`), or `None` when
+/// `line` is not one.
+///
+/// The `:` alignment markers are accepted and validated but not reported:
+/// upstream's `renderTable` never reads `token.align`, so this port renders
+/// every column left-aligned like it does.
+fn parse_delimiter_row(line: &str) -> Option<usize> {
+    // GFM requires a pipe somewhere on the delimiter row; without it a bare
+    // `---` is a horizontal rule.
+    if !line.contains('|') {
+        return None;
+    }
+    let cells = split_table_row(line);
+    if cells.is_empty() || !cells.iter().all(|cell| is_delimiter_cell(cell)) {
+        return None;
+    }
+    Some(cells.len())
+}
+
+/// True for a single delimiter cell: `-`, `--`, `:-:`, and so on.
+fn is_delimiter_cell(cell: &str) -> bool {
+    let body = cell.trim();
+    let body = body.strip_prefix(':').unwrap_or(body);
+    let body = body.strip_suffix(':').unwrap_or(body);
+    !body.is_empty() && body.chars().all(|c| c == '-')
+}
+
+/// Split a table row into trimmed cells.
+///
+/// Splits on unescaped `|` and drops the empty cells the optional outer pipes
+/// create. A `\|` is kept escaped so the inline scanner turns it back into a
+/// literal `|`. Like marked, a `|` inside an inline code span still splits the
+/// row — a documented divergence, never a panic.
+fn split_table_row(line: &str) -> Vec<String> {
+    let mut cells: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                current.push('\\');
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            '|' => cells.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    cells.push(current);
+
+    if cells.first().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.pop();
+    }
+    cells
+        .into_iter()
+        .map(|cell| cell.trim().to_string())
+        .collect()
 }
 
 /// True when `line` opens a block construct (and therefore ends a paragraph).
@@ -592,6 +724,10 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                 maybe_blank(&mut out, next);
             }
             Block::List(list) => out.extend(render_list(list, width)),
+            Block::Table(table) => {
+                out.extend(render_table(table, width, base));
+                maybe_blank(&mut out, next);
+            }
         }
     }
 
@@ -639,6 +775,226 @@ fn render_list(list: &ListBlock, width: usize) -> Vec<StyledLine> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Tables
+// ---------------------------------------------------------------------------
+
+/// Longest word (in characters) that a table cell may demand before it is
+/// allowed to wrap mid-word (upstream `maxUnbrokenWordWidth`).
+const MAX_UNBROKEN_WORD_WIDTH: usize = 30;
+
+/// Column widths for one table, in the order upstream computes them.
+fn table_column_widths(table: &TableBlock, available: usize, base: SpanStyle) -> Vec<usize> {
+    let columns = table.header.len();
+    let mut natural = vec![0usize; columns];
+    let mut min_words = vec![1usize; columns];
+
+    for (i, cell) in table.header.iter().enumerate() {
+        measure_cell(&render_inline(cell, base), &mut natural, &mut min_words, i);
+    }
+    for row in &table.rows {
+        for (i, cell) in row.iter().enumerate() {
+            measure_cell(&render_inline(cell, base), &mut natural, &mut min_words, i);
+        }
+    }
+
+    let mut min_widths = min_words.clone();
+    let mut min_cells: usize = min_widths.iter().sum();
+    if min_cells > available {
+        // Not even the longest words fit: shrink every column to one column of
+        // text and hand the slack back proportionally to the word widths.
+        min_widths = vec![1; columns];
+        let remaining = available - columns;
+        if remaining > 0 {
+            let total_weight: usize = min_words.iter().map(|w| w.saturating_sub(1)).sum();
+            let mut allocated = 0usize;
+            for i in 0..columns {
+                let weight = min_words[i].saturating_sub(1);
+                let growth = (weight * remaining).checked_div(total_weight).unwrap_or(0);
+                min_widths[i] += growth;
+                allocated += growth;
+            }
+            let mut leftover = remaining - allocated;
+            let mut i = 0usize;
+            while leftover > 0 && i < columns {
+                min_widths[i] += 1;
+                leftover -= 1;
+                i += 1;
+            }
+        }
+        min_cells = min_widths.iter().sum();
+    }
+
+    // "Everything fits naturally" is `sum(natural) + borderOverhead <= width`,
+    // and `available` is already that width minus the border overhead.
+    if natural.iter().sum::<usize>() <= available {
+        return (0..columns)
+            .map(|i| natural[i].max(min_widths[i]))
+            .collect();
+    }
+
+    // Shrink towards the minimum widths, then hand the rounding remainder to
+    // the columns that still have room to grow.
+    let total_grow: usize = (0..columns)
+        .map(|i| natural[i].saturating_sub(min_widths[i]))
+        .sum();
+    let extra = available.saturating_sub(min_cells);
+    let mut widths: Vec<usize> = (0..columns)
+        .map(|i| {
+            let delta = natural[i].saturating_sub(min_widths[i]);
+            let grow = (delta * extra).checked_div(total_grow).unwrap_or(0);
+            min_widths[i] + grow
+        })
+        .collect();
+    let mut remaining = available.saturating_sub(widths.iter().sum::<usize>());
+    while remaining > 0 {
+        let mut grew = false;
+        for i in 0..columns {
+            if remaining == 0 {
+                break;
+            }
+            if widths[i] < natural[i] {
+                widths[i] += 1;
+                remaining -= 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    widths
+}
+
+/// Fold one rendered cell into the running natural / longest-word widths.
+fn measure_cell(
+    cell: &[StyledSpan],
+    natural: &mut [usize],
+    min_words: &mut [usize],
+    column: usize,
+) {
+    natural[column] = natural[column].max(styled_width(cell));
+    let longest = longest_word_width(&plain_text(cell));
+    min_words[column] = min_words[column].max(longest.max(1));
+}
+
+/// Visible width of a styled run under this module's character-counting
+/// convention.
+fn styled_width(line: &[StyledSpan]) -> usize {
+    line.iter().map(|span| span.text.chars().count()).sum()
+}
+
+/// Width of the longest whitespace-delimited word in `text`, capped at
+/// [`MAX_UNBROKEN_WORD_WIDTH`].
+fn longest_word_width(text: &str) -> usize {
+    text.split_whitespace()
+        .map(|word| word.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_UNBROKEN_WORD_WIDTH)
+}
+
+/// Render a GFM table as a box-drawing grid, porting upstream `renderTable`
+/// (`components/markdown.ts:839-1015`) including its width negotiation.
+///
+/// Falls back to replaying the raw markdown source when the available width
+/// cannot hold the borders plus one column per cell, so a narrow terminal never
+/// produces a mangled grid.
+fn render_table(table: &TableBlock, width: usize, base: SpanStyle) -> Vec<StyledLine> {
+    let columns = table.header.len();
+    if columns == 0 {
+        return Vec::new();
+    }
+
+    // "│ " + (n-1) * " │ " + " │" == 3n + 1 columns of border and padding.
+    let border_overhead = 3 * columns + 1;
+    if width < border_overhead + columns {
+        let mut fallback: Vec<StyledLine> = Vec::new();
+        for line in &table.raw {
+            fallback.extend(wrap_line(&render_inline(line, base), width));
+        }
+        return fallback;
+    }
+    let available_for_cells = width - border_overhead;
+    let widths = table_column_widths(table, available_for_cells, base);
+
+    let mut out: Vec<StyledLine> = Vec::new();
+    let border = |left: &str, middle: &str, right: &str| -> StyledLine {
+        let mut spans: StyledLine = Vec::new();
+        push_span(&mut spans, format!("{left}─"), base);
+        for (i, cell_width) in widths.iter().enumerate() {
+            if i > 0 {
+                push_span(&mut spans, format!("─{middle}─"), base);
+            }
+            push_span(&mut spans, "─".repeat(*cell_width), base);
+        }
+        push_span(&mut spans, format!("─{right}"), base);
+        spans
+    };
+
+    out.push(border("┌", "┬", "┐"));
+
+    let header_cells: Vec<Vec<StyledLine>> = table
+        .header
+        .iter()
+        .enumerate()
+        .map(|(i, cell)| wrap_line(&render_inline(cell, base), widths[i].max(1)))
+        .collect();
+    push_table_row(&mut out, &header_cells, &widths, base, true);
+
+    let separator = border("├", "┼", "┤");
+    out.push(separator.clone());
+
+    for (row_index, row) in table.rows.iter().enumerate() {
+        let cells: Vec<Vec<StyledLine>> = row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| wrap_line(&render_inline(cell, base), widths[i].max(1)))
+            .collect();
+        push_table_row(&mut out, &cells, &widths, base, false);
+        if row_index + 1 < table.rows.len() {
+            out.push(separator.clone());
+        }
+    }
+
+    out.push(border("└", "┴", "┘"));
+    out
+}
+
+/// Push one physical table row: each cell wrapped to its column width, padded,
+/// and joined with the ` │ ` separators. Header cells are bold, like upstream
+/// (`theme.bold(padded)`); the padding of every cell carries the inherited
+/// style so a table inside a quote stays quoted.
+fn push_table_row(
+    out: &mut Vec<StyledLine>,
+    cells: &[Vec<StyledLine>],
+    widths: &[usize],
+    base: SpanStyle,
+    bold: bool,
+) {
+    let line_count = cells.iter().map(|cell| cell.len()).max().unwrap_or(1);
+    for line_index in 0..line_count {
+        let mut spans: StyledLine = Vec::new();
+        push_span(&mut spans, "│ ", base);
+        for (column, cell_lines) in cells.iter().enumerate() {
+            if column > 0 {
+                push_span(&mut spans, " │ ", base);
+            }
+            let empty = StyledLine::new();
+            let cell = cell_lines.get(line_index).unwrap_or(&empty);
+            let padding = widths[column].saturating_sub(styled_width(cell));
+            for span in cell {
+                let style = if bold { span.style.bold() } else { span.style };
+                push_span(&mut spans, span.text.clone(), style);
+            }
+            let pad_style = if bold { base.bold() } else { base };
+            push_span(&mut spans, " ".repeat(padding), pad_style);
+        }
+        push_span(&mut spans, " │", base);
+        out.push(spans);
+    }
 }
 
 // ---------------------------------------------------------------------------

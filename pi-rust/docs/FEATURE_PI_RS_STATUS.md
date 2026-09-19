@@ -7632,3 +7632,113 @@ $ ... cargo clippy --workspace --all-targets --offline -- -D warnings
 - 本节这批 docs 提交（`a969ff0c8`，以及把 `c7dec41bc` 合入工作分支的 `2816b458a`）直接以
   `2816b458a` 快进推入 `feature/pi.rs`（`c7dec41bc..2816b458a`）——工作分支已包含 `c7dec41bc`，
   无需再套一层空合并；推送后 `feature/pi.rs` 的 tree 与 `work/lum-1126` 一致。
+## LUM-1127 round — 核验 `feature/pi.rs`（含 LUM-1126）+ GFM 表格渲染（frontier P3 第 7 项）+ 槽位满未派发
+
+（autopilot 协调轮；开工后把 LUM-1127 的泛标题「pi」改成本轮实际内容。）
+
+### 一、起点与槽位
+
+- 进入本轮时 `origin/feature/pi.rs` = `00c51de11`（LUM-1126 的 `SettingsList` + `/settings` 已合入，
+  其状态 `in_review`）；本工作分支 `work/lum-1127` 起点为 `c7dec41bc`（LUM-1126 的合并提交），
+  随后把 `00c51de11` 合入。
+- `multica daemon status` = `running_task_count = 3`（上限 3 路）：本轮 + Stage 35（LUM-1128，鼠标区域派发）
+  + Stage 36（LUM-1129，`node:module` / `node:readline`）。**没有空槽，本轮不派发**（见第五节）。
+- **主动放弃一份已完成的 `node:module` 切片**：本轮开工时先按 LUM-1126 frontier 的第 3 项实现了
+  `node:module`（`createRequire` / `isBuiltin` / `builtinModules` / `Module`，4 条新测试全绿、`node_builtins`
+  兼容门禁同步收敛），但核查在途任务时发现 LUM-1126 已于 17:42:52Z 派发 **Stage 36（LUM-1129）做同一件事**，
+  且范围更大（还要 `node:readline` 与 `host.rs` op 分支）。两份实现会落在 `pi-ext-shim.mjs` 的同一区域、
+  同一张 `NODE_BUILTINS.md` 表与同一个 `KNOWN_UNBRIDGED` 常量上：合并必冲突，且会留下两套重复实现。
+  因此**丢弃**了这份本地改动（补丁留档在本轮工作目录 `lum-1127-node-module-duplicate.patch`，不推送），
+  改做 frontier 上与本轮两个在途任务**零文件重叠**的第 7 项。
+
+### 二、本轮切片：GFM 表格渲染（`pi-tui/src/markdown.rs`）
+
+frontier 第 7 项（`latex.ts` 与 `markdown.rs` 未覆盖子集）里，表格是上游**真实渲染**、而本端口此前
+降级成纯文本的部分（上游 block 分派里的 `case "table"` → `renderTable`）。本轮把它整条做掉，只改
+`markdown.rs`：不需要新模块、不动 `lib.rs` 的 `pub mod` 区域（Stage 35 正在写那里）。
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| 表 = `\|` 行 + 分隔行，分隔行单元格 `:?-+:?`，两行列数必须一致 | marked table tokenizer | `parse_table` / `parse_delimiter_row` / `is_delimiter_cell`；列数不一致整段退回普通段落，`\|` 不切列（交给行内扫描器还原成 `\|`） |
+| 表格必须从块的首行开始（段落会吞掉后续行） | marked block 规则 | 只在 `parse_blocks` 主循环识别表格，段落循环不为表头断行 |
+| 行单元格按表头列数归一 | marked `splitCells` | `cells.resize(header.len(), "")` + `truncate` |
+| 边框开销 `3n + 1`；装不下就回放 `token.raw` | `markdown.ts:856-870` | 同式；回放时逐源行 wrap（偏离 2） |
+| 自然宽度 = 每个单元格**渲染后**的可见宽度；每列下界 = 最长单词（上限 30） | `markdown.ts:872-899` | `table_column_widths` / `measure_cell` / `longest_word_width` |
+| 下界之和超出可用宽度：先全列降为 1，再按 `weight = 最长单词-1` 比例分配剩余 | `markdown.ts:901-926` | 同式（`checked_div` + 余数逐列补） |
+| 自然宽度放不下：向 `minColumnWidths` 收缩，按 `(自然-下界)/总潜力` 分配，再逐列补余数 | `markdown.ts:929-955` | 同式（两段 `while` 补余数与上游逐字对应） |
+| 网格 `┌─…─┬─…─┐` / 表头 `theme.bold(padded)` / 行间 `├─…─┼─…─┤` / `└─┴┘`；单元格按列宽 wrap 再补空格 | `markdown.ts:957-1005` | `render_table` + `push_table_row`：跨度模型里逐 span 上色，补白继承样式，所以引用块里的表格保持 `mdQuote` |
+| 只有下一个块不是空行时才补空行 | `markdown.ts:1007-1010` | 复用既有 `maybe_blank` |
+
+**刻意偏离（都写进模块文档，不是遗漏）：**
+
+1. **对齐不渲染**：`:---:` 会被解析与校验，但上游 `renderTable` 从不读 `token.align`，本端口同样全部左对齐
+   —— 这与上游一致。
+2. **过窄回放按源行 wrap**：上游 `wrapTextWithAnsi(token.raw, width)` 把整段 raw 当一个字符串，本端口逐源行 wrap；
+   折行点可能不同，但同样不越界、不产生残破网格。
+3. **无管道的表体行结束表格**（上游 row 正则更宽）；行内含 `|` 的代码跨度仍会切列（marked 也切）。
+4. **边框不带颜色槽**：上游边框是纯文本；本端口用继承样式（顶层 `PLAIN`，引用块内跟随 `mdQuote`）。
+5. **宽字形算 1 列**：沿用本 crate 唯一的宽度约定（`display_width`），与上游 `visibleWidth` 的东亚宽度不同，
+   属既有偏离；测试用 CJK 表格固定「不越界、网格等宽」。
+
+**仍未做（第 7 项的剩余部分）**：`renderLatex`（上游 `latex.ts` 1394 行）、OSC-8 hyperlink（需要能力探测并让
+ANSI 逃逸进入单元格，与「单元格里永远没有 ANSI」的既有架构冲突，要单独立项）、语法高亮、块级 HTML。
+
+### 三、测试与验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  21 个 suite 共 417 passed / 0 failed      # 起点 405 → +12（tests/markdown.rs 的表格组）
+$ ... cargo test -p pi-coding-agent --offline
+  15 个 suite 共 360 passed / 0 failed      # 与起点持平：markdown 的下游消费者零回归
+$ ... cargo test --workspace --offline
+  94 个 suite 共 1226 passed / 0 failed
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished，0 warning（仅 vendor `rquickjs-core` 既有 12 条）
+$ rustfmt --check crates/pi-tui/src/markdown.rs crates/pi-tui/tests/markdown.rs
+  clean
+```
+
+新增的 12 条测试全部走 `render_markdown` 公共入口，断言 `plain_text` 与 `ThemeColor::Md*` 槽位而不是 ANSI：
+
+- 网格逐字节（表头 bold、正文不粗、边框无颜色槽）；行分隔只在表头下与行间；**列宽不破最长单词**
+  （上游同款断言：`superlongword` 那一列 ≥ 13）；宽度 50 的三列 wrap（逐行不越界 + 所有网格行等宽 + 内容不丢）；
+  过窄回放（无边框、逐行不越界、原文单词仍在）；对齐标记不渲染；行单元格归一（3 列截断 / 1 列补空）；
+  分隔行列数不匹配退回段落且 `---` 仍是水平线；引用块内表格保持 `mdQuoteBorder` / `mdQuote`；
+  `\|` 与 `MdCode` / `MdLink` / `MdLinkUrl` 槽位；表格结尾不补空行、后接块才补；CJK 宽字形不越界。
+- 另外把 `|` 与 `:` 加进既有的 `special_character_soup_never_panics` 字母表：现在 18 个字符的三层组合
+  （约 1.7 万次、宽度 1/3/8，正好压满「过窄回放」路径）全部不 panic。
+
+### 四、合并与推送
+
+`work/lum-1127` → `feature/pi.rs`：`feature/pi.rs` 仍被若干历史 worktree 占着（HEAD 停在 `009b4179d`），
+按前几轮做法用 plumbing `git merge-tree --write-tree` + `git commit-tree` 合并，再 push 合并提交与工作分支。
+真实哈希见文末补记。
+
+### 五、本轮派发：无（槽位已满）
+
+`running_task_count = 3`：本轮 + Stage 35（LUM-1128，写 `app.rs` / `lib.rs`）+ Stage 36（LUM-1129，
+写 `pi-ext-shim.mjs` / `host.rs`）。3 路上限下没有空槽，而 frontier 剩下的候选全都与在途任务同文件
+（第 2 项选区粒度、第 6 项 `alt-screen-search` 写 `app.rs`；第 5 项 `fetch` 要写 `host.rs`；第 4 项 gzip 仍受
+离线 registry 无 `flate2` 阻塞）。按既有口径「宁可空槽，不制造必然冲突」，本轮不派发；下一轮先看
+LUM-1128 / LUM-1129 的落地情况再排。
+
+### 六、frontier（本轮更新）
+
+第 7 项的「表格」已收口，第 7 项剩余部分与其余各项维持：
+
+1. **P1 鼠标区域派发 / 点击命中**（在途 Stage 35 / LUM-1128）。
+2. **P1 选区粒度与边缘体验**（双击选词 / 三击选行、边缘自动滚动、grapheme 整格扩边）：写 `app.rs`，排在 Stage 35 之后。
+3. **P2 `node:module` / `node:readline`**（在途 Stage 36 / LUM-1129）。
+4. **P2 `node:zlib` 的 gzip/deflate**：纯依赖问题，离线 registry 有 `flate2` / `miniz_oxide` 时再接。
+5. **P2 `fetch` 全局**：要真实 HTTP 桥，落 `host.rs` / shim 通道。
+6. **P3 `alt-screen-search.ts`**（上游 327 行）：需要 `app.rs` 钩子。
+7. **P3 `latex.ts`（1394 行）与 `markdown.rs` 的剩余子集**：本轮已落地**表格**；剩下 LaTeX、OSC-8 hyperlink、
+   语法高亮、块级 HTML —— 后三者的落点都超出 `markdown.rs`（OSC-8 要动缓冲/样式层），应按各自子系统单独立项。
+8. **P3 provider catalog / LUM-1090**：结论维持（无上游 `data/*.json` 事实源，不写猜测值）。
+9. **P3 旧式 X10 鼠标序列、`updateScrollbarHover` 悬停高亮、滚动条拖拽**：等第 1 项落地后顺带。
+10. **新增欠账**：`/settings` 只有三条设置（上游 `SettingsSelectorComponent` 945 行的其余行随各自子系统补）；
+    `settings-list` 的鼠标点击命中与搜索行内嵌 `Input`。
+
+并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。
