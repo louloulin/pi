@@ -18,6 +18,9 @@
 //!
 //! Stage 11 wires [`packages`], the `pi install` / `remove` / `list` /
 //! `version` / `list-models` / `update-models` ecosystem.
+//!
+//! Stage 12 wires [`rpc`], the headless JSON-RPC 2.0 over stdio mode
+//! (`pi --rpc`) that editors and host processes drive.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -30,6 +33,7 @@ pub mod file_processor;
 pub mod interactive;
 pub mod packages;
 pub mod print_mode;
+pub mod rpc;
 pub mod session_log;
 pub mod text_fallback;
 pub mod tool_executor;
@@ -42,5 +46,8 @@ pub use file_processor::{
 };
 pub use print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions, PrintModeResult,
+};
+pub use rpc::{
+    run_rpc_server, JsonRpcError, RpcOutcome, RpcServerError, RpcServerOptions,
 };
 pub use tool_executor::{default_executor, BuiltinToolExecutor};
