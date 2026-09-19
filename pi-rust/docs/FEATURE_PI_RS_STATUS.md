@@ -2392,3 +2392,129 @@ telemetry，已是 trunk 的 `969623ba7`）、`agent/devbox1/lum-1020`（文档�
 **Stage 16 status after this round:** 不变（telemetry 已接入 agent loop）。
 Stage 17 落地后，下一步是 LUM-1067（chord services）→ LUM-1068/1069
 （server/client）。
+
+## LUM-1064 round — Stage 16 (tool wiring): the CLI executes real tools, and the OpenAI family finally sees their output
+
+LUM-1064 (2026-09-19, same autopilot template as LUM-982 / LUM-1011…LUM-1063)
+looked at the frontier after Stage 15 and found that the binary could not
+actually *act*: every mode built its agent without a `ToolExecutor`, and the
+OpenAI-family request builder threw the tool results away. Both gaps are
+self-contained in `pi-coding-agent` + `pi-ai`, so this round fixed them
+instead of dispatching a fourth concurrent task (LUM-1061 / LUM-1063 /
+LUM-1065 / LUM-1066 were already running). It landed alongside the other
+half of the same frontier: `c58b63db3` (LUM-1063) wired telemetry into
+`pi-agent-core`'s loop and took the plain "Stage 16" label, so this round is
+labelled "Stage 16 (tool wiring)".
+
+### Bug 1 — the CLI never registered the built-in tool bundle
+
+`print_mode::build_agent`, `interactive::run_interactive` and
+`rpc::server::Server::new` all constructed `AgentOptions` with only
+`(model, stream_fn, system_prompt)`. `pi-agent-core` treats "no executor" as
+the documented Stage 2 behaviour (`agent_loop.rs::execute_tool_calls`): the
+model's tool call is answered with the fabricated string
+`"(stub) executed <name>"`. The seven real tools built in Stage 10/11
+(`read`, `write`, `edit`, `bash`, `find`, `grep`, `ls`) were therefore
+reachable from library tests only — `pi --print "…"` could not touch a file.
+Worse, the fake result was indistinguishable from a real one at the protocol
+level, so the model kept reasoning on invented output.
+
+| File | Change |
+|------|--------|
+| `crates/pi-coding-agent/src/print_mode.rs` | `PrintModeOptions::tool_executor: Arc<dyn ToolExecutor>` (+ `text()` default); `build_agent` now chains `.with_tool_executor(…)` |
+| `crates/pi-coding-agent/src/interactive.rs` | same field on `InteractiveOptions`, defaulted in `Default`, carried in `Debug`, used by the TUI agent |
+| `crates/pi-coding-agent/src/rpc/mod.rs` | same field on `RpcServerOptions` |
+| `crates/pi-coding-agent/src/rpc/server.rs` | `Server::new` chains `.with_tool_executor(…)` |
+| `crates/pi-coding-agent/src/main.rs` | builds one `default_executor()` at the composition root and passes it to all three modes |
+| `crates/pi-coding-agent/tests/print_mode.rs` | the two full `PrintModeOptions` literals use `default_executor()` |
+
+### Bug 2 — every OpenAI-compatible provider received an empty tool result
+
+Wiring the executor was not enough: the integration tests in this round
+initially passed for the wrong reason (the assertion string also occurred in
+the echoed tool-call arguments), and once the marker was made reachable only
+through the shell, the tool message in the second request came back as
+`{"role":"tool","content":"","tool_call_id":"…"}`.
+
+`pi-ai/src/providers/openai.rs::chat_message_from` built `Role::Tool`
+content by scanning only bare `Content::Text` blocks, but
+`pi-agent-core` wraps every result in `Content::ToolResult(ToolResult {
+content: Box<Content>, .. })`. The Anthropic and Google adapters already
+unwrap that box; the OpenAI one silently produced `""` — which covers
+OpenAI itself and all 13 OpenAI-compatible providers added in Stage 15.
+
+The fix mirrors `anthropic.rs::chat_message_from`: unwrap
+`ToolResult::content`, keep accepting bare text blocks for hand-built
+contexts, and JSON-encode any non-text payload instead of dropping it.
+
+| File | Change |
+|------|--------|
+| `crates/pi-ai/src/providers/openai.rs` | `Role::Tool` serialization unwraps `Content::ToolResult`; +2 unit tests (`tool_result_content_reaches_the_model`, `tool_result_accepts_bare_text_blocks`) |
+
+### Regression tests — `tests/cli_tools.rs` (4 process-level tests)
+
+The file spawns the real binary against a **loopback SSE server** that speaks
+just enough OpenAI chat-completions to script a `bash` / `read` call followed
+by a plain-text reply. The scripted shell command prints the value of
+`PI_CLI_TOOLS_MARKER`, so the marker literal never appears in the request's
+tool-call arguments: finding it in the **second** request proves a real shell
+ran *and* that the real result was fed back. `(stub)` must appear nowhere.
+
+| Test | Proves |
+|------|--------|
+| `print_mode_executes_the_bash_tool_and_feeds_the_result_back` | first request advertises the tool schemas; second carries the shell output; `json-events` reports `tool_execution_end` with `is_error:false` |
+| `print_mode_runs_the_read_tool_against_a_real_file` | the file's bytes reach the model through `read` |
+| `print_mode_surfaces_real_tool_failures_as_error_results` | `exit 3` becomes an error result carrying `[exit code 3]`, and the turn still completes |
+| `rpc_mode_executes_the_bash_tool_and_feeds_the_result_back` | `pi --rpc` drives the same executor and reports the execution as an event |
+
+### Verification (rebased onto `b5f1c9271`, which already contains LUM-1063's telemetry commit)
+
+```
+$ cargo check   --workspace --all-targets                          # 0 errors, 0 warnings
+$ cargo clippy  --workspace --all-targets -- -D warnings            # clean
+$ cargo test    --workspace                                         # 376 / 376 pass
+```
+
+The workspace total moved 363 → 376 across the three commits that landed
+since Stage 15: this round contributes 6 new tests (4 `cli_tools`
+integration + 2 `openai.rs` unit), LUM-1055 adds the Gemini pricing tests
+and LUM-1063 the telemetry ones.
+
+Every `cli_tools` assertion is end-to-end through the real binary: the
+loopback server sees two requests per turn, the second one carrying the
+actual tool output, and the `json-events` / RPC stream reports the
+execution that produced it.
+
+### Known gaps (next candidates)
+
+1. **Settings are still inert.** `crates/pi-coding-agent/src/config.rs` is a
+   14-line placeholder (`ConfigSources`), so upstream's
+   `~/.pi/agent/settings.json` + `<cwd>/.pi/settings.json` merge
+   (`defaultProvider`, `defaultModel`, `defaultThinkingLevel`, `defaultTools`,
+   `enabledModels`, `sessionDir`, `extensions`, compaction/retry settings) has
+   no Rust equivalent. This is the largest remaining parity gap for
+   `packages/coding-agent/src/core/settings-manager.ts` (1417 lines).
+2. **No tool selection flags.** Upstream ships `--tools` / `--no-tools`; the
+   Rust CLI always registers all seven tools. `AgentOptions` already carries
+   the executor, so this is a thin filter over `default_executor()`.
+3. **Extensions are still dead code.** `extensions/js_loader.rs` and the
+   `-e/--extension` flag are never invoked, and `--extensions-dir` is
+   documented but not defined.
+4. **`pi-mono` is re-export glue only.**
+5. **Telemetry is still not wired into the agent turn** (unchanged since
+   Stage 13, owned by LUM-1061).
+
+### Push status
+
+This branch (`agent/devbox1/lum-1064`, local `feature/lum-1064`) was cut from
+`origin/feature/pi.rs` at `751bbd6e4` (the Stage 15 commit) and rebased onto
+the branch tip as of this round (`4218c8992`, after LUM-1055's Gemini pricing
+and LUM-1063's telemetry commits) before being merged back into
+`feature/pi.rs`, so the integration branch and GitHub carry the Stage 16
+tool-wiring commits.
+
+**Numbering note.** LUM-1063's telemetry round (`c58b63db3`, "Stage 16 —
+telemetry wired into the agent loop") landed first and therefore keeps the
+plain "Stage 16" label; this round is the *tool-wiring* half of the same
+frontier and is labelled accordingly. The two touch disjoint crates
+(`pi-agent-core` vs `pi-coding-agent` + the `pi-ai` OpenAI adapter).
