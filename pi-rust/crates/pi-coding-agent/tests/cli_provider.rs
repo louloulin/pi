@@ -33,13 +33,14 @@ use std::time::Duration;
 
 /// Every credential env var the router understands. Removed before each
 /// spawn so the host environment cannot influence the assertions.
-const CREDENTIAL_VARS: [&str; 19] = [
+const CREDENTIAL_VARS: [&str; 21] = [
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_OAUTH_TOKEN",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
+    "ANT_LING_API_KEY",
     "BASETEN_API_KEY",
     "CEREBRAS_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -50,6 +51,7 @@ const CREDENTIAL_VARS: [&str; 19] = [
     "NVIDIA_API_KEY",
     "OPENROUTER_API_KEY",
     "TOGETHER_API_KEY",
+    "XAI_API_KEY",
     "XIAOMI_API_KEY",
     "ZAI_API_KEY",
     "ZAI_CODING_CN_API_KEY",
@@ -57,11 +59,12 @@ const CREDENTIAL_VARS: [&str; 19] = [
 
 /// Every base-URL override env var the router understands, for the same
 /// environment-isolation reason.
-const BASE_URL_VARS: [&str; 18] = [
+const BASE_URL_VARS: [&str; 20] = [
     "OPENAI_BASE_URL",
     "ANTHROPIC_BASE_URL",
     "GEMINI_BASE_URL",
     "GOOGLE_BASE_URL",
+    "ANT_LING_BASE_URL",
     "BASETEN_BASE_URL",
     "CEREBRAS_BASE_URL",
     "DEEPSEEK_BASE_URL",
@@ -73,6 +76,7 @@ const BASE_URL_VARS: [&str; 18] = [
     "NVIDIA_BASE_URL",
     "OPENROUTER_BASE_URL",
     "TOGETHER_BASE_URL",
+    "XAI_BASE_URL",
     "XIAOMI_BASE_URL",
     "ZAI_BASE_URL",
     "ZAI_CODING_CN_BASE_URL",
@@ -317,6 +321,8 @@ fn list_models_includes_the_openai_compatible_family() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for entry in [
         "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-flash",
+        "ant-ling/Ling-2.6-flash",
         "groq/openai/gpt-oss-120b",
         "cerebras/gpt-oss-120b",
         "zai/glm-5.3",
@@ -329,6 +335,7 @@ fn list_models_includes_the_openai_compatible_family() {
         "huggingface/moonshotai/Kimi-K2.6",
         "baseten/zai-org/GLM-5.2",
         "xiaomi/mimo-v2.5-pro",
+        "xai/grok-4.6",
     ] {
         assert!(
             stdout.contains(entry),
@@ -391,6 +398,28 @@ fn deepseek_model_dials_the_chat_completions_endpoint() {
         "DEEPSEEK_API_KEY",
         "deepseek/deepseek-v4-pro",
         "POST /chat/completions",
+    );
+}
+
+#[test]
+fn ant_ling_model_dials_the_chat_completions_endpoint() {
+    assert_request_path(
+        "ANT_LING_BASE_URL",
+        "ANT_LING_API_KEY",
+        "ant-ling/Ling-2.6-flash",
+        "POST /chat/completions",
+    );
+}
+
+#[test]
+fn xai_model_dials_the_responses_endpoint() {
+    // `xai` is not `openai-responses`: it reuses the Responses adapter but
+    // must dial its own host and credential.
+    assert_request_path(
+        "XAI_BASE_URL",
+        "XAI_API_KEY",
+        "xai/grok-4.6",
+        "POST /responses",
     );
 }
 

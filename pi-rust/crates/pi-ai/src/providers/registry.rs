@@ -12,12 +12,21 @@
 //! The table mirrors the TypeScript upstream's `packages/ai/src/providers/*.ts`.
 //! The upstream ships dozens of providers; the Rust port currently covers
 //! the first-party API families (`faux`, `openai` Chat Completions,
-//! `openai-responses` Responses, `anthropic`, `google`) plus the OpenAI
-//! Chat Completions–compatible family, whose members only differ by base
-//! URL, credential and model ids. Providers that speak a wire protocol
-//! this build has no adapter for (Bedrock Converse, Cohere v2, Mistral
-//! conversations, Anthropic-native such as `kimi-coding`) are
-//! intentionally absent until their adapters land.
+//! `openai-responses` Responses, `anthropic`, `google`) plus every provider
+//! whose wire protocol one of those adapters already speaks:
+//!
+//! * the OpenAI Chat Completions–compatible family (DeepSeek, Groq,
+//!   Cerebras, Moonshot AI, Z.AI, OpenRouter, Together, Fireworks, Baseten,
+//!   NVIDIA, Hugging Face, Xiaomi, Ant Ling), whose members only differ by
+//!   base URL, credential and model ids;
+//! * `xai`, which speaks the OpenAI **Responses** API against a different
+//!   host and credential than `openai-responses`.
+//!
+//! Providers that speak a wire protocol this build has no adapter for
+//! (Bedrock Converse, Cohere v2, Mistral conversations, Azure/Vertex
+//! variants) are intentionally absent until their adapters land, as are
+//! the OAuth/subscription-first providers (`github-copilot`,
+//! `openai-codex`, `kimi-coding`), whose auth flow is not ported yet.
 //!
 //! All entries in [`BUILTIN_PROVIDERS`] use one of the adapters in
 //! [`super`]: [`pi_protocol::Api::OpenAiChatCompletions`] maps to
@@ -181,13 +190,40 @@ impl ProviderSpec {
     }
 }
 
+/// Ant Ling — https://api.ant-ling.com/v1 (`/chat/completions`).
+///
+/// Ids, limits and rates come from the upstream generator's hand-written
+/// `antLingModels` block (`packages/ai/scripts/generate-models.ts`), which
+/// is checked in — unlike the models.dev-derived catalogs.
+const ANT_LING_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("Ling-2.6-flash", "Ling 2.6 Flash")
+        .with_limits(262_144, 65_536)
+        .with_pricing(Pricing::micro_usd(10_000, 20_000, 0, 0)),
+    ModelSpec::new("Ling-2.6-1T", "Ling 2.6 1T")
+        .with_limits(262_144, 65_536)
+        .with_pricing(Pricing::micro_usd(60_000, 250_000, 0, 0)),
+    ModelSpec::new("Ring-2.6-1T", "Ring 2.6 1T")
+        .with_limits(262_144, 65_536)
+        .with_pricing(Pricing::micro_usd(60_000, 250_000, 0, 0)),
+];
+
 /// DeepSeek — https://api.deepseek.com (`/chat/completions`).
+///
+/// `deepseek-flash` and `deepseek-v4-pro` carry the exact limits and rates
+/// from the upstream generator's hand-written `deepseekModels` block;
+/// DeepSeek also offers time-based off-peak rates, which the cost model
+/// cannot represent.
 const DEEPSEEK_MODELS: &[ModelSpec] = &[
     ModelSpec::new("deepseek-chat", "DeepSeek Chat"),
     ModelSpec::new("deepseek-r1", "DeepSeek R1").with_limits(128_000, 65_536),
     ModelSpec::new("deepseek-v3.2", "DeepSeek V3.2").with_limits(128_000, 65_536),
+    ModelSpec::new("deepseek-flash", "DeepSeek V4.1 Flash")
+        .with_limits(1_000_000, 384_000)
+        .with_pricing(Pricing::micro_usd(300_000, 1_200_000, 6_000, 0)),
     ModelSpec::new("deepseek-v4-flash", "DeepSeek V4 Flash").with_limits(128_000, 65_536),
-    ModelSpec::new("deepseek-v4-pro", "DeepSeek V4 Pro").with_limits(128_000, 65_536),
+    ModelSpec::new("deepseek-v4-pro", "DeepSeek V4 Pro")
+        .with_limits(1_000_000, 384_000)
+        .with_pricing(Pricing::micro_usd(1_320_000, 3_960_000, 44_000, 0)),
 ];
 
 /// Moonshot AI (global + mainland China). Same model ids on both hosts.
@@ -264,6 +300,20 @@ const FIREWORKS_MODELS: &[ModelSpec] = &[
 
 /// Xiaomi MiMo.
 const XIAOMI_MODELS: &[ModelSpec] = &[ModelSpec::new("mimo-v2.5-pro", "MiMo v2.5 Pro")];
+
+/// xAI — https://api.x.ai/v1 (`POST /v1/responses`).
+///
+/// Reuses the Responses adapter, so this entry only needs xAI's host,
+/// credential and model ids. Upstream builds the catalog from models.dev
+/// and strips unverified aliases (`XAI_BUILTIN_EXCLUDED_MODEL_IDS`); the
+/// three ids below are the ones its own tests index by name, so they are
+/// the stable part of that catalog. Limits fall back to [`ModelSpec::new`]
+/// defaults until the generated catalog can be checked in.
+const XAI_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("grok-4.6", "Grok 4.6"),
+    ModelSpec::new("grok-4.5", "Grok 4.5"),
+    ModelSpec::new("grok-4.3", "Grok 4.3"),
+];
 
 /// The first-party faux provider used by tests and offline runs.
 const FAUX_MODELS: &[ModelSpec] =
@@ -348,6 +398,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
                 .with_limits(1_048_576, 65_536)
                 .with_pricing(Pricing::micro_usd(100_000, 400_000, 25_000, 0)),
         ],
+    },
+    ProviderSpec {
+        id: "ant-ling",
+        display_name: "Ant Ling",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://api.ant-ling.com/v1",
+        api_key_env: &["ANT_LING_API_KEY"],
+        base_url_env: &["ANT_LING_BASE_URL"],
+        models: ANT_LING_MODELS,
     },
     ProviderSpec {
         id: "baseten",
@@ -447,6 +506,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["TOGETHER_API_KEY"],
         base_url_env: &["TOGETHER_BASE_URL"],
         models: TOGETHER_MODELS,
+    },
+    ProviderSpec {
+        id: "xai",
+        display_name: "xAI",
+        api: Api::OpenAiResponses,
+        default_base_url: "https://api.x.ai/v1",
+        api_key_env: &["XAI_API_KEY"],
+        base_url_env: &["XAI_BASE_URL"],
+        models: XAI_MODELS,
     },
     ProviderSpec {
         id: "xiaomi",
@@ -615,6 +683,7 @@ mod tests {
     #[test]
     fn openai_compatible_family_is_present() {
         for id in [
+            "ant-ling",
             "baseten",
             "cerebras",
             "deepseek",
@@ -635,6 +704,27 @@ mod tests {
             assert!(spec.requires_api_key(), "provider `{id}`");
             assert!(!spec.models.is_empty(), "provider `{id}`");
         }
+    }
+
+    #[test]
+    fn xai_reuses_the_responses_adapter_with_its_own_credential() {
+        let spec = find_provider("xai").expect("xai provider");
+        assert_eq!(spec.api, Api::OpenAiResponses);
+        assert_eq!(spec.api_key_env, &["XAI_API_KEY"]);
+        assert_eq!(spec.base_url_env, &["XAI_BASE_URL"]);
+        assert_eq!(spec.default_base_url, "https://api.x.ai/v1");
+        // xAI is its own host/credential, so it must not share OpenAI's.
+        assert_ne!(
+            spec.api_key_env,
+            find_provider("openai-responses")
+                .expect("openai-responses")
+                .api_key_env
+        );
+        assert!(
+            spec.models.iter().any(|m| m.id == "grok-4.6"),
+            "grok-4.6 must be selectable via `--model xai/grok-4.6`"
+        );
+        assert!(spec.models.iter().all(|m| m.max_output_tokens > 0));
     }
 
     #[test]
@@ -686,6 +776,47 @@ mod tests {
         assert_eq!(model_pricing("nope", "gemini-2.5-flash"), None);
         assert_eq!(model_pricing("google", "nope"), None);
         assert_eq!(google.pricing_for("gemini-3-pro"), None);
+    }
+
+    #[test]
+    fn hand_written_catalogs_keep_their_upstream_rates() {
+        // Ant Ling and DeepSeek are the two catalogs the upstream generator
+        // hard-codes rather than deriving from models.dev, so their numbers
+        // are stable enough to pin.
+        let ant_ling = find_provider("ant-ling").expect("ant-ling provider");
+        let flash = ant_ling
+            .pricing_for("Ling-2.6-flash")
+            .expect("Ling-2.6-flash pricing");
+        assert!((flash.input_usd() - 0.01).abs() < 1e-9);
+        assert!((flash.output_usd() - 0.02).abs() < 1e-9);
+        let big = ant_ling
+            .pricing_for("Ling-2.6-1T")
+            .expect("Ling-2.6-1T pricing");
+        assert!((big.input_usd() - 0.06).abs() < 1e-9);
+        assert!((big.output_usd() - 0.25).abs() < 1e-9);
+        assert_eq!(ant_ling.pricing_for("Ring-2.6-1T"), Some(big));
+
+        let deepseek = find_provider("deepseek").expect("deepseek provider");
+        let v41 = deepseek
+            .pricing_for("deepseek-flash")
+            .expect("deepseek-flash pricing");
+        assert!((v41.input_usd() - 0.30).abs() < 1e-9);
+        assert!((v41.output_usd() - 1.20).abs() < 1e-9);
+        assert!((v41.cache_read_usd() - 0.006).abs() < 1e-9);
+        let pro = deepseek
+            .pricing_for("deepseek-v4-pro")
+            .expect("deepseek-v4-pro pricing");
+        assert!((pro.input_usd() - 1.32).abs() < 1e-9);
+        assert!((pro.output_usd() - 3.96).abs() < 1e-9);
+        assert!((pro.cache_read_usd() - 0.044).abs() < 1e-9);
+
+        let pro_spec = deepseek
+            .models
+            .iter()
+            .find(|m| m.id == "deepseek-v4-pro")
+            .expect("deepseek-v4-pro model");
+        assert_eq!(pro_spec.context_window, 1_000_000);
+        assert_eq!(pro_spec.max_output_tokens, 384_000);
     }
 
     #[test]

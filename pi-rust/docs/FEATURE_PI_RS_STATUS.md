@@ -5267,3 +5267,86 @@ LUM-1097 轮记录的「建议 0.9 → 0.14 迁移」本轮做了**反证**，�
 - LUM-1090：`--rpc` NDJSON/stdio 与 `pi-client` 带帧 socket 传输层不同，**前提不成立**的结论
   维持，建议重写定界或 `wontfix`。
 - 其余（主题系统 / provider 家族 / `.wasm` 宿主）体量大，仍不作为单轮 autopilot 目标。
+
+## LUM-1099 round — 核验 `feature/pi.rs` + provider 家族补全（xAI / Ant Ling + DeepSeek 定价）+ 3 路协调轮盘点
+
+本轮（autopilot，2026-09-19 20:29 CST 触发）核验 `feature/pi.rs`，确认没有「已交付未合入」的
+分支后，落了一块**零文件重叠、数据驱动**的切片：把上游已有适配器、但 Rust 注册表里缺失的
+provider 补齐，并修正 DeepSeek 的定价 / 上限。
+
+### 一、核验与在途盘点
+
+- 开工 `origin/feature/pi.rs = b10f49088`（LUM-1098 协调轮）；`git fetch --all` 后远端未前移。
+- 逐分支核对「已提交但未合入」：
+  - `mirror/work/lum-1088`（2 commits）确实未合入，但 LUM-1088 仍在 `in_progress` → **不动**。
+  - `mirror/agent/devbox1/9f0097e10886` 相对 `feature/pi.rs` 只有 `lib.rs` 里两行 `pub use`
+    的**顺序**差异（内容等价）；`mirror/agent/devbox1/b662db4686e7` 是 Stage 0 旧 lineage。
+    两者都没有新内容。
+- 槽位：开工 `multica daemon status` 为 `running_task_count = 3`（本协调 run + LUM-1083 +
+  LUM-1088），中途涨到 5（同工作区另有 LUM-1100 / LUM-1101 两路 autopilot 协调轮）→ **本轮不派发**。
+  同一 autopilot 触发产生了 3 路重复协调轮（LUM-1099 / 1100 / 1101），存在重复劳动与
+  `FEATURE_PI_RS_STATUS.md` 推送冲突风险；本轮提交前重新 `git fetch` 并基于最新 tip 推送（见下）。
+
+### 二、验证（native，复用 LUM-1097 轮次的 `target` 缓存）
+
+```
+$ cargo check    --workspace --all-targets --offline                 # 0 errors
+$ cargo clippy   --workspace --all-targets --offline -- -D warnings   # 0 warnings
+$ cargo test     --workspace --no-fail-fast --offline                # 仅 1 个 target 失败
+```
+
+唯一失败是 LUM-1083 的概率性扩展宿主崩溃，本轮**新出现在第三个 target**
+（`-p pi-coding-agent --test print_mode` 的 `sigint_or_clean_exit`，`free(): double free detected
+in tcache 2`）；连跑 5 次里第 4 次失败（≈1/5），与 LUM-1098 轮记录的 rpc 5/12 同源。
+
+本切片改完后的定向验证：
+
+```
+$ cargo test   -p pi-ai --offline                                 # 63 passed（含 registry 14）
+$ cargo test   -p pi-coding-agent --lib --offline                 # 219 passed
+$ cargo test   -p pi-coding-agent --test cli_provider --offline   # 17 passed
+$ cargo clippy -p pi-ai -p pi-coding-agent --all-targets --offline -- -D warnings   # 0 warnings
+```
+
+### 三、本轮切片：registry provider 家族补全
+
+上游 `packages/ai` 有数十个 provider，Rust 注册表（`pi-ai/src/providers/registry.rs`）此前只有
+19 个。本轮只补**适配器已经存在**的那些（OpenAI Chat Completions / Anthropic Messages /
+OpenAI Responses），因此是纯数据、零新代码路径：
+
+| provider | api | base URL | credential | 模型 |
+|----------|-----|----------|------------|------|
+| `ant-ling` | `openai-completions` | `https://api.ant-ling.com/v1` | `ANT_LING_API_KEY` | `Ling-2.6-flash` / `Ling-2.6-1T` / `Ring-2.6-1T` |
+| `xai` | `openai-responses` | `https://api.x.ai/v1` | `XAI_API_KEY` | `grok-4.6` / `grok-4.5` / `grok-4.3` |
+
+- `ant-ling` 的 model id / 上下文 262144 / 输出 65536 / 费率（0.01·0.02、0.06·0.25 美元每百万 token）
+  取自上游 `scripts/generate-models.ts` 里**手写**的 `antLingModels` 块（已入库，不是 models.dev 生成物）。
+- 同源的 `deepseekModels` 块也被用来**修正** Rust 侧：新增 `deepseek-flash`（1M 上下文 /
+  384k 输出 / 0.30 / 1.20 / cache-read 0.006），并把 `deepseek-v4-pro` 从 128k / 65k 修正为
+  1M / 384k 加 1.32 / 3.96 / 0.044（原先没有任何定价）。
+- `xai` 只登记上游测试直接按名索引的三个 id；`XAI_BUILTIN_EXCLUDED_MODEL_IDS` 里的未验证别名
+  （`grok-3*` / `grok-4.20-*` / `grok-code-fast-1` / `grok-build-0.1`）**不登记**。其
+  `contextWindow` / `maxTokens` 暂用 `ModelSpec::new` 默认值（上游该 catalog 是 models.dev
+  生成物、未入库），注释里注明待生成 catalog 入库后校正。
+- 未登记 Anthropic Messages 家族（`minimax` / `minimax-cn` / `kimi-coding`）：适配器够用，但
+  这些 id 的 limits 同样只存在于未入库的生成 catalog，不为凑数写入猜测值。
+
+| File | Change |
+|------|--------|
+| `pi-ai/src/providers/registry.rs` | 新增 `ANT_LING_MODELS` / `XAI_MODELS`、修正 `DEEPSEEK_MODELS`、新增 `ant-ling` 与 `xai` 两条 `ProviderSpec`、更新模块文档；`openai_compatible_family_is_present` 纳入 `ant-ling`；+2 单测（`xai_reuses_the_responses_adapter_with_its_own_credential`、`hand_written_catalogs_keep_their_upstream_rates`） |
+| `pi-coding-agent/src/provider.rs` | 模块文档的 family 清单加 `xai` 说明；+1 单测（只有 `XAI_API_KEY` 时只注册 `xai`，不会连带注册 `openai-responses`） |
+| `pi-coding-agent/tests/cli_provider.rs` | 凭证 / base-URL 隔离表新增 `ANT_LING_*`、`XAI_*`（19→21、18→20）；`list-models` 断言新增 3 条；+2 进程级测试（`ant-ling` 拨 `/chat/completions`、`xai` 拨 `/responses`） |
+
+因为 `ProviderRouter` 完全由 `BUILTIN_PROVIDERS` 派生，登记一条 `ProviderSpec` 即端到端可用：
+`--model xai/grok-4.6`、`--model ant-ling/Ling-2.6-flash` 会各自拨号并由现成适配器流式返回。
+
+### 四、frontier
+
+- 主题系统 / 配色：`pi-tui` 目前**完全没有** `Color::` 使用，且组件 API 是
+  `render_lines(width) -> Vec<String>`（纯文本，无 `Span` 样式）→ 单独加主题模块只会是死代码，
+  要连同全组件渲染 API 一起改，属 Stage 级，本轮不做。
+- provider 家族：`minimax` / `minimax-cn` / `kimi-coding` / `vercel-ai-gateway` 等仍缺 catalog
+  数据；Mistral Conversations 这类需要新适配器（上游 941 行 TS），属 Stage 级。
+- LUM-1083：进程级崩溃仍在（本轮新增 `print_mode` target 证据），修复在途（占扩展加载路径）。
+- LUM-1090：`--rpc` 客户端定界问题维持 LUM-1098 结论（前提不成立，建议重写定界或 `wontfix`）。
+

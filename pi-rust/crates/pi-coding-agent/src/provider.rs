@@ -35,8 +35,9 @@
 //! registry carries the OpenAI Chat
 //! Completions–compatible family (DeepSeek, Groq, Cerebras, Moonshot AI,
 //! Z.AI, OpenRouter, Together, Fireworks, Baseten, NVIDIA, Hugging Face,
-//! Xiaomi). All of those reuse [`OpenAiProvider`] and differ only by
-//! base URL and credential — no per-provider code path.
+//! Xiaomi, Ant Ling) and `xai`, which speaks the Responses API against
+//! its own host (`XAI_API_KEY`). All of those reuse an existing adapter
+//! and differ only by base URL and credential — no per-provider code path.
 //!
 //! Each adapter also accepts an optional base-URL override
 //! (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL` /
@@ -399,6 +400,25 @@ mod tests {
                 Api::OpenAiChatCompletions
             ))
             .is_ok());
+    }
+
+    #[test]
+    fn xai_key_registers_the_responses_adapter_for_its_own_host() {
+        // `xai` rides the Responses adapter but keeps its own credential,
+        // so an XAI key must not register (or unregister) `openai-responses`.
+        let router = ProviderRouter::from_env_with(|name| match name {
+            "XAI_API_KEY" => Some("test-key".to_string()),
+            _ => None,
+        });
+        assert!(router.has_provider("xai"));
+        assert!(!router.has_provider("openai-responses"));
+        assert!(!router.has_provider("openai"));
+        assert_eq!(router.provider_ids(), vec!["faux", "xai"]);
+        assert!(router
+            .require(&model("xai", "grok-4.6", Api::OpenAiResponses))
+            .is_ok());
+        assert_eq!(api_key_env_vars("xai"), &["XAI_API_KEY"]);
+        assert_eq!(base_url_env_vars("xai"), &["XAI_BASE_URL"]);
     }
 
     #[test]
