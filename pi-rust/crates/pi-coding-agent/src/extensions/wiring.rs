@@ -13,29 +13,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use pi_agent_core::tools::ToolExecutor;
 use pi_extensions::{
     CommandExecutionOutcome, ExtensionBridge, ExtensionError, ExtensionSideEffects, HostOptions,
-    JsExtensionHost, RegisteredCommand, ToolContext, UiHandler,
+    JsExtensionHost, RegisteredCommand, UiHandler,
 };
 use pi_protocol::{ExtensionEvent, UiLevel};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
-use crate::extensions::ui_bridge::TuiUiBridge;
 use crate::tool_executor::{BuiltinToolExecutor, ExtensionToolExecutor};
-
-/// Timeout used for interactive extension calls.
-///
-/// The default [`pi_extensions::DEFAULT_TIMEOUT`] is 5s, which is right
-/// for a headless host but far too short for a human: the extension is
-/// *awaiting a key press* for as long as the user takes to read the
-/// prompt. Interactive mode therefore raises the ceiling to five
-/// minutes — long enough for any dialog, short enough that a wedged
-/// extension cannot hold a turn open forever.
-///
-pub const INTERACTIVE_UI_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Everything [`load`] needs to resolve and evaluate extensions.
 #[derive(Debug, Clone)]
@@ -51,11 +38,6 @@ pub struct ExtensionLoadOptions {
     pub mode: String,
     /// Whether `ctx.hasUI` is `true` for this mode.
     pub has_ui: bool,
-    /// Interactive UI bridge. Setting it installs the TUI dialog
-    /// handler *and* makes `ctx.hasUI` reflect that handler (see
-    /// [`load`]). Leave it `None` for print / RPC / no-TTY runs, where
-    /// the stderr handler is the honest answer.
-    pub ui: Option<TuiUiBridge>,
     /// Set by `--no-extensions`: skip discovery and ship built-ins only.
     pub disabled: bool,
 }
@@ -74,7 +56,6 @@ impl ExtensionLoadOptions {
             explicit: Vec::new(),
             mode: mode.into(),
             has_ui,
-            ui: None,
             disabled: false,
         }
     }
@@ -197,20 +178,18 @@ impl ExtensionRuntime {
     }
 }
 
-/// `UiHandler` for every non-interactive mode.
+/// `UiHandler` that surfaces extension notifications on stderr.
 ///
 /// Interactive prompts (confirm / input / select) are deliberately
-/// non-interactive here: extensions get the documented deny / cancel
-/// answers rather than blocking the mode on a prompt nothing can
-/// render (the JS shim additionally reports the denial through
-/// `ctx.ui.notify`, so a plugin author can see why). Notifications are
-/// forwarded so `ctx.ui.notify(...)` stays visible.
+/// non-interactive for now: extensions get the documented deny / cancel
+/// answers rather than blocking the agent on a prompt the Rust TUI does
+/// not render yet. Notifications are forwarded so `ctx.ui.notify(...)`
+/// from an extension is visible.
 #[derive(Debug, Default)]
 pub struct StderrUiHandler;
 
-#[async_trait::async_trait]
 impl UiHandler for StderrUiHandler {
-    async fn notify(&self, message: &str, level: UiLevel) {
+    fn notify(&self, message: &str, level: UiLevel) {
         eprintln!("[extension] {level:?}: {message}");
     }
 }
@@ -240,28 +219,9 @@ pub fn load(
         explicit: options.explicit.clone(),
     };
     let cwd = options.cwd.display().to_string();
+    let host_options = HostOptions::default().with_ui_handler(Arc::new(StderrUiHandler));
     let mode = options.mode.clone();
-    // `ctx.hasUI` tracks the *installed handler*, not the mode name: no
-    // dialog bridge means the shim's non-interactive path (deny +
-    // warn) is the truth, so a mode cannot claim a UI it cannot show.
-    let has_ui = options.has_ui && options.ui.is_some();
-    let host_options = match &options.ui {
-        Some(ui) => HostOptions::default()
-            .with_ui_handler(ui.handler())
-            .with_timeout(INTERACTIVE_UI_TIMEOUT)
-            .with_tool_context(ToolContext {
-                mode: mode.clone(),
-                has_ui,
-                cwd: cwd.clone(),
-            }),
-        None => HostOptions::default()
-            .with_ui_handler(Arc::new(StderrUiHandler))
-            .with_tool_context(ToolContext {
-                mode: mode.clone(),
-                has_ui,
-                cwd: cwd.clone(),
-            }),
-    };
+    let has_ui = options.has_ui;
 
     let result = runtime.block_on(async {
         let host = JsExtensionHost::with_options(host_options).await?;
@@ -269,7 +229,7 @@ pub fn load(
             host.clone(),
             &request,
             &options.mode,
-            has_ui,
+            options.has_ui,
             &cwd,
         )
         .await;

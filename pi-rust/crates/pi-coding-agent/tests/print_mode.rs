@@ -473,7 +473,12 @@ fn binary_json_events_mode_emits_ndjson() {
         .env("RUST_BACKTRACE", "0")
         .output()
         .expect("run");
-    assert!(output.status.success(), "binary exited non-zero");
+    assert!(
+        output.status.success(),
+        "binary exited non-zero: {:?} (stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let events: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
     assert!(!events.is_empty(), "no NDJSON lines emitted");
@@ -500,7 +505,12 @@ fn binary_at_file_expands_prompt() {
         .env("RUST_BACKTRACE", "0")
         .output()
         .expect("run");
-    assert!(output.status.success(), "binary exited non-zero");
+    assert!(
+        output.status.success(),
+        "binary exited non-zero: {:?} (stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     // We can't directly observe the expanded prompt on stdout (the
     // faux provider always returns "(faux) hello") but we can verify
     // the binary didn't error out on `@file` expansion.

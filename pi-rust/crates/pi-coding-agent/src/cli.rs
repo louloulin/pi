@@ -54,6 +54,23 @@ pub struct Cli {
     #[arg(long, value_name = "TEXT")]
     pub append_system_prompt: Vec<String>,
 
+    /// Load a skill file or directory for this run only. The default
+    /// locations (`~/.pi/agent/skills` and `.pi/skills`) are always
+    /// searched unless `--no-skills` is set. Repeatable. Mirrors
+    /// `pi --skill`.
+    #[arg(long = "skill", value_name = "PATH")]
+    pub skill: Vec<std::path::PathBuf>,
+
+    /// Disable skill discovery and loading (`--no-skills`, `-ns` in the
+    /// TS CLI).
+    #[arg(long = "no-skills")]
+    pub no_skills: bool,
+
+    /// Disable `AGENTS.md` / `CLAUDE.md` discovery and loading
+    /// (`--no-context-files`, `-nc` in the TS CLI).
+    #[arg(long = "no-context-files")]
+    pub no_context_files: bool,
+
     /// Path to a session directory. Defaults to `~/.pi/sessions/`.
     #[arg(long, value_name = "PATH")]
     pub session_dir: Option<std::path::PathBuf>,

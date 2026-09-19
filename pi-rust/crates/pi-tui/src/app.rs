@@ -23,7 +23,6 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::dialog::{Dialog, DialogAction, DialogKind};
 use crate::editor::EditorAction;
 use crate::input::{InputEvent, Key, KeyCode, KeyModifiers};
 use crate::message::{MessageItem, MessageView};
@@ -91,14 +90,6 @@ pub struct RenderSnapshot {
     pub selector_items: Vec<SelectorItem>,
     /// Selector cursor index (when open).
     pub selector_cursor: Option<usize>,
-    /// Whether a modal extension dialog is currently visible.
-    pub dialog_open: bool,
-    /// Flavour of the open dialog (when open).
-    pub dialog_kind: Option<DialogKind>,
-    /// Title of the open dialog (when open).
-    pub dialog_title: Option<String>,
-    /// Rendered dialog lines (when open).
-    pub dialog_lines: Vec<String>,
     /// Status bar snapshot.
     pub status: StatusData,
 }
@@ -119,12 +110,6 @@ pub struct App {
     status_bar: StatusBar,
     status_data: StatusData,
     selector: Option<Selector>,
-    /// Modal requested by a JS extension (`ctx.ui.confirm` / `input` /
-    /// `select`) that is waiting for a key press.
-    dialog: Option<Dialog>,
-    /// Channel carrying dialogs from the extension host. Only set in
-    /// interactive mode; see `pi-coding-agent`'s extension UI bridge.
-    ui_dialogs: Option<mpsc::UnboundedReceiver<Dialog>>,
     /// Live subscription to agent events. Constructed in
     /// [`App::new`] from `agent.subscribe()` so the App receives every
     /// event the agent emits across all turns.
@@ -164,8 +149,6 @@ impl App {
             status_bar: StatusBar::new(),
             status_data,
             selector: None,
-            dialog: None,
-            ui_dialogs: None,
             event_rx: Some(event_rx),
             cancel_token: None,
             pending_error: None,
@@ -385,89 +368,6 @@ impl App {
         self.selector.is_some()
     }
 
-    /// Attach the channel that carries extension dialogs.
-    ///
-    /// The interactive entry point calls this with the receiver half of
-    /// the extension UI bridge; [`App::poll_ui_dialogs`] then turns each
-    /// envelope into a modal.
-    pub fn attach_ui_dialogs(&mut self, rx: mpsc::UnboundedReceiver<Dialog>) {
-        self.ui_dialogs = Some(rx);
-    }
-
-    /// Show `dialog` and wait for the user.
-    ///
-    /// Returns `false` without showing it when another modal is already
-    /// on screen — the dialog is answered with its cancel default so the
-    /// extension never waits on a prompt nobody can see.
-    pub fn open_dialog(&mut self, mut dialog: Dialog) -> bool {
-        if self.dialog.is_some() {
-            dialog.cancel();
-            return false;
-        }
-        self.dialog = Some(dialog);
-        true
-    }
-
-    /// Whether a modal extension dialog is on screen.
-    pub fn dialog_open(&self) -> bool {
-        self.dialog.is_some()
-    }
-
-    /// Borrow the open dialog.
-    pub fn dialog(&self) -> Option<&Dialog> {
-        self.dialog.as_ref()
-    }
-
-    /// Take the open dialog out of the App — used by the entry point
-    /// after it resolved the answer itself.
-    pub fn take_dialog(&mut self) -> Option<Dialog> {
-        self.dialog.take()
-    }
-
-    /// Drain queued extension UI requests.
-    ///
-    /// `notify` requests become message-view lines (they are
-    /// fire-and-forget), everything else becomes a modal. A modal whose
-    /// host stopped waiting is closed. Returns whether the App changed
-    /// and the caller should redraw.
-    pub fn poll_ui_dialogs(&mut self) -> bool {
-        let mut changed = false;
-        if let Some(dialog) = &self.dialog {
-            if dialog.is_abandoned() {
-                self.dialog = None;
-                changed = true;
-            }
-        }
-        loop {
-            let dialog = match self.ui_dialogs.as_mut() {
-                None => break,
-                Some(rx) => match rx.try_recv() {
-                    Ok(dialog) => dialog,
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        self.ui_dialogs = None;
-                        changed = true;
-                        break;
-                    }
-                },
-            };
-            changed = true;
-            if dialog.kind() == DialogKind::Notify {
-                let mut dialog = dialog;
-                if let Some((message, level)) = dialog.notify_text() {
-                    self.messages.push_info(format!("[{level:?}] {message}"));
-                }
-                dialog.resolve(Some(pi_protocol::UiResponse::NotifyAck));
-                continue;
-            }
-            // A rejected dialog is answered with its cancel default by
-            // `open_dialog`; the sender dropping would do the same, but
-            // sending is explicit.
-            let _ = self.open_dialog(dialog);
-        }
-        changed
-    }
-
     /// Borrow the active selector (if any).
     pub fn selector(&self) -> Option<&Selector> {
         self.selector.as_ref()
@@ -478,14 +378,6 @@ impl App {
     pub fn step(&mut self, event: InputEvent) -> StepOutcome {
         if self.exit_requested {
             return StepOutcome::Exit;
-        }
-        // An open modal owns the keyboard: the selector and prompt stay
-        // frozen underneath it.
-        if self.dialog.is_some() {
-            let InputEvent::Key(key) = event else {
-                return StepOutcome::Idle;
-            };
-            return self.step_dialog(key);
         }
         // Selector gets first dibs on keys when it is open.
         if let Some(selector) = self.selector.as_mut() {
@@ -509,11 +401,6 @@ impl App {
     /// Process a single [`Key`]. Public so tests can step the App
     /// with explicit keys.
     pub fn step_key(&mut self, key: Key) -> StepOutcome {
-        // A modal dialog swallows every key — including Ctrl+C / Esc,
-        // which cancel the dialog instead of the turn or the App.
-        if self.dialog.is_some() {
-            return self.step_dialog(key);
-        }
         // Global keys first.
         match key {
             // Esc cancels the in-flight turn, otherwise dismisses
@@ -566,23 +453,6 @@ impl App {
             PromptAction::Eof => {
                 self.exit_requested = true;
                 StepOutcome::Exit
-            }
-        }
-    }
-
-    /// Route a key to the open dialog.
-    fn step_dialog(&mut self, key: Key) -> StepOutcome {
-        let Some(dialog) = self.dialog.as_mut() else {
-            return StepOutcome::Idle;
-        };
-        match dialog.handle_key(key) {
-            DialogAction::None => StepOutcome::Idle,
-            DialogAction::Changed => StepOutcome::Redraw,
-            // The answer already travelled to the host over the
-            // dialog's reply channel; the modal just closes.
-            DialogAction::Resolved(_) => {
-                self.dialog = None;
-                StepOutcome::Redraw
             }
         }
     }
@@ -647,37 +517,8 @@ impl App {
             let start_row = area.y + 1;
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
-                if y >= area.y + message_height {
+                if y >= area.y + area.height.saturating_sub(status_height + prompt_height) {
                     break;
-                }
-                for (col, ch) in line.chars().enumerate() {
-                    let x = area.x + col as u16;
-                    if x >= area.x + area.width {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_char(ch);
-                    }
-                }
-            }
-        }
-
-        // Extension dialog overlay — topmost, so it wins over the
-        // selector if both are somehow open.
-        if let Some(dialog) = &self.dialog {
-            let lines = dialog.render_lines(area.width);
-            let start_row = area.y;
-            for (offset, line) in lines.iter().enumerate() {
-                let y = start_row + offset as u16;
-                if y >= area.y + message_height {
-                    break;
-                }
-                // Blank the row first: a modal must be readable even
-                // when the message view underneath is full of text.
-                for col in 0..area.width {
-                    if let Some(cell) = buf.cell_mut((area.x + col, y)) {
-                        cell.set_char(' ');
-                    }
                 }
                 for (col, ch) in line.chars().enumerate() {
                     let x = area.x + col as u16;
@@ -728,14 +569,6 @@ impl App {
                 .map(|s| s.items().to_vec())
                 .unwrap_or_default(),
             selector_cursor: self.selector.as_ref().map(|s| s.cursor()),
-            dialog_open: self.dialog.is_some(),
-            dialog_kind: self.dialog.as_ref().map(|d| d.kind()),
-            dialog_title: self.dialog.as_ref().map(|d| d.title().to_string()),
-            dialog_lines: self
-                .dialog
-                .as_ref()
-                .map(|d| d.render_lines(width))
-                .unwrap_or_default(),
             status: self.status_data.clone(),
         }
     }

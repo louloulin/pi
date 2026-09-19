@@ -36,7 +36,6 @@ use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::commands::{handle_command, SlashCommand};
-use crate::extensions::ui_bridge::TuiUi;
 use crate::extensions::wiring::ExtensionRuntime;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
@@ -92,10 +91,6 @@ pub struct InteractiveOptions {
     /// Loaded JS extensions, when any. `None` disables extension
     /// command dispatch and side-effect persistence.
     pub extensions: Option<Arc<ExtensionRuntime>>,
-    /// Interactive UI bridge for `ctx.ui.confirm / input / select`.
-    /// `None` keeps the headless behaviour (deny / cancel), which is
-    /// what tests and non-TTY runs get.
-    pub extension_ui: Option<TuiUi>,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -111,7 +106,6 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("stream_fn", &"<dyn StreamFn>")
             .field("tool_executor", &"<dyn ToolExecutor>")
             .field("extensions", &self.extensions.is_some())
-            .field("extension_ui", &self.extension_ui.is_some())
             .finish()
     }
 }
@@ -129,7 +123,6 @@ impl Default for InteractiveOptions {
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
             tool_executor: default_executor(),
             extensions: None,
-            extension_ui: None,
         }
     }
 }
@@ -149,10 +142,14 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     }
 
     let agent = Agent::new(
-        AgentOptions::new(resolved_model.clone(), stream_fn, system_prompt)
-            // The TUI is a real coding session: tool calls must hit the
-            // filesystem / shell instead of the Stage 2 stub.
-            .with_tool_executor(options.tool_executor.clone()),
+        AgentOptions::new(
+            resolved_model.clone(),
+            stream_fn,
+            system_prompt,
+        )
+        // The TUI is a real coding session: tool calls must hit the
+        // filesystem / shell instead of the Stage 2 stub.
+        .with_tool_executor(options.tool_executor.clone()),
     );
     let agent = Arc::new(AsyncMutex::new(agent));
 
@@ -189,21 +186,12 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     agent: Arc<AsyncMutex<Agent>>,
-    mut options: InteractiveOptions,
+    options: InteractiveOptions,
     config: AppConfig,
 ) -> anyhow::Result<InteractiveExit> {
     // Build the App on the stack first so we can drop it before
     // tearing down the terminal.
     let mut app = App::new(&*agent.lock().await, config.clone());
-
-    // Extension dialogs: the App drains the bridge every tick, and the
-    // gate only opens now that the loop is running (see `ui_bridge`).
-    if let Some(ui) = options.extension_ui.as_mut() {
-        if let Some(dialogs) = ui.take_dialogs() {
-            app.attach_ui_dialogs(dialogs);
-        }
-        ui.arm();
-    }
 
     // Initial prompt is submitted on launch.
     if let Some(text) = options.initial_prompt.clone() {
@@ -219,16 +207,13 @@ async fn run_loop(
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
         app.drain_agent_events();
-        // Turn queued `ctx.ui.*` requests into modals (and notifications
-        // into transcript lines) before rendering them.
-        app.poll_ui_dialogs();
         // Extensions write session entries / custom messages from
         // event handlers; fold them into the log + transcript each
         // tick so nothing is lost between turns.
         persist_extension_side_effects(&mut app, &options);
 
         if app.is_exit_requested() {
-            break;
+            return Ok(InteractiveExit::UserExit);
         }
 
         // Redraw.
@@ -267,18 +252,12 @@ async fn run_loop(
                     handle_input_event(&mut app, &agent, &options, translated).await?
                 {
                     match action {
-                        InternalAction::Exit => break,
+                        InternalAction::Exit => return Ok(InteractiveExit::UserExit),
                     }
                 }
             }
         }
     }
-
-    // Nothing is pumping dialogs any more: deny instead of queueing.
-    if let Some(ui) = options.extension_ui.as_ref() {
-        ui.disarm();
-    }
-    Ok(InteractiveExit::UserExit)
 }
 
 /// Internal action returned from `handle_input_event`.
@@ -297,9 +276,8 @@ async fn handle_input_event(
     options: &InteractiveOptions,
     event: InputEvent,
 ) -> anyhow::Result<Option<InternalAction>> {
-    // When the selector is open (and no extension dialog is on top of
-    // it), handle selection first.
-    if app.selector_open() && !app.dialog_open() {
+    // When the selector is open, handle selection first.
+    if app.selector_open() {
         let InputEvent::Key(key) = event else {
             return Ok(None);
         };
@@ -515,10 +493,7 @@ fn help_text_with_extensions(commands: &[pi_extensions::RegisteredCommand]) -> S
         if command.description.is_empty() {
             section.push_str(&format!("  /{}\n", command.name));
         } else {
-            section.push_str(&format!(
-                "  /{:<16} {}\n",
-                command.name, command.description
-            ));
+            section.push_str(&format!("  /{:<16} {}\n", command.name, command.description));
         }
     }
     match base.split_once("\nkeys:") {
@@ -541,8 +516,7 @@ fn persist_extension_side_effects(app: &mut App, options: &InteractiveOptions) {
     let log = options.session_log.as_ref();
     for entry in &effects.entries {
         if let Some(log) = log {
-            let _ =
-                log.append_extension("extension", entry.custom_type.clone(), entry.data.clone());
+            let _ = log.append_extension("extension", entry.custom_type.clone(), entry.data.clone());
         }
     }
     for message in &effects.messages {
@@ -553,8 +527,11 @@ fn persist_extension_side_effects(app: &mut App, options: &InteractiveOptions) {
     }
     for user_message in &effects.user_messages {
         if let Some(log) = log {
-            let _ =
-                log.append_extension("extension", "user_message", serde_json::json!(user_message));
+            let _ = log.append_extension(
+                "extension",
+                "user_message",
+                serde_json::json!(user_message),
+            );
         }
         app.info(format!("[extension] queued message: {user_message}"));
     }
@@ -695,12 +672,18 @@ mod tests {
 
     #[test]
     fn help_text_without_commands_is_unchanged() {
-        assert_eq!(help_text_with_extensions(&[]), crate::commands::help_text());
+        assert_eq!(
+            help_text_with_extensions(&[]),
+            crate::commands::help_text()
+        );
     }
 
     #[test]
     fn message_preview_prefers_content_then_text_then_json() {
-        assert_eq!(message_preview(&serde_json::json!({"content": "hi"})), "hi");
+        assert_eq!(
+            message_preview(&serde_json::json!({"content": "hi"})),
+            "hi"
+        );
         assert_eq!(message_preview(&serde_json::json!("plain")), "plain");
         assert_eq!(
             message_preview(&serde_json::json!({"other": 1})),
