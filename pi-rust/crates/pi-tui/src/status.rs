@@ -5,7 +5,11 @@
 
 use std::fmt::Write as _;
 
+use crate::styled::{
+    plain_text, themed_text, write_styled_line, SpanStyle, StyledLine, StyledSpan,
+};
 use crate::styles::SelectListStyles;
+use crate::theme::{Theme, ThemeColor};
 
 /// Snapshot of the data the status bar renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +63,7 @@ impl StatusBar {
 
     /// Render the status bar as a single string for a given width.
     pub fn render(&self, data: &StatusData, width: u16) -> String {
-        self.render_impl(data, width, None)
+        plain_text(&self.render_styled_line(data, width))
     }
 
     /// Themed variant of [`StatusBar::render`].
@@ -75,15 +79,20 @@ impl StatusBar {
         width: u16,
         styles: &SelectListStyles<'_>,
     ) -> String {
-        self.render_impl(data, width, Some(styles))
+        themed_text(&self.render_styled_line(data, width), styles.theme())
     }
 
-    fn render_impl(
-        &self,
-        data: &StatusData,
-        width: u16,
-        styles: Option<&SelectListStyles<'_>>,
-    ) -> String {
+    /// Lay the bar out as theme-slot spans clipped to `width`.
+    ///
+    /// This is the single layout implementation behind [`render`] (plain
+    /// text), [`render_themed`] (ANSI strings) and the App's themed buffer
+    /// path. Each segment is clipped against the remaining budget in visual
+    /// order, so the concatenated text is exactly the leading `width`
+    /// characters of the full `<model><session><padding><stats>` line.
+    ///
+    /// [`render`]: StatusBar::render
+    /// [`render_themed`]: StatusBar::render_themed
+    pub fn render_styled_line(&self, data: &StatusData, width: u16) -> StyledLine {
         let width = width as usize;
         let mut left = String::new();
         let _ = write!(&mut left, "{}", data.model);
@@ -114,42 +123,27 @@ impl StatusBar {
         } else {
             0
         };
-
-        let Some(styles) = styles else {
-            let mut out = String::with_capacity(width.max(left_len + session_len + right_len));
-            out.push_str(&left);
-            out.push_str(&session);
-            for _ in 0..pad_count {
-                out.push(' ');
-            }
-            out.push_str(&right);
-            if out.chars().count() > width {
-                out = out.chars().take(width).collect();
-            }
-            return out;
-        };
-
-        // Themed layout: clip each plain segment to the same visible budget
-        // the plain render would keep, then style the clipped text. Styling
-        // never changes the visible character count, so the result lines up
-        // with the plain render.
         let padding = " ".repeat(pad_count);
-        let mut out = String::new();
+
+        let mut spans: StyledLine = Vec::new();
         let mut remaining = width;
         let model = clip(&left, &mut remaining);
         if !model.is_empty() {
-            out.push_str(&styles.accent(model));
+            spans.push(StyledSpan::new(model, SpanStyle::fg(ThemeColor::Accent)));
         }
         let session = clip(&session, &mut remaining);
         if !session.is_empty() {
-            out.push_str(&styles.muted(session));
+            spans.push(StyledSpan::new(session, SpanStyle::fg(ThemeColor::Muted)));
         }
-        out.push_str(clip(&padding, &mut remaining));
+        let padding = clip(&padding, &mut remaining);
+        if !padding.is_empty() {
+            spans.push(StyledSpan::new(padding, SpanStyle::PLAIN));
+        }
         let stats = clip(&right, &mut remaining);
         if !stats.is_empty() {
-            out.push_str(&styles.dim(stats));
+            spans.push(StyledSpan::new(stats, SpanStyle::fg(ThemeColor::Dim)));
         }
-        out
+        spans
     }
 
     /// Render into a `ratatui::buffer::Buffer`. Used by the
@@ -170,6 +164,20 @@ impl StatusBar {
                 cell.set_char(ch);
             }
         }
+    }
+
+    /// Themed variant of [`StatusBar::render_to_buffer`]: each written cell
+    /// carries the [`Style`](ratatui::style::Style) for its segment's theme
+    /// slot.
+    pub fn render_to_buffer_themed(
+        &self,
+        data: &StatusData,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        theme: &Theme,
+    ) {
+        let line = self.render_styled_line(data, area.width);
+        write_styled_line(buf, area.x, area.y, area.width, &line, theme);
     }
 }
 

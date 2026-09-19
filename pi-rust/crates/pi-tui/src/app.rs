@@ -31,6 +31,8 @@ use crate::message::{MessageItem, MessageView};
 use crate::prompt::{Prompt, PromptAction};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::status::{StatusBar, StatusData};
+use crate::styled::write_styled_line;
+use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeError};
 
 /// Configuration knobs for the App.
 #[derive(Debug, Clone)]
@@ -136,6 +138,10 @@ pub struct App {
     messages: MessageView,
     status_bar: StatusBar,
     status_data: StatusData,
+    /// The active palette the buffer render path consumes. Swapping it with
+    /// [`App::set_theme`] takes effect on the next [`App::render_to_buffer`]
+    /// call — no rebuild, no restart.
+    theme: Theme,
     selector: Option<Selector>,
     /// Modal requested by a JS extension (`ctx.ui.confirm` / `input` /
     /// `select`) that is waiting for a key press.
@@ -190,6 +196,8 @@ impl App {
             messages: MessageView::new(),
             status_bar: StatusBar::new(),
             status_data,
+            theme: builtin_theme("dark", ColorMode::TrueColor)
+                .expect("built-in dark theme is valid"),
             selector: None,
             dialog: None,
             ui_dialogs: None,
@@ -230,6 +238,29 @@ impl App {
     /// Mutable borrow of the status data.
     pub fn status_data_mut(&mut self) -> &mut StatusData {
         &mut self.status_data
+    }
+
+    /// The palette the buffer render path currently consumes.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Install a theme. The next [`App::render_to_buffer`] (or
+    /// [`App::render_snapshot`]) reflects it immediately — hot-swapping does
+    /// not require rebuilding the App.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// Load and install a theme by name, keeping the current colour mode.
+    ///
+    /// Built-in names (`dark`, `light`) always resolve; custom themes are not
+    /// searched because the App does not own a custom-themes directory. On
+    /// failure the previous theme is left untouched.
+    pub fn set_theme_by_name(&mut self, name: &str) -> Result<(), ThemeError> {
+        let theme = load_theme(name, self.theme.color_mode(), None)?;
+        self.theme = theme;
+        Ok(())
     }
 
     /// Whether the user has requested an exit.
@@ -678,9 +709,10 @@ impl App {
             height: prompt_height,
         };
 
-        self.messages.render_to_buffer(message_area, buf);
+        self.messages
+            .render_to_buffer_themed(message_area, buf, &self.theme);
         self.status_bar
-            .render_to_buffer(&self.status_data, status_area, buf);
+            .render_to_buffer_themed(&self.status_data, status_area, buf, &self.theme);
 
         // Prompt line.
         let line = self.prompt.render_line(area.width);
@@ -697,22 +729,14 @@ impl App {
         // Selector overlay — when open, draw on top of everything
         // except the prompt and status.
         if let Some(selector) = &self.selector {
-            let lines = selector.render_lines(area.width);
+            let lines = selector.render_styled_lines(area.width);
             let start_row = area.y + 1;
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
                 if y >= area.y + message_height {
                     break;
                 }
-                for (col, ch) in line.chars().enumerate() {
-                    let x = area.x + col as u16;
-                    if x >= area.x + area.width {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_char(ch);
-                    }
-                }
+                write_styled_line(buf, area.x, y, area.width, line, &self.theme);
             }
         }
 

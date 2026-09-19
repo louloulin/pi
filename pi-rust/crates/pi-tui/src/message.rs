@@ -9,7 +9,11 @@
 
 use std::fmt::Write as _;
 
+use crate::styled::{
+    plain_text, themed_text, write_styled_line, SpanStyle, StyledLine, StyledSpan,
+};
 use crate::styles::SelectListStyles;
+use crate::theme::{Theme, ThemeColor};
 
 /// Logical role — drives the visual prefix and the message-view
 /// rendering. Mirrors the `user` / `assistant` / `tool` distinction the
@@ -223,7 +227,10 @@ impl MessageView {
     /// prepending a one-character role prefix to each line. The TUI
     /// slices the returned vector into the visible viewport.
     pub fn render_lines(&self, width: u16) -> Vec<String> {
-        self.render_lines_impl(width, None)
+        self.render_styled_lines(width)
+            .iter()
+            .map(|line| plain_text(line))
+            .collect()
     }
 
     /// Themed variant of [`MessageView::render_lines`].
@@ -234,58 +241,67 @@ impl MessageView {
     /// `accent`/`muted`, and the streaming caret `dim`. Markdown rendering and
     /// its `MarkdownTheme` are out of scope for this slice.
     pub fn render_lines_themed(&self, width: u16, styles: &SelectListStyles<'_>) -> Vec<String> {
-        self.render_lines_impl(width, Some(styles))
+        let theme = styles.theme();
+        self.render_styled_lines(width)
+            .iter()
+            .map(|line| themed_text(line, theme))
+            .collect()
     }
 
-    fn render_lines_impl(&self, width: u16, styles: Option<&SelectListStyles<'_>>) -> Vec<String> {
+    /// Render the log as theme-slot spans, one line per entry, wrapping at
+    /// `width`.
+    ///
+    /// This is the single layout implementation behind [`render_lines`] (plain
+    /// text), [`render_lines_themed`] (ANSI strings) and the App's themed
+    /// buffer path.
+    ///
+    /// [`render_lines`]: MessageView::render_lines
+    /// [`render_lines_themed`]: MessageView::render_lines_themed
+    pub fn render_styled_lines(&self, width: u16) -> Vec<StyledLine> {
         let prefix_width = 2usize; // "> " or "* "
         let text_width = (width as usize).saturating_sub(prefix_width).max(1);
 
-        let mut out: Vec<String> = Vec::new();
+        let mut out: Vec<StyledLine> = Vec::new();
         for item in &self.items {
-            let (prefix, body) = match item.role {
-                Role::User => ("> ", item.text.clone()),
-                Role::Assistant => ("  ", item.text.clone()),
-                Role::Tool => ("* ", item.text.clone()),
-            };
-            let styled_prefix = match styles {
-                Some(styles) => match item.role {
-                    Role::User => styles.accent(prefix),
-                    Role::Assistant => prefix.to_string(),
-                    Role::Tool => styles.muted(prefix),
-                },
-                None => prefix.to_string(),
+            let (prefix, body, prefix_style, body_style) = match item.role {
+                Role::User => (
+                    "> ",
+                    item.text.clone(),
+                    SpanStyle::fg(ThemeColor::Accent),
+                    SpanStyle::fg(ThemeColor::UserMessageText),
+                ),
+                Role::Assistant => (
+                    "  ",
+                    item.text.clone(),
+                    SpanStyle::PLAIN,
+                    SpanStyle::fg(ThemeColor::Text),
+                ),
+                Role::Tool => (
+                    "* ",
+                    item.text.clone(),
+                    SpanStyle::fg(ThemeColor::Muted),
+                    SpanStyle::fg(ThemeColor::ToolOutput),
+                ),
             };
             let wrapped = wrap_text(&body, text_width);
             if wrapped.is_empty() {
-                out.push(styled_prefix);
+                out.push(vec![StyledSpan::new(prefix, prefix_style)]);
                 continue;
             }
             for (idx, line) in wrapped.iter().enumerate() {
-                let tail = if idx == 0 && item.role == Role::Assistant && item.streaming {
-                    " ▍"
-                } else {
-                    ""
-                };
-                let styled_tail = match styles {
-                    Some(styles) if !tail.is_empty() => styles.dim(tail),
-                    _ => tail.to_string(),
-                };
-                if let Some(styles) = styles {
-                    let styled_body = match item.role {
-                        Role::User => styles.user_message_text(line),
-                        Role::Assistant => styles.text(line),
-                        Role::Tool => styles.tool_output(line),
-                    };
-                    out.push(format!("{styled_prefix}{styled_body}{styled_tail}"));
-                } else {
-                    out.push(format!("{prefix}{line}{tail}"));
+                let mut spans = vec![
+                    StyledSpan::new(prefix, prefix_style),
+                    StyledSpan::new(line.clone(), body_style),
+                ];
+                if idx == 0 && item.role == Role::Assistant && item.streaming {
+                    spans.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
                 }
+                out.push(spans);
             }
         }
 
         if out.is_empty() {
-            out.push(String::new());
+            out.push(Vec::new());
         }
         out
     }
@@ -294,7 +310,28 @@ impl MessageView {
     /// `ratatui::buffer::Buffer`. Used by the [`App`](crate::App) and
     /// by the snapshot tests in `tests/snapshot.rs`.
     pub fn render_to_buffer(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
-        let lines = self.render_lines(area.width);
+        self.render_to_buffer_impl(area, buf, None);
+    }
+
+    /// Themed variant of [`MessageView::render_to_buffer`]: every written cell
+    /// carries the [`Style`](ratatui::style::Style) for its span's theme slot,
+    /// so the App's buffer path consumes the theme without ANSI strings.
+    pub fn render_to_buffer_themed(
+        &self,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        theme: &Theme,
+    ) {
+        self.render_to_buffer_impl(area, buf, Some(theme));
+    }
+
+    fn render_to_buffer_impl(
+        &self,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        theme: Option<&Theme>,
+    ) {
+        let lines = self.render_styled_lines(area.width);
         let height = area.height as usize;
         let total = lines.len();
         let skip = total.saturating_sub(height + self.scroll_from_bottom);
@@ -306,13 +343,18 @@ impl MessageView {
             if y >= area.y + area.height {
                 break;
             }
-            for (col, ch) in line.chars().enumerate() {
-                let x = area.x + col as u16;
-                if x >= area.x + area.width {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
+            match theme {
+                Some(theme) => write_styled_line(buf, area.x, y, area.width, line, theme),
+                None => {
+                    for (col, ch) in plain_text(line).chars().enumerate() {
+                        let x = area.x + col as u16;
+                        if x >= area.x + area.width {
+                            break;
+                        }
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(ch);
+                        }
+                    }
                 }
             }
         }
