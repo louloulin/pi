@@ -56,14 +56,26 @@
 //!   `0x1D` / `ESC 0x1D`, which crossterm decodes as `Ctrl+5` /
 //!   `Ctrl+Alt+5`, so both spellings are accepted — the same legacy
 //!   translation upstream performs in `packages/tui/src/keys.ts:1276`.
+//! * When an [`AutocompleteProvider`] is installed
+//!   ([`Editor::set_autocomplete_provider`]), typing `/` at the start of
+//!   the line or `@` (and `#`) at a token boundary opens a candidate
+//!   dropdown: `Up` / `Down` move the selection, `Tab` and `Enter` apply
+//!   it, `Esc` dismisses it. `Tab` while the dropdown is closed forces a
+//!   completion. This mirrors upstream `Editor.handleInput`'s
+//!   autocomplete block; the provider is opt-in, so a caller that never
+//!   installs one (the [`App`] / [`Prompt`] path) keeps the
+//!   pre-autocomplete behaviour byte for byte.
 //!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
 //!
 //! [`App`]: crate::App
+//! [`Prompt`]: crate::Prompt
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
+use crate::autocomplete::{AutocompleteItem, AutocompleteProvider};
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::kill_ring::{KillDirection, KillRing};
 use crate::undo_stack::UndoStack;
@@ -74,6 +86,19 @@ use crate::input::KeyModifiers;
 
 /// Maximum number of history entries kept by the editor.
 pub const HISTORY_LIMIT: usize = 100;
+
+/// Characters that open the autocomplete dropdown at a token boundary
+/// by default, upstream `DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS`.
+pub const DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS: [char; 2] = ['@', '#'];
+
+/// Default number of dropdown rows, upstream `autocompleteMaxVisible = 5`.
+pub const DEFAULT_AUTOCOMPLETE_MAX_VISIBLE: usize = 5;
+
+/// Lower clamp for the dropdown height, upstream's `Math.max(3, …)`.
+pub const MIN_AUTOCOMPLETE_MAX_VISIBLE: usize = 3;
+
+/// Upper clamp for the dropdown height, upstream's `Math.min(20, …)`.
+pub const MAX_AUTOCOMPLETE_MAX_VISIBLE: usize = 20;
 
 /// Action returned from [`Editor::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +185,25 @@ pub struct Editor {
     /// Armed `tui.editor.jumpForward` / `jumpBackward` target, if any.
     /// Set by `Ctrl+]` / `Ctrl+Alt+]` and consumed by the next key.
     jump_mode: Option<JumpDirection>,
+    /// Optional provider driving the autocomplete dropdown. `None`
+    /// disables the feature entirely, which is the default so existing
+    /// callers keep their behaviour.
+    autocomplete_provider: Option<Arc<dyn AutocompleteProvider>>,
+    /// Characters that open the dropdown at a token boundary.
+    autocomplete_trigger_characters: Vec<char>,
+    /// Candidates currently shown (empty when the dropdown is closed).
+    autocomplete_items: Vec<AutocompleteItem>,
+    /// Index of the highlighted candidate.
+    autocomplete_selected: usize,
+    /// Prefix the candidates were computed for, passed back to the
+    /// provider when one is applied.
+    autocomplete_prefix: String,
+    /// Whether the open dropdown came from an explicit Tab request
+    /// (upstream's `"force"` state), so refreshing keeps forcing.
+    autocomplete_force: bool,
+    /// Dropdown height in rows (clamped to
+    /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`]..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`]).
+    autocomplete_max_visible: usize,
 }
 
 impl Default for Editor {
@@ -182,6 +226,13 @@ impl Editor {
             last_yank_len: 0,
             undo_stack: UndoStack::new(),
             jump_mode: None,
+            autocomplete_provider: None,
+            autocomplete_trigger_characters: DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS.to_vec(),
+            autocomplete_items: Vec::new(),
+            autocomplete_selected: 0,
+            autocomplete_prefix: String::new(),
+            autocomplete_force: false,
+            autocomplete_max_visible: DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
         }
     }
 
@@ -213,6 +264,7 @@ impl Editor {
         self.buffer = text.into();
         self.cursor = self.buffer.len();
         self.last_action = LastAction::Other;
+        self.cancel_autocomplete();
     }
 
     /// Clear the buffer without touching history, and drop the undo
@@ -226,6 +278,7 @@ impl Editor {
         self.last_action = LastAction::Other;
         self.undo_stack.clear();
         self.jump_mode = None;
+        self.cancel_autocomplete();
     }
 
     /// The armed jump direction, if `Ctrl+]` / `Ctrl+Alt+]` is waiting
@@ -338,6 +391,7 @@ impl Editor {
         self.cursor += c.len_utf8();
         self.reset_history_navigation();
         self.last_action = LastAction::TypeWord;
+        self.update_autocomplete_after_edit(Some(c));
         EditorAction::Changed
     }
 
@@ -355,6 +409,7 @@ impl Editor {
         self.cursor += s.len();
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
+        self.cancel_autocomplete();
         EditorAction::Changed
     }
 
@@ -370,6 +425,7 @@ impl Editor {
         self.cursor = prev;
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
+        self.update_autocomplete_after_edit(None);
         EditorAction::Changed
     }
 
@@ -383,6 +439,7 @@ impl Editor {
         self.buffer.replace_range(self.cursor..next, "");
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
+        self.update_autocomplete_after_edit(None);
         EditorAction::Changed
     }
 
@@ -393,6 +450,7 @@ impl Editor {
         }
         self.cursor = self.prev_char_boundary(self.cursor);
         self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
@@ -403,6 +461,7 @@ impl Editor {
         }
         self.cursor = self.next_char_boundary(self.cursor);
         self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
@@ -413,6 +472,7 @@ impl Editor {
         }
         self.cursor = 0;
         self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
@@ -424,6 +484,7 @@ impl Editor {
         }
         self.cursor = end;
         self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
@@ -437,6 +498,7 @@ impl Editor {
         }
         self.cursor = find_word_backward(&self.buffer, self.cursor);
         self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
@@ -450,6 +512,7 @@ impl Editor {
         }
         self.cursor = find_word_forward(&self.buffer, self.cursor);
         self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
@@ -462,6 +525,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
+        self.cancel_autocomplete();
         let killed = self.buffer[..self.cursor].to_string();
         let accumulate = self.last_action == LastAction::Kill;
         self.buffer.replace_range(..self.cursor, "");
@@ -482,6 +546,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
+        self.cancel_autocomplete();
         let killed = self.buffer[self.cursor..].to_string();
         let accumulate = self.last_action == LastAction::Kill;
         self.buffer.truncate(self.cursor);
@@ -505,6 +570,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
+        self.cancel_autocomplete();
         let killed = self.buffer[delete_from..self.cursor].to_string();
         // Read the previous action *before* overwriting it: a kill that
         // follows another kill accumulates into the same ring entry
@@ -532,6 +598,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
+        self.cancel_autocomplete();
         let killed = self.buffer[self.cursor..delete_to].to_string();
         let accumulate = self.last_action == LastAction::Kill;
         self.buffer.replace_range(self.cursor..delete_to, "");
@@ -548,6 +615,7 @@ impl Editor {
         let Some(text) = self.kill_ring.peek().map(str::to_string) else {
             return EditorAction::None;
         };
+        self.cancel_autocomplete();
         self.push_undo_snapshot();
         self.buffer.insert_str(self.cursor, &text);
         self.cursor += text.len();
@@ -565,6 +633,7 @@ impl Editor {
         if self.last_action != LastAction::Yank || self.kill_ring.len() <= 1 {
             return EditorAction::None;
         }
+        self.cancel_autocomplete();
         self.push_undo_snapshot();
         // Remove the text the previous yank inserted; the cursor sits at
         // its end, so the range is `cursor - last_yank_len .. cursor`.
@@ -604,6 +673,7 @@ impl Editor {
         self.buffer = snapshot.buffer;
         self.cursor = snapshot.cursor.min(self.buffer.len());
         self.last_action = LastAction::Other;
+        self.cancel_autocomplete();
         self.reset_history_navigation();
         EditorAction::Changed
     }
@@ -611,6 +681,302 @@ impl Editor {
     /// Number of undo snapshots currently available to `Ctrl+-`.
     pub fn undo_len(&self) -> usize {
         self.undo_stack.len()
+    }
+
+    // -- autocomplete -------------------------------------------------
+
+    /// Install the autocomplete provider driving the dropdown, or
+    /// replace the current one. The provider's extra
+    /// [`trigger_characters`](AutocompleteProvider::trigger_characters)
+    /// are merged into the editor defaults (`@`, `#`).
+    pub fn set_autocomplete_provider(&mut self, provider: Arc<dyn AutocompleteProvider>) {
+        for trigger in provider.trigger_characters() {
+            if self.is_valid_trigger_character(*trigger)
+                && !self.autocomplete_trigger_characters.contains(trigger)
+            {
+                self.autocomplete_trigger_characters.push(*trigger);
+            }
+        }
+        self.autocomplete_provider = Some(provider);
+        self.cancel_autocomplete();
+    }
+
+    /// Remove the autocomplete provider and close any open dropdown,
+    /// restoring the default trigger characters.
+    pub fn clear_autocomplete_provider(&mut self) {
+        self.autocomplete_provider = None;
+        self.autocomplete_trigger_characters = DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS.to_vec();
+        self.cancel_autocomplete();
+    }
+
+    /// True when the autocomplete dropdown currently has candidates.
+    pub fn is_showing_autocomplete(&self) -> bool {
+        !self.autocomplete_items.is_empty()
+    }
+
+    /// The candidates currently shown (empty when the dropdown is
+    /// closed).
+    pub fn autocomplete_items(&self) -> &[AutocompleteItem] {
+        &self.autocomplete_items
+    }
+
+    /// Index of the highlighted candidate.
+    pub fn autocomplete_selected(&self) -> usize {
+        self.autocomplete_selected
+    }
+
+    /// The prefix the current candidates were computed for.
+    pub fn autocomplete_prefix(&self) -> &str {
+        &self.autocomplete_prefix
+    }
+
+    /// Dropdown height in rows.
+    pub fn autocomplete_max_visible(&self) -> usize {
+        self.autocomplete_max_visible
+    }
+
+    /// Set the dropdown height, clamped to
+    /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`]..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`]
+    /// like upstream's `Math.max(3, Math.min(20, …))`.
+    pub fn set_autocomplete_max_visible(&mut self, rows: usize) {
+        self.autocomplete_max_visible =
+            rows.clamp(MIN_AUTOCOMPLETE_MAX_VISIBLE, MAX_AUTOCOMPLETE_MAX_VISIBLE);
+    }
+
+    /// Move the highlighted candidate by `delta` rows, wrapping around —
+    /// upstream's ArrowUp / ArrowDown handling.
+    pub fn move_autocomplete(&mut self, delta: i32) {
+        let len = self.autocomplete_items.len();
+        if len == 0 {
+            return;
+        }
+        let len_i = len as i64;
+        let next = (self.autocomplete_selected as i64 + i64::from(delta)).rem_euclid(len_i);
+        self.autocomplete_selected = next as usize;
+    }
+
+    /// Apply the highlighted candidate and close the dropdown,
+    /// returning [`EditorAction::Changed`]. A no-op returning
+    /// [`EditorAction::None`] when the dropdown is closed.
+    pub fn accept_autocomplete(&mut self) -> EditorAction {
+        let Some(item) = self
+            .autocomplete_items
+            .get(self.autocomplete_selected)
+            .cloned()
+        else {
+            self.cancel_autocomplete();
+            return EditorAction::None;
+        };
+        let prefix = self.autocomplete_prefix.clone();
+        self.apply_completion_item(&item, &prefix);
+        self.cancel_autocomplete();
+        EditorAction::Changed
+    }
+
+    /// Close the dropdown without touching the buffer — upstream's
+    /// `cancelAutocomplete`.
+    pub fn cancel_autocomplete(&mut self) {
+        self.autocomplete_items.clear();
+        self.autocomplete_selected = 0;
+        self.autocomplete_prefix.clear();
+        self.autocomplete_force = false;
+    }
+
+    /// Handle `Tab` with the dropdown closed: complete the current
+    /// `/`-command when the cursor sits in a command name, otherwise
+    /// force a file completion — upstream `handleTabCompletion`.
+    /// Returns `true` when a completion was applied or a dropdown was
+    /// opened.
+    pub fn handle_tab_completion(&mut self) -> bool {
+        if self.autocomplete_provider.is_none() {
+            return false;
+        }
+        let before = self.before_cursor_text();
+        let trimmed = before.trim_start();
+        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+            self.request_autocomplete(false, true)
+        } else {
+            self.request_autocomplete(true, true)
+        }
+    }
+
+    /// Compute candidates for the current cursor and open or refresh the
+    /// dropdown. Returns `true` when the dropdown is open (or an
+    /// explicit-Tab single candidate was applied directly).
+    ///
+    /// `force` mirrors upstream's `"force"` state (skip the textual
+    /// heuristics); `explicit_tab` enables upstream's auto-apply of a
+    /// lone candidate.
+    pub fn request_autocomplete(&mut self, force: bool, explicit_tab: bool) -> bool {
+        let Some(provider) = self.autocomplete_provider.clone() else {
+            return false;
+        };
+        let lines = [self.buffer.clone()];
+        let cursor_col = self.cursor;
+        if force && !provider.should_trigger_file_completion(&lines, 0, cursor_col) {
+            return false;
+        }
+        let Some(suggestions) = provider.get_suggestions(&lines, 0, cursor_col, force) else {
+            self.cancel_autocomplete();
+            return false;
+        };
+        if suggestions.items.is_empty() {
+            self.cancel_autocomplete();
+            return false;
+        }
+        // Upstream auto-applies a lone candidate on an explicit Tab.
+        if force && explicit_tab && suggestions.items.len() == 1 {
+            let item = suggestions.items[0].clone();
+            self.apply_completion_item(&item, &suggestions.prefix);
+            return true;
+        }
+        let selected = best_autocomplete_match_index(&suggestions.items, &suggestions.prefix);
+        self.autocomplete_prefix = suggestions.prefix;
+        self.autocomplete_items = suggestions.items;
+        self.autocomplete_selected = selected;
+        self.autocomplete_force = force;
+        true
+    }
+
+    /// Render the dropdown rows for a widget `width`, one entry per
+    /// candidate (already windowed to the configured height). The
+    /// highlighted row is marked with `❯`.
+    pub fn autocomplete_render_lines(&self, width: usize) -> Vec<String> {
+        let len = self.autocomplete_items.len();
+        if len == 0 || width == 0 {
+            return Vec::new();
+        }
+        let visible = self.autocomplete_max_visible.min(len);
+        let (start, end) = self.autocomplete_visible_range(visible);
+        let mut rows = Vec::with_capacity(end - start);
+        for index in start..end {
+            let item = &self.autocomplete_items[index];
+            let marker = if index == self.autocomplete_selected {
+                "❯ "
+            } else {
+                "  "
+            };
+            let text = match &item.description {
+                Some(description) if width > 44 => {
+                    format!("{marker}{}  {description}", item.label)
+                }
+                _ => format!("{marker}{}", item.label),
+            };
+            rows.push(truncate_display(&text, width));
+        }
+        if len > visible {
+            rows.push(format!("  ({}/{len})", self.autocomplete_selected + 1));
+        }
+        rows
+    }
+
+    /// The `(start, end)` window of candidates to render, keeping the
+    /// selection centred like [`crate::Selector`].
+    fn autocomplete_visible_range(&self, visible: usize) -> (usize, usize) {
+        let len = self.autocomplete_items.len();
+        if visible >= len {
+            return (0, len);
+        }
+        let half = visible / 2;
+        let start = self
+            .autocomplete_selected
+            .saturating_sub(half)
+            .min(len - visible);
+        (start, start + visible)
+    }
+
+    /// Apply one candidate, capturing an undo snapshot first (upstream
+    /// pushes the pre-completion state so `Ctrl+-` reverts it).
+    fn apply_completion_item(&mut self, item: &AutocompleteItem, prefix: &str) {
+        let Some(provider) = self.autocomplete_provider.clone() else {
+            return;
+        };
+        self.push_undo_snapshot();
+        let lines = [self.buffer.clone()];
+        let result = provider.apply_completion(&lines, 0, self.cursor, item, prefix);
+        self.buffer = result.lines.into_iter().next().unwrap_or_default();
+        self.cursor = clamp_to_char_boundary(&self.buffer, result.cursor_col);
+        self.reset_history_navigation();
+        self.last_action = LastAction::Other;
+    }
+
+    /// Recompute the dropdown after an edit.
+    ///
+    /// `inserted` is the character that was just typed (if any).
+    /// Mirrors upstream `handleInput`'s rule: while the dropdown is
+    /// open, every edit refreshes it; while it is closed, only an edit
+    /// that lands in a command / path context opens it.
+    fn update_autocomplete_after_edit(&mut self, inserted: Option<char>) {
+        if self.autocomplete_provider.is_none() {
+            return;
+        }
+        let was_open = self.is_showing_autocomplete();
+        let should_request = if was_open {
+            true
+        } else {
+            let before = self.before_cursor_text();
+            match inserted {
+                Some(c) => self.opens_autocomplete_after_insert(c, before),
+                None => self.opens_autocomplete_for_text(before),
+            }
+        };
+        if !should_request {
+            return;
+        }
+        let force = was_open && self.autocomplete_force;
+        self.request_autocomplete(force, false);
+    }
+
+    /// Re-query the provider while the dropdown is open so its prefix
+    /// tracks the cursor, upstream's `updateAutocomplete` after a cursor
+    /// move / deletion. Closes the dropdown when the new position yields
+    /// no candidates.
+    fn refresh_autocomplete_if_open(&mut self) {
+        if !self.is_showing_autocomplete() {
+            return;
+        }
+        let force = self.autocomplete_force;
+        self.request_autocomplete(force, false);
+    }
+
+    /// Whether typing `c` (now part of `before`) should open the
+    /// dropdown, upstream `handleInput`'s autocomplete trigger.
+    fn opens_autocomplete_after_insert(&self, c: char, before: &str) -> bool {
+        // `/` at the start of the message always opens the command menu.
+        if c == '/' {
+            let trimmed = before.trim();
+            if trimmed.is_empty() || trimmed == "/" {
+                return true;
+            }
+        }
+        if self.autocomplete_trigger_characters.contains(&c) {
+            return at_token_boundary(before);
+        }
+        if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            return self.opens_autocomplete_for_text(before);
+        }
+        false
+    }
+
+    /// Whether `text` (before the cursor) is already inside a context
+    /// the provider can complete. Upstream's
+    /// `isInSlashCommandContext(text) || triggerPattern.test(text)`.
+    fn opens_autocomplete_for_text(&self, text: &str) -> bool {
+        if text.trim_start().starts_with('/') {
+            return true;
+        }
+        trigger_pattern_matches(text, &self.autocomplete_trigger_characters)
+    }
+
+    /// The buffer text before the cursor.
+    fn before_cursor_text(&self) -> &str {
+        &self.buffer[..self.cursor.min(self.buffer.len())]
+    }
+
+    /// True for trigger characters the editor accepts (`/` is handled
+    /// by the command rule, whitespace never triggers).
+    fn is_valid_trigger_character(&self, c: char) -> bool {
+        c != '/' && !c.is_whitespace()
     }
 
     /// Capture the current buffer and cursor for `Ctrl+-`.
@@ -771,6 +1137,48 @@ impl Editor {
             return EditorAction::None;
         }
 
+        // Autocomplete dropdown. Checked above the plain-key handling so
+        // Esc / Up / Down / Tab / Enter steer the candidate list while it
+        // is open, mirroring upstream `Editor.handleInput`'s autocomplete
+        // block (which runs after undo, before Tab and deletion).
+        if self.is_showing_autocomplete() && key.modifiers.is_empty() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.cancel_autocomplete();
+                    return EditorAction::None;
+                }
+                KeyCode::Up => {
+                    self.move_autocomplete(-1);
+                    return EditorAction::Changed;
+                }
+                KeyCode::Down => {
+                    self.move_autocomplete(1);
+                    return EditorAction::Changed;
+                }
+                KeyCode::Tab => return self.accept_autocomplete(),
+                KeyCode::Enter => {
+                    let prefix = self.autocomplete_prefix.clone();
+                    let applied = self.accept_autocomplete();
+                    if applied == EditorAction::None {
+                        return EditorAction::None;
+                    }
+                    // A command name is still submitted: upstream falls
+                    // through to the normal Enter handling when the
+                    // prefix starts with `/`.
+                    if prefix.starts_with('/') {
+                        return EditorAction::Submit(self.buffer.clone());
+                    }
+                    return applied;
+                }
+                _ => {}
+            }
+        }
+
+        // Tab with the dropdown closed forces a completion.
+        if key.code == KeyCode::Tab && key.modifiers.is_empty() && self.handle_tab_completion() {
+            return EditorAction::Changed;
+        }
+
         match key.code {
             KeyCode::Char(c) => self.insert_char(c),
             KeyCode::Enter => {
@@ -866,6 +1274,72 @@ fn is_char_boundary(bytes: &[u8], pos: usize) -> bool {
     (bytes[pos] & 0b1100_0000) != 0b1000_0000
 }
 
+/// Clamp a byte offset to the nearest valid UTF-8 boundary of `text`
+/// (rounding down), and to the text length.
+fn clamp_to_char_boundary(text: &str, pos: usize) -> usize {
+    let mut pos = pos.min(text.len());
+    while pos > 0 && !text.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Truncate `text` to at most `max` characters.
+fn truncate_display(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max).collect()
+}
+
+/// Whether the character just before the token in `before` is a space or
+/// tab — upstream's "the trigger character starts a token" test.
+fn at_token_boundary(before: &str) -> bool {
+    let mut chars = before.chars().rev();
+    // Skip the trigger character itself.
+    chars.next();
+    match chars.next() {
+        Some(c) => c == ' ' || c == '\t',
+        // Start of the buffer: the shape of a one-character input.
+        None => true,
+    }
+}
+
+/// Match upstream's trigger pattern `(?:^|[\s])[@#][^\s]*$` against
+/// `text`, using the editor's configured trigger characters.
+fn trigger_pattern_matches(text: &str, triggers: &[char]) -> bool {
+    let token_start = text
+        .char_indices()
+        .filter(|(_, c)| c.is_whitespace())
+        .map(|(idx, c)| idx + c.len_utf8())
+        .next_back()
+        .unwrap_or(0);
+    let token = &text[token_start..];
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(c) if triggers.contains(&c) => !chars.any(char::is_whitespace),
+        _ => false,
+    }
+}
+
+/// Upstream `getBestAutocompleteMatchIndex`: an exact prefix match wins,
+/// otherwise the first `value.starts_with(prefix)`, otherwise the first
+/// candidate.
+fn best_autocomplete_match_index(items: &[AutocompleteItem], prefix: &str) -> usize {
+    if prefix.is_empty() {
+        return 0;
+    }
+    let mut first_prefix_match = None;
+    for (index, item) in items.iter().enumerate() {
+        if item.value == prefix {
+            return index;
+        }
+        if first_prefix_match.is_none() && item.value.starts_with(prefix) {
+            first_prefix_match = Some(index);
+        }
+    }
+    first_prefix_match.unwrap_or(0)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
