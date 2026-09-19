@@ -277,7 +277,7 @@ fn whitespace_only_input_renders_nothing() {
 #[test]
 fn special_character_soup_never_panics() {
     let alphabet = [
-        '*', '_', '`', '~', '[', ']', '(', ')', '#', '>', '-', ' ', '\\', 'a', '\n',
+        '*', '_', '`', '~', '[', ']', '(', ')', '#', '>', '-', ' ', '\\', 'a', '\n', '|', ':',
     ];
     let mut cases: Vec<String> = Vec::new();
     for a in alphabet {
@@ -474,4 +474,292 @@ fn markdown_message_view_renders_into_a_buffer() {
         .map(|x| buf.cell((x, 0)).map(|c| c.symbol()).unwrap_or(" "))
         .collect();
     assert!(row0.starts_with("  Title"));
+}
+
+// ---------------------------------------------------------------------------
+// Tables (GFM) — upstream `renderTable` in
+// `packages/tui/src/components/markdown.ts:839-1015`.
+// ---------------------------------------------------------------------------
+
+/// The simplest table, byte-for-byte: natural column widths (the longest cell
+/// per column), bold headers, a divider between the header and every body row.
+#[test]
+fn table_renders_a_box_grid_with_bold_headers() {
+    let lines = render_markdown(
+        "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |",
+        80,
+    );
+    assert_eq!(
+        texts(&lines),
+        vec![
+            "┌───────┬─────┐",
+            "│ Name  │ Age │",
+            "├───────┼─────┤",
+            "│ Alice │ 30  │",
+            "├───────┼─────┤",
+            "│ Bob   │ 25  │",
+            "└───────┴─────┘",
+        ]
+    );
+
+    // Header cells are bold (`theme.bold(padded)`), body cells are not, and no
+    // border carries a colour slot.
+    let header = find(&lines[1], "Name ");
+    assert!(header.style.bold);
+    assert_eq!(header.style.fg, None);
+    let body = &lines[3];
+    assert!(plain_text(body).contains("Alice"));
+    assert!(body.iter().all(|span| !span.style.bold));
+    // The whole border is one plain span (`push_span` merges equal slots).
+    assert_eq!(slot(&lines[0], "┌───────┬─────┐"), None);
+}
+
+/// One divider between the header and the first body row, one between each
+/// pair of body rows, none after the last row (upstream "row dividers" case).
+#[test]
+fn table_dividers_separate_rows_but_not_the_bottom_border() {
+    let lines = texts(&render_markdown(
+        "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |",
+        80,
+    ));
+    assert_eq!(lines.iter().filter(|line| line.contains('┼')).count(), 2);
+    assert_eq!(lines.iter().filter(|line| line.starts_with('┌')).count(), 1);
+    assert_eq!(lines.iter().filter(|line| line.starts_with('└')).count(), 1);
+    assert!(lines[1].starts_with('│'));
+    assert!(lines[2].starts_with('├'));
+}
+
+/// Port of upstream's "should keep column width at least the longest word":
+/// at width 32 the long word drives the first column's floor.
+#[test]
+fn table_column_never_goes_below_its_longest_word() {
+    let lines = render_markdown(
+        "| Column One | Column Two |\n| --- | --- |\n| superlongword short | otherword |\n| small | tiny |",
+        32,
+    );
+    let plain = texts(&lines);
+    let data_line = plain
+        .iter()
+        .find(|line| line.contains("superlongword"))
+        .expect("data row with the longest word");
+    let segment = data_line.split('│').nth(1).expect("first column segment");
+    let column_width = segment.chars().count() - 2;
+    assert!(
+        column_width >= "superlongword".chars().count(),
+        "first column width {column_width} < 13 in {data_line:?}"
+    );
+    assert!(plain[0].chars().count() <= 32);
+}
+
+/// Port of upstream's "should wrap table cells when table exceeds available
+/// width": nothing overflows the width, content survives the wrap, and the
+/// grid stays aligned across the wrapped rows.
+#[test]
+fn table_wraps_cells_and_keeps_the_grid_aligned() {
+    let lines = render_markdown(
+        "| Command | Description | Example |\n| --- | --- | --- |\n| npm install | Install all dependencies | npm install |\n| npm run build | Build the project | npm run build |",
+        50,
+    );
+    let plain = texts(&lines);
+    for line in &plain {
+        assert!(
+            line.chars().count() <= 50,
+            "line exceeds width 50: {line:?}"
+        );
+    }
+    // Every grid line has the same width as the top border.
+    let grid_width = plain[0].chars().count();
+    for line in plain.iter().filter(|line| line.starts_with('│')) {
+        assert_eq!(
+            line.chars().count(),
+            grid_width,
+            "uneven grid line {line:?}"
+        );
+    }
+    let joined = plain.join(" ");
+    for needle in [
+        "Command",
+        "Description",
+        "npm install",
+        "Install",
+        "Build the project",
+    ] {
+        assert!(joined.contains(needle), "missing {needle:?}");
+    }
+    // "Install all dependencies" is wrapped, not dropped.
+    assert!(plain.iter().any(|line| line.contains("Install all")));
+    assert!(plain.iter().any(|line| line.contains("dependencies")));
+}
+
+/// Too narrow for borders plus one column per cell: upstream replays
+/// `token.raw`; this port wraps each raw source line instead of producing a
+/// mangled grid.
+#[test]
+fn table_too_narrow_replays_the_raw_markdown() {
+    let source = "| Command | Description | Example |\n| --- | --- | --- |\n| npm install | Install | npm install |";
+    let lines = texts(&render_markdown(source, 12));
+    assert!(!lines.iter().any(|line| line.contains('┌')));
+    assert!(!lines.iter().any(|line| line.contains('│')));
+    for line in &lines {
+        assert!(line.chars().count() <= 12, "{line:?}");
+    }
+    // The raw source is present word by word.
+    let joined = lines.join(" ");
+    assert!(joined.contains("Command"));
+    assert!(joined.contains("Description"));
+    assert!(joined.contains("Example"));
+    assert!(joined.contains("---"));
+}
+
+/// Alignment markers are accepted (and validated) but not rendered: upstream's
+/// `renderTable` never reads `token.align`, so every column is left-aligned.
+#[test]
+fn table_alignment_markers_are_accepted_but_not_rendered() {
+    let lines = texts(&render_markdown(
+        "| Left | Center | Right |\n| :--- | :---: | ---: |\n| A | B | C |\n| Long text | Middle | End |",
+        80,
+    ));
+    assert_eq!(
+        lines,
+        vec![
+            "┌───────────┬────────┬───────┐",
+            "│ Left      │ Center │ Right │",
+            "├───────────┼────────┼───────┤",
+            "│ A         │ B      │ C     │",
+            "├───────────┼────────┼───────┤",
+            "│ Long text │ Middle │ End   │",
+            "└───────────┴────────┴───────┘",
+        ]
+    );
+}
+
+/// A body row is normalised to the header's column count (marked does the
+/// same), and an optional outer pipe is not a cell.
+#[test]
+fn table_rows_are_normalised_to_the_header_width() {
+    let lines = texts(&render_markdown(
+        "| a | b |\n| --- | --- |\n| 1 | 2 | 3 |\n| 4 |",
+        40,
+    ));
+    assert_eq!(
+        lines,
+        vec![
+            "┌───┬───┐",
+            "│ a │ b │",
+            "├───┼───┤",
+            "│ 1 │ 2 │",
+            "├───┼───┤",
+            "│ 4 │   │",
+            "└───┴───┘",
+        ]
+    );
+}
+
+/// A delimiter row whose column count disagrees with the header does not start
+/// a table — the lines stay literal text.
+#[test]
+fn table_requires_a_matching_delimiter_row() {
+    let lines = texts(&render_markdown("| a | b |\n| --- |\n| 1 | 2 |", 40));
+    assert_eq!(lines, vec!["| a | b |", "| --- |", "| 1 | 2 |"]);
+
+    // A bare `---` is still a horizontal rule, not a delimiter row.
+    let lines = texts(&render_markdown("text\n\n---", 40));
+    assert_eq!(lines[2], "─".repeat(40));
+}
+
+/// Inside a block quote the table inherits the quote style: the quote border
+/// stays, and cells carry `mdQuote`.
+#[test]
+fn table_inside_a_quote_keeps_the_quote_style() {
+    let lines = render_markdown("> | a | b |\n> | --- | --- |\n> | 1 | 2 |", 40);
+    assert_eq!(
+        texts(&lines),
+        vec![
+            "│ ┌───┬───┐",
+            "│ │ a │ b │",
+            "│ ├───┼───┤",
+            "│ │ 1 │ 2 │",
+            "│ └───┴───┘",
+        ]
+    );
+    for line in &lines {
+        assert_eq!(
+            line.first().expect("quote border span").style.fg,
+            Some(ThemeColor::MdQuoteBorder)
+        );
+    }
+    let cell = find(&lines[1], "a");
+    assert_eq!(cell.style.fg, Some(ThemeColor::MdQuote));
+    assert!(cell.style.italic);
+    assert!(cell.style.bold);
+}
+
+/// A `\|` inside a cell is a literal pipe, and inline markup inside a cell
+/// keeps its own slots while the column width still fits the whole cell.
+#[test]
+fn table_cells_keep_escaped_pipes_and_inline_slots() {
+    let lines = render_markdown("| a \\| b | `c` |\n| --- | --- |\n| 1 | 2 |", 40);
+    assert_eq!(
+        texts(&lines),
+        vec![
+            "┌───────┬───┐",
+            "│ a | b │ c │",
+            "├───────┼───┤",
+            "│ 1     │ 2 │",
+            "└───────┴───┘",
+        ]
+    );
+    // The header is bold, but the code cell keeps its `mdCode` slot.
+    let code = find(&lines[1], "c");
+    assert_eq!(code.style.fg, Some(ThemeColor::MdCode));
+    assert!(code.style.bold);
+
+    // A link renders its label and its URL, and the width accounts for both.
+    let lines = render_markdown(
+        "| `c` | [l](https://e.com/p) |\n| --- | --- |\n| 1 | 2 |",
+        40,
+    );
+    let header = &lines[1];
+    assert_eq!(find(header, "l").style.fg, Some(ThemeColor::MdLink));
+    assert_eq!(
+        find(header, " (https://e.com/p)").style.fg,
+        Some(ThemeColor::MdLinkUrl)
+    );
+    let width = plain_text(&lines[0]).chars().count();
+    assert_eq!(plain_text(header).chars().count(), width);
+}
+
+/// Upstream only adds a trailing blank line when another block follows, so a
+/// table at the end of a document ends at its bottom border.
+#[test]
+fn table_ends_the_document_without_a_trailing_blank() {
+    let lines = render_markdown("| a |\n| --- |\n| 1 |", 40);
+    assert_eq!(texts(&lines).last().expect("last line"), "└───┘");
+
+    let lines = render_markdown("| a |\n| --- |\n| 1 |\n\nafter", 40);
+    assert_eq!(texts(&lines)[5], "");
+    assert_eq!(texts(&lines)[6], "after");
+}
+
+/// Wide glyphs count one column (this crate's single width convention), so a
+/// CJK table never overflows or panics.
+#[test]
+fn table_with_wide_glyphs_stays_within_the_width() {
+    let lines = texts(&render_markdown(
+        "| 名前 | 年齢 |\n| --- | --- |\n| あいうえお | 30 |",
+        20,
+    ));
+    for line in &lines {
+        assert!(line.chars().count() <= 20, "{line:?}");
+    }
+    assert!(lines[1].contains("名前"));
+    assert!(lines[3].contains("あいうえお"));
+    let grid_width = lines[0].chars().count();
+    for line in lines.iter().filter(|line| line.starts_with('│')) {
+        assert_eq!(
+            line.chars().count(),
+            grid_width,
+            "uneven grid line {line:?}"
+        );
+    }
 }
