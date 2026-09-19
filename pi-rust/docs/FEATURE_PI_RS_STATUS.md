@@ -8593,8 +8593,16 @@ $ rustfmt 1.8.0（1.85.0 工具链）--edition 2021 --check <本轮 4 个文件>
 
 **补记（推送后回填真实哈希）：**
 
-- 代码提交 `41d77c99d`（4 个文件：`app.rs` / `tests/selection_granularity.rs` / `tests/mouse_selection.rs` /
-  `tests/app_theme.rs`），文档提交见下一条。
-- 推送：`41d77c99d`（rebase 后）快进到 `feature/pi.rs`；本节的 docs 提交随后一并推送。
-- 合并态复测（第五节）跑的树就是 rebase 后的工作树，与推送的 `feature/pi.rs` 新头同源。
+- 代码提交 `41d77c99d`（4 个文件），文档提交 `466144269`（本节 +119 行）；两者都在 rebase 后的工作分支上，
+  起点 `8b1ad7e13`。
+- 因为起点就是当时 `origin/feature/pi.rs` 的头，本次是**快进、无 merge 提交**，没用 plumbing：
+  `git push origin 466144269:refs/heads/feature/pi.rs` → `8b1ad7e13..466144269`（快进），
+  `work/lum-1133` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `466144269691380a5c361f8c2da49f6a5c658b90`。
+- `git diff --numstat 8b1ad7e13 466144269`（本轮全部改动，5 个文件、**+1109 / − 89**）：
+  `pi-tui/src/app.rs` +671/−54、`pi-tui/tests/selection_granularity.rs` +283（新）、
+  `pi-tui/tests/mouse_selection.rs` +28/−27、`pi-tui/tests/app_theme.rs` +8/−8、本节文档 +119。
+  **`pi-extensions` / `pi-coding-agent` / `pi-session` 一个文件都不在其中。**
+- 合并态复测（第五节）跑的树就是 rebase 后的工作树，与 `feature/pi.rs` 的新头 `466144269` 同源，数字即第五节所列。
+- 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节如实记录。
 
