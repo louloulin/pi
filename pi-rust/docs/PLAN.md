@@ -162,13 +162,22 @@ gone. Merged in LUM-1048.
 with a shared ignore list (`mod_ignore.rs`) and sandbox checks. Merged in
 LUM-1048.
 
-## Planned — Stage 10–12
+## Stage 10–12 — dispatched (LUM-1051 / LUM-1052 / LUM-1053)
 
-| Stage | Scope | Exit criterion |
-|-------|-------|----------------|
-| 10 | `--rpc` mode: stdio JSON-RPC over the `Agent` facade, mirroring `packages/server` | a JSON-RPC client can start a session, send a prompt and receive the streamed event vocabulary |
-| 11 | Google Gemini provider (`generativelanguage` streaming) + catalog | fixture-driven tests equivalent to the Stage 7 Anthropic suite |
-| 12 | print mode on `pi-session` (SQLite) instead of JSONL | `--continue` / `--session` read/write the same store as `/resume` |
+| Stage | Issue | Scope | Exit criterion |
+|-------|-------|-------|----------------|
+| 10 | LUM-1051 | real `ToolExecutor` in `pi-agent-core`, driven by the `pi-coding-agent` tool bundle | an agent turn actually runs `bash` / `read` / `write` / `edit` / `find` / `grep` / `ls` |
+| 11 | LUM-1052 | pi packages manager: `install` / `remove` / `list` / `update-models` / `list-models` / `version` | each subcommand has a real `ModeTarget` arm and a test |
+| 12 | LUM-1053 | `--rpc` JSON-RPC over stdio | a client can start a session, send a prompt and receive the print-mode event vocabulary |
 
-Stages 10–12 touch disjoint files and are dispatched at most three at a
-time; `feature/pi.rs` is the integration branch for each.
+## Stage 13 — parked in `backlog` (LUM-1055 / LUM-1056 / LUM-1057)
+
+| Issue | Scope |
+|-------|-------|
+| LUM-1055 | `pi-ai`: Google Gemini provider (streaming, catalog, fixtures, `google_faux` e2e) |
+| LUM-1056 | print mode on the `pi-session` SQLite store (closes LUM-1044's JSONL limitation) |
+| LUM-1057 | new `pi-telemetry` crate, the last `packages/*` with no Rust counterpart |
+
+Stage 13 stays `backlog` until the Stage 10 barrier closes, so at most three
+runs are ever in flight; `feature/pi.rs` is the integration branch for all of
+them.

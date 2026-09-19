@@ -1682,28 +1682,31 @@ The overlay was at 94% (3.0 GB free) after the builds. Removing the
 feature worktree freed ~12 GB → **15 GB free**, enough headroom for the
 next three concurrent builds.
 
-### LUM-981 plan — next three stages
+### LUM-981 plan — next stages
 
-LUM-981's two acceptance criteria ("基于rust实现pi" / "兼容pi的插件生态")
+LUM-981's two acceptance criteria ("基于 rust 实现 pi" / "兼容 pi 的插件生态")
 remain met, and the follow-up debt is now concrete rather than
-protocol-reconciliation-shaped. Three independent workstreams, planned as
-Stage 10–12 sub-issues (dispatched one slot at a time, respecting the
-3-concurrent cap):
+protocol-reconciliation-shaped.
 
-1. **Stage 10 — `--rpc` mode.** `main.rs` still prints
-   `rpc mode is a Stage 5 deliverable`. Port `packages/server`'s JSON-RPC
-   surface (`rpc-entry.ts` + `connection.ts` / `session-router.ts`) to a
-   stdio JSON-RPC loop over the existing `Agent` facade, with the
-   print-mode NDJSON event vocabulary reused for server→client events.
-2. **Stage 11 — Google Gemini provider.** Only faux / OpenAI Chat
-   Completions / Anthropic Messages exist today; `packages/ai/src/providers/google.ts`
-   is the next highest-traffic provider. Reuses `pi-ai`'s SSE parser and the
-   Stage 7 fixture/test shape.
-3. **Stage 12 — print mode on the SQLite session backend.** LUM-1044
-   deliberately wrote JSONL because Stage 5's `pi-session` landed later;
-   switching `PrintModeOptions` to the `pi-session` reader/writer removes the
-   last duplicate session format and makes `--continue` / `--session`
-   consistent with `/resume`.
+**Already dispatched and running (≤ 3 concurrent, cap saturated):**
+
+| Stage | Issue | Scope |
+|-------|-------|-------|
+| 10 | LUM-1051 | `pi-agent-core`: real `ToolExecutor` replacing the stubbed `execute_tool_calls`, driven by `pi-coding-agent`'s tool bundle |
+| 11 | LUM-1052 | `pi-coding-agent`: real `install` / `remove` / `list` / `update-models` / `list-models` / `version` (the pi-packages ecosystem surface) |
+| 12 | LUM-1053 | `pi-coding-agent`: `--rpc` JSON-RPC over stdio, reusing the print-mode event vocabulary |
+
+These were opened by the concurrent LUM-1050 round; the three run at the
+same time and all target `feature/pi.rs`, so this round does **not** open a
+fourth run.
+
+**Parked for the round after (stage 13, `backlog`, no run enqueued):**
+
+| Stage | Issue | Scope |
+|-------|-------|-------|
+| 13 | LUM-1055 | `pi-ai`: Google Gemini provider (streaming + model catalog + fixtures + `google_faux` e2e) |
+| 13 | LUM-1056 | `pi-coding-agent`: print mode on the `pi-session` SQLite store, closing LUM-1044's known limitation |
+| 13 | LUM-1057 | new `pi-telemetry` crate (the last `packages/*` with no Rust counterpart) |
 
 All three are additive and touch disjoint files, so they can run in
 parallel within the cap. `feature/pi.rs` is the integration target for each.
