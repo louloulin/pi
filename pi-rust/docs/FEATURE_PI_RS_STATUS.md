@@ -6093,3 +6093,124 @@ $ cargo test   -p pi-tui --offline                                     # 199 pas
 另：LUM-1104 / LUM-1105 / LUM-1106 是同一个 autopilot 触发产生的三路协调轮，frontier 评估
 高度重叠（三份都在重估同一批候选），建议合并为一路；LUM-1088 的 run 仍挂着占一个槽位。
 
+
+## LUM-1107 round — 核验 `feature/pi.rs` + 扩展 API `pi.exec` 落地（插件生态）+ 清理陈旧 `target` 解除磁盘打满
+
+（autopilot 协调轮；开工后把 LUM-1107 的泛标题「pi」改名为本轮实际内容。）
+
+### 一、在途盘点、磁盘与槽位
+
+- 开工 `multica daemon status` = `running_task_count = 2`（本轮 + LUM-1083，后者挂在
+  rquickjs vendor `free(): double free` 上已 3 小时）。**有 1 个空槽**，但见第五节：本轮把
+  空槽用于派发一个**跨 crate、与 host.rs 无交集**的验证任务，而不是再造一路同源协调轮。
+- 磁盘：开工时 overlay **100%（余 340M）**，`cargo check` 刚开始就悬。按 LUM-1040 先例
+  （用户当时明确要求 `cargo clean`）清掉**已收工**轮的 `target`：`lum-1093` 7.3G、
+  `lum-1104` 8.3G、`lum-1105` 323M、`lum-1106` 427M → 余 16G（68%）。**未触碰**
+  LUM-1083 的 worktree 与 target（在途 run 的产物）。本轮全程用本 workspace 的
+  `pi-rust/target`（`cargo check -p pi-coding-agent` 后 15G 仍有余量）。
+- `origin/feature/pi.rs` 停在 `6423677ab`（LUM-1106 的 merge），**无新提交**；本轮工作分支
+  `work/lum-1107` 就是它的直接子节点，因此没有 merge 动作要做（见第四节）。
+
+### 二、本轮切片：`pi.exec`（插件生态最便宜的硬缺口）
+
+上游扩展**不**直接 `import node:child_process` 去起 `git`/`sh`，而是用扩展 API 的
+`pi.exec(command, args, options)` —— 仓库自带 example 里有 9 个这么写：
+`auto-commit-on-exit.ts`、`border-status-editor.ts`、`dirty-repo-guard.ts`、
+`git-checkpoint.ts`、`git-merge-and-resolve.ts`、`github-issue-autocomplete.ts`、
+`inline-bash.ts`、`input-transform-streaming.ts`、`shutdown-command.ts`。
+
+而 shim 里冻结的 `pi` 对象只有 `on` / `registerTool` / `registerCommand` / `appendEntry` /
+`sendMessage` / `sendUserMessage` / `setSessionName` —— **没有 `exec`**。这些扩展在 Rust
+宿主下一调用就是 `TypeError: pi.exec is not a function`：不是行为差异，是**能力缺失**，
+因此优先级高于 frontier 里那些「实现了但语义有偏差」的项，也比 Stage 级的 `.wasm` 宿主便宜得多。
+
+上游契约（`packages/coding-agent/src/core/exec.ts` + `src/core/extensions/loader.ts:395`）：
+
+```ts
+exec(command: string, args: string[], options?: { signal?: AbortSignal; timeout?: number; cwd?: string })
+  → Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>
+// spawn(command, args, { cwd: options?.cwd ?? sessionCwd, shell: false, stdio: ["ignore","pipe","pipe"] })
+// 永远 resolve：spawn 失败也 resolve { stdout:"", stderr:"", code:1, killed:false }
+// timeout → SIGTERM，5s 后 SIGKILL；signal 可取消
+```
+
+| File | Change |
+|------|--------|
+| `crates/pi-extensions/src/host.rs` | `ExecRequest { args, cwd?, timeout? }` / `ExecOutcome { stdout, stderr, code, killed }`；`host_exec_impl(command, argsJson) -> Promise<JSON>`（解析信封、**永不 reject**，与上游一致）；`run_child` 用 `tokio::process::Command` —— stdin `null`、stdout/stderr piped、`kill_on_drop(true)`（宿主外层超时丢 future 时子进程不能存活）、可选 `current_dir`，**两条管道各起一个 drain task 与 `wait()` 并发**（否则输出超过 OS 管道缓冲 ~64KiB 的子进程会写阻塞、宿主等退出 → 死锁），`timeout > 0` 时 `start_kill()` + `killed = true`，spawn 失败 → `code = 1` 且把 OS 错误写进 `stderr`，`code = status.code().unwrap_or(-1)`；`read_pipe<R: AsyncRead+Unpin>` 泛型 + `from_utf8_lossy`（对齐 Node 的 `data.toString()`）；在 `install_imports` 末尾注册 `host_exec`（`Function::new(ctx, Async(..))`，与 `host_ui_*` 同一条 Async 路径） |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | `pi` 对象新增 `async exec(command, args, options)`：`command` 非空字符串 / `args` 字符串数组否则 `TypeError`（上游对**命令失败**才 resolve，**调用形态错**仍应 reject）；`cwd` 默认 `globalThis._pi_cwd`（宿主从 `ToolContext` 写入）；`timeout > 0` 透传；`signal` 接受但忽略；对宿主返回做形状兜底（缺字段补 `""` / `0` / `false`）；host 不可用时明确报错 |
+| `crates/pi-extensions/tests/pi_exec.rs`（新增，`#![cfg(unix)]`） | 6 个集成测试：① stdout/stderr/exit code/spawn 失败一次跑通（含非 ASCII 参数）② 参数逐字传递（`printf "%s\|%s" "a b" "*"`，无 shell）+ 200 000 字节输出不阻塞 ③ cwd 默认 session cwd、`options.cwd` 覆盖 ④ `timeout` 杀进程（`killed: true`、`code: -1`，且远早于 `sleep 5` 返回）⑤ 参数校验的两条 `TypeError` ⑥ 事件处理器里 `await pi.exec`（`_pi_dispatch` 路径）+ `pi.appendEntry` 落到宿主日志 |
+| `crates/pi-extensions/docs/EXTENSIONS.md` | `pi` 全局表 / Host imports 表各加一行；新增 `host_exec` 段落，写清它支撑哪些 example；记录三条刻意差异 |
+| `crates/pi-extensions/docs/NODE_BUILTINS.md` | 覆盖表新增「靠 `pi.exec` 起进程的 8 个 example：**Unblocked**」一行；`node:child_process` frontier 行改写（说清「`pi.exec` 覆盖了声明式 shell-out，直接 `import node:child_process` 仍缺」，剩余示例点名） |
+
+**与上游的刻意差异**（三条，均已写进 `docs/EXTENSIONS.md`）：
+
+1. **`signal` 忽略**：QuickJS 没有 `AbortSignal`，取消改由宿主 per-call 超时兜底
+   （`DEFAULT_TIMEOUT` 5s；交互 TUI 300s）。后果：print/RPC 模式下长命令（`git fetch`）
+   会被宿主超时打断 —— **这是本轮最大的已知限制**，frontier 已登记。
+2. **超时用 `SIGKILL`**（不做 SIGTERM → 5s → SIGKILL 升级），且 `code = -1`。上游此时
+   `waitForChildProcess` 的 `code` 为 null、`?? 0` 兜成 0，会让**被杀的进程看起来成功**；
+   `if (code !== 0)` 的扩展会误判，故刻意不复刻。
+3. **spawn 失败（`ENOENT`）把 OS 错误写进 `stderr`**（`code = 1` 与上游一致）；上游 `.catch`
+   路径把错误丢掉、`stderr` 是空串，扩展只能拿到一个 `code: 1`。
+
+未做（记入 frontier，不做猜测性实现）：`options.signal`；`node:child_process` 的
+`spawn`/`exec`（那是真流式 stdio + 进程生命周期模型，Stage 级）。
+
+### 三、验证
+
+```
+$ rustfmt --edition 2021 --check crates/pi-extensions/src/host.rs crates/pi-extensions/tests/pi_exec.rs
+      # clean（只对本轮改动文件校验：`cargo fmt -p pi-extensions` 会顺带重排 5 个历史未格式化
+      #  文件 —— bridge.rs / error.rs / lib.rs / shim.rs / tests/*，已 checkout 还原，避免无关 diff）
+$ cargo clippy -p pi-extensions --all-targets -- -D warnings     # 0 warnings
+$ cargo test   -p pi-extensions                                  # 57 passed / 0 failed
+      （10 e2e + 33 host + 3 loader + 5 node_builtins + 6 pi_exec；本轮新增 6，51 → 57）
+$ cargo check  -p pi-coding-agent --offline                      # Finished（49s，下游未被破坏）
+```
+
+`pi_exec.rs` 里 `pi_exec_passes_arguments_verbatim_and_drains_large_output` 是专门打
+「管道死锁」那条的回归：`yes x | head -c 200000` 远超 64KiB 管道缓冲，若 drain 不与
+`wait()` 并发就会挂死（本轮实现前该用例在设计上必挂）。
+
+**没跑**的：`cargo test --workspace`、`cargo test -p pi-coding-agent`（`pi-coding-agent`
+的 `rusqlite` / `quickjs` 链接阶段吃磁盘，前几轮多次在这里 ENOSPC）。本轮改动对下游只**新增**
+一个宿主 import 与 shim 方法、不改任何公开 Rust 签名，`cargo check -p pi-coding-agent` 干净；
+把「真实 `pi` 二进制里扩展 `pi.exec` 端到端」作为独立子任务派发（见第五节），不在这轮硬做。
+
+### 四、合并与推送
+
+- 工作分支 `work/lum-1107`（起点 `6423677ab`）：`8062c7996`（实现 + 文档，5 文件）→ 本轮
+  的状态文档提交。`origin/feature/pi.rs` 未前进 → **无 merge 动作**，直接 fast-forward
+  合入 `feature/pi.rs` 并**非 force** 推送。
+
+### 五、frontier（本轮更新）：空槽派发第一单
+
+本轮把空槽用于**跨 crate**的独立任务，避开前几轮「同源协调轮重复核验」的循环：
+派发 `[Stage 28] pi-coding-agent: 扩展 pi.exec 端到端集成测试`（parent LUM-981），落在
+`pi-coding-agent/tests/`，**明确禁止改** `pi-extensions/src/host.rs`（LUM-1083 在途）与 shim。
+
+frontier 重排（`pi.exec` 已从「缺失 API」中划掉）：
+
+1. **P1 `.wasm` 扩展宿主**：Stage 级、改 `host.rs`，与 LUM-1083 同文件 → 仍须排队。
+2. **P1 LUM-1083 扩展宿主 double free**：本轮在 `feature/pi.rs` lineage 上跑完整
+   `pi-extensions`（57 passed）**未复现**，但本套件是 current-thread runtime、负载与
+   LUM-1098 的 12 次 rpc 循环不同，**证据强度有限**，不据此改判。
+3. **P1 `pi.exec` 的 `signal` + 超时放开**（本轮新暴露）：要真取消得先有
+   `AbortSignal`/`AbortController`（shim 纯 JS 可做）或给宿主加 `cancelled` 通道；
+   「长命令不至于被 5s 宿主超时打断」也可以先给扩展一个显式 `HostOptions::timeout` 入口。
+4. **P2 编辑器剩余键位**：`ctrl+b` / `ctrl+f`（`cursorLeft/Right` 别名）是唯一无歧义项；
+   `ctrl+d` 语义（EOF vs forward-delete）与 `jumpForward/jumpBackward`（上游只登记了键位、
+   没有实现）都需要先定语义，不适合机械移植。
+5. **P2 `pi-tui` 渲染 API 样式化**（`Span` + 主题消费方）：Stage 级。
+6. **P3 `node:child_process`**：剩余 6 个直接 import 的 example
+   （`interactive-shell.ts` / `ssh.ts` / `mac-system-theme.ts` / `sandbox/index.ts` /
+   `subagent/index.ts` / `truncated-tool.ts`）；Stage 级。
+7. **P3 `node:zlib` / `node:readline` / `node:module`**：各是单点，但都要动 `host.rs` 的
+   op 表（zlib 还要新依赖 `flate2`/`miniz_oxide`）→ 与 LUM-1083 排队。
+8. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 不写猜测值；
+   `--rpc` 与 `pi-client` 传输层前提不成立）。
+
+并发建议（维持前几轮结论）：上限 3 路；`pi-extensions/src/host.rs` 与
+`docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写；LUM-1104 / 1105 / 1106 / 1107 是同一
+autopilot 触发串出来的四路协调轮，frontier 高度重叠，**建议合并为一路**，否则每轮都在重估
+同一批候选（本轮除 `pi.exec` 外仍是重估，区别只在于顺手把空槽变成了跨 crate 的独立交付）。
