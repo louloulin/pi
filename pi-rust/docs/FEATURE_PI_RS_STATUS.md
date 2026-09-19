@@ -5407,22 +5407,28 @@ $ cargo check  -p pi-tui --all-targets --offline                          # 0 er
 $ cargo clippy -p pi-tui --all-targets --offline -- -D warnings            # 0 warnings
 $ cargo fmt    -p pi-tui -- --check                                       # clean
 $ cargo test   -p pi-tui --offline                                        # 110 passed / 0 failed（含 1 doctest）
-$ cargo test   --workspace --no-fail-fast --offline                       # 859 passed / 2 failed
+$ cargo test   --workspace --no-fail-fast --offline                       # 合并前 859 passed / 2 failed
+$ cargo test   --workspace --no-fail-fast --offline                       # 合并 LUM-1099 后 864 passed / 2 failed
 ```
 
-全量 859/2 中的 2 个失败**不是本轮改动**：`pi-coding-agent --test print_mode` 的
-`binary_json_events_mode_emits_ndjson` / `sigint_or_clean_exit`（见下节）；基线为 837/0，
-本轮 +24 个主题测试后为 859/2，差额与计数完全对得上。
+全量 2 个失败**不是本轮改动**，且两次跑的失败目标不同（见下节）；合并前基线 837/0，本轮
++24 个主题测试（14 内联 + 9 集成 + 1 doctest），合并 LUM-1099 新增用例后为 864/2。
 
 ### 三、LUM-1083 崩溃：本轮又复现一次（新证据）
 
 - **只在 workspace 全量并行 + 高负载下出现**：单跑
   `cargo test -p pi-coding-agent --test print_mode` 连跑 5 次全绿；
   `target/debug/pi --print=hello --output-format=json-events` 并发 24 次 **0 崩溃**。
-- 失败形态与 panic 位置：子进程 `unix_wait_status(139)`（SIGSEGV）或 `exit code: None`，
-  同时在终端打出
-  `panicked at /tmp/cargo-home/.../event-listener-5.4.2/src/intrusive.rs:341:
-   attempt to subtract with overflow`（即 `self.notified -= 1`）。
+- 两次全量跑的失败形态与命中目标：
+  - `--test print_mode` 的 `binary_json_events_mode_emits_ndjson` / `sigint_or_clean_exit`：
+    子进程 `unix_wait_status(139)`（SIGSEGV）或 `exit code: None`，同时打出
+    `panicked at .../event-listener-5.4.2/src/intrusive.rs:341: attempt to subtract with
+    overflow`（即 `self.notified -= 1`）。
+  - 合并 LUM-1099 后那次：`--test cli_provider::xai_model_dials_the_responses_endpoint`、
+    `--test rpc::set_model_rejects_unknown_model`，子进程 `signal: Some(6)`（SIGABRT）+ 非
+    0 退出，stderr 为 `free(): double free detected in tcache 2`。
+  - 两次都指向「spawn `pi` 二进制」的任意用例，即宿主进程退出时的内存/计数腐坏；用例名与
+    崩溃位置无固定关系。
 - 与 LUM-1098 的结论一致：`Cargo.lock` 里 `event-listener` 只由
   `rquickjs-core ← async-lock`（`pi-extensions`）引入，LUM-1098 已实测把
   `event-listener` 降到 5.3.1 只是把同一处下溢平移到 `std.rs:228`（5.3.1 无 `intrusive.rs`，
