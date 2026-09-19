@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_protocol::{ExtensionEvent, UiRequest, UiResponse};
+use pi_protocol::{ExtensionEvent, ResourcesDiscoverReason, UiRequest, UiResponse};
 
 use crate::api::ExtensionBridge;
 use crate::error::ExtensionError;
-use crate::host::JsExtensionHost;
+use crate::host::{DiscoveredResources, JsExtensionHost};
 
 /// Bridge that delivers events through a [`JsExtensionHost`].
 pub struct JsExtensionBridge {
@@ -53,6 +53,44 @@ impl JsExtensionBridge {
     /// Wrap a bridge in an `Arc` so it can be shared with the agent.
     pub fn into_arc(self) -> Arc<Self> {
         Arc::new(self)
+    }
+
+    /// Ask every loaded extension to advertise extra skill / prompt /
+    /// theme paths (upstream `resources_discover`).
+    ///
+    /// A handler-level failure is reported through the `pi_extension`
+    /// tracing target and yields no paths: discovery is best-effort, so
+    /// a broken extension cannot keep the agent from starting. Handlers
+    /// that did answer still contribute.
+    pub async fn discover_resources(&self, reason: ResourcesDiscoverReason) -> DiscoveredResources {
+        let event = ExtensionEvent::ResourcesDiscover {
+            cwd: self.cwd.clone(),
+            reason,
+        };
+        match self
+            .host
+            .emit_event_with(&event, Some(&self.mode), self.has_ui, &self.cwd)
+            .await
+        {
+            Ok(outcome) => {
+                if let Some(err) = outcome.errored.as_ref() {
+                    tracing::warn!(
+                        target: "pi_extension",
+                        error = %err.message,
+                        "resources_discover handler failed"
+                    );
+                }
+                DiscoveredResources::from_dispatch(&outcome)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "pi_extension",
+                    error = %err,
+                    "failed to dispatch resources_discover"
+                );
+                DiscoveredResources::default()
+            }
+        }
     }
 }
 

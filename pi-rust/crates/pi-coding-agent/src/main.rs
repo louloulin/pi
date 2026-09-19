@@ -14,10 +14,11 @@ use pi_coding_agent::packages::{commands as package_commands, PackageCommand};
 use pi_coding_agent::print_mode::{run_print_mode, PrintModeOptions};
 use pi_coding_agent::provider::ProviderRouter;
 use pi_coding_agent::resource_loader::{
-    build_cli_prompt_templates, build_cli_system_prompt_with_extension_tools,
+    build_cli_prompt_templates_with_extensions, build_cli_system_prompt_with_extensions,
     resolve_cli_project_trust,
 };
 use pi_coding_agent::session_log::SessionLog;
+use pi_extensions::DiscoveredResources;
 use pi_protocol::{Api, Model, ProviderId};
 
 fn main() -> ExitCode {
@@ -88,26 +89,10 @@ fn main() -> ExitCode {
     };
 
     // Prompt templates are expanded at submission time, not baked into
-    // the system prompt, so they are loaded alongside it for every agent
-    // mode. `--no-prompt-templates` / `-np` skips default discovery while
-    // still honouring explicit `--prompt-template` paths.
-    let prompt_templates = match target_mode {
-        ModeTarget::Interactive | ModeTarget::Print | ModeTarget::Rpc => {
-            let loaded = build_cli_prompt_templates(&cli);
-            for diagnostic in &loaded.diagnostics {
-                match diagnostic.path.as_deref() {
-                    Some(path) => eprintln!(
-                        "pi: prompt template {} ({})",
-                        diagnostic.message,
-                        path.display()
-                    ),
-                    None => eprintln!("pi: prompt template {}", diagnostic.message),
-                }
-            }
-            loaded.templates
-        }
-        ModeTarget::Session | ModeTarget::Packages => Vec::new(),
-    };
+    // the system prompt. They are loaded per mode *after* the extension
+    // host has run `resources_discover`, so a plugin-provided template
+    // participates in the same `/name` lookup the default directories do
+    // (`--no-prompt-templates` / `-np` still silences both).
 
     let initial_prompt = cli.command.as_ref().and_then(|cmd| match cmd {
         Command::Print { prompt } => Some(prompt.join(" ")),
@@ -139,8 +124,13 @@ fn main() -> ExitCode {
             let ui_bridge = extension_ui.as_ref().map(|ui| ui.bridge().clone());
             let has_ui = ui_bridge.is_some();
             let loaded_extensions = load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge);
-            let system_prompt =
-                build_system_prompt_for(&cli, loaded_extensions.runtime.tool_prompts());
+            let extension_resources = loaded_extensions.runtime.resource_paths().clone();
+            let system_prompt = build_system_prompt_for(
+                &cli,
+                loaded_extensions.runtime.tool_prompts(),
+                &extension_resources,
+            );
+            let prompt_templates = load_prompt_templates_for(&cli, &extension_resources);
             let tool_executor = loaded_extensions.executor.clone();
             let extension_runtime = Arc::new(loaded_extensions.runtime.clone());
             // Interactive mode is the only path that still uses the
@@ -161,7 +151,7 @@ fn main() -> ExitCode {
                 session_log,
                 session_id: session_id.clone(),
                 initial_prompt,
-                prompt_templates: prompt_templates.clone(),
+                prompt_templates,
                 stream_fn: stream_fn.clone(),
                 tool_executor,
                 extensions: Some(extension_runtime),
@@ -197,10 +187,6 @@ fn main() -> ExitCode {
                     return ExitCode::from(err.exit_code());
                 }
             };
-            let prompt_text = pi_coding_agent::expand_prompt_template(
-                &expanded.text,
-                &prompt_templates,
-            );
             // `--continue` / `--session` interact: a bare `--continue`
             // (`None` payload) attaches the most recent session, while
             // `--continue=<id>` and `--session <id>` attach that exact
@@ -224,8 +210,20 @@ fn main() -> ExitCode {
                 }
             };
             let loaded_extensions = load_extensions(&runtime, &cli, "print", false, None);
-            let system_prompt =
-                build_system_prompt_for(&cli, loaded_extensions.runtime.tool_prompts());
+            let extension_resources = loaded_extensions.runtime.resource_paths().clone();
+            let system_prompt = build_system_prompt_for(
+                &cli,
+                loaded_extensions.runtime.tool_prompts(),
+                &extension_resources,
+            );
+            let prompt_templates = load_prompt_templates_for(&cli, &extension_resources);
+            // Template expansion runs here, not before the extension load:
+            // `/name` must be able to resolve to a template a plugin
+            // contributed through `resources_discover`.
+            let prompt_text = pi_coding_agent::expand_prompt_template(
+                &expanded.text,
+                &prompt_templates,
+            );
             let tool_executor = loaded_extensions.executor.clone();
             let options = PrintModeOptions {
                 prompt: prompt_text,
@@ -258,8 +256,13 @@ fn main() -> ExitCode {
                 }
             };
             let loaded_extensions = load_extensions(&runtime, &cli, "rpc", false, None);
-            let system_prompt =
-                build_system_prompt_for(&cli, loaded_extensions.runtime.tool_prompts());
+            let extension_resources = loaded_extensions.runtime.resource_paths().clone();
+            let system_prompt = build_system_prompt_for(
+                &cli,
+                loaded_extensions.runtime.tool_prompts(),
+                &extension_resources,
+            );
+            let prompt_templates = load_prompt_templates_for(&cli, &extension_resources);
             let tool_executor = loaded_extensions.executor.clone();
             let options = pi_coding_agent::rpc::RpcServerOptions {
                 model: resolved_model,
@@ -267,7 +270,7 @@ fn main() -> ExitCode {
                 stream_fn,
                 system_prompt,
                 session_id,
-                prompt_templates: prompt_templates.clone(),
+                prompt_templates,
                 tool_executor,
             };
             match runtime.block_on(pi_coding_agent::rpc::run_rpc_server(options)) {
@@ -332,12 +335,16 @@ enum ModeTarget {
 }
 
 /// Build the system prompt for one agent mode, folding in the prompt
-/// contributions declared by the mode's extension tools and reporting
+/// contributions declared by the mode's extension tools and the skills
+/// its extensions advertised through `resources_discover`, and reporting
 /// any skill diagnostics on stderr.
 fn build_system_prompt_for(
     cli: &Cli,
     extension_tools: &[pi_extensions::RegisteredToolPrompt],
+    extension_resources: &DiscoveredResources,
 ) -> String {
+    // Resolved here rather than inside the loader so the notice can name
+    // the directory; the loader takes the decision as a flag.
     let (trusted, has_trust_requiring_resources) = resolve_cli_project_trust(cli);
     if has_trust_requiring_resources && !trusted {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -346,7 +353,8 @@ fn build_system_prompt_for(
             cwd.display()
         );
     }
-    let (prompt, diagnostics) = build_cli_system_prompt_with_extension_tools(cli, extension_tools);
+    let (prompt, diagnostics) =
+        build_cli_system_prompt_with_extensions(cli, extension_tools, extension_resources);
     for diagnostic in &diagnostics {
         match diagnostic.path.as_deref() {
             Some(path) => eprintln!("pi: skill {} ({})", diagnostic.message, path.display()),
@@ -354,6 +362,26 @@ fn build_system_prompt_for(
         }
     }
     prompt
+}
+
+/// Load the prompt templates for one agent mode, folding in what the
+/// loaded extensions advertised, and report diagnostics on stderr.
+fn load_prompt_templates_for(
+    cli: &Cli,
+    extension_resources: &DiscoveredResources,
+) -> Vec<pi_coding_agent::prompt_templates::PromptTemplate> {
+    let loaded = build_cli_prompt_templates_with_extensions(cli, extension_resources);
+    for diagnostic in &loaded.diagnostics {
+        match diagnostic.path.as_deref() {
+            Some(path) => eprintln!(
+                "pi: prompt template {} ({})",
+                diagnostic.message,
+                path.display()
+            ),
+            None => eprintln!("pi: prompt template {}", diagnostic.message),
+        }
+    }
+    loaded.templates
 }
 
 fn default_session_dir() -> std::path::PathBuf {

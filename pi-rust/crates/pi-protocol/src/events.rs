@@ -121,6 +121,26 @@ pub enum ExtensionEvent {
         /// The final assistant message.
         message: AssistantMessage,
     },
+    /// An extension is asked to advertise extra skill / prompt / theme
+    /// paths. Mirrors upstream `resources_discover`.
+    ResourcesDiscover {
+        /// Working directory the session opened in.
+        cwd: String,
+        /// Why discovery runs.
+        reason: ResourcesDiscoverReason,
+    },
+}
+
+/// Why an extension is asked to advertise extra resource paths.
+///
+/// Mirrors the `reason` field of upstream's `ResourcesDiscoverEvent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourcesDiscoverReason {
+    /// The session is starting.
+    Startup,
+    /// Resources are being re-read after a config change.
+    Reload,
 }
 
 /// UI request delivered to extensions (notify, confirm, input, select, custom).

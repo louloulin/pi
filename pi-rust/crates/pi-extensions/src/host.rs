@@ -10,6 +10,7 @@
 //! when the agent calls a tool, the host invokes the JS-side execute
 //! function via [`JsExtensionHost::execute_tool`].
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -836,6 +837,100 @@ pub struct DispatchError {
     /// Error message raised by the JS handler (stringified).
     #[serde(default)]
     pub message: String,
+}
+
+/// Extra resource paths an extension advertised from a
+/// `resources_discover` handler.
+///
+/// Rust port of the `ResourcesDiscoverResult` the upstream
+/// `ExtensionRunner.emitResourcesDiscover` collects. Relative paths are
+/// resolved against the session `cwd` by the loader that consumes them,
+/// matching upstream's `resolveResourcePath`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveredResources {
+    /// Skill files / directories to load in addition to the defaults.
+    pub skill_paths: Vec<PathBuf>,
+    /// Prompt template files / directories to load in addition.
+    pub prompt_paths: Vec<PathBuf>,
+    /// Theme files. Collected for parity with upstream; the Rust TUI has
+    /// no theme system yet, so nothing consumes them.
+    pub theme_paths: Vec<PathBuf>,
+}
+
+impl DiscoveredResources {
+    /// True when no extension contributed anything: the caller can skip
+    /// re-deriving its resource bundle entirely.
+    pub fn is_empty(&self) -> bool {
+        self.skill_paths.is_empty() && self.prompt_paths.is_empty() && self.theme_paths.is_empty()
+    }
+
+    /// Fold one extension's JSON result into the accumulator.
+    ///
+    /// A handler returns `{ skillPaths?, promptPaths?, themePaths? }`;
+    /// anything else (a bare string, `null`, a number) is ignored
+    /// instead of failing the whole discovery pass, because a single
+    /// misbehaving extension must not take away the paths its peers
+    /// returned.
+    pub fn absorb_value(&mut self, value: &serde_json::Value) {
+        let Some(object) = value.as_object() else {
+            return;
+        };
+        collect_paths(object.get("skillPaths"), &mut self.skill_paths);
+        collect_paths(object.get("promptPaths"), &mut self.prompt_paths);
+        collect_paths(object.get("themePaths"), &mut self.theme_paths);
+    }
+
+    /// Build the aggregate from a `_pi_dispatch` summary, dropping the
+    /// duplicate paths two handlers may both advertise.
+    pub fn from_dispatch(outcome: &DispatchOutcome) -> Self {
+        let mut discovered = Self::default();
+        for result in &outcome.results {
+            discovered.absorb_value(result);
+        }
+        discovered.dedup();
+        discovered
+    }
+
+    /// Remove duplicate paths while keeping first-seen order (upstream
+    /// `mergePaths`).
+    pub fn dedup(&mut self) {
+        dedup_paths(&mut self.skill_paths);
+        dedup_paths(&mut self.prompt_paths);
+        dedup_paths(&mut self.theme_paths);
+    }
+}
+
+fn collect_paths(value: Option<&serde_json::Value>, out: &mut Vec<PathBuf>) {
+    let Some(entries) = value.and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for entry in entries {
+        // Upstream entries are plain strings. Accept `{ "path": "..." }`
+        // too: that is the shape the runner wraps them into internally, so
+        // an extension that echoes it back still works.
+        let raw = match entry {
+            serde_json::Value::String(path) => Some(path.as_str()),
+            serde_json::Value::Object(object) => object.get("path").and_then(|p| p.as_str()),
+            _ => None,
+        };
+        if let Some(path) = raw {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                out.push(PathBuf::from(trimmed));
+            }
+        }
+    }
+}
+
+fn dedup_paths(paths: &mut Vec<PathBuf>) {
+    let mut seen: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    paths.retain(|path| {
+        if seen.contains(path) {
+            return false;
+        }
+        seen.push(path.clone());
+        true
+    });
 }
 
 /// Result of invoking a registered tool's JS execute function.

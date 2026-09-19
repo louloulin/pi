@@ -26,7 +26,7 @@
 
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -150,11 +150,40 @@ impl Capture {
         format!("http://{}", self.addr)
     }
 
-    fn request_head(&self) -> String {
-        self.requests
-            .recv_timeout(Duration::from_secs(30))
-            .expect("provider never dialed the loopback capture server")
+    /// Wait for the child's request head.
+    ///
+    /// The child is already dead by the time this runs (`cmd.output()`
+    /// blocked on it), so a timeout means it exited *without* dialing —
+    /// which is how the known extension-host crash in LUM-1083 shows up
+    /// here: the process dies during startup and the only visible symptom
+    /// is this 30s wait. Report the exit status and stderr so a CI failure
+    /// names the real cause instead of looking like a provider timeout.
+    fn request_head(&self, child: &Output) -> String {
+        match self.requests.recv_timeout(Duration::from_secs(30)) {
+            Ok(head) => head,
+            Err(err) => panic!(
+                "provider never dialed the loopback capture server ({err});\n\
+                 child exit code: {:?}, signal: {:?},\nchild stderr: {}",
+                child.status.code(),
+                termination_signal(&child.status),
+                String::from_utf8_lossy(&child.stderr)
+            ),
+        }
     }
+}
+
+/// The signal that killed a child, when it did not exit normally. A crash
+/// (`SIGSEGV` / `SIGABRT`) is diagnosable only through this — `ExitStatus`
+/// has no portable accessor for it.
+#[cfg(unix)]
+fn termination_signal(status: &ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn termination_signal(_status: &ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Run one provider end-to-end and assert the captured request path.
@@ -179,7 +208,7 @@ fn assert_request_path(base_url_var: &str, key_var: &str, model_arg: &str, expec
     }
     let output = cmd.output().expect("failed to spawn pi");
     drop(sessions);
-    let head = capture.request_head();
+    let head = capture.request_head(&output);
     capture.handle.join().ok();
 
     let ok = head.contains(expected);
