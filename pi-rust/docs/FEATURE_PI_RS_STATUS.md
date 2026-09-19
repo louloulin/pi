@@ -9737,3 +9737,168 @@ pi-rust/crates/pi-agent-core/tests/tool_parallel.rs(+143/-0)
 并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-agent-core`（`agent_loop.rs`
 及其两个测试文件）与本文档。
+
+## LUM-1141 round — `pi-agent-core` 工具批次事件流（`AgentEvent` 发射点下移到真实执行点，frontier 第 3 项收口）+ 合并推送 feature/pi.rs
+
+本轮起点 `ce44b692f`（LUM-1142 合并态）。先落代码提交 `6716a1fcd`，再合并
+`origin/feature/pi.rs @ d68188dba`（LUM-1143 的取消语义 + Stage 42 派发），合并提交
+`f5f92efdd`，最后是本轮文档提交。真实哈希与 numstat 见本节末补记。
+
+### 一、切片：把 7 种 `AgentEvent` 从「回合结束后补发」改成「真实执行点即时发出」
+
+LUM-1139 第六节记的欠账是：`pi-agent-core` 的 `AgentEvent` 只在回合结束后（`on_turn` 里）
+被补发，消费端看到的是「一次性回放」而不是流式事件。本轮把出口下移到真实发生点，事件形状
+（`crates/pi-agent-core/src/events.rs`）一个字节没改，也没新增事件类型。
+
+| 事件 | 上游落点（`packages/agent/src/agent-loop.ts`） | Rust 落点 |
+|------|-----------------------------------------------|-----------|
+| `TurnStart` | 每回合 provider 请求前（`agent-loop.ts:300` 附近） | `agent_loop.rs:326`（Step 3b：pending 排空 / `prepare_next_turn` 之后、发起请求之前） |
+| `MessageStart { model }` | `AssistantMessageEvent::Start` | `agent_loop.rs:642`（`stream_assistant_events` 的 `Start` 分支） |
+| `MessageUpdate(..)` | `text_delta` / `thinking_delta` / `toolcall_delta` 各自原样转发（`agent-loop.ts:300-380`） | `agent_loop.rs:682-709` 三种 delta 逐条转发，**不再事后合成** |
+| `MessageEnd { message }` | `Done` 组装出 `AssistantMessage` 时 | `agent_loop.rs:646-671`（`Done` 分支，回填后再发，`:662`） |
+| `ToolExecutionStart { call }` | 单次调用 dispatch 前（串行 `agent-loop.ts:437`、并行 `agent-loop.ts:505`） | `agent_loop.rs:979` `emit_tool_start`，在 `execute_batch_sequential:885` / `execute_batch_parallel:932` 调 `prepare_call`（`:890` / `:935`）**之前** |
+| `ToolExecutionEnd { result, duration_ms }` | 单次调用 finalize 后 | `agent_loop.rs:990` `emit_tool_end`，`duration_ms = started.elapsed_ms()`，即**单次调用**窗口 |
+| `TurnEnd { message, tool_results }` | 工具结果写回上下文之后 | `agent_loop.rs:424`（Step 5b，紧挨 `on_turn(&outcome)` 之前） |
+
+管线改造：
+
+- 新增 `pub type EventObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;`（`agent_loop.rs:115`）
+  与 `emit_event(Option<&EventObserver>, AgentEvent)`（`agent_loop.rs:118`）——同步调用口径，
+  与上游 `emit` 一致；`AgentLoop` 增加 `observer` 字段与 `set_event_observer` /
+  `event_observer`（`agent_loop.rs:154,159`）。
+- `Agent::prompt` 在 `run` 之前装一个 fan-out 观察者（把事件推进既有 `subscribers` 通道），
+  `run` 结束后两条路径（成功 / `Err`）都清空（`agent.rs:246-275`）。因此**消费端零改动**：
+  `pi-tui` / `pi-coding-agent` / `pi-evals` 走的仍是 `Agent::subscribe()`。
+- `on_turn` 退化为 no-op（`|_turn: &TurnOutcome| {}`），`agent.rs` 里的
+  `fan_turn_to_subscribers` 与 `Monotonic` / `monotonic_now` / `monotonic_ms_since` 一并删除；
+  `Monotonic` 迁到 `agent_loop.rs:1098`，让「单次调用耗时」在 dispatch 现场测量（native 用
+  `Instant`、wasm32 用 `js_sys::Date::now()`，`saturating_sub` 防回拨）。
+- 并行批次：**所有 `ToolExecutionStart` 都在准备阶段发出**（`agent_loop.rs:935` 起的 prepare 循环），
+  任何 `ToolExecutionEnd` 都由真正跑那次调用的 future 发出；因此两支并发调用的两个 start 必然
+  早于任一 end（有专门用例锁定）。
+
+### 二、刻意偏离：为 `FauxProvider` 保留一次「补流」（点名受影响测试）
+
+`pi-ai` 的 `FauxProvider`（`crates/pi-ai/src/providers/faux.rs`）只产出 `Start` + `Done`，
+**不流式 `TextDelta`**；而 `pi-coding-agent/src/print_mode.rs` 的 print 输出只认
+`MessageUpdate(TextDelta)`（`rpc::events::agent_event_to_json` 之后的
+`payload.pointer("/assistantMessageEvent/delta")`）。事件流化之后，`pi-coding-agent` 的
+**`print_mode_defaults_to_faux_without_credentials`**（`tests/print_mode.rs`）会因此渲染不出文本。
+
+`pi-ai` 属于本轮禁区（「不改 `pi-ai`」），所以选择在 `agent_loop.rs:743`
+`emit_unstreamed_content` 做一次**兼容性补流**：`Done` 组装出 `AssistantMessage` 后、`MessageEnd`
+之前，对**从未流式过**的 delta 类别各补一条 `MessageUpdate`（`Content::Text` →
+`TextDelta`；`Content::ToolCall` → `ToolCallDelta`，带 `index` / `id` / `name` /
+`arguments_delta`）。`stream_assistant_events` 用 `saw_text_delta` / `saw_tool_call_delta` 两个
+标志位判断「这条 delta 类别是否从头到尾没来过」，所以：
+
+- 真流式的 provider（Anthropic / OpenAI / 上游 faux）完全不受影响——标志位让它一条都不补；
+- 部分流式（例如只流了 thinking 后直接 `Done`）也不会整条重发。
+
+**为什么新口径仍满足该测试的意图**：该测试要证明的是「无凭据时默认走 faux provider，且这次
+print 运行的文本能端到端输出到 stdout」，它断言的是**打印结果**而不是「事件条数」或「有没有补发」。
+补流后 `MessageUpdate(TextDelta)` 依旧由 `Agent::subscribe()` 投递给同一个消费者，print 文本逐字节
+不变，因此**该测试的断言口径没有被改写**（本轮没动它一行）。它也是本轮唯一「行为上依赖事件补发
+时机」的既有测试，按约定在此点名。
+
+上游差异说明：上游 TS 的 faux 是真流式的（`packages/ai/src/providers/faux.ts:401` 推
+`text_delta`），且上游 `agent-loop.ts` 在 `done` 时**不做**合成。这里补流纯属本仓库
+`pi-ai` 暂不可动导致的过渡措施；待 `pi-ai` 的 faux 补上 `text_delta` 后，`emit_unstreamed_content`
+可以整段删除（已记入下方后续项）。
+
+### 三、失败路径：事件序列会截断（有意的）
+
+provider / stream 出错时，`run` 返回 `Err`，此时序列停在已发生的部分：`TurnStart`，
+可能还有 `MessageStart` 与若干 `MessageUpdate`，但**没有 `MessageEnd` 也没有 `TurnEnd`**。
+上游同样如此（错误回合不发 `turn_end`），并且这是「事件即真相」的必然结果——本轮不为了对称
+回填补事件。该口径写进了 `stream_assistant_events` 的文档注释，并由
+`provider_error_truncates_the_event_sequence` 用例锁定。
+
+### 四、验证
+
+```
+$ rustc --version                       # 1.85.0-x86_64-unknown-linux-gnu（复用既有工具链）
+$ cargo test -p pi-agent-core -p pi-coding-agent -p pi-tui -p pi-evals --offline
+#   57 个 test 目标全绿：979 passed / 0 failed / 1 ignored
+#   （ignored 是 pi-evals 既有的 PI_EVAL_LIVE=1 用例，非本轮引入）
+$ cargo clippy -p pi-agent-core -p pi-coding-agent --all-targets --offline --no-deps -- -D warnings
+#   零告警（pi-telemetry 的既有 needless_lifetimes 不在本轮范围）
+$ rustfmt --edition 2021 --check <本轮 3 个文件>
+#   clean（agent.rs 只剩 :60 的既有漂移，本轮未引入、也未碰）
+```
+
+新增用例 `crates/pi-agent-core/tests/event_stream.rs`（565 行，6 条，全部通过）：
+
+1. `tool_execution_start_precedes_end_and_carries_the_real_call` — start 早于 end，且 `call`
+   是完整 `ToolCall`（id / name 非空、arguments 对得上）。
+2. `tool_execution_end_duration_is_per_call_not_per_turn` — 300ms provider 延迟 + 100ms 工具：
+   `duration_ms >= 100 && duration_ms < 250` 且 `turn_elapsed_ms >= 380`，从时间量级上把
+   「单次调用窗口」和「整回合窗口」区分开。
+3. `text_deltas_are_forwarded_before_message_end` — 逐条 `TextDelta` 原样转发且都在
+   `MessageEnd` 之前（含顺序）。
+4. `parallel_batch_emits_every_start_before_any_end` — 并行批次两个 start 都早于任一 end。
+5. `aborted_queued_call_still_pairs_its_start_with_an_end` — 与 LUM-1143 合并后新增的
+   不变量：被 abort 抢先的排队调用已经发过 start，就必须补一条 `Operation aborted` 的
+   `ToolExecutionEnd`，消费端不会出现「永远 running」的调用。
+6. `provider_error_truncates_the_event_sequence` — 见第三节。
+
+既有测试**没有因为「事件变流式」而改写断言口径**：`pi-agent-core` 的 41 条、`pi-coding-agent`
+的 245 + 19 + 4 条、`pi-tui` / `pi-evals` 全部原样通过；唯一被事件时机影响的
+`print_mode_defaults_to_faux_without_credentials` 已在第二节点名，且其断言未动。
+
+### 五、合并与推送
+
+- 代码提交 `6716a1fcd`（3 文件，+846/-195）。
+- `git merge origin/feature/pi.rs`（`d68188dba`）：**唯一冲突**在
+  `pi-agent-core/src/agent_loop.rs` 的 `execute_batch_sequential` / `execute_batch_parallel`
+  ——HEAD 是本轮的逐调用事件发射，另一边是 LUM-1143 的 abort/cancel 语义。解决方式**两边都留**：
+  串行「执行后 `is_cancelled()` 就 break」与并行「prepare 后 break + 排队调用
+  `aborted_tool_result`」一个不回退，同时每次派发照旧发 start / end；被 abort 抢先的排队调用
+  照样发配对的 end（用例 5）。合并提交 `f5f92efdd`（第一父 `6716a1fcd`、第二父 `d68188dba`）。
+- 合并后整套复测（第四节那三行命令）在合并态重跑，全绿。
+- `git diff --numstat d68188dba f5f92efdd`（本轮全部改动）：
+  pi-rust/crates/pi-agent-core/src/agent.rs(+23/-157)
+  pi-rust/crates/pi-agent-core/src/agent_loop.rs(+316/-40)
+  pi-rust/crates/pi-agent-core/tests/event_stream.rs(+565/-0)
+- 推送：`git push origin HEAD:refs/heads/feature/pi.rs`（`d68188dba..<本节文档提交>`）；
+  `work/lum-1141` 作为留档分支一并推送。真实回执哈希与 `git ls-remote` 复查见本轮 issue 评论。
+
+### 六、已知风险 / 后续项（本轮刻意不做）
+
+1. **`pi-agent-core/src/wasm.rs` 的 `RefCell` 借用风险**：wasm 侧的 drainer 会在 `await`
+   期间 `borrow()` 同一份 `RefCell`，事件改成「执行中即时发出」之后，`await` 中的
+   `borrow_mut()` 与 drainer 的 `borrow()` 撞车会抛 `BorrowError`。本轮不碰 wasm（禁区之外但
+   属另一条线），记在这里作为 frontier 的下一步。
+2. **`pi-tui/src/app.rs` 的 `ToolCallDelta` 逐 delta `push_tool`**：真实流式之后，同一个
+   tool call 的多个 delta 会被重复建块（目前 faux 只发一条、且旧口径下 delta 是事后合成的，
+   所以还没暴雷）。`app.rs` 是 Stage 42（LUM-1144）的文件，本轮不动，留给它或下一轮。
+3. **`emit_unstreamed_content` 的退场**：等 `pi-ai` 的 faux 补上 `text_delta`，这段兼容补流
+   可整体删除（见第二节）。
+
+### 七、frontier（本轮更新）
+
+1. ~~`pi-ai` 提供商请求重试~~ **LUM-1142 收口**。
+2. **P2 agent 级重试（`utils/retry.ts`）**：错误文案分类器 + `retryAssistantCall`，落点
+   `agent_loop`；它等的就是本轮的 `agent_loop` 事件/回合结构，现在可以起跑了。
+3. ~~**P2 工具批次的事件流**~~ **本轮（LUM-1141）收口**：7 种 `AgentEvent` 全部下移到真实执行点，
+   6 条新用例锁定顺序 / 逐条转发 / 单调用耗时 / 并行 start 先行 / abort 配对 / 错误截断。
+   LUM-1139 第六节第 5 项（该轮 frontier 的编号）即此项。
+4. ~~**P2 取消语义对齐**~~ **LUM-1143 收口**（本轮合并进来，语义未回退）。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要动 ratatui `Cell` 与
+   `app.rs` 写入路径；与 Stage 42 串行。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：Stage 42 = LUM-1144（`in_progress`），
+   落点 `app.rs` 的渲染 / 选择 / 指针路径与 `input.rs` 的 X10 解析。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（`backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的。`pi-ai`（LUM-1142）、
+   `pi-coding-agent`（LUM-1142）、`pi-agent-core`（本轮）均已收手，唯一在写方只剩 LUM-1144 的
+   `app.rs`；启动全量 `cargo fmt` 前仍需确认它不在写。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档继续分叉（既有欠账）。
+10. **未移植的 `pi-ai` 上游模块**（下一批候选）：`utils/overflow.ts`、`utils/estimate.ts`、
+    `utils/json-parse.ts`，以及 bedrock / mistral / azure / vertex / oauth / images。
+11. **新增（本轮记入）**：`pi-agent-core/src/wasm.rs` 的 `RefCell` 即时事件借用风险；
+    `pi-tui/src/app.rs` 的 `ToolCallDelta` 重复建块——两者都是事件流化之后才暴露的。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-agent-core`（`agent.rs` /
+`agent_loop.rs` 及其新测试文件）与本文档。

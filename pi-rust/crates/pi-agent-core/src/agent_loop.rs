@@ -30,6 +30,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use crate::events::{AgentEvent, AssistantMessageUpdate};
 use crate::hooks::{
     AgentHookAdapter, AgentLoopTurnUpdate, PrepareNextTurnContext, ShouldStopAfterTurnContext,
 };
@@ -99,6 +100,27 @@ struct TurnBatch {
     continue_loop: bool,
 }
 
+/// Sink the loop calls **synchronously at every real event point** — the
+/// moment a turn starts, a provider delta arrives, a tool call is dispatched
+/// or finishes.
+///
+/// The observer is a plain `Fn` (no `async`): events are emitted in the order
+/// the loop produces them, and a fan-out that pushes onto channels cannot
+/// reorder them. `Agent` installs one that fans every event out to its
+/// [`subscribe`](crate::Agent::subscribe) channels; the TUI, the RPC pump and
+/// the WASM bridge all consume that single feed.
+///
+/// A loop without an observer behaves exactly as before — the events are
+/// simply dropped, not buffered.
+pub type EventObserver = Arc<dyn Fn(AgentEvent) + Send + Sync>;
+
+/// Forward one event to an optional observer.
+fn emit_event(observer: Option<&EventObserver>, event: AgentEvent) {
+    if let Some(observer) = observer {
+        observer(event);
+    }
+}
+
 /// Single agent turn entry point.
 #[derive(Clone)]
 pub struct AgentLoop {
@@ -107,6 +129,7 @@ pub struct AgentLoop {
     hooks: AgentHookAdapter,
     follow_up: Vec<Message>,
     signal: CancellationToken,
+    observer: Option<EventObserver>,
 }
 
 impl AgentLoop {
@@ -119,7 +142,22 @@ impl AgentLoop {
             hooks,
             follow_up: Vec::new(),
             signal: CancellationToken::new(),
+            observer: None,
         }
+    }
+
+    /// Install (or clear) the [`EventObserver`] the loop reports to.
+    ///
+    /// [`Agent::prompt`](crate::Agent::prompt) sets a fan-out observer for the
+    /// duration of the call and clears it afterwards; standalone
+    /// [`AgentLoop::run`] callers may install their own.
+    pub fn set_event_observer(&mut self, observer: Option<EventObserver>) {
+        self.observer = observer;
+    }
+
+    /// Borrow the currently-installed observer, if any.
+    pub fn event_observer(&self) -> Option<&EventObserver> {
+        self.observer.as_ref()
     }
 
     /// Borrow the current state.
@@ -237,6 +275,10 @@ impl AgentLoop {
         root: Option<SpanRef>,
     ) -> Result<TurnOutcome, AgentError> {
         // Step 1 — clone initial prompts into the state and the new-message list.
+        // The observer is read once per `run` so a caller that clears it
+        // mid-run (or installs one from another task) cannot interleave two
+        // feeds.
+        let observer = self.observer.clone();
         let mut new_messages: Vec<Message> = prompts.clone();
         for prompt in &prompts {
             self.state.messages.push(prompt.clone());
@@ -278,6 +320,11 @@ impl AgentLoop {
                     new_messages.push(message);
                 }
 
+                // Step 3b — announce the turn. Upstream emits `turn_start`
+                // here: after `prepare_next_turn` / the pending drain and
+                // before the provider request.
+                emit_event(observer.as_ref(), AgentEvent::TurnStart);
+
                 // Step 4 — stream one assistant response and run the tool
                 // batch it produced. Both nest inside a single
                 // `pi.harness.turn` span when telemetry is installed.
@@ -296,7 +343,10 @@ impl AgentLoop {
                             self.config.tool_executor.as_ref(),
                             &self.hooks,
                             &self.signal,
-                            None,
+                            TurnSinks {
+                                observer: observer.as_ref(),
+                                telemetry: None,
+                            },
                         )
                         .await?
                     }
@@ -307,6 +357,9 @@ impl AgentLoop {
                         let signal = self.signal.clone();
                         let context = current_context.clone();
                         let loop_config = loop_config.clone();
+                        // The observer is shared, not cloned per event, so the
+                        // telemetry branch only clones the `Arc`.
+                        let observer = observer.clone();
                         let options = SpanOptions::new(span_name::HARNESS_TURN)
                             .with_attribute(attribute_name::TURN_ID, turn_id.to_string());
                         parent
@@ -318,7 +371,10 @@ impl AgentLoop {
                                     executor.as_ref(),
                                     &hooks,
                                     &signal,
-                                    Some(turn_span),
+                                    TurnSinks {
+                                        observer: observer.as_ref(),
+                                        telemetry: Some(&turn_span),
+                                    },
                                 )
                                 .await
                             })
@@ -360,6 +416,16 @@ impl AgentLoop {
                     tool_results: tool_result_messages.clone(),
                     tool_executed: !tool_result_messages.is_empty(),
                 };
+                // Step 5b — the tool results are back in the context, so the
+                // turn is complete. Upstream emits `turn_end` at this point,
+                // before `should_stop_after_turn` runs.
+                emit_event(
+                    observer.as_ref(),
+                    AgentEvent::TurnEnd {
+                        message: outcome.message.clone(),
+                        tool_results: outcome.tool_results.clone(),
+                    },
+                );
                 on_turn(&outcome);
 
                 // Step 6 — build the completed-turn context the next
@@ -452,9 +518,18 @@ fn apply_turn_update(
     }
 }
 
+/// The two sinks a turn writes its observations to: the live event observer
+/// (when a consumer is attached) and the telemetry span the turn runs inside
+/// (when telemetry is enabled). Bundled so the turn plumbing keeps one
+/// "where do the observations go" argument instead of one per sink.
+#[derive(Clone, Copy)]
+struct TurnSinks<'a> {
+    observer: Option<&'a EventObserver>,
+    telemetry: Option<&'a SpanRef>,
+}
+
 /// Run one turn: stream the assistant response, then execute the tool batch
-/// it produced. `telemetry` is the `pi.harness.turn` span the turn runs
-/// inside, if any.
+/// it produced.
 async fn run_turn_batch(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
@@ -462,17 +537,17 @@ async fn run_turn_batch(
     executor: Option<&Arc<dyn ToolExecutor>>,
     hooks: &AgentHookAdapter,
     signal: &CancellationToken,
-    telemetry: Option<SpanRef>,
+    sinks: TurnSinks<'_>,
 ) -> Result<TurnBatch, AgentError> {
-    let assistant_message =
-        stream_assistant_response(stream_fn, context, config, telemetry.as_ref()).await?;
+    let assistant_message = stream_assistant_response(stream_fn, context, config, sinks).await?;
     let (tool_results, continue_loop) = execute_tool_calls(
         executor,
         hooks,
         &assistant_message,
         config.tool_execution,
         signal,
-        telemetry.as_ref(),
+        sinks.observer,
+        sinks.telemetry,
     )
     .await;
     Ok(TurnBatch {
@@ -488,10 +563,10 @@ async fn stream_assistant_response(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
     config: &LoopConfig,
-    telemetry: Option<&SpanRef>,
+    sinks: TurnSinks<'_>,
 ) -> Result<AssistantMessage, AgentError> {
-    let Some(parent) = telemetry else {
-        return stream_assistant_events(stream_fn, context, config).await;
+    let Some(parent) = sinks.telemetry else {
+        return stream_assistant_events(stream_fn, context, config, sinks.observer).await;
     };
     let options = SpanOptions::new(span_name::AI_REQUEST)
         .with_attribute(attribute_name::AI_OPERATION, "stream")
@@ -507,7 +582,7 @@ async fn stream_assistant_response(
         .with_attribute(attribute_name::AI_STREAMING, true);
     parent
         .start_span_with(options, |span| async move {
-            match stream_assistant_events(stream_fn, context, config).await {
+            match stream_assistant_events(stream_fn, context, config, sinks.observer).await {
                 Ok(message) => {
                     span.set_attributes(response_attributes(&message));
                     Ok(message)
@@ -521,12 +596,25 @@ async fn stream_assistant_response(
         .await
 }
 
-/// Stream a single assistant response from the provider and fold the
-/// event stream into the final [`AssistantMessage`].
+/// Stream a single assistant response from the provider, forwarding each
+/// provider event to the observer at the moment it arrives and folding the
+/// stream into the final [`AssistantMessage`].
+///
+/// The observer sees `MessageStart` on `AssistantMessageEvent::Start`, one
+/// `MessageUpdate` per `TextDelta` / `ThinkingDelta` / `ToolCallDelta`, and a
+/// single `MessageEnd` once the message is assembled.
+///
+/// **Failure paths truncate the sequence.** A `Stream` / `Provider` error
+/// returns `Err` after `TurnStart` (and possibly `MessageStart` / some
+/// `MessageUpdate`s) have already been emitted — there is then no `MessageEnd`
+/// or `TurnEnd`. Consumers must tolerate a truncated event sequence; this is
+/// deliberate (upstream behaves the same way) and replaces the old behaviour
+/// where a failed turn emitted no events at all.
 async fn stream_assistant_events(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
     config: &LoopConfig,
+    observer: Option<&EventObserver>,
 ) -> Result<AssistantMessage, AgentError> {
     let options = pi_ai::SimpleStreamOptions::default();
     let mut stream = stream_fn
@@ -535,15 +623,23 @@ async fn stream_assistant_events(
         .map_err(|err| AgentError::Stream(err.to_string()))?;
 
     let mut final_message: Option<AssistantMessage> = None;
+    // `Done` closes the message; a stream that ends without one (e.g. after
+    // `Aborted`) still owes consumers a `MessageEnd`.
+    let mut message_ended = false;
+    // Which delta kinds the provider actually streamed — see
+    // [`emit_unstreamed_content`].
+    let mut saw_text_delta = false;
+    let mut saw_tool_call_delta = false;
     while let Some(event) = stream.next().await {
         match event.map_err(|err| AgentError::Stream(err.to_string()))? {
             AssistantMessageEvent::Start { model } => {
                 final_message = Some(AssistantMessage {
-                    model,
+                    model: model.clone(),
                     content: Vec::new(),
                     stop_reason: pi_protocol::StopReason::Empty,
                     usage: pi_protocol::Usage::default(),
                 });
+                emit_event(observer, AgentEvent::MessageStart { model });
             }
             AssistantMessageEvent::Done {
                 content,
@@ -562,6 +658,16 @@ async fn stream_assistant_events(
                         usage,
                     });
                 }
+                if let Some(message) = final_message.as_ref() {
+                    emit_unstreamed_content(observer, message, saw_text_delta, saw_tool_call_delta);
+                    emit_event(
+                        observer,
+                        AgentEvent::MessageEnd {
+                            message: message.clone(),
+                        },
+                    );
+                    message_ended = true;
+                }
             }
             AssistantMessageEvent::Error { message } => {
                 return Err(AgentError::Provider(message));
@@ -571,17 +677,96 @@ async fn stream_assistant_events(
                     message.stop_reason = pi_protocol::StopReason::Aborted;
                 }
             }
-            // Text / thinking / toolcall deltas are ignored — Stage 2
-            // collapses the stream into the final message only.
-            AssistantMessageEvent::TextDelta { .. }
-            | AssistantMessageEvent::ThinkingDelta { .. }
-            | AssistantMessageEvent::ToolCallDelta { .. } => {}
+            // Deltas are forwarded verbatim — the loop no longer collapses
+            // the stream into the final message only (Stage 40).
+            AssistantMessageEvent::TextDelta { delta } => {
+                saw_text_delta = true;
+                emit_event(
+                    observer,
+                    AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta { delta }),
+                );
+            }
+            AssistantMessageEvent::ThinkingDelta { delta } => {
+                emit_event(
+                    observer,
+                    AgentEvent::MessageUpdate(AssistantMessageUpdate::ThinkingDelta { delta }),
+                );
+            }
+            AssistantMessageEvent::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta,
+            } => {
+                saw_tool_call_delta = true;
+                emit_event(
+                    observer,
+                    AgentEvent::MessageUpdate(AssistantMessageUpdate::ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        arguments_delta,
+                    }),
+                );
+            }
         }
     }
 
-    final_message.ok_or_else(|| {
+    let message = final_message.ok_or_else(|| {
         AgentError::Stream("provider stream closed without a Start or Done event".into())
-    })
+    })?;
+    if !message_ended {
+        emit_event(
+            observer,
+            AgentEvent::MessageEnd {
+                message: message.clone(),
+            },
+        );
+    }
+    Ok(message)
+}
+
+/// Emit `MessageUpdate`s for message content the provider delivered only in
+/// its final `Done` event.
+///
+/// This is a **compatibility backfill, not a streaming path**: real providers
+/// stream their deltas, which are forwarded one by one above, and
+/// `saw_*_delta` then suppresses the corresponding backfill. It is needed
+/// because `pi-ai`'s `FauxProvider` emits `Start` + `Done` only (out of scope
+/// this round), while delta-driven consumers render text exclusively from
+/// `MessageUpdate` — without it a faux turn would render as empty in
+/// `pi-coding-agent`'s print mode and in the TUI.
+///
+/// The backfill runs immediately before `MessageEnd`, so it never reorders
+/// the event sequence, and it only fires for a delta kind the provider never
+/// emitted at all — a partially streamed message is never re-emitted in full.
+fn emit_unstreamed_content(
+    observer: Option<&EventObserver>,
+    message: &AssistantMessage,
+    saw_text_delta: bool,
+    saw_tool_call_delta: bool,
+) {
+    for (index, block) in message.content.iter().enumerate() {
+        let update = match block {
+            Content::Text(text) if !saw_text_delta && !text.text.is_empty() => {
+                Some(AssistantMessageUpdate::TextDelta {
+                    delta: text.text.clone(),
+                })
+            }
+            Content::ToolCall(call) if !saw_tool_call_delta => {
+                Some(AssistantMessageUpdate::ToolCallDelta {
+                    index: index as u32,
+                    id: Some(call.id.clone()),
+                    name: Some(call.name.clone()),
+                    arguments_delta: Some(call.arguments.to_string()),
+                })
+            }
+            _ => None,
+        };
+        if let Some(update) = update {
+            emit_event(observer, AgentEvent::MessageUpdate(update));
+        }
+    }
 }
 
 /// Execute the tool calls emitted by an assistant message.
@@ -613,6 +798,7 @@ async fn execute_tool_calls(
     assistant_message: &AssistantMessage,
     mode: ToolExecutionMode,
     signal: &CancellationToken,
+    observer: Option<&EventObserver>,
     telemetry: Option<&SpanRef>,
 ) -> (Vec<ToolResult>, bool) {
     let tool_calls: Vec<&ToolCall> = assistant_message
@@ -641,9 +827,9 @@ async fn execute_tool_calls(
     };
 
     if sequential {
-        execute_batch_sequential(executor, hooks, &tool_calls, signal, telemetry).await
+        execute_batch_sequential(executor, hooks, &tool_calls, signal, observer, telemetry).await
     } else {
-        execute_batch_parallel(executor, hooks, &tool_calls, signal, telemetry).await
+        execute_batch_parallel(executor, hooks, &tool_calls, signal, observer, telemetry).await
     }
 }
 
@@ -678,28 +864,37 @@ async fn prepare_call(hooks: &AgentHookAdapter, call: &ToolCall) -> (CallPrepara
 }
 
 /// Serialized dispatch — each call is prepared, executed and finalized
-/// before the next one starts. When the signal is aborted the loop stops
-/// after the call that observed the abort: the remaining calls never reach
-/// the executor at all (upstream `executeToolCallsSequential`,
-/// `packages/agent/src/agent-loop.ts:476-478`).
+/// before the next one starts.
+///
+/// `ToolExecutionStart` is emitted **before** the call's `BeforeToolCall` hook
+/// and `ToolExecutionEnd` once the result is finalized, so a consumer can
+/// render the call as running for its whole real lifetime. `duration_ms`
+/// measures that same window for this one call (not the batch).
+///
+/// When the signal is aborted the loop stops after the call that observed the
+/// abort: the remaining calls never reach the executor at all (upstream
+/// `executeToolCallsSequential`, `packages/agent/src/agent-loop.ts:476-478`).
 async fn execute_batch_sequential(
     executor: Option<&Arc<dyn ToolExecutor>>,
     hooks: &AgentHookAdapter,
     tool_calls: &[&ToolCall],
     signal: &CancellationToken,
+    observer: Option<&EventObserver>,
     telemetry: Option<&SpanRef>,
 ) -> (Vec<ToolResult>, bool) {
     let mut all_terminate = true;
     let mut results = Vec::with_capacity(tool_calls.len());
     for call in tool_calls {
+        let started = Monotonic::now();
+        emit_tool_start(observer, call);
         let (preparation, terminate) = prepare_call(hooks, call).await;
         all_terminate &= terminate;
-        match preparation {
-            CallPreparation::Immediate(result) => results.push(result),
-            CallPreparation::Execute => {
-                results.push(run_call(executor, hooks, call, signal, telemetry).await);
-            }
-        }
+        let result = match preparation {
+            CallPreparation::Immediate(result) => result,
+            CallPreparation::Execute => run_call(executor, hooks, call, signal, telemetry).await,
+        };
+        emit_tool_end(observer, &result, started);
+        results.push(result);
         if signal.is_cancelled() {
             break;
         }
@@ -712,6 +907,11 @@ async fn execute_batch_sequential(
 /// allowed calls run concurrently, and their results are folded back into
 /// source order.
 ///
+/// Every `ToolExecutionStart` is emitted during the preparation pass, i.e.
+/// **before any of the batch's calls is awaited for execution**, and each
+/// `ToolExecutionEnd` is emitted by the future that ran that call. Two
+/// concurrent calls therefore always produce both starts before either end.
+///
 /// Cancellation mirrors upstream `executeToolCallsParallel`
 /// (`packages/agent/src/agent-loop.ts:504-545`): the preparation loop stops
 /// as soon as the signal is aborted (calls after it are dropped), and a call
@@ -722,19 +922,25 @@ async fn execute_batch_parallel(
     hooks: &AgentHookAdapter,
     tool_calls: &[&ToolCall],
     signal: &CancellationToken,
+    observer: Option<&EventObserver>,
     telemetry: Option<&SpanRef>,
 ) -> (Vec<ToolResult>, bool) {
     let mut all_terminate = true;
     let mut slots: Vec<Option<ToolResult>> = Vec::with_capacity(tool_calls.len());
-    let mut prepared: Vec<(usize, &ToolCall)> = Vec::with_capacity(tool_calls.len());
+    let mut prepared: Vec<(usize, &ToolCall, Monotonic)> = Vec::with_capacity(tool_calls.len());
 
     for call in tool_calls {
+        let started = Monotonic::now();
+        emit_tool_start(observer, call);
         let (preparation, terminate) = prepare_call(hooks, call).await;
         all_terminate &= terminate;
         match preparation {
-            CallPreparation::Immediate(result) => slots.push(Some(result)),
+            CallPreparation::Immediate(result) => {
+                emit_tool_end(observer, &result, started);
+                slots.push(Some(result));
+            }
             CallPreparation::Execute => {
-                prepared.push((slots.len(), call));
+                prepared.push((slots.len(), call, started));
                 slots.push(None);
             }
         }
@@ -745,10 +951,11 @@ async fn execute_batch_parallel(
 
     // Each queued call checks the signal once more right before it starts, so
     // an abort that lands between the preparation loop and the join still
-    // short-circuits execution (the result slot is filled, the executor is
-    // not called).
+    // short-circuits execution (the result slot is filled, the executor is not
+    // called) — and still emits a matching `ToolExecutionEnd`, because its
+    // `ToolExecutionStart` was already emitted in the preparation pass.
     let cancelled = signal.clone();
-    let futures = prepared.iter().map(|(slot, call)| {
+    let futures = prepared.iter().map(|(slot, call, started)| {
         let signal = cancelled.clone();
         async move {
             let result = if signal.is_cancelled() {
@@ -756,6 +963,7 @@ async fn execute_batch_parallel(
             } else {
                 run_call(executor, hooks, call, &signal, telemetry).await
             };
+            emit_tool_end(observer, &result, *started);
             (*slot, result)
         }
     });
@@ -765,6 +973,28 @@ async fn execute_batch_parallel(
 
     let results = slots.into_iter().flatten().collect();
     (results, !all_terminate)
+}
+
+/// Emit `ToolExecutionStart` for one dispatchable call.
+fn emit_tool_start(observer: Option<&EventObserver>, call: &ToolCall) {
+    emit_event(
+        observer,
+        AgentEvent::ToolExecutionStart { call: call.clone() },
+    );
+}
+
+/// Emit `ToolExecutionEnd` with the real duration of the call that just
+/// finished. Every emitted `ToolExecutionStart` — including one that is
+/// finalized as `Operation aborted` before it reaches the executor — gets a
+/// matching end.
+fn emit_tool_end(observer: Option<&EventObserver>, result: &ToolResult, started: Monotonic) {
+    emit_event(
+        observer,
+        AgentEvent::ToolExecutionEnd {
+            result: result.clone(),
+            duration_ms: started.elapsed_ms(),
+        },
+    );
 }
 
 /// Error result upstream synthesizes for a queued parallel call that finds
@@ -854,5 +1084,51 @@ async fn dispatch_tool(
             is_error: false,
             details: None,
         },
+    }
+}
+
+/// Monotonic timestamp used to measure one tool call's wall-clock duration.
+///
+/// Wraps [`std::time::Instant`] on native targets and falls back to
+/// `js_sys::Date::now()` on `wasm32-unknown-unknown`, where `Instant::now`
+/// panics because no monotonic clock source is available. The WASM fallback
+/// is wall-clock and therefore only used for an *elapsed* reading, never for
+/// ordering.
+#[derive(Copy, Clone)]
+struct Monotonic {
+    #[cfg(not(target_arch = "wasm32"))]
+    instant: std::time::Instant,
+    #[cfg(target_arch = "wasm32")]
+    millis: u64,
+}
+
+impl Monotonic {
+    fn now() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self {
+                instant: std::time::Instant::now(),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self {
+                millis: js_sys::Date::now() as u64,
+            }
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.instant.elapsed().as_millis() as u64
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Clamp to zero so a wall clock that runs slightly backwards
+            // (e.g. an NTP correction) cannot surface as a huge duration.
+            let now = js_sys::Date::now() as u64;
+            now.saturating_sub(self.millis)
+        }
     }
 }
