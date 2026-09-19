@@ -11493,7 +11493,8 @@ LUM-1090 置 `todo`），pi 项目内的在跑路数 = 本协调轮 + 2 = **3 �
 
 `feature/pi.rs`：`b03b21f37` → **`3d7a732cf`**；留档分支 `work/lum-1156`（同哈希）。
 本轮提交：`739a31162`（代码）+ `3d7a732cf` 所在链的文档提交 + 合并提交（合并 LUM-1155 的
-`b03b21f37` 补记）。`git ls-remote` 复查：`3d7a732cfd2defdd1e2aaeb3307800a1584b554a`。
+`b03b21f37` 补记）。推送时 `git ls-remote` 复查 tip = `3d7a732cf`；本补记提交使 tip 再前进一格
+（以 `git ls-remote` 为准），未再改动代码。
 
 ### 六、frontier（本轮更新）
 
