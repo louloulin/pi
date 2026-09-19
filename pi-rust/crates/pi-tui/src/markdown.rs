@@ -27,16 +27,23 @@
 //!   rows, rendered as a box-drawing grid with width-aware cell wrapping
 //!   (upstream `renderTable` in `components/markdown.ts:839-1015`).
 //! * Horizontal rules (`---`, `***`, `___`) capped at 80 columns.
+//! * LaTeX math blocks (`$$…$$` and `\[…\]`) rendered through
+//!   [`crate::latex::render_latex_with`] in display mode, falling back to the
+//!   trimmed source when the expression is unsupported.
 //!
 //! Inline level:
 //!
 //! * `**bold**` / `__bold__`, `*italic*` / `_italic_`, `` `code` ``,
 //!   `~~strikethrough~~`, `[label](url)` links, backslash escapes.
+//! * Inline LaTeX (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) rendered through
+//!   [`crate::latex::render_latex`], with the upstream pending/malformed guards
+//!   (a `$` opener followed by whitespace, a trailing digit, a backtick or an
+//!   empty/newline-only body stays literal text).
 //!
 //! # Deliberately not covered (degrade to plain text, never panic)
 //!
-//! LaTeX (upstream `renderLatex`), terminal images / OSC-8 hyperlinks, syntax
-//! highlighting, block HTML and the `transform` hooks are separate subsystems.
+//! Terminal images / OSC-8 hyperlinks, syntax highlighting, block HTML and the
+//! `transform` hooks are separate subsystems.
 //! A link whose target is not a plain `[label](url)` is emitted as its literal
 //! text, and the link URL is always rendered inline (`MdLinkUrl`) because
 //! hyperlink capability detection is not ported.
@@ -67,6 +74,7 @@
 //! assert_eq!(plain_text(&lines[2]), "body bold");
 //! ```
 
+use crate::latex::{render_latex, render_latex_with};
 use crate::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::{Theme, ThemeColor};
 
@@ -140,6 +148,8 @@ enum Block {
     List(ListBlock),
     /// A horizontal rule.
     Hr,
+    /// A LaTeX math block (`$$…$$` or `\[…\]`).
+    Latex(LatexBlock),
 }
 
 /// A parsed list.
@@ -190,6 +200,18 @@ struct Fence {
     info: String,
 }
 
+/// A LaTeX math block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LatexBlock {
+    /// Content between the delimiters: trimmed for a closed block, verbatim for
+    /// a pending one (whose raw source is rendered instead).
+    text: String,
+    /// The raw source lines the block spans, replayed when rendering fails.
+    raw: Vec<String>,
+    /// True when no closing delimiter was found before the end of the input.
+    pending: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Block parsing
 // ---------------------------------------------------------------------------
@@ -205,6 +227,12 @@ fn parse_blocks(lines: &[String]) -> Vec<Block> {
         if line.trim().is_empty() {
             blocks.push(Block::Space);
             i += 1;
+            continue;
+        }
+
+        if let Some((block, next)) = parse_latex_block(lines, i) {
+            blocks.push(Block::Latex(block));
+            i = next;
             continue;
         }
 
@@ -488,11 +516,187 @@ fn split_table_row(line: &str) -> Vec<String> {
 
 /// True when `line` opens a block construct (and therefore ends a paragraph).
 fn is_block_start(line: &str) -> bool {
-    parse_fence(line).is_some()
+    starts_latex_block(line)
+        || parse_fence(line).is_some()
         || parse_heading(line).is_some()
         || parse_hr(line)
         || parse_quote_line(line).is_some()
         || parse_list_marker(line).is_some()
+}
+
+/// Parse a LaTeX math block (`$$…$$` or `\[…\]`) starting at `lines[start]`.
+///
+/// Returns the parsed block and the index of the first unconsumed line. The
+/// shape mirrors upstream `tokenizeBlockLatex` (`components/markdown.ts:101`):
+/// the opener sits at up to three leading spaces, the closing delimiter must be
+/// the last non-padding content of its line, and an unterminated `$$` only
+/// becomes a pending block when its body looks like math (an unterminated `\[`
+/// always does).
+fn parse_latex_block(lines: &[String], start: usize) -> Option<(LatexBlock, usize)> {
+    let indent = leading_spaces(lines[start].as_str());
+    if indent > 3 {
+        return None;
+    }
+    let source = lines[start..].join("\n");
+    let rest = &source[indent..];
+    let (closing, bracket) = if rest.starts_with("$$") {
+        ("$$", false)
+    } else if rest.starts_with("\\[") {
+        ("\\]", true)
+    } else {
+        return None;
+    };
+    let content_start = skip_latex_opener(&source, indent + 2);
+
+    let mut search = content_start;
+    while let Some(index) = find_closing_delimiter(&source, closing, search) {
+        // An empty capture never matches upstream's regex; keep scanning.
+        if is_line_end_padding(&source, index + closing.len()) && index > content_start {
+            let text = source[content_start..index].trim().to_string();
+            let close_line = start + source[..index].matches('\n').count();
+            return Some((
+                LatexBlock {
+                    text,
+                    raw: lines[start..=close_line].to_vec(),
+                    pending: false,
+                },
+                close_line + 1,
+            ));
+        }
+        search = index + closing.len();
+    }
+
+    let text = source[content_start..].to_string();
+    if !bracket && !looks_like_pending_dollar_math(&text) {
+        return None;
+    }
+    Some((
+        LatexBlock {
+            text,
+            raw: lines[start..].to_vec(),
+            pending: true,
+        },
+        lines.len(),
+    ))
+}
+
+/// True when `line` looks like the first line of a LaTeX math block.
+fn starts_latex_block(line: &str) -> bool {
+    let indent = leading_spaces(line);
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let (tail, closing) = if let Some(tail) = rest.strip_prefix("$$") {
+        (tail, "$$")
+    } else if let Some(tail) = rest.strip_prefix("\\[") {
+        (tail, "\\]")
+    } else {
+        return false;
+    };
+    if tail.bytes().all(|b| b == b' ' || b == b'\t') {
+        return true;
+    }
+    matches!(
+        find_closing_delimiter(tail, closing, 0),
+        Some(index) if is_line_end_padding(tail, index + closing.len())
+    )
+}
+
+/// Index after a block opener: its trailing spaces/tabs and one newline are not
+/// part of the captured body (upstream `[ \t]*(?:\n)?`).
+fn skip_latex_opener(source: &str, mut index: usize) -> usize {
+    let bytes = source.as_bytes();
+    while index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t') {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index] == b'\n' {
+        index += 1;
+    }
+    index
+}
+
+/// True when every byte from `index` to the end of its line is a space or tab.
+fn is_line_end_padding(source: &str, index: usize) -> bool {
+    for byte in source.as_bytes()[index..].iter().copied() {
+        match byte {
+            b'\n' => return true,
+            b' ' | b'\t' => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Index of the next `closing` occurrence at or after `from` that is not
+/// backslash-escaped.
+fn find_closing_delimiter(source: &str, closing: &str, from: usize) -> Option<usize> {
+    let mut search = from;
+    while let Some(relative) = source[search..].find(closing) {
+        let index = search + relative;
+        if !is_escaped_str(source, index) {
+            return Some(index);
+        }
+        search = index + closing.len();
+    }
+    None
+}
+
+/// True when `index` is preceded by an odd number of backslashes.
+fn is_escaped_str(source: &str, index: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut backslashes = 0usize;
+    let mut j = index;
+    while j > 0 && bytes[j - 1] == b'\\' {
+        backslashes += 1;
+        j -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+/// True when an unterminated `$$` body looks like math (upstream
+/// `looksLikePendingDollarMath`, `components/markdown.ts:44`).
+fn looks_like_pending_dollar_math(source: &str) -> bool {
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if chars.peek().is_some_and(|next| next.is_ascii_alphabetic()) {
+                return true;
+            }
+            continue;
+        }
+        if matches!(
+            c,
+            '_' | '^'
+                | '='
+                | '+'
+                | '*'
+                | '/'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '|'
+                | '±'
+                | '≤'
+                | '≥'
+                | '≠'
+                | '≈'
+                | '∈'
+                | '→'
+                | '⇒'
+                | '∞'
+                | '∫'
+                | '∑'
+                | '√'
+                | '-'
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse an ATX heading (`#` … `######`).
@@ -685,6 +889,20 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                 if next.is_some_and(|b| !matches!(b, Block::Space | Block::List(_))) {
                     out.push(Vec::new());
                 }
+            }
+            Block::Latex(block) => {
+                let rendered = if block.pending {
+                    block.raw.join("\n").trim().to_string()
+                } else {
+                    render_latex_with(&block.text, true)
+                        .unwrap_or_else(|| block.raw.join("\n").trim().to_string())
+                };
+                for line in rendered.split('\n') {
+                    let mut spans: StyledLine = Vec::new();
+                    push_span(&mut spans, line.to_string(), base);
+                    out.push(spans);
+                }
+                maybe_blank(&mut out, next);
             }
             Block::Code { lang, lines } => {
                 out.push(vec![StyledSpan::new(
@@ -1016,6 +1234,11 @@ fn parse_inline(chars: &[char], base: SpanStyle, out: &mut StyledLine) {
         let c = chars[i];
         match c {
             '\\' => {
+                if let Some((consumed, rendered)) = try_inline_latex(chars, i) {
+                    push_span(out, rendered, base);
+                    i += consumed;
+                    continue;
+                }
                 if i + 1 < chars.len() && is_escapable(chars[i + 1]) {
                     push_span(out, chars[i + 1].to_string(), base);
                     i += 2;
@@ -1050,6 +1273,15 @@ fn parse_inline(chars: &[char], base: SpanStyle, out: &mut StyledLine) {
                     continue;
                 }
                 push_span(out, "~".to_string(), base);
+                i += 1;
+            }
+            '$' => {
+                if let Some((consumed, rendered)) = try_inline_latex(chars, i) {
+                    push_span(out, rendered, base);
+                    i += consumed;
+                    continue;
+                }
+                push_span(out, "$".to_string(), base);
                 i += 1;
             }
             '[' => {
@@ -1100,6 +1332,80 @@ fn parse_emphasis(
     }
     parse_inline(&chars[i + 1..end], base.italic(), out);
     Some(end + 1 - i)
+}
+
+/// Try to read an inline LaTeX run starting at `chars[start]`.
+///
+/// Returns the number of characters consumed and the text to emit (either the
+/// rendered expression or the literal source). Mirrors upstream
+/// `tokenizeInlineLatex` (`components/markdown.ts:52`) including its
+/// look-alike guards for `$…$`.
+fn try_inline_latex(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let source: String = chars[start..].iter().collect();
+    let (opening_len, closing, backslash_opener) = if source.starts_with("$$") {
+        (2usize, "$$", false)
+    } else if source.starts_with("\\(") {
+        (2, "\\)", true)
+    } else if source.starts_with("\\[") {
+        (2, "\\]", true)
+    } else if source.starts_with('$') && !source[1..].starts_with(char::is_whitespace) {
+        (1, "$", false)
+    } else {
+        return None;
+    };
+
+    if let Some(index) = find_closing_delimiter(&source, closing, opening_len) {
+        let inner = &source[opening_len..index];
+        if opening_len == 1 {
+            let after = &source[index + closing.len()..];
+            let trailing_whitespace = inner.ends_with(char::is_whitespace);
+            let digit_after = after.starts_with(|c: char| c.is_ascii_digit());
+            let name_guard = is_symbolic_dollar_name(inner) && starts_with_identifier(after);
+            if trailing_whitespace || digit_after || name_guard || inner.contains('`') {
+                return None;
+            }
+        }
+        if inner.is_empty() || inner.contains('\n') {
+            return None;
+        }
+        let rendered =
+            render_latex(inner).unwrap_or_else(|| source[..index + closing.len()].to_string());
+        let consumed = source[..index].chars().count() + closing.chars().count();
+        return Some((consumed, rendered));
+    }
+
+    let pending_source = &source[opening_len..];
+    if backslash_opener || looks_like_pending_dollar_math(pending_source) {
+        return Some((source.chars().count(), source));
+    }
+    None
+}
+
+/// True for a `$ALL_CAPS_LOOKALIKE` body that upstream refuses to treat as math
+/// (regex `^[A-Z_][A-Z0-9_]*(?:[^A-Za-z0-9_\s])?$`).
+fn is_symbolic_dollar_name(inner: &str) -> bool {
+    let mut chars = inner.chars().peekable();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() || c == '_' => {}
+        _ => return false,
+    }
+    while chars
+        .peek()
+        .is_some_and(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+    {
+        chars.next();
+    }
+    match chars.next() {
+        None => true,
+        Some(c) => {
+            chars.next().is_none() && !c.is_ascii_alphanumeric() && c != '_' && !c.is_whitespace()
+        }
+    }
+}
+
+/// True when `text` starts with an identifier (regex `^[A-Za-z_][A-Za-z0-9_]*`).
+fn starts_with_identifier(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Parse a `~~strikethrough~~` run at `chars[i]`.
@@ -1280,7 +1586,7 @@ fn is_escaped(chars: &[char], idx: usize) -> bool {
 /// Characters with dedicated inline handling; the plain-text scanner stops at
 /// every one of them.
 fn is_special(c: char) -> bool {
-    matches!(c, '\\' | '`' | '*' | '_' | '~' | '[')
+    matches!(c, '\\' | '`' | '*' | '_' | '~' | '[' | '$')
 }
 
 /// Characters a backslash escapes.

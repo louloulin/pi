@@ -7921,3 +7921,80 @@ setPrompt, getPrompt, prompt, close, on/once/off, Symbol.asyncIterator}`。
 
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮 `host.rs` 零改动，未占用）。
+
+## LUM-1130 round — `latex.ts` 全量移植 + markdown 块级/内联接线（frontier P3 第 7 项 LaTeX 收口）+ 槽位满未派发
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1130`，起点 `origin/feature/pi.rs` @ `09bb2cb80`（LUM-1129 的合并提交，已含
+  `node:module` / `node:readline`）。本轮只写 `pi-tui`：新增 `src/latex.rs` + `tests/latex.rs`，
+  `src/markdown.rs` / `tests/markdown.rs` 接入 LaTeX，`src/lib.rs` 加一行 `pub mod latex;`。
+  **`src/app.rs` / `host.rs` 零改动**，与在途 Stage 35（LUM-1128，鼠标区域派发）不抢文件。
+- 槽位：开工时 `multica daemon status` 报 4 路（超上限）→ 回落到 3 路（含本轮），到上限，**本轮不派发**。
+  收尾时 `running_task_count = 2`（含本轮），空出 1 槽，但 frontier 里剩下的高优先级项（P1 第 2 项、
+  P3 第 6 项）**都要写 `app.rs`**，而 Stage 35 的 `app.rs` 改动尚未合并；按「`app.rs` 一次只允许一路在写」
+  的并发约束，下一轮应先核验 Stage 35 是否落地，再派发第 2 项，本轮不派。
+- 环境事故（影响构建，记录备查）：`/` 一度 100% 满（剩 53 MB），`cc`/`rust-lld` 在 link 阶段
+  `Bus error`，误看起来像 `latex.rs` 的问题。定位后清掉 `/tmp/cargo-target`（12 GB 的**无主构建缓存**——
+  `git grep` / `/proc/*/fd` / 各 cargo 进程的 `CARGO_TARGET_DIR` 都证明没有活进程引用；不属于任何仓库、
+  可重建），释放 12 GB 后 link 恢复。**没有删任何其它工作区 / 其它轮次的 target 目录。**
+
+### 二、本轮切片：`latex.ts`（上游 1394 行）+ markdown 接线
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/latex.rs`（新） | 上游 `packages/tui/src/latex.ts` 的 Rust 移植：`render_latex` / `render_latex_with(source, display)`；15 张查表函数（`symbol` / `negated_symbol` / `blackboard` / `superscript` / `subscript` / `accent` / `is_named_operator` / `is_limit_operator` / `is_display_limit_symbol` / `is_relation_command` / `is_spacing_command` / `is_negative_spacing_command` / `is_ignored_command` / `is_size_command` / `is_plain_wrapper`）、`LatexParser`、分数/根式/矩阵/environment 布局、`normalize_output` 的正负间距 |
+| `crates/pi-tui/src/lib.rs:20` | `pub mod latex;` |
+| `crates/pi-tui/src/markdown.rs` | 块级 `Block::Latex(LatexBlock)` + `parse_latex_block`（`$$…$$` / `\[…\]`，含「开界符单独成行」「闭界符必须是本行最后一个非空白内容」「未闭合的 `$$` 只在内容像数学时才算 pending」三条上游形状）+ `starts_latex_block` 接进 `is_block_start`；内联 `try_inline_latex`（`$…$` / `$$…$$` / `\(…\)` / `\[…\]`，含 trailing-whitespace / 后随数字 / `$ALL_CAPS$name` / 反引号四条守卫与 pending 回退）；`is_special` 增加 `'$'` |
+| `crates/pi-tui/tests/latex.rs`（新，24 条） | 逐条移植上游 `packages/tui/test/latex.test.ts`（505 行、`defineCases` 全部表格 + 11 个独立 `it`） |
+| `crates/pi-tui/tests/markdown.rs` | 新增 11 条 LaTeX 接线测试（块级 display / 单行块 / `\[` / 未闭合 / 不支持命令回退原文 / 内联四种界符 / 守卫保持字面量 / 标题与列表项内），并把 `$` / `$$` / `\(` / `$$\n\frac{1}{2}` / `a $$\sum_{i=0}^n$$ b` 加进 no-panic 模糊输入表 |
+
+数据表不在 Rust 里手打：`workdir/gen_latex_tables.py`（仓库外的一次性脚本）解析上游 `latex.ts` 生成 15 个
+`#[rustfmt::skip]` 查表函数，`workdir/latex_template.rs` 是手写的手干逻辑模板，两者拼出 `src/latex.rs`。
+这样 ~260 条符号表与上游**逐字节一致**，也不会有人肉抄错；提交进仓库的只有生成结果。
+
+### 三、有意偏离（两处，都写进了模块文档）
+
+1. **宽度按字符数**（`visible_width = chars().count()`），与上游的 `visibleWidth`（East Asian Width）不同。
+   这是 crate 既有约定（`message.rs` / `selector.rs` 的 `display_width`），不引入第二套宽度语义；
+   受影响的只有 display 模式的对齐宽度。
+2. **没有 `renderLatex: false` 开关**：上游那是 `MarkdownOptions` 对象上的选项，本 crate 的 markdown API 是
+   函数式的，没有 options 载体；渲染恒开，不支持的命令回退到原文（与上游 `?? token.raw` 同路径）。
+
+### 四、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home cargo test -p pi-tui --offline
+  pi-tui 15 个 suite 共 397 passed / 0 failed
+  （新增 tests/latex.rs 24 条，全绿；tests/markdown.rs 45 → 56 条）
+$ CARGO_HOME=/tmp/cargo-home cargo test --workspace --offline
+  全部 suite ok（0 failed）
+$ CARGO_HOME=/tmp/cargo-home cargo clippy -p pi-tui --all-targets --offline
+  Finished，0 warning
+$ cargo fmt -p pi-tui -- --check
+  本轮改动的 4 个文件 clean（latex.rs / markdown.rs / tests/latex.rs / tests/markdown.rs，
+  1.85 与 1.98 两版 rustfmt 都 clean）
+```
+
+已知的**本轮之外**问题（照实记）：`cargo fmt -p pi-tui --check` 在 `src/app.rs` / `src/settings.rs` /
+`tests/settings_list.rs` 上仍报 diff，三个文件都停在 LUM-1126 的 `86513cee4`、不是本轮改的（本轮只格式化了自己
+的 4 个文件，避免与 Stage 35 的 `app.rs` 抢文件）。留给后续轮次顺手收。
+
+### 五、合并与推送
+
+`work/lum-1130` → `feature/pi.rs`（plumbing merge），提交信息 `feat(pi-tui): port latex.ts + wire LaTeX into markdown`。
+
+### 六、frontier（本轮更新）
+
+第 7 项的 LaTeX 部分**整条收口**（`latex.ts` 1394 行全量移植 + markdown 块级/内联接线）；该项剩余
+OSC-8 hyperlink / 语法高亮 / 块级 HTML。其余维持：
+
+1. **P1 鼠标区域派发 / 点击命中**（在途 Stage 35 / LUM-1128）。2. **P1 选区粒度与边缘体验**（双击选词 / 三击选行 /
+边缘自动滚动）：写 `app.rs`，排 Stage 35 之后——下一轮可派。3. ~~P2 `node:module` / `node:readline`~~ 已落地。
+4. **P2 `node:zlib` gzip/deflate**：仍卡在离线 registry 没有 `flate2`（不许加新依赖凑接口）。
+5. **P2 `fetch` 全局**：要真实 HTTP 桥（`host.rs` 新 op + 代理/证书策略），需要架构取舍，不在一轮内做。
+6. **P3 `alt-screen-search.ts`**：要 `app.rs` 钩子。7. ~~P3 `latex.ts`~~ **本轮已落地**（剩 OSC-8 / 高亮 / HTML）。
+8. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。9. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：等第 1 项。
+10. **新增欠账（本轮）**：LaTeX 的字符宽度算法与上游 East Asian Width 不一致（文档化偏离）；
+`src/app.rs` / `src/settings.rs` / `tests/settings_list.rs` 的 rustfmt diff 待收。
+
