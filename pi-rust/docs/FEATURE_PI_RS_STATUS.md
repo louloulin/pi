@@ -1631,12 +1631,13 @@ integration, not ideation.
 ```
 $ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
 $ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
-$ cargo test     --workspace                                       # 197 / 197 pass
+$ cargo test     --workspace                                       # 221 / 221 pass
 ```
 
-197 tests vs 126 at LUM-1039 — the delta is +10 `pi-ai` anthropic,
+221 tests vs 126 at LUM-1039 — the delta is +10 `pi-ai` anthropic,
 +6 `pi-agent-core` anthropic_faux, +13 `pi-coding-agent` print_mode,
-+9 `pi-coding-agent` navigation tools, plus the models-catalog cases.
++11 `pi-coding-agent` navigation tools in `tests/tools.rs`, +24 in
+`tests/tools_navigation.rs`, plus the models-catalog cases.
 
 End-to-end CLI spot checks on the merged tree:
 
@@ -1652,6 +1653,26 @@ $ cargo run -p pi-coding-agent --example manual_check -- <dir>   # find / grep /
 The `manual_check` example confirms `find **/*.rs`, `grep '^name' Cargo.toml`
 and `ls detail/all` behave like their shell equivalents (relative paths,
 `file:line:content`, directory-first ordering, hidden-file filtering).
+
+### Concurrent-round reconciliation (LUM-1050)
+
+The LUM-1050 round ran in parallel and pushed its own Stage 8 + 9 merge
+(`b8e270fdf`) plus a doc commit (`21c598da3`) to `origin/feature/pi.rs`
+while this round was working. Merging it back produced exactly one code
+-level conflict-free result:
+
+- the Stage 8/9 files were byte-identical, so git auto-merged them;
+- `tests/tools_navigation.rs` (the extra 24-test suite from LUM-1050)
+  was kept;
+- the only real conflict was the status doc (both rounds appended a
+  section at the same offset) — both sections are preserved, LUM-1048
+  first, LUM-1050 after;
+- the merge silently duplicated the newly-added `regex` entry in
+  `[workspace.dependencies]` (`error: duplicate key`), which was caught by
+  the post-merge test run and removed.
+
+Net effect: `origin/feature/pi.rs` now carries the *tested* Stage 7
+revision, Stage 8, Stage 9, and both rounds' test suites.
 
 ### Disk housekeeping
 
@@ -1686,3 +1707,58 @@ Stage 10–12 sub-issues (dispatched one slot at a time, respecting the
 
 All three are additive and touch disjoint files, so they can run in
 parallel within the cap. `feature/pi.rs` is the integration target for each.
+## LUM-1050 round — Stage 8 + Stage 9 landed on `feature/pi.rs`
+
+LUM-1050 (2026-09-19 01:40 UTC) picked up two task branches that were
+in `in_review` but **not** on `feature/pi.rs`, and merged both:
+
+- **Stage 8 / LUM-1044 (`agent/devbox1/lum-1044`)** — full print mode:
+  `print_mode.rs` (text / json / json-events, `--continue` /
+  `--session` / `--max-turns`, SIGINT/SIGTERM handling),
+  `file_processor.rs` (`@file` expansion + piped stdin), CLI flags and
+  `tests/print_mode.rs`. Merged as a real merge commit; the single
+  `main.rs` conflict was resolved in favour of the Stage 7 Claude model
+  catalog (`claude-sonnet/opus/haiku-4-5`) over Stage 8's stub entry.
+- **Stage 9 / LUM-1043 (`agent/devbox1/7046ef4e9915`)** — `find`,
+  `grep`, `ls` tools plus `tools/mod_ignore.rs` and the navigation
+  integration tests. That branch was cut from `origin/main` and
+  re-added the whole `pi-rust` tree, so it could not be merged; only its
+  delta over the `feature/pi.rs` base (`e67ede02a`) was applied as a
+  patch (files + `walkdir` / `regex` deps + `tests/tools_navigation.rs`).
+
+### Verification (this round, on `feature/pi.rs`)
+
+```
+$ cargo check  --workspace --all-targets                  # 0 errors
+$ cargo clippy --workspace --all-targets -- -D warnings    # clean
+$ cargo test   --workspace                                 # 195 passed, 0 failed
+$ ./target/debug/pi --print=hello                          # (faux) hello
+$ ./target/debug/pi --print=hello --output-format=json-events  # NDJSON event stream
+$ ./target/debug/pi --print=@./prompt.txt                  # @file expansion
+```
+
+Test count moved 126 → 195 (Stage 7 Anthropic fixtures + Stage 8
+print-mode suite + Stage 9 navigation suite).
+
+### Known gaps surfaced while verifying (candidates for Stage 10-12)
+
+1. **The agent loop does not execute real tools yet.**
+   `pi-agent-core/src/agent_loop.rs` still calls a stubbed
+   `execute_tool_calls` ("Stage 2 uses a stub executor"), so the
+   `bash` / `read` / `write` / `edit` / `find` / `grep` / `ls` bundle
+   from `pi-coding-agent` never runs during an agent turn.
+2. **`pi install` / `remove` / `list` / `update-models` / `list-models` /
+   `version` fall through to interactive mode.** `cli.rs` declares the
+   subcommands but `main.rs`'s `ModeTarget` match has no arms for them,
+   so the pi-packages surface is a no-op.
+3. **Print / interactive modes hardcode the faux provider**
+   (`SharedStreamFn::from(Arc::new(FauxProvider::default()))` in
+   `main.rs`), so Stage 7's real `OpenAiProvider` /
+   `AnthropicProvider` are unreachable from the CLI.
+4. **`pi --rpc` still prints "rpc mode is a Stage 5 deliverable"** and
+   exits non-zero.
+
+Suggested next dispatches (≤ 3 concurrent): Stage 10 = wire a
+`ToolExecutor` into `pi-agent-core` + drive it from `pi-coding-agent`;
+Stage 11 = pi packages manager + real provider selection in the CLI;
+Stage 12 = RPC mode over `pi-protocol` framing.
