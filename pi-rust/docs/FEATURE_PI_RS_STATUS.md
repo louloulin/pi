@@ -9283,10 +9283,10 @@ numstat 见本节末补记。
 **补记（推送后回填真实哈希）：**
 
 - 代码提交 `8c0193630`（7 文件）、合并提交 `f92bb3b0b`（第一父 `8c0193630`、第二父 `8e1765325`）、
-  本节文档提交 `__DOC__`。
-- 推送是**快进、无额外 merge**：`git push origin __PUSH__:refs/heads/feature/pi.rs` →
-  `8e1765325..__PUSH__`，`work/lum-1140` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查见下。
-- `git diff --numstat 8e1765325 f92bb3b0b`（本轮全部改动）：`__NUMSTAT__`
+  本节文档提交 `04a00d1b2`。
+- 推送是**快进、无额外 merge**：`git push origin 04a00d1b2:refs/heads/feature/pi.rs` →
+  `8e1765325..04a00d1b2`，`work/lum-1140` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查见下。
+- `git diff --numstat 8e1765325 f92bb3b0b`（本轮全部改动）：pi-rust/crates/pi-coding-agent/src/cli.rs(+12/-2) pi-rust/crates/pi-coding-agent/src/commands/session.rs(+42/-2) pi-rust/crates/pi-session/src/export.rs(+167/-0) pi-rust/crates/pi-session/src/lib.rs(+9/-0) pi-rust/crates/pi-session/src/reader.rs(+13/-0) pi-rust/crates/pi-session/src/schema.rs(+27/-1) pi-rust/crates/pi-session/tests/export.rs(+253/-0) 
 - 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源（合并只带来文档改动），数字即第四节所列。
 - 本轮**派发 1 个子任务**：LUM-1141（Stage 40，`pi-agent-core` 工具批次事件流），
   以 `backlog` 创建、在本轮推送完成后提升为 `todo` 启动，确保它的 checkout 起点已含本节。
