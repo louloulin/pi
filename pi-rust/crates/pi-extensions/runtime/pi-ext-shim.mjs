@@ -3776,6 +3776,88 @@ const __pi_util_module = (() => {
 })();
 
 // ---------------------------------------------------------------------------
+// Shared `EventEmitter` — the `child.stdout` / `child.stderr` streams and
+// `node:readline`'s `Interface` are EventEmitters, so the implementation lives
+// at module scope instead of inside `node:child_process`.
+// ---------------------------------------------------------------------------
+
+class Emitter {
+  constructor() {
+    this._listeners = Object.create(null);
+  }
+
+  on(type, listener) {
+    if (typeof listener !== "function") {
+      throw new TypeError('The "listener" argument must be of type function');
+    }
+    const key = String(type);
+    (this._listeners[key] || (this._listeners[key] = [])).push(listener);
+    return this;
+  }
+
+  once(type, listener) {
+    const self = this;
+    function wrapper(...args) {
+      self.off(type, wrapper);
+      listener.apply(self, args);
+    }
+    wrapper.listener = listener;
+    return this.on(type, wrapper);
+  }
+
+  off(type, listener) {
+    const key = String(type);
+    const list = this._listeners[key];
+    if (!list) return this;
+    if (listener === undefined) {
+      delete this._listeners[key];
+      return this;
+    }
+    this._listeners[key] = list.filter(
+      (item) => item !== listener && item.listener !== listener,
+    );
+    return this;
+  }
+
+  addListener(type, listener) {
+    return this.on(type, listener);
+  }
+
+  removeListener(type, listener) {
+    return this.off(type, listener);
+  }
+
+  removeAllListeners(type) {
+    if (type === undefined) this._listeners = Object.create(null);
+    else delete this._listeners[String(type)];
+    return this;
+  }
+
+  listeners(type) {
+    return (this._listeners[String(type)] || []).slice();
+  }
+
+  listenerCount(type) {
+    return (this._listeners[String(type)] || []).length;
+  }
+
+  emit(type, ...args) {
+    const key = String(type);
+    const list = this._listeners[key];
+    if (!list || list.length === 0) {
+      // Node's EventEmitter rethrows an unhandled `error` event.
+      if (key === "error") {
+        const error = args[0];
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      return false;
+    }
+    for (const listener of list.slice()) listener.apply(this, args);
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // `node:child_process` — `exec` / `execFile` / `execSync` / `execFileSync` /
 // `spawn` / `spawnSync`, backed by the `child_process.*` host ops (see
 // `src/host.rs`). The buffered host op is the primitive: the callback and
@@ -3799,86 +3881,6 @@ const __pi_util_module = (() => {
 const __pi_child_process_module = (() => {
   const BufferCtor = __pi_buffer_module.Buffer;
   const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
-
-  // -------------------------------------------------------------------------
-  // Minimal event emitter — `child` and its stdio streams are EventEmitters.
-  // -------------------------------------------------------------------------
-
-  class Emitter {
-    constructor() {
-      this._listeners = Object.create(null);
-    }
-
-    on(type, listener) {
-      if (typeof listener !== "function") {
-        throw new TypeError('The "listener" argument must be of type function');
-      }
-      const key = String(type);
-      (this._listeners[key] || (this._listeners[key] = [])).push(listener);
-      return this;
-    }
-
-    once(type, listener) {
-      const self = this;
-      function wrapper(...args) {
-        self.off(type, wrapper);
-        listener.apply(self, args);
-      }
-      wrapper.listener = listener;
-      return this.on(type, wrapper);
-    }
-
-    off(type, listener) {
-      const key = String(type);
-      const list = this._listeners[key];
-      if (!list) return this;
-      if (listener === undefined) {
-        delete this._listeners[key];
-        return this;
-      }
-      this._listeners[key] = list.filter(
-        (item) => item !== listener && item.listener !== listener,
-      );
-      return this;
-    }
-
-    addListener(type, listener) {
-      return this.on(type, listener);
-    }
-
-    removeListener(type, listener) {
-      return this.off(type, listener);
-    }
-
-    removeAllListeners(type) {
-      if (type === undefined) this._listeners = Object.create(null);
-      else delete this._listeners[String(type)];
-      return this;
-    }
-
-    listeners(type) {
-      return (this._listeners[String(type)] || []).slice();
-    }
-
-    listenerCount(type) {
-      return (this._listeners[String(type)] || []).length;
-    }
-
-    emit(type, ...args) {
-      const key = String(type);
-      const list = this._listeners[key];
-      if (!list || list.length === 0) {
-        // Node's EventEmitter rethrows an unhandled `error` event.
-        if (key === "error") {
-          const error = args[0];
-          throw error instanceof Error ? error : new Error(String(error));
-        }
-        return false;
-      }
-      for (const listener of list.slice()) listener.apply(this, args);
-      return true;
-    }
-  }
 
   /** The `child.stdout` / `child.stderr` shape: the Readable subset the
    *  examples use (`on("data")` / `on("end")` / `setEncoding`). Chunks that
@@ -4482,6 +4484,444 @@ const __pi_child_process_module = (() => {
     fork: () => {
       throw new Error("child_process.fork is not supported in the pi extension host");
     },
+  };
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:module` — the CommonJS module facade, scoped to the virtual module
+// map.
+//
+// The consumers are real and their shapes differ: `doom-overlay/doom-engine.ts:6`
+// and `core/extensions/loader.ts:76` read `createRequire(import.meta.url)`,
+// `chord/src/node/bundle-loader.ts:177` passes a *path* and then gates package
+// names on `isBuiltin(specifier)` (:180, :206), `tui/src/native-module-path.ts:5`
+// calls `require.resolve("@earendil-works/pi-tui")` inside a `try`/`catch`, and
+// `tui/test/native-platform.test.ts:59,85` mocks a native addon through
+// `new Module(path)` + `require.cache[path]`. So `createRequire` resolves
+// *bridged* modules — the builtins and the SDK virtual modules — and nothing
+// else; `require.cache` is the real `Module._cache`; and an unresolvable
+// specifier throws so the `try`/`catch` above behaves like it does on Node.
+// That last part is the deliberate sandbox line: widening it to arbitrary files
+// off disk is a separate decision, not a side effect of adding a module (see
+// `docs/NODE_BUILTINS.md`, "Not bridged"). `registerHooks`
+// (`ai/test/lazy-module-load.test.ts:19`, `experimental/source-resolver.ts:2`)
+// stays a documented gap.
+//
+// `builtinModules` / `isBuiltin` are derived from the virtual module map
+// rather than from Node's full builtin list, so they answer "what can this
+// host actually resolve?": `isBuiltin("node:stream")` is `false` here where
+// Node says `true`. `Module` is present for the one upstream shape that mocks
+// a native addon (`packages/tui/test/native-platform.test.ts:85` constructs
+// `new Module(path)` and writes `require.cache[path]`), so `require.cache` is
+// a real store consulted by `require()` — not a decorative object.
+// ---------------------------------------------------------------------------
+
+const __pi_module_module = (() => {
+  const hasOwn = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
+
+  function invalidArgType(name, value) {
+    const received = value === null ? "null" : typeof value;
+    const error = new TypeError(
+      'The "' + name + '" argument must be of type string. Received type ' + received,
+    );
+    error.code = "ERR_INVALID_ARG_TYPE";
+    return error;
+  }
+
+  function moduleNotFound(specifier, requester) {
+    let message = "Cannot find module '" + specifier + "'";
+    if (specifier.indexOf("node:") === 0) {
+      message +=
+        " (`" +
+        specifier +
+        "` is a Node builtin the pi extension host does not bridge; docs/NODE_BUILTINS.md lists what it does)";
+    }
+    if (requester) message += "\nRequire stack:\n- " + requester;
+    const error = new Error(message);
+    error.code = "MODULE_NOT_FOUND";
+    if (requester) error.requireStack = [requester];
+    return error;
+  }
+
+  function makeRequire(requester) {
+    function requireFromModule(specifier) {
+      const key = String(specifier);
+      const virtual = globalThis.__pi_virtual_modules[key];
+      if (virtual) return virtual;
+      const cached = Module._cache[key];
+      if (cached && cached.exports !== undefined) return cached.exports;
+      throw moduleNotFound(key, requester);
+    }
+
+    requireFromModule.resolve = function resolve(specifier) {
+      const key = String(specifier);
+      if (globalThis.__pi_virtual_modules[key]) return key;
+      if (Module._cache[key]) return key;
+      throw moduleNotFound(key, requester);
+    };
+    // Node's `require.cache` *is* `Module._cache`; keeping one store means a
+    // mocked module is visible from either handle.
+    requireFromModule.cache = Module._cache;
+    requireFromModule.main = undefined;
+    return requireFromModule;
+  }
+
+  /** `module.createRequire(from)` / `Module.createRequire(from)`. */
+  function createRequire(from) {
+    let requester = "";
+    if (typeof from === "string") requester = from;
+    else if (from && typeof from === "object" && typeof from.href === "string") {
+      requester = from.href;
+    } else {
+      throw invalidArgType("filename", from);
+    }
+    return makeRequire(requester);
+  }
+
+  function isBuiltin(specifier) {
+    if (typeof specifier !== "string") throw invalidArgType("specifier", specifier);
+    const key = specifier.indexOf("node:") === 0 ? specifier : "node:" + specifier;
+    return hasOwn(globalThis.__pi_virtual_modules, key);
+  }
+
+  let builtinCache = null;
+  function builtinModules() {
+    if (builtinCache) return builtinCache;
+    const names = [];
+    for (const key of Object.keys(globalThis.__pi_virtual_modules)) {
+      if (key.indexOf("node:") === 0) names.push(key.slice("node:".length));
+    }
+    builtinCache = Object.freeze(names.sort());
+    return builtinCache;
+  }
+
+  class Module {
+    constructor(id, parent) {
+      this.id = id === undefined ? "" : String(id);
+      this.path = this.id;
+      this.filename = this.id;
+      this.exports = {};
+      this.loaded = false;
+      this.children = [];
+      this.paths = [];
+      if (parent) this.parent = parent;
+    }
+
+    require(specifier) {
+      return makeRequire(this.filename || this.id)(specifier);
+    }
+  }
+  Module._cache = Object.create(null);
+  Module.createRequire = createRequire;
+  Module.isBuiltin = isBuiltin;
+  Object.defineProperty(Module, "builtinModules", {
+    get: builtinModules,
+    enumerable: true,
+  });
+
+  const mod = {
+    createRequire: createRequire,
+    isBuiltin: isBuiltin,
+    Module: Module,
+  };
+  Object.defineProperty(mod, "builtinModules", {
+    get: builtinModules,
+    enumerable: true,
+  });
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
+// ---------------------------------------------------------------------------
+// `node:readline` — line reading off a stream-like input, plus UI-backed
+// questions.
+//
+// `createInterface({ input })` accepts any object with `on("data")` /
+// `on("end")` — exactly the `child.stdout` shape `node:child_process` hands
+// out, which is what the TUI's own tools read (`core/tools/grep.ts:169` and
+// `core/tools/find.ts:217` do `createInterface({ input: child.stdout })` +
+// `on("line")`, and `examples/rpc-extension-ui.ts:521` does the same over a
+// spawned agent's stdout with `terminal: false`). Lines split on `\n` /
+// `\r\n` / lone `\r`; a `\r\n` pair straddling two chunks is still one break
+// because a pending CR is remembered instead of using Node's 100 ms
+// `crlfDelay` timer — the same thing `core/session-manager.ts:698` asks for
+// with `crlfDelay: Infinity`, and `git-merge-and-resolve.ts:37` gets with
+// `for await (const line of rl)` over a file stream.
+//
+// Terminal/raw mode is a documented gap, not a fake: there is no TTY in the
+// embedded engine and the host owns stdin, so `terminal: true` throws
+// `ERR_READLINE_TTY_UNSUPPORTED`. The `process.stdin` callers
+// (`packages/ai/src/cli.ts:48`, `core/main.ts:283`) therefore take the
+// UI-dialog path: with no `input`, `question()` goes through the session's UI
+// (`host_ui_input`, the channel `ctx.ui.input` uses); a host without UI fails
+// fast from `createInterface` with `ERR_READLINE_NO_INPUT` instead of handing
+// back an interface whose promises never settle. `close()` (and input `end`)
+// settles every pending consumer.
+// ---------------------------------------------------------------------------
+
+const __pi_readline_module = (() => {
+  const BufferCtor = __pi_buffer_module.Buffer;
+
+  function readlineError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function chunkToString(chunk) {
+    if (typeof chunk === "string") return chunk;
+    if (chunk instanceof Uint8Array) return BufferCtor.from(chunk).toString("utf8");
+    return String(chunk);
+  }
+
+  function uiInputAvailable() {
+    let hasUI = false;
+    if (typeof globalThis._pi_tool_ctx === "string") {
+      try {
+        hasUI = JSON.parse(globalThis._pi_tool_ctx).hasUI === true;
+      } catch (_e) {
+        hasUI = false;
+      }
+    }
+    return hasUI && typeof globalThis.host_ui_input === "function";
+  }
+
+  /** Renders `query` where Node would: the `output` stream, else the log. */
+  function writeQuery(output, query) {
+    if (output && typeof output.write === "function") {
+      output.write(query);
+      return;
+    }
+    if (typeof globalThis.host_log === "function") {
+      globalThis.host_log("info", query.replace(/\n+$/, "") || query);
+    }
+  }
+
+  class Interface extends Emitter {
+    constructor(input, output) {
+      super();
+      this.__input = input;
+      this.__output = output;
+      this.__queue = [];
+      this.__waiters = [];
+      this.__buffer = "";
+      this.__pendingCR = false;
+      this.__closed = false;
+      this.__ended = false;
+      this.__prompt = "";
+      if (input) {
+        this.__onData = (chunk) => this.__push(chunkToString(chunk));
+        this.__onEnd = () => this.__finish();
+        input.on("data", this.__onData);
+        input.on("end", this.__onEnd);
+      }
+    }
+
+    __push(text) {
+      if (this.__closed) return;
+      for (let index = 0; index < text.length; index++) {
+        const char = text[index];
+        if (this.__pendingCR) {
+          this.__pendingCR = false;
+          // `\r\n` split across two chunks is one break, not two lines.
+          if (char === "\n") continue;
+        }
+        if (char === "\n" || char === "\r") {
+          if (char === "\r") this.__pendingCR = true;
+          this.__emitLine();
+          continue;
+        }
+        this.__buffer += char;
+      }
+    }
+
+    __emitLine() {
+      const line = this.__buffer;
+      this.__buffer = "";
+      this.emit("line", line);
+      const waiter = this.__waiters.shift();
+      if (waiter) waiter({ done: false, value: line });
+      else this.__queue.push(line);
+    }
+
+    __next() {
+      if (this.__queue.length > 0) {
+        return Promise.resolve({ done: false, value: this.__queue.shift() });
+      }
+      if (this.__ended || this.__closed) {
+        return Promise.resolve({ done: true, value: undefined });
+      }
+      return new Promise((resolve) => {
+        this.__waiters.push(resolve);
+      });
+    }
+
+    __settleWaiters() {
+      const waiters = this.__waiters;
+      this.__waiters = [];
+      for (const resolve of waiters) resolve({ done: true, value: undefined });
+    }
+
+    __finish() {
+      if (this.__ended || this.__closed) return;
+      this.__ended = true;
+      // Node emits a trailing line without a terminating newline.
+      if (this.__buffer.length > 0) this.__emitLine();
+      this.__detach();
+      this.__settleWaiters();
+      if (!this.__closed) {
+        this.__closed = true;
+        this.emit("close");
+      }
+    }
+
+    __detach() {
+      const input = this.__input;
+      if (!input || !this.__onData) return;
+      const remove =
+        typeof input.off === "function"
+          ? input.off
+          : typeof input.removeListener === "function"
+            ? input.removeListener
+            : null;
+      if (!remove) return;
+      remove.call(input, "data", this.__onData);
+      remove.call(input, "end", this.__onEnd);
+    }
+
+    /**
+     * Ask a question and resolve the next line.
+     *
+     * With a stream `input` this is Node's behaviour (write the query, take
+     * the next line; `null` when the stream ends first). Without one the
+     * session UI supplies the answer, and a host that cannot prompt never
+     * gets here (`createInterface` already threw).
+     */
+    question(query, options, callback) {
+      if (typeof options === "function") {
+        callback = options;
+        options = undefined;
+      }
+      void options;
+      const text = query === undefined || query === null ? "" : String(query);
+      if (this.__closed) {
+        throw readlineError(
+          "ERR_USE_AFTER_CLOSE",
+          "readline.Interface was closed: no more questions can be asked",
+        );
+      }
+      writeQuery(this.__output, text);
+      const answer = this.__input
+        ? this.__next().then((result) => (result.done ? null : result.value))
+        : Promise.resolve(globalThis.host_ui_input(text, "")).then(
+            (value) => (typeof value === "string" ? value : null),
+            () => null,
+          );
+      if (typeof callback === "function") {
+        answer.then((value) => callback(value));
+        return undefined;
+      }
+      return answer;
+    }
+
+    /** `rl.write(data)` feeds `data` through the same line splitter. */
+    write(data) {
+      this.__push(String(data));
+      return this;
+    }
+
+    pause() {
+      return this;
+    }
+
+    resume() {
+      return this;
+    }
+
+    setPrompt(prompt) {
+      this.__prompt = prompt === undefined ? "" : String(prompt);
+      return this;
+    }
+
+    getPrompt() {
+      return this.__prompt;
+    }
+
+    prompt(preserveCursor) {
+      void preserveCursor;
+      writeQuery(this.__output, this.__prompt);
+      return this;
+    }
+
+    close() {
+      if (this.__closed) return this;
+      this.__closed = true;
+      this.__detach();
+      this.__settleWaiters();
+      this.emit("close");
+      return this;
+    }
+
+    [Symbol.asyncIterator]() {
+      const self = this;
+      return {
+        next: () => self.__next(),
+        return: () => Promise.resolve({ done: true, value: undefined }),
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+      };
+    }
+  }
+
+  function createInterface(input, output, terminal) {
+    // Node's deprecated positional form `(input, output, terminal)` and the
+    // options-object form both reach here.
+    let options;
+    if (
+      input &&
+      typeof input === "object" &&
+      typeof input.on !== "function" &&
+      typeof input.read !== "function"
+    ) {
+      options = input;
+    } else {
+      options = { input: input, output: output, terminal: terminal };
+    }
+
+    const stream = options.input;
+    const outputStream = options.output === undefined ? null : options.output;
+    const isTerminal =
+      options.terminal === undefined
+        ? Boolean(outputStream && outputStream.isTTY === true)
+        : Boolean(options.terminal);
+
+    if (isTerminal) {
+      throw readlineError(
+        "ERR_READLINE_TTY_UNSUPPORTED",
+        "readline terminal (raw TTY) mode is not available in the pi extension host: the embedded engine has no TTY and the host owns stdin",
+      );
+    }
+    if (stream !== undefined && stream !== null && typeof stream.on !== "function") {
+      throw readlineError(
+        "ERR_INVALID_ARG_TYPE",
+        'The "input" argument must be a readable stream. Received ' + typeof stream,
+      );
+    }
+    if ((stream === undefined || stream === null) && !uiInputAvailable()) {
+      throw readlineError(
+        "ERR_READLINE_NO_INPUT",
+        "readline.createInterface needs an `input` stream or a session UI: the pi extension host does not expose process.stdin",
+      );
+    }
+    return new Interface(stream === undefined ? null : stream, outputStream);
+  }
+
+  const mod = {
+    createInterface: createInterface,
+    Interface: Interface,
   };
   mod.default = mod;
   return Object.freeze(mod);
@@ -6064,6 +6504,10 @@ globalThis.__pi_virtual_modules = Object.freeze({
   util: __pi_util_module,
   "node:child_process": __pi_child_process_module,
   child_process: __pi_child_process_module,
+  "node:module": __pi_module_module,
+  module: __pi_module_module,
+  "node:readline": __pi_readline_module,
+  readline: __pi_readline_module,
   typebox: __pi_typebox_module,
   "@sinclair/typebox": __pi_typebox_module,
   ...__pi_sdk_specifiers,

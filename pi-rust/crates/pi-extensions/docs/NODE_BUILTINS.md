@@ -6,7 +6,7 @@ extensions in the wild import Node builtins directly:
 ```
 node:path (43)  node:fs (28)  node:fs/promises (18)  node:os (16)
 node:crypto (15)  node:child_process (14)  node:url (8)  node:buffer (1)
-node:util (1)  node:zlib (1)
+node:util (1)  node:zlib (1)  node:module (1)  node:readline (1)
 ```
 
 The `pi` Rust port embeds QuickJS, which has no operating-system surface
@@ -39,6 +39,11 @@ Key properties:
   uses two async host imports — `host_child_read(handle, stream)` and
   `host_child_wait(handle)` — because a live child outlives the call that
   created it.
+- **Some modules are pure JS.** `node:util`, `node:module` and
+  `node:readline` add no op at all: they are implemented entirely inside the
+  shim, over the same map (and, for `question`, the existing `host_ui_input`
+  dialog). A module only earns a host op when it needs something the JS
+  side cannot do — the filesystem, entropy, a child process.
 - **Errors are values.** The bridge never throws: it returns
   `{"ok":false,"code","message","syscall","path"}` and the shim turns
   that into a Node-shaped `Error` (`err.code === "ENOENT"`) so
@@ -185,6 +190,63 @@ Not covered: `parseArgs`, `parseEnv`, `diff`, `aborted`,
 `setTraceSigInt` — importing the module still works, but those names are
 absent (the failure is a plain "undefined is not a function").
 
+### `node:module`
+
+Pure JS — no host op is involved. Upstream uses every shape of it:
+`doom-overlay/doom-engine.ts:6,64` and `core/extensions/loader.ts:76` read
+`createRequire(import.meta.url)`, `chord/src/node/bundle-loader.ts:177` passes a
+*path* and then gates package names on `isBuiltin(specifier)` (`:180`, `:206`),
+`tui/src/native-module-path.ts:5,15` calls `require.resolve(…)` inside a
+`try`/`catch`, and `tui/test/native-platform.test.ts:59,85` mocks a native addon
+by writing `new Module(path)` into `require.cache`.
+
+| Node API | Notes |
+|---|---|
+| `createRequire(from)` / `Module.createRequire` | `from` may be a string or an object with an `href` (`import.meta.url` is a `file://` URL string). The returned `require` resolves **the bridged virtual modules** — the builtins and the `@earendil-works/*` / `typebox` SDK modules — and consults the shared `Module._cache`; anything else throws an `Error` with `code: "MODULE_NOT_FOUND"` and `requireStack: [from]`. |
+| `require.resolve(specifier)` | Returns the specifier itself for a resolvable module (a virtual module has no disk path to canonicalize) and throws the same `MODULE_NOT_FOUND` otherwise. |
+| `require.cache` | *Is* `Module._cache` — one store, so a mocked module is visible from either handle. |
+| `builtinModules` / `isBuiltin(specifier)` | Derived from the virtual module map, i.e. they answer "what can this host resolve?": `node:fs`, `node:module`, `node:readline` … are `true`, `node:stream` is `false` where Node says `true`. `isBuiltin` accepts the bare and `node:` forms. |
+| `Module` | `new Module(id[, parent])` with `id` / `path` / `filename` / `exports` / `loaded` / `children` / `paths` / `require(specifier)`; statics `createRequire` / `isBuiltin` / `builtinModules` / `_cache`. |
+
+Not covered: `register` / `registerHooks` / `syncBuiltinESMExports`
+(loader-level hooks), `runMain`, `wrap`, `findSourceMap` / `SourceMap`, and the
+internal `_load` / `_resolveFilename` / `_extensions` machinery. Requiring a
+path that exists on disk does **not** work: the virtual-module sandbox is the
+point, and widening it is a separate decision.
+
+### `node:readline`
+
+The sync subset: `createInterface` over a stream-like `input` — any object with
+`on("data")` / `on("end")`, which is exactly the `child.stdout` shape
+`node:child_process` returns. That is the shape the TUI's own tools use:
+`core/tools/grep.ts:169` and `core/tools/find.ts:217` do
+`createInterface({ input: child.stdout })` +
+`rl.on("line", …)` + `rl.close()`, and the `rpc-extension-ui.ts:521` example
+does the same over a spawned agent's stdout with `terminal: false`.
+`git-merge-and-resolve.ts:37` and `core/session-manager.ts:698` iterate a file
+stream with `for await (const line of rl)` — the latter passing
+`crlfDelay: Infinity`, which the pending-CR handling below matches without a
+timer. The `process.stdin` callers (`packages/ai/src/cli.ts:48`,
+`core/main.ts:283`, `rpc-example.ts:46`) are the ones that take the UI-dialog
+path.
+
+| Node API | Notes |
+|---|---|
+| `createInterface({ input, output?, terminal? })` | Also accepts the deprecated positional form `(input, output, terminal)`. Lines split on `\n`, `\r\n` and a lone `\r`; a CRLF pair straddling two chunks is still one break (the pending CR is remembered instead of using Node's 100 ms `crlfDelay` timer). `close` fires on `rl.close()` and on input `end`. |
+| `rl.on("line", …)` / `rl.on("close", …)` / `rl.pause()` / `rl.resume()` / `rl.write(data)` | `Interface` is an `EventEmitter`; `write` feeds `data` through the same splitter (how a caller simulates typing). |
+| `for await (const line of rl)` | Reads the internal queue, then waits; `close()` (or input `end`) settles every pending consumer with `done: true` instead of leaving the promise hanging. |
+| `rl.question(query[, options][, callback])` | Resolves (or calls back) with the next line, `null` when the input ends first. With no `input`, the query goes to the session UI (`host_ui_input`, the channel `ctx.ui.input` uses). |
+| `rl.setPrompt` / `getPrompt` / `prompt()` | The prompt is written to `output` when there is one, else to `host_log`. |
+
+Branches that **fail instead of pretending**: `terminal: true` →
+`ERR_READLINE_TTY_UNSUPPORTED` (there is no TTY in the embedded engine, and the
+host owns stdin); no `input` and no session UI → `ERR_READLINE_NO_INPUT`; a
+non-stream `input` → `ERR_INVALID_ARG_TYPE`; `question` after `close()` →
+`ERR_USE_AFTER_CLOSE`.
+
+Not covered: `emitKeypressEvents`, `cursorTo` / `moveCursor` / `clearLine` /
+`clearScreenDown`, `getCursorPos`, and the `readline/promises` entry point.
+
 ## Coverage against the repo's own extensions
 
 | Extension | Builtins it imports | Status |
@@ -193,7 +255,9 @@ absent (the failure is a plain "undefined is not a function").
 | `.pi/extensions/import-repro.ts` | `node:buffer`, `node:fs`, `node:path` | Covered; additionally needs the `fetch` global. |
 | `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; the `@earendil-works/pi-tui` module it needs is bridged as well (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
 | `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; the `@earendil-works/*` modules they need are bridged (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
-| `git-merge-and-resolve.ts`, `subagent/index.ts`, `sandbox/index.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:child_process` / `node:module` / `node:zlib` | `node:child_process` (LUM-1110) and `node:zlib`'s zstd family (LUM-1125) are bridged; still blocked on `node:readline` / `node:module`, and `wad-finder.ts` additionally needs the gzip half of `node:zlib`. `sandbox/index.ts` additionally needs `setTimeout` / `process.kill`, which are engine/process-contract gaps rather than builtin ones. |
+| `git-merge-and-resolve.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:module` / `node:zlib` | `node:readline` / `node:module` (LUM-1129) and `node:zlib`'s zstd family (LUM-1125) are bridged, so **every import resolves**. Each file still has a non-builtin blocker: `git-merge-and-resolve.ts` reads its input with `fs.createReadStream` (not bridged), `doom-engine.ts` needs to `require` the local `doom.js` off disk (the sandbox refuses) and reads a WAD with `readFileSync` (covered), and `wad-finder.ts` calls `gunzipSync` (no gzip backend). |
+| `rpc-extension-ui.ts` (example) | `node:child_process`, `node:path`, `node:readline`, `node:url`, `@earendil-works/pi-tui` | **Unblocked** as far as builtins go: `spawn` + `readline.createInterface({ input: agent.stdout, terminal: false })` + `on("line")` is exactly the subset above. Its remaining dependency is the TUI SDK, not a builtin. |
+| `core/tools/grep.ts`, `core/tools/find.ts`, `core/session-manager.ts` (host-side, not extensions) | `node:readline` (+ `node:child_process`) | The readline patterns these rely on (`child.stdout` + `on("line")` + `close()`; file stream + `for await` + `crlfDelay: Infinity`) all work; they are not loaded through the extension host, so this is a completeness note rather than a coverage claim. |
 | `interactive-shell.ts`, `ssh.ts`, `mac-system-theme.ts`, `truncated-tool.ts` | `node:child_process` (+ `node:util`) | **Unblocked**: all four now have the builtins they import. `ssh.ts`'s timed/abortable path additionally needs the `setTimeout` global (engine-level, not builtin); `AbortSignal` is available since LUM-1116. |
 | `auto-commit-on-exit.ts`, `border-status-editor.ts`, `dirty-repo-guard.ts`, `git-checkpoint.ts`, `github-issue-autocomplete.ts`, `inline-bash.ts`, `input-transform-streaming.ts`, `shutdown-command.ts` | — (shell out through the extension API) | **Unblocked**: these use `pi.exec`, which is now bridged to the Rust host (see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)); they never import `node:child_process` themselves. |
 
@@ -226,6 +290,9 @@ gaps, and every divergence.
 | `spawn` pipes are fully buffered host-side; `maxBuffer` does not apply to `spawn` (only to the buffered forms), and there is no implicit 1 MiB default anywhere. | The reader tasks must always drain so the child never blocks on a full pipe; enforcing a cap on a live stream would mean dropping bytes an extension can still observe. |
 | `stdio: "inherit"` replays the captured output through the log-backed `process.stdout` / `stderr` after the child exits, instead of handing the real terminal to the child. | The `pi` process owns stdout (`--rpc`); a raw passthrough would corrupt the protocol. `spawnSync(…, {stdio: "inherit"})` therefore returns `stdout: null`, like Node. |
 | Writing to `child.stdin` is not supported (`spawn`'s stdin is `/dev/null`) and `detached` is ignored. | The host bridges no stdin channel; `detached` would need a process-group model the host does not have. |
+| `readline` splits lines immediately instead of waiting out Node's 100 ms `crlfDelay`, so a bare `\r` is a break at once. | The host has no timer surface for the shim to schedule the delay on, and immediate splitting is what every reader actually wants. |
+| `readline.createInterface()` with no `input` asks through the session UI dialog instead of Node's `process.stdin`, and `terminal: true` throws `ERR_READLINE_TTY_UNSUPPORTED`. | There is no TTY in the embedded engine and the host owns stdin; a raw-mode interface that can never read a keystroke would be a lie, and the UI dialog is the real prompt channel (`ctx.ui.input`). |
+| `module.createRequire` resolves only the bridged virtual modules — a path that exists on disk still throws `MODULE_NOT_FOUND` — and `builtinModules` / `isBuiltin` report the bridged set (`isBuiltin("node:stream")` is `false`). | The virtual-module boundary is the sandbox; reporting Node's full builtin list would promise resolutions that fail. |
 
 ## Not bridged (frontier)
 
@@ -237,9 +304,8 @@ plain "undefined is not a function":
 
 | Builtin | Why it is missing | What it would take |
 |---|---|---|
-| `node:module` | `createRequire` would let an extension `require` arbitrary paths off disk, which the virtual-module sandbox exists to prevent. | Would need a deliberate decision to widen the sandbox, e.g. require-from-`node_modules`-only. Used by `doom-overlay/doom-engine.ts`. |
-| `node:readline` | Interactive prompting; needs streams and stdin ownership. | `readline.createInterface` over a stream bridge; the host owns stdin. Used by `git-merge-and-resolve.ts`. |
 | `node:zlib` gzip/deflate (`gzipSync` / `gunzipSync` / `deflateSync` / `inflateSync`) | The workspace bundles no `flate2`/`miniz_oxide`, and the offline registry has neither. The zstd family *is* bridged (LUM-1125); `doom-overlay/wad-finder.ts` calls `gunzipSync`, so it stays blocked. | Add `flate2` (or `miniz_oxide`) once the registry has it, then expose `gunzipSync`/`gzipSync`/`inflateRawSync`/`deflateSync`. |
+| `node:module`'s disk resolution (`require` of a real path, `registerHooks`, `findSourceMap`) | The virtual-module sandbox deliberately stops at the bridged set; `createRequire` / `Module` / `builtinModules` themselves **are** bridged (LUM-1129). | A deliberate decision to widen the sandbox (e.g. require-from-`node_modules`-only); `doom-overlay/doom-engine.ts` would then load its local CJS blob. |
 | `node:stream` / `node:http` / `node:net` / `node:worker_threads` | No event loop integration for streams. | Substantial; probably out of scope for the QuickJS host. |
 | `crypto.createHash` / `createHmac` / `webcrypto` | No digest backend is bundled in the workspace. | Add a small SHA-256 implementation (`sha2`) or vendor a JS one. |
 | `fs.watch`, `fs.createReadStream/WriteStream` | Needs a filesystem watcher and stream plumbing. | `notify` crate + stream bridge. |
@@ -256,8 +322,11 @@ table and the shim cannot drift apart silently.
 
 ## Adding a new op
 
-1. `crates/pi-extensions/src/host.rs` — add an arm to `node_call(op, args)`,
-   returning a JSON value or `NodeError::io(..)`/`NodeError::invalid(..)`.
+1. `crates/pi-extensions/src/host.rs` — for a module that needs the
+   operating system, add an arm to `node_call(op, args)`, returning a JSON
+   value or `NodeError::io(..)`/`NodeError::invalid(..)`. A module that is
+   implementable in JS (`node:util`, `node:module`, `node:readline`) needs no
+   arm at all — do not add one just to have one.
 2. `crates/pi-extensions/runtime/pi-ext-shim.mjs` — wrap it in the matching
    module object (`__pi_fs_module`, `__pi_os_module`, …) and add the
    specifier to `globalThis.__pi_virtual_modules` if it is a new module.
