@@ -9131,11 +9131,17 @@ $ cargo check -p pi-tui --all-targets --offline        # exit 0（合并进来�
 **补记（推送后回填真实哈希）：**
 
 - 代码提交 `d269d338e`（8 文件）、合并提交 `5d0fc3a86`（第一父 `d269d338e`、第二父 `5fa1c1999`）、
-  本节文档提交 `__DOC__`。
-- 推送是**快进、无额外 merge**：`git push origin __PUSH__:refs/heads/feature/pi.rs` →
-  `5fa1c1999..__PUSH__`，`work/lum-1139` 作为留档分支一并推送（同哈希）。
-  `git ls-remote` 复查见下。
-- `git diff --numstat 5fa1c1999 __PUSH__`（本轮全部改动）：`__NUMSTAT__`
+  本节文档提交 `cd1acb3f2`（+145 行）。
+- 推送是**快进、无额外 merge**：`git push origin cd1acb3f2:refs/heads/feature/pi.rs` →
+  `5fa1c1999..cd1acb3f2`，`work/lum-1139` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `cd1acb3f2f115a2b4742780f6ee12e04c4bf2185`。（推送时 git 又打了 `unable to get credential storage lock`
+  的提示，但 ref 已更新，事上为成功——与前几轮同一现象。）
+- `git diff --numstat 5fa1c1999 cd1acb3f2`（本轮全部改动，10 个文件、**+1165 / − 66**）：
+  `pi-agent-core/tests/tool_parallel.rs` +616（新）、`pi-agent-core/src/agent_loop.rs` +171/−56、
+  `pi-coding-agent/src/tool_executor.rs` +96/−1、`pi-coding-agent/tests/agent_tools.rs` +77/−1、
+  `pi-agent-core/src/agent.rs` +18/−1、`pi-agent-core/src/state.rs` +12/−1、
+  `pi-agent-core/src/tools.rs` +28/−6、`pi-agent-core/tests/{telemetry,tool_execution}.rs` 各 +1、
+  本节文档 +145。**`pi-tui` / `pi-extensions` / `pi-session` / `pi-ai` 一个文件都不在其中。**
 - 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源，数字即第四节所列。
 - 本轮**未派发任何子任务**（`running_task_count = 3`，达上限）。
 
