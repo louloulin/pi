@@ -136,11 +136,13 @@ impl OpenAiProvider {
             .await?;
         let status = response.status();
         if !status.is_success() {
+            let hint = crate::retry::retry_hint_from_headers(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(StreamError::Provider {
-                status: status.as_u16(),
-                body: truncate_body(&body),
-            });
+            return Err(StreamError::provider_with_hint(
+                status.as_u16(),
+                truncate_body(&body),
+                hint,
+            ));
         }
         let model_id = body.model.clone();
         let byte_stream = response.bytes_stream();
@@ -162,11 +164,13 @@ impl OpenAiProvider {
             .await?;
         let status = response.status();
         if !status.is_success() {
+            let hint = crate::retry::retry_hint_from_headers(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(StreamError::Provider {
-                status: status.as_u16(),
-                body: truncate_body(&body),
-            });
+            return Err(StreamError::provider_with_hint(
+                status.as_u16(),
+                truncate_body(&body),
+                hint,
+            ));
         }
         Ok(response.json::<ChatResponse>().await?)
     }

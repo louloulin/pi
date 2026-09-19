@@ -6,7 +6,9 @@ use std::sync::Arc;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
-use pi_coding_agent::config::load_compaction_settings_default;
+use pi_coding_agent::config::{
+    load_compaction_settings_default, load_provider_retry_policy_default,
+};
 use pi_coding_agent::extensions::ui_bridge::TuiUi;
 use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
 use pi_coding_agent::file_processor::expand_prompt;
@@ -58,7 +60,12 @@ fn main() -> ExitCode {
     // Anthropic / Google adapters and `/model` + `setModel` can switch
     // providers mid-session. Fail fast when the selected model's provider
     // has no credential instead of silently streaming from the faux one.
-    let router = ProviderRouter::from_env();
+    //
+    // `settings.retry.provider` wraps every adapter in the provider-request
+    // retry loop (429/5xx/transport failures, `Retry-After` aware). The
+    // default policy retries nothing, matching upstream.
+    let router =
+        ProviderRouter::from_env().with_provider_retry(load_provider_retry_policy_default());
     if let Err(err) = router.require(&resolved_model) {
         eprintln!("pi: {err}");
         return ExitCode::from(err.exit_code());

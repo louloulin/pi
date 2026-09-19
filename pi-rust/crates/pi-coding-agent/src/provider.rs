@@ -59,7 +59,9 @@ use pi_ai::providers::openai::OpenAiProvider;
 use pi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use pi_ai::providers::registry::{self, ProviderSpec, BUILTIN_PROVIDERS};
 use pi_ai::stream::AssistantMessageEventStream;
-use pi_ai::{SharedStreamFn, SimpleStreamOptions, StreamError, StreamFn};
+use pi_ai::{
+    ProviderRetryPolicy, RetryStreamFn, SharedStreamFn, SimpleStreamOptions, StreamError, StreamFn,
+};
 use pi_protocol::{Api, Context, Model};
 use thiserror::Error;
 
@@ -97,6 +99,15 @@ fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Opti
         Api::BedrockConverse | Api::CohereV2 => return None,
     };
     Some(adapter)
+}
+
+/// Wrap `adapter` in [`RetryStreamFn`] when `policy` retries at all,
+/// otherwise return it unchanged so the default build has no extra layer.
+fn adapt_retry(adapter: SharedStreamFn, policy: ProviderRetryPolicy) -> SharedStreamFn {
+    if !policy.is_enabled() {
+        return adapter;
+    }
+    RetryStreamFn::shared(adapter, policy)
 }
 
 /// Errors raised while resolving a provider for a model.
@@ -177,6 +188,21 @@ impl ProviderRouter {
     /// [`from_env`](Self::from_env) with an injectable environment, so
     /// tests can exercise every branch without mutating process state.
     pub fn from_env_with(get_env: impl Fn(&str) -> Option<String>) -> Self {
+        Self::from_env_with_policy(get_env, ProviderRetryPolicy::default())
+    }
+
+    /// [`from_env_with`](Self::from_env_with) with an explicit
+    /// provider-request retry policy.
+    ///
+    /// The policy is applied to every registered adapter through
+    /// [`RetryStreamFn`], so `settings.retry.provider` reaches every
+    /// provider without a per-adapter retry loop. The default,
+    /// [`ProviderRetryPolicy::DEFAULT`], retries nothing — upstream's
+    /// `settings.retry.provider.maxRetries` also starts undefined.
+    pub fn from_env_with_policy(
+        get_env: impl Fn(&str) -> Option<String>,
+        retry_policy: ProviderRetryPolicy,
+    ) -> Self {
         let mut adapters: HashMap<String, SharedStreamFn> = HashMap::new();
 
         for spec in BUILTIN_PROVIDERS {
@@ -187,11 +213,35 @@ impl ProviderRouter {
             let base_url = env_value(&get_env, spec.base_url_env)
                 .unwrap_or_else(|| spec.default_base_url.to_string());
             if let Some(adapter) = build_adapter(spec, api_key, base_url) {
-                adapters.insert(spec.id.to_string(), adapter);
+                adapters.insert(spec.id.to_string(), adapt_retry(adapter, retry_policy));
             }
         }
 
         Self { adapters }
+    }
+
+    /// Re-wrap every adapter with a new provider-request retry policy.
+    ///
+    /// `pi-coding-agent` reads the `settings.retry.provider` slice and
+    /// applies it here after building the router from the environment.
+    /// Calling it twice wraps twice, so callers apply it once.
+    pub fn with_provider_retry(mut self, policy: ProviderRetryPolicy) -> Self {
+        if !policy.is_enabled() {
+            return self;
+        }
+        for adapter in self.adapters.values_mut() {
+            *adapter = adapt_retry(adapter.clone(), policy);
+        }
+        self
+    }
+
+    /// Replace the adapter registered for `provider_id`.
+    ///
+    /// Test-only: [`build_adapter`] covers every registry entry, so only
+    /// the router's own tests need to install a scripted adapter.
+    #[cfg(test)]
+    fn set_adapter(&mut self, provider_id: &str, adapter: SharedStreamFn) {
+        self.adapters.insert(provider_id.to_string(), adapter);
     }
 
     /// Resolve the adapter for `model`, or explain what is missing.
@@ -279,6 +329,55 @@ mod tests {
 
     fn empty_env(_: &str) -> Option<String> {
         None
+    }
+
+    /// Fails `remaining_failures` times with a retryable 503 (whose
+    /// server-requested delay is zero, so retrying is instant), then
+    /// delegates to the faux provider.
+    struct FlakyAdapter {
+        remaining_failures: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FlakyAdapter {
+        fn new(remaining_failures: usize) -> Self {
+            Self {
+                remaining_failures: std::sync::atomic::AtomicUsize::new(remaining_failures),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl StreamFn for FlakyAdapter {
+        async fn stream_simple(
+            &self,
+            model: &Model,
+            ctx: &Context,
+            options: &SimpleStreamOptions,
+        ) -> Result<AssistantMessageEventStream, StreamError> {
+            use std::sync::atomic::Ordering;
+
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.remaining_failures.load(Ordering::SeqCst) > 0 {
+                self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+                return Err(StreamError::provider_with_hint(
+                    503,
+                    "overloaded".to_string(),
+                    pi_ai::ProviderRetryHint {
+                        retry_after_ms: Some(0),
+                        should_retry: None,
+                    },
+                ));
+            }
+            FauxProvider::default()
+                .stream_simple(model, ctx, options)
+                .await
+        }
     }
 
     #[test]
@@ -511,5 +610,48 @@ mod tests {
             Ok(_) => panic!("openai is unconfigured and must not stream"),
             Err(err) => assert!(err.to_string().contains("OPENAI_API_KEY"), "{err}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_retry_policy_retries_a_transient_stream_error() {
+        use futures::StreamExt;
+
+        let flaky = Arc::new(FlakyAdapter::new(1));
+        let mut router = ProviderRouter::from_env_with(empty_env);
+        router.set_adapter("faux", flaky.clone());
+        let router = router.with_provider_retry(ProviderRetryPolicy::new(2));
+
+        let stream = router
+            .stream_simple(
+                &model("faux", "faux-model", Api::Faux),
+                &Context::new("test"),
+                &SimpleStreamOptions::default(),
+            )
+            .await
+            .expect("the retry loop must recover from the 503");
+        let events: Vec<_> = stream.collect().await;
+        assert!(!events.is_empty());
+        assert_eq!(flaky.calls(), 2, "one failure plus one retry");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_default_policy_never_retries() {
+        let flaky = Arc::new(FlakyAdapter::new(1));
+        let mut router = ProviderRouter::from_env_with(empty_env);
+        router.set_adapter("faux", flaky.clone());
+        let router = router.with_provider_retry(ProviderRetryPolicy::default());
+
+        match router
+            .stream_simple(
+                &model("faux", "faux-model", Api::Faux),
+                &Context::new("test"),
+                &SimpleStreamOptions::default(),
+            )
+            .await
+        {
+            Ok(_) => panic!("a disabled policy must surface the provider error"),
+            Err(err) => assert!(matches!(err, StreamError::Provider { status: 503, .. })),
+        }
+        assert_eq!(flaky.calls(), 1);
     }
 }

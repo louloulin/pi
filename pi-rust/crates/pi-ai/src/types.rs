@@ -147,6 +147,23 @@ impl<'de> Deserialize<'de> for SimpleStreamOptions {
     }
 }
 
+/// Server-supplied retry guidance carried by a non-2xx provider response.
+///
+/// This is the narrowed Rust counterpart of the `status` + `headers` pair
+/// upstream's `ProviderError` hands to `utils/provider-retry.ts`: only the
+/// two header signals [`crate::retry`] reads are kept, so the error type
+/// stays transport-agnostic (and serialisable) instead of holding a
+/// `reqwest::header::HeaderMap`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderRetryHint {
+    /// `Retry-After-Ms`, or a numeric `Retry-After`, in milliseconds.
+    /// The HTTP-date form of `Retry-After` is not parsed yet.
+    pub retry_after_ms: Option<u64>,
+    /// `X-Should-Retry` override: `Some(true)` forces a retry, `Some(false)`
+    /// suppresses one, `None` leaves the decision to the status code.
+    pub should_retry: Option<bool>,
+}
+
 /// Errors a provider stream can produce.
 #[derive(Debug, Error)]
 pub enum StreamError {
@@ -158,13 +175,16 @@ pub enum StreamError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
-    /// Provider returned a non-2xx response. Carries the status and body.
+    /// Provider returned a non-2xx response. Carries the status, body and
+    /// the response's retry guidance.
     #[error("provider returned {status}: {body}")]
     Provider {
         /// HTTP status code.
         status: u16,
         /// Response body (truncated to 4 KiB in the helper constructors).
         body: String,
+        /// Retry guidance parsed from the response headers.
+        hint: ProviderRetryHint,
     },
     /// Stream produced malformed SSE / JSON.
     #[error("malformed stream: {0}")]
@@ -175,4 +195,29 @@ pub enum StreamError {
     /// Underlying I/O error (e.g. file fixture read).
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl StreamError {
+    /// A non-2xx provider response with no server retry guidance.
+    pub fn provider(status: u16, body: impl Into<String>) -> Self {
+        Self::Provider {
+            status,
+            body: body.into(),
+            hint: ProviderRetryHint::default(),
+        }
+    }
+
+    /// A non-2xx provider response carrying retry guidance parsed from its
+    /// headers (`Retry-After-Ms`, `Retry-After`, `X-Should-Retry`).
+    pub fn provider_with_hint(
+        status: u16,
+        body: impl Into<String>,
+        hint: ProviderRetryHint,
+    ) -> Self {
+        Self::Provider {
+            status,
+            body: body.into(),
+            hint,
+        }
+    }
 }

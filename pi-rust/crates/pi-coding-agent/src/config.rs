@@ -11,7 +11,10 @@
 //!   `compaction.keepRecentTokens`, and the toggle `compaction.enabled`,
 //!   also accepted as a top-level `autoCompact` boolean);
 //! * the `/settings` UI slice — `theme` and `fullscreenCopyOnSelect` —
-//!   loaded by [`load_ui_settings`].
+//!   loaded by [`load_ui_settings`];
+//! * the provider-request retry budget (`retry.provider.maxRetries`,
+//!   `retry.provider.maxRetryDelayMs`) loaded by
+//!   [`load_provider_retry_policy`].
 //!
 //! Writes go through [`save_user_setting`], which only ever touches the
 //! **user** file: upstream's `setTheme` / `setAutoCompact` /
@@ -27,6 +30,8 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+
+use pi_ai::ProviderRetryPolicy;
 
 use crate::compaction::{CompactionSettings, DEFAULT_COMPACTION_SETTINGS};
 use crate::paths;
@@ -46,6 +51,16 @@ pub const DEFAULT_AUTO_COMPACT: bool = DEFAULT_COMPACTION_SETTINGS.enabled;
 /// Default for `fullscreenCopyOnSelect` — upstream `?? true`
 /// (`core/settings-manager.ts:1280`).
 pub const DEFAULT_FULLSCREEN_COPY_ON_SELECT: bool = true;
+
+/// Default for `retry.provider.maxRetryDelayMs` — upstream
+/// `DEFAULT_MAX_RETRY_DELAY_MS`: a server-requested delay above this fails
+/// the request instead of sleeping.
+pub const DEFAULT_PROVIDER_MAX_RETRY_DELAY_MS: u64 = 60_000;
+
+/// Default for `retry.provider.maxRetries` — upstream leaves it undefined,
+/// and `retryProviderRequest` then retries nothing (the agent-level retry is
+/// what retries by default in the TypeScript build).
+pub const DEFAULT_PROVIDER_MAX_RETRIES: u32 = 0;
 
 /// Locations the config loader reads from. Mirrors the precedence in the
 /// TS implementation: CLI flags > project settings > user settings > defaults.
@@ -145,6 +160,63 @@ fn read_bool(merged: &Map<String, Value>, key: &str, default: bool) -> bool {
             default
         }
     }
+}
+
+/// Load the provider-request retry budget from the default locations under
+/// the current working directory.
+pub fn load_provider_retry_policy_default() -> ProviderRetryPolicy {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_provider_retry_policy(&ConfigSources::discover(&cwd))
+}
+
+/// Load the provider-request retry budget from `sources`, project over user.
+///
+/// Mirrors upstream `SettingsManager.getProviderRetrySettings()`
+/// (`core/settings-manager.ts:949`): only the `retry.provider` object reaches
+/// the provider request layer. The agent-level keys (`retry.enabled`,
+/// `retry.maxRetries`, `retry.baseDelayMs`, `retry.maxAgentDelayMs`) belong to
+/// the agent retry loop and are deliberately not read here, so a user's
+/// agent-level budget cannot silently start retrying raw HTTP calls.
+///
+/// Every problem degrades to the default for the affected key and warns on
+/// stderr, like the other loaders in this module.
+pub fn load_provider_retry_policy(sources: &ConfigSources) -> ProviderRetryPolicy {
+    let merged = merged_settings(sources);
+    let provider = merged
+        .get("retry")
+        .and_then(Value::as_object)
+        .and_then(|retry| retry.get("provider"))
+        .and_then(Value::as_object);
+
+    let max_retries = match provider.and_then(|provider| provider.get("maxRetries")) {
+        None => DEFAULT_PROVIDER_MAX_RETRIES,
+        Some(value) => match value.as_u64().and_then(|raw| u32::try_from(raw).ok()) {
+            Some(raw) => raw,
+            None => {
+                warn(&format!(
+                    "retry.provider.maxRetries must be a non-negative integer (got {value}); \
+                     provider retrying stays off"
+                ));
+                DEFAULT_PROVIDER_MAX_RETRIES
+            }
+        },
+    };
+
+    let max_retry_delay_ms = match provider.and_then(|provider| provider.get("maxRetryDelayMs")) {
+        None => DEFAULT_PROVIDER_MAX_RETRY_DELAY_MS,
+        Some(value) => match value.as_u64() {
+            Some(raw) => raw,
+            None => {
+                warn(&format!(
+                    "retry.provider.maxRetryDelayMs must be a non-negative integer (got {value}); \
+                     using {DEFAULT_PROVIDER_MAX_RETRY_DELAY_MS}"
+                ));
+                DEFAULT_PROVIDER_MAX_RETRY_DELAY_MS
+            }
+        },
+    };
+
+    ProviderRetryPolicy::with_max_retry_delay_ms(max_retries, max_retry_delay_ms)
 }
 
 /// Persist one setting into the **user** settings file, creating it when
@@ -432,6 +504,13 @@ mod tests {
         })
     }
 
+    fn retry_policy(user: Option<&Path>, project: Option<&Path>) -> ProviderRetryPolicy {
+        load_provider_retry_policy(&ConfigSources {
+            user: user.map(Path::to_path_buf),
+            project: project.map(Path::to_path_buf),
+        })
+    }
+
     #[test]
     fn missing_files_yield_defaults() {
         assert_eq!(settings(None, None), DEFAULT_COMPACTION_SETTINGS);
@@ -595,6 +674,85 @@ mod tests {
             project: None,
         });
         assert_eq!(settings, UiSettings::default());
+    }
+
+    #[test]
+    fn provider_retry_defaults_to_no_retries_with_a_sixty_second_cap() {
+        assert_eq!(
+            retry_policy(None, None),
+            ProviderRetryPolicy::default(),
+            "missing files leave provider retrying off, like upstream"
+        );
+        assert!(!retry_policy(None, None).is_enabled());
+        assert_eq!(
+            retry_policy(None, None).max_retry_delay_ms,
+            DEFAULT_PROVIDER_MAX_RETRY_DELAY_MS
+        );
+    }
+
+    #[test]
+    fn provider_retry_slice_is_read_project_over_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"retry":{"provider":{"maxRetries":2,"maxRetryDelayMs":1000}}}"#,
+        );
+        let project = write(
+            dir.path(),
+            "project.json",
+            r#"{"retry":{"provider":{"maxRetries":5}}}"#,
+        );
+
+        let resolved = retry_policy(Some(&user), Some(&project));
+        assert_eq!(resolved.max_retries, 5, "project wins for maxRetries");
+        assert_eq!(
+            resolved.max_retry_delay_ms, 1_000,
+            "the untouched user key falls through"
+        );
+        assert!(resolved.is_enabled());
+
+        let user_only = retry_policy(Some(&user), None);
+        assert_eq!(user_only.max_retries, 2);
+    }
+
+    #[test]
+    fn agent_level_retry_keys_do_not_turn_on_provider_retrying() {
+        // `retry.maxRetries` is the agent-level budget; the provider layer
+        // reads `retry.provider.maxRetries` and nothing else.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"retry":{"enabled":true,"maxRetries":3,"baseDelayMs":2000}}"#,
+        );
+        assert!(!retry_policy(Some(&user), None).is_enabled());
+    }
+
+    #[test]
+    fn malformed_provider_retry_values_fall_back_per_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"retry":{"provider":{"maxRetries":-1,"maxRetryDelayMs":"soon"}}}"#,
+        );
+        let resolved = retry_policy(Some(&user), None);
+        assert_eq!(resolved.max_retries, DEFAULT_PROVIDER_MAX_RETRIES);
+        assert_eq!(
+            resolved.max_retry_delay_ms,
+            DEFAULT_PROVIDER_MAX_RETRY_DELAY_MS
+        );
+
+        // A zero cap is valid and means "no limit" (upstream).
+        let uncapped = write(
+            dir.path(),
+            "uncapped.json",
+            r#"{"retry":{"provider":{"maxRetries":1,"maxRetryDelayMs":0}}}"#,
+        );
+        let resolved = retry_policy(Some(&uncapped), None);
+        assert_eq!(resolved.max_retries, 1);
+        assert_eq!(resolved.max_retry_delay_ms, 0);
     }
 
     #[test]
