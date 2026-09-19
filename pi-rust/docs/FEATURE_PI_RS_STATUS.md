@@ -9288,8 +9288,10 @@ numstat 见本节末补记。
   `8e1765325..04a00d1b2`，`work/lum-1140` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查见下。
 - `git diff --numstat 8e1765325 f92bb3b0b`（本轮全部改动）：pi-rust/crates/pi-coding-agent/src/cli.rs(+12/-2) pi-rust/crates/pi-coding-agent/src/commands/session.rs(+42/-2) pi-rust/crates/pi-session/src/export.rs(+167/-0) pi-rust/crates/pi-session/src/lib.rs(+9/-0) pi-rust/crates/pi-session/src/reader.rs(+13/-0) pi-rust/crates/pi-session/src/schema.rs(+27/-1) pi-rust/crates/pi-session/tests/export.rs(+253/-0) 
 - 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源（合并只带来文档改动），数字即第四节所列。
-- 本轮**派发 1 个子任务**：LUM-1141（Stage 40，`pi-agent-core` 工具批次事件流），
-  以 `backlog` 创建、在本轮推送完成后提升为 `todo` 启动，确保它的 checkout 起点已含本节。
+- 本轮**派发 1 个子任务**：LUM-1141（Stage 40，`pi-agent-core` 工具批次事件流），以 `backlog`
+  创建（先建单、后推送，保证它的 checkout 起点一定含本节）。
+  **收尾复查时槽位已被同刻启动的 LUM-1142 占用**（`running_task_count` 从 2 回到 3：
+  LUM-1137 + 本轮 + LUM-1142），因此 LUM-1141 **维持 `backlog`**，等任一路收手后晋升为 `todo`。
 
 ### 六、frontier（本轮更新）
 
@@ -9298,7 +9300,7 @@ numstat 见本节末补记。
    顺带修掉 `SessionRow::to_header` 的毫秒/秒误读。本轮新增这一项，同轮收口。
 2. **Stage 39 keybindings 消费方**：LUM-1137 仍 `in_progress`（`app.rs` / `editor.rs` 硬编码和弦
    → `get_keybindings()`），与本轮无交集。
-3. **P2 工具批次的事件流** → **已派发 LUM-1141（Stage 40，`backlog` → 本轮推送后 `todo`）**：
+3. **P2 工具批次的事件流** → **已派发 LUM-1141（Stage 40，`backlog`，等槽位空出后晋升）**：
    事件出口下移到 `agent_loop`（真实流式的 `ToolExecutionStart/End` + 逐条 delta + 单次调用
    `duration_ms`），只碰 `pi-agent-core`（+ 消费方测试），不碰 `app.rs`。
 4. **P2 取消语义对齐**（LUM-1139 记入，仍挂）：让两条工具路径在 `signal.aborted` 时停止派发剩余
