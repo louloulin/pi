@@ -6923,6 +6923,12 @@ $ cargo fmt -p pi-tui -- --check                                     # 干净
   父 `c72b950a8` + `9c50439dc`）——测试就是在这个树上跑的。
 - 本轮文档提交（本节）在其之后；最终用 `git merge-tree --write-tree 9c50439dc work/lum-1119`
   + `git commit-tree` 生成以 `feature/pi.rs` 为第一父的合并提交推上去，`work/lum-1119` 分支一并推送。
+  实际结果：`git merge-tree --write-tree 9c50439dc work/lum-1119` → tree `fbb47e489`（零冲突），
+  `git commit-tree` 得合并提交 `bc791835a`（父 `9c50439dc` + `072c81187`）；
+  `git push origin bc791835a:refs/heads/feature/pi.rs` → `9c50439dc..bc791835a`，
+  `git push origin work/lum-1119`（新分支）。
+- 核对：合并后 `origin/feature/pi.rs` 的 tree 与 `work/lum-1119` **完全一致**（都是 `fbb47e489`）；
+  `git diff --stat 9c50439dc origin/feature/pi.rs` 只含本轮 5 个文件（+796 / −33）。
 
 ### 六、frontier（本轮更新）+ 槽位决策
 
