@@ -8875,3 +8875,133 @@ POST body 的 UTF-8 往返、预中止信号、以及**飞行中中止**（用 `
   `[Tech-debt] 清偿 workspace 质量门：cargo fmt 122 文件漂移 + clippy 8 处既有 lint`
   = **LUM-1138**（`01a0bb2c-705a-7986-8caa-35e2b6de1fd7`，priority `medium`）。
   派发后 `multica daemon status` 报 `running_task_count = 3`（满额）。
+
+## LUM-1136 round — 转录搜索覆盖层（`alt-screen-search.ts` 全量移植，frontier 第 3 项收口）+ 槽位满未派发
+
+本轮不是协调轮派发的：LUM-1136 自己就是那个切片（建单标题 `pi`，开工后按平台要求改名）。
+只做 frontier 第 3 项，改动全部落在 `pi-tui`，不碰 `pi-extensions` / `pi-coding-agent` / `pi-session`，
+不做第 4、5 项（LaTeX 剩余 / 滚条悬停拖拽），不派发子任务。
+
+### 一、起点与槽位
+
+- 开工时 `origin/feature/pi.rs @ e5f5585d7`（LUM-1133 补记）；本轮进行中该分支连推两轮 —
+  `288ec3781`（LUM-1134 keybindings 配置层）、`9412e1c00`（LUM-1135 `fetch` 桥 + 派发 Stage 39）。
+  工作提交 `cecd36498` **rebase** 到 `9412e1c00` 之上，因此并入 `feature/pi.rs` 是**快进**。
+- LUM-1134 改 `pi-coding-agent/src/keybindings.rs`、LUM-1135 改 `pi-extensions/*`，
+  与本轮唯一触碰的 `pi-tui/src/app.rs` 无重叠，rebase 零冲突。
+- 槽位：`multica daemon status` 报 `running_task_count = 3`（LUM-1136 + Stage 39 LUM-1137 + …），
+  按上限 3 路的口径**本轮不派发子任务**。frontier 里唯一「够小、够独立」的第 5 项（滚条）撞在
+  `app.rs` 上、且明确排在 Stage 39 之后，不适合再塞进满槽的一轮。
+- **串行线提示（给 Stage 39 / LUM-1137）**：本轮把 `Ctrl+Shift+F` 开关接到 `App::step_key` 的
+  全局段、并在 `App` 上加了 `search` 字段 / 一批 pub API，`pi-tui/src/app.rs` 因此偏移。
+  LUM-1137（`app.rs` / `editor.rs` 硬编码和弦 → `get_keybindings()`）**必须 rebase 到 `cecd36498`**，
+  不能基于 `9412e1c00` 直接改。
+
+### 二、上游语义逐条对齐（`packages/tui/src/alt-screen-search.ts` + `tui-alt-screen.ts`）
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| `buildSearchCorpus`：把**渲染后的纯文本行**拼成语料，每条记录带 `row` + 字符列区间；ASCII 期快速路径与 grapheme 路径并存 | `alt-screen-search.ts:60`–`205` | `SearchCorpus` / `build_corpus`（可打印 ASCII 走 `push_ascii_matches`，其余走 `GraphemeSearch` trait 的 `unicode-segmentation` 路径）/ `lowercase_chars` |
+| `findMatches`：查询先 `normalize`（折叠空白 + trim），空查询返回 `[]`；同一行相邻片段合并 | `:120`–`240` | `normalize_query` / `find_corpus_matches` / `find_matches` / `SearchMatch::key` |
+| `AltScreenSearchIndex` 复用上一帧语料，`search()` 返回 `changed` | `:250`–`300` | `SearchIndex::search` → `SearchResult { matches, changed }`；`clear` |
+| `SearchBar`：`query` / 光标位置 / `resultIndex` / `resultCount` / `resultLabel`（`"No matches"` vs `"1/2"`）+ 编辑动作 + `navigationDirectionAt(row,col)` | `:240`–`420` | `SearchBar`（`insert_char` / `backspace` / `delete_forward` / `move_left|right|home|end` / `delete_to_start|end` / `result_label` / `navigation_direction_at`）+ `apply_query_key` |
+| 覆盖层几何：`width: "40%"`、`minWidth: 32`、右上角、margin 1；底边规则里放 `↑ <searchPrevious 首键>` 与 `↓ <searchNext 首键>` 两个按钮 | `:300`–`460` | `search_bar_rect` / `SearchBarLayout { lines, previous_span, next_span }` / `render_search_bar` / `format_key` / `first_key_label` / `search_bar_text` / `SEARCH_PLACEHOLDER` |
+| `tui.altScreen.search`（默认 `ctrl+shift+f`）**先于**「覆盖层是否持有焦点」判定，永远 toggle | `tui-alt-screen.ts:705`–`708` | `App::step_key` 全局段 `get_keybindings().matches(…, "tui.altScreen.search")` → `open_search()`；覆盖层开着时由 `step_search_key` 先消费同一和弦并 `close_search()` |
+| `searchNext` / `searchPrevious` / `searchClose` **只在** `activeSearch.overlay.isFocused()` 时生效 | `:709`–`720` | `step_search_key` 的前三分支（`1` / `-1` / 关闭），其余键才进查询编辑 |
+| `shouldDeferViewportInputToOverlay()` 在搜索覆盖层持有焦点时为 `false`，视口和弦继续走视口 | `:644`–`645` | `PageUp` / `PageDown` / `Home` / `End`（无修饰）与 `Ctrl+C` / `Ctrl+L` 返回 `PassThrough`，落到既有全局处理 |
+| 查询变更后把锚点设为 `getVisibleLineRange()[0]`，选**第一个 `row >= anchor`** 的命中；`searchNext`/`searchPrevious` 各自回绕 | `:496`–`600` | `SearchSelectionMode { Query, Retain, Next, Previous }` + `search_anchor_row` + `viewport_skip` + `search_base_index`（精确 → 钳到前一个 → `-1`） |
+| 命中不在可见区间时滚到 `firstRow − page/3` 并钳到 `max`；已在屏上不动 | `:560`–`640` | `search_reveal`（按 `MessageView::line_count` / `set_scroll_from_bottom`） |
+| `searchMatchStyle` / `searchCurrentMatchStyle`（其余命中下划线、当前命中加粗 + 反显） | `:40`–`60` | `apply_search_highlight`：非当前 `Modifier::UNDERLINED`、当前 `Modifier::BOLD | Modifier::REVERSED`，**保留原有 fg**，按位或叠加，因此与选区反显可共存 |
+| `getSearchNavigationDirectionAt` + `handleSearchMouseEvent`：悬停高亮、按下导航；覆盖层矩形内的手势归 overlay，不外泄给聊天日志 | `:640`–`700` | `App::step_search_mouse_gesture`（在 `step_mouse_gesture` 最前面挂钩）+ `SearchBar::set_hovered` / `hovered()` |
+| 关闭即销毁组件，重新打开是空查询 | `:600`–`660` | `close_search` 直接把 `self.search = None`（无「上次查询」记忆） |
+
+### 三、刻意偏离（都写进 `search.rs` / `app.rs` 的模块文档，不是遗漏）
+
+1. **列按字符计，不按显示宽度**：沿用 LUM-1124 / LUM-1133 的口径（`selection_text` 就是 1 char = 1 列），
+   `SearchSegment` 的 `start_col` / `end_col` 也用 `chars().count()`；**没有**做宽字符整格扩边，
+   因此宽字符行的高亮可能比上游窄一格。`unicode-segmentation` 只在大小写折叠对齐时用其 grapheme 路径。
+2. **大小写折叠是逐字符 `to_lowercase()`**，不是上游 `regex` 的 `iu` 完整 Unicode case folding：
+   `pi-tui` 的依赖表里没有 `regex`（`Cargo.toml`: pi-protocol / pi-agent-core / pi-ai / serde /
+   serde_json / crossterm / ratatui / parking_lot / tokio / tokio-util / anyhow / thiserror /
+   unicode-segmentation），为这一处匹配拉进 `regex` 不划算。`ß`/`İ` 这类折叠差异与上游不同（已注明）。
+3. **语料本身就是纯文本**：上游在 `buildSearchCorpus` 里还要 `stripTerminalSequences`，而本仓库的
+   `MessageView::visible_lines` + `styled::plain_text` 产出的已经是无转义序列的纯文本（扩展输出的
+   ANSI 在写入日志时就已被清洗），所以没有这一层，也没有「命中落在被剥离的序列里」这一类边界。
+4. **不绘制输入光标单元**：上游 `SearchBar` 由终端光标停在输入框内指示位置；本实现只保留 `cursor` 偏移
+   （编辑语义完整、`move_left|right|home|end` 可测），**不**在栏内画反色块。
+   边框 `┌│└┐┘` 由 `render_search_bar` 补齐，所以 `search_bar_text` 输出的每一行宽度严格等于栏宽（有测试）。
+5. **覆盖层贴的是消息视口，不是整个终端**：`App::record_viewport` 记下的消息区（整宽 × 视口高）
+   是上游挂 overlay 的容器；App 不拥有状态行 / 输入行，所以搜索栏只可能盖住聊天日志。
+   搜索栏在 `render_to_buffer_impl` **最后**绘制（`apply_selection_highlight` → `apply_search_highlight`
+   → 搜索栏），因此扩展弹窗 / 对话框也盖不住它。
+6. **没有 timer / 后台线程**：`refresh_search` 在每帧渲染前同步重算（`SearchIndex::search` 用上一帧语料，
+   只在语料变化时重建），驱动侧的 50 ms 渲染循环负责重绘；流水日志在栏开着时也会被重新索引（有测试）。
+
+### 四、改动清单（自 `9412e1c00`）
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-tui/src/search.rs`（新，1100 行） | `SearchSegment` / `SearchMatch`（`key()` / `first_row` / `last_row`）/ `normalize_query` / `SourceSpan` / `SearchCorpus` / `build_corpus`（`GraphemeSearch` trait）/ `lowercase_chars` / `find_corpus_matches` / `find_matches` / `SearchResult` / `SearchIndex` / `SearchSelectionMode` / `SearchBar`（编辑 + `result_label` + `navigation_direction_at`）/ `byte_index` / `SearchBarLayout` / `search_bar_rect` / `format_key` / `first_key_label` / `render_search_bar` / `apply_query_key` / `search_bar_text` / `SEARCH_PLACEHOLDER`；13 条单测 |
+| `crates/pi-tui/src/app.rs` | 新增 `SearchState { index, bar, matches, selected_index, selected_key, anchor_row, selection_mode }` / `SearchKeyOutcome`；`App` 新增 `search` 字段；`step_key` 全局段接 `tui.altScreen.search` 开关；`step_search_key`（关闭 / 前后跳 / 编辑 / 视口和弦 PassThrough）；pub API `search_open` / `search_query` / `search_matches` / `search_match_index` / `search_bar` / `open_search` / `close_search` / `toggle_search` / `set_search_query` / `navigate_search` / `refresh_search`；私有 `search_query_changed` / `search_anchor_row` / `viewport_skip` / `search_reveal` / `apply_search_highlight` / `step_search_mouse_gesture`；`record_viewport`；`render_to_buffer` 重算并绘制搜索栏；模块文档新增 `# Transcript search` 一节 |
+| `crates/pi-tui/src/lib.rs` | `pub mod search;` + 12 个公开类型 / 函数的 re-export |
+| `crates/pi-tui/tests/alt_screen_search.rs`（新，454 行） | 12 条 App 级契约：开关与栏几何、打字建索引并锚定首个命中、无命中清空选择、`Enter`/`Ctrl+G` 与 `Shift+Enter`/`Ctrl+Shift+G` 步进与回绕、命中高亮就地切换、查询锚定视口顶行并滚动揭示、重开是空查询、流水日志重新索引、鼠标悬停/点击导航按钮与离开清悬停、栏矩形吞掉点击（下方同一手势仍可选区）、栏持有焦点时视口和弦仍生效、覆盖层不改变日志文本 |
+
+既有公开契约（`App::step` / `render_to_buffer` / `MessageView` / keybindings 注册表）**没变**：
+搜索只新增字段与 API，`Ctrl+Shift+F` 之前没有任何处理器（`tui.altScreen.search` 注册了但无人消费），
+所以不存在「抢键」回归 —— `Ctrl+F` / `Esc` / `Enter` 的旧行为全部由既有测试继续守着。
+
+### 五、验证（rustc 1.98.1）
+
+```
+$ CARGO_TARGET_DIR=… cargo test -p pi-tui
+  26 个 suite 共 530 passed / 0 failed    # 起点 25 suite / 505（LUM-1133 补记口径），+1 suite / +25
+$ … cargo test -p pi-tui --test alt_screen_search
+  12 passed / 0 failed
+$ … cargo check --workspace --all-targets
+  0 error / 0 warning                      # 8 个 crate 全过
+$ … cargo clippy -p pi-tui --all-targets
+  0 warning                                # 含本轮新代码
+$ rustfmt --edition 2021 --check src/app.rs src/search.rs src/lib.rs tests/alt_screen_search.rs
+  0 diff
+```
+
+`+25` 的来源：`src/search.rs` 13 条单测（`lib` 232 中含这 13 条，起点 219）+ `tests/alt_screen_search.rs` 12（新 suite）。
+
+**质量门的两条如实记录**：
+1. `cargo fmt -p pi-tui --check` 仍报 `src/settings.rs` 8 处 + `tests/settings_list.rs` 8 处 diff ——
+   即 LUM-1135 记的「122 文件 rustfmt 漂移」中属于 `pi-tui` 的那 2 个文件。本轮**跑 fmt 时曾把整个包一起
+   格式化了**（`cargo fmt -p pi-tui -- <显式文件>` 是包级动作，显式路径只是附加参数），发现后立刻
+   `git checkout` 把这两个文件**还原**，不把无关 churn 混进本轮提交。这 2 个（以及 workspace 另外 120 个）
+   留给 LUM-1138。
+2. `cargo clippy --workspace --all-targets -- -D warnings` 仍过不了，原因与本轮无关（既有 lint 在
+   `pi-telemetry` / `pi-server` / `pi-extensions` / `pi-tui` 的 `autocomplete.rs:427`、`theme.rs:213`）。
+   摘掉依赖后 `cargo clippy -p pi-tui --all-targets`（默认门）**零警告**是本轮的实际门。
+
+### 六、合并与推送
+
+起点 `9412e1c00` 就是推送时刻 `origin/feature/pi.rs` 的头，代码提交 `cecd36498` 在其上，
+所以 `feature/pi.rs` 是它的祖先 —— 推送**快进、无 merge、无 plumbing**。真实哈希与 numstat 见本节末补记。
+
+### 七、frontier（本轮更新）
+
+1. ~~P3 `alt-screen-search.ts`~~ **本轮（LUM-1136）收口**：搜索栏编辑 / 索引 / 锚定 / 步进回绕 / 滚动揭示 /
+   就地高亮 / 鼠标导航按钮 / 视口和弦共存，全部有测试；偏离已写进 `search.rs` 与 `app.rs` 的模块文档。
+2. **keybindings 消费方（Stage 39 / LUM-1137）**：注册表（LUM-1132）与配置层（LUM-1134）都已落地，
+   本轮之后 `app.rs` 的硬编码和弦正好包括搜索那几个 —— **必须 rebase 到 `cecd36498`**（见第一节末）。
+3. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 ratatui `Cell` 支持链接单元
+   （0.28 不带），得改 `app.rs` 的 buffer 写入路径，与第 2 项串行。
+4. **P3 X10 鼠标序列 / `updateScrollbarHover` 悬停高亮 / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径，
+   排在第 2、3 项之后。**本轮明确未做。**
+5. **质量门清偿（LUM-1138，backlog）**：`cargo fmt` 122 文件漂移 + workspace `-D warnings` 的 8 处既有 lint；
+   本轮只做到「新代码 0 diff / 0 警告」，没顺手清旧账（会与 LUM-1138 重复）。
+6. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+7. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉；既有欠账
+   （`pi-agent-core/src/tools.rs:13` 并行工具路径、`pi-ai` registry 缺 `openai-codex` / `kimi-coding`）维持不动。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、`docs/FEATURE_PI_RS_STATUS.md`
+各自一次只允许一路在写（本轮只写前者与本文档）。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `4ec928866`（4 个文件、+2188 / −10），本节文档提交 `43b8d10de`（+130 行）。
+- 本轮**未派发任何子任务**（槽位满：`running_task_count = 3`）。
