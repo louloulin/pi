@@ -5113,3 +5113,93 @@ $ cargo test   -p pi-extensions --test host --offline               # 32 passed�
 
 `work/lum-1096` → `origin/feature/pi.rs`（非 force）。回滚面：只碰 `pi-extensions` 的 shim /
 测试与本节文档，CJS 路径与既有 `node:path` / `node:url` 行为不变，可整轮 revert。
+
+## LUM-1097 round — 核验 `feature/pi.rs`（含 LUM-1096 typebox）+ `SelectList` 描述列对齐（Stage 4 收口）
+
+本轮（autopilot，2026-09-19 19:00 CST 触发）先把 `feature/pi.rs` 核到 `43b3fed20`（含上一条
+并行的 LUM-1096 协调轮：`typebox` 虚拟模块），在 3 槽仍占满、无法派发新任务的前提下，自己
+收口一个此前被显式记为「刻意分歧」的 Stage 4 缺口：`SelectList` 的描述列对齐。
+
+### 一、远程核验与槽位
+
+- 开工 `origin/feature/pi.rs = 43b3fed20`；到达时 LUM-1096（`9fbf0a384` typebox + `43b3fed20`
+  文档）**已推送并收口**，其占用的 `pi-extensions/*` 已释放。本分支 `work/lum-1097` 基于
+  `43b3fed20`。
+- `multica daemon status`：`active_task_count = 3` / `running_task_count = 3`（本协调 run +
+  LUM-1088 项目信任门接扩展加载 + LUM-1093 Stage 27 自动压缩接线）→ **3 槽占满，本轮不派发
+  新任务**（沿用 3 并发上限）。
+- 冲突地图（本轮据此选点）：LUM-1088 占 `pi-coding-agent` 的信任门 / 扩展加载；LUM-1093 占
+  `pi-coding-agent/{config,interactive,main}.rs` + `pi-tui/src/app.rs`。本轮**只动**
+  `pi-tui/src/selector.rs` / `lib.rs`，与两者零文件重叠。
+- 再遍历 remote 分支求差集：仍只有那 5 条已判定「重复落地 / 刻意跳过」的分支，无新代码可合。
+
+### 二、frontier 重估（承 LUM-1096）
+
+- LUM-1090（`[Stage 25]`）**前提不成立**的结论本轮复核后维持：`--rpc` 是 NDJSON/stdio
+  服务端，`pi-client` 是带帧 socket 客户端，两者不同传输层，字面目标无法实现；继续留在
+  backlog，建议重写定界或标 `wontfix`。
+- LUM-1083（扩展宿主 `free(): double free detected in tcache 2`）本轮**再次复现**：出现在
+  `cargo test --workspace` 的 `pi-coding-agent --test cli_tools` 与 `--test rpc` 中。把这两个
+  用例单独重跑各 3 次**全部通过**，重跑整个 `-p pi-coding-agent` 也 206 + 全绿 → 确认为
+  **概率性 / 并发触发**，与本轮改动无关。根因仍在 `rquickjs-core 0.9` 的 async 集成
+  （`futures` feature → `async-lock` → `event-listener`），修复需 `0.9 → 0.14` 迁移，仍受
+  离线环境（crate 不可下载）阻塞，建议留给有网 run。
+- 其余 frontier：主题系统、provider 家族、`.wasm` 宿主——体量大或受环境阻塞，本轮不动。
+
+### 三、本轮实现：`SelectList` 描述列对齐
+
+`crates/pi-tui/src/selector.rs` 的模块文档此前把「描述只跟在两个空格后面、不做列对齐」
+记为**刻意分歧**（「keeps the port free of a width-tracking dependency」）。本轮按上游
+`packages/tui/src/components/select-list.ts` 的 `renderItem` / `getPrimaryColumnWidth` /
+`getPrimaryColumnBounds` 逐行对齐：
+
+- 新增 `SelectorLayout { min_primary_column_width, max_primary_column_width }`（`Default` =
+  上游 `DEFAULT_PRIMARY_COLUMN_WIDTH` = 32／32）与 builder
+  `Selector::with_primary_column_width(min, max)`；列宽 = **最宽可见标签 + `PRIMARY_COLUMN_GAP`(2)**
+  再 `clamp` 到 `[min, max]`（与上游 `getPrimaryColumnBounds` 的归一化一致）。
+- 描述列：仅当 `width > 40`（上游 `MIN_DESCRIPTION_LIST_WIDTH`）、且截断标签后剩余宽度
+  `> MIN_DESCRIPTION_WIDTH`(10) 时渲染；描述列起点在每一行都相同（前缀 2 + 主列宽），
+  否则**回落到只画截断标签**。标签与描述都按可用宽度截断（`truncate_to_width`），不再可能
+  溢出终端宽度。
+- 宽度一律按 `char` 计数（`display_width`），与本 crate 其余部分（`message` / `prompt`）
+  一致；标签为空的行走上游 `getDisplayValue` 回落为 `value`。
+- 选择标记仍沿用本移植的 `❯ `（上游是 `→ `），两者可见宽度都是 2 列，故列位一致。
+- `SelectorLayout` 从 `pi-tui` 顶层 re-export，未改任何调用点，picker 默认即上游默认布局。
+
+改动文件：
+
+- `pi-rust/crates/pi-tui/src/selector.rs`（新增 `SelectorLayout` / 常量 / `render_row` /
+  `primary_column_width` / `primary_column_bounds` / `display_width` / `truncate_to_width` /
+  `display_value`，更新模块文档「刻意分歧」条目与渲染测试）
+- `pi-rust/crates/pi-tui/src/lib.rs`（re-export `SelectorLayout`）
+- `pi-rust/crates/pi-tui/tests/selector_search.rs`（`cargo fmt` 顺带收敛的一处换行，无行为变化）
+
+新增 / 调整测试（`crates/pi-tui/src/selector.rs` 内联模块）：
+
+1. `descriptions_align_into_a_primary_column` — 默认布局下三行描述都从**同一列（34）**开始。
+2. `primary_column_width_tracks_the_widest_label_within_bounds` — `with_primary_column_width(10, 40)`
+   时列宽跟最宽标签走（19 + 2 = 21）。
+3. `narrow_rows_render_the_label_without_the_description_column` — `width = 40` 时按上游规则
+   只画标签（`❯ Alpha`）。
+4. `long_labels_and_descriptions_are_clamped_to_the_width` — 长标签 + 长描述不溢出宽度。
+5. `multi_line_descriptions_render_on_one_line` 改为在 `width = 80` 断描述列，并继续验证多行
+   描述被压成一行。
+
+### 四、验证（`work/lum-1097`，native，`--offline`）
+
+```
+$ cargo fmt -p pi-tui --check                                     # exit 0
+$ cargo clippy --workspace --all-targets --offline -- -D warnings # exit 0，0 warnings
+$ cargo test   -p pi-tui --offline                                # 62 + 8 + 7 + 9 passed
+$ cargo test   --workspace --no-fail-fast --offline               # 见下
+```
+
+- 全 workspace：唯一失败是 LUM-1083 的概率性 double free（`pi-coding-agent --test cli_tools` /
+  `--test rpc`，stderr `free(): double free detected in tcache 2`）。这两个用例单独重跑各 3 次
+  全绿，重跑整个 `-p pi-coding-agent` 也全绿，确认与 `pi-tui` 改动无关。
+- 磁盘提醒：本轮开工 13G 可用，`cargo test --workspace` 后剩 6.0G（共享盘，先看 `df -h`）。
+
+### 五、推送
+
+`work/lum-1097` → `origin/feature/pi.rs`（非 force）。回滚面：只碰 `pi-tui` 的 selector 渲染与
+re-export，`Selector` 的构造 / 过滤 / 键位行为不变，可整轮 revert。
