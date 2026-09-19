@@ -3869,6 +3869,117 @@ Stage 20 UI 桥）合入本轮分支。冲突三处，均已在合并提交里�
 
 `feature/pi.rs`，commit 见本轮 push（Stage 22 代码 + 本节状态文档）。
 
+## LUM-1082 round — `selector` 对齐上游 `SelectList`（过滤 / 滚动窗口 / 无匹配）+ `/model`、`/resume` 可搜索
+
+Stage 22 收口后，LUM-1077 列的 dialog 增强项里还剩「select 的过滤/搜索」。本轮不做派发
+（`multica daemon status` 显示 `active_task_count = 3` / `running_task_count = 3`，三个槽位仍在
+LUM-1068（`pi-server`）与 LUM-1081（Stage 22）手里），改为把这一项直接落地。选它的理由是：
+它是 `packages/tui/src/components/select-list.ts` 的**直接上游对应物**（不是新设计），
+落在 LUM-1068 / LUM-1081 都没动的 `pi-tui`，不需要任何新依赖，且能本地端到端验证。
+
+### 1. `Selector` 的过滤与滚动窗口（`crates/pi-tui/src/selector.rs`）
+
+上游 `SelectList` 的三个语义逐条搬过来：
+
+- **过滤**：`Selector::set_filter` / `clear_filter` / `push_filter_char` / `pop_filter_char`、
+  `filtered_len()`、`visible_items()`，内部用 `filtered: Vec<usize>`（下标指向 `items`）
+  保存当前视图。光标、`next` / `prev` / `first` / `last` / `jump_to_prefix` / `reset_cursor`
+  全部改成在**过滤后的视图**上运算，与上游「导航只作用于 `filteredItems`」一致；
+  `set_filter` 会把光标复位到第一行（上游 `selectedIndex = 0`）。
+- **滚动窗口**：`with_max_visible(n)` 对应上游 `maxVisible`；`render_lines` 只画窗口内的行，
+  窗口按上游 `getVisibleRange()` 的公式以光标居中并夹到列表边界
+  （`start = max(0, min(cursor - maxVisible/2, len - maxVisible))`），
+  窗口没覆盖全表时在末尾追加 `  ({cursor+1}/{filtered_len})`。
+  **不设** `max_visible` 时行为与改动前一致（整表渲染、无指示行），所以扩展弹窗不受影响。
+- **无匹配**：过滤后为空时渲染 `  No matching items`；列表本身就是空时仍保留原来的
+  `(no items)` 提示——这两种「空」对用户含义不同，故刻意分开。
+- 描述列现在过一遍 `normalize_single_line`（上游 `normalizeToSingleLine`：
+  把 `[\r\n]+` 折成空格再 trim），避免多行描述把「一行一项」的布局冲掉。
+
+### 2. 可搜索的 selector（`Selector::searchable(true)`）
+
+`handle_search_key` 是上游 `model-selector.ts` / `session-selector.ts` 的按键路由：方向键 /
+`Home` / `End` 移动，`PageUp` / `PageDown` 按一个窗口移动（对应 `session-selector.ts`
+`PageUp`/`PageDown` ±`maxVisible`），`Enter` 选中，`Esc` 取消，`Backspace` 删搜索字符，
+其余可打印字符（`!control && !alt && !meta`，允许 shift）进入过滤串。
+因此打开 `/model`、`/resume` 后 **`j` / `k` 是搜索字符而不是 vim 导航**——这正是上游的行为。
+未开启 `searchable` 的 selector 仍走原来的 `j`/`k`/`g`/`G` 路径（本轮顺带给这条路径补上了
+`PageUp`/`PageDown`）。
+
+### 3. 接线（`crates/pi-coding-agent/src/interactive.rs`）
+
+`/model` 与 `/resume` 两个选择器改为
+`Selector::new(..).searchable(true).with_max_visible(10)`：上游 `model-selector.ts` 与
+`session-selector.ts` 的 `maxVisible` 都是 10，`value` 仍是 `model:<id>` / 会话 opaque payload，
+所以 `apply_selector_choice` 的解析逻辑没有任何改动。
+`ctx.ui.select` 的弹窗（`dialog.rs`）**故意保持不可搜索**：上游 `ExtensionSelectorComponent`
+是纯方向键列表（没用 `SelectList`，也没有过滤），给它加搜索反而会和扩展作者的按键预期冲突。
+`App` 不需要新分支——按键路由在 `Selector::handle_key` 内部，`RenderSnapshot::selector_items`
+改为返回**过滤后**的行（滚动窗口属渲染细节，由 `render_lines` 施加）。
+
+### 验证
+
+```
+$ cargo clippy --workspace --all-targets -- -D warnings      # 0 warnings
+$ cargo test -p pi-tui                                        # 58 lib + 8 e2e + 7 selector_search + 9 snapshot
+$ cargo test -p pi-coding-agent                               # 173 lib 全绿；集成 target 全绿
+$ cargo test --workspace --no-fail-fast -- --test-threads=1   # 695 passed / 1 failed / 2 ignored（63 个 target）
+```
+
+- 单测 44 → **58**（`selector.rs` 里 6 → 20 个 `#[test]`）：过滤命中 `value`/`label`/`description`
+  且大小写不敏感、过滤后光标复位、无匹配行、`(n/total)` 指示行、窗口跟随光标、
+  分页夹边界、多行描述归一、可搜索路由（`j` 进过滤串 / `Backspace` / `Esc` / Ctrl 组合不落串）、
+  不可搜索 selector 仍忽略可打印键、`jump_to_prefix` 只在可见集里跳。
+- 新增集成 target `crates/pi-tui/tests/selector_search.rs`（7 个用例）走**完整 App 输入路径**：
+  打字过滤且不落进 prompt、无匹配行、`Backspace` 回退、`Enter` 返回被过滤视图里高亮项的 opaque
+  `value`（即 `pi-coding-agent` 反解 `model:<id>` 的契约）、`Esc` 不丢且不清过滤串、
+  12 项 + `max_visible(10)` 时的窗口/指示行随光标滚动、不可搜索 selector 保 `j` 导航。
+- 全仓测试里唯一的失败是文档已记录的 `pi-coding-agent` `--test rpc` 子进程抖动
+  （LUM-1081 节已定位到扩展宿主的 `free(): double free detected in tcache 2` → SIGABRT）：
+  两次全量跑挂的是**不同**用例（`prompt_returns_response_and_streams_events` /
+  `rpc_flag_no_longer_prints_the_stage5_stub`），单跑都过。为了确认与本轮无关，我还把本轮
+  改动 `git stash` 后在父提交上连跑 3 次 `--test rpc`：**同样 2 次失败**（`invalid_json_line…`、
+  `prompt_returns_response…`、`unknown_method…`），即干净树上同样随机挂——属于既存缺陷，
+  不是本轮引入。
+
+### 与上游的刻意差异
+
+- 匹配用**大小写不敏感的子串**（`value` / `label` / `description` 三者任一命中），
+  而上游 `SelectList` 是 `item.value` 的**前缀**匹配。原因是 Rust 侧 `value` 存的是
+  `model:gpt-5` 这类 opaque payload，前缀匹配等于让用户去猜 payload；子串匹配也更贴近上游
+  模型选择器实际的模糊搜索体验。已写进 `selector.rs` 的模块文档。
+- 上游 `SelectList` 会把描述对齐进固定 32 列的副列（`DEFAULT_PRIMARY_COLUMN_WIDTH = 32`、
+  间距 2、描述最少 10 列、宽度 > 40 才双列）；本端口仍然是把描述接在主列后面（宽度够就加）。
+  对齐需要显示宽度计算（`unicode-width` 只是 ratatui 的间接依赖、不在 `pi-tui` 的依赖表里），
+  纯外观收益，留作后续。
+- 上游 `setFilter` 在仓库里没有调用方（`SelectList` 只有编辑器自动补全用，且它自己传
+  `maxVisible = clamp(autocompleteMaxVisible ?? 5, 3, 20)`），所以本轮的语义对齐以
+  `select-list.ts` 的行为为准，而不是以调用方为准。
+
+### 剩余 frontier（本轮盘点后）
+
+1. **`pi-client` 提升**：仍等 LUM-1068 把 `pi-server` / `pi-protocol::rpc` 的 UI 请求-响应
+   消息推上来（本轮 `pi-rust/crates/` 下仍无 `pi-server`、`pi-client`），之后才是
+   「把 Stage 12 的内联 JSON-RPC 换成 `pi-client`」。
+2. **`.wasm` 扩展宿主**：`rustup` 不在 PATH、没有 wasm32 target，`wasmtime` 在
+   `[workspace.dependencies]` 里但不在 `Cargo.lock`（要联网拉），且上游 pi 本身没有 `.wasm` ABI。
+3. **扩展 `resources_discover` 钩子**：扩展现在能贡献工具提示词了，但仍不能注入
+   skills / context files / prompt templates。
+4. **dialog 增强剩余两项**：`input` 多行输入、鼠标点击/滚动（`select` 的过滤/搜索本轮已做，
+   只剩描述列对齐这个外观项）。
+5. **`/trust` + 项目本地 `.pi/SYSTEM.md`**、会话压缩。
+6. **provider 家族**：`mistral-conversations` / `azure-openai-responses` / `google-vertex` /
+   `openai-codex-responses` / `bedrock-converse` 仍未接（`build_adapter` 对
+   `BedrockConverse` / `CohereV2` 明确返回 `None`）；上游 `packages/ai/src/providers/*.models.ts`
+   依赖被 `.gitignore:11` 排除的 `./data/*.json`，无法忠实搬运目录数据，所以不在没有真实
+   数据来源的情况下硬编。
+
+### Push status
+
+`feature/pi.rs`：本轮 2 个 commit（`feat(pi-tui,pi-coding-agent): searchable + windowed selector …`
++ 本节状态文档），rebase 到 `origin/feature/pi.rs`（`d18fe9ae2`，含 LUM-1080/1081 的 Stage 22）
+之后 push。
+
 ## LUM-1084 round — Stage 23：扩展资源发现（`resources_discover`）
 
 Stage 22 的「仍未做」第一条正是这一项：扩展工具已经能进提示词，但扩展还**不能**注入

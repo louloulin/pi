@@ -725,7 +725,10 @@ impl App {
             selector_items: self
                 .selector
                 .as_ref()
-                .map(|s| s.items().to_vec())
+                // The rows that pass the selector's search filter (the
+                // scroll window is a rendering detail and is applied by
+                // `Selector::render_lines`).
+                .map(|s| s.visible_items().cloned().collect())
                 .unwrap_or_default(),
             selector_cursor: self.selector.as_ref().map(|s| s.cursor()),
             dialog_open: self.dialog.is_some(),
