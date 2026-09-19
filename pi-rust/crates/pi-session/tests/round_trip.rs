@@ -140,6 +140,65 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
     }
 }
 
+/// A `/compact` checkpoint survives the SQLite round trip: the summary and
+/// the retained tail are what a resuming reader replays.
+#[test]
+fn round_trip_compaction_entry() {
+    let dir = fresh_dir("compaction");
+    let path = dir.join("session.sqlite");
+
+    let writer = SessionWriter::open(&path).expect("open writer");
+    writer
+        .write_header(SessionEntry::Header {
+            id: "compact".into(),
+            created_at: chrono::Utc::now(),
+            version: "0.1.0".into(),
+        })
+        .expect("header");
+    writer
+        .append(SessionEntry::UserMessage(user_message("old prompt")))
+        .expect("user message");
+    writer
+        .append(SessionEntry::Compaction {
+            summary: "## Goal\nship the port".into(),
+            retained_tail: vec![Message {
+                role: Role::Assistant,
+                content: vec![Content::text("latest answer")],
+                model: Some("faux/faux-model".into()),
+            }],
+            tokens_before: 12_345,
+            usage: Some(Usage {
+                input: 100,
+                output: 20,
+                ..Usage::default()
+            }),
+            details: Some(serde_json::json!({"readFiles": ["src/lib.rs"], "modifiedFiles": []})),
+        })
+        .expect("compaction");
+    writer.checkpoint().expect("checkpoint");
+
+    let reader = SessionReader::open(&path).expect("open reader");
+    let entries = reader.iter_entries("compact").expect("entries");
+    assert_eq!(entries.len(), 2);
+    match &entries[1].entry {
+        SessionEntry::Compaction {
+            summary,
+            retained_tail,
+            tokens_before,
+            usage,
+            details,
+        } => {
+            assert_eq!(summary, "## Goal\nship the port");
+            assert_eq!(tokens_before, &12_345);
+            assert_eq!(retained_tail.len(), 1);
+            assert_eq!(retained_tail[0].role, Role::Assistant);
+            assert_eq!(usage.expect("usage").input, 100);
+            assert_eq!(details.as_ref().expect("details")["readFiles"][0], "src/lib.rs");
+        }
+        other => panic!("expected compaction entry, got {other:?}"),
+    }
+}
+
 #[test]
 fn writer_is_idempotent_for_header() {
     let dir = fresh_dir("idem");

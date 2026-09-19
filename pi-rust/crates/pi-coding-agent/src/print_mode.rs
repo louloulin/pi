@@ -904,21 +904,36 @@ fn migrate_legacy_jsonl(source: &Path, destination: &Path) -> Result<(), PrintMo
 ///
 /// Only user / assistant messages participate in the conversation
 /// context; tool calls, tool results, and extension entries are skipped
-/// (the loop re-derives tool traffic on every turn).
+/// (the loop re-derives tool traffic on every turn). A compaction entry
+/// resets the log to its summary plus the retained tail, exactly like the
+/// original `/compact` did.
 fn load_history(reader: &SessionReader, session_id: &str) -> Vec<Message> {
     match reader.iter_entries(session_id) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| match entry.entry {
-                SessionEntry::UserMessage(message) => Some(message),
-                SessionEntry::AssistantMessage(message) => Some(Message {
-                    role: Role::Assistant,
-                    content: message.content,
-                    model: Some(message.model),
-                }),
-                _ => None,
-            })
-            .collect(),
+        Ok(entries) => {
+            let mut history: Vec<Message> = Vec::new();
+            for entry in entries {
+                match entry.entry {
+                    SessionEntry::UserMessage(message) => history.push(message),
+                    SessionEntry::AssistantMessage(message) => history.push(Message {
+                        role: Role::Assistant,
+                        content: message.content,
+                        model: Some(message.model),
+                    }),
+                    SessionEntry::Compaction {
+                        summary,
+                        retained_tail,
+                        ..
+                    } => {
+                        history = crate::compaction::replace_with_compaction(
+                            &retained_tail,
+                            &summary,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            history
+        }
         Err(err) => {
             warn!("session: cannot read entries for {session_id}: {err}");
             Vec::new()

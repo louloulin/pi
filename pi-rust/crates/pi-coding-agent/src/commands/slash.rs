@@ -24,6 +24,12 @@ pub enum SlashCommand {
     /// decision. `None` shows the current state; the decision only takes
     /// effect on the next start. Mirrors upstream `showTrustSelector`.
     Trust(Option<bool>),
+    /// `/compact [instructions]` — replace the conversation prefix with a
+    /// model-generated summary.
+    Compact {
+        /// Optional custom focus appended to the summarization prompt.
+        instructions: Option<String>,
+    },
     /// Anything else, captured as the command name (without the slash).
     Unknown(String),
 }
@@ -46,6 +52,9 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "model" => SlashCommand::Model,
         "session" => SlashCommand::Session,
         "resume" => SlashCommand::Resume,
+        "compact" => SlashCommand::Compact {
+            instructions: (!args.is_empty()).then(|| args.to_string()),
+        },
         "exit" | "quit" => SlashCommand::Exit,
         "trust" => SlashCommand::Trust(parse_trust_decision(args)),
         other => SlashCommand::Unknown(other.to_string()),
@@ -76,6 +85,7 @@ pub fn help_text() -> String {
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /resume   resume a previous session\n");
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
+    out.push_str("  /compact  summarize the conversation prefix to free context\n");
     out.push_str("  /exit     quit the interactive session\n");
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
@@ -102,6 +112,10 @@ mod tests {
         assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/resume").unwrap(), SlashCommand::Resume);
         assert_eq!(handle_command("/trust").unwrap(), SlashCommand::Trust(None));
+        assert_eq!(
+            handle_command("/compact").unwrap(),
+            SlashCommand::Compact { instructions: None }
+        );
     }
 
     #[test]
@@ -121,6 +135,12 @@ mod tests {
         assert_eq!(
             handle_command("/trust maybe").unwrap(),
             SlashCommand::Trust(None)
+        );
+        assert_eq!(
+            handle_command("/compact keep the API notes").unwrap(),
+            SlashCommand::Compact {
+                instructions: Some("keep the API notes".into())
+            }
         );
     }
 

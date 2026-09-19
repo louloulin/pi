@@ -36,6 +36,7 @@ use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::commands::{handle_command, SlashCommand};
+use crate::compaction::{compact, DEFAULT_COMPACTION_SETTINGS};
 use crate::extensions::ui_bridge::TuiUi;
 use crate::extensions::wiring::ExtensionRuntime;
 use crate::prompt_templates::PromptTemplate;
@@ -526,6 +527,9 @@ async fn run_slash_command(
                 }
             }
         }
+        SlashCommand::Compact { instructions } => {
+            run_compact(app, agent, options, instructions.as_deref()).await;
+        }
         SlashCommand::Unknown(name) => {
             // A `/name` that is not a built-in may still belong to an
             // extension (`pi.registerCommand`). Run it when it does.
@@ -552,6 +556,79 @@ async fn run_slash_command(
         }
     }
     Ok(())
+}
+
+/// Run `/compact`: summarize the conversation prefix and replace the
+/// agent's message log with the summary plus the retained tail.
+///
+/// The on-screen transcript is kept as scrollback (it is the user's
+/// record of the session) and gains an info block describing what was
+/// summarized; only the model context is replaced.
+async fn run_compact(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &InteractiveOptions,
+    instructions: Option<&str>,
+) {
+    if app.is_busy() {
+        app.info("/compact: a turn is in flight — abort or wait for it to finish");
+        return;
+    }
+
+    let (model, history) = {
+        let guard = agent.lock().await;
+        (guard.model().clone(), guard.state().messages.clone())
+    };
+    if history.is_empty() {
+        app.info("/compact: nothing to compact yet");
+        return;
+    }
+
+    let compaction = match compact(
+        &history,
+        &model,
+        &options.stream_fn,
+        DEFAULT_COMPACTION_SETTINGS,
+        instructions,
+    )
+    .await
+    {
+        Ok(compaction) => compaction,
+        Err(err) => {
+            app.info(format!("/compact: {err}"));
+            return;
+        }
+    };
+
+    if let Some(log) = options.session_log.as_ref() {
+        let _ = log.append_compaction(
+            compaction.summary.clone(),
+            compaction.retained_tail.clone(),
+            compaction.tokens_before,
+            Some(compaction.usage),
+            Some(compaction.details()),
+        );
+    }
+
+    let retained = compaction.retained_tail.len();
+    let tokens_before = compaction.tokens_before;
+    let read_files = compaction.read_files.len();
+    let modified_files = compaction.modified_files.len();
+    let summary = compaction.summary.clone();
+    let compacted_history = compaction.into_history();
+    let tokens_after = crate::compaction::estimate_context_tokens(&compacted_history);
+
+    {
+        let mut guard = agent.lock().await;
+        guard.state_mut().messages = compacted_history;
+    }
+
+    app.info(format!(
+        "/compact: summarized {} message(s) → kept {retained} ({tokens_before} → {tokens_after} est. tokens; {} read, {} modified)\n\n{summary}",
+        history.len() - retained,
+        read_files,
+        modified_files,
+    ));
 }
 
 /// Extract the text the user typed after the command name.

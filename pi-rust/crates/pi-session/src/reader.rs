@@ -242,6 +242,17 @@ pub enum RawEntryShape {
         /// Arbitrary JSON payload.
         payload: serde_json::Value,
     },
+    /// Compaction checkpoint (`/compact`).
+    Compaction {
+        /// Structured summary text.
+        summary: String,
+        /// Recent messages kept verbatim.
+        #[serde(default)]
+        retained_tail: Vec<serde_json::Value>,
+        /// Estimated context tokens before compaction.
+        #[serde(default)]
+        tokens_before: u32,
+    },
 }
 
 #[cfg(test)]
