@@ -45,6 +45,14 @@ pub struct AppConfig {
     /// TUI uses this to throttle the render loop when there is no
     /// input.
     pub event_poll_interval: Duration,
+    /// Render assistant bodies as markdown (headings, lists, fenced code,
+    /// emphasis, …) instead of plain text. On by default, matching
+    /// upstream's `Markdown` component in the assistant message
+    /// (`packages/coding-agent/src/modes/interactive/components/assistant-message.ts`).
+    ///
+    /// The switch can be flipped at runtime with [`App::set_markdown`];
+    /// `/clear` and other transcript operations leave it untouched.
+    pub markdown: bool,
 }
 
 impl Default for AppConfig {
@@ -53,6 +61,7 @@ impl Default for AppConfig {
             prompt_placeholder: "type a prompt — /help for commands".to_string(),
             session_id: "local".to_string(),
             event_poll_interval: Duration::from_millis(50),
+            markdown: true,
         }
     }
 }
@@ -197,10 +206,11 @@ impl App {
         let mut prompt = Prompt::new("> ");
         prompt.set_placeholder(config.prompt_placeholder.clone());
         let event_rx = agent.subscribe();
+        let markdown = config.markdown;
         Self {
             config,
             prompt,
-            messages: MessageView::new(),
+            messages: MessageView::new().with_markdown(markdown),
             status_bar: StatusBar::new(),
             status_data,
             theme: builtin_theme("dark", ColorMode::TrueColor)
@@ -217,6 +227,19 @@ impl App {
             viewport_width: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
         }
+    }
+
+    /// Whether assistant bodies are currently rendered as markdown.
+    pub fn markdown(&self) -> bool {
+        self.messages.markdown()
+    }
+
+    /// Turn markdown rendering of assistant bodies on or off.
+    ///
+    /// Takes effect on the next render; the transcript items themselves are
+    /// untouched, so flipping the switch back re-renders the same bodies.
+    pub fn set_markdown(&mut self, enabled: bool) {
+        self.messages.set_markdown(enabled);
     }
 
     /// Borrow the message view (for tests and snapshots).
