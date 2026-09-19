@@ -9168,3 +9168,151 @@ $ cargo check -p pi-tui --all-targets --offline        # exit 0（合并进来�
 并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-agent-core` /
 `pi-coding-agent` 与本文档）。
+
+## LUM-1140 round — `pi-session` JSONL 导出（export↔migrate 往返）+ 修复 header 时间戳毫秒误读 + 派发 Stage 40
+
+本轮由 autopilot 定时触发（LUM-1140，建单标题 `pi`，开工后按平台要求改名）。与 LUM-1137（Stage 39
+keybindings 消费方，`in_progress`）并行推进；切片取自 `pi-session` 的一处自包含缺口，不碰任何串行区。
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1140`，起点 `origin/feature/pi.rs @ cd1acb3f2`（LUM-1139 的文档提交）。
+  开工后 fetch 发现远端已推进到 **`8e1765325`**（LUM-1139 的补记提交：回填真实哈希 + numstat），
+  收尾前合入（合并提交 `f92bb3b0b`，快进式内容合并，**零冲突**——那笔补记只动本文档）。
+- 槽位：开工时 `multica daemon status` 报 `running_task_count = 3`（LUM-1137 + LUM-1139 + 本轮），
+  达 3 路上限 ⇒ 开局不派发；收尾复查 **`running_task_count = 2`**（LUM-1137 `in_progress` + 本轮，
+  LUM-1139 已转 `in_review`）⇒ 空出 1 槽，**派发 LUM-1141（Stage 40）**。LUM-1138（质量门清偿）
+  维持 `backlog`：它的 `cargo fmt` 会重排 `pi-tui/src/app.rs`，与仍在写的 LUM-1137 直接冲突。
+- 切片选择：frontier 第 5 项（工具事件流）是最有价值的下一轮切片，但它是 `pi-agent-core` /
+  `pi-coding-agent` 的**事件出口重构**（要动 `run` 的观察者管道 + 并发批次两条路径），
+  与本轮剩余预算不匹配；因此**把第 5 项派发成 Stage 40（LUM-1141）**，本轮自己做一个
+  自包含、可整段收口且不碰串行区的切片——`pi-session` 的 JSONL 反向导出。
+
+### 二、本轮切片：`pi session export` 从「别名 stub」变成真正的 JSONL 导出
+
+现状：迁移只有单向。`pi-session` 的 `migrate_jsonl` 能把 Stage 4 的 JSONL 读进 SQLite，
+但**没有任何反向导出**；CLI 的 `pi session export` 只是 `show` 的别名（`cli.rs:288`），
+只打印 `entries`、**不含 header 行**，把它喂回 `migrate` 会丢掉 `created_at` / `version`。
+上游对应能力是 `packages/coding-agent/src/core/session-export.ts` 的 `exportSessionToJsonl`。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-session/src/export.rs`（新，167 行） | `render_jsonl`（纯渲染，返回 String）/ `export_jsonl`（写文件 + `ExportReport`）/ `export_session`（缺省路径）/ `default_export_path`（`session-<sanitised-id>.jsonl`，非法字符替换为 `_`；空 id → `untitled`） |
+| `crates/pi-session/src/reader.rs` | 新增 `SessionReader::session_row(id)`（按 id 取单行 header；原来只有 `session_header()` 取「第一行」） |
+| `crates/pi-session/src/schema.rs` | 修复 `SessionRow::to_header` 把**毫秒**当秒传给 `from_timestamp` 的 bug（见下） |
+| `crates/pi-session/src/lib.rs` | 导出新 API + crate 文档加「Exporting back to JSONL」一节 |
+| `crates/pi-coding-agent/src/cli.rs` | `SessionCommand::Export` 增加 `--output PATH`，文档从「alias for show」改为真实语义 |
+| `crates/pi-coding-agent/src/commands/session.rs` | `export()` 取代原来的 `session show` fallthrough：不给 `--output` 时把 JSONL 打到 stdout，给了就写文件 + 打印 `{session_id, destination, entries_written, bytes_written}` |
+| `crates/pi-session/tests/export.rs`（新，253 行 / 7 条用例） | 渲染形状、export→migrate 逐条等价、header 行折叠、时间戳回归、缺省路径、未知 session、父目录自动创建 |
+
+关键设计：
+
+- **输出格式就是 `migrate_jsonl` 的输入**：第一行 `SessionEntry::Header`，随后每条 entry 一行，
+  行尾带 `\n`。因此 export → migrate 在 `entries` 表上是恒等（第 4 节的往返用例逐条比对 seq / type /
+  payload 验证了这一点）。
+- **header 行只写一次**：`sessions` 表是 header 的事实源；TS 写法会把 header **同时**存进
+  `entries`，这种库里 `iter_entries` 能看到一条 `header` 行，导出时折进首行而不是写两行
+  （`header_entry_rows_are_folded_into_the_leading_header_line` 覆盖）。
+- **header 用 Rust 的 `header` tag，不用 TS 的 `session` spelling**：`SessionEntry` 的
+  serde tag 就是 `header`，写成 TS spelling 会产出一个本 port 读不回来的文件。这是有意的格式偏离，
+  写进了模块文档。
+- **`cwd` 在 JSONL 里丢失**：`SessionEntry::Header` 没有该字段，`sessions.cwd` 只存在于数据库侧。
+  同样写进了 doc。
+- **CLI 默认仍是 stdout**：`--output` 是新增可选参数，不给时行为与之前兼容（多了首行 header），
+  避免破坏脚本；`session show` 未改动（依旧只打 entries）。
+
+### 三、顺带修掉的真实缺陷：header 时间戳被当成「秒」
+
+`crates/pi-session/src/schema.rs` 的 `SessionRow::to_header` 里：
+
+```rust
+created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(self.created_at, 0)
+```
+
+而 `sessions.created_at` 列按 schema 注释与 `SessionWriter::write_header`
+（`created_at.timestamp_millis()`）、`now_millis()` 的口径存的是**毫秒**。于是任何走
+`SessionRow::to_header()` 的路径都会把时间戳放大 1000 倍。真实复现（第 4 节的 E2E）：
+
+```
+$ pi session migrate session.jsonl --to e2e.sqlite && pi session export e2e-1 --database e2e.sqlite
+{"type":"header","id":"e2e-1","created_at":"+58299-09-13T00:00:00Z","version":"0.1.0"}   # 修复前
+{"type":"header","id":"e2e-1","created_at":"2026-05-01T00:00:00Z","version":"0.1.0"}      # 修复后
+```
+
+修复为 `from_timestamp_millis`，并加了两条回归用例：`schema::tests::to_header_reads_created_at_as_milliseconds`
+（单元）与 `tests/export.rs::exported_header_keeps_the_original_timestamp`（端到端，断言
+`"2026-05-01T12:34:56.789Z"` 逐字还原）。这个 bug 在本轮之前**没有任何测试覆盖**——它只有在一个
+「把 DB 行写回外部格式」的路径出现时才会暴露。
+
+### 四、验证
+
+```
+$ rustc --version                       # 1.85.0（本机 /tmp/rustup-home 工具链）
+$ export CARGO_HOME=/tmp/cargo-home CARGO_INCREMENTAL=0
+$ export CARGO_TARGET_DIR=<lum-1136 工作区的空 target>（复用，未新建、未删任何在用 target）
+$ cargo test -p pi-session --offline    # exit 0：7 + 7 + 6 + 5 + 1(doc) 条全绿
+  #   其中 tests/export.rs 7 条为本轮新增；tests/round_trip.rs / ts_compat.rs 未改一行
+$ cargo test -p pi-coding-agent --offline
+  # exit 0：lib 239 条 + 15 个集成 suite + doc-test 全绿（CLI 参数改动无回归）
+$ cargo clippy -p pi-session -p pi-coding-agent --all-targets --offline
+  # 本轮文件零告警；输出里的 5 条 warning 全在 pi-tui / pi-telemetry / pi-extensions（LUM-1138 的既有债）
+$ rustfmt --edition 2021 --check <本轮 7 个文件>   # 全部 clean
+```
+
+端到端（真实二进制，非 mock）：
+
+```
+$ pi session migrate session.jsonl --to e2e.sqlite     # {"entries_migrated":3,"header_id":"e2e-1"}
+$ pi session export e2e-1 --database e2e.sqlite --output out/deep/exported.jsonl
+  # {"bytes_written":322,"destination":"out/deep/exported.jsonl","entries_written":3,...}
+  #   父目录 out/deep 被自动创建
+$ diff session.jsonl out/deep/exported.jsonl && echo IDENTICAL
+IDENTICAL
+```
+
+即 `migrate → export` 得到与输入**字节完全一致**的 JSONL（含 header 行），再 `migrate` 回去
+`entries_migrated` 仍为 3、`header_id` 不变。
+
+### 五、合并与推送
+
+起点 `cd1acb3f2`；先落代码提交 `8c0193630`（7 文件），再把 `origin/feature/pi.rs @ 8e1765325`
+合入（合并提交 `f92bb3b0b`），最后补本节文档提交。`8e1765325` 是本轮所有提交的祖先，因此并入
+`feature/pi.rs` 是**快进、无 plumbing merge**（该补记只改本文档，与本轮文件零交集）。真实哈希与
+numstat 见本节末补记。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `8c0193630`（7 文件）、合并提交 `f92bb3b0b`（第一父 `8c0193630`、第二父 `8e1765325`）、
+  本节文档提交 `__DOC__`。
+- 推送是**快进、无额外 merge**：`git push origin __PUSH__:refs/heads/feature/pi.rs` →
+  `8e1765325..__PUSH__`，`work/lum-1140` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查见下。
+- `git diff --numstat 8e1765325 f92bb3b0b`（本轮全部改动）：`__NUMSTAT__`
+- 合并态复测（第四节）跑的树与 `feature/pi.rs` 新头同源（合并只带来文档改动），数字即第四节所列。
+- 本轮**派发 1 个子任务**：LUM-1141（Stage 40，`pi-agent-core` 工具批次事件流），
+  以 `backlog` 创建、在本轮推送完成后提升为 `todo` 启动，确保它的 checkout 起点已含本节。
+
+### 六、frontier（本轮更新）
+
+1. ~~`pi-session` JSONL 反向导出~~ **本轮（LUM-1140）收口**：`render_jsonl` / `export_jsonl` /
+   `export_session` + `pi session export --output`，export↔migrate 在 `entries` 上是恒等；
+   顺带修掉 `SessionRow::to_header` 的毫秒/秒误读。本轮新增这一项，同轮收口。
+2. **Stage 39 keybindings 消费方**：LUM-1137 仍 `in_progress`（`app.rs` / `editor.rs` 硬编码和弦
+   → `get_keybindings()`），与本轮无交集。
+3. **P2 工具批次的事件流** → **已派发 LUM-1141（Stage 40，`backlog` → 本轮推送后 `todo`）**：
+   事件出口下移到 `agent_loop`（真实流式的 `ToolExecutionStart/End` + 逐条 delta + 单次调用
+   `duration_ms`），只碰 `pi-agent-core`（+ 消费方测试），不碰 `app.rs`。
+4. **P2 取消语义对齐**（LUM-1139 记入，仍挂）：让两条工具路径在 `signal.aborted` 时停止派发剩余
+   调用（上游行为），代价是要改 `cancelled_token_is_forwarded_to_executor` 的既有口径。
+   与第 3 项同属事件/调度层，**必须排在 LUM-1141 之后**（同一个 `agent_loop` 文件，避免并发写）。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要 ratatui `Cell` 支持链接单元
+   （0.28 不带），得改 `app.rs` 的 buffer 写入路径 —— 属 `app.rs` 串行区，要等 LUM-1137。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择 / 渲染路径。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（仍 `backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的。**必须等 LUM-1137 收手**再启动，
+   否则 `cargo fmt` 会与它对 `app.rs` / `editor.rs` 的在写改动直接冲突。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档的事实源继续分叉（既有欠账）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-session` /
+`pi-coding-agent` 的 session 命令与本文档；`pi-agent-core` 留给 LUM-1141）。
