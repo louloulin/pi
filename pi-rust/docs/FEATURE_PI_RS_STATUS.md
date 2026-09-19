@@ -8718,3 +8718,19 @@ LUM-1132 已记为全仓 122 文件），本轮**没有**顺手格式化它们�
    全仓 122 文件 rustfmt 漂移、`pi-agent-core/src/tools.rs:13` 并行工具路径、`pi-ai` registry 缺
    `openai-codex` / `kimi-coding`）维持不动。
 
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `bbcd46cc8`（3 文件），文档提交 `288ec3781`（本节 +112 行），合并提交 `7019cebea`
+  （第一父 `bbcd46cc8`、第二父 `e5f5585d7`）。
+- 推送是**快进、无额外 merge**：`git push origin 288ec3781:refs/heads/feature/pi.rs` →
+  `e5f5585d7..288ec3781`，`work/lum-1134` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `288ec3781274419040d7d3e69168ae01c490e21f`。（推送时 git 打了 `unable to get credential storage lock` 的
+  提示，但 ref 已更新，事上为成功。）
+- `git diff --numstat e5f5585d7 288ec3781`（本轮全部改动，4 个文件、**+1368 / − 0**）：
+  `pi-coding-agent/src/keybindings.rs` +762（新）、`pi-coding-agent/tests/keybindings.rs` +486（新）、
+  `pi-coding-agent/src/lib.rs` +8、本节文档 +112。**`pi-tui` / `pi-extensions` / `pi-session` / `pi-ai`
+  一个文件都不在其中。**
+- 合并态复测（第五节）跑的树与 `feature/pi.rs` 的新头 `288ec3781` 同源，数字即第五节所列。
+- 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节
+  如实记录（基线即红，与本轮无关；本 crate `--no-deps` 零 warning）。
+
