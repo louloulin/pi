@@ -8460,3 +8460,22 @@ CI 门（`scripts/ci.sh` 里的 `cargo fmt --all --check` 目前对全仓都是�
     `pi-tui` 的 `clear` 键与上游 `keys.ts` 的完整词表差异只做了文档化（`KeyCode` 无对应变体）。
     既有欠账（`settings.rs` / `tests/settings_list.rs` rustfmt diff、`pi-agent-core/src/tools.rs:13` 并行工具
     路径、`pi-ai` registry 缺 `openai-codex` / `kimi-coding`）维持不动。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `e48bcae6a`（3 个文件）、文档提交 `62d5581e3`，都在 `work/lum-1132` 上，起点 `4c0485378`。
+- 合入前 `git fetch`：`origin/feature/pi.rs` 仍是 `4c0485378`（LUM-1131 的两条补记），`work/lum-1132` 无需合并
+  （`Already up to date.`）。
+- 推送：`work/lum-1132` → 新远端分支 `@ 62d5581e3`；`feature/pi.rs` 用 plumbing merge
+  （`git merge-tree --write-tree` + `git commit-tree`：第一父 `4c0485378`、第二父 `62d5581e3`，树 `6286d7c0d`）
+  = `b993f1541`，`git push origin b993f1541:refs/heads/feature/pi.rs` → **快进** `4c0485378..b993f1541`。
+- `git diff --numstat 4c0485378 b993f1541`（本轮全部改动，4 个文件、**+1201 / −0**）：
+  `pi-tui/src/keybindings.rs` +690（新）、`pi-tui/tests/keybindings.rs` +407（新）、`pi-tui/src/lib.rs` +6、
+  本节文档 +98。**`pi-tui/src/app.rs` 与其它 crate 一个文件都不在其中。**
+- 合并态复测（第四节）跑的树与合并树 `6286d7c0d` 同源：plumbing merge 的第二父就是 `62d5581e3`，两边树逐字节
+  相同，数字即第四节所列。
+- 本轮**派发 1 个子任务**（收尾时 LUM-1131 已释放槽位，`running_task_count` 从 3 降到 2，空出 1 槽）：
+  `[Stage 38] pi-coding-agent: keybindings 配置层（KEYBINDINGS 覆盖表 + 旧名迁移 + keybindings.json）`
+  = **LUM-1134**（`01a0bb07-e1cf-7b58-b1be-41b79574e23f`，`priority = high`，无父级，与 Stage 33/34/36/37 同形）。
+  它从 `origin/feature/pi.rs @ b993f1541` 起分支——本轮先把合并推送落地再派发，避免它从旧头起分支。
+  派发后 `running_task_count = 3`（LUM-1133 + LUM-1134 + 本轮收尾），正好在「最多 3 个并发」上限。
