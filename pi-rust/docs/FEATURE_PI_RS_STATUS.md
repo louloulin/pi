@@ -4186,3 +4186,88 @@ $ cargo test   -p pi-coding-agent --test system_prompt_resources # 6 passed / 0 
 ### Push status
 
 `feature/pi.rs`：本轮 1 个代码 commit + 本节状态文档，push 到 `origin/feature/pi.rs`。
+
+## LUM-1087 round — 3 槽已满 → 不派发；把「已提交但从未合并」的 Stage 19 `pi-server` 合入
+
+本轮（autopilot，2026-09-19 09:00Z）先按流程盘点 frontier 与槽位：
+
+- `multica daemon status`：`active_task_count = 3` / `running_task_count = 3`，
+  槽位已满（LUM-1086 正在 `feature/pi.rs-work` 上跑全量测试，本 run 自己占一个），
+  因此**不新建子任务**——沿用 LUM-1017 以来的一致判断。
+- 于是把精力放在「盘点有没有已经做完、但没进 `feature/pi.rs` 的代码」上，
+  做法是枚举所有 `ahead > 0` 的分支再逐个用 `git cherry` 判是否已按 patch 合入。
+
+### 发现：Stage 19 的 `pi-server` 是唯一真正缺失的功能块
+
+`agent/devbox1/lum-1068`（commit `6af9188ba`，2026-09-19 06:54）已经把
+`packages/server` + `packages/protocol` 的 RPC 线格式层移植完（31 文件 / +5976 行，
+自带 18 个协议一致性用例 + 2 个真实 socket 端到端用例），但该分支**从未合入
+`feature/pi.rs`**；对应 run 于 08:57:59 被 `execution cancelled` 终止，worktree
+`lum-1068-ec160c061fa1/workdir/pi` 停在 detached HEAD，`crates/pi-server` 不在
+`feature/pi.rs` 的树里（LUM-1082 / LUM-1085 两轮的「`pi-client` 仍等 LUM-1068」
+正是卡在这里）。
+
+其余 `ahead` 分支逐个核过，都不是「缺失功能」，无需处理：
+
+| 分支 | 结论 |
+|------|------|
+| `9f0097e10886`（Stage 12 RPC）、`5b45b672209a`（`pi-evals`）、`7046ef4e9915`（find/grep/ls）、`lum-1061`（telemetry 接线）、`e3a55b14fe9d`（Gemini） | 同一功能已由后续轮次（LUM-1059 / LUM-1071 / LUM-1050 / LUM-1063 / LUM-1055）以不同提交落地，`git cherry` 报 `+` 只是 patch 不逐字相同 |
+| `a5e8bd115db9`（Stage 1）、`18de691ee1bc`（Stage 2）、`b662db4686e7`（LUM-996 全量 merge） | 状态文档已记录为**刻意跳过**（协议/事件设计冲突），不是遗漏 |
+| `1baa9881aff2`（LUM-1028） | 纯文档提交 |
+
+### 环境阻塞：磁盘 100% → 先清理再动手
+
+开工时 `df` 显示 `/` 100%（`47G/50G`，可用 0），`git checkout` 直接失败
+（`cannot create directory at 'pi-rust': No space left on device`）。按 LUM-1040 的
+同一处置，删掉两个**已完成轮次**的构建产物（`lum-1081` 6.7G + `lum-1082` 6.6G），
+释放 10G 后再继续；`target/` 是纯产物，可复现。剩余四个 worktree 的 `target/`
+（`lum-1084` / `lum-1085` / `lum-1086` 及本 run）保留。
+
+### 合并与冲突
+
+`git merge mirror/agent/devbox1/lum-1068` 只有 `FEATURE_PI_RS_STATUS.md` 一处冲突
+（两边的 LUM-1068 节都插在 LUM-1074 节之后）；代码部分全部自动合并：`Cargo.toml`
+（workspace 成员 +1）、`Cargo.lock`、`crates/pi-mono`（native-only 依赖并
+`pub use pi_server as server`）、`crates/pi-protocol/src/lib.rs`（`pub mod rpc` +
+`pub use rpc::*`），加上新增的 5 个 `pi-protocol/src/rpc/*` 与整个
+`crates/pi-server/`。文档按**轮次顺序**解决：LUM-1068 节放在 LUM-1074 之后、
+LUM-1075 之前。
+
+`pi-server` 保持 native-only（`cfg(not(target_arch = "wasm32"))`），不进入 wasm 构建面。
+
+### 验证
+
+```
+$ cargo check  --workspace --all-targets --offline                    # 0 errors
+$ cargo clippy --workspace --all-targets --offline -- -D warnings     # 0 warnings
+$ cargo test   -p pi-protocol -p pi-server --offline                  # 24 + 21 passed / 0 failed
+$ cargo test   --workspace --no-fail-fast --offline                   # 67 targets: 744 passed / 1 failed / 2 ignored
+```
+
+- `pi-protocol` 24（14 单测 + 10 RPC codec）+ `pi-server` 21（1 错误映射 +
+  18 一致性 + 2 真实 socket 传输用例，与分支原始记录一致）。
+- 全量跑唯一的失败仍是文档已多处记录的 `pi-coding-agent` `--test rpc` 抖动
+  （LUM-1081 节定位到扩展宿主 `free(): double free detected in tcache 2` → SIGABRT，
+  即 LUM-1083）。本轮挂的是 `unknown_method_returns_method_not_found`，
+  与 LUM-1082 / LUM-1085 两轮挂的**不是同一个用例**；单独跑该 target 连跑 3 次
+  9/9 全绿。本轮只新增 `pi-protocol` / `pi-server`，`pi-coding-agent` 的扩展宿主
+  代码路径未被触碰，故与本轮无关。
+
+### 本轮之后的状态与 frontier
+
+Stage 19 的 server 侧补齐后，frozen 的 frontier 变成：
+
+1. **`pi-client`（LUM-1069，backlog）** —— **依赖已解除**：`pi-protocol::rpc` 的
+   `ClientMessage` / `ServerMessage` / `FrameDecoder` 已在树上，`pi-server` 提供了
+   `testing/client.rs` 的 `ProtocolTestClient` 可作参考实现。下一轮可以直接派发。
+2. `pi-coding-agent` 把 Stage 12 的内联 JSON-RPC 换成 `pi-client`（等 1 完成）。
+3. 扩展 `resources_discover` 钩子（LUM-1084 / LUM-1086 在途）。
+4. `.wasm` 扩展宿主（环境缺 wasm32 target 与 `wasmtime`）。
+5. dialog 剩余外观项：`input` 多行输入、鼠标点击/滚动、描述列对齐。
+6. `themes` 目录的信任门接线。
+7. provider 家族（缺 `./data/*.json`，暂不硬编）。
+
+### Push status
+
+`feature/pi.rs`：本轮 1 个 merge commit（Stage 19 `pi-server`）+ 本节状态文档，
+push 到 `origin/feature/pi.rs`。
