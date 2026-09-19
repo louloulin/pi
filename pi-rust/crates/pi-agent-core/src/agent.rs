@@ -6,12 +6,10 @@ use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{Content, Message, Model, ToolExecutionMode};
 use pi_telemetry::TelemetryContext;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 use tokio::sync::mpsc;
 
-use crate::agent_loop::{AgentLoop, TurnOutcome};
-use crate::events::{AgentEvent, AssistantMessageUpdate};
+use crate::agent_loop::{AgentLoop, EventObserver, TurnOutcome};
+use crate::events::AgentEvent;
 use crate::hooks::{AgentHookAdapter, PrepareHookFn, ShouldStopHookFn};
 use crate::queue::{MessageQueue, QueueMode};
 use crate::state::{AgentConfig, AgentState};
@@ -240,10 +238,11 @@ impl Agent {
     ///
     /// The loop drives each turn through the streaming layer, executes
     /// any tool calls the model emits, and emits the full event union
-    /// on every subscriber channel. The call returns when the loop
-    /// exits (either because the model stopped, the user hook
-    /// requested an early exit, or the loop surface returned an
-    /// error).
+    /// on every subscriber channel **at the moment each event happens** —
+    /// provider deltas, per-tool `ToolExecutionStart` / `ToolExecutionEnd`
+    /// and the turn boundaries. The call returns when the loop exits
+    /// (either because the model stopped, the user hook requested an early
+    /// exit, or the loop surface returned an error).
     pub async fn prompt(&mut self, text: &str) -> Result<(), crate::agent_loop::AgentError> {
         let user_message = Message {
             role: pi_protocol::Role::User,
@@ -258,16 +257,21 @@ impl Agent {
             return Ok(());
         }
 
-        // Build an observer that fans events out to all subscribers
-        // for the duration of this turn. Drop the Arc when the call
-        // returns so the closure captures a weak handle that does not
-        // extend the Agent's lifetime.
+        // Install a fan-out observer for the duration of the run. The loop
+        // calls it synchronously at every real event point, so subscribers
+        // observe deltas and tool execution while the turn is still running.
+        // The closure captures an `Arc` clone of the subscriber list (not the
+        // `Agent`), so the loop can be driven from outside this borrow.
         let subscribers = self.subscribers.clone();
-        self.inner
-            .run(drained, |turn: &TurnOutcome| {
-                fan_turn_to_subscribers(&subscribers, turn);
-            })
-            .await?;
+        let observer: EventObserver = Arc::new(move |event: AgentEvent| {
+            emit_to(&subscribers, event);
+        });
+        self.inner.set_event_observer(Some(observer));
+        let result = self.inner.run(drained, |_turn: &TurnOutcome| {}).await;
+        // Clear the observer on every path — including the error path — so a
+        // later `run` on the same loop starts without a stale sink.
+        self.inner.set_event_observer(None);
+        result?;
 
         Ok(())
     }
@@ -283,146 +287,8 @@ impl Agent {
     }
 }
 
-/// Translate a finished `TurnOutcome` into the AgentEvent sequence the
-/// TUI consumes and fan it out to every subscriber.
-///
-/// The translator covers the three event groups the TUI depends on:
-/// `TurnStart` → `MessageStart` → `MessageUpdate(*)` → `MessageEnd` →
-/// `ToolExecutionStart`(* per tool call) → `ToolExecutionEnd`(*) →
-/// `TurnEnd`.
-fn fan_turn_to_subscribers(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, turn: &TurnOutcome) {
-    emit_to(subscribers, AgentEvent::TurnStart);
-    emit_to(
-        subscribers,
-        AgentEvent::MessageStart {
-            model: turn.message.model.clone(),
-        },
-    );
-
-    for block in &turn.message.content {
-        match block {
-            Content::Text(text) => {
-                emit_to(
-                    subscribers,
-                    AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta {
-                        delta: text.text.clone(),
-                    }),
-                );
-            }
-            Content::ToolCall(call) => {
-                emit_to(
-                    subscribers,
-                    AgentEvent::MessageUpdate(AssistantMessageUpdate::ToolCallDelta {
-                        index: 0,
-                        id: Some(call.id.clone()),
-                        name: Some(call.name.clone()),
-                        arguments_delta: Some(call.arguments.to_string()),
-                    }),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    emit_to(
-        subscribers,
-        AgentEvent::MessageEnd {
-            message: turn.message.clone(),
-        },
-    );
-
-    let started = monotonic_now();
-    for tool_message in &turn.tool_results {
-        let result = tool_message.content.iter().find_map(|c| match c {
-            Content::ToolResult(r) => Some(r.clone()),
-            _ => None,
-        });
-        if let Some(result) = result {
-            let call = pi_protocol::ToolCall {
-                id: result.tool_call_id.clone(),
-                name: String::new(),
-                arguments: serde_json::Value::Null,
-            };
-            emit_to(subscribers, AgentEvent::ToolExecutionStart { call });
-            emit_to(
-                subscribers,
-                AgentEvent::ToolExecutionEnd {
-                    result,
-                    duration_ms: monotonic_ms_since(started),
-                },
-            );
-        }
-    }
-
-    emit_to(
-        subscribers,
-        AgentEvent::TurnEnd {
-            message: turn.message.clone(),
-            tool_results: turn.tool_results.clone(),
-        },
-    );
-}
-
-/// Monotonic timestamp — wraps [`Instant::now`] on native targets and
-/// returns a `SystemTime`-based fallback on `wasm32-unknown-unknown`
-/// where `Instant::now` panics (no monotonic clock source is
-/// available).
-fn monotonic_now() -> Monotonic {
-    Monotonic::now()
-}
-
-/// Elapsed milliseconds since the given monotonic timestamp.
-///
-/// Always returns `0` on wasm32 because the only timestamp source
-/// available there is wall-clock — it does not satisfy the
-/// `Instant` monotonicity contract.
-fn monotonic_ms_since(started: Monotonic) -> u64 {
-    started.elapsed_ms()
-}
-
-#[derive(Copy, Clone)]
-struct Monotonic {
-    #[cfg(not(target_arch = "wasm32"))]
-    instant: Instant,
-    #[cfg(target_arch = "wasm32")]
-    millis: u64,
-}
-
-impl Monotonic {
-    fn now() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Self {
-                instant: Instant::now(),
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // `js_sys::Date::now()` returns wall-clock milliseconds since
-            // the Unix epoch. We only need *elapsed* milliseconds so the
-            // absolute origin does not matter — wall clock is good
-            // enough for a tool-execution duration.
-            let now = js_sys::Date::now() as u64;
-            Self { millis: now }
-        }
-    }
-
-    fn elapsed_ms(&self) -> u64 {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.instant.elapsed().as_millis() as u64
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Clamp to zero so a clock that runs slightly backwards
-            // (e.g. NTP correction) does not surface as a negative
-            // duration.
-            let now = js_sys::Date::now() as u64;
-            now.saturating_sub(self.millis)
-        }
-    }
-}
-
+/// Send one event to every subscriber. Subscribers whose channel is closed
+/// are pruned.
 fn emit_to(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, event: AgentEvent) {
     let mut guard = subscribers.lock();
     guard.retain(|tx| tx.send(event.clone()).is_ok());
