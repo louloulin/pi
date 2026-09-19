@@ -10733,3 +10733,139 @@ frontier 上一项：
 `cb5696061`，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `1b1a6c342`
 **快进至 `cb5696061`**（`git ls-remote` 复查一致：`cb5696061f5761c866861543bbf92242d3a62449`），
 本补记提交再追加一次推送，留档分支 `work/lum-1149` 一并推送（同哈希）。
+
+## LUM-1150 round — `pi-ai` 上下文溢出识别（`utils/overflow.ts` 移植 + agent 重试排除 + 自动压缩兜底，frontier 第 6 项之一）+ 合并推送 feature/pi.rs
+
+本轮起点 `127d07439`（LUM-1147 补记态）。代码提交 `542e56b35`，随后合并
+`origin/feature/pi.rs`（已含 LUM-1148 `add630b62` / LUM-1149 `cb5696061`，合并提交
+`81ecf0008`），最后是本轮文档提交。真实推送哈希见本节末补记。
+
+### 一、上游语义：`isContextOverflow` 分三类信号
+
+`packages/ai/src/utils/overflow.ts`（180 行）此前完全未移植，是 frontier 第 6 项点名的
+缺口之一。上游一个函数里塞了三种 provider 行为：
+
+1. **错误文案溢出**：`stopReason === "error"` 且 `errorMessage` 命中 25 条文案表之一
+   （Ollama `prompt too long; exceeded max context length`、Together AI
+   `input (N tokens) is longer than the model's context length (M tokens)`、
+   LiteLLM 包装的 OpenAI `exceeds ... maximum context length of N tokens`、
+   OpenAI 兼容的 `Input length (N) exceeds ... (M)`、OpenRouter/Poolside
+   `exceeds the maximum allowed input length of N tokens`、DS4
+   `configured context size is N tokens`（带千分位逗号）、Cerebras `400/413 ... (no body)` 等）。
+   前置 3 条 non-overflow 文案（Bedrock 人读前缀 `Throttling error:` / `Service unavailable:`、
+   `rate limit`、`too many requests`）优先否决——Bedrock 的
+   `Throttling error: Too many tokens` 因此不会被 `too many tokens` 误判成溢出。
+2. **静默溢出**：z.ai 之流不报错而是照常返回，唯一信号是 `usage.input + cache_read`
+   **大于** context window。
+3. **length-stop 溢出**：Xiaomi MiMo 把超长输入截到刚好填满窗口，再以 `length` + 输出 0 结束；
+   判据是 `output === 0` 且 `input + cacheRead >= window * 0.99`。
+
+另有一个 `isRecoverableLength`（`length` + `output < desiredMaxOutput`）。
+
+### 二、切片：三个落点
+
+**1. 新增 `crates/pi-ai/src/overflow.rs`**（约 200 行，`pub mod overflow` + `lib.rs` 再导出）：
+
+- `is_context_overflow(stop_reason, error_message: Option<&str>, usage, context_window)` — 三类信号
+  全量；`context_window` 为 `None`/`0` 时关闭第 2、3 类（对齐上游 `contextWindow &&` 真值判断）。
+- `is_context_overflow_error_text(text)` — 只做第 1 类的文案判定，供重试分类器使用。
+- `is_recoverable_length(stop_reason, usage, desired_max_output)`、`get_overflow_patterns()`、
+  `get_non_overflow_patterns()`。
+- 文案表用 `regex`（与 `pi-agent-core` 同一份 crate，已在 lockfile 里，**未新增传递依赖**），
+  大小写不敏感，两条表各合成一条 alternation。`\d` 收紧为 `[0-9]` 以对齐 JS 的 ASCII 语义。
+
+**2. `crates/pi-agent-core/src/retry.rs` — 溢出不进重试预算**：`is_retryable_error_message`
+在空串检查后**先**调 `pi_ai::is_context_overflow_error_text`，命中直接 `false`，其余顺序不变。
+对齐上游 `_isRetryableError`（先 `isContextOverflow`、后 `isRetryableAssistantError`）：超长 prompt
+重放多少次都一样，应交给压缩而不是退避重试。
+
+**3. `pi-tui` + `pi-coding-agent` — 自动压缩补一条溢出触发**：
+
+- `pi_tui::app::TurnUsage` 增加 `stop_reason: StopReason`（由 `message.stop_reason` 填），
+  这样驱动层不必新增对会话日志的依赖就能拿到「上一轮是怎么结束的」。
+- `interactive::maybe_auto_compact` 在阈值之外增加 `pi_ai::is_context_overflow(turn.stop_reason,
+  None, &turn.usage, Some(model.context_window))` 分支：任一命中即压缩，并在 info 文案里标注
+  `auto-compact (overflow|threshold)`。对应 `_checkCompaction` 的第 2、3 类。
+
+### 三、刻意偏离（代码注释已同步）
+
+1. **第 1 类在消息层不可达**：`pi-protocol::AssistantMessage` 没有 `errorMessage` 字段，失败调用
+   以 `Err(AgentError)` 结束、不会变成 assistant message（与 LUM-1146/1147 记下的同一处缺口）。
+   因此 `is_context_overflow` 把错误文案做成显式形参、`maybe_auto_compact` 传 `None`；
+   当前该类的实际约束点是**重试排除**（第 2 节第 2 点），而「报错→压缩→重试」这一条
+   （上游 `_checkCompaction` 第 1 类）仍等 `errorMessage` 上提到协议层。
+2. **第 2、3 类与阈值高度重叠**：`should_compact` 是
+   `context_tokens + reserve_tokens > window`，而 `context_tokens >= input + cacheRead`，
+   所以「input 超窗」必然同时触发阈值。溢出分支真正能独立命中、阈值漏掉的窄区间是
+   **`reserve_tokens` 很小（可为 0）且 `input + cacheRead ∈ [0.99·window, window]`、
+   `output = 0`**——本轮用例正是用 `reserve_tokens: 0` + `input = 990 / 1000` 锁住这条边界。
+   保留该分支是为了与上游结构一一对应，并给后续 `should_compact` 口径变化留锚点。
+3. **`is_recoverable_length` 暂无消费方**：上游在 `agent-session.ts` 用它决定「length 截断是否
+   再给一次带更小 `maxOutputTokens` 的尝试」。Rust 侧尚无该重试路径，本轮只把分类器与
+   LUM-1138 口径的服务端（`pi-ai`）一起备好，不接入未验证的行为。
+
+### 四、测试与验证
+
+- 新增 `crates/pi-ai/tests/overflow.rs` **22 项**，逐条镜像上游 `packages/ai/test/overflow.test.ts`：
+  9 条 provider 溢出文案正例、4 条 non-overflow 反例（Bedrock 限流/Service unavailable/rate limit/429）、
+  z.ai 静默溢出（含「恰好等于窗口不算」）、MiMo length-stop 溢出、`is_recoverable_length` 三态、
+  `None`/`0` 窗口关闭用法类、空文案不命中、Cerebras `400/413 (no body)` 锚定行首。
+- `crates/pi-agent-core/tests/retry.rs` 新增 `keeps_context_overflow_errors_non_retryable`：
+  其中 `503 service unavailable: ... maximum context length ...` 同时命中瞬时文案，
+  只有溢出排除能让它保持不重试。
+- `crates/pi-coding-agent/src/interactive.rs` 新增
+  `auto_compaction_runs_on_a_length_stop_overflow_the_threshold_would_miss`（内建
+  `LengthStopProvider` faux 流，`reserve_tokens: 0`），并把 `app_after_two_turns` 抽出
+  `app_after_two_turns_with(provider, window)` 供其复用。
+- 合并态复测（默认 target，`cargo` 走本地缓存）：`cargo test -p pi-ai` 全绿（94/12/10/**22**）、
+  `cargo test -p pi-agent-core` 全绿（含 **29** 项 retry）、`cargo test -p pi-tui` 28 个 test
+  binary 全绿（lib 256）、`cargo test -p pi-coding-agent` 全绿（**lib 272** + 全部集成测试）、
+  `cargo clippy -p pi-ai -p pi-agent-core -p pi-tui -p pi-coding-agent --all-targets` **exit 0**、
+  改动文件引用的告警为 0。
+- **fmt 事故与处置**：为对齐风格跑了 `cargo fmt --all`，结果整仓 **131 个文件**被重排
+  （仓库仍未 `fmt`-clean，见 LUM-1138）。处置：`git checkout --` 撤回全部非本轮文件，
+  再手工回退 `interactive.rs` 里 6 处非本轮格式化 hunk，最终 diff 只含本轮 7 个文件 + 2 个新文件。
+  **教训**：该仓在 LUM-1138 结清前不要跑 `cargo fmt --all`，只对新文件/新行做局部格式化。
+- **磁盘事故与处置**：`cargo test --workspace` 链接阶段写满根分区（仅剩 13M，
+  `couldn't create a temp dir: No space left on device`）。处置：确认 LUM-1147 已结束、
+  扫 `/proc/*/environ` 无进程引用后，删除 `LUM-1147` 遗留的
+  `/tmp/pi-rust-target-lum1147`（2.6G）、`-clippy`（300M）与 `/tmp/fmtbase`（103M），
+  释放约 3G；LUM-1148/1149 与本轮 target 未触碰。随后按 crate 分批判定式复跑，
+  未再触发 `--workspace` 全量链接。
+
+### 五、给后续轮的口径 / 遗留
+
+- **`errorMessage` 上提是解锁最多的一条**：一旦 `pi-protocol::AssistantMessage` 带上
+  `error_message`（与 `provider`），`is_context_overflow` 的 `Option<&str>` 形参即可收敛为
+  直接吃 `&AssistantMessage`，第 1 类「报错→压缩→重试」与 session 级 `auto_retry_start/end`
+  才都有落点。改协议属高风险、需同时改 wire 类型（`pi-protocol/tests/wire_types.rs`）。
+- **溢出分类器的唯一来源是 `pi-ai::overflow`**：后续任何重试/压缩/提示路径要判溢出，都应调它，
+  不要各写一份文案表（LUM-1146/1147 的 retry 撞车就是教训）。
+- **`pi-ai` 的 `regex`**：本轮的 25+3 条文案表复用 `pi-agent-core` 已引入的同一 crate，
+  lockfile 只多一行依赖声明。`rust-wasm.yml` 的 `.wasm < 500 KB` 断言仍**未实测**
+  （环境无 `wasm-pack`），与 LUM-1147 记下的风险同源；若 CI stage 6 超限，最便宜的修法是
+  把两条表退回显式子串匹配（`overflow.rs` 的 `OVERFLOW_PATTERNS` 已按可平滑替换的形状组织）。
+
+### 六、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试**~~（LUM-1146/1147 收口）。
+2. **P3 渲染保真**：语法高亮（LUM-1149）已收口；只剩 **OSC-8 hyperlink**（落点 `app.rs`，等无写方）。
+3. **P2 `ToolCallDelta` 重复建块**（落点 `app.rs`，与第 2 项串行）。
+4. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在（本轮**新增行零漂移**，
+   但撤回事故说明该门未结清前不能跑 `--all`）。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：~~`utils/overflow.ts`~~ **本轮收口**；`utils/estimate.ts` 复核确认
+   已落在 `pi-coding-agent/src/compaction.rs`（`estimate_tokens` / `estimate_message_tokens` /
+   `estimate_context_tokens` / `calculate_context_tokens` / `context_tokens_with_trailing`），
+   可结案；剩 bedrock / mistral / azure / vertex / oauth / images。
+7. **本轮新增**：`pi-coding-agent` read/write 工具输出接入 `highlight_code` +
+   `theme.ts::getLanguageFromPath`（LUM-1149 记入，消费方待接）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。开工时槽位 3/3 满
+（LUM-1148 `work/lum-1148`、LUM-1149 `work/lum-1149` 在飞），**未派发新子任务**，
+本轮本人只写 `pi-ai`（新增 `overflow.rs` + `tests/overflow.rs`，动 `lib.rs` / `Cargo.toml`）、
+`pi-agent-core/src/retry.rs`、`pi-tui/src/app.rs`、`pi-coding-agent/src/interactive.rs` 与本文档。
+
+环境记录：本轮使用检出内默认 `pi-rust/target`（无独立 `/tmp` target）；释放的是**已结束**的
+LUM-1147 的 `/tmp` target 目录。
