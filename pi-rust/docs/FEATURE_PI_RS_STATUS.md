@@ -6215,3 +6215,173 @@ frontier 重排（`pi.exec` 已从「缺失 API」中划掉）：
 `docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写；LUM-1104 / 1105 / 1106 / 1107 是同一
 autopilot 触发串出来的四路协调轮，frontier 高度重叠，**建议合并为一路**，否则每轮都在重估
 同一批候选（本轮除 `pi.exec` 外仍是重估，区别只在于顺手把空槽变成了跨 crate 的独立交付）。
+
+## LUM-1109 round — 核验 `feature/pi.rs` + 合入 LUM-1083（rquickjs double free vendor 修复）+ 空槽派发 `node:child_process`
+
+（autopilot 协调轮；开工后把 LUM-1109 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 2`（含本 run；LUM-1083 的 run 刚在
+  14:37Z 收工进 `in_review`，LUM-1108 的 run 在跑）→ **有 1 个空槽**（上限 3）。
+- `git fetch --all` 后逐分支核对「已提交但未合入 `origin/feature/pi.rs`」：除历史 lineage 外，
+  **唯一有实质未合并内容的是 `origin/work/lum-1083`（commit `eb50c5e6c`）** —— 它修掉了
+  `pi --rpc` 的 rquickjs double free，但它自己的 run 明确写了「未动 `main`/`feature/pi.rs`」，
+  即上一轮 LUM-1098 的「根因收敛并放行」并没有把修复送进集成分支。这正是本轮要收的口子。
+- 其余 `agent/devbox1/*` ahead 分支都是早已等价合入的旧 lineage（Stage 0/1/2 脚手架、
+  LUM-1019/LUM-1028 文档轮）或只差文档次序，无新内容。
+
+### 二、本轮切片：合入 LUM-1083 的 vendor 修复
+
+`origin/work/lum-1083` = `eb50c5e6c`，内容：
+
+| File | Change |
+|------|--------|
+| `pi-rust/vendor/rquickjs-core/`（新增） | `rquickjs-core 0.9.0` 源码副本，与上游唯一差异是 `src/context/async/future.rs` 的 `WithFuture::poll` 双重释放修复（`let old = mem::replace(&mut this.lock_state, LockState::Initial); drop(old);`，照搬上游 0.12.0 写法）+ `PATCH.md`（原因 / 版本表 / 移除方式） |
+| `pi-rust/Cargo.toml` | `exclude = ["vendor/rquickjs-core"]`（第三方源码不进 workspace 的 fmt/clippy/test）+ `[patch.crates-io] rquickjs-core = { path = "vendor/rquickjs-core" }` |
+| `pi-rust/Cargo.lock` | `rquickjs-core` 由 registry 源改为 path 源 |
+| `pi-rust/crates/pi-extensions/tests/rquickjs_contention.rs`（新增） | 并发 `async_with!` 回归（未修复时约半数运行 SIGSEGV/abort） |
+
+为什么是 vendor 补丁而不是升级：0.8.1–0.11.0 全部同 bug，0.12+ 把 `async_with!` 换成
+`AsyncFnOnce` 需要 Rust 1.85，而本 workspace 声明 `rust-version = "1.75"`。这条取舍由
+LUM-1083 论证并在本轮原样接受（`PATCH.md` 也在仓库里，不靠评论记忆）。
+
+### 三、验证（在合并树 `work/lum-1109` 上复跑）
+
+```
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p pi-extensions --offline
+  lib 0 + e2e 10 + host 33 + loader 3 + node_builtins 5 + pi_exec 6 + rquickjs_contention 1 = 58 passed
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p pi-coding-agent --test rpc --offline
+  9 passed（LUM-1083 修复的正是这条链路上的随机崩溃）
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --workspace --offline
+  **969 passed / 0 failed**（含 doc-tests；这是本 lineage 第一次在合并树上跑全量 workspace）
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished，0 warnings
+$ cargo fmt --all -- --check
+  537 处 `Diff in` —— 全是分支既有问题（rustfmt 版本漂移），本轮新增的
+  `tests/rquickjs_contention.rs` **不在** diff 列表里，vendor 目录已 exclude
+```
+
+磁盘：开工 15G 可用（69%），不再复现前几轮的共享盘 ENOSPC；本轮 workspace `target` 用
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0` 构建。**没有**删任何别人的 worktree / target。
+
+### 四、合并与推送
+
+- 工作分支 `work/lum-1109`，起点 `origin/feature/pi.rs` @ `40abb452d`（LUM-1107 轮）。
+- `git merge --no-edit eb50c5e6c` → 合并提交，**零冲突**（LUM-1083 只碰 `Cargo.toml` /
+  `Cargo.lock` / `vendor/` / 新测试文件，与 LUM-1107 的改动不重叠）。
+- 非 force 合入 `feature/pi.rs` 并推送。
+
+### 五、frontier（本轮更新）+ 空槽派发
+
+本轮把空槽用于 **frontier 里 plugin 生态最大缺口**：派发 **LUM-1110**
+（`[Stage 28] pi-extensions: node:child_process 虚拟模块`，parent LUM-981，`--status todo`
+→ 即刻起跑）。它只碰 `pi-extensions`（`host.rs` / shim / `tests/node_builtins.rs` /
+`docs/NODE_BUILTINS.md`），与在途 LUM-1108（`pi-coding-agent/tests`）零文件重叠。
+
+frontier 重排：
+
+1. **P1 `pi.exec` 的 `signal` + 超时放开**：要真取消得先有 `AbortSignal`/`AbortController`
+   （shim 纯 JS 可做）或给宿主加 `cancelled` 通道；`node:child_process` 轮会顺带把「子进程
+   生命周期 + 宿主 deadline」这条语义定下来，之后再做这条更省事。
+2. **P1 `.wasm` 扩展宿主**：`pi-extensions` 仍只有 QuickJS(JS) 宿主；Stage 级、改 `host.rs`
+   → 本轮已由 LUM-1110 占用该文件，需排队。
+3. **P2 编辑器剩余键位**：`ctrl+b` / `ctrl+f`（`cursorLeft/Right` 别名）仍是唯一无歧义项。
+4. **P2 `pi-tui` 渲染 API 样式化**（`Span` + 主题消费方）：Stage 级。
+5. **P3 `node:zlib` / `node:readline` / `node:module`**：各是单点，但要动 `host.rs` 的 op 表
+   （zlib 还要新依赖 `flate2`/`miniz_oxide`）→ 与 LUM-1110 排队。
+6. **P3 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+7. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 不写猜测值）。
+
+并发建议（维持）：上限 3 路；`pi-extensions/src/host.rs` 与
+`docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写；LUM-1104 → 1110 这一串 autopilot 轮里，
+**只有 LUM-1107（`pi.exec`）、LUM-1109（合入 LUM-1083）、LUM-1110（`node:child_process`）
+产出了新的可合并内容**，其余都是同一批候选的重复核验 —— 仍建议人工把重复轮合流。
+
+## LUM-1111 round — pi-tui 编辑器 `Ctrl+B` / `Ctrl+F` 落地 + `feature/pi.rs` 核验 + 空槽派发主题消费层
+
+（autopilot 协调轮；开工后把 LUM-1111 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 2`（含本 run；在跑的是 LUM-1110
+  `node:child_process`）→ **有 1 个空槽**（上限 3）。
+- `git fetch --all` 后逐分支核对「已提交但未合入 `origin/feature/pi.rs`」：`origin/feature/pi.rs`
+  = `8ed5d936d`，`work/lum-1108`、`work/lum-1109`、`work/lum-1110` 均已是它的祖先/等同；
+  其余 ahead 的 `agent/devbox1/*` 仍是早已等价合入的旧 lineage。**本轮没有待合并的历史欠账**
+  （上一轮的 LUM-1083 vendor 修复已在 `8ed5d936d` 里，`eb50c5e6c` 与 `1969f2fc6` 都是它的祖先）。
+- 于是本轮把「空槽 + 自身实现」都用于 frontier 上**唯一既无歧义、又不与 LUM-1110 抢
+  `pi-extensions/src/host.rs` 的切片**。
+
+### 二、本轮切片：`Ctrl+B` / `Ctrl+F`（`tui.editor.cursorLeft` / `cursorRight`）
+
+frontier 里长期挂着的 P2「编辑器剩余键位」中，`ctrl+b` / `ctrl+f` 是唯一无歧义项
+（`ctrl+d` 的 EOF vs forward-delete 语义、`jumpForward` / `jumpBackward` 上游只登记键位
+没有实现，都需要先定语义）。上游默认值在 `packages/tui/src/keybindings.ts:82`：
+
+```ts
+"tui.editor.cursorLeft":  { defaultKeys: ["left",  "ctrl+b"] },
+"tui.editor.cursorRight": { defaultKeys: ["right", "ctrl+f"] },
+```
+
+改动（只碰 `pi-tui`）：
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/editor.rs` | 控制字符分支补 `b` / `B` → `move_left()`、`f` / `F` → `move_right()`（与 `Ctrl+A`/`Ctrl+E` 的 emacs 别名同组），模块文档同步；新增 3 个单测（单字符移动、两端 no-op、多字节字符整字跨越） |
+| `crates/pi-tui/tests/cursor_chords.rs`（新增） | 5 个集成测试：公共 `Editor` / `Prompt` 事件面 + **crossterm 转换**（终端发 `0x02`/`0x06` → `Char('b'|'f') + CONTROL`）、缓冲区两端的 no-op、多字节按字符边界跨越、`Prompt` 只 `Changed` 不 `Submit` |
+
+刻意与相邻的 `Alt+B` / `Alt+F`（按词移动，`tui.editor.cursorWordLeft` / `cursorWordRight`）
+区分：`Ctrl+B`/`Ctrl+F` 只走**一个字符**，这是上游 `defaultKeys` 的直接含义，单测里以
+`hello` 上 `4 → 3 → 4`（而非 `0`）钉住。
+
+### 三、验证
+
+```
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p pi-tui --offline
+  lib 153 + cursor_chords 5 + e2e 9 + selector_search 7 + snapshot 9 + theme 9 + undo 7
+  + word_navigation 7 + doctest 1 = **207 passed / 0 failed**
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p pi-tui --all-targets --offline -- -D warnings
+  Finished，0 warnings
+$ cargo fmt -p pi-tui -- --check
+  干净（本 crate 不在 LUM-1109 记录的 537 处既有 rustfmt 漂移里）
+```
+
+改动只落在一个 crate 且不涉及依赖变更，因此没有重跑全量 workspace（`8ed5d936d` 上的
+969 passed 记录仍然有效）；`pi-tui` 是 `pi-coding-agent` 的依赖，重建时它随本 crate 一起编译。
+
+### 四、合并与推送
+
+工作分支 `work/lum-1111`（起点 `origin/feature/pi.rs` @ `8ed5d936d`）→ 非 force 合入
+`feature/pi.rs` 并推送；`work/lum-1111` 同步留在远端。
+
+### 五、frontier（本轮更新）+ 空槽派发
+
+空槽用于 **LUM-1112**（`[Stage 29] pi-tui: 主题消费层`，parent LUM-981，`--status todo`
+→ 即刻起跑）：新增主题→组件的样式适配器（对齐上游 `SelectListTheme` /
+`SettingsListTheme` 的 `selectedText` / `description` / `noMatch` / `scrollInfo`）并让
+`Selector` / `StatusBar` / `MessageView` 真正消费 `Theme`。它落 `pi-tui` 的**新文件 +
+渲染函数**，明确避开 `editor.rs` / `word_navigation.rs`（本轮刚改）与
+`pi-extensions/**`（LUM-1110 在跑），是本轮唯一能安全并行且上下游都用得到的缺口
+（现在 `pi-tui` 里除 `theme.rs` 自身外**没有任何组件消费主题**，`grep -rn Theme src/*.rs`
+只命中 `lib.rs` 的重导出）。
+
+frontier 重排（`ctrl+b`/`ctrl+f` 已划掉）：
+
+1. **P2 主题消费层** → 本轮派发 LUM-1112（Stage 级，`pi-tui`）。
+2. **P1 `pi.exec` 的 `signal` + 超时放开**：仍要等 LUM-1110 把「子进程生命周期 + 宿主
+   deadline」语义定下来（同文件 `host.rs`）。
+3. **P1 `.wasm` 扩展宿主**：`pi-extensions` 仍只有 QuickJS(JS) 宿主；Stage 级、改 `host.rs`
+   → 与 LUM-1110 排队。
+4. **P2 `pi-tui` markdown 渲染**（上游 1015 行 `components/markdown.ts`，Rust 侧目前
+   完全缺失；需要先定「自研 vs `pulldown-cmark` + 版本锁定」）：Stage 级，LUM-1112 之后。
+5. **P2 剩余键位**：`ctrl+d` 语义、`jumpForward` / `jumpBackward` 需先定语义，不做机械移植。
+6. **P3 `node:zlib` / `node:readline` / `node:module`**：动 `host.rs` 的 op 表 → 与 LUM-1110 排队。
+7. **P3 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+8. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 不写猜测值）。
+
+并发建议（维持）：上限 3 路；`pi-extensions/src/host.rs` 与
+`docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。LUM-1104 → 1111 这一串 autopilot 轮里，
+真正产出新可合并内容的只有 LUM-1107（`pi.exec`）、LUM-1109（合入 LUM-1083）、
+LUM-1110（`node:child_process`）、LUM-1111（本轮 `Ctrl+B`/`Ctrl+F`），
+**仍建议人工把这串协调轮合流**，否则每轮都在重估同一批候选。

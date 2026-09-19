@@ -9,6 +9,8 @@
 
 use std::fmt::Write as _;
 
+use crate::styles::SelectListStyles;
+
 /// Logical role — drives the visual prefix and the message-view
 /// rendering. Mirrors the `user` / `assistant` / `tool` distinction the
 /// TS message components make.
@@ -221,6 +223,21 @@ impl MessageView {
     /// prepending a one-character role prefix to each line. The TUI
     /// slices the returned vector into the visible viewport.
     pub fn render_lines(&self, width: u16) -> Vec<String> {
+        self.render_lines_impl(width, None)
+    }
+
+    /// Themed variant of [`MessageView::render_lines`].
+    ///
+    /// The visible text is identical to the plain render; the user body uses
+    /// `userMessageText` (`user-message.ts:48`), the assistant body `text`, the
+    /// tool body `toolOutput` (`tool-execution.ts:165`), the user/tool prefixes
+    /// `accent`/`muted`, and the streaming caret `dim`. Markdown rendering and
+    /// its `MarkdownTheme` are out of scope for this slice.
+    pub fn render_lines_themed(&self, width: u16, styles: &SelectListStyles<'_>) -> Vec<String> {
+        self.render_lines_impl(width, Some(styles))
+    }
+
+    fn render_lines_impl(&self, width: u16, styles: Option<&SelectListStyles<'_>>) -> Vec<String> {
         let prefix_width = 2usize; // "> " or "* "
         let text_width = (width as usize).saturating_sub(prefix_width).max(1);
 
@@ -231,21 +248,38 @@ impl MessageView {
                 Role::Assistant => ("  ", item.text.clone()),
                 Role::Tool => ("* ", item.text.clone()),
             };
+            let styled_prefix = match styles {
+                Some(styles) => match item.role {
+                    Role::User => styles.accent(prefix),
+                    Role::Assistant => prefix.to_string(),
+                    Role::Tool => styles.muted(prefix),
+                },
+                None => prefix.to_string(),
+            };
             let wrapped = wrap_text(&body, text_width);
             if wrapped.is_empty() {
-                out.push(prefix.to_string());
+                out.push(styled_prefix);
                 continue;
             }
             for (idx, line) in wrapped.iter().enumerate() {
-                if idx == 0 {
-                    let tail = if item.role == Role::Assistant && item.streaming {
-                        " ▍"
-                    } else {
-                        ""
-                    };
-                    out.push(format!("{prefix}{line}{tail}"));
+                let tail = if idx == 0 && item.role == Role::Assistant && item.streaming {
+                    " ▍"
                 } else {
-                    out.push(format!("{prefix}{line}"));
+                    ""
+                };
+                let styled_tail = match styles {
+                    Some(styles) if !tail.is_empty() => styles.dim(tail),
+                    _ => tail.to_string(),
+                };
+                if let Some(styles) = styles {
+                    let styled_body = match item.role {
+                        Role::User => styles.user_message_text(line),
+                        Role::Assistant => styles.text(line),
+                        Role::Tool => styles.tool_output(line),
+                    };
+                    out.push(format!("{styled_prefix}{styled_body}{styled_tail}"));
+                } else {
+                    out.push(format!("{prefix}{line}{tail}"));
                 }
             }
         }

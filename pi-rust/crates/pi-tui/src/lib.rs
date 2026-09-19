@@ -19,6 +19,7 @@ pub mod message;
 pub mod prompt;
 pub mod selector;
 pub mod status;
+pub mod styles;
 pub mod theme;
 pub mod undo_stack;
 pub mod word_navigation;
@@ -32,6 +33,7 @@ pub use message::{MessageItem, MessageView};
 pub use prompt::{Prompt, PromptAction};
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use status::{StatusBar, StatusData};
+pub use styles::SelectListStyles;
 pub use theme::{
     available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,
     default_theme_name, is_light_theme, load_theme, load_theme_from_path, parse_auto_theme_setting,
