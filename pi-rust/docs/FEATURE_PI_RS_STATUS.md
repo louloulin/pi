@@ -2341,3 +2341,54 @@ $ cargo test    --workspace                        # 351 passed / 0 failed（347
 **Stage 16 status after this round:** telemetry 已接入 agent loop（run / turn /
 request / tool 四层 span 树），`pi-agent-core` 成为第一个 emit span 的核心
 crate；exporter、CLI 开关与上游剩余 provider 协议仍未落地。
+
+## LUM-1070 round — 协调盘点：Stage 17 进行中，3 槽已满，跳过派发
+
+本轮（autopilot，2026-09-19 04:40Z）只做协调与复检，**没有新建/派发子任务，也
+没有代码改动**：`feature/pi.rs` 已由刚完成的 LUM-1055 轮推到 `b5f1c9271`，
+Stage 17 的两个任务正在跑，并发配额（3）已满。
+
+### 复检（`b5f1c9271`，native）
+
+```
+$ cargo test   --workspace                        # 370 passed / 0 failed
+$ cargo clippy --workspace --all-targets -- -D warnings   # 0 warning
+```
+
+370 vs LUM-1063 记录里的 351：增量来自 LUM-1055 的 Gemini 价格字段与
+Stage 15 provider 注册表用例。
+
+### 并发盘点（依据各 workdir 的 `.gc_meta.json` `completed_at`）
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| LUM-1055 Gemini pricing | **completed**（`b5f1c9271` 已合入） | Stage 13 收尾 |
+| LUM-1061 telemetry 复检 | completed | 协调轮，重复实现已丢弃，未 push |
+| LUM-1062 Stage 15 | completed | `751bbd6e4` |
+| LUM-1063 Stage 16 | completed | `c58b63db3` |
+| LUM-1064 CLI 真实工具执行器 | **running** | `pi-coding-agent` 三模式接线 |
+| LUM-1065 `pi-chord` core | **running** | Stage 17 |
+| LUM-1066 `pi-evals` | **running** | Stage 17 |
+
+正在运行的任务恰为 3 个，达到「最多 3 个同时运行」的上限。因此本轮按
+既有 backpressure 策略**跳过**新建子任务：Stage 18（LUM-1067）/ Stage 19
+（LUM-1068 / LUM-1069）继续留在 backlog，由 stage-17 barrier（Stage 17 全部
+到达终态时唤醒 LUM-981 的 assignee）逐级 promote。
+
+### 已完成但未合入 `feature/pi.rs` 的分支
+
+无。`origin/feature/pi.rs` = `b5f1c9271`，包含 Stage 1–16 的全部交付物。以下
+远端分支是**旧拓扑/重复实现**，内容已在 trunk，不需要再合：
+`agent/devbox1/e3a55b14fe9d`（LUM-1055 旧基线版本）、`agent/devbox1/lum-1023`
+（Stage 3，已在 `pi-extensions` 落地）、`agent/devbox1/lum-1058`（Stage 13
+telemetry，已是 trunk 的 `969623ba7`）、`agent/devbox1/lum-1020`（文档轮）。
+
+### 环境记录
+
+复检时 overlay 文件系统一度 100% 满（ENOSPC 导致 `cargo test` 首次失败），
+清理了两个**已 completed** 轮的 `target/` 构建缓存（LUM-1061 / LUM-1062，共约
+13.8 GB）后复检通过。`target/` 是可再生构建产物，不影响任何源码或 git 历史。
+
+**Stage 16 status after this round:** 不变（telemetry 已接入 agent loop）。
+Stage 17 落地后，下一步是 LUM-1067（chord services）→ LUM-1068/1069
+（server/client）。
