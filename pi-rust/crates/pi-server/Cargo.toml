@@ -1,0 +1,29 @@
+[package]
+name = "pi-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Routed Session server: handshake, protocol negotiation, request dispatch and byte transports (Rust port of packages/server)."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+pi-chord = { path = "../pi-chord" }
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+futures.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+tracing.workspace = true
+
+[dev-dependencies]
+# The offline conformance tests build an in-memory loopback transport and a
+# scripted [`ServerHost`](testing::TestServerHost); no extra dependency is
+# needed beyond the workspace set above.

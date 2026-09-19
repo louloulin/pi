@@ -11,4 +11,6 @@ pub use pi_extensions as extensions;
 #[cfg(not(target_arch = "wasm32"))]
 pub use pi_evals as evals;
 pub use pi_protocol as protocol;
+#[cfg(not(target_arch = "wasm32"))]
+pub use pi_server as server;
 pub use pi_telemetry as telemetry;

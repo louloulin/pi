@@ -3131,6 +3131,103 @@ coordinator 盘点时按 barrier 放行（本轮不主动派发，槽位仍满�
    两个模式）。
 5. `wasm32-unknown-unknown` 目标在当前环境仍未安装，本轮只做 native 验证。
 
+## LUM-1068 round — Stage 19: `pi-server`（连接 / 握手 / 路由 / 传输）
+
+对齐 [`packages/server/src`](../../packages/server/src)（约 1.97k 行 TS），
+把 agent 会话以「服务器」形态暴露：握手 + 协议版本协商、请求路由、
+会话路由、以及在 stdio / unix socket / TCP 上的传输层。这是 LUM-981 server 侧
+的最后一块空白。
+
+### 关键发现：`pi-protocol` 缺 RPC 线格式层
+
+任务书假设 Rust `pi-protocol` 已经承载协议类型，实际检查后发现它只有
+`pi-protocol` 的**应用层**消息类型（`Message` / `Content` / `SessionEntry` …），
+`packages/protocol` 里的 RPC 线格式（`rpc.ts` + `cbor/*`）在 Rust 侧并不存在。
+按「类型必须复用、不得平行重定义」的约束，先补协议层再建 server：
+
+| 新增（`pi-protocol`） | 上游 | 内容 |
+| --- | --- | --- |
+| `src/rpc/protocol.rs` | `src/rpc.ts` | `ClientMessage` / `ServerMessage` / `RpcTarget` / `ProtocolError` / `PROTOCOL_VERSION` |
+| `src/rpc/framing.rs` | `src/cbor/framing.ts` | 4 字节大端长度前缀、`FrameDecoder` |
+| `src/rpc/cbor.rs` | `src/cbor/{encode,decode}.ts` | 手写 RFC 8949 子集（长度确定的 map/array/text/int/float/bool/null） |
+| `src/rpc/codec.rs` | `src/cbor/*` 的严格校验 | 逐 key 校验 + `ClientMessageDecoder` / `ServerMessageDecoder` |
+
+环境无 CBOR crate 缓存（`ciborium` / `serde_cbor` 都不可用），故 CBOR 编解码为
+手写，只覆盖上游实际用到的 JSON 值域；byte string / tag / 不定长一律拒绝。
+
+### 交付
+
+| 文件 | 内容 |
+| --- | --- |
+| `crates/pi-server/src/connection.rs` | `ByteConnection`（`closed` / `send` / `close`）、`ByteConnectionHandler`、acceptor 闭包、`ConnectionStage` |
+| `crates/pi-server/src/listener.rs` | `ServerListener` trait（`start` / `close`） |
+| `crates/pi-server/src/errors.rs` | `ServerErrorCode`（含 `internal_error`）、`ServerError` → `ProtocolError` 映射 |
+| `crates/pi-server/src/types.rs` | host / presentation / attachment 契约、`ServerOptions`、连接数与错误观察者、`target_session` |
+| `crates/pi-server/src/session_router.rs` | 每客户端 attachment 路由、会话 acquire/release、终止广播 |
+| `crates/pi-server/src/server.rs` | `Server`：握手 / 版本协商 / 超时、请求派发、取消、订阅、生命周期 |
+| `crates/pi-server/src/transports/{memory,tcp,unix,stdio,stream}.rs` | 四种传输 + 共享流连接实现 |
+| `crates/pi-server/src/testing/{host,client}.rs` | `TestServerHost` / `TestHarness`（含 gate 与故障注入）、`ProtocolTestClient` |
+| `crates/pi-server/tests/conformance.rs` | 18 个协议一致性用例 |
+| `crates/pi-server/tests/transports.rs` | TCP（`127.0.0.1:0`）与 unix socket 的端到端用例 |
+| `crates/pi-server/README.md` | 映射表、传输说明、偏差清单 |
+| `crates/pi-mono` | native-only 依赖并 `pub use pi_server as server` |
+
+### 架构要点
+
+* **同步派发 + 异步传输边界。** fixture 来自 `pi-chord`（服务图完全同步），
+  所以服务调用跑在 `spawn_blocking`，socket 读写仍是 async Tokio 任务；
+  每条连接一个出站队列 + 一个写任务，`send` 不阻塞读循环。
+* **target 二选一。** 无 `attachment_id` 的请求路由到 server 自身服务；
+  带 `attachment_id` 的走 `SessionRouter` 到具体会话。attach 本身也是一次
+  server 服务调用（`pi.session-management.attach` / `.detach`），
+  服务端回 `Attachment` 消息带会话 target。
+* **取消无法打断阻塞调用。** `Cancel` 立即置位 `AbortSignal` 并释放 id，
+  调用返回后再观察 abort，返回 `cancelled` 而不是结果。
+* **订阅**以 `pi-chord` provider listener 形式安装，向前端推 `ServiceUpdate`；
+  不可序列化的 provider update 走 `ServiceStateEncoder` 的 `to_json()`。
+### 验证
+
+```
+$ cargo check  --workspace --all-targets --offline                    # 0 errors
+$ cargo clippy --workspace --all-targets --offline -- -D warnings     # 0 warnings
+$ cargo test   --workspace --offline                                  # 579 passed / 0 failed
+$ cargo test   -p pi-server --offline                                 # 1 + 18 + 2 + 1 doctest
+$ cargo test   -p pi-protocol --offline                               # 14 + 10 + doctests
+```
+
+一致性用例覆盖：握手接受 / 版本不符 / 首个消息必须是 hello / hello 只能一次 /
+握手超时 / 请求往返 / 缺会话 → `session_not_found` / 服务器不符 → `wrong_server` /
+非法服务调用 → `invalid_request` / 未知 server 服务 → `internal_error` /
+重复请求 id → `invalid_request` / 取消 → `cancelled` / detach 只影响本客户端 /
+断开释放 attachment / 会话终止广播 `attachment(None)` / 连接数观察者 /
+非法 server id / 分帧重组。传输用例在真实 `127.0.0.1:0` 与临时 unix socket 上
+重跑握手 + attach + 会话请求。
+
+### 与上游的偏差
+
+1. **多出三种传输。** 上游 `packages/server` 只有 unix listener；本移植按任务要求
+   补了 in-memory（对应上游 `testing/` loopback）、TCP、stdio。
+2. **握手不挂在 promise 后面。** `finish_handshake` 同步执行；`Handshaking` 阶段与
+   超时仍然生效。
+3. **Unix 生命周期简化。** 只在文件系统项确实是 socket 时清理陈旧路径，
+   未复刻上游的 hash/link/inode 协议。
+4. **`ProtocolError` 是共享的纯数据结构**（来自 `pi-protocol`），服务器通过
+   `ServerError::to_protocol_error` 构造失败，而不是自带的 `ProtocolError` 构造器。
+5. **`SessionMetadata` 定义在本 crate**（`id()` + 可选 parent），
+   因为 `pi-agent-core` 没有对应 trait；测试 host 为 `SessionId` 实现它。
+
+### 已知限制
+
+1. 服务派发在 `spawn_blocking` 上不可中断：取消只能丢弃结果并回 `cancelled`，
+   真正在跑的用户 handler 不会被强行终止。
+2. stdio 传输无法关闭继承来的标准流，`close` 只 abort 读写任务。
+3. 未接 `pi-client`（LUM-1069）；本 crate 只提供 server 侧与测试客户端。
+
+### 并发与派发
+
+本轮开工时 `multica daemon status` 报 3 槽已满（LUM-1067 + LUM-1074 + 本 run），
+未新建子任务，直接自己实现；提交从 `origin/feature/pi.rs` 的 `13b80b2b1`
+切出分支后 push 到 `feature/pi.rs`。
 ## LUM-1075 round — Stage 18 收口 + Stage 19 放行（`pi-server` / `pi-client`）
 
 本轮（autopilot，2026-09-19 06:00Z）盘点 frontier 后，把已经落地但还挂着
