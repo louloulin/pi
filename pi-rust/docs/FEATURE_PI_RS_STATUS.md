@@ -1583,3 +1583,106 @@ $ cargo build --workspace --all-targets                         # clean (cached,
 (cheapest end-to-end check; full `cargo check / clippy / test`
 match the LUM-1040 prior results: 0 errors / 0 warnings / 126/126
 tests.)
+
+## LUM-1048 round — Stage 7 revision + Stage 8 + Stage 9 merged into `feature/pi.rs`
+
+LUM-1048 (2026-09-19 09:20 Asia/Shanghai, autopilot template re-run)
+broke the "verify + doc" loop for good: three completed-but-unmerged
+Stage branches were sitting on disk with their tasks already
+`in_review`, so this round integrated all three into `feature/pi.rs`
+and pushed.
+
+### Why "skip" was the wrong answer this round
+
+| Stage | Task | Branch | State found |
+|-------|------|--------|-------------|
+| 7 (rev) | LUM-1042 | `agent/devbox1/8a8831a92542` | 1664-LOC tested `AnthropicProvider` + `tests/anthropic.rs` + `fixtures/anthropic/*` + `anthropic_faux` e2e — **unmerged** |
+| 8 | LUM-1044 | `origin/agent/devbox1/lum-1044` (`4776e91c1`) | `print_mode.rs` (875) + `file_processor.rs` (561) + 13 tests, replacing the `print mode is a stub` — **unmerged** |
+| 9 | LUM-1043 | `agent/devbox1/7046ef4e9915` (`25bf64d36`) | `find` / `grep` / `ls` + `defaults.rs` + `mod_ignore.rs` + 11 tests — **unmerged** |
+
+Adding more parallel sub-issues on top of three finished-but-dangling
+branches would have produced zero forward motion. The bottleneck was
+integration, not ideation.
+
+### Integration details
+
+1. **Stage 7 revision (LUM-1042).** `feature/pi.rs` already carried an
+   *earlier, untested* Stage 7 (`b48b235cc`, 1342 LOC, no tests). The
+   LUM-1042 branch is the same adapter taken through the full acceptance
+   criteria (SSE fixtures under `fixtures/anthropic/`, `tests/anthropic.rs`
+   with 10 cases, `anthropic_faux.rs` agent-loop integration test, model
+   catalog loader `register_provider_json`, wasm feature gate). Only two
+   merge conflicts (`providers/anthropic.rs`, `examples/anthropic_stream.rs`);
+   both resolved in favour of the tested version. The three superseded flat
+   fixtures (`anthropic_{text,thinking,tool_use}.sse`) were deleted.
+2. **Stage 8 (LUM-1044).** One conflict in `main.rs`: kept `feature/pi.rs`'s
+   3-model Claude catalog while adopting Stage 8's `ExitCode`-based
+   `run_print_mode` dispatch.
+3. **Stage 9 (LUM-1043).** Its branch was cut from `main` with a flattened
+   `pi-rust` snapshot, so a git merge would have reverted Stages 7/8.
+   Applied file-by-file instead: the five new tool modules + `tools/mod.rs`
+   (7-tool bundle, `SandboxViolation` / `InvalidArgument` error variants) +
+   `tests/tools.rs` + `examples/manual_check.rs`; workspace `regex = "1"`
+   and `pi-coding-agent` `walkdir` / `regex` deps. The Stage 8 `futures`
+   dep and `tempfile` dev-dep were preserved.
+
+### Verification (native)
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo test     --workspace                                       # 197 / 197 pass
+```
+
+197 tests vs 126 at LUM-1039 — the delta is +10 `pi-ai` anthropic,
++6 `pi-agent-core` anthropic_faux, +13 `pi-coding-agent` print_mode,
++9 `pi-coding-agent` navigation tools, plus the models-catalog cases.
+
+End-to-end CLI spot checks on the merged tree:
+
+```
+$ target/debug/pi --print "hello"
+(faux) hello
+
+$ target/debug/pi --print "hello" --output-format json           # valid JSON, usage + stop_reason
+$ target/debug/pi --print "hello" --output-format json-events    # valid NDJSON
+$ cargo run -p pi-coding-agent --example manual_check -- <dir>   # find / grep / ls vs shell parity
+```
+
+The `manual_check` example confirms `find **/*.rs`, `grep '^name' Cargo.toml`
+and `ls detail/all` behave like their shell equivalents (relative paths,
+`file:line:content`, directory-first ordering, hidden-file filtering).
+
+### Disk housekeeping
+
+The overlay was at 94% (3.0 GB free) after the builds. Removing the
+`target/` directories of the three now-merged worktrees
+(`lum-1042`, `lum-1043`, `lum-1044`) plus the stale `lum-1040`
+feature worktree freed ~12 GB → **15 GB free**, enough headroom for the
+next three concurrent builds.
+
+### LUM-981 plan — next three stages
+
+LUM-981's two acceptance criteria ("基于rust实现pi" / "兼容pi的插件生态")
+remain met, and the follow-up debt is now concrete rather than
+protocol-reconciliation-shaped. Three independent workstreams, planned as
+Stage 10–12 sub-issues (dispatched one slot at a time, respecting the
+3-concurrent cap):
+
+1. **Stage 10 — `--rpc` mode.** `main.rs` still prints
+   `rpc mode is a Stage 5 deliverable`. Port `packages/server`'s JSON-RPC
+   surface (`rpc-entry.ts` + `connection.ts` / `session-router.ts`) to a
+   stdio JSON-RPC loop over the existing `Agent` facade, with the
+   print-mode NDJSON event vocabulary reused for server→client events.
+2. **Stage 11 — Google Gemini provider.** Only faux / OpenAI Chat
+   Completions / Anthropic Messages exist today; `packages/ai/src/providers/google.ts`
+   is the next highest-traffic provider. Reuses `pi-ai`'s SSE parser and the
+   Stage 7 fixture/test shape.
+3. **Stage 12 — print mode on the SQLite session backend.** LUM-1044
+   deliberately wrote JSONL because Stage 5's `pi-session` landed later;
+   switching `PrintModeOptions` to the `pi-session` reader/writer removes the
+   last duplicate session format and makes `--continue` / `--session`
+   consistent with `/resume`.
+
+All three are additive and touch disjoint files, so they can run in
+parallel within the cap. `feature/pi.rs` is the integration target for each.

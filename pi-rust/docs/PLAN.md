@@ -142,3 +142,33 @@ Stages 1–3 are independent and run as three parallel sub-tasks:
 | Provider conformance | Recorded SSE fixtures in `crates/pi-ai/fixtures/` |
 | Extension conformance | The existing TS extension examples loaded via `pi-extensions` |
 | WASM target | `cargo build -p pi-agent-core --target wasm32-unknown-unknown` |
+
+## Delivered after Stage 6
+
+### Stage 7 — `pi-ai` Anthropic Messages provider
+`AnthropicProvider` streaming adapter (`POST {base}/v1/messages`), SSE
+parsing for text / tool_use / thinking blocks, usage + cache-read/write
+mapping, stop-reason mapping, Claude 4.5 model catalog, SSE fixtures and
+an `anthropic_faux` agent-loop integration test. Merged in LUM-1048.
+
+### Stage 8 — `pi-coding-agent` print mode
+`print_mode.rs` (`text` / `json` / `json-events`) and `file_processor.rs`
+(`@file` expansion, stdin pipe, 1 MiB cap), sysexits exit codes,
+`SIGINT` / `SIGTERM` handling. The `print mode is a stub` placeholder is
+gone. Merged in LUM-1048.
+
+### Stage 9 — navigation tools
+`find` / `grep` / `ls` alongside `bash` / `read` / `write` / `edit`,
+with a shared ignore list (`mod_ignore.rs`) and sandbox checks. Merged in
+LUM-1048.
+
+## Planned — Stage 10–12
+
+| Stage | Scope | Exit criterion |
+|-------|-------|----------------|
+| 10 | `--rpc` mode: stdio JSON-RPC over the `Agent` facade, mirroring `packages/server` | a JSON-RPC client can start a session, send a prompt and receive the streamed event vocabulary |
+| 11 | Google Gemini provider (`generativelanguage` streaming) + catalog | fixture-driven tests equivalent to the Stage 7 Anthropic suite |
+| 12 | print mode on `pi-session` (SQLite) instead of JSONL | `--continue` / `--session` read/write the same store as `/resume` |
+
+Stages 10–12 touch disjoint files and are dispatched at most three at a
+time; `feature/pi.rs` is the integration branch for each.
