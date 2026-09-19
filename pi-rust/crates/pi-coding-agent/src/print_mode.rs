@@ -25,17 +25,22 @@
 //! calls this out.
 //!
 //! Session integration is opt-in: when the caller passes a
-//! [`PrintModeOptions::session`] or sets
-//! [`PrintModeOptions::continue_session`] we attach to the matching
-//! [`SessionWriter`](pi_session::SessionWriter). Otherwise we open a
-//! fresh SQLite database under `--session-dir` and write a header +
-//! user/assistant rows as the turn progresses. The writer is
-//! checkpointed on the way out so the next `--continue` invocation
-//! sees a consistent file.
+//! [`PrintModeOptions::session`] or sets it to `Some(None)` for
+//! `--continue` we attach to the matching
+//! [`SessionWriter`](pi_session::SessionWriter) — the same Stage 5
+//! SQLite store the TUI's `/resume` reads. Otherwise we open a fresh
+//! database under `--session-dir` and write a header + user/assistant
+//! rows as the turn progresses. The writer is checkpointed on the way
+//! out so the next `--continue` invocation sees a consistent file.
+//!
+//! Legacy Stage 4 JSONL sessions found in `--session-dir` are migrated
+//! into SQLite in place (best-effort, source preserved) before the
+//! writer opens, and a resumed session replays its stored user /
+//! assistant messages into the agent context.
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +50,7 @@ use futures::FutureExt;
 use pi_agent_core::{Agent, AgentError, AgentEvent, AgentOptions};
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{AssistantMessage, Content, Message, Model, Role, StopReason, Usage};
+use pi_session::{SessionEntry, SessionReader, SessionWriter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -53,7 +59,6 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
 
 use crate::file_processor::FileError;
-use crate::session_log::SessionLog;
 
 /// Maximum size (in bytes) for any single stdout write. Keeps the
 /// pipe buffer from blocking the agent thread.
@@ -224,6 +229,12 @@ pub async fn run_print_mode(
     let session_path = session_writer.as_ref().map(|s| s.path.clone());
 
     let agent = Arc::new(AsyncMutex::new(build_agent(&options)?));
+    // Replay the stored conversation so `--continue` / `--session <id>`
+    // resumes with the same context the TUI would load.
+    if let Some(handle) = session_writer.as_ref().filter(|h| !h.history.is_empty()) {
+        let mut guard = agent.lock().await;
+        guard.state_mut().messages.extend(handle.history.clone());
+    }
     let mut subscriber = agent.lock().await.subscribe();
 
     // Kick off the prompt in the background. Cancellation in this
@@ -637,71 +648,280 @@ fn install_signal_handlers(state: Arc<SignalState>) -> Result<(), PrintModeError
     Ok(())
 }
 
-/// Resolve the session target into a [`SessionLog`] (JSONL fallback)
-/// or `None` when session logging is disabled.
+/// Where a session request points.
+enum SessionTarget {
+    /// `--session <id-or-path>` / `--continue=<id>`.
+    Explicit(String),
+    /// Bare `--continue`: the most recent session in the directory.
+    MostRecent,
+}
+
+/// Resolve the session target into an open [`SessionWriter`], or `None`
+/// when session logging is disabled.
 ///
-/// We intentionally use the JSONL fallback instead of the Stage 5
-/// SQLite backend here — the issue scope says "Stage 5 的 pi-session
-/// SQLite 后端" but the JSONL path remains the simpler integration
-/// point for the print mode (single writer, easy to test, no
-/// cross-platform zstd worries). The SQLite integration lands as a
-/// follow-up.
+/// Print mode writes to the Stage 5 `pi-session` SQLite backend, the
+/// same store the TUI's `/resume` reads. A legacy Stage 4 JSONL file is
+/// migrated in place (best-effort, source preserved) before the writer
+/// opens — see [`migrate_legacy_jsonl`].
 fn resolve_session(options: &PrintModeOptions) -> Result<Option<SessionHandle>, PrintModeError> {
-    let session_id = match options.session.as_ref() {
-        // Explicit `--session <id>`.
-        Some(Some(id)) => id.clone(),
-        // `--continue` (no argument): attach the most recent session
-        // in `--session-dir`, falling back to a fresh one when the
-        // directory is empty.
-        Some(None) => match crate::list_resumable(&options.session_dir) {
-            Ok(mut refs) => match refs.pop() {
-                Some(recent) => recent.session_id,
-                None => new_session_id(),
-            },
-            Err(_) => new_session_id(),
-        },
+    let target = match options.session.as_ref() {
         // No session requested.
         None => return Ok(None),
+        // Explicit `--session <id-or-path>` / `--continue=<id>`.
+        Some(Some(raw)) => SessionTarget::Explicit(raw.clone()),
+        // Bare `--continue`: attach the most recent session in
+        // `--session-dir`, falling back to a fresh one when the
+        // directory is empty.
+        Some(None) => SessionTarget::MostRecent,
     };
 
-    let log = SessionLog::open(&options.session_dir, &session_id)
-        .map_err(|err| PrintModeError::Session(err.to_string()))?;
-    log.write_header(env!("CARGO_PKG_VERSION"))
-        .map_err(|err| PrintModeError::Session(err.to_string()))?;
-    // Mirror the user message into the log so the file mirrors what
+    let (path, session_id) = match target {
+        SessionTarget::Explicit(raw) => resolve_explicit_session(&options.session_dir, &raw)?,
+        SessionTarget::MostRecent => match most_recent_session(&options.session_dir)? {
+            Some(found) => found,
+            None => {
+                let id = new_session_id();
+                (options.session_dir.join(format!("{id}.sqlite")), id)
+            }
+        },
+    };
+
+    // Load the stored conversation *before* opening the writer so the
+    // read-only handle never races the WAL writer. A missing database
+    // yields an empty history (the writer below creates the file); a
+    // corrupt one is logged and treated as empty rather than aborting
+    // the turn.
+    let history = if path.exists() {
+        match SessionReader::open(&path) {
+            Ok(reader) => load_history(&reader, &session_id),
+            Err(err) => {
+                warn!("session: cannot read {}: {err}", path.display());
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let writer = SessionWriter::open(&path).map_err(session_error)?;
+    writer
+        .write_header(SessionEntry::Header {
+            id: session_id.clone(),
+            created_at: chrono::Utc::now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+        .map_err(session_error)?;
+    // Derive `next_seq` from the stored rows so a continued session does
+    // not collide with its own history.
+    writer.resume(&session_id).map_err(session_error)?;
+    // Mirror the user message into the session so the store records what
     // the agent saw on the wire.
     let user_message = Message {
         role: Role::User,
         content: vec![Content::text(options.prompt.clone())],
         model: None,
     };
-    log.append_user(user_message)
-        .map_err(|err| PrintModeError::Session(err.to_string()))?;
+    writer
+        .append(SessionEntry::UserMessage(user_message))
+        .map_err(session_error)?;
+
     Ok(Some(SessionHandle {
-        log,
-        path: options.session_dir.join(format!("{session_id}.jsonl")),
+        writer,
+        path,
+        history,
     }))
 }
 
-/// Lightweight wrapper around [`SessionLog`] that exposes the
-/// path the writer is bound to (used for the public result struct).
+/// Resolve an explicit `--session` / `--continue=<id>` argument into the
+/// `(database path, session id)` pair the writer binds to.
+///
+/// Accepts, in order: a direct `*.sqlite` path, a direct legacy `*.jsonl`
+/// path, a session id already present under `directory`, a legacy
+/// `<id>.jsonl` file, or a brand-new id (which creates
+/// `<directory>/<id>.sqlite`).
+fn resolve_explicit_session(
+    directory: &Path,
+    raw: &str,
+) -> Result<(PathBuf, String), PrintModeError> {
+    let direct = Path::new(raw);
+    if direct.is_file() {
+        match direct.extension().and_then(|s| s.to_str()) {
+            Some("sqlite") => {
+                let id = latest_session_id(direct)?;
+                return Ok((direct.to_path_buf(), id));
+            }
+            Some("jsonl") => {
+                let database = direct.with_extension("sqlite");
+                migrate_legacy_jsonl(direct, &database)?;
+                let id = latest_session_id(&database)?;
+                return Ok((database, id));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(found) = find_session_by_id(directory, raw)? {
+        return Ok(found);
+    }
+
+    let legacy = directory.join(format!("{raw}.jsonl"));
+    if legacy.is_file() {
+        let database = directory.join(format!("{raw}.sqlite"));
+        migrate_legacy_jsonl(&legacy, &database)?;
+        return Ok((database, raw.to_string()));
+    }
+
+    Ok((directory.join(format!("{raw}.sqlite")), raw.to_string()))
+}
+
+/// Session id of the newest session stored in `database`.
+fn latest_session_id(database: &Path) -> Result<String, PrintModeError> {
+    let reader = SessionReader::open(database).map_err(session_error)?;
+    reader
+        .latest_session()
+        .map_err(session_error)?
+        .map(|session| session.id)
+        .ok_or_else(|| {
+            PrintModeError::Session(format!(
+                "session database {} has no sessions",
+                database.display()
+            ))
+        })
+}
+
+/// Look for `session_id` across every SQLite database in `directory`.
+fn find_session_by_id(
+    directory: &Path,
+    session_id: &str,
+) -> Result<Option<(PathBuf, String)>, PrintModeError> {
+    let refs = crate::list_resumable(directory)
+        .map_err(|err| PrintModeError::Session(err.to_string()))?;
+    Ok(refs
+        .into_iter()
+        .find(|r| r.session_id == session_id)
+        .map(|r| (r.database, r.session_id)))
+}
+
+/// Most recent SQLite session in `directory`, after migrating any legacy
+/// JSONL files. Returns `None` when the directory holds no sessions.
+fn most_recent_session(directory: &Path) -> Result<Option<(PathBuf, String)>, PrintModeError> {
+    migrate_legacy_sessions(directory);
+    let refs = crate::list_resumable(directory)
+        .map_err(|err| PrintModeError::Session(err.to_string()))?;
+    Ok(refs
+        .into_iter()
+        .next()
+        .map(|r| (r.database, r.session_id)))
+}
+
+/// Best-effort one-shot migration of every `<id>.jsonl` in `directory`
+/// that has no sibling `<id>.sqlite` yet.
+///
+/// The JSONL source is never deleted, so the migration is **reversible**:
+/// the original bytes stay on disk and `pi session migrate <file>` can be
+/// rerun. A failure is logged and skipped — a corrupt legacy file must
+/// not abort `--continue`.
+fn migrate_legacy_sessions(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let database = path.with_extension("sqlite");
+        if database.exists() {
+            continue;
+        }
+        // Skip empty files: a zero-length JSONL has no header and would
+        // otherwise materialise an empty database.
+        if path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+            continue;
+        }
+        if let Err(err) = migrate_legacy_jsonl(&path, &database) {
+            warn!(
+                "session: legacy migration skipped for {}: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Migrate a single legacy JSONL session into SQLite, best-effort.
+///
+/// A no-op when the destination already exists (never overwrite a live
+/// database) or when the source is absent. The JSONL is preserved on
+/// success and on failure; see [`pi_session::migrate_jsonl`].
+fn migrate_legacy_jsonl(source: &Path, destination: &Path) -> Result<(), PrintModeError> {
+    if destination.exists() || !source.is_file() {
+        return Ok(());
+    }
+    pi_session::migrate_jsonl(source, destination)
+        .map(|_| ())
+        .map_err(|err| {
+            PrintModeError::Session(format!(
+                "migrating {} → {}: {err}",
+                source.display(),
+                destination.display()
+            ))
+        })
+}
+
+/// Rebuild the agent's message log from the stored session entries.
+///
+/// Only user / assistant messages participate in the conversation
+/// context; tool calls, tool results, and extension entries are skipped
+/// (the loop re-derives tool traffic on every turn).
+fn load_history(reader: &SessionReader, session_id: &str) -> Vec<Message> {
+    match reader.iter_entries(session_id) {
+        Ok(entries) => entries
+            .into_iter()
+            .filter_map(|entry| match entry.entry {
+                SessionEntry::UserMessage(message) => Some(message),
+                SessionEntry::AssistantMessage(message) => Some(Message {
+                    role: Role::Assistant,
+                    content: message.content,
+                    model: Some(message.model),
+                }),
+                _ => None,
+            })
+            .collect(),
+        Err(err) => {
+            warn!("session: cannot read entries for {session_id}: {err}");
+            Vec::new()
+        }
+    }
+}
+
+/// Normalise a `pi-session` error into the print-mode error surface.
+fn session_error(err: pi_session::SessionError) -> PrintModeError {
+    PrintModeError::Session(err.to_string())
+}
+
+/// Open SQLite session the driver appends to, plus the history the
+/// agent starts from.
 struct SessionHandle {
-    log: SessionLog,
+    writer: SessionWriter,
     path: PathBuf,
+    history: Vec<Message>,
 }
 
 impl SessionHandle {
-    /// Append an assistant content block as a [`Message`].
+    /// Append an assistant message to the session. Failures are logged
+    /// and swallowed so a session write never aborts the turn (matches
+    /// the TS behaviour).
     fn append_assistant(&self, message: AssistantMessage) {
-        if let Err(err) = self.log.append_assistant(message) {
+        if let Err(err) = self.writer.append(SessionEntry::AssistantMessage(message)) {
             warn!("session: failed to append assistant message: {err}");
         }
     }
 
+    /// Checkpoint the WAL so the next `--continue` sees a consistent
+    /// file.
     fn flush(&self) -> Result<(), PrintModeError> {
-        self.log
-            .close()
-            .map_err(|err| PrintModeError::Session(err.to_string()))
+        self.writer.checkpoint().map_err(session_error)?;
+        Ok(())
     }
 }
 

@@ -138,6 +138,29 @@ impl SessionWriter {
         Ok(())
     }
 
+    /// Attach the writer to an existing session in this database.
+    ///
+    /// Sets the current session id and continues the entry sequence
+    /// *after* the highest `seq` already stored, so an append-only
+    /// caller (e.g. `pi --print --continue`) never reuses a primary key.
+    /// A freshly created session has no rows, so `next_seq` resets to 1.
+    ///
+    /// Call after [`write_header`](Self::write_header) (which creates the
+    /// `sessions` row) — the two are complementary: `write_header` is
+    /// idempotent on the header while `resume` derives the sequence from
+    /// the `entries` table.
+    pub fn resume(&self, session_id: &str) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let max_seq: i64 = inner.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM entries WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        inner.next_seq = max_seq + 1;
+        inner.current_session = Some(session_id.to_string());
+        Ok(())
+    }
+
     /// Append a [`SessionEntry`]. The entry is staged in memory until
     /// [`commit`] is called (or the buffer limit is reached, in which
     /// case a commit runs implicitly).
@@ -289,5 +312,36 @@ mod tests {
         let n = writer.commit().expect("commit");
         assert_eq!(n, 1);
         writer.checkpoint().expect("checkpoint");
+    }
+
+    #[test]
+    fn resume_continues_the_sequence() {
+        let dir = tempdir();
+        let path = dir.join("resume.sqlite");
+        let writer = SessionWriter::open(&path).expect("open");
+        writer
+            .write_header(SessionEntry::Header {
+                id: "resume-id".into(),
+                created_at: chrono::Utc::now(),
+                version: "0.1.0".into(),
+            })
+            .expect("header");
+        for i in 0..3 {
+            writer
+                .append(SessionEntry::Extension {
+                    extension: "test".into(),
+                    kind: format!("marker-{i}"),
+                    payload: serde_json::json!(i),
+                })
+                .expect("append");
+        }
+        writer.checkpoint().expect("checkpoint");
+        drop(writer);
+
+        // A second writer starts at seq 1 until it resumes the session.
+        let writer = SessionWriter::open(&path).expect("reopen");
+        assert_eq!(writer.next_seq(), 1);
+        writer.resume("resume-id").expect("resume");
+        assert_eq!(writer.next_seq(), 4);
     }
 }

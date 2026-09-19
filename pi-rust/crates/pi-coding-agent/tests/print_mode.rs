@@ -10,15 +10,19 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
+use async_trait::async_trait;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
+use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
 use pi_coding_agent::file_processor::expand_prompt;
 use pi_coding_agent::print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions,
 };
-use pi_protocol::{Api, Model, ProviderId, StopReason};
+use pi_coding_agent::session_log::SessionLog;
+use pi_protocol::{Api, AssistantMessage, Content, Message, Model, ProviderId, Role, StopReason, Usage};
+use pi_session::{SessionEntry, SessionReader};
 use tempfile::TempDir;
 
 fn faux_model() -> Model {
@@ -198,6 +202,184 @@ async fn empty_prompt_returns_agent_setup_error() {
     let err = run_print_mode(options).await.unwrap_err();
     assert!(matches!(err, PrintModeError::AgentSetup(_)));
     assert_eq!(err.exit_code(), 78);
+}
+
+// ---------------------------------------------------------------------------
+// Session backend tests — print mode writes through the Stage 5
+// `pi-session` SQLite store that the TUI's `/resume` also reads.
+// ---------------------------------------------------------------------------
+
+/// Options for a session-backed run with a single scripted reply.
+fn session_options(
+    dir: &TempDir,
+    prompt: &str,
+    session: Option<Option<String>>,
+) -> PrintModeOptions {
+    PrintModeOptions {
+        prompt: prompt.into(),
+        model: faux_model(),
+        stream_fn: faux_stream(vec!["(faux) stored".into()]),
+        system_prompt: String::new(),
+        session,
+        session_dir: dir.path().to_path_buf(),
+        max_turns: 0,
+        output_format: OutputFormat::Text,
+    }
+}
+
+#[tokio::test]
+async fn print_mode_session_is_readable_by_pi_session() {
+    let dir = fresh_tmp("session-roundtrip");
+    let options = session_options(&dir, "persist me", Some(Some("roundtrip".into())));
+    let result = run_print_mode(options).await.expect("run");
+
+    let path = result.session_path.expect("session path");
+    assert_eq!(path.extension().and_then(|s| s.to_str()), Some("sqlite"));
+
+    // The cross-module contract: the Stage 5 reader sees what print mode
+    // wrote, in the same database the TUI would attach to.
+    let reader = SessionReader::open(&path).expect("open session db");
+    let sessions = reader.list_sessions().expect("list sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "roundtrip");
+
+    let entries = reader.iter_entries("roundtrip").expect("entries");
+    assert_eq!(entries.len(), 2, "user + assistant");
+    match &entries[0].entry {
+        SessionEntry::UserMessage(message) => match &message.content[0] {
+            Content::Text(text) => assert_eq!(text.text, "persist me"),
+            other => panic!("expected text content, got {other:?}"),
+        },
+        other => panic!("expected user message, got {other:?}"),
+    }
+    assert!(matches!(
+        &entries[1].entry,
+        SessionEntry::AssistantMessage(_)
+    ));
+
+    // `/resume` in the TUI goes through `list_resumable`, which is built
+    // on the same reader — the two modes now share one store.
+    let refs = pi_coding_agent::list_resumable(dir.path()).expect("list resumable");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].session_id, "roundtrip");
+    assert_eq!(refs[0].database, path);
+}
+
+#[tokio::test]
+async fn continue_session_appends_after_stored_sequence() {
+    let dir = fresh_tmp("session-continue");
+    run_print_mode(session_options(&dir, "first", Some(Some("cont".into()))))
+        .await
+        .expect("first run");
+
+    let database = dir.path().join("cont.sqlite");
+    assert!(database.exists(), "first run must create the sqlite store");
+
+    // Bare `--continue` (`Some(None)`) attaches the most recent session.
+    let result = run_print_mode(session_options(&dir, "second", Some(None)))
+        .await
+        .expect("second run");
+    assert_eq!(result.session_path.as_deref(), Some(database.as_path()));
+
+    let reader = SessionReader::open(&database).expect("open session db");
+    let entries = reader.iter_entries("cont").expect("entries");
+    assert_eq!(entries.len(), 4, "two user + two assistant rows");
+    let seqs: Vec<i64> = entries.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![1, 2, 3, 4], "continuation must not reuse seqs");
+}
+
+#[tokio::test]
+async fn legacy_jsonl_session_is_migrated_on_continue() {
+    let dir = fresh_tmp("session-legacy");
+    // Stage 4 wrote `<id>.jsonl`; emulate that with the legacy writer.
+    let log = SessionLog::open(dir.path(), "legacy").expect("open jsonl");
+    log.write_header("0.0.1").expect("header");
+    log.append_user(Message {
+        role: Role::User,
+        content: vec![Content::text("old prompt")],
+        model: None,
+    })
+    .expect("user");
+    log.append_assistant(AssistantMessage {
+        model: "faux-model".into(),
+        content: vec![Content::text("old reply")],
+        stop_reason: StopReason::Stop,
+        usage: Usage::default(),
+    })
+    .expect("assistant");
+    log.close().expect("close");
+
+    let legacy = dir.path().join("legacy.jsonl");
+    assert!(legacy.exists());
+
+    let result = run_print_mode(session_options(&dir, "new turn", Some(None)))
+        .await
+        .expect("run");
+    let database = result.session_path.expect("session path");
+    assert_eq!(database, dir.path().join("legacy.sqlite"));
+    assert!(legacy.exists(), "the legacy JSONL must be preserved");
+
+    let reader = SessionReader::open(&database).expect("open session db");
+    let entries = reader.iter_entries("legacy").expect("entries");
+    // Migrated user + assistant, then this turn's user + assistant.
+    assert_eq!(entries.len(), 4);
+    assert!(matches!(entries[0].entry, SessionEntry::UserMessage(_)));
+    assert!(matches!(entries[2].entry, SessionEntry::UserMessage(_)));
+}
+
+/// Stream adapter that records how many messages each turn's context
+/// carried before delegating to the faux provider.
+struct ContextRecorder {
+    inner: Arc<FauxProvider>,
+    seen: Arc<StdMutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl StreamFn for ContextRecorder {
+    async fn stream_simple(
+        &self,
+        model: &Model,
+        ctx: &pi_protocol::Context,
+        options: &SimpleStreamOptions,
+    ) -> Result<AssistantMessageEventStream, StreamError> {
+        self.seen.lock().expect("lock").push(ctx.messages.len());
+        self.inner.stream_simple(model, ctx, options).await
+    }
+}
+
+#[tokio::test]
+async fn continue_replays_history_into_the_agent_context() {
+    let dir = fresh_tmp("session-history");
+    let seen = Arc::new(StdMutex::new(Vec::new()));
+
+    let first = PrintModeOptions {
+        prompt: "first".into(),
+        stream_fn: Arc::new(ContextRecorder {
+            inner: Arc::new(FauxProvider::with_scripts(vec!["one".into()])),
+            seen: seen.clone(),
+        }) as SharedStreamFn,
+        session: Some(Some("hist".into())),
+        ..session_options(&dir, "first", Some(Some("hist".into())))
+    };
+    run_print_mode(first).await.expect("first run");
+
+    let second = PrintModeOptions {
+        prompt: "second".into(),
+        stream_fn: Arc::new(ContextRecorder {
+            inner: Arc::new(FauxProvider::with_scripts(vec!["two".into()])),
+            seen: seen.clone(),
+        }) as SharedStreamFn,
+        ..session_options(&dir, "second", Some(None))
+    };
+    run_print_mode(second).await.expect("second run");
+
+    let counts = seen.lock().expect("lock").clone();
+    assert_eq!(counts.len(), 2, "one streamed turn per run");
+    assert_eq!(counts[0], 1, "a fresh session starts from just the prompt");
+    assert_eq!(
+        counts[1], 3,
+        "--continue replays user + assistant before the new prompt"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,6 @@ fn main() -> ExitCode {
 
     let session_dir = cli.session_dir.clone().unwrap_or_else(default_session_dir);
     let session_id = cli.resume.clone().unwrap_or_else(new_session_id);
-    let session_log = SessionLog::open(&session_dir, &session_id).ok();
 
     let system_prompt = default_system_prompt();
 
@@ -80,6 +79,12 @@ fn main() -> ExitCode {
 
     match target_mode {
         ModeTarget::Interactive => {
+            // Interactive mode is the only path that still uses the
+            // legacy JSONL writer (for the `/resume` directory hint).
+            // Print mode owns its SQLite session through `pi-session`,
+            // so opening the JSONL log eagerly would leave empty
+            // `<id>.jsonl` files behind in `--session-dir`.
+            let session_log = SessionLog::open(&session_dir, &session_id).ok();
             let options = InteractiveOptions {
                 system_prompt,
                 append_system_prompt: cli.append_system_prompt.clone(),
@@ -126,14 +131,16 @@ fn main() -> ExitCode {
                 }
             };
             // `--continue` / `--session` interact: a bare `--continue`
-            // (`None` payload) attaches the most recent session, an
-            // explicit `--session <id>` attaches that id.
+            // (`None` payload) attaches the most recent session, while
+            // `--continue=<id>` and `--session <id>` attach that exact
+            // session. All three resolve against the same `pi-session`
+            // SQLite store the TUI's `/resume` reads.
             let session_target = if let Some(id) = cli.session.clone() {
                 Some(Some(id))
-            } else if cli.continue_.is_some() {
-                Some(None)
             } else {
-                None
+                // `Some(None)` for bare `--continue`, `Some(Some(id))`
+                // for `--continue=<id>`.
+                cli.continue_.clone()
             };
             let options = PrintModeOptions {
                 prompt: expanded.text,

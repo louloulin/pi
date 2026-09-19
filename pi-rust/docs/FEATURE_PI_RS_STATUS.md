@@ -1867,3 +1867,84 @@ f693264d4dd0a897012d32653bdcfc67b6dbce23
 The credential-helper lock warning (`unable to get credential storage
 lock`) is the same benign noise documented in LUM-1039; the push itself
 succeeds.
+
+## LUM-1056 round — Stage 13: print mode on the `pi-session` SQLite store
+
+LUM-1056 closes the last "same feature, two implementations" gap in
+`feature/pi.rs`: Stage 8 (LUM-1044) deliberately wrote print-mode
+sessions as JSONL because Stage 5's `pi-session` SQLite backend landed
+later. `pi --print --continue` / `--session <id>` and the TUI's
+`/resume` therefore read/wrote different stores and could not see each
+other's sessions. Print mode now uses `pi-session` end to end.
+
+### Code changes
+
+| File | Change |
+|------|--------|
+| `pi-coding-agent/src/print_mode.rs` | `resolve_session` replaced the `SessionLog` (JSONL) writer with `pi_session::SessionWriter`; `SessionHandle` holds the writer + the loaded history; new helpers `resolve_explicit_session` / `find_session_by_id` / `most_recent_session` / `latest_session_id` / `load_history` / `migrate_legacy_jsonl` / `migrate_legacy_sessions`; best-effort JSONL → SQLite migration before the writer opens; `--continue` replays stored user/assistant messages into the agent context before the new prompt; the writer is `checkpoint()`ed on exit. |
+| `pi-coding-agent/src/main.rs` | `--continue=<id>` is now honoured (previously the payload was dropped and only "most recent" was possible); the legacy `SessionLog` is opened lazily and only on the interactive path, so print mode no longer leaves empty `<id>.jsonl` files in `--session-dir`. |
+| `pi-session/src/writer.rs` | New `SessionWriter::resume(session_id)` — sets the current session and derives `next_seq` from `MAX(seq)` so a continued session never reuses a primary key (a re-opened writer otherwise started at seq 1). |
+| `pi-coding-agent/src/session_log.rs` | Fixed the writer storing the literal `"session"` as its header id instead of the caller-supplied id — the migration reads that header to name the SQLite session. |
+| `pi-coding-agent/tests/print_mode.rs` | 4 new tests (see below). |
+| `pi-coding-agent/tests/...` | unchanged otherwise. |
+
+The `text` / `json` / `json-events` emitters (`EventEmitter`) are
+untouched, so the three output formats are byte-identical to the Stage 8
+baseline. The 13 pre-existing `print_mode` cases pass unchanged.
+
+### New tests (+5)
+
+- `print_mode_session_is_readable_by_pi_session` — a `--print` turn with
+  `--session roundtrip` writes a `*.sqlite` file whose session and
+  user/assistant rows are visible to `pi_session::SessionReader`, and to
+  `pi_coding_agent::list_resumable` (the TUI `/resume` path).
+- `continue_session_appends_after_stored_sequence` — bare `--continue`
+  re-attaches the same database and appends at seq 3/4 instead of
+  colliding with the stored rows.
+- `legacy_jsonl_session_is_migrated_on_continue` — a Stage 4 `<id>.jsonl`
+  is migrated on `--continue`; the JSONL is preserved and the SQLite
+  session contains the migrated rows plus the new turn.
+- `continue_replays_history_into_the_agent_context` — a recording
+  `StreamFn` observes 1 message on the first run and 3 on the resume
+  (user + assistant replayed before the new prompt).
+- `pi_session::writer::tests::resume_continues_the_sequence` — unit test
+  for the new writer API.
+
+### Migration semantics / known limitations
+
+- The migration is **best-effort and reversible**: the JSONL source is
+  never deleted (on success or failure), so `pi session migrate <file>`
+  can always be rerun. A corrupt legacy file is logged and skipped
+  rather than aborting the turn.
+- Migration only runs for `<id>.jsonl` files that have no sibling
+  `<id>.sqlite`; an existing database is never overwritten. Empty
+  (zero-byte) JSONL files are skipped.
+- History replay feeds only user / assistant messages back into the
+  agent context; tool-call and extension rows are preserved in the store
+  but not replayed (the loop re-derives tool traffic per turn).
+- A headerless legacy JSONL migrates its entries under `<default>` with
+  no `sessions` row, so `--continue` cannot discover it. Our own Stage 4
+  writer always emitted a header, so this only affects hand-written
+  files; use `pi session migrate` explicitly in that case.
+
+### Verification (native)
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo test     --workspace                                       # 284 / 284 pass
+```
+
+284 vs 279 at LUM-1059 — the delta is exactly the 5 new session tests.
+
+End-to-end CLI spot checks (temp `--session-dir`):
+
+```
+$ pi --print "hello"                                  # (faux) hello — unchanged
+$ pi --print "hello" --output-format json-events      # unchanged NDJSON
+$ pi --print "first"  --session-dir $D --session demo
+$ pi --print "second" --session-dir $D --continue     # same demo.sqlite, seq 3/4
+$ pi session show demo --database $D/demo.sqlite      # 4 rows
+$ pi --print "third"  --session-dir $D --continue=demo
+$ pi session show demo --database $D/demo.sqlite      # 6 rows
+```
