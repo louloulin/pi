@@ -5350,3 +5350,83 @@ OpenAI Responses），因此是纯数据、零新代码路径：
 - LUM-1083：进程级崩溃仍在（本轮新增 `print_mode` target 证据），修复在途（占扩展加载路径）。
 - LUM-1090：`--rpc` 客户端定界问题维持 LUM-1098 结论（前提不成立，建议重写定界或 `wontfix`）。
 
+
+## LUM-1102 round — 核验 `feature/pi.rs` + 编辑器 kill ring / yank（Stage 4 后续）+ 3 槽决策与 Stage 28 计划
+
+本轮（autopilot，2026-09-19 20:40 CST 触发）核验 `feature/pi.rs = 7c5519a54`（LUM-1099 轮
+的 provider 家族切片已在线），确认没有「已交付但未合入」的分支可并（`work/lum-1088` 仍
+`in_progress`、`work/lum-1100` 正在同一批 autopilot 里实现 `node:*` 内建模块），因此本轮
+**不派发新子任务**（开工 `multica daemon status` = `running_task_count = 6`，远超「最多 3 路
+并行」的上限），改为一轮自包含实现 + Stage 28 计划。
+
+### 一、核验与在途盘点
+
+- 开工 `origin/feature/pi.rs = 7c5519a54`（LUM-1099 轮推送）；`git fetch --all` 后逐分支核对
+  「已提交但未合入」：
+  - `work/lum-1088`（2 commits，项目信任门接扩展加载）：LUM-1088 仍 `in_progress` → **不动**。
+  - `work/lum-1100`（1 commit，`pi-extensions` `node:*` 虚拟模块）：同一批 autopilot 的兄弟
+    run 正在实现，本地分支未推 → **不动**（避免与在途 host.rs 冲突）。
+  - 其余 `mirror/agent/devbox1/*`、`origin/agent/devbox1/lum-10xx` 分支均为已合并 lineage 或
+    只差 `pub use` 顺序的等价物，无新内容。
+- 槽位：`running_task_count = 6`（本 run + LUM-1083 崩溃修复 + LUM-1088 + LUM-1099/1100/1101
+  三路同源 autopilot 轮）→ 本轮**不派发**。同一触发产生多路重复协调轮的问题在 LUM-1099 轮
+  已记录，本轮延续该结论。
+
+### 二、本轮切片：编辑器 kill ring + yank（对齐 `packages/tui`）
+
+此前的 Rust `Editor` 把 `Ctrl+U` 与 `Ctrl+K` 都实现成「清空整个 buffer」，且 `Alt` 组合键
+一律丢弃 —— 与上游 `packages/tui` 的按键契约不符（`keybindings.ts`：`deleteToLineStart =
+ctrl+u`、`deleteToLineEnd = ctrl+k`、`yank = ctrl+y`、`yankPop = alt+y`）。本轮补齐这块：
+
+| File | Change |
+|------|--------|
+| `pi-tui/src/kill_ring.rs`（新增） | 移植 `packages/tui/src/kill-ring.ts`：`push(text, direction, accumulate)`（向后 kill 前置拼接 / 向前 kill 后置拼接，空文本不入库）、`peek`、`rotate`（yank-pop 循环用）、`len` / `is_empty` / `clear`，+8 单测（含 rotate 环绕与单条不旋转） |
+| `pi-tui/src/editor.rs` | `kill_line`（清空 buffer）拆成 `kill_to_line_start`（`Ctrl+U`）与 `kill_to_line_end`（`Ctrl+K`），二者把被杀文本推入 kill ring；新增 `yank`（`Ctrl+Y`）与 `yank_pop`（`Alt+Y`，先删除上次 yank 的区间再 `rotate` + 插入，与上游 `yankPop` 同序）；新增私有 `LastAction` 状态机（`Kill`/`Yank`/其它），非 kill/yank 动作（含光标移动、插入、历史导航）会打断累积与 yank 链 —— 对齐上游 `lastAction` 的置空点；模块文档补按键表。+11 单测 |
+| `pi-tui/src/lib.rs` | 导出 `kill_ring` 模块与 `KillRing` / `KillDirection` |
+
+单行编辑器的 `line start/end` 即 buffer 两端，已在文档里注明（上游是多行编辑器，`Ctrl+U`
+只杀到行首）。上游 `Ctrl+W` / `Alt+D`（word kill）与 `ctrl+-`（undo）**本轮不做**：它们要么
+依赖 `Intl.Segmenter` 分词（P3 follow-up），要么需要 snapshot 栈（P2 follow-up），见下。
+
+### 三、验证（native，复用 LUM-1097 轮次的 `target` 缓存）
+
+```
+$ cargo test   -p pi-tui --offline                       # 82 lib + 9 + 7 + 9 integration，全绿
+$ cargo test   -p pi-coding-agent --lib --offline         # 219 passed
+$ cargo clippy -p pi-tui -p pi-coding-agent --all-targets --offline -- -D warnings   # 0 warnings
+$ cargo check  --workspace --all-targets --offline        # Finished，0 error
+```
+
+`Editor` 是被 `Prompt` 包住后供 `App` / 交互模式使用的（`pi-tui/src/prompt.rs:29`），
+`kill_line` 的移除只影响 crate 内调用点（全仓 `grep` 确认无其它引用），`pi-coding-agent`
+全量 `--all-targets` 编译通过。未跑全量 `cargo test --workspace`：LUM-1083 的概率性扩展宿主
+崩溃（`free(): double free in tcache 2`）仍在，跑它只会复现已知噪声，本轮不做无信息量的重跑。
+
+### 四、frontier 与 Stage 28 候选（本轮不派发，仅落计划）
+
+按「插件生态兼容 > 核心 agent 能力 > 外观」排序：
+
+1. **P1 `.wasm` 扩展宿主**（多轮 frontier 的第一项）：`pi-extensions` 目前只有 QuickJS(JS)
+   宿主，`.wasm` 扩展在枚举后被跳过。体量为 Stage 级（wasmtime/wasmi + 扩展 ABI 映射），
+   且与在途的 `host.rs` / shim 改动同文件，**必须等 LUM-1100 / LUM-1088 收口后再开**。
+2. **P1 LUM-1083 扩展宿主崩溃**：根因已收敛到 `pi-extensions/src/host.rs:384` 丢弃
+   `tokio::spawn(runtime.drive())` 的 `JoinHandle`、无 shutdown 握手（LUM-1098 轮证据：
+   连跑 12 次 rpc 5 次 abort；`--no-extensions` 14 次 0 abort）。修复在途。
+3. **P2 编辑器 undo 栈**（本轮识别）：移植 `packages/tui/src/undo-stack.ts` +
+   `tui.editor.undo = ctrl+-`，与本轮 kill ring 同文件、零外部依赖，适合单轮完成。
+4. **P2 word kill / word move**（`Ctrl+W` / `Alt+D` / `Alt+B` / `Alt+F`）：上游用
+   `Intl.Segmenter`（`packages/tui/src/word-navigation.ts`），Rust 侧需要自建分词 + 标点边界
+   规则，且要多组回归向量，属 P2 单轮偏上。
+5. **P3 主题系统**：`themePaths` 有来源没消费方；`pi-tui` 组件当前是
+   `render_lines(width) -> Vec<String>` 纯文本，没有 `Span` 样式，单独加主题模块只会是死
+   代码，必须连同渲染 API 一起改 → Stage 级。
+6. **P3 provider catalog**：`minimax` / `minimax-cn` / `kimi-coding` / `vercel-ai-gateway`
+   的适配器已在 Rust 侧可用（Anthropic Messages / OpenAI 兼容），缺的只是
+   `packages/ai/src/providers/data/*.json`（`.gitignore` 掉、由 `scripts/generate-models.ts`
+   从 models.dev 生成）里的 limits / 定价。**没有 catalog 就不写猜测值**（LUM-1099 结论维持）。
+7. **P3 LUM-1090**：`--rpc` NDJSON 与 `pi-client` 带帧 socket 传输层前提不成立，建议重写定界
+   或 `wontfix`，不建议按原描述实现。
+
+并发轨道建议：上限 3 路，且同一文件（尤其 `pi-extensions/src/host.rs`、
+`FEATURE_PI_RS_STATUS.md`）一次只允许一路在写；`work/lum-1099/1100/1101` 这类同触发重复
+协调轮应合并成一路，否则每轮都在做同样的核验与 frontier 重估。
