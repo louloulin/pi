@@ -43,7 +43,9 @@
 //!   counted in `char`s, exactly like the rest of this crate.
 
 use crate::input::{InputEvent, Key, KeyCode};
+use crate::styled::{plain_text, themed_text, SpanStyle, StyledLine, StyledSpan};
 use crate::styles::SelectListStyles;
+use crate::theme::{ThemeBg, ThemeColor};
 
 /// Default primary (label) column width, upstream
 /// `DEFAULT_PRIMARY_COLUMN_WIDTH`.
@@ -541,17 +543,18 @@ impl Selector {
     /// description in a column that starts at the same offset on every row;
     /// otherwise it falls back to a width-clamped label alone.
     ///
-    /// `styles` is the themed variant of the same layout: the selected row is
-    /// wrapped whole (upstream `select-list.ts:205,216`), a non-selected
-    /// description column is wrapped on its own (`select-list.ts:208`).
-    fn render_row(
+    /// The row is returned as theme-slot spans, so the same layout drives the
+    /// plain render, the ANSI `*_themed` render and the App's styled buffer:
+    /// the selected row is wrapped whole (upstream `select-list.ts:205,216`),
+    /// a non-selected description column is wrapped on its own
+    /// (`select-list.ts:208`).
+    fn render_row_spans(
         &self,
         item: &SelectorItem,
         selected: bool,
         width: usize,
         primary_column_width: usize,
-        styles: Option<&SelectListStyles<'_>>,
-    ) -> String {
+    ) -> StyledLine {
         let marker = if selected { "❯ " } else { "  " };
         let prefix_width = display_width(marker);
 
@@ -570,52 +573,89 @@ impl Selector {
                 let remaining = width.saturating_sub(description_start + 2);
                 if remaining > MIN_DESCRIPTION_WIDTH {
                     let truncated_description = truncate_to_width(&description, remaining);
-                    let body = format!("{marker}{truncated}{spacing}{truncated_description}");
-                    return match styles {
-                        Some(styles) if selected => styles.selected_text(&body),
-                        // Upstream wraps the gap and the description together:
-                        // `this.theme.description(spacing + truncatedDesc)`
-                        // (`select-list.ts:208`).
-                        Some(styles) => format!(
-                            "{marker}{truncated}{}",
-                            styles.description(&format!("{spacing}{truncated_description}"))
+                    if selected {
+                        let body = format!("{marker}{truncated}{spacing}{truncated_description}");
+                        return vec![StyledSpan::new(
+                            body,
+                            SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
+                        )];
+                    }
+                    // Upstream wraps the gap and the description together:
+                    // `this.theme.description(spacing + truncatedDesc)`
+                    // (`select-list.ts:208`).
+                    return vec![
+                        StyledSpan::new(format!("{marker}{truncated}"), SpanStyle::PLAIN),
+                        StyledSpan::new(
+                            format!("{spacing}{truncated_description}"),
+                            SpanStyle::fg(ThemeColor::Muted),
                         ),
-                        None => body,
-                    };
+                    ];
                 }
             }
         }
 
         let max_width = width.saturating_sub(prefix_width + 2).max(1);
         let body = format!("{marker}{}", truncate_to_width(display, max_width));
-        match styles {
-            Some(styles) if selected => styles.selected_text(&body),
-            _ => body,
+        if selected {
+            vec![StyledSpan::new(
+                body,
+                SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
+            )]
+        } else {
+            vec![StyledSpan::new(body, SpanStyle::PLAIN)]
         }
     }
 
     /// Render the selector as a flat vector of lines (used by the App
     /// and by tests).
     pub fn render_lines(&self, width: u16) -> Vec<String> {
-        self.render_lines_impl(width, None)
+        self.render_styled_lines(width)
+            .iter()
+            .map(|line| plain_text(line))
+            .collect()
     }
 
     /// Themed variant of [`Selector::render_lines`].
     ///
     /// The visible text is byte-for-byte the same as the plain render; the
-    /// no-match line, the selected row, the description column and the
-    /// `(n/total)` indicator additionally carry ANSI styling from `styles`.
-    /// A [`ColorMode::None`](crate::theme::ColorMode::None) theme makes this
+    /// title (`accent`, bold), the `─` border (`borderMuted`), the no-match
+    /// line, the selected row (`accent` over `selectedBg`), the description
+    /// column (`muted`) and the `(n/total)` indicator (`muted`) additionally
+    /// carry ANSI styling from `styles`. A
+    /// [`ColorMode::None`](crate::theme::ColorMode::None) theme makes this
     /// identical to [`Selector::render_lines`].
     pub fn render_lines_themed(&self, width: u16, styles: &SelectListStyles<'_>) -> Vec<String> {
-        self.render_lines_impl(width, Some(styles))
+        let theme = styles.theme();
+        self.render_styled_lines(width)
+            .iter()
+            .map(|line| themed_text(line, theme))
+            .collect()
     }
 
-    fn render_lines_impl(&self, width: u16, styles: Option<&SelectListStyles<'_>>) -> Vec<String> {
-        let mut lines = Vec::new();
+    /// Render the selector as theme-slot spans, one line per row.
+    ///
+    /// This is the single layout implementation behind [`render_lines`] (plain
+    /// text), [`render_lines_themed`] (ANSI strings) and the App's themed
+    /// buffer path.
+    ///
+    /// [`render_lines`]: Selector::render_lines
+    /// [`render_lines_themed`]: Selector::render_lines_themed
+    pub fn render_styled_lines(&self, width: u16) -> Vec<StyledLine> {
+        let mut lines: Vec<StyledLine> = Vec::new();
         let width = width as usize;
-        lines.push(self.title.clone());
-        lines.push("─".repeat(width.min(40)));
+        // The modal title and the `─` rule are themed even though upstream's
+        // `SelectList` has no header: upstream renders modal titles as
+        // `theme.fg("accent", theme.bold(title))` (`extension-selector.ts:47`)
+        // and editor/modal borders as `borderMuted`
+        // (`theme.ts:1222`).
+        lines.push(vec![StyledSpan::new(
+            self.title.clone(),
+            SpanStyle::fg(ThemeColor::Accent).bold(),
+        )]);
+        lines.push(vec![StyledSpan::new(
+            "─".repeat(width.min(40)),
+            SpanStyle::fg(ThemeColor::BorderMuted),
+        )]);
         if self.filtered.is_empty() {
             // An empty list and a filter without matches read differently
             // to the user, so they keep different lines.
@@ -624,30 +664,29 @@ impl Selector {
             } else {
                 "  No matching items".to_string()
             };
-            lines.push(match styles {
-                Some(styles) => styles.no_match(&line),
-                None => line,
-            });
+            lines.push(vec![StyledSpan::new(
+                line,
+                SpanStyle::fg(ThemeColor::Muted),
+            )]);
             return lines;
         }
         let (start, end) = self.visible_range();
         let primary_column_width = self.primary_column_width();
         for row in start..end {
             let item = &self.items[self.filtered[row]];
-            lines.push(self.render_row(
+            lines.push(self.render_row_spans(
                 item,
                 row == self.cursor,
                 width,
                 primary_column_width,
-                styles,
             ));
         }
         if start > 0 || end < self.filtered.len() {
             let indicator = format!("  ({}/{})", self.cursor + 1, self.filtered.len());
-            lines.push(match styles {
-                Some(styles) => styles.scroll_info(&indicator),
-                None => indicator,
-            });
+            lines.push(vec![StyledSpan::new(
+                indicator,
+                SpanStyle::fg(ThemeColor::Muted),
+            )]);
         }
         lines
     }

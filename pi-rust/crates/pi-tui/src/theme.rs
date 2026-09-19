@@ -914,6 +914,11 @@ pub struct Theme {
     mode: ColorMode,
     fg: HashMap<ThemeColor, String>,
     bg: HashMap<ThemeBg, String>,
+    /// The resolved (fallback-applied) source values, kept so the render
+    /// pipeline can translate a slot into a backend colour without parsing
+    /// the ANSI prefix back out of `fg` / `bg`.
+    fg_values: HashMap<ThemeColor, ColorValue>,
+    bg_values: HashMap<ThemeBg, ColorValue>,
 }
 
 impl Theme {
@@ -931,6 +936,7 @@ impl Theme {
     ) -> Result<Self, ThemeError> {
         let label = name.clone().unwrap_or_else(|| "<in-memory>".to_string());
         let mut fg = HashMap::new();
+        let mut resolved_fg = HashMap::new();
         for slot in ThemeColor::ALL {
             let value = fg_values
                 .get(&slot)
@@ -940,8 +946,10 @@ impl Theme {
                     token: slot.key().to_string(),
                 })?;
             fg.insert(slot, fg_ansi(value, mode)?);
+            resolved_fg.insert(slot, value.clone());
         }
         let mut bg = HashMap::new();
+        let mut resolved_bg = HashMap::new();
         for slot in ThemeBg::ALL {
             let value = bg_values
                 .get(&slot)
@@ -951,6 +959,7 @@ impl Theme {
                     token: slot.key().to_string(),
                 })?;
             bg.insert(slot, bg_ansi(value, mode)?);
+            resolved_bg.insert(slot, value.clone());
         }
         Ok(Self {
             name,
@@ -958,6 +967,8 @@ impl Theme {
             mode,
             fg,
             bg,
+            fg_values: resolved_fg,
+            bg_values: resolved_bg,
         })
     }
 
@@ -1013,6 +1024,21 @@ impl Theme {
     /// ([`ColorMode::None`]).
     pub fn is_plain(&self) -> bool {
         matches!(self.mode, ColorMode::None)
+    }
+
+    /// The resolved source value for a foreground slot.
+    ///
+    /// This is the literal the slot was resolved to (after fallbacks and
+    /// `vars` expansion), not the ANSI prefix [`Theme::get_fg_ansi`] returns;
+    /// the render pipeline uses it to build a backend [`ratatui::style::Color`]
+    /// directly. See [`crate::styled`].
+    pub fn fg_value(&self, color: ThemeColor) -> Option<&ColorValue> {
+        self.fg_values.get(&color)
+    }
+
+    /// The resolved source value for a background slot.
+    pub fn bg_value(&self, color: ThemeBg) -> Option<&ColorValue> {
+        self.bg_values.get(&color)
     }
 
     /// Wrap `text` in a foreground colour (resetting only the foreground).
