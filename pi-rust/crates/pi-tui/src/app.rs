@@ -155,6 +155,7 @@
 //!   terminal: the App does not own the status / prompt rows. It is painted
 //!   *last*, so an extension dialog cannot cover it.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
@@ -250,6 +251,18 @@ pub struct AppConfig {
     /// [`App::take_clipboard_request`]); the App never touches the
     /// terminal or the system clipboard itself.
     pub copy_on_select: bool,
+    /// Render markdown links as OSC 8 hyperlinks when the terminal supports
+    /// them.
+    ///
+    /// `None` (the default) auto-detects from the environment via
+    /// [`crate::hyperlink::supports_hyperlinks`]; `Some(false)` forces the
+    /// plain `label (url)` fallback and `Some(true)` forces escape output
+    /// (useful for tests and for a driver that probed the terminal itself).
+    ///
+    /// When enabled, the live buffer wraps every link-labelled cell in an
+    /// OSC 8 pair and drops the inline `(url)`; the `/transcript` snapshot
+    /// stays plain text. See [`crate::hyperlink`].
+    pub hyperlinks: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -260,6 +273,7 @@ impl Default for AppConfig {
             event_poll_interval: Duration::from_millis(50),
             markdown: true,
             copy_on_select: true,
+            hyperlinks: None,
         }
     }
 }
@@ -734,6 +748,15 @@ pub struct App {
     /// In-flight scrollbar drag, if any (upstream's `scrollbarDrag`,
     /// `packages/tui/src/tui-alt-screen.ts:129-138`).
     scrollbar_drag: Option<ScrollbarDrag>,
+    /// Provider tool-call index → call id for the assistant message that is
+    /// currently streaming.
+    ///
+    /// A `ToolCallDelta` carries the id only on its first fragment (the
+    /// OpenAI streaming shape), so the index is the only key available for
+    /// the rest. The map is cleared at `MessageStart` / `MessageEnd`, which
+    /// bounds it to one assistant message. See
+    /// [`MessageView::begin_tool_stream`].
+    tool_call_ids: HashMap<u32, String>,
 }
 
 impl App {
@@ -755,10 +778,15 @@ impl App {
         prompt.set_placeholder(config.prompt_placeholder.clone());
         let event_rx = agent.subscribe();
         let markdown = config.markdown;
+        let hyperlinks = config
+            .hyperlinks
+            .unwrap_or_else(crate::hyperlink::supports_hyperlinks);
         Self {
             config,
             prompt,
-            messages: MessageView::new().with_markdown(markdown),
+            messages: MessageView::new()
+                .with_markdown(markdown)
+                .with_hyperlinks(hyperlinks),
             status_bar: StatusBar::new(),
             status_data,
             theme: builtin_theme("dark", ColorMode::TrueColor)
@@ -788,6 +816,7 @@ impl App {
             pending_clipboard: None,
             scrollbar_hover: false,
             scrollbar_drag: None,
+            tool_call_ids: HashMap::new(),
         }
     }
 
@@ -802,6 +831,11 @@ impl App {
     /// untouched, so flipping the switch back re-renders the same bodies.
     pub fn set_markdown(&mut self, enabled: bool) {
         self.messages.set_markdown(enabled);
+    }
+
+    /// Whether markdown links render as OSC 8 hyperlinks.
+    pub fn hyperlinks(&self) -> bool {
+        self.messages.hyperlinks()
     }
 
     /// Borrow the message view (for tests and snapshots).
@@ -936,6 +970,7 @@ impl App {
         match event {
             AgentEvent::TurnStart => {}
             AgentEvent::MessageStart { model } => {
+                self.tool_call_ids.clear();
                 self.messages.begin_assistant_stream(&model);
             }
             AgentEvent::MessageUpdate(update) => match update {
@@ -949,20 +984,44 @@ impl App {
                     index,
                     id,
                     name,
-                    arguments_delta: _,
+                    arguments_delta,
                 } => {
-                    let label = name.unwrap_or_else(|| format!("tool-{index}"));
-                    let _ = id; // placeholder — Stage 4 collapses into a single block
-                    self.messages.push_tool(&label, "(streaming)", "", false);
+                    // The first delta for a call carries the provider id;
+                    // the rest only carry argument fragments. Remember the
+                    // id by index so every fragment lands in one block.
+                    let call_id = match id {
+                        Some(id) => {
+                            self.tool_call_ids.insert(index, id.clone());
+                            id
+                        }
+                        None => self
+                            .tool_call_ids
+                            .get(&index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("tool-{index}")),
+                    };
+                    self.messages.begin_tool_stream(&call_id, name.as_deref());
+                    if let Some(delta) = arguments_delta {
+                        self.messages.append_tool_stream_args(&call_id, &delta);
+                    }
                 }
             },
             AgentEvent::MessageEnd { message } => {
                 self.messages.end_assistant_stream();
+                // Tool execution events that follow carry their own call id,
+                // so the index map has done its job and can be dropped.
+                self.tool_call_ids.clear();
                 self.status_data
                     .add_tokens(message.usage.input, message.usage.output);
             }
             AgentEvent::ToolExecutionStart { call } => {
-                self.messages.push_tool(&call.name, "(running)", "", false);
+                let args = if call.arguments.is_null() {
+                    String::new()
+                } else {
+                    call.arguments.to_string()
+                };
+                self.messages
+                    .start_tool_execution(&call.id, &call.name, &args);
             }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id: _,
@@ -974,14 +1033,17 @@ impl App {
                 result,
                 duration_ms,
             } => {
-                let name = String::new();
                 let is_error = result.is_error;
                 let body = match result.content.as_ref() {
                     Content::Text(t) => t.text.clone(),
                     _ => "(binary result)".to_string(),
                 };
-                self.messages
-                    .push_tool(&name, &format!("{duration_ms}ms"), &body, is_error);
+                self.messages.finish_tool_execution(
+                    &result.tool_call_id,
+                    duration_ms,
+                    &body,
+                    is_error,
+                );
             }
             AgentEvent::TurnEnd {
                 message,
@@ -2910,7 +2972,7 @@ impl App {
         // streaming output and `/clear` both change the corpus under an open
         // bar, which is where upstream refreshes it too (from `render`).
         let _ = self.refresh_search();
-        self.render_to_buffer_impl(area, buf, true);
+        self.render_to_buffer_impl(area, buf, true, self.messages.hyperlinks());
     }
 
     /// Remember the message viewport's geometry as of a render: the width the
@@ -2933,7 +2995,13 @@ impl App {
     /// passes `false`: it is a flat text snapshot (it also backs the
     /// `/transcript` export), so it stays about content rather than screen
     /// furniture. See the module docs.
-    fn render_to_buffer_impl(&self, area: Rect, buf: &mut Buffer, scrollbar: bool) {
+    fn render_to_buffer_impl(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        scrollbar: bool,
+        hyperlinks: bool,
+    ) {
         // Layout: message view fills the top, prompt the bottom row,
         // status bar the row above the prompt.
         let status_height = 1u16;
@@ -2963,8 +3031,12 @@ impl App {
         // see — exactly what the reader was looking at.
         self.record_viewport(area);
 
-        self.messages
-            .render_to_buffer_themed(message_area, buf, &self.theme);
+        self.messages.render_to_buffer_themed_with_links(
+            message_area,
+            buf,
+            &self.theme,
+            hyperlinks,
+        );
         // Selection highlight goes on top of the message cells but under
         // any modal, so an open selector or dialog stays readable.
         self.apply_selection_highlight(message_area, buf);
@@ -3089,7 +3161,10 @@ impl App {
             height,
         };
         let mut buf = Buffer::empty(area);
-        self.render_to_buffer_impl(area, &mut buf, false);
+        // `/transcript` (and the snapshot tests) want plain text, never
+        // OSC 8 escapes, so links fall back to the inline `(url)` form
+        // regardless of the live capability.
+        self.render_to_buffer_impl(area, &mut buf, false, false);
         let lines = buf
             .content()
             .chunks(width as usize)
@@ -3337,5 +3412,167 @@ mod selection_tests {
             initial: None,
         };
         assert!(empty.bounds().is_none());
+    }
+}
+
+/// Regression tests for the `ToolCallDelta` → block mapping (LUM-1141 /
+/// LUM-1152). A provider streams each tool call as several deltas that all
+/// share one provider id, so the transcript must end up with exactly one
+/// block per call — deltas, execution and result folded together — rather
+/// than one block per event.
+#[cfg(test)]
+mod tool_stream_tests {
+    use super::*;
+    use crate::message::Role;
+    use pi_agent_core::AgentOptions;
+    use pi_ai::providers::faux::FauxProvider;
+    use pi_protocol::{Api, AssistantMessage, Model, ProviderId, ToolCall, ToolResult};
+
+    fn faux_model() -> Model {
+        Model {
+            provider: ProviderId::new("faux"),
+            id: "faux-model".into(),
+            api: Api::Faux,
+            label: Some("Faux".into()),
+            context_window: 1024,
+            max_output_tokens: 256,
+        }
+    }
+
+    fn test_app() -> App {
+        let agent = Agent::new(AgentOptions::new(
+            faux_model(),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        App::new(&agent, AppConfig::default())
+    }
+
+    fn tool_delta(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments_delta: &str,
+    ) -> AgentEvent {
+        AgentEvent::MessageUpdate(AssistantMessageUpdate::ToolCallDelta {
+            index,
+            id: id.map(str::to_string),
+            name: name.map(str::to_string),
+            arguments_delta: Some(arguments_delta.to_string()),
+        })
+    }
+
+    fn finished_message() -> AssistantMessage {
+        AssistantMessage {
+            model: "faux-model".into(),
+            content: Vec::new(),
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        }
+    }
+
+    fn tool_items(app: &App) -> Vec<String> {
+        app.messages()
+            .items()
+            .iter()
+            .filter(|item| item.role == Role::Tool)
+            .map(|item| item.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn repeated_deltas_for_one_call_render_one_block() {
+        let mut app = test_app();
+        app.apply_event(AgentEvent::MessageStart {
+            model: "faux-model".into(),
+        });
+        // First fragment carries id + name; later fragments only arguments.
+        app.apply_event(tool_delta(0, Some("call_1"), Some("read"), "{\"path\":"));
+        app.apply_event(tool_delta(0, None, None, "\"/tmp/x\""));
+        app.apply_event(tool_delta(0, None, None, "}"));
+        app.apply_event(AgentEvent::MessageEnd {
+            message: finished_message(),
+        });
+
+        assert_eq!(
+            tool_items(&app),
+            vec!["[tool:read] {\"path\":\"/tmp/x\"}".to_string()],
+            "one call id must produce exactly one tool block"
+        );
+        assert_eq!(
+            app.messages().items().len(),
+            2,
+            "assistant + one tool block"
+        );
+    }
+
+    #[test]
+    fn execution_and_result_land_in_the_streamed_block() {
+        let mut app = test_app();
+        app.apply_event(AgentEvent::MessageStart {
+            model: "faux-model".into(),
+        });
+        app.apply_event(tool_delta(0, Some("call_1"), Some("read"), "{\"path\":"));
+        app.apply_event(tool_delta(0, None, None, "\"/tmp/x\"}"));
+        app.apply_event(AgentEvent::MessageEnd {
+            message: finished_message(),
+        });
+        app.apply_event(AgentEvent::ToolExecutionStart {
+            call: ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "/tmp/x" }),
+            },
+        });
+        app.apply_event(AgentEvent::ToolExecutionEnd {
+            result: ToolResult {
+                tool_call_id: "call_1".into(),
+                content: Box::new(Content::text("ok")),
+                is_error: false,
+                details: None,
+            },
+            duration_ms: 3,
+        });
+
+        assert_eq!(
+            tool_items(&app),
+            vec!["[tool:read] {\"path\":\"/tmp/x\"} → ok".to_string()],
+            "the result must rewrite the streamed block, not append a new one"
+        );
+    }
+
+    #[test]
+    fn separate_calls_keep_separate_blocks() {
+        let mut app = test_app();
+        app.apply_event(AgentEvent::MessageStart {
+            model: "faux-model".into(),
+        });
+        app.apply_event(tool_delta(0, Some("call_a"), Some("read"), "{}"));
+        app.apply_event(tool_delta(1, Some("call_b"), Some("list"), "{}"));
+        app.apply_event(AgentEvent::MessageEnd {
+            message: finished_message(),
+        });
+
+        assert_eq!(
+            tool_items(&app),
+            vec!["[tool:read] {}".to_string(), "[tool:list] {}".to_string()]
+        );
+    }
+
+    #[test]
+    fn result_without_a_streamed_block_still_renders() {
+        // A replayed / synthetic turn can deliver only the result event; the
+        // old standalone-block behaviour must survive.
+        let mut app = test_app();
+        app.apply_event(AgentEvent::ToolExecutionEnd {
+            result: ToolResult {
+                tool_call_id: "orphan".into(),
+                content: Box::new(Content::text("done")),
+                is_error: false,
+                details: None,
+            },
+            duration_ms: 1,
+        });
+        assert_eq!(tool_items(&app), vec!["[tool:] → done".to_string()]);
     }
 }

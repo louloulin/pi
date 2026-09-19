@@ -17,6 +17,7 @@ pub mod dialog;
 pub mod editor;
 pub mod fuzzy;
 pub mod highlight;
+pub mod hyperlink;
 pub mod input;
 pub mod keybindings;
 pub mod kill_ring;
@@ -45,6 +46,7 @@ pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
 pub use highlight::{highlight_code, supports_language, tokenize, Token, TokenKind};
+pub use hyperlink::{close_hyperlink, hyperlink, open_hyperlink, visible_width};
 pub use input::{
     is_mouse_sequence, parse_mouse_sequence, InputEvent, Key, KeyModifiers, MouseButton,
     MouseGesture, MouseGestureKind,
@@ -55,7 +57,7 @@ pub use keybindings::{
     KeybindingsManager,
 };
 pub use kill_ring::{KillDirection, KillRing};
-pub use markdown::{render_markdown, render_markdown_with_theme};
+pub use markdown::{render_markdown, render_markdown_with_links, render_markdown_with_theme};
 pub use message::{MessageItem, MessageView};
 pub use mouse_region::{MouseRegion, MouseRegionPoint};
 pub use prompt::{Prompt, PromptAction};

@@ -7,11 +7,12 @@
 //! width, and the [`MessageView::render_to_buffer`] method writes the
 //! lines into a `ratatui::buffer::Buffer` for snapshot tests.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
 use crate::styled::{
-    plain_text, themed_text, write_styled_line, SpanStyle, StyledLine, StyledSpan,
+    plain_text, themed_text, write_styled_line_hyperlinked, SpanStyle, StyledLine, StyledSpan,
 };
 use crate::styles::SelectListStyles;
 use crate::theme::{Theme, ThemeColor};
@@ -81,12 +82,32 @@ impl MessageItem {
     }
 }
 
+/// One in-flight tool call, keyed by its provider call id.
+///
+/// Mirrors upstream's `pendingTools: Map<string, ToolExecutionComponent>`
+/// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:430`):
+/// the map is what makes a streamed tool call produce *one* transcript block
+/// instead of one per delta. `index` points back into the rendered item list.
+#[derive(Debug, Clone)]
+struct ToolStream {
+    /// Index of the call's [`MessageItem`] in `MessageView::items`.
+    index: usize,
+    /// Tool name; empty until the first delta or execution start names it.
+    name: String,
+    /// JSON arguments collected so far.
+    args: String,
+    /// True between execution start and end.
+    running: bool,
+}
+
 /// Conversation log rendered by the TUI. Holds an ordered list of
 /// [`MessageItem`] entries and supports incremental updates so the
 /// TUI redraws only the tail while the assistant streams.
 #[derive(Debug, Default)]
 pub struct MessageView {
     items: Vec<MessageItem>,
+    /// In-flight tool calls, keyed by call id. See [`ToolStream`].
+    tool_streams: HashMap<String, ToolStream>,
     /// Scroll offset — lines from the bottom. `0` means pinned to the
     /// tail (latest message visible).
     scroll_from_bottom: usize,
@@ -109,17 +130,23 @@ pub struct MessageView {
     /// path. Off by default so existing callers and snapshots keep their
     /// byte-identical output.
     markdown: bool,
+    /// When true, markdown link labels render as OSC 8 hyperlinks and drop
+    /// the inline `(url)` suffix. Off by default; the driver turns it on from
+    /// [`crate::hyperlink::supports_hyperlinks`] via `AppConfig::hyperlinks`.
+    hyperlinks: bool,
 }
 
 impl Clone for MessageView {
     fn clone(&self) -> Self {
         Self {
             items: self.items.clone(),
+            tool_streams: self.tool_streams.clone(),
             scroll_from_bottom: self.scroll_from_bottom,
             detached: self.detached,
             last_render_width: AtomicU16::new(self.last_render_width.load(Ordering::Relaxed)),
             last_render_lines: AtomicUsize::new(self.last_render_lines.load(Ordering::Relaxed)),
             markdown: self.markdown,
+            hyperlinks: self.hyperlinks,
         }
     }
 }
@@ -146,6 +173,22 @@ impl MessageView {
         self.markdown = enabled;
     }
 
+    /// Enable/disable OSC 8 hyperlinks for markdown links (builder form).
+    pub fn with_hyperlinks(mut self, enabled: bool) -> Self {
+        self.hyperlinks = enabled;
+        self
+    }
+
+    /// Whether markdown links render as OSC 8 hyperlinks.
+    pub fn hyperlinks(&self) -> bool {
+        self.hyperlinks
+    }
+
+    /// Enable/disable OSC 8 hyperlinks in place.
+    pub fn set_hyperlinks(&mut self, enabled: bool) {
+        self.hyperlinks = enabled;
+    }
+
     /// Number of items in the log.
     pub fn len(&self) -> usize {
         self.items.len()
@@ -170,6 +213,7 @@ impl MessageView {
     /// Drop every item from the log. `/clear` uses this.
     pub fn clear(&mut self) {
         self.items.clear();
+        self.tool_streams.clear();
         self.scroll_from_bottom = 0;
         self.detached = false;
     }
@@ -217,6 +261,10 @@ impl MessageView {
     /// Start a new streaming assistant block — used when the TUI sees
     /// a `MessageStart` event for a new turn.
     pub fn begin_assistant_stream(&mut self, model: &str) {
+        // A new assistant message starts a fresh tool-call batch. Any stream
+        // still open here belongs to an aborted / never-executed call, so it
+        // is dropped rather than leaking into the next message.
+        self.tool_streams.clear();
         let mut item = MessageItem::assistant_streaming();
         let _ = write!(item.text, "[{model}]");
         self.items.push(item);
@@ -236,22 +284,137 @@ impl MessageView {
 
     /// Append a tool execution block.
     pub fn push_tool(&mut self, name: &str, args: &str, result: &str, is_error: bool) {
-        let mut text = String::new();
-        if is_error {
-            let _ = write!(text, "[tool:{name}] error");
-            if !result.is_empty() {
-                let _ = write!(text, ": {result}");
+        self.push(MessageItem::tool(format_tool(name, args, result, is_error)));
+    }
+    /// Start (or look up) the streamed tool-call block for `call_id`.
+    ///
+    /// The first `ToolCallDelta` for a call carries its provider id and name;
+    /// later deltas carry only argument fragments, and the execution / result
+    /// events are keyed by the same id. Routing all of them through this map
+    /// is what keeps one call to one block, mirroring upstream's `pendingTools`
+    /// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:430`).
+    ///
+    /// `name` is ignored when the block already exists (the first delta names
+    /// it). Returns `true` when a new block was appended.
+    pub fn begin_tool_stream(&mut self, call_id: &str, name: Option<&str>) -> bool {
+        if self.tool_streams.contains_key(call_id) {
+            // A provider may name the call on a later fragment; fill the
+            // name in rather than opening a second block.
+            let update = {
+                let stream = self
+                    .tool_streams
+                    .get_mut(call_id)
+                    .expect("contains_key checked above");
+                if stream.name.is_empty() {
+                    name.filter(|n| !n.is_empty()).map(|n| {
+                        stream.name = n.to_string();
+                        (
+                            stream.index,
+                            streaming_tool_text(&stream.name, &stream.args, stream.running),
+                        )
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some((index, text)) = update {
+                self.items[index].text = text;
+                self.repin_if_following();
             }
-        } else {
-            let _ = write!(text, "[tool:{name}]");
-            if !args.is_empty() {
-                let _ = write!(text, " {args}");
+            return false;
+        }
+        let name = name.unwrap_or("").to_string();
+        self.items
+            .push(MessageItem::tool(streaming_tool_text(&name, "", false)));
+        let index = self.items.len() - 1;
+        self.tool_streams.insert(
+            call_id.to_string(),
+            ToolStream {
+                index,
+                name,
+                args: String::new(),
+                running: false,
+            },
+        );
+        self.repin_if_following();
+        true
+    }
+
+    /// Append an argument fragment to an existing streamed tool call.
+    ///
+    /// Returns `false` when `call_id` is unknown, so the caller can decide
+    /// whether to open the block first (upstream always has an id on every
+    /// delta; this port's [`ToolCallDelta`](pi_agent_core::AgentEvent) only
+    /// carries one on the first, so a stray fragment is dropped rather than
+    /// creating an anonymous second block).
+    pub fn append_tool_stream_args(&mut self, call_id: &str, delta: &str) -> bool {
+        let Some(stream) = self.tool_streams.get_mut(call_id) else {
+            return false;
+        };
+        stream.args.push_str(delta);
+        let (index, name, args) = (stream.index, stream.name.clone(), stream.args.clone());
+        self.items[index].text = streaming_tool_text(&name, &args, stream.running);
+        self.repin_if_following();
+        true
+    }
+
+    /// Mark a streamed tool call as executing, creating the block when the
+    /// provider never streamed deltas for it (upstream's
+    /// `tool_execution_start` branch creates the component if missing,
+    /// `interactive-mode.ts:3325-3345`).
+    pub fn start_tool_execution(&mut self, call_id: &str, name: &str, args: &str) {
+        match self.tool_streams.get_mut(call_id) {
+            Some(stream) => {
+                if stream.name.is_empty() && !name.is_empty() {
+                    stream.name = name.to_string();
+                }
+                if stream.args.is_empty() && !args.is_empty() {
+                    stream.args = args.to_string();
+                }
+                stream.running = true;
+                let (index, name, args) = (stream.index, stream.name.clone(), stream.args.clone());
+                self.items[index].text = streaming_tool_text(&name, &args, true);
             }
-            if !result.is_empty() {
-                let _ = write!(text, " → {result}");
+            None => {
+                self.items
+                    .push(MessageItem::tool(streaming_tool_text(name, args, true)));
+                let index = self.items.len() - 1;
+                self.tool_streams.insert(
+                    call_id.to_string(),
+                    ToolStream {
+                        index,
+                        name: name.to_string(),
+                        args: args.to_string(),
+                        running: true,
+                    },
+                );
             }
         }
-        self.push(MessageItem::tool(text));
+        self.repin_if_following();
+    }
+
+    /// Finish a tool call: write its result into the *same* block the deltas
+    /// and execution start used, then retire the mapping (upstream's
+    /// `tool_execution_end` updates and `pendingTools.delete`s,
+    /// `interactive-mode.ts:3349-3362`).
+    pub fn finish_tool_execution(
+        &mut self,
+        call_id: &str,
+        duration_ms: u64,
+        result: &str,
+        is_error: bool,
+    ) {
+        let _ = duration_ms;
+        match self.tool_streams.remove(call_id) {
+            Some(stream) => {
+                self.items[stream.index].text =
+                    format_tool(&stream.name, &stream.args, result, is_error);
+                self.repin_if_following();
+            }
+            // No start event for this id (synthetic / replayed turn): keep
+            // the standalone block the previous implementation produced.
+            None => self.push_tool("", "", result, is_error),
+        }
     }
 
     /// Push a free-form info message — used by `/help`, slash
@@ -352,7 +515,6 @@ impl MessageView {
             .map(|line| plain_text(line))
             .collect()
     }
-
     /// Themed variant of [`MessageView::render_lines`].
     ///
     /// The visible text is identical to the plain render; the user body uses
@@ -375,11 +537,17 @@ impl MessageView {
     ///
     /// This is the single layout implementation behind [`render_lines`] (plain
     /// text), [`render_lines_themed`] (ANSI strings) and the App's themed
-    /// buffer path.
+    /// buffer path. Markdown links follow [`MessageView::hyperlinks`].
     ///
     /// [`render_lines`]: MessageView::render_lines
     /// [`render_lines_themed`]: MessageView::render_lines_themed
     pub fn render_styled_lines(&self, width: u16) -> Vec<StyledLine> {
+        self.render_styled_lines_with_links(width, self.hyperlinks)
+    }
+
+    /// [`MessageView::render_styled_lines`] with an explicit hyperlink
+    /// capability, overriding [`MessageView::hyperlinks`].
+    pub fn render_styled_lines_with_links(&self, width: u16, hyperlinks: bool) -> Vec<StyledLine> {
         let prefix_width = 2usize; // "> " or "* "
         let text_width = (width as usize).saturating_sub(prefix_width).max(1);
 
@@ -413,6 +581,7 @@ impl MessageView {
                     prefix,
                     prefix_style,
                     item.streaming,
+                    hyperlinks,
                 ));
                 continue;
             }
@@ -451,7 +620,21 @@ impl MessageView {
     /// maps pointer coordinates onto it for text selection, so a rendered
     /// row and a selectable row can never drift apart.
     pub fn visible_lines(&self, width: u16, height: u16) -> (usize, Vec<StyledLine>) {
-        let lines = self.render_styled_lines(width);
+        self.visible_lines_with_links(width, height, self.hyperlinks)
+    }
+
+    /// [`MessageView::visible_lines`] with an explicit hyperlink capability.
+    ///
+    /// The caller must pass the same capability it draws with, or selection
+    /// and search would map columns against a different link rendering than
+    /// the screen shows.
+    pub fn visible_lines_with_links(
+        &self,
+        width: u16,
+        height: u16,
+        hyperlinks: bool,
+    ) -> (usize, Vec<StyledLine>) {
+        let lines = self.render_styled_lines_with_links(width, hyperlinks);
         let total = lines.len();
         let skip = total.saturating_sub(height as usize + self.scroll_from_bottom);
         let start = skip.min(total);
@@ -463,7 +646,7 @@ impl MessageView {
     /// `ratatui::buffer::Buffer`. Used by the [`App`](crate::App) and
     /// by the snapshot tests in `tests/snapshot.rs`.
     pub fn render_to_buffer(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
-        self.render_to_buffer_impl(area, buf, None);
+        self.render_to_buffer_impl(area, buf, None, false);
     }
 
     /// Themed variant of [`MessageView::render_to_buffer`]: every written cell
@@ -475,7 +658,20 @@ impl MessageView {
         buf: &mut ratatui::buffer::Buffer,
         theme: &Theme,
     ) {
-        self.render_to_buffer_impl(area, buf, Some(theme));
+        self.render_to_buffer_impl(area, buf, Some(theme), self.hyperlinks);
+    }
+
+    /// [`MessageView::render_to_buffer_themed`] with an explicit hyperlink
+    /// capability: markdown links render as OSC 8 sequences when `hyperlinks`
+    /// is true and as the inline `(url)` fallback when it is false.
+    pub fn render_to_buffer_themed_with_links(
+        &self,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        theme: &Theme,
+        hyperlinks: bool,
+    ) {
+        self.render_to_buffer_impl(area, buf, Some(theme), hyperlinks);
     }
 
     fn render_to_buffer_impl(
@@ -483,15 +679,18 @@ impl MessageView {
         area: ratatui::layout::Rect,
         buf: &mut ratatui::buffer::Buffer,
         theme: Option<&Theme>,
+        hyperlinks: bool,
     ) {
-        let (_, lines) = self.visible_lines(area.width, area.height);
+        let (_, lines) = self.visible_lines_with_links(area.width, area.height, hyperlinks);
         for (row, line) in lines.iter().enumerate() {
             let y = area.y + row as u16;
             if y >= area.y + area.height {
                 break;
             }
             match theme {
-                Some(theme) => write_styled_line(buf, area.x, y, area.width, line, theme),
+                Some(theme) => write_styled_line_hyperlinked(
+                    buf, area.x, y, area.width, line, theme, hyperlinks,
+                ),
                 None => {
                     for (col, ch) in plain_text(line).chars().enumerate() {
                         let x = area.x + col as u16;
@@ -508,6 +707,44 @@ impl MessageView {
     }
 }
 
+/// Format a finished tool call exactly like [`MessageView::push_tool`].
+///
+/// Kept as a free function so the streaming path
+/// ([`MessageView::finish_tool_execution`]) and the one-shot path
+/// ([`MessageView::push_tool`]) cannot drift apart.
+fn format_tool(name: &str, args: &str, result: &str, is_error: bool) -> String {
+    if is_error {
+        let mut text = format!("[tool:{name}] error");
+        if !result.is_empty() {
+            let _ = write!(text, ": {result}");
+        }
+        text
+    } else {
+        let mut text = format!("[tool:{name}]");
+        if !args.is_empty() {
+            let _ = write!(text, " {args}");
+        }
+        if !result.is_empty() {
+            let _ = write!(text, " → {result}");
+        }
+        text
+    }
+}
+
+/// The text of an in-flight tool block: `[tool:name] args` while streaming,
+/// `[tool:name] args (running)` once execution starts.
+fn streaming_tool_text(name: &str, args: &str, running: bool) -> String {
+    let mut text = format!("[tool:{name}]");
+    if !args.is_empty() {
+        text.push(' ');
+        text.push_str(args);
+    }
+    if running {
+        text.push_str(" (running)");
+    }
+    text
+}
+
 /// Render an assistant body through the markdown renderer, prepending the
 /// role prefix to every line and appending the streaming caret to the last
 /// line. A whitespace-only body falls back to a single prefixed blank line
@@ -518,8 +755,9 @@ fn markdown_lines(
     prefix: &str,
     prefix_style: SpanStyle,
     streaming: bool,
+    hyperlinks: bool,
 ) -> Vec<StyledLine> {
-    let lines = crate::markdown::render_markdown(body, width);
+    let lines = crate::markdown::render_markdown_with_links(body, width, hyperlinks);
     if lines.is_empty() {
         return vec![vec![StyledSpan::new(prefix, prefix_style)]];
     }

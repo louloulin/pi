@@ -11,6 +11,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::hyperlink::hyperlink;
 use crate::theme::{hex_to_256, hex_to_rgb, ColorMode, ColorValue, Theme, ThemeBg, ThemeColor};
 
 /// The theme slot(s) a [`StyledSpan`] renders with.
@@ -151,15 +152,41 @@ pub struct StyledSpan {
     pub text: String,
     /// The run's theme slot.
     pub style: SpanStyle,
+    /// OSC 8 target, if this run is a terminal hyperlink.
+    ///
+    /// The URL never lives in [`StyledSpan::text`], so width math, wrapping
+    /// and selection (all of which read `text` / [`plain_text`]) cannot see
+    /// it. Only the two presentation paths — [`themed_text`] and
+    /// [`write_styled_line`] — turn it into a sequence. A terminal that does
+    /// not understand OSC 8 paints the text unchanged; that is why the
+    /// caller decides whether to attach a link at all (see
+    /// [`crate::hyperlink`]).
+    pub link: Option<String>,
 }
 
 impl StyledSpan {
-    /// Build a span from its text and slot.
+    /// Build a plain span from its text and slot.
     pub fn new(text: impl Into<String>, style: SpanStyle) -> Self {
         Self {
             text: text.into(),
             style,
+            link: None,
         }
+    }
+
+    /// Build a span that renders as an OSC 8 hyperlink to `url`.
+    pub fn linked(text: impl Into<String>, style: SpanStyle, url: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            link: Some(url.into()),
+        }
+    }
+
+    /// Attach an OSC 8 target to this span (builder form).
+    pub fn with_link(mut self, url: impl Into<String>) -> Self {
+        self.link = Some(url.into());
+        self
     }
 }
 
@@ -172,9 +199,19 @@ pub fn plain_text(line: &[StyledSpan]) -> String {
 }
 
 /// Render a line as an ANSI string using each span's slot.
+///
+/// A span carrying an OSC 8 [`link`](StyledSpan::link) is wrapped in the
+/// matching open/close sequence after its SGR styling, exactly like
+/// upstream's `hyperlink(styledLink, token.href)`
+/// (`packages/tui/src/components/markdown.ts:695`). The escapes are
+/// zero-width, so [`crate::hyperlink::visible_width`] of the result equals
+/// [`plain_text`].
 pub fn themed_text(line: &[StyledSpan], theme: &Theme) -> String {
     line.iter()
-        .map(|span| span.style.ansi(theme, &span.text))
+        .map(|span| match &span.link {
+            Some(url) => hyperlink(&span.style.ansi(theme, &span.text), url),
+            None => span.style.ansi(theme, &span.text),
+        })
         .collect()
 }
 
@@ -191,15 +228,53 @@ pub fn write_styled_line(
     line: &[StyledSpan],
     theme: &Theme,
 ) {
+    write_styled_line_hyperlinked(buf, x0, y, max_width, line, theme, false);
+}
+
+/// [`write_styled_line`] with OSC 8 hyperlink emission.
+///
+/// When `hyperlinks` is true, every cell belonging to a linked span gets a
+/// self-contained `open + glyph + close` sequence as its symbol. `ratatui`
+/// 0.28 has no hyperlink channel on `Cell`, but its `crossterm` backend
+/// writes `cell.symbol()` verbatim (`Print(cell.symbol())`), so the sequence
+/// reaches the terminal while the cell still occupies exactly one column —
+/// the cell grid, the diff and every width computation are unchanged.
+/// Wrapping *per cell* (rather than once around the run) keeps every printed
+/// sequence balanced, which matters because the backend emits cells
+/// independently.
+///
+/// The live frame passes `true`; the flat `/transcript` snapshot passes
+/// `false` so exported text never carries escapes.
+pub fn write_styled_line_hyperlinked(
+    buf: &mut Buffer,
+    x0: u16,
+    y: u16,
+    max_width: u16,
+    line: &[StyledSpan],
+    theme: &Theme,
+    hyperlinks: bool,
+) {
     let mut col = 0u16;
     for span in line {
         let style = span.style.to_style(theme);
+        let link = if hyperlinks {
+            span.link.as_deref()
+        } else {
+            None
+        };
         for ch in span.text.chars() {
             if col >= max_width {
                 return;
             }
             if let Some(cell) = buf.cell_mut((x0 + col, y)) {
-                cell.set_char(ch);
+                match link {
+                    Some(url) => {
+                        cell.set_symbol(&hyperlink(&ch.to_string(), url));
+                    }
+                    None => {
+                        cell.set_char(ch);
+                    }
+                }
                 cell.set_style(style);
             }
             col += 1;

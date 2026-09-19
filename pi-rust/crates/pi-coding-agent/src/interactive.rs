@@ -194,6 +194,9 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         markdown: true,
         // Upstream default: `copyOnSelect ?? true`.
         copy_on_select: true,
+        // Let the App detect the terminal's OSC 8 support from the
+        // environment (`Hyperlinks: None` = auto).
+        hyperlinks: None,
     };
 
     let mut terminal = match setup_terminal() {
