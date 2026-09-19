@@ -13,7 +13,7 @@ use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId};
 use pi_tui::app::{App, AppConfig, StepOutcome};
 use pi_tui::backend::event::{Event as CtEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use pi_tui::input::InputEvent;
+use pi_tui::input::{InputEvent, MouseButton, MouseGesture, MouseGestureKind};
 use pi_tui::selector::{Selector, SelectorItem};
 
 const WIDTH: u16 = 40;
@@ -101,21 +101,40 @@ fn scroll_up_and_down_translate_to_mouse_events() {
 }
 
 #[test]
-fn non_wheel_mouse_events_stay_ignored() {
-    // Clicks / moves / drags are not handled until the App owns a scrollbar
-    // or text selection.
-    for kind in [
-        MouseEventKind::Down(pi_tui::backend::event::MouseButton::Left),
-        MouseEventKind::Up(pi_tui::backend::event::MouseButton::Left),
-        MouseEventKind::Moved,
-        MouseEventKind::Drag(pi_tui::backend::event::MouseButton::Left),
-    ] {
+fn non_wheel_mouse_events_translate_to_gestures() {
+    // Clicks / moves / drags reach the App as gestures; the App turns the
+    // left-button ones into a chat-log text selection (see
+    // `tests/mouse_selection.rs`).
+    let expect = |kind: MouseEventKind, gesture: MouseGestureKind| {
         assert_eq!(
             App::translate_event(mouse(kind, KeyModifiers::NONE)),
-            InputEvent::Ignored,
+            InputEvent::MouseGesture(MouseGesture::new(gesture, 1, 1, false)),
             "{kind:?}"
         );
-    }
+    };
+    expect(
+        MouseEventKind::Down(pi_tui::backend::event::MouseButton::Left),
+        MouseGestureKind::Press(MouseButton::Left),
+    );
+    expect(
+        MouseEventKind::Up(pi_tui::backend::event::MouseButton::Left),
+        MouseGestureKind::Release(MouseButton::Left),
+    );
+    expect(MouseEventKind::Moved, MouseGestureKind::Move);
+    expect(
+        MouseEventKind::Drag(pi_tui::backend::event::MouseButton::Left),
+        MouseGestureKind::Drag(MouseButton::Left),
+    );
+    expect(
+        MouseEventKind::Down(pi_tui::backend::event::MouseButton::Right),
+        MouseGestureKind::Press(MouseButton::Right),
+    );
+
+    // The Alt modifier rides along on gestures too.
+    assert_eq!(
+        App::translate_event(mouse(MouseEventKind::Moved, KeyModifiers::ALT)),
+        InputEvent::MouseGesture(MouseGesture::new(MouseGestureKind::Move, 1, 1, true))
+    );
 }
 
 #[test]

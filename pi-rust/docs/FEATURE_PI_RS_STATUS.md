@@ -7173,3 +7173,141 @@ $ git push origin work/lum-1123                            # 新分支
   **没有覆盖任何在途工作**，也没留下合并债。
 - 本节定稿的这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`
   （零冲突），推送后 `feature/pi.rs` 的 tree 与 `work/lum-1123` 保持一致。
+
+## LUM-1124 round — 核验 `feature/pi.rs`（含 LUM-1122）+ alt-screen 自持鼠标：文本选择 / 复制（`copyOnSelect`）+ 空槽派发 `node:zlib`
+
+（autopilot 协调轮；开工后把 LUM-1124 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 1`（`active_task_count` 也只算本 run 之外的活动任务），
+  上限 3 路 → 有 **2 个空槽**。
+- 本轮只派发 **1 路**（LUM-1125，`node:zlib`），第 2 个空槽**刻意留空**。理由不是预算而是文件级串行：
+  frontier 里除 `node:zlib` 之外每一项都要么写 `pi-extensions/runtime/pi-ext-shim.mjs` + `host.rs`
+  （正好是本轮派发的那条通道，zlib 落地时必须同时改这两处），要么写 `pi-tui/src/app.rs` / `lib.rs`
+  （本轮切片的合并还没推上去，且刚合进来的 LUM-1122 `autocomplete` 也在这两个文件里）。
+  也就是说第二个空槽无论派什么，都会与**已确定在写的文件**直接重叠——这与 LUM-1118 / LUM-1119 /
+  LUM-1123 三轮维持的同一口径冲突：**`pi-extensions/src/host.rs`、`pi-tui/src/app.rs`、
+  `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写**。宁可空一个槽，不制造必然的合并冲突。
+- 进入本轮时 `origin/feature/pi.rs` = `d57999354`（`Merge branch 'work/lum-1122' into feature/pi.rs`），
+  即 LUM-1123 的滚轮切片 + **LUM-1122（Stage 33 `autocomplete`）已合入**；LUM-1122 状态 `in_review`。
+
+### 二、核验 `feature/pi.rs`
+
+在 `work/lum-1124`（起点 `origin/feature/pi.rs` @ `d57999354`）上，先在合并态跑门（第四节给完整输出）。
+`pi-tui` 的起点基线是 **19 suite / 361 passed**（把本轮改动 `git stash` 后在 `d57999354` 上实测），
+所以本轮结束时的 20 suite / 377 正好对得上「+1 suite / +16 测试」，没有别的语义漂移。
+
+### 三、本轮切片：alt-screen 自持鼠标的文本选择 + `copyOnSelect`
+
+LUM-1123 打开鼠标捕获换来滚轮，同时消掉了终端自持的拖选——用户路径上的欠账，记在 frontier 第 3 项。
+本轮把它补上。上游语义逐条对齐（`packages/tui/src/tui-alt-screen.ts`）：
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| `copyOnSelect` 默认 **true** | `:186,245,272`（`options.copyOnSelect ?? true`） | `AppConfig::copy_on_select`，默认 `true` |
+| 拖选状态就是**两个点**：`selectionAnchor` / `selectionFocus` | `:211-212` | `struct Selection { anchor, focus }`（私有） |
+| 鼠标事件分流 | `:1301`（`handleSelectionMouseEvent`，`:936` 调用） | `InputEvent::MouseGesture` + `App::step_mouse_gesture` |
+| 只有**左键**参与选择（右/中键直接 return） | `:1302-1303`（`button !== 0` → return） | 非 `Press/Release/Drag(Left)` 一律 `Idle` |
+| 空选区判定：anchor == focus → `undefined`（即「点一下 = 清空选区」） | `:1381-1397` | `Selection::bounds()` 返回 `None`；release 后 `has_selection() == false` |
+| 文本抽取：**末列含入**（`selection.end.col + 1`），逐行 `trimEnd()`，`"\n"` 连接，空串 → 无 | `:1399-1417`（`getSelectionColumns`）、`:1419-1435` | `App::selection_text()` 同序：`start` 行从起始列切，`end` 行切到 `end_col + 1` 并钳到行宽 |
+| 释放时按 `copyOnSelect` 复制；**复制后选区保持可见** | `:1343`（`if (this.copyOnSelect) void this.copySelectionToClipboard()`） | `step_mouse_gesture` 的 `Release` 分支：`pending_clipboard = Some(text)`，选区不清 |
+| 剪贴板可注入；缺省写 **OSC 52** | `:1443-1462`，序列见 `:1459`（`\x1b]52;c;<base64>\x07`） | `App` 不碰终端：`take_clipboard_request()` 把文本交给 driver，driver 写 `pi_tui::clipboard::osc52_sequence()` |
+
+**刻意偏离（都已写进代码注释，不是遗漏）：**
+
+1. **只做字符粒度**。上游还有双击选词 / 三击选行（`selectionGranularity`，`:213`，`:80-81` 明确
+   把路径与 `kebab-case` token 当整体），本轮不做。
+2. **没有边缘自动滚动**（上游 `stopSelectionAutoScroll` / auto-scroll）。选区锚在**日志行号**上而不是屏幕行，
+   所以手动 `PageUp` / 滚轮滚出视野再滚回来时，选区文本与高亮都还在正确位置（有测试）。
+3. **没有鼠标区域派发 / URL 点击**。上游释放时先 `dispatchMouseToOverlay` → `dispatchMouseToLayout`，
+   命中目标会 `clearTextSelection()`（`:1326-1339`）；本仓库还没有 `components/mouse-region.ts`
+   那一层（frontier 第 9 项），所以「点击」现在的全部效果就是清空选区。
+4. **没有宽字符 / grapheme 感知**：上游用 `getGraphemeCellRange` 把列宽按 grapheme 扩到整格
+   （`:1408-1412`），我们按「1 char = 1 列」切（与 `MessageView` 现有渲染口径一致）。
+5. 选区只在**消息视口**内生效：落在状态行 / 输入行上的手势被忽略（`selection_point` 返回 `None`）。
+   上游的选择是全局 `previousScreen` 坐标，还能选到状态行；我们把范围收窄到「聊天日志」这一条真实用途。
+
+改动清单（自 `d57999354`）：
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-tui/src/input.rs` | 新增 `MouseGesture { kind, x, y, alt }` / `MouseGestureKind { Press/Release/Drag(MouseButton), Move }` / `MouseButton { Left, Middle, Right, Other }` 与 `InputEvent::MouseGesture` 变体；**滚轮保持独立的 `InputEvent::Mouse { up, alt }`**（对齐上游把 wheel 走 `routeWheel` 单独分流），因此既有滚轮测试一条都不用改；新增 3 个构造器 + 1 条单元测试 |
+| `crates/pi-tui/src/message.rs` | 新增 `MessageView::visible_lines(width, height) -> (start, Vec<StyledLine>)`，把「可见窗口」的 `total - (height + scroll_from_bottom)` 跳过逻辑抽成**唯一事实源**；`render_to_buffer_impl` 改为调用它——渲染出来的行与可选中的行从此不可能错位 |
+| `crates/pi-tui/src/app.rs` | `AppConfig::copy_on_select`（默认 true）；`App` 新增 `viewport_origin`（消息区左上角绝对格，`AtomicU16` ×2）、`selection: Option<Selection>`、`selection_dragging`、`pending_clipboard`；`step()` 把 `MouseGesture` 交给新增的 `step_mouse_gesture`；新增 `selection_bounds` / `selection_text` / `has_selection` / `clear_selection` / `take_clipboard_request` / `viewport_origin`；`apply_selection_highlight` 在消息区渲染完成后给命中格 `cell.modifier \|= Modifier::REVERSED`（在弹窗/选择器之前，模态盖在上面）；`Ctrl+L` 清屏时一并清选区（行号指向的日志已经没了） |
+| `crates/pi-tui/src/clipboard.rs`（新） | `base64_encode`（手写 15 行 RFC 4648，避免为此加依赖）+ `osc52_sequence(text)`；3 条单元测试（RFC 4648 §10 全部 7 个向量、UTF-8 按字节编码、escape 外壳） |
+| `crates/pi-tui/src/lib.rs` | 导出 `clipboard` 模块与 `MouseGesture` 家族 |
+| `crates/pi-coding-agent/src/interactive.rs` | 渲染从「`render_snapshot` 再把字符逐格抄进 frame」改成 `app.render_to_buffer(frame.area(), frame.buffer_mut())`——**内容完全相同，多出来的是主题样式与选区高亮**，同时也顺手消掉了 `terminal.size()` 与 `frame.area()` 可能不一致的隐患；事件循环尾部消费 `take_clipboard_request()` 并写 OSC 52 |
+| `crates/pi-tui/tests/mouse_scroll.rs` | 原 `non_wheel_mouse_events_stay_ignored` 改名并反转语义（点击/拖动现在**必须**翻译成手势），补上右中键与 Alt 修饰；滚轮 6 条测试原样保留 |
+| `crates/pi-tui/tests/mouse_selection.rs`（新） | 12 条：单选/跨行（保留渲染前缀）、滚动后选区跟随与滚出视野后高亮消失、reversed 高亮逐格断言（含边界外一格不亮）、release 才复制且只复制一次、`copy_on_select = false` 只选不拷、点击清空旧选区、视口外手势忽略、弹窗吞手势、非左键不选、无 press 的 drag 不选、crossterm → 手势带坐标/修饰翻译 |
+
+### 四、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  20 个 suite 共 377 passed / 0 failed      # 起点 19 / 361（stash 实测），+1 suite / +16 测试
+$ ... cargo test -p pi-coding-agent --offline
+  15 个 suite 共 345 passed / 0 failed      # 与 LUM-1123 轮持平，driver 改动不碰测试面
+$ ... cargo check --workspace --all-targets --offline
+  0 error                                   # 8 个 crate 全过
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished，0 warnings
+```
+
+`+16` 的来源：`tests/mouse_selection.rs` 12 + `input.rs` 手势构造器 1 + `clipboard.rs` 3。
+`cargo fmt --all -- --check` 在本仓库 HEAD 上**本来就有失败项**（`pi-agent-core/src/agent.rs:57`、
+`pi-agent-core/tests/anthropic_faux.rs:105,150` 等一批与 rustfmt 版本相关的历史格式差异，`stash` 后在
+`d57999354` 上同样失败）。本轮口径：**只保证自己碰的文件 rustfmt 干净**（逐文件 `--check` 比对确认），
+不顺手 `cargo fmt` 全仓库去掩盖别人的差异。
+
+### 五、合并与推送
+
+按前几轮的做法：`work/lum-1124` → `feature/pi.rs`（`feature/pi.rs` 被别的 worktree 占着，用 plumbing
+`git merge-tree --write-tree` + `git commit-tree` 合并），然后 push 合并提交与工作分支。
+
+### 六、frontier（本轮更新）
+
+本轮消掉了 LUM-1123 留下的 **P1 欠账**（alt-screen 自持鼠标的选区/复制），并把该欠账带来的两个次生项
+（双击选词、鼠标区域派发）显式排到后面；`node:zlib` 已派发（LUM-1125），其同通道兄弟项排在它后面。
+
+1. **P1 `settings-list` + `/settings` 子菜单**（上游 `components/settings-list.ts` 328 行 +
+   `settings-manager` 1417 行；`config.rs` 目前只读 `compaction` 一段）：列表全走 `fuzzyFilter`
+   （LUM-1119 成果），但**必须动 `pi-tui/src/app.rs` 与 `lib.rs`** → 与本轮切片同一文件，
+   等本轮合并落地后再开。
+2. **P1 鼠标区域派发 / 点击命中（`components/mouse-region.ts` 33 行 + `tui-alt-screen.ts:1326-1339`
+   的 `dispatchMouseToOverlay` → `dispatchMouseToLayout` → `clearTextSelection`）**：本轮已把
+   `InputEvent::MouseGesture`（button / 坐标 / press-release-drag）铺好，这一项现在是「在
+   `App` 里按矩形派发给定组件」的增量，也是本轮的**新欠账**。
+3. **P1 选区粒度与边缘体验**：双击选词 / 三击选行（上游 `:80-81` 对路径与 `kebab-case` token 有明确
+   期望）、拖到视口上下边缘自动滚动、`getGraphemeCellRange` 的宽字符整格扩边。三者都在本轮新增的
+   `Selection` 上增量做。
+4. **P1 `node:zlib`（已派发 LUM-1125）**：zstd 家族 + `crc32`，复用已有 `zstd = "=0.13"`
+   （`Cargo.toml:74-75`），零新依赖；gzip/deflate 因离线 registry 无 `flate2`/`miniz_oxide` 明确不覆盖。
+5. **P2 `node:module` / `node:readline`**：与本轮派发的 LUM-1125 **同一组文件**
+   （`pi-extensions/runtime/pi-ext-shim.mjs` + `src/host.rs` + `tests/node_builtins.rs` 的
+   `KNOWN_UNBRIDGED`）→ 与 LUM-1125 串行排队。
+6. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）；
+   同样落在 `host.rs` / shim 通道，排在 LUM-1125 之后。
+7. **P3 `alt-screen-search.ts`**（上游 327 行）：与新落地的选区逻辑有天然联动（命中高亮 = 另一种
+   "reversed 高亮"），但需要新文件 + `app.rs` 钩子。
+8. **P3 `latex.ts`**（1394 行）与 `markdown.rs` 尚未覆盖的子集（表格 / LaTeX / OSC-8 hyperlink / 语法高亮）。
+9. **P3 provider catalog / LUM-1090**：结论维持（上游没有可搬运的 `data/*.json` 事实源，不写猜测值）。
+10. **P3 旧式 X10 鼠标序列、`updateScrollbarHover` 悬停高亮、滚动条拖拽**：等第 2 项落地后基本是顺带。
+
+并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只派发 1 路（LUM-1125）。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree d57999354 work/lum-1124` → tree `abc3eada7`（零冲突）。
+- 合并提交 `966435aef`（`Merge branch 'work/lum-1124' into feature/pi.rs`，父 `d57999354` +
+  工作提交 `51868d49c`），其 tree `abc3eada7` 与当时的 `work/lum-1124` **完全一致**。
+- `git push origin 966435aef:refs/heads/feature/pi.rs` → `d57999354..966435aef`；`work/lum-1124`
+  作为新分支一并推送。
+- `git diff --stat d57999354 966435aef` = 本轮 9 个文件（代码 8 + 本节文档 124 行，共 +1048 / −58），
+  无其他改动。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `d57999354`（LUM-1125 刚开工、工作分支尚未推送），因此这次
+  合并**没有覆盖任何在途工作**，也没留下合并债。
+- 本节定稿的这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`
+  （零冲突），推送后 `feature/pi.rs` 的 tree 与 `work/lum-1124` 保持一致。
