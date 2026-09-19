@@ -10869,3 +10869,8 @@ frontier 上一项：
 
 环境记录：本轮使用检出内默认 `pi-rust/target`（无独立 `/tmp` target）；释放的是**已结束**的
 LUM-1147 的 `/tmp` target 目录。
+
+补记（推送哈希）：本轮代码提交 `542e56b35` + 合并提交 `81ecf0008` + 文档提交 `ecaba34d2`，
+`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `d27a17679` **快进至 `ecaba34d2`**
+（`git ls-remote` 复查一致：`ecaba34d266b9456435f42230c9804f202e28573`），
+留档分支 `work/lum-1150` 一并推送（同哈希）。
