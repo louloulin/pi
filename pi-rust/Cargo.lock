@@ -1036,6 +1036,7 @@ dependencies = [
  "indexmap",
  "js-sys",
  "pi-protocol",
+ "regex",
  "reqwest",
  "serde",
  "serde-wasm-bindgen",

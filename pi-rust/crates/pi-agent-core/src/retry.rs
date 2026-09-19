@@ -216,10 +216,19 @@ fn retryable_pattern() -> &'static Regex {
 
 /// Classify error **text** as a transient provider / transport failure.
 ///
+/// A context-window overflow is never retryable — upstream
+/// `_isRetryableError` checks `isContextOverflow` before
+/// `isRetryableAssistantError`, because the agent compacts instead of
+/// replaying the same oversized prompt. The classifier lives in `pi-ai`
+/// (`utils/overflow.ts`) and is consulted first here too.
+///
 /// Quota / billing exhaustion wins over the transient pattern, exactly like
 /// `isRetryableAssistantError` checks the non-retryable pattern first.
 pub fn is_retryable_error_message(error_message: &str) -> bool {
     if error_message.is_empty() {
+        return false;
+    }
+    if pi_ai::is_context_overflow_error_text(error_message) {
         return false;
     }
     if non_retryable_pattern().is_match(error_message) {

@@ -821,10 +821,14 @@ async fn run_compact(
 /// context size against the model's context window and summarize the
 /// prefix when it no longer fits `reserveTokens` of head-room.
 ///
-/// Mirrors the threshold branch of `_checkCompaction` in
-/// `agent-session.ts`: the check runs between turns (never while a turn
-/// is in flight, hence the [`App::is_busy`] guard) and `settings.enabled`
-/// — `compaction.enabled` / `autoCompact` in `settings.json` — gates it.
+/// Mirrors `_checkCompaction` in `agent-session.ts`: the check runs between
+/// turns (never while a turn is in flight, hence the [`App::is_busy`] guard)
+/// and `settings.enabled` — `compaction.enabled` / `autoCompact` in
+/// `settings.json` — gates it. Two signals trigger it, exactly like upstream:
+/// `context_tokens + reserve_tokens` crossing the window, and an overflow
+/// signal in the finished turn (`pi_ai::is_context_overflow`) that the
+/// reserve threshold would otherwise miss, e.g. a length stop with zero
+/// output that filled the window while `reserve_tokens` is 0.
 ///
 /// Returns `true` when a compaction ran.
 async fn maybe_auto_compact(
@@ -860,9 +864,31 @@ async fn maybe_auto_compact(
     } else {
         crate::compaction::estimate_context_tokens(&history)
     };
-    if !crate::compaction::should_compact(context_tokens, model.context_window, settings) {
+    // Upstream `_checkCompaction` compacts on two further signals besides the
+    // threshold: a *successful* turn whose reported input already exceeds the
+    // window (z.ai answers an oversized prompt instead of failing it), and a
+    // length stop with zero output that filled the window (Xiaomi MiMo
+    // truncates the input to fit and generates nothing) — `utils/overflow.ts`.
+    // The error-message case cannot fire here: `pi-protocol::AssistantMessage`
+    // carries no error text, and a failed attempt is retried by
+    // `pi-agent-core::retry` instead (which excludes overflow from the retry
+    // budget).
+    let context_overflow = pi_ai::is_context_overflow(
+        turn.stop_reason,
+        None,
+        &turn.usage,
+        Some(model.context_window),
+    );
+    if !context_overflow
+        && !crate::compaction::should_compact(context_tokens, model.context_window, settings)
+    {
         return false;
     }
+    let trigger = if context_overflow {
+        "overflow"
+    } else {
+        "threshold"
+    };
 
     let compaction = match compact(
         &history,
@@ -892,7 +918,7 @@ async fn maybe_auto_compact(
 
     let report = apply_compaction(agent, options, history.len(), compaction).await;
     app.info(format!(
-        "auto-compact: context {context_tokens} > {} window − {} reserve; summarized {} message(s) → kept {} ({} → {} est. tokens)\n\n{}",
+        "auto-compact ({trigger}): context {context_tokens} vs {} window − {} reserve; summarized {} message(s) → kept {} ({} → {} est. tokens)\n\n{}",
         model.context_window,
         settings.reserve_tokens,
         report.summarized(),
@@ -1223,7 +1249,10 @@ mod tests {
 
     use pi_agent_core::{Agent, AgentOptions};
     use pi_ai::providers::faux::FauxProvider;
-    use pi_protocol::{Api, Message, Model, ProviderId, Role};
+    use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
+    use pi_protocol::{
+        Api, AssistantMessageEvent, Context, Message, Model, ProviderId, Role, StopReason, Usage,
+    };
     use pi_tui::app::AppConfig;
 
     const LONG: usize = 400;
@@ -1271,12 +1300,49 @@ mod tests {
         }
     }
 
+    /// A provider whose every reply is a `length` stop carrying `usage`, so the
+    /// App records exactly the turn signal the test wants to exercise.
+    #[derive(Debug)]
+    struct LengthStopProvider {
+        usage: Usage,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamFn for LengthStopProvider {
+        async fn stream_simple(
+            &self,
+            model: &Model,
+            _context: &Context,
+            _options: &SimpleStreamOptions,
+        ) -> Result<AssistantMessageEventStream, StreamError> {
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(AssistantMessageEvent::Start {
+                    model: model.id.clone(),
+                }),
+                Ok(AssistantMessageEvent::Done {
+                    content: vec![pi_protocol::Content::text("truncated")],
+                    stop_reason: StopReason::MaxTokens,
+                    usage: self.usage,
+                }),
+            ])))
+        }
+    }
+
     /// Seed `[user, assistant]` and run one more prompt, producing a
     /// four-message history long enough to exceed a 100-token window.
     async fn app_after_two_turns(context_window: u32) -> (App, Arc<AsyncMutex<Agent>>) {
+        app_after_two_turns_with(context_window, Arc::new(FauxProvider::default())).await
+    }
+
+    /// Like [`app_after_two_turns`], but with a caller-supplied provider whose
+    /// reply controls the turn's recorded [`pi_tui::app::TurnUsage`].
+    async fn app_after_two_turns_with(
+        context_window: u32,
+        provider: SharedStreamFn,
+    ) -> (App, Arc<AsyncMutex<Agent>>) {
         let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
             small_window_model(context_window),
-            Arc::new(FauxProvider::default()),
+            provider,
             "you are pi",
         ))));
         {
@@ -1369,6 +1435,38 @@ mod tests {
         };
         assert!(!maybe_auto_compact(&mut app, &agent, &options).await);
         assert_eq!(agent.lock().await.state().messages.len(), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_compaction_runs_on_a_length_stop_overflow_the_threshold_would_miss() {
+        // 990 / 1000 = 99% of the window with zero output — the Xiaomi MiMo
+        // shape (`is_context_overflow` case 3). With `reserve_tokens: 0` the
+        // threshold check (`990 + 0 > 1000`) stays false, so only the overflow
+        // branch can trigger a compaction.
+        let provider = Arc::new(LengthStopProvider {
+            usage: Usage {
+                input: 990,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                total: 990,
+            },
+        });
+        let (mut app, agent) = app_after_two_turns_with(1_000, provider).await;
+        let options = InteractiveOptions {
+            compaction: CompactionSettings {
+                enabled: true,
+                reserve_tokens: 0,
+                keep_recent_tokens: 100,
+            },
+            ..InteractiveOptions::default()
+        };
+
+        assert!(
+            maybe_auto_compact(&mut app, &agent, &options).await,
+            "a 99%-full length stop should compact even below the reserve threshold"
+        );
+        assert_eq!(agent.lock().await.state().messages.len(), 3);
     }
 
     // -----------------------------------------------------------------------

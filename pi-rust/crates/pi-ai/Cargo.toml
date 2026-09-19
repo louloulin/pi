@@ -32,6 +32,11 @@ tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 
+# Context-overflow detection (`utils/overflow.ts`) is a pattern list; the
+# `regex` crate already reaches the WASM bundle through `pi-agent-core`, so
+# sharing it here does not add a new transitive dependency.
+regex.workspace = true
+
 # Tokio's feature set is target-conditional: the workspace dep pulls `full`
 # (which transitively depends on `mio`), and `mio` does not compile on
 # `wasm32-unknown-unknown`. We therefore declare tokio *only* in the

@@ -98,6 +98,22 @@ fn keeps_provider_limit_errors_non_retryable() {
 }
 
 #[test]
+fn keeps_context_overflow_errors_non_retryable() {
+    // Upstream `_isRetryableError` checks `isContextOverflow` before the
+    // transient classifier: the agent compacts instead of replaying the same
+    // oversized prompt. The second vector also matches the transient pattern
+    // (`503` / `service unavailable`), so it only stays non-retryable because
+    // of the overflow check.
+    for message in [
+        "prompt is too long: 213462 tokens > 200000 maximum",
+        "503 service unavailable: requested token count exceeds the model's maximum context length of 131072 tokens.",
+        "413 request_too_large: Request exceeds the maximum size",
+    ] {
+        assert!(!is_retryable_error_message(message), "{message}");
+    }
+}
+
+#[test]
 fn classifies_assistant_error_text() {
     assert!(is_retryable_error_message("overloaded_error"));
     assert!(is_retryable_error_message("524 status code (no body)"));

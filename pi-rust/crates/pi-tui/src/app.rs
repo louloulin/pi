@@ -163,7 +163,7 @@ use crossterm::event::{
 };
 use parking_lot::Mutex;
 use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate};
-use pi_protocol::{Content, Message, Usage};
+use pi_protocol::{Content, Message, StopReason, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -276,6 +276,11 @@ impl Default for AppConfig {
 pub struct TurnUsage {
     /// Usage reported by the turn's final assistant message.
     pub usage: Usage,
+    /// Stop reason of the turn's final assistant message. Drivers use it to
+    /// tell a silent context overflow (`stop` with input over the window) and
+    /// a length-stop overflow (`max_tokens` with zero output) from a normal
+    /// turn, so compaction can be triggered before the threshold is crossed.
+    pub stop_reason: StopReason,
     /// Messages that followed that assistant message in the turn (the
     /// tool results it produced), for `context_tokens_with_trailing`.
     pub trailing: Vec<Message>,
@@ -987,6 +992,7 @@ impl App {
                 }
                 self.last_turn_usage = Some(TurnUsage {
                     usage: message.usage,
+                    stop_reason: message.stop_reason,
                     trailing: tool_results,
                 });
             }
