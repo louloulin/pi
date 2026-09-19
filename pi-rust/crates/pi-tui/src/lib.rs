@@ -24,6 +24,7 @@ pub mod markdown;
 pub mod message;
 pub mod mouse_region;
 pub mod prompt;
+pub mod search;
 pub mod selector;
 pub mod settings;
 pub mod status;
@@ -53,6 +54,11 @@ pub use markdown::{render_markdown, render_markdown_with_theme};
 pub use message::{MessageItem, MessageView};
 pub use mouse_region::{MouseRegion, MouseRegionPoint};
 pub use prompt::{Prompt, PromptAction};
+pub use search::{
+    apply_query_key, find_matches, normalize_query, render_search_bar, search_bar_rect,
+    search_bar_text, SearchBar, SearchBarLayout, SearchIndex, SearchMatch, SearchResult,
+    SearchSegment, SearchSelectionMode,
+};
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use settings::{SettingItem, SettingsAction, SettingsList};
 pub use status::{StatusBar, StatusData};
