@@ -1,0 +1,29 @@
+[package]
+name = "pi-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared wire types between the Pi Rust crates and the WASM extension ABI."
+
+[lints]
+workspace = true
+
+[features]
+# `wasm` enables WASM-specific serde helpers (e.g. `Serialize`/`Deserialize`
+# impls that round-trip via `serde-wasm-bindgen`). It is a marker feature so
+# downstream consumers can opt in; the crate itself compiles to wasm32 with
+# or without it.
+default = []
+wasm = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+# `uuid` is conditional: native builds use the default `rand`-based RNG,
+# the `wasm` feature enables `uuid`'s `js` feature so the crate still works
+# in `wasm32-unknown-unknown` (where `getrandom` cannot call into libc).
+uuid = { workspace = true, features = ["js"] }
+chrono.workspace = true
+thiserror.workspace = true

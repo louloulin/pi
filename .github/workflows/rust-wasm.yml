@@ -1,0 +1,108 @@
+name: Rust WASM
+
+# Stage 6 CI: build `pi-agent-core` and `pi-ai` for `wasm32-unknown-unknown`
+# via `wasm-pack`, then exercise the generated JS host with the
+# node-based smoke tests in `examples/wasm-host/test.mjs`. Also asserts
+# the resulting `.wasm` is under the 500 KB size budget the Stage 6
+# plan commits to.
+
+on:
+  push:
+    branches: [main, stage6-wasm-bindgen, stage4-tui-interactive]
+    paths:
+      - "pi-rust/Cargo.toml"
+      - "pi-rust/Cargo.lock"
+      - "pi-rust/crates/pi-agent-core/**"
+      - "pi-rust/crates/pi-ai/**"
+      - "pi-rust/crates/pi-protocol/**"
+      - "pi-rust/examples/wasm-host/**"
+      - ".github/workflows/rust-wasm.yml"
+  pull_request:
+    paths:
+      - "pi-rust/Cargo.toml"
+      - "pi-rust/Cargo.lock"
+      - "pi-rust/crates/pi-agent-core/**"
+      - "pi-rust/crates/pi-ai/**"
+      - "pi-rust/crates/pi-protocol/**"
+      - "pi-rust/examples/wasm-host/**"
+      - ".github/workflows/rust-wasm.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-wasm:
+    name: Build & test pi-agent-core (wasm32-unknown-unknown)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "pi-rust -> target"
+          cache-on-failure: true
+
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer.sh | sh
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cargo check (wasm32 + wasm feature)
+        working-directory: pi-rust
+        run: |
+          cargo check \
+            -p pi-ai \
+            -p pi-agent-core \
+            -p pi-protocol \
+            --target wasm32-unknown-unknown \
+            --features pi-agent-core/wasm
+
+      - name: wasm-pack build pi-agent-core
+        working-directory: pi-rust
+        run: |
+          wasm-pack build \
+            -p pi-agent-core \
+            --target web \
+            --features wasm
+
+      - name: Install JS dependencies
+        working-directory: pi-rust/examples/wasm-host
+        run: npm install --no-audit --no-fund
+
+      - name: Run wasm-host smoke tests
+        working-directory: pi-rust/examples/wasm-host
+        run: node --test test.mjs
+
+      - name: Vite production build
+        working-directory: pi-rust/examples/wasm-host
+        run: npm run build
+
+      - name: Assert wasm size under 500 KB
+        working-directory: pi-rust/examples/wasm-host
+        run: |
+          set -euo pipefail
+          WASM_PATH="pkg/pi_agent_core_bg.wasm"
+          if [ ! -f "$WASM_PATH" ]; then
+            echo "::error::$WASM_PATH not found"
+            exit 1
+          fi
+          SIZE_BYTES=$(wc -c < "$WASM_PATH")
+          SIZE_KB=$((SIZE_BYTES / 1024))
+          echo "wasm size: ${SIZE_KB} KB"
+          if [ "$SIZE_KB" -gt 500 ]; then
+            echo "::error::wasm size ${SIZE_KB} KB exceeds the 500 KB budget"
+            exit 1
+          fi
+          echo "ok: wasm is under the 500 KB budget"

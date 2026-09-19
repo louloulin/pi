@@ -1,0 +1,20 @@
+[package]
+name = "pi-mono"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Workspace glue for the Pi Rust port (provider selection, default config)."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+pi-ai = { path = "../pi-ai" }
+pi-agent-core = { path = "../pi-agent-core" }
+pi-extensions = { path = "../pi-extensions" }
+
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
