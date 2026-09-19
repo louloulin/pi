@@ -10177,7 +10177,10 @@ Stage 42。本轮起点 `ce44b692f`（LUM-1142 合并态），代码提交 `7b6d
 本轮只碰 `pi-tui`，与 LUM-1141（`pi-agent-core`）、LUM-1143（`pi-agent-core`）、LUM-1145
 （`pi-ai`）零文件交集，`git merge origin/feature/pi.rs @ 2745e1c76` 无冲突，合并提交 `b22371424`。
 
-推送与远端哈希见本轮补记（`feature/pi.rs` 与留档分支 `work/lum-1144` 指向同一提交）。
+推送：`git push origin 97d709b69:refs/heads/feature/pi.rs` → `2745e1c76..97d709b69`（快进，
+含代码提交 `7b6d33615`、合并提交 `b22371424` 与上一版文档提交）；留档分支 `work/lum-1144`
+同为 `97d709b69`，`git ls-remote` 复查两条 ref 一致。此后本节文字本身又作了一次修订，
+再以快进追加推到同一分支。
 
 ### 六、frontier（本轮更新）
 
