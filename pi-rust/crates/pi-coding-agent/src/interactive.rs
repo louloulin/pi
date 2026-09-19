@@ -201,6 +201,18 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         }
     };
 
+    // TUI-only: install the merged coding-agent table (the `pi-tui` defaults
+    // plus the four `tui.*` platform overrides and the `app.*` ids) as the
+    // process-wide registry the `pi-tui` components resolve every chord
+    // against. Print / RPC / no-TTY runs never reach this point and keep the
+    // `pi-tui` defaults.
+    //
+    // The returned manager is the handle a config reload re-installs through
+    // (`keybindings::reload_keybindings`); the render loop has no reload
+    // trigger yet, so it is only kept alive for the session here.
+    let _keybindings =
+        crate::keybindings::install_keybindings_from(crate::paths::agent_dir_or_default());
+
     let outcome = run_loop(&mut terminal, agent, options, config).await;
 
     let teardown = teardown_terminal(&mut terminal);

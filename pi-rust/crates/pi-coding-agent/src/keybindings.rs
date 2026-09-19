@@ -760,3 +760,37 @@ impl KeybindingsManager {
         self.inner.matches(event, keybinding)
     }
 }
+
+/// Install `manager`'s resolved table as the process-wide `pi-tui`
+/// keybindings.
+///
+/// The `pi-tui` components resolve every chord through
+/// [`pi_tui::keybindings::get_keybindings`], so this is the bridge from the
+/// coding-agent config layer to the consumer: upstream
+/// `setKeybindings(manager)`.
+pub fn install_keybindings(manager: &KeybindingsManager) {
+    pi_tui::keybindings::set_keybindings(manager.inner().clone());
+}
+
+/// Build the merged coding-agent table for `agent_dir` and install it as the
+/// process-wide `pi-tui` keybindings.
+///
+/// Returns the manager so the caller can later
+/// [`reload_keybindings`] it. The interactive TTY path is the only caller:
+/// print / RPC / no-TTY runs have no chords to resolve and must keep the
+/// registry's `pi-tui` defaults.
+pub fn install_keybindings_from(agent_dir: impl AsRef<Path>) -> KeybindingsManager {
+    let manager = KeybindingsManager::create(agent_dir);
+    install_keybindings(&manager);
+    manager
+}
+
+/// Re-read `keybindings.json` and re-install the resolved table.
+///
+/// Installing once at startup is not enough on its own: the registry holds a
+/// clone of the inner table, so a changed `keybindings.json` only reaches the
+/// TUI when the new table is installed again.
+pub fn reload_keybindings(manager: &mut KeybindingsManager) {
+    manager.reload();
+    install_keybindings(manager);
+}

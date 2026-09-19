@@ -447,6 +447,33 @@ fn is_function_key(name: &str) -> bool {
     matches!(digits.parse::<u8>(), Ok(1..=12))
 }
 
+/// True when `event` triggers `keybinding`, with built-in chords standing in
+/// while the installed table does not define the id.
+///
+/// The `app.*` ids belong to the coding-agent config layer, so a bare
+/// `pi-tui` registry (only the `tui.*` ids) leaves them unknown and
+/// [`KeybindingsManager::matches`] returns `false`. The caller's built-in
+/// chords then stand in, so the standalone component behaviour is preserved;
+/// once any table defines the id — even deliberately unbound — the fallback
+/// stops applying and the table decides.
+///
+/// `builtin` chords use the same spelling as the registry ids
+/// (`"ctrl+d"`, `"escape"`, ...).
+pub fn matches_with_fallback(
+    manager: &KeybindingsManager,
+    event: &InputEvent,
+    keybinding: &str,
+    builtin: &[&str],
+) -> bool {
+    if manager.get_definition(keybinding).is_none() {
+        let InputEvent::Key(key) = event else {
+            return false;
+        };
+        return builtin.iter().any(|chord| key_matches(chord, key));
+    }
+    manager.matches(event, keybinding)
+}
+
 /// True when `key` is the chord `key_id` names.
 ///
 /// See the module docs for the matching rules (case-as-Shift for letters,
