@@ -20,6 +20,7 @@ pub mod input;
 pub mod kill_ring;
 pub mod markdown;
 pub mod message;
+pub mod mouse_region;
 pub mod prompt;
 pub mod selector;
 pub mod settings;
@@ -43,6 +44,7 @@ pub use input::{InputEvent, Key, KeyModifiers, MouseButton, MouseGesture, MouseG
 pub use kill_ring::{KillDirection, KillRing};
 pub use markdown::{render_markdown, render_markdown_with_theme};
 pub use message::{MessageItem, MessageView};
+pub use mouse_region::{MouseRegion, MouseRegionPoint};
 pub use prompt::{Prompt, PromptAction};
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use settings::{SettingItem, SettingsAction, SettingsList};
