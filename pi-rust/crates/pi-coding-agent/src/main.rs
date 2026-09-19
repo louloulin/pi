@@ -7,7 +7,8 @@ use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
 use pi_coding_agent::config::{
-    load_compaction_settings_default, load_provider_retry_policy_default,
+    load_agent_retry_policy_default, load_compaction_settings_default,
+    load_provider_retry_policy_default,
 };
 use pi_coding_agent::extensions::ui_bridge::TuiUi;
 use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
@@ -159,6 +160,10 @@ fn main() -> ExitCode {
                 session_log,
                 session_id: session_id.clone(),
                 compaction: load_compaction_settings_default(),
+                // `settings.retry` drives the agent-level retry loop: a
+                // transient provider failure restarts the assistant call
+                // with exponential backoff instead of ending the turn.
+                retry: load_agent_retry_policy_default(),
                 initial_prompt,
                 prompt_templates,
                 stream_fn: stream_fn.clone(),
@@ -245,6 +250,7 @@ fn main() -> ExitCode {
                 output_format: cli.output_format,
                 tool_executor,
                 extensions: Arc::new(loaded_extensions.runtime.clone()),
+                retry: load_agent_retry_policy_default(),
             };
             match runtime.block_on(run_print_mode(options)) {
                 Ok(_) => ExitCode::SUCCESS,

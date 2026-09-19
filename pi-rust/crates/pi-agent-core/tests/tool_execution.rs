@@ -405,6 +405,9 @@ async fn context_exposes_executor_definitions() {
         model: faux_model(),
         tool_executor: Some(executor),
         tool_execution: pi_protocol::ToolExecutionMode::Parallel,
+        // Nothing in this fixture expects a retry; keep the loop a
+        // passthrough so failures surface on the first attempt.
+        retry: pi_agent_core::RetryPolicy::disabled(),
         telemetry: None,
     };
     let state = AgentState {

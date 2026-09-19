@@ -48,7 +48,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use futures::FutureExt;
 use pi_agent_core::tools::ToolExecutor;
-use pi_agent_core::{Agent, AgentError, AgentEvent, AgentOptions};
+use pi_agent_core::{Agent, AgentError, AgentEvent, AgentOptions, RetryPolicy};
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{AssistantMessage, Content, Message, Model, Role, StopReason, Usage};
 use pi_session::{SessionEntry, SessionReader, SessionWriter};
@@ -196,6 +196,9 @@ pub struct PrintModeOptions {
     /// handler's `pi.appendEntry` / `pi.sendMessage` side effects into
     /// the session.
     pub extensions: Arc<ExtensionRuntime>,
+    /// Agent-level retry budget for the assistant call, resolved from
+    /// `settings.json` by the caller (`config::load_agent_retry_policy`).
+    pub retry: RetryPolicy,
 }
 
 impl PrintModeOptions {
@@ -214,6 +217,7 @@ impl PrintModeOptions {
             output_format: OutputFormat::Text,
             tool_executor: default_executor(),
             extensions: Arc::new(ExtensionRuntime::empty()),
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -602,7 +606,10 @@ fn build_agent(options: &PrintModeOptions) -> Result<Agent, PrintModeError> {
     // calls it emits for real. Without this the loop falls back to the
     // Stage 2 stub ("(stub) executed <name>") and the model sees a
     // fabricated result for every tool call.
-    .with_tool_executor(options.tool_executor.clone());
+    .with_tool_executor(options.tool_executor.clone())
+    // `settings.retry` decides how many times a transient provider failure
+    // restarts the assistant call before the run fails.
+    .with_retry_policy(options.retry);
     Ok(Agent::new(agent_options))
 }
 

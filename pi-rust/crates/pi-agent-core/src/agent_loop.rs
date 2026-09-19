@@ -34,6 +34,7 @@ use crate::events::{AgentEvent, AssistantMessageUpdate};
 use crate::hooks::{
     AgentHookAdapter, AgentLoopTurnUpdate, PrepareNextTurnContext, ShouldStopAfterTurnContext,
 };
+use crate::retry::{retry_assistant_call, RetryPolicy};
 use crate::state::{AgentConfig, AgentState};
 use crate::telemetry::{
     attribute_name, request_error_attributes, response_attributes, span_name, tool_attributes,
@@ -81,6 +82,9 @@ pub struct LoopConfig {
     /// How a tool batch without any `Sequential` tool is dispatched.
     /// Copied from [`AgentConfig::tool_execution`].
     pub tool_execution: ToolExecutionMode,
+    /// Agent-level retry budget for the assistant call. Copied from
+    /// [`AgentConfig::retry`] — `prepare_next_turn` cannot change it.
+    pub retry: RetryPolicy,
 }
 
 impl From<&AgentConfig> for LoopConfig {
@@ -89,6 +93,7 @@ impl From<&AgentConfig> for LoopConfig {
             model: config.model.clone(),
             thinking_level: None,
             tool_execution: config.tool_execution,
+            retry: config.retry,
         }
     }
 }
@@ -539,7 +544,8 @@ async fn run_turn_batch(
     signal: &CancellationToken,
     sinks: TurnSinks<'_>,
 ) -> Result<TurnBatch, AgentError> {
-    let assistant_message = stream_assistant_response(stream_fn, context, config, sinks).await?;
+    let assistant_message =
+        stream_assistant_response_with_retry(stream_fn, context, config, signal, sinks).await?;
     let (tool_results, continue_loop) = execute_tool_calls(
         executor,
         hooks,
@@ -555,6 +561,35 @@ async fn run_turn_batch(
         tool_results,
         continue_loop,
     })
+}
+
+/// Stream one assistant response, retrying transient provider failures when
+/// the loop's [`RetryPolicy`] allows it.
+///
+/// The retry loop wraps the *whole* `pi.ai.request` span, so a retried attempt
+/// opens its own span and re-emits `MessageStart` / deltas after the failed
+/// attempt's truncated sequence — a failed attempt is not rolled back, exactly
+/// like upstream (which surfaces the failed message and then restarts the
+/// turn). A policy that is disabled returns the first response unchanged.
+async fn stream_assistant_response_with_retry(
+    stream_fn: &SharedStreamFn,
+    context: &AgentContext,
+    config: &LoopConfig,
+    signal: &CancellationToken,
+    sinks: TurnSinks<'_>,
+) -> Result<AssistantMessage, AgentError> {
+    let policy = config.retry;
+    if !policy.enabled {
+        return stream_assistant_response(stream_fn, context, config, sinks).await;
+    }
+    retry_assistant_call(
+        || stream_assistant_response(stream_fn, context, config, sinks),
+        Some(&policy),
+        &config.model.id,
+        signal,
+        None,
+    )
+    .await
 }
 
 /// Stream a single assistant response, wrapping it in a `pi.ai.request` span

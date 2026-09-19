@@ -28,7 +28,7 @@ use crossterm::terminal::{
 };
 use parking_lot::Mutex as SyncMutex;
 use pi_agent_core::tools::ToolExecutor;
-use pi_agent_core::{Agent, AgentEvent, AgentOptions};
+use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy};
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
@@ -114,6 +114,10 @@ pub struct InteractiveOptions {
     /// `None` keeps the headless behaviour (deny / cancel), which is
     /// what tests and non-TTY runs get.
     pub extension_ui: Option<TuiUi>,
+    /// Agent-level retry budget for the assistant call, resolved from
+    /// `settings.json` by the caller (`config::load_agent_retry_policy`).
+    /// Applied to the agent the TUI drives.
+    pub retry: RetryPolicy,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -132,6 +136,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("tool_executor", &"<dyn ToolExecutor>")
             .field("extensions", &self.extensions.is_some())
             .field("extension_ui", &self.extension_ui.is_some())
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -152,6 +157,7 @@ impl Default for InteractiveOptions {
             tool_executor: default_executor(),
             extensions: None,
             extension_ui: None,
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -174,7 +180,10 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         AgentOptions::new(resolved_model.clone(), stream_fn, system_prompt)
             // The TUI is a real coding session: tool calls must hit the
             // filesystem / shell instead of the Stage 2 stub.
-            .with_tool_executor(options.tool_executor.clone()),
+            .with_tool_executor(options.tool_executor.clone())
+            // `settings.retry` decides how many times a transient provider
+            // failure restarts the assistant call before the TUI reports it.
+            .with_retry_policy(options.retry),
     );
     let agent = Arc::new(AsyncMutex::new(agent));
 

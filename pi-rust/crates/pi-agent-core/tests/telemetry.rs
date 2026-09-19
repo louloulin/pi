@@ -193,6 +193,10 @@ fn loop_with(
             model: faux_model(),
             tool_executor: executor,
             tool_execution: pi_protocol::ToolExecutionMode::Parallel,
+            // `provider_errors_are_recorded_on_the_request_and_run_spans`
+            // streams a permanent `connection refused` failure; retrying it
+            // would only make the test slow.
+            retry: pi_agent_core::RetryPolicy::disabled(),
             telemetry,
         },
         AgentState {
