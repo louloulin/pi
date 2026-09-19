@@ -3171,6 +3171,13 @@ $ cargo test   --workspace --no-fail-fast                    # 543 passed / 0 fa
 > `--no-fail-fast` 重跑中均未复现（疑似并发编译 + 加载下的时序抖动）。失败
 > 用例名未被捕获；后续 CI 若再出现，优先排查 `pi-extensions/tests/host.rs`
 > 的 5s 超时用例与 `cli_extensions.rs` 的二进制 + loopback SSE 用例。
+>
+> **LUM-1076 补记（已定位）**：该 flake 是
+> `pi-coding-agent --test cli_provider::anthropic_auth_token_is_an_accepted_credential`，
+> 断言在 `crates/pi-coding-agent/tests/cli_provider.rs:156`，报
+> `provider never dialed the loopback capture server: Timeout`，即 30s 内子进程
+> 没连上 loopback capture server。全量并行跑时有概率踩到，单独跑 3/3 次都是
+> `0.16s` 通过，重跑整个 workspace 也全绿。属负载相关的计时抖动，不是产品缺陷。
 
 ### 并发与派发
 
@@ -3200,3 +3207,140 @@ Stage 19 落地后，LUM-981 的「构建相同的 crates」在服务端 / 客�
 3. `registerCommand` / 扩展 UI 的交互式确认（`confirm` / `input` / `select`）
    仍未接 TUI；
 4. `.wasm` 扩展宿主仍未实现。
+
+## LUM-1076 round — Stage 19 在途盘点、修正“可并行”假设、派发 Stage 20（扩展 UI 交互桥）
+
+本轮（autopilot，2026-09-19 06:35Z）没有可合入的代码增量：trunk
+`origin/feature/pi.rs` 仍是 `6d5f90495`，Stage 19 的两个 crate 都还没推。
+于是本轮做的是**在途盘点 + 修正上一轮的并行假设 + 补一个不被 Stage 19 阻塞的
+独立任务**，并重新验证 trunk。
+
+### 盘点结果
+
+| 任务 | 本轮开始时状态 | 实际观察 | 处置 |
+|------|----------------|----------|------|
+| LUM-1068 Stage 19 `pi-server` | `in_progress`，run running | worktree 持续写入（最后 mtime 06:24Z），已新增 `pi-protocol/src/rpc/**` + 整个 `pi-server` crate | 不动，等它自己推 |
+| LUM-1069 Stage 19 `pi-client` | `todo`，但 run 已 completed 且 delivered_comment_ids 为空 | run `01a0b847-6287…` 06:08:05 起、06:12:26 断，397 条消息全在 `thinking`（Arc/Weak 回调设计、serde wire 建模），**从未写文件**；worktree 干净停在 `13b80b2b1` | **→ `backlog`**（见下） |
+| LUM-1074/1067 Stage 17/18 | `in_review` | 已在 trunk | 不动 |
+
+### 修正：Stage 19 的两个 crate 并不能真正并行
+
+LUM-1075 的判断是「两者接口都以已冻结的 `pi-protocol` wire 类型为准，可并行」。
+LUM-1076 实际核对后认为**这个前提不成立**：LUM-1068 正在**新增** wire 类型，
+而不是复用已有类型。它的 worktree 里已经出现
+
+- `pi-protocol/src/rpc/{protocol,framing,cbor,codec}.rs`，导出 `ClientHello` /
+  `ServerHello` / `RequestEnvelope` / `ResponseEnvelope` / `ClientMessage` /
+  `ServerMessage` / `encode_frame` / `FrameDecoder` / `parse_client_message` …
+- `pi-protocol/src/lib.rs` 新增 `pub mod rpc;` + `pub use rpc::*;`
+- 新的 `pi-server` crate（`server.rs` / `connection.rs` / `transports/*` /
+  `testing/*` / `tests/conformance.rs`）
+
+而 LUM-1069 的任务书要求「协议类型复用 `crates/pi-protocol`」，交付物里明确要
+「握手与版本协商、请求/响应配对」以及「用临时目录 + **测试用最小 server**」跑
+unix socket 端到端 —— 这些字符串/枚举/帧格式正是 LUM-1068 此刻在定义的东西。
+
+两份任务书其实都建立在同一个错误前提上。LUM-1068 写的是「协议类型直接复用已有的
+`crates/pi-protocol`（`ClientMessage`/`ServerMessage`/`RequestEnvelope`/
+`ResponseEnvelope`/`RpcTarget` 等 Stage 1-12 已落地），**不要重复定义**」，
+但在 trunk 上实测并不存在：
+
+```
+$ git grep -ln "RequestEnvelope\|ClientHello\|ServerMessage" HEAD -- pi-rust/crates/pi-protocol
+（无输出）
+$ git grep -ln "ClientHello" HEAD -- pi-rust
+（无输出）
+```
+
+即 `ClientHello` 在 `6d5f90495` 的整个仓库里都不存在。LUM-1068 自己发现后选择了
+“就地新增 `pi-protocol::rpc`”这条正确的路；LUM-1069 如果也起跑，只会在同一位置
+第二次发明同一套类型。这也解释了 LUM-1069 那次 run 为什么会死：它在 397 条消息里
+反复推敲 “serde wire modelling”，而没有可以依赖的现成类型。
+若让 LUM-1069 现在起跑，它只能自己另发明一套 wire 类型或帧实现，与 1068 撞车；
+更糟的是两边各自的 `pi-protocol` 增补会在合并时互相覆盖。`pi-protocol/src/rpc/mod.rs`
+自己的注释也写着 “`pi-server` and (Stage 19, parallel) `pi-client` both build on
+this module, so the two crates share one wire definition instead of forking it” ——
+要共享，就必须先有它。
+
+因此：**LUM-1069 置为 `backlog`**，等 LUM-1068 把 `pi-protocol::rpc` 推上
+`feature/pi.rs` 之后再 promote。这样做的代价是 Stage 19 的 barrier 会一直不闭合
+（backlog 不是终态），需要下一轮协调 run 主动 promote。
+
+顺带记两处任务书瑕疵（不阻塞执行，供后续修正）：
+
+- LUM-1069 的范围表把参考实现写成
+  `pi-rust/crates/pi-coding-agent/src/rpc/rpc.rs`，实际不存在；真实文件是
+  `rpc/protocol.rs` / `rpc/server.rs` / `rpc/events.rs` / `rpc/error.rs`。
+- LUM-1069 的前置只写了 Stage 18（`pi-chord` services），漏了
+  「LUM-1068 的 `pi-protocol::rpc` 必须先落」。
+
+### 本轮派发：LUM-1077（Stage 20）
+
+free 槽位给了 **LUM-1077 `[Stage 20] pi-coding-agent + pi-tui: 扩展 UI 交互桥`**
+（`--stage 20 --status todo`，06:33Z 已 enqueue）。选它的理由：
+
+- **不被 Stage 19 阻塞**：只碰 `pi-extensions/src/host.rs`、
+  `pi-tui/src/{app,prompt,selector}.rs`、`pi-coding-agent/src/extensions/wiring.rs`，
+  不碰 `pi-protocol` / `pi-server` / `pi-client`；任务书里显式禁止改 `pi-protocol`
+  的线格式，避免和 LUM-1068 合并冲突。
+- **补的是真实的插件兼容缺口**：`pi-extensions` 侧
+  `host_ui_notify/confirm/input/select` → `UiRequest` → `ui_worker` → `UiHandler`
+  整条链路已经通了（`host.rs:1027`），`pi-protocol/src/ui.rs` 的
+  `UiRequest`/`UiResponse` 也齐了，唯一缺的是 CLI 只装了 `StderrUiHandler`
+  （`wiring.rs:189`）：`notify` 打到 stderr，`confirm` 一律 `false`、`input`/`select`
+  一律 `None`。结果是上游真实插件里最常见的 `await ctx.ui.confirm(...)`
+  （如 `packages/coding-agent/examples/extensions/confirm-destructive.ts`）
+  在 Rust 端口被静默拒绝，与上游 `ExtensionUIContext` 语义不一致。
+- **体量可控**：`pi-tui` 已经有 `Prompt`（`prompt.rs`）与 `Selector`（`selector.rs`）
+  两个组件可以直接复用，任务是把它们按 modal 语义接进 `App`。
+
+任务书里预先写明了唯一的设计不确定点：`UiHandler` 目前是**同步** trait
+（`host.rs:37`），而 interactive 需要挂起等待按键；建议改成 `#[async_trait]`
+（`async-trait` 已是 `pi-extensions` 依赖）或在实现侧用 oneshot +
+`block_in_place`，并要求在 PR 说明里给出取舍理由。
+
+### 验证（native，trunk = `6d5f90495`）
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings（58s）
+$ cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings
+$ cargo test   --workspace --no-fail-fast                   # 543 passed / 0 failed / 2 ignored
+```
+
+543 / 0 / 2 与 LUM-1075 在 `13b80b2b1` 上的记录一致 —— `13b80b2b1 →`
+`6d5f90495` 只多了一个 docs commit，没有代码增量，这个数是预期的。
+
+首次全量跑同样出现 1 个失败，**本轮把它定位清楚了**：
+
+```
+test anthropic_auth_token_is_an_accepted_credential ... FAILED
+thread panicked at crates/pi-coding-agent/tests/cli_provider.rs:156:
+provider never dialed the loopback capture server: Timeout
+```
+
+`cargo test -p pi-coding-agent --test cli_provider
+anthropic_auth_token_is_an_accepted_credential` 连跑 3 次全部 `0.16s` 通过，
+随后整个 workspace 重跑也 543/0/2 全绿。结论：并发行/编译负载下子进程 30s 内
+没连上 loopback capture server 的计时抖动，与代码无关。已在 LUM-1075 的注释块
+上方加了补记，后续 CI 若再出现可直接跳过排查这一步。
+
+### 本轮改动
+
+`feature/pi.rs` 的**代码增量为零**；本协调轮只追加本节状态文档（外加一段对
+LUM-1075 注释的补记）。Stage 19 的代码增量由 LUM-1068 自己推。
+
+### 并发
+
+派发后 `multica daemon status` 与 `multica issue runs --siblings` 互相印证：
+在途 pi 任务为 **LUM-1068（running）+ LUM-1077（刚 enqueue）**，加上本协调 run
+正好 3 槽，符合「最多 3 个任务同时运行」。LUM-1069 已退出在途集合。
+
+### 剩余 frontier（本轮更新）
+
+1. ~~`registerCommand` / 扩展 UI 的交互式确认~~ → 已派发 **LUM-1077**；
+2. LUM-1068 落地后 promote **LUM-1069**，把 `pi-server` / `pi-client` 用
+   `pi-protocol::rpc` + `pi-chord services` 端到端跑通；
+3. 把 `pi-client` 接进 `pi-coding-agent` 的 `--rpc` 模式，替换 Stage 12 的内联
+   JSON-RPC 实现；
+4. `.wasm` 扩展宿主仍未实现（`pi-extensions` 的 QuickJS 宿主目前只有 native
+   路径）。
