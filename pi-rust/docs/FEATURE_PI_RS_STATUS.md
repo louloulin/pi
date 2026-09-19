@@ -11426,3 +11426,96 @@ LUM-1090 置 `todo`），pi 项目内的在跑路数 = 本协调轮 + 2 = **3 �
 **已知限制**：`bash` 非零退出走 `Err(ToolError::Execution)` 且**不带 details**，所以出错时看不到
 `Took` 用量与截断告警（渲染器已按「details 为空」容错，但信息本身在工具层丢了，属 `tools/bash.rs`
 的既有口径）；`edit` 仍无渲染器；`ls` 无条目上限故 `entryLimitReached` 分支暂无生产者。
+
+## LUM-1156 round — `pi-coding-agent` 工具参数 coercion（`pi-ai` `utils/validation.ts` 移植，coercion 半边）+ 合并推送 feature/pi.rs（3 路已满，本轮不派发）
+
+### 一、本轮定位与选型
+
+协调轮：先核验基线，再切一刀不与在飞任务撞文件的活。开工时 pi 内已有两路在跑
+——LUM-1157（Stage 46，`pi-ai` utils 三件）与 LUM-1090（Stage 47，RPC 客户端）——
+加上本路正好 **3 路上限**，故本轮**不派发**新子任务。
+
+选型来自 LUM-1154 遗留清单第 3 项「工具参数校验/coercion」。这是**真实缺口**而非纸面项：
+`BuiltinToolExecutor` 把 `call.arguments` 原样交给工具，工具用严格
+`serde_json::from_value` 解析；而模型经常发 `"limit": "2"`、`"replace_all": "true"`，
+或给可选参数发 `null`。上游 `validateToolArguments`（`packages/ai/src/utils/validation.ts`）
+在派发前会先 **coerce**，Rust 侧则直接判 `InvalidArguments` —— 同一个模型行为在两边一个成功一个失败。
+
+只做 coercion、不做 TypeBox 等价校验：`jsonschema` 虽写在 workspace 依赖里，但不在
+`Cargo.lock` 中（没有任何 crate 用它），引入会改锁文件、需要联网解析，而且上游那套 coercion
+本来也不是 jsonschema 提供的。最终严格性仍由各工具自己的 `serde_json::from_value` 兜底，
+所以这一刀**只放宽两边本就不该失败的情形，不放宽任何真错**。
+
+### 二、实现（4 个文件，+约 640 / −5）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-coding-agent/src/tool_validation.rs`（新，+约 470） | `coerce_tool_arguments(parameters, arguments)`；`coerce_primitive_by_type` / `coerce_with_json_schema` / `coerce_with_union_schema` / `coerce_object` / `coerce_array` / `normalize_optional_nulls`，以及服务 union 选择与可选 null 判定的最小结构检查器 `schema_accepts`；13 条单测 |
+| `crates/pi-coding-agent/src/tool_executor.rs`（+约 20） | `BuiltinToolExecutor::execute` 在 dispatch 前对 `tool.parameters()` 做 coercion；`ExtensionToolExecutor` 的扩展工具分支对扩展自己的 `ToolDefinition.parameters` 做同一处理，再送进 QuickJS 宿主 |
+| `crates/pi-coding-agent/src/lib.rs`（+1） | 注册 `pub mod tool_validation;` |
+| `crates/pi-coding-agent/tests/tool_argument_coercion.rs`（新，+约 150） | executor 边界 4 用例（见第四节） |
+
+复刻的上游语义：`number`/`integer` 收字符串与布尔（`""` 与 `"abc"` 不动）、`boolean` 收
+`"true"`/`"false"`/`1`/`0`、`string` 收数字与布尔、`null` 类型收 `""`/`0`/`false`；
+`allOf` 依次套用，`anyOf`/`oneOf` 先看原值是否已被某分支接受、否则逐分支 coerce 后取首个通过者；
+对象按 `properties` 递归、`additionalProperties` 为对象时对未定义键同样递归；数组按 tuple `items`
+或 `items` schema 递归；可选属性上的 `null`（非 `required`、非 `$ref`、该 schema 不接受 null）会被删掉。
+
+### 三、与上游的偏离（都写在模块头注释里）
+
+1. **union 选择用最小 `schema_accepts` 而非编译后的 TypeBox validator**。它只认
+   `type` / `required` / `properties` / `additionalProperties` / `items` / `$ref`（宽松）与三个组合子，
+   未知关键字按「不约束」处理 —— 宁可少 coerce，也不把值选进错误分支。
+2. **不做 TypeBox `Value.Convert`**（它还会填 `default`）。内置工具的 JSON Schema 是手写 `json!`，
+   可选字段统一用 `#[serde(default)]`，没有需要填的 default。
+3. **不复刻校验失败文案**（上游 `Validation failed for tool "…"` + 逐条 error path）。仍由工具的
+   serde 错误给出原因；要复刻就得引入 JSON Schema validator，见第一节的取舍。
+
+### 四、验证
+
+- `cargo test -p pi-coding-agent --offline`：lib **301 passed / 0 failed**（原 288 + 本轮 13）；
+  全部集成目标绿，含新增 `tool_argument_coercion` **4 passed**；`print_mode` 17 passed（未再假失败）。
+- `cargo clippy -p pi-coding-agent --all-targets --offline -- -D warnings`：**EXIT 0**
+  （初稿触发 4 条 `iter().any()` → `contains()` 建议，已改；其余为本轮之前不存在的告警）。
+- 格式：两个新文件 `rustfmt --edition 2021` 后 `--check` 零 diff；`tool_executor.rs` 只对**新增块**核验，
+  `rustfmt --check` 里仅剩**本轮之前就有**的两处漂移（第 49 / 64 行），未扩大；`lib.rs` 刻意不跑
+  rustfmt（它会递归格式化 `cli.rs` 的既有漂移，是 LUM-1153 判例的变体）。
+- 复用 **LUM-1153 检出的 `pi-rust/target`**（`CARGO_TARGET_DIR` 显式指向），未新建 target。
+
+新增的 4 条边界用例正好是这刀的验收面：
+
+1. `read` 的 `limit: "1"`（字符串）现在成功且真的只读一行；
+2. `edit` 的 `replace_all: "true"`（字符串）现在成功且三处全替换；
+3. `read` 的 `limit: "not-a-number"` **仍然** `is_error`（只放宽可 coerce 的类型错，不放宽真错）；
+4. `read` 的 `limit: null` 被归一化掉，走工具默认（读全文件）。
+
+### 五、合并与推送
+
+`feature/pi.rs`：`b03b21f37` → **（见本轮补记）**；留档分支 `work/lum-1156`（同哈希）。
+本轮提交：`739a31162`（代码）+ 文档提交 + 合并提交（合并 LUM-1155 的 `b03b21f37` 补记）。
+
+### 六、frontier（本轮更新）
+
+1. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；本轮新增行零漂移。
+2. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」；RPC 客户端已由 LUM-1090 在跑。
+3. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex / oauth / images。
+4. **`edit` 渲染器**：仍是 `renderers/` 唯一缺口；前置是 `edit-diff.ts` 的 fuzzy match + LCS diff
+   （556 行），体量单独立项。
+5. ~~**`pi-ai` `utils/` 小件**~~：`estimate` / `error-body` / `deferred-tools` → **LUM-1157（Stage 46）在飞**。
+6. ~~**`--rpc` 客户端**~~：→ **LUM-1090（Stage 47）在飞**。
+7. **（本轮收口）工具参数 coercion**：`validation.ts` 的 coerce 半边落地，executor 边界有回归用例。
+   **仍缺的是 TypeBox 等价校验**（`required` 缺失/类型不符的结构化报错文案），要有意引入
+   `jsonschema` 时再谈 —— 这是留的口子，不是遗漏。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人只写
+`crates/pi-coding-agent/src/tool_validation.rs`、`src/tool_executor.rs`、`src/lib.rs`、
+`tests/tool_argument_coercion.rs` 与本文档；**未碰** `pi-ai`、`pi-tui`、`pi-extensions`、
+`rpc/`（LUM-1090 的地盘）与 `tools/render.rs`。
+
+环境记录：开工时磁盘空闲 **16G**（此前几轮的磁盘事故已由 LUM-1155 清理 target 缓解），
+本轮全程复用 LUM-1153 的 `target`，未新建、未删除任何 target。
+
+**已知限制**：coercion 只覆盖 JSON Schema 的类型层面；一个语义上非法、类型上合法的参数
+（例如 `read` 的 `offset: -3`）仍会在工具内部被拒，行为不变。扩展工具的 schema 若用了本模块
+不认识的关键字，coercion 会保守跳过（见第三节第 1 条）。
