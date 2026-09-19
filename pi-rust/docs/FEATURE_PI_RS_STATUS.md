@@ -9553,4 +9553,58 @@ $ cargo test --workspace                         # 1431 通过 / 0 失败（107 
 
 ### 五、合并与推送
 
-见本节末补记（推送后回填真实哈希）。
+代码提交 `37576a8b0`（12 文件，1325+/38-），合并提交 `5170faacc`（第一父 `37576a8b0`、
+第二父 `9d8844817`），本节文档提交 `e8a5f2f2a`。`9d8844817` 是本轮提交的祖先，所以并入
+`feature/pi.rs` 是**快进、无 plumbing merge**；本轮文件与 LUM-1137 的 `pi-tui` 改动零交集，
+`git merge origin/feature/pi.rs` 无冲突。
+
+推送：`git push origin e8a5f2f2a:refs/heads/feature/pi.rs` → `9d8844817..e8a5f2f2a`（快进），
+`work/lum-1142` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查：两条 ref 都指向
+`e8a5f2f2a`。
+
+`git diff --numstat 9d8844817 37576a8b0`（本轮全部代码改动）：
+pi-rust/crates/pi-ai/src/lib.rs(+5/-1) pi-rust/crates/pi-ai/src/providers/anthropic.rs(+19/-10)
+pi-rust/crates/pi-ai/src/providers/google.rs(+19/-5) pi-rust/crates/pi-ai/src/providers/openai.rs(+12/-8)
+pi-rust/crates/pi-ai/src/providers/openai_responses.rs(+12/-8) pi-rust/crates/pi-ai/src/retry.rs(+761/-0)
+pi-rust/crates/pi-ai/src/stream.rs(+15/-0) pi-rust/crates/pi-ai/src/types.rs(+46/-1)
+pi-rust/crates/pi-coding-agent/src/config.rs(+159/-1) pi-rust/crates/pi-coding-agent/src/main.rs(+9/-2)
+pi-rust/crates/pi-coding-agent/src/provider.rs(+144/-2) pi-rust/crates/pi-coding-agent/tests/cli_provider.rs(+124/-0)
+
+合并态复测即第三节末行（`cargo test --workspace` 1431 通过 / 0 失败）——推送的 `e8a5f2f2a`
+与复测的树只差本节文档文字。
+
+### 六、派发与槽位
+
+本轮开工时 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`，
+**槽位满，不派发**（LUM-1141 维持 `backlog`）。推送完成后复查 `running = 2`（另一路收手），
+按 LUM-1140 定下的口径把 **LUM-1141 从 `backlog` 晋升为 `todo`**（会立即起跑），3 路重新填满。
+
+顺带记录环境事实：本轮构建期间根分区一度 100%（另两路工作树占 23G），为此清掉了
+`debug/incremental`、`debug/examples` 与 `/tmp/rustup-home` 下**已无活跃使用者的 1.85.0
+工具链**（1.4G；仓库未固定 rust-toolchain 版本，构建一律用 stable 1.98.1）；推送前另一路
+释放 17G，遂补跑全量 `cargo test --workspace`。`cargo fmt` 全量仍**不跑**（122 文件漂移，
+且会与刚改完的 `app.rs` / `editor.rs` 直接冲突），本轮只保证新代码的 rustfmt 口径。
+
+### 七、frontier（本轮更新）
+
+1. ~~`pi-ai` 提供商请求重试（`utils/provider-retry.ts`）~~ **本轮（LUM-1142）收口**：
+   `retry.rs` + `StreamError::Provider` 携带 hint + router 装饰器 + `settings.retry.provider`。
+2. **新入账：agent 级重试（`utils/retry.ts`）** —— 错误文案分类器 + `retryAssistantCall`
+   语义，落点在 `agent_loop`；**必须排在 LUM-1141 之后**（同一文件，避免并发写）。
+3. **P2 工具批次的事件流** = LUM-1141（Stage 40）：**本轮晋升 `todo`，已在跑**。
+4. **P2 取消语义对齐**（LUM-1139 记入，仍挂）：与第 3 项同属 `agent_loop`，必须排在 LUM-1141 之后。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要动 ratatui `Cell` 与
+   `app.rs` 写入路径；LUM-1137 本轮已合并（`9d8844817`），重新变为可动，但与任何在跑的
+   `app.rs` 任务必须串行。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：同样改 `app.rs` 的选择/渲染路径。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（`backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的；LUM-1137 已收手，现在可以启动。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档继续分叉（既有欠账）。
+10. **未移植的 `pi-ai` 上游模块**（下一批候选）：`utils/overflow.ts`（上下文溢出检测）、
+    `utils/estimate.ts`、`utils/json-parse.ts`，以及 bedrock / mistral / azure / vertex /
+    oauth / images 这些 provider 与 transport。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-ai` / `pi-coding-agent`
+的重试接线与本文档；`pi-agent-core` 留给 LUM-1141）。
