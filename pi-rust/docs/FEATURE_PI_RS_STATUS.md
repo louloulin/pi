@@ -9608,3 +9608,132 @@ pi-rust/crates/pi-coding-agent/src/provider.rs(+144/-2) pi-rust/crates/pi-coding
 并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮只写 `pi-ai` / `pi-coding-agent`
 的重试接线与本文档；`pi-agent-core` 留给 LUM-1141）。
+
+---
+
+## LUM-1143 round — `pi-agent-core` 工具批次取消语义对齐（frontier 第 4 项提前收口）+ 合并推送 feature/pi.rs + 派发 Stage 42
+
+本轮起点 `9d8844817`（LUM-1137 合并态）。先落代码提交 `5074583e3`，再合入
+`origin/feature/pi.rs @ ce44b692f`（LUM-1142 的 `pi-ai` 请求重试层），合并提交 `1882f4e3d`，
+最后是本轮文档提交。真实哈希与 numstat 见本节末补记。
+
+### 一、选型：为什么先把取消语义做掉（而不是按原定顺序等 LUM-1141）
+
+frontier 第 4 项（P2）原定「必须排在 LUM-1141 之后」（两者同在 `agent_loop.rs`，避免并发写）。
+本轮动手前核对了并发事实：
+
+- `work/lum-1141` 的工作树停在 `ce44b692f` 且 **`git status` 干净**——LUM-1141 只被晋升为
+  `in_progress`，尚未落笔，不存在真正的并发写；
+- 取消语义只改 `execute_batch_sequential` / `execute_batch_parallel` 两个函数（加 abort 检查与
+  一个结果构造器），与「事件流」要加的出口虽在同一个文件、但落点不同；
+- 取消语义**先落地反而更好**：LUM-1141（Stage 40）的 checkout 起点是 `ce44b692f`，它收尾时
+  照例会 `git merge origin/feature/pi.rs`，因此能直接吃到这份修复，而不必等它做完再改同一段。
+
+据此本轮把第 4 项提前收口，并在第六节记录对 LUM-1141 的影响与合并提示。
+
+### 二、实现（上游 `packages/agent/src/agent-loop.ts:409-545`）
+
+| 路径 | 上游行为 | Rust 落点 |
+|------|----------|-----------|
+| 串行 | 每个调用执行后查 `signal.aborted`，命中即 `break`：**剩余调用既不 prepare 也不 dispatch**（`agent-loop.ts:476-478`） | `agent_loop.rs:685` `execute_batch_sequential`，循环尾 `agent_loop.rs:703` `if signal.is_cancelled() { break; }` |
+| 并行 | prepare 循环里「emit start → prepare → 推入队列 → 若 aborted 则 break」（`agent-loop.ts:504-545`）；已入队但未起跑的调用在 join 时产出 `createErrorToolResult("Operation aborted")`（`agent-loop.ts:519-525`） | `agent_loop.rs:720` `execute_batch_parallel`：prepare 循环尾 `agent_loop.rs:741` 同款 `break`；每个 future 起跑前 `agent_loop.rs:754` 再查一次 `is_cancelled()`，命中即 `aborted_tool_result(call)`（不再调 executor） |
+
+新增私有辅助 `aborted_tool_result(&ToolCall) -> ToolResult`（`agent_loop.rs:773`）：
+`is_error: true`、文本 `"Operation aborted"`、`details: None`，对上游 `createErrorToolResult`
+的一比一映射（`agent-loop.ts:767-772`）。模块头补了 `# Cancellation` 说明段。
+
+关键口径：**串行路径的 abort 检查是「执行后」而不是「预检」**——带着已取消 token 的第一个
+调用仍会落进 executor（上游如此），只是其后不再派发。这正是既有
+`cancelled_token_is_forwarded_to_executor`（`tests/tool_execution.rs:426`）用到的语义，本轮只把
+它的注释改精确，断言未动。
+
+### 三、验证
+
+```
+$ rustc --version                      # 1.98.1（stable；/tmp/rustup-home 工具链）
+$ export CARGO_HOME=/tmp/cargo-home CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+$ export CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1143   # 本轮独立 target，避开另两路的 target
+$ cargo check --workspace --all-targets --offline       # 干净（1m08s，零 error）
+$ cargo test -p pi-agent-core --offline                 # 41 通过 / 0 失败
+  #   tool_parallel.rs 12 条（本轮新增 3 条：pre_cancelled_parallel_batch_yields_operation_aborted
+  #   / parallel_batch_stops_queuing_after_abort / sequential_batch_stops_after_the_abort_observation），
+  #   tool_execution.rs 8 条原样通过（含 cancelled_token_is_forwarded_to_executor）
+$ cargo test -p pi-tui --offline                        # 531 通过 / 0 失败（LUM-1137 的 app.rs 改动在合并态复测）
+$ cargo clippy -p pi-agent-core --all-targets --offline -- -D warnings   # 零告警
+$ rustfmt --edition 2021 --check <本轮 3 个文件>        # 全部 clean
+```
+
+三条新用例分别锁住：并行路径预取消时「只 prepare 第一条 + 产出 `Operation aborted` + 其余丢弃」；
+并行路径在批次中途 abort 时「已入队的都产出 `Operation aborted`、未入队的（`call-f3`）连 prepare
+都不到、executor 全程零调用」；串行路径在批次中途 abort 时「观察者调用照常执行、其后的调用不再
+派发」。`abort` 由 `BeforeToolCall` 钩子（`tests/tool_parallel.rs:299` `CancelOnCall`）在 prepare
+阶段触发，覆盖了「abort 落在批次内部」这条最难自然构造的路径。
+
+### 四、刻意未做 / 与上游的偏离
+
+1. **并行路径的 abort 检查点在 future 内、而非「prepare 循环与 join 之间」**：上游的 thunk 也是在
+   `Promise.all` 执行时才查 `signal.aborted`，两者时机一致；差别只是实现机制（闭包 thunk vs.
+   async future），无行为差异。
+2. **不动 `ToolExecutionMode` 的选取规则与 `BeforeToolCall.terminate` 的折叠口径**：本轮不碰
+   `execute_tool_calls` 的入口分派逻辑。
+3. **不做 agent 级重试（`utils/retry.ts`）**：仍须排在 LUM-1141 之后（`agent_loop` 同一文件 +
+   错误文案分类器），见 frontier 第 2 项。
+4. **不做滚条（frontier 第 6 项）**：`app.rs` 的滚条渲染 / `updateScrollbarHover` 悬停高亮 /
+   拖拽牵动布局几何与指针状态机，体量不是一个 P2 小切片；本轮改为**派发 Stage 42**（见第六节），
+   并已把 issue 标题改为只承诺本轮真正交付的范围。
+
+### 五、合并与推送
+
+- 代码提交 `5074583e3`（3 文件，+202/-8）。
+- 合并提交 `1882f4e3d`（第一父 `5074583e3`、第二父 `ce44b692f`）：`git merge origin/feature/pi.rs`
+  **零冲突**（LUM-1142 只动 `pi-ai` / `pi-coding-agent`，与本轮的 `pi-agent-core` 文件零交集）。
+- 本节文档提交把上面的哈希写进第四节；`ce44b692f` 是本轮提交的祖先，因此并入 `feature/pi.rs`
+  是**快进、无 plumbing merge**（文档提交与代码改动同属一条线）。
+- 推送：`git push origin HEAD:refs/heads/feature/pi.rs` → `ce44b692f..<本节文档提交>`（快进）；
+  `work/lum-1143` 作为留档分支一并推送。真实回执哈希与 `git ls-remote` 复查见本轮 issue 评论。
+
+`git diff --numstat 9d8844817 5074583e3`（本轮全部代码改动）：
+pi-rust/crates/pi-agent-core/src/agent_loop.rs(+53/-6)
+pi-rust/crates/pi-agent-core/tests/tool_execution.rs(+6/-2)
+pi-rust/crates/pi-agent-core/tests/tool_parallel.rs(+143/-0)
+
+### 六、派发与槽位
+
+- 开工时 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`（LUM-1141 +
+  LUM-1142 + 本轮），**槽位满**。
+- 推送前复查：LUM-1142 已收口为 `in_review`、本轮自己亦将结束，`running_task_count` 回到 **2**，
+  留出 **1 个空槽**；按「先建单、后推送」的口径以 `todo` **派发 Stage 42 = LUM-1144**（滚条渲染 +
+  `updateScrollbarHover` 悬停高亮 + 滚条拖拽 / X10 鼠标序列），让空槽立刻被用上。LUM-1144 只碰
+  `pi-tui/src/app.rs` / `input.rs`，与在跑的 LUM-1141（`pi-agent-core`）零交集，上限 3 路不被突破。
+- **给 LUM-1141 的合并提示**：LUM-1141 的基点是 `ce44b692f`，不含本轮的 abort 修复；它收尾时
+  `git merge origin/feature/pi.rs` 会带上 `5074583e3`。若事件流的出口恰好改到
+  `execute_batch_*` 的同一个循环，冲突应保留「每次迭代后的 `is_cancelled()` 检查」不回退。
+
+环境记录：本轮复用 `/tmp/pi-rust-target-lum1143` 独立 target（LUM-1142 用
+`/tmp/pi-rust-target-lum1139`），避免 cargo 锁与磁盘互相拖累；根分区在合并/复测期间维持 12G 空闲。
+
+### 七、frontier（本轮更新）
+
+1. ~~`pi-ai` 提供商请求重试~~ **LUM-1142 收口**。
+2. **P2 agent 级重试（`utils/retry.ts`）**：错误文案分类器 + `retryAssistantCall`，落点
+   `agent_loop`；**必须排在 LUM-1141 之后**（同一文件）。
+3. **P2 工具批次的事件流** = LUM-1141（Stage 40）：`in_progress`，在跑。
+4. ~~**P2 取消语义对齐**~~ **本轮（LUM-1143）收口**：串行「执行后 break」、并行「prepare 后 break +
+   排队调用 `Operation aborted`」，三条新用例锁定；既有 `cancelled_token_is_forwarded_to_executor`
+   口径不变（只改注释）。
+5. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：要动 ratatui `Cell` 与
+   `app.rs` 写入路径；`app.rs` 已随 LUM-1137 合并（`9d8844817`）空出，与 Stage 42 必须串行。
+6. **P3 X10 鼠标序列 / `updateScrollbarHover` / 滚条拖拽**：**本轮派发 Stage 42 = LUM-1144（`todo`，
+   已起跑）**，落点 `app.rs` 的渲染 / 选择 / 指针路径与 `input.rs` 的 X10 解析。
+7. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+8. **质量门清偿** = LUM-1138（`backlog`）：`cargo clippy --workspace --all-targets -- -D warnings`
+   与 `cargo fmt --all -- --check`（122 文件漂移）仍是红的。`pi-ai` / `pi-coding-agent`（LUM-1142）
+   与本轮 `pi-agent-core` 均已收手，只剩 LUM-1141 的 `agent_loop` 与 LUM-1144 的 `app.rs`；
+   启动全量 `cargo fmt` 前仍需确认这两处没有在写方。
+9. `pi-rust/docs/PLAN.md` 仍停在 Stage 14，与本文档继续分叉（既有欠账）。
+10. **未移植的 `pi-ai` 上游模块**（下一批候选）：`utils/overflow.ts`、`utils/estimate.ts`、
+    `utils/json-parse.ts`，以及 bedrock / mistral / azure / vertex / oauth / images。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-agent-core`（`agent_loop.rs`
+及其两个测试文件）与本文档。

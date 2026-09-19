@@ -8,6 +8,16 @@
 //! none is configured), and forwards `should_stop_after_turn` /
 //! `prepare_next_turn` decisions to the user-registered hooks. Stage 4 fills
 //! in queue draining and steering / follow-up message sources.
+//!
+//! # Cancellation
+//!
+//! Tool batches honour the loop's [`CancellationToken`] the way upstream
+//! honours its `AbortSignal` (`packages/agent/src/agent-loop.ts:409-545`):
+//! the sequential path stops after the call that observes the abort, and the
+//! parallel path stops preparing once aborted and finalizes a queued-but-not-
+//! yet-started call as an `Operation aborted` error result. The abort check
+//! is *not* a pre-flight guard in the sequential path — the first call still
+//! runs with the token it was handed, exactly as upstream does.
 
 use futures::StreamExt;
 use pi_ai::stream::SharedStreamFn;
@@ -860,6 +870,10 @@ async fn prepare_call(hooks: &AgentHookAdapter, call: &ToolCall) -> (CallPrepara
 /// and `ToolExecutionEnd` once the result is finalized, so a consumer can
 /// render the call as running for its whole real lifetime. `duration_ms`
 /// measures that same window for this one call (not the batch).
+///
+/// When the signal is aborted the loop stops after the call that observed the
+/// abort: the remaining calls never reach the executor at all (upstream
+/// `executeToolCallsSequential`, `packages/agent/src/agent-loop.ts:476-478`).
 async fn execute_batch_sequential(
     executor: Option<&Arc<dyn ToolExecutor>>,
     hooks: &AgentHookAdapter,
@@ -881,6 +895,9 @@ async fn execute_batch_sequential(
         };
         emit_tool_end(observer, &result, started);
         results.push(result);
+        if signal.is_cancelled() {
+            break;
+        }
     }
     (results, !all_terminate)
 }
@@ -894,6 +911,12 @@ async fn execute_batch_sequential(
 /// **before any of the batch's calls is awaited for execution**, and each
 /// `ToolExecutionEnd` is emitted by the future that ran that call. Two
 /// concurrent calls therefore always produce both starts before either end.
+///
+/// Cancellation mirrors upstream `executeToolCallsParallel`
+/// (`packages/agent/src/agent-loop.ts:504-545`): the preparation loop stops
+/// as soon as the signal is aborted (calls after it are dropped), and a call
+/// that was already queued but has not started yet finalizes as an
+/// `Operation aborted` error result instead of reaching the executor.
 async fn execute_batch_parallel(
     executor: Option<&Arc<dyn ToolExecutor>>,
     hooks: &AgentHookAdapter,
@@ -921,12 +944,28 @@ async fn execute_batch_parallel(
                 slots.push(None);
             }
         }
+        if signal.is_cancelled() {
+            break;
+        }
     }
 
-    let futures = prepared.iter().map(|(slot, call, started)| async move {
-        let result = run_call(executor, hooks, call, signal, telemetry).await;
-        emit_tool_end(observer, &result, *started);
-        (*slot, result)
+    // Each queued call checks the signal once more right before it starts, so
+    // an abort that lands between the preparation loop and the join still
+    // short-circuits execution (the result slot is filled, the executor is not
+    // called) — and still emits a matching `ToolExecutionEnd`, because its
+    // `ToolExecutionStart` was already emitted in the preparation pass.
+    let cancelled = signal.clone();
+    let futures = prepared.iter().map(|(slot, call, started)| {
+        let signal = cancelled.clone();
+        async move {
+            let result = if signal.is_cancelled() {
+                aborted_tool_result(call)
+            } else {
+                run_call(executor, hooks, call, &signal, telemetry).await
+            };
+            emit_tool_end(observer, &result, *started);
+            (*slot, result)
+        }
     });
     for (slot, result) in futures::future::join_all(futures).await {
         slots[slot] = Some(result);
@@ -945,7 +984,9 @@ fn emit_tool_start(observer: Option<&EventObserver>, call: &ToolCall) {
 }
 
 /// Emit `ToolExecutionEnd` with the real duration of the call that just
-/// finished.
+/// finished. Every emitted `ToolExecutionStart` — including one that is
+/// finalized as `Operation aborted` before it reaches the executor — gets a
+/// matching end.
 fn emit_tool_end(observer: Option<&EventObserver>, result: &ToolResult, started: Monotonic) {
     emit_event(
         observer,
@@ -954,6 +995,18 @@ fn emit_tool_end(observer: Option<&EventObserver>, result: &ToolResult, started:
             duration_ms: started.elapsed_ms(),
         },
     );
+}
+
+/// Error result upstream synthesizes for a queued parallel call that finds
+/// the signal aborted before it runs (`createErrorToolResult("Operation
+/// aborted")`, `packages/agent/src/agent-loop.ts:524`).
+fn aborted_tool_result(call: &ToolCall) -> ToolResult {
+    ToolResult {
+        tool_call_id: call.id.clone(),
+        content: Box::new(Content::text("Operation aborted")),
+        is_error: true,
+        details: None,
+    }
 }
 
 /// Execute one tool call and finalize it: dispatch to the registered executor

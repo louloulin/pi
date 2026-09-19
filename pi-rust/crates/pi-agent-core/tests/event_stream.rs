@@ -461,6 +461,56 @@ async fn parallel_batch_emits_every_start_before_any_end() {
 }
 
 #[tokio::test]
+async fn aborted_queued_call_still_pairs_its_start_with_an_end() {
+    // `execute_batch_parallel` emits `ToolExecutionStart` for every call it
+    // prepares and only then stops on the abort (LUM-1143), so the call that
+    // is finalized as `Operation aborted` still owes consumers a matching
+    // `ToolExecutionEnd` — otherwise a consumer would show it as running
+    // forever.
+    let stream = Arc::new(ScriptedEvents::new(vec![
+        tool_call_script(&[("alpha", "call-a"), ("beta", "call-b")], Duration::ZERO),
+        text_reply("done"),
+    ]));
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model(), stream, "you are pi").with_tool_executor(Arc::new(
+            SleepyExecutor {
+                delay: Duration::ZERO,
+            },
+        )),
+    );
+    let token = agent.loop_ref().cancellation_token();
+    token.cancel();
+    agent.loop_mut().set_cancellation_token(token);
+    let mut rx = agent.subscribe();
+    agent.prompt("go").await.expect("prompt succeeds");
+    let events = drain(&mut rx);
+
+    assert_eq!(
+        tool_start_names(&events)
+            .iter()
+            .map(|(_, id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call-a"],
+        "calls after the abort are never dispatched: {events:#?}"
+    );
+    let ends = tool_end_indices(&events);
+    assert_eq!(
+        ends.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(),
+        vec!["call-a"],
+        "a start without a matching end would leave the call running forever: {events:#?}"
+    );
+    let (end_index, _) = ends[0];
+    let AgentEvent::ToolExecutionEnd { result, .. } = &events[end_index] else {
+        unreachable!("position only returns ToolExecutionEnd indices")
+    };
+    assert!(result.is_error, "the aborted call is an error result");
+    assert!(
+        matches!(result.content.as_ref(), Content::Text(text) if text.text == "Operation aborted"),
+        "unexpected aborted payload: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn provider_error_truncates_the_event_sequence() {
     let stream = Arc::new(ScriptedEvents::new(vec![(
         Duration::ZERO,

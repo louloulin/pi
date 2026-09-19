@@ -424,8 +424,12 @@ async fn context_exposes_executor_definitions() {
 
 #[tokio::test]
 async fn cancelled_token_is_forwarded_to_executor() {
-    // The loop hands the executor its cancellation token; a pre-cancelled
-    // token is the executor's signal to fail fast rather than do work.
+    // The loop hands the executor its cancellation token. Upstream's
+    // sequential path dispatches the call that observes the abort and only
+    // then stops (`packages/agent/src/agent-loop.ts:476-478`), so with a
+    // pre-cancelled token and a single-call batch the executor is still
+    // reached with that call. The parallel path behaves differently — see
+    // `tests/tool_parallel.rs`.
     let executor = Arc::new(MockToolExecutor::new());
     let stream = Arc::new(ScriptedStream::new(vec![
         tool_call_message(&[("alpha", "call-a")]),
