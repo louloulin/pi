@@ -910,10 +910,26 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                     SpanStyle::fg(ThemeColor::MdCodeBlockBorder),
                 )]);
                 let code_style = with_fg(base, ThemeColor::MdCodeBlock);
-                for code_line in lines {
+                // Upstream delegates fenced code to `theme.highlightCode`
+                // (`packages/tui/src/components/markdown.ts`), which maps
+                // `highlight.js` classes onto the `ThemeColor::Syntax*` slots.
+                // `highlight::highlight_code` reproduces that for the subset of
+                // languages it knows, keeping the base code-block color for
+                // everything it does not classify.
+                let source = lines.join("\n");
+                let highlighted = crate::highlight::highlight_code(
+                    &source,
+                    if lang.is_empty() {
+                        None
+                    } else {
+                        Some(lang.as_str())
+                    },
+                    code_style,
+                );
+                for code_line in highlighted {
                     let mut spans: StyledLine =
                         vec![StyledSpan::new(CODE_BLOCK_INDENT, SpanStyle::PLAIN)];
-                    push_span(&mut spans, code_line.clone(), code_style);
+                    spans.extend(code_line);
                     out.push(spans);
                 }
                 out.push(vec![StyledSpan::new(

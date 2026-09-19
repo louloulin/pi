@@ -16,6 +16,7 @@ pub mod clipboard;
 pub mod dialog;
 pub mod editor;
 pub mod fuzzy;
+pub mod highlight;
 pub mod input;
 pub mod keybindings;
 pub mod kill_ring;
@@ -43,6 +44,7 @@ pub use clipboard::{base64_encode, osc52_sequence};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
+pub use highlight::{highlight_code, supports_language, tokenize, Token, TokenKind};
 pub use input::{
     is_mouse_sequence, parse_mouse_sequence, InputEvent, Key, KeyModifiers, MouseButton,
     MouseGesture, MouseGestureKind,

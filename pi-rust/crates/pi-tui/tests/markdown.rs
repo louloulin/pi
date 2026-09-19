@@ -89,10 +89,12 @@ fn fenced_code_block_uses_language_on_the_border() {
         slot(&lines[0], "```rust"),
         Some(ThemeColor::MdCodeBlockBorder)
     );
-    assert_eq!(
-        slot(&lines[1], "fn main() {}"),
-        Some(ThemeColor::MdCodeBlock)
-    );
+    // Upstream funnels fenced code through `theme.highlightCode`, so the
+    // language's tokens land on the `Syntax*` slots (see `highlight.rs`).
+    assert_eq!(slot(&lines[1], "fn"), Some(ThemeColor::SyntaxKeyword));
+    assert_eq!(slot(&lines[1], "main"), Some(ThemeColor::SyntaxFunction));
+    // Text the highlighter does not classify keeps the code-block color.
+    assert_eq!(slot(&lines[1], " "), Some(ThemeColor::MdCodeBlock));
     assert_eq!(slot(&lines[2], "```"), Some(ThemeColor::MdCodeBlockBorder));
 }
 
@@ -111,10 +113,8 @@ fn unclosed_fence_runs_to_end_without_panicking() {
         texts(&lines),
         vec!["```rust", "  fn main() {", "      todo!()", "```"]
     );
-    assert_eq!(
-        slot(&lines[1], "fn main() {"),
-        Some(ThemeColor::MdCodeBlock)
-    );
+    assert_eq!(slot(&lines[1], "fn"), Some(ThemeColor::SyntaxKeyword));
+    assert_eq!(slot(&lines[1], " "), Some(ThemeColor::MdCodeBlock));
 }
 
 #[test]
