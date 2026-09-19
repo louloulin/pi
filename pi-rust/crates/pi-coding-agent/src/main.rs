@@ -279,90 +279,28 @@ fn new_session_id() -> String {
 }
 
 fn build_default_models() -> Models {
+    // The catalog is data, not code: every entry comes from
+    // `pi_ai::providers::registry::BUILTIN_PROVIDERS`, the same table the
+    // `ProviderRouter` uses to build streaming adapters. Adding a provider
+    // therefore means one registry entry, not an edit here.
     let mut models = Models::new();
-    // Stage 4 ships the faux model + a couple of pseudo provider
-    // entries so `/model` lists something useful. Stage 7 replaces
-    // the Anthropic stub with the real `AnthropicProvider` streaming
-    // adapter; the model catalog stays inline for now (a future stage
-    // will move it into `pi-ai/src/models/catalog.json` like the TS
-    // upstream does).
-    let faux = Model {
-        provider: ProviderId::new("faux"),
-        id: "faux-model".into(),
-        api: Api::Faux,
-        label: Some("Faux test model".into()),
-        context_window: 8192,
-        max_output_tokens: 1024,
-    };
-    let openai = Model {
-        provider: ProviderId::new("openai"),
-        id: "gpt-4o-mini".into(),
-        api: Api::OpenAiChatCompletions,
-        label: Some("GPT-4o mini".into()),
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-    };
-    let anthropic_sonnet = Model {
-        provider: ProviderId::new("anthropic"),
-        id: "claude-sonnet-4-5".into(),
-        api: Api::AnthropicMessages,
-        label: Some("Claude Sonnet 4.5".into()),
-        context_window: 200_000,
-        max_output_tokens: 8_192,
-    };
-    let anthropic_opus = Model {
-        provider: ProviderId::new("anthropic"),
-        id: "claude-opus-4-5".into(),
-        api: Api::AnthropicMessages,
-        label: Some("Claude Opus 4.5".into()),
-        context_window: 200_000,
-        max_output_tokens: 8_192,
-    };
-    let anthropic_haiku = Model {
-        provider: ProviderId::new("anthropic"),
-        id: "claude-haiku-4-5".into(),
-        api: Api::AnthropicMessages,
-        label: Some("Claude Haiku 4.5".into()),
-        context_window: 200_000,
-        max_output_tokens: 8_192,
-    };
-    // Google entries match the ids the Stage 13 `GoogleProvider` fixture
-    // tests use (`crates/pi-ai/tests/google.rs`); previously the adapter
-    // existed but no model selected it, so it was unreachable from the CLI.
-    let google_pro = Model {
-        provider: ProviderId::new("google"),
-        id: "gemini-2.5-pro".into(),
-        api: Api::GoogleGenerativeAi,
-        label: Some("Gemini 2.5 Pro".into()),
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
-    };
-    let google_flash = Model {
-        provider: ProviderId::new("google"),
-        id: "gemini-2.5-flash".into(),
-        api: Api::GoogleGenerativeAi,
-        label: Some("Gemini 2.5 Flash".into()),
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
-    };
-    let google_flash_lite = Model {
-        provider: ProviderId::new("google"),
-        id: "gemini-2.5-flash-lite".into(),
-        api: Api::GoogleGenerativeAi,
-        label: Some("Gemini 2.5 Flash Lite".into()),
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
-    };
-    models.set_provider(ProviderId::new("faux"), vec![faux]);
-    models.set_provider(ProviderId::new("openai"), vec![openai]);
-    models.set_provider(
-        ProviderId::new("anthropic"),
-        vec![anthropic_sonnet, anthropic_opus, anthropic_haiku],
-    );
-    models.set_provider(
-        ProviderId::new("google"),
-        vec![google_pro, google_flash, google_flash_lite],
-    );
+    for spec in pi_ai::providers::registry::BUILTIN_PROVIDERS {
+        let entries: Vec<Model> = spec
+            .models
+            .iter()
+            .map(|m| Model {
+                provider: ProviderId::new(spec.id),
+                id: m.id.to_string(),
+                api: spec.api,
+                label: Some(m.label.to_string()),
+                context_window: m.context_window,
+                max_output_tokens: m.max_output_tokens,
+            })
+            .collect();
+        if !entries.is_empty() {
+            models.set_provider(ProviderId::new(spec.id), entries);
+        }
+    }
     models
 }
 

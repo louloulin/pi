@@ -25,12 +25,22 @@
 //! `GEMINI_API_KEY`, but the Google SDKs document both names and users
 //! routinely export the latter. `GEMINI_API_KEY` always wins.
 //!
+//! The concrete provider list, credential env vars, base URLs and model
+//! catalogs all live in the data-driven
+//! [`pi_ai::providers::registry`]. Besides the four first-party
+//! providers above, the registry carries the OpenAI Chat
+//! Completions–compatible family (DeepSeek, Groq, Cerebras, Moonshot AI,
+//! Z.AI, OpenRouter, Together, Fireworks, Baseten, NVIDIA, Hugging Face,
+//! Xiaomi). All of those reuse [`OpenAiProvider`] and differ only by
+//! base URL and credential — no per-provider code path.
+//!
 //! Each adapter also accepts an optional base-URL override
 //! (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GEMINI_BASE_URL` /
-//! `GOOGLE_BASE_URL`) so a local gateway or proxy can be used without a
-//! code change. The upstream catalog carries `baseUrl` per model instead;
-//! the Rust `Model` descriptor has no such field yet, so the environment
-//! is the extension point.
+//! `GOOGLE_BASE_URL`, and a `<PROVIDER>_BASE_URL` name for every registry
+//! entry) so a local gateway or proxy can be used without a code change.
+//! The upstream catalog carries `baseUrl` per model instead; the Rust
+//! `Model` descriptor has no such field yet, so the environment is the
+//! extension point.
 
 use std::collections::HashMap;
 use std::env;
@@ -41,40 +51,43 @@ use pi_ai::providers::anthropic::AnthropicProvider;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::providers::google::GoogleProvider;
 use pi_ai::providers::openai::OpenAiProvider;
+use pi_ai::providers::registry::{self, ProviderSpec, BUILTIN_PROVIDERS};
 use pi_ai::stream::AssistantMessageEventStream;
 use pi_ai::{SharedStreamFn, SimpleStreamOptions, StreamError, StreamFn};
-use pi_protocol::{Context, Model};
+use pi_protocol::{Api, Context, Model};
 use thiserror::Error;
-
-/// Providers this router knows how to construct, in catalog order.
-const KNOWN_PROVIDERS: [&str; 3] = ["openai", "anthropic", "google"];
 
 /// Credential environment variables for `provider`, in priority order.
 ///
 /// Returns an empty slice for providers that need no credential (the
-/// faux provider) or that this build has no adapter for.
+/// faux provider) or that this build has no adapter for. Backed by the
+/// provider registry so `pi-coding-agent` and `pi-ai` cannot disagree.
 pub fn api_key_env_vars(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "anthropic" => &[
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_OAUTH_TOKEN",
-        ],
-        "openai" => &["OPENAI_API_KEY"],
-        "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        _ => &[],
-    }
+    registry::api_key_env_vars(provider)
 }
 
 /// Base-URL override environment variables for `provider`, in priority
 /// order. Empty for providers without an override.
 pub fn base_url_env_vars(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "openai" => &["OPENAI_BASE_URL"],
-        "anthropic" => &["ANTHROPIC_BASE_URL"],
-        "google" => &["GEMINI_BASE_URL", "GOOGLE_BASE_URL"],
-        _ => &[],
-    }
+    registry::base_url_env_vars(provider)
+}
+
+/// Construct the streaming adapter for one registry entry.
+///
+/// `api_key` and `base_url` are ignored by adapters that do not use them
+/// (the faux provider). Returns `None` for API families this build has no
+/// adapter for; every family currently in
+/// [`BUILTIN_PROVIDERS`](pi_ai::providers::registry::BUILTIN_PROVIDERS)
+/// is implemented, so this is a forward-compatibility guard.
+fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Option<SharedStreamFn> {
+    let adapter: SharedStreamFn = match spec.api {
+        Api::Faux => Arc::new(FauxProvider::default()),
+        Api::OpenAiChatCompletions => Arc::new(OpenAiProvider::with_base_url(api_key, base_url)),
+        Api::AnthropicMessages => Arc::new(AnthropicProvider::with_base_url(api_key, base_url)),
+        Api::GoogleGenerativeAi => Arc::new(GoogleProvider::with_base_url(api_key, base_url)),
+        Api::OpenAiResponses | Api::BedrockConverse | Api::CohereV2 => return None,
+    };
+    Some(adapter)
 }
 
 /// Errors raised while resolving a provider for a model.
@@ -144,8 +157,8 @@ impl ProviderRouter {
     /// Build a router from the process environment.
     ///
     /// The faux provider is always registered (offline / test runs);
-    /// `openai` / `anthropic` / `google` are registered only when their
-    /// credential env var is present. Requesting a model whose provider
+    /// every other registry entry is registered only when one of its
+    /// credential env vars is present. Requesting a model whose provider
     /// is absent then fails [`require`](Self::require) with the exact
     /// env var to set instead of silently streaming from faux.
     pub fn from_env() -> Self {
@@ -156,32 +169,17 @@ impl ProviderRouter {
     /// tests can exercise every branch without mutating process state.
     pub fn from_env_with(get_env: impl Fn(&str) -> Option<String>) -> Self {
         let mut adapters: HashMap<String, SharedStreamFn> = HashMap::new();
-        adapters.insert(
-            "faux".to_string(),
-            Arc::new(FauxProvider::default()) as SharedStreamFn,
-        );
 
-        for provider in KNOWN_PROVIDERS {
-            let Some(api_key) = env_value(&get_env, api_key_env_vars(provider)) else {
+        for spec in BUILTIN_PROVIDERS {
+            let api_key = env_value(&get_env, spec.api_key_env).unwrap_or_default();
+            if spec.requires_api_key() && api_key.is_empty() {
                 continue;
-            };
-            let base_url = env_value(&get_env, base_url_env_vars(provider));
-            let adapter: SharedStreamFn = match provider {
-                "openai" => match base_url {
-                    Some(url) => Arc::new(OpenAiProvider::with_base_url(api_key, url)),
-                    None => Arc::new(OpenAiProvider::new(api_key)),
-                },
-                "anthropic" => match base_url {
-                    Some(url) => Arc::new(AnthropicProvider::with_base_url(api_key, url)),
-                    None => Arc::new(AnthropicProvider::new(api_key)),
-                },
-                "google" => match base_url {
-                    Some(url) => Arc::new(GoogleProvider::with_base_url(api_key, url)),
-                    None => Arc::new(GoogleProvider::new(api_key)),
-                },
-                _ => unreachable!("KNOWN_PROVIDERS is exhaustive"),
-            };
-            adapters.insert(provider.to_string(), adapter);
+            }
+            let base_url = env_value(&get_env, spec.base_url_env)
+                .unwrap_or_else(|| spec.default_base_url.to_string());
+            if let Some(adapter) = build_adapter(spec, api_key, base_url) {
+                adapters.insert(spec.id.to_string(), adapter);
+            }
         }
 
         Self { adapters }
@@ -370,6 +368,45 @@ mod tests {
             .require(&model("google", "gemini-2.5-flash", Api::GoogleGenerativeAi))
             .is_ok());
         assert_eq!(router.provider_ids(), vec!["faux", "google"]);
+    }
+
+    #[test]
+    fn family_credentials_register_the_shared_adapter() {
+        // The OpenAI-compatible family reuses `OpenAiProvider`; only the
+        // credential, base URL and model ids differ, and all of that now
+        // comes from the registry.
+        let router = ProviderRouter::from_env_with(|name| match name {
+            "DEEPSEEK_API_KEY" | "GROQ_API_KEY" => Some("test-key".to_string()),
+            _ => None,
+        });
+        assert!(router.has_provider("deepseek"));
+        assert!(router.has_provider("groq"));
+        assert!(!router.has_provider("openai"));
+        assert!(!router.has_provider("anthropic"));
+        assert_eq!(router.provider_ids(), vec!["deepseek", "faux", "groq"]);
+        assert!(router
+            .require(&model(
+                "deepseek",
+                "deepseek-v4-pro",
+                Api::OpenAiChatCompletions
+            ))
+            .is_ok());
+    }
+
+    #[test]
+    fn family_missing_key_names_the_env_var_to_set() {
+        let router = ProviderRouter::from_env_with(empty_env);
+        let err = require_err(
+            &router,
+            &model("zai-coding-cn", "glm-5.3", Api::OpenAiChatCompletions),
+        );
+        assert_eq!(
+            err,
+            ProviderError::MissingApiKey {
+                provider: "zai-coding-cn".to_string(),
+                vars: "ZAI_CODING_CN_API_KEY".to_string(),
+            }
+        );
     }
 
     #[test]

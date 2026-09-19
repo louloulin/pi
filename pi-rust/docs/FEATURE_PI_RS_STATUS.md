@@ -2137,3 +2137,111 @@ tests.
 
 **Stage 13 status after this round:** LUM-1055 (Gemini), LUM-1056 (print mode
 on the SQLite store) and LUM-1057 (this crate) are all delivered.
+
+## LUM-1062 round — Stage 15: data-driven provider registry + OpenAI-compatible family
+
+LUM-1062 (2026-09-19 11:40 Asia/Shanghai, same autopilot template as
+LUM-982 / LUM-1011…LUM-1061) looked at the frontier after Stage 14 and
+picked the next functional-parity gap. Stage 14 made the CLI able to reach
+a real provider, but it only knew four providers because both the model
+catalog (`main.rs::build_default_models`) and the credential mapping
+(`provider.rs`) were hard-coded match arms. The TS upstream ships dozens
+of providers, and the majority of the missing ones are plain OpenAI Chat
+Completions endpoints that differ only by base URL, credential env var
+and model ids — no new wire protocol. That made them additive and
+self-contained in `pi-ai` + `pi-coding-agent`, so this round implemented
+them instead of dispatching a fourth concurrent task.
+
+### Change — `pi_ai::providers::registry` (Stage 15)
+
+New `pi-rust/crates/pi-ai/src/providers/registry.rs` holds every provider
+as data (`ProviderSpec`: id, display name, `Api`, default base URL,
+credential env vars, base-URL override env vars, model catalog;
+`ModelSpec`: id, label, context window, max output tokens).
+`ProviderRouter` and `build_default_models` now both read that one table,
+so a new provider is a single entry and the router and the catalog cannot
+drift apart again.
+
+| File | Change |
+|------|--------|
+| `crates/pi-ai/src/providers/registry.rs` | **new** — `ProviderSpec` / `ModelSpec`, `BUILTIN_PROVIDERS`, `find_provider`, `api_key_env_vars`, `base_url_env_vars`, `default_base_url`, `provider_ids`, 9 unit tests |
+| `crates/pi-ai/src/providers/mod.rs` | export `registry` |
+| `crates/pi-coding-agent/src/provider.rs` | `api_key_env_vars` / `base_url_env_vars` delegate to the registry; `from_env_with` iterates `BUILTIN_PROVIDERS` and builds each adapter from `spec.api`; new `build_adapter` helper; +2 unit tests |
+| `crates/pi-coding-agent/src/main.rs` | `build_default_models` builds the catalog from `BUILTIN_PROVIDERS` (the inline literals are gone) |
+| `crates/pi-coding-agent/tests/cli_provider.rs` | credential + base-URL isolation lists extended; +5 process-level tests |
+
+Providers now in the table (beyond the four first-party ones):
+
+| provider | base URL | credential |
+|----------|----------|------------|
+| `deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `groq` | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
+| `cerebras` | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEY` |
+| `moonshotai` | `https://api.moonshot.ai/v1` | `MOONSHOT_API_KEY` |
+| `moonshotai-cn` | `https://api.moonshot.cn/v1` | `MOONSHOT_API_KEY` |
+| `zai` | `https://api.z.ai/api/coding/paas/v4` | `ZAI_API_KEY` |
+| `zai-coding-cn` | `https://open.bigmodel.cn/api/coding/paas/v4` | `ZAI_CODING_CN_API_KEY` |
+| `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `together` | `https://api.together.ai/v1` | `TOGETHER_API_KEY` |
+| `fireworks` | `https://api.fireworks.ai/inference` | `FIREWORKS_API_KEY` |
+| `baseten` | `https://inference.baseten.co/v1` | `BASETEN_API_KEY` |
+| `nvidia` | `https://integrate.api.nvidia.com/v1` | `NVIDIA_API_KEY` |
+| `huggingface` | `https://router.huggingface.co/v1` | `HF_TOKEN` |
+| `xiaomi` | `https://api.xiaomimimo.com/v1` | `XIAOMI_API_KEY` |
+
+All of them reuse `OpenAiProvider`; each also honours a
+`<PROVIDER>_BASE_URL` override for local gateways. Base URLs, credential
+names and the default model per provider were verified against
+`packages/ai/src/providers/*.ts` and
+`packages/coding-agent/src/core/model-resolver.ts` (upstream's generated
+`data/*.json` catalogs are gitignored, so the remaining model ids are
+curated from the upstream provider tests).
+
+### Verification (native, on `feature/pi.rs` + this round)
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo test     --workspace                                       # 363 / 363 pass
+$ cargo check    -p pi-ai -p pi-agent-core -p pi-protocol \
+      --target wasm32-unknown-unknown --features pi-agent-core/wasm
+```
+
+363 tests vs 347 at the LUM-1057 tip — the delta is exactly this round's
+16 tests (9 registry + 2 router unit + 5 `cli_provider` integration).
+The wasm check compiles; it still reports the five pre-existing
+native-only dead-code warnings in `openai.rs` / `google.rs` (untouched
+here).
+
+The integration tests prove the family end-to-end without network or
+real keys: with `DEEPSEEK_BASE_URL` / `OPENROUTER_BASE_URL` /
+`ZAI_BASE_URL` pointed at a loopback capture server the binary issues
+`POST /chat/completions`, a missing `DEEPSEEK_API_KEY` exits `78`, and
+`pi list-models` lists every new entry.
+
+### Known gaps (next candidates)
+
+1. **Providers that need a different wire protocol are still absent**:
+   `xai` (OpenAI Responses), `mistral` (Mistral conversations),
+   `minimax` / `kimi-coding` (Anthropic Messages with a custom base
+   URL), `azure-openai-responses`, `amazon-bedrock`, `cohere`, plus the
+   subscription/plan providers (`qwen-token-plan*`, `xiaomi-token-plan*`,
+   `opencode*`, `cloudflare-*`, `github-copilot`, `openai-codex`,
+   `vercel-ai-gateway`, `ant-ling`, `radius`). `ProviderRouter` reports
+   them as unsupported rather than silently degrading to faux.
+2. **The catalog is curated, not generated.** Upstream builds
+   `providers/data/*.json` with `scripts/generate-models.ts`; those files
+   are gitignored, so token limits and non-default model ids here may
+   drift from the vendor's live catalog.
+3. **Base URL is per provider, not per model.** The upstream `Model`
+   descriptor carries `baseUrl`; the Rust `Model` has no such field yet,
+   so a single provider cannot mix endpoints.
+4. **Telemetry is still not wired into the agent turn** (unchanged from
+   Stage 13).
+
+### Push status
+
+This branch (`agent/devbox1/lum-1062`) is cut from
+`origin/feature/pi.rs` at `969623ba7` (the Stage 13 `pi-telemetry`
+commit), merged back into `feature/pi.rs` before pushing, so the
+integration branch and GitHub carry the Stage 15 commit.

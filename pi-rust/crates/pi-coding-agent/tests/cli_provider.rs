@@ -16,8 +16,13 @@
 //!    request head and closes without responding, so no network access or
 //!    real API key is needed.
 //!
-//! The catalog also lists Google entries, so the Stage 13 `GoogleProvider`
-//! adapter that previously had no CLI-reachable model is covered here.
+//! The catalog also lists Google entries and the OpenAI-compatible family
+//! (DeepSeek, Groq, …), so the adapters that previously had no
+//! CLI-reachable model are covered here.
+//!
+//! Stage 15 makes the provider list data-driven
+//! (`pi_ai::providers::registry`), so the family members below reach the
+//! same `OpenAiProvider` through their own base URL and credential.
 
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener};
@@ -28,13 +33,49 @@ use std::time::Duration;
 
 /// Every credential env var the router understands. Removed before each
 /// spawn so the host environment cannot influence the assertions.
-const CREDENTIAL_VARS: [&str; 6] = [
+const CREDENTIAL_VARS: [&str; 19] = [
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_OAUTH_TOKEN",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
+    "BASETEN_API_KEY",
+    "CEREBRAS_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "FIREWORKS_API_KEY",
+    "GROQ_API_KEY",
+    "HF_TOKEN",
+    "MOONSHOT_API_KEY",
+    "NVIDIA_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TOGETHER_API_KEY",
+    "XIAOMI_API_KEY",
+    "ZAI_API_KEY",
+    "ZAI_CODING_CN_API_KEY",
+];
+
+/// Every base-URL override env var the router understands, for the same
+/// environment-isolation reason.
+const BASE_URL_VARS: [&str; 18] = [
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "GEMINI_BASE_URL",
+    "GOOGLE_BASE_URL",
+    "BASETEN_BASE_URL",
+    "CEREBRAS_BASE_URL",
+    "DEEPSEEK_BASE_URL",
+    "FIREWORKS_BASE_URL",
+    "GROQ_BASE_URL",
+    "HUGGINGFACE_BASE_URL",
+    "MOONSHOT_BASE_URL",
+    "MOONSHOT_CN_BASE_URL",
+    "NVIDIA_BASE_URL",
+    "OPENROUTER_BASE_URL",
+    "TOGETHER_BASE_URL",
+    "XIAOMI_BASE_URL",
+    "ZAI_BASE_URL",
+    "ZAI_CODING_CN_BASE_URL",
 ];
 
 /// Spawn `pi` with a cleared credential environment.
@@ -54,6 +95,9 @@ fn pi(args: &[&str]) -> Output {
         cmd.arg("--session-dir").arg(sessions.path());
     }
     for var in CREDENTIAL_VARS {
+        cmd.env_remove(var);
+    }
+    for var in BASE_URL_VARS {
         cmd.env_remove(var);
     }
     let output = cmd.output().expect("failed to spawn pi");
@@ -128,6 +172,11 @@ fn assert_request_path(base_url_var: &str, key_var: &str, model_arg: &str, expec
             cmd.env_remove(var);
         }
     }
+    for var in BASE_URL_VARS {
+        if var != base_url_var {
+            cmd.env_remove(var);
+        }
+    }
     let output = cmd.output().expect("failed to spawn pi");
     drop(sessions);
     let head = capture.request_head();
@@ -198,6 +247,33 @@ fn list_models_includes_the_google_catalog() {
 }
 
 #[test]
+fn list_models_includes_the_openai_compatible_family() {
+    let output = pi(&["list-models"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for entry in [
+        "deepseek/deepseek-v4-pro",
+        "groq/openai/gpt-oss-120b",
+        "cerebras/gpt-oss-120b",
+        "zai/glm-5.3",
+        "zai-coding-cn/glm-5.3",
+        "moonshotai/kimi-k2.6",
+        "openrouter/moonshotai/kimi-k2.6",
+        "together/deepseek-ai/DeepSeek-V4-Pro",
+        "fireworks/accounts/fireworks/models/kimi-k2p6",
+        "nvidia/nvidia/nemotron-3-super-120b-a12b",
+        "huggingface/moonshotai/Kimi-K2.6",
+        "baseten/zai-org/GLM-5.2",
+        "xiaomi/mimo-v2.5-pro",
+    ] {
+        assert!(
+            stdout.contains(entry),
+            "list-models is missing {entry}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn anthropic_model_dials_the_anthropic_messages_endpoint() {
     assert_request_path(
         "ANTHROPIC_BASE_URL",
@@ -234,6 +310,45 @@ fn google_model_dials_the_stream_generate_content_endpoint() {
         "GEMINI_API_KEY",
         "google/gemini-2.5-flash",
         "POST /models/gemini-2.5-flash:streamGenerateContent",
+    );
+}
+
+#[test]
+fn missing_deepseek_key_exits_78_and_names_the_env_var() {
+    let output = pi(&["--model", "deepseek/deepseek-v4-pro", "--print", "hello"]);
+    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(&output));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("DEEPSEEK_API_KEY"));
+}
+
+#[test]
+fn deepseek_model_dials_the_chat_completions_endpoint() {
+    assert_request_path(
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+        "deepseek/deepseek-v4-pro",
+        "POST /chat/completions",
+    );
+}
+
+#[test]
+fn openrouter_model_dials_the_chat_completions_endpoint() {
+    assert_request_path(
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "openrouter/moonshotai/kimi-k2.6",
+        "POST /chat/completions",
+    );
+}
+
+#[test]
+fn family_providers_use_their_own_base_url_override() {
+    // Same adapter as OpenAI, but a distinct override var: proves the
+    // lookup is data-driven rather than a switch on the provider id.
+    assert_request_path(
+        "ZAI_BASE_URL",
+        "ZAI_API_KEY",
+        "zai/glm-5.3",
+        "POST /chat/completions",
     );
 }
 
