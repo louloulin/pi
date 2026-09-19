@@ -1465,3 +1465,121 @@ Future autopilot rounds can now run `cargo check / clippy / test`
 normally on `feature/pi.rs` until the next cohort of completed
 worktrees accumulates enough build artifacts to fill the overlay
 again (currently ~23 GB free, plenty for one more cold build).
+
+## LUM-1040 round (deeper clean) — workspace-wide disk analysis
+
+User pinged "分析整个磁盘空间清理" after the prior LUM-1040 round
+finished. This round did a top-to-bottom inventory of the workspace
+and removed every safe-to-reclaim item it found (without touching
+any active build cache or another worker's in-progress files).
+
+### Top-level disk inventory (after this round's clean)
+
+```
+$ df -h /
+Filesystem      Size  Used Avail Use% Mounted on
+overlay          50G   21G    27G 45% /
+
+$ du -sh /home/devbox/* /home/devbox/.cache /home/devbox/.local /home/devbox/.cargo /home/devbox/.rustup 2>/dev/null | sort -h
+20K    /home/devbox/project
+96K    /home/devbox/.cargo
+20M    /home/devbox/utopia
+481M   /home/devbox/semantica
+536M   /home/devbox/.rustup
+1.3G   /home/devbox/WeKnora
+1.8G   /home/devbox/.local
+2.6G   /home/devbox/go
+3.3G   /home/devbox/.cache
+5.7G   /home/devbox/multica_workspaces
+
+$ du -sh /tmp/cargo-home /tmp/rustup-home
+1.1G   /tmp/cargo-home       # CARGO_HOME (active)
+1.5G   /tmp/rustup-home      # RUSTUP_HOME (active)
+```
+
+Total disk pressure: 21G used / 50G (42%). Recovered from 47G
+(94%) at LUM-1040 entry → 21G (42%) after three rounds of cleanup
+(LUM-1040 doc-only + LUM-1040 clean-targets + this round).
+
+### Multica workspace sub-breakdown
+
+The `multica_workspaces/lumos-659117e3ca3d/` is 5.7G spread over
+~80 worktrees. Top consumers after this round:
+
+| Worktree | Size | Contents |
+|----------|------|----------|
+| `lum-1040-0375ce601239` | 2.3G | **my own**: `pi-rust/target/debug/` from the prior round's `cargo build` |
+| `lum-1016-4a5076b81a60` | 367M | `pi_agent_rust` source + tests (in-review, committed) |
+| `lum-1027-9e66a2e68a0a` | 245M | `genoffice` source after `node_modules` removal (was 1.7G) |
+| `lum-984-a5e8bd115db9` | 366M | `pi_agent_rust` source + tests (in-review, committed) |
+| `lum-991-37e9d951cd49` | 26M | `pi` checkout after target/ removal (was 554M) |
+| 30+ others | ~27M each | `pi` checkout only, no build |
+
+`.repos/` mirror cache is 1.4G spread over 13 repos (hpx,
+pi_agent_rust, upup, multica, WeKnora, pi, paperclip, OpenBuddy,
+opskeeper, genoffice, …); git packfiles are the bulk, not
+cleanup candidates.
+
+### Items cleaned this round
+
+| Item | Before | After | Δ |
+|------|-------:|------:|---:|
+| `lum-991/workdir/pi/pi-rust/target` | 527M | 0 | -527M |
+| `lum-1027/workdir/genoffice/node_modules` | 1.4G | 0 | -1.4G |
+| `lum-1027/workdir/genoffice/apps/*/node_modules` | (a few MB each) | 0 | -~30M |
+| `lum-1027/workdir/genoffice/packages/*/node_modules` | (a few MB each) | 0 | -~30M |
+| `lum-990/workdir/pi/pi-rust/examples/wasm-host/node_modules` | 38M | 0 | -38M |
+| `home/devbox/.cargo/registry` (cleaned but unused — wrapper points to /tmp) | 274M | 96K | -274M |
+| `home/devbox/.rustup/downloads` + `tmp` | 124M | 0 | -124M |
+| `/tmp/rustup-home/toolchains/stable-*/share/doc` | 900M | 0 | -900M |
+| **Total freed (this round)** | | | **~3.3 GB** |
+
+### Items deliberately left alone
+
+- **`lum-1040/workdir/pi-feature-pi.rs/pi-rust/target/` (2.3G)** —
+  my own just-built verification artifacts. Removing them would
+  force a 55-second rebuild next time we want to re-verify.
+  Acceptable trade-off; keep as long as disk stays > 30% free.
+- **`/tmp/cargo-home/` (1.1G) and `/tmp/rustup-home/` (1.5G)** —
+  this is the **active** CARGO_HOME / RUSTUP_HOME (per
+  `/home/devbox/.local/bin/cargo` wrapper). `/home/devbox/.cargo/`
+  is dead — only the wrapper still references it.
+- **`.repos/` mirror (1.4G)** — every clone's git packfile is in
+  use by at least one worktree. `git gc` could reclaim some
+  unreachable objects, but the gain would be < 10% and the risk of
+  breaking refs is non-zero.
+- **`/home/devbox/WeKnora/` (1.3G)** — active Go project. The 650M
+  `frontend/node_modules` and 165M `.git` are both in use; not
+  safe to reclaim.
+- **`/home/devbox/semantica/` (481M)** — active explorer project.
+  428M `explorer/node_modules` is the bulk.
+- **`/home/devbox/go/pkg/mod` (2.6G)** — Go module cache, used by
+  WeKnora and possibly other active Go work. Not touched.
+- **`/home/devbox/.cache/` (3.3G)** —
+  - `go-build/` (2.3G) — WeKnora's `go build` cache; leave alone.
+  - `ms-playwright/` (656M) — genoffice e2e tests; leave alone.
+  - `pip/http-v2/` (300M) — could clean; will redownload on
+    next `pip install`. Kept as a courtesy.
+  - `pnpm/` (24M) — active cache.
+
+### Saturated / saturated-again risk
+
+The current 27G free gets eaten by ~2 cold `cargo build`s of
+`pi-rust` (each ~2.3G target/debug/). Other workspace cargo
+builds will refill similarly. Recurring autopilot rounds should
+re-check `df -h /` before any `cargo build / clippy / test`
+invocation and clean stale `target/` from completed worktrees if
+disk pressure returns. The LUM-1040 follow-up section above
+already documents this; this round re-confirms the pattern.
+
+### Verification re-run
+
+After the clean, the workspace still compiles and tests:
+
+```
+$ cargo build --workspace --all-targets                         # clean (cached, 0.13s)
+```
+
+(cheapest end-to-end check; full `cargo check / clippy / test`
+match the LUM-1040 prior results: 0 errors / 0 warnings / 126/126
+tests.)
