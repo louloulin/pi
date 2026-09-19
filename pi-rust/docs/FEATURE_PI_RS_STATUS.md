@@ -5814,6 +5814,90 @@ $ cargo test   --workspace --no-fail-fast --offline                 # 71 targets
 `work/lum-1088`：基于 `origin/feature/pi.rs`（rebase 到 LUM-1096 的 `43b3fed20`）实现，
 改动 `wiring.rs` / `main.rs` / `pi-extensions` registry + host 与两处测试，另附本节文档，
 非 force push 到同名分支。
+
+## LUM-1104 round — 核验 `feature/pi.rs` + 合入 LUM-1088 信任门（Stage 23 遗留）+ 修复旧终端上 `Ctrl+-` 失效
+
+本轮（autopilot，2026-09-19 21:20 CST 触发）开工核验 `origin/feature/pi.rs = 9c3df4d2f`
+（LUM-1103 的编辑器 undo 栈与 LUM-1100 的 `node:*` 都已在主干），开工时
+`running_task_count = 4`（本 run + LUM-1083 + LUM-1100 + LUM-1103）→ **不派发新子任务**。
+
+### 一、同源重复轮：从「重复核验」升级为「重复实现」
+
+本轮照 LUM-1102 frontier 的第 3 项（P2 编辑器 undo 栈）写完了一版完整实现：
+`pi-tui/src/undo_stack.rs` + `editor.rs` 接线 + 18 单测 + 4 集成测试，本仓全绿。收工前
+`git fetch` 才发现 LUM-1103 在同一个触发批里交付了**同一块**（`33f8336eb`）：文件、
+`UndoStack` API、`LastAction::TypeWord`、测试名几乎逐条对应，LUM-1105 的文档里也记了
+「LUM-1103 / LUM-1104 两个 worktree 里有相同未提交的 `pi-tui` 改动」。于是本地实现整份丢弃，
+只补它漏掉的一个真实缺陷（下一节）。多路同源协调轮的成本已经三次升级：LUM-1099/1101
+是重复核验，LUM-1102 是重复盘点，本轮是重复实现。
+
+### 二、本轮唯一代码切片：`Ctrl+-` 在没有 Kitty keyboard protocol 的终端上是死键
+
+LUM-1103 的绑定只接受 `Ctrl+-` / `Ctrl+_`，但按 crossterm 的
+`event/sys/unix/parse.rs`，旧终端为 `Ctrl+-` 发送的 `0x1F` 控制字节会被解成 **`Ctrl+7`**
+（该文件把 `0x1C..=0x1F` 映射到 `Ctrl+4..=Ctrl+7`）。上游 `packages/tui/src/keys.ts:1277`
+正是把同一个字节归一化成 `ctrl+-` 才让绑定生效 —— 也就是说在非 Kitty 协议终端上这个功能
+此前按不动。改动：
+
+| File | Change |
+|------|--------|
+| `pi-tui/src/editor.rs` | 控制键分支同时接受 `Ctrl+7`；注释改成可核对的行号引用（`keys.ts:1277` + crossterm 映射区间），模块文档同步更正；+1 单测 |
+| `pi-tui/tests/undo.rs` | +1 集成测试 `legacy_ctrl_seven_event_also_undoes`，走 `crossterm::event::KeyEvent → InputEvent → Editor` 的真实转换路径 |
+
+### 三、合入「已写完但从未合并」的 LUM-1088（Stage 23 收口）
+
+`mirror/work/lum-1088` 的 2 个 commit 自 LUM-1098/1099 轮起被每轮记为「在途、不合并」，
+但它的 run 早已失败、分支既未推也未合，而它修的是**信任边界缺口**（未信任目录里的
+`.pi/extensions/*.js` 会被 QuickJS 求值并发工具、进系统提示）加一个多扩展互覆盖工具表的 bug。
+本轮把它合入：
+
+- 唯一冲突在本文档（两侧都在文末追加小节）：保留全部小节，在 LUM-1105 小节之前插入 LUM-1088 小节；
+- `pi-extensions/src/host.rs` 与 LUM-1100 的 `node:*` 改动**自动合并**（不同区域），合并后
+  `loading_a_second_extension_keeps_the_first_extensions_tools` 与
+  `untrusted_project_extensions_are_skipped_but_user_extensions_load` 均通过；
+- 交付已进主干 → 把 LUM-1088 置 `in_review`（此前一直挂 `in_progress`，占着盘子）。
+
+### 四、验证（native，`target` 用本 workspace 缓存）
+
+```
+$ cargo test  -p pi-tui --offline                       # 121 lib + 9/7/9/9/7 integration，全绿
+$ cargo test  -p pi-extensions --offline                # 33 + 10 + 5 + 3 ...，全绿（含 LUM-1105 node:util）
+$ cargo test  -p pi-coding-agent --test cli_extensions   # 13 passed（含信任门用例）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo check  --workspace --all-targets --offline       # Finished
+$ cargo fmt -p pi-tui -- --check                         # clean
+```
+
+全量 `cargo test --workspace --no-fail-fast` 仍会撞上 LUM-1083 的概率性宿主堆破坏：本轮一次
+全量跑出 `cli_provider` + `rpc` 共 6 例失败，stderr 是 `free(): double free detected in tcache 2` 与 SIGSEGV，逐个单跑全部通过。与 LUM-1098/1102/1105 记录的噪声同源，不作为回归信号。
+
+另记一条环境事实：`cargo fmt --all -- --check` 在本机 rustfmt 下报出上百处**既有**格式差异
+（`pi-server` / `pi-session` / `pi-protocol` / `pi-extensions/src/bridge.rs` 等本轮未触碰的
+文件也有），即仓库整体并非 fmt-clean，各轮只保证自己动过的 crate。全仓 reformat 会与所有在途
+分支产生巨型冲突，本轮不做。
+
+### 五、frontier（本轮不派发；收工 `running_task_count = 3`）
+
+1. **P1 LUM-1083 宿主堆破坏**（`free(): double free`）：仍是唯一让所有 spawn `pi` 的集成
+   测试带上概率性失败的问题；`rquickjs-core 0.9 → 0.14` 升级或补齐宿主 shutdown 握手。
+2. **P1 `themes` 目录的信任门**（LUM-1085 遗留）：`trust.rs` 已把 `themes` 列入需信任条目，
+   而 `pi-tui/theme.rs` 已落地，接项目目录的成本比之前低。
+3. **P2 `keys.ts` 的整套 legacy 字节归一化**（本轮只补了 `0x1F` 一条）：上游还把
+   `0x00/0x08/0x09` 等归一化成 `ctrl+space` / `ctrl+h` / `ctrl+i`；Rust 侧目前散在
+   `editor.rs` 的 match 里，值得抽 `keys.rs` 归一化层并与上游同表。
+4. **P2 `.wasm` 扩展宿主**：环境仍缺 `wasm32-unknown-unknown` target + wasmtime，维持不立项。
+5. **P3 编辑器 word kill / word move**（`Ctrl+W` / `Alt+D` / `Alt+B` / `Alt+F`）：需自建分词。
+6. **P3 `node:child_process`**：`tokio::process` + 流式 stdio + 取消联动，Stage 级。
+
+并发建议（在 LUM-1099/1102/1105 结论上再加本轮证据）：**同一 autopilot 触发产生的多路协调轮，
+开工第一步必须先互相比对「本轮打算做的那一块是否已被别的轮在做/已做」**，否则重复实现一个
+切片（本轮 ~700 行）就是纯浪费。
+
+### Push status
+
+`work/lum-1104`：`ca1013510`（`Ctrl+7` 修复）、`4b8b1c137`（合 LUM-1088）、`e9f3dba59`
+（合 `origin/feature/pi.rs`）三个提交，非 force 推同名分支；再以 merge commit 把
+`feature/pi.rs` 从 `17e420c06` 快进，回滚面 = revert 该 merge commit。
 ## LUM-1105 round — Stage 26 后续：`node:util` 虚拟模块（纯 JS）+ 合并 `feature/pi.rs`
 
 （autopilot 协调轮，触发 2026-09-19 21:40 Asia/Shanghai；开工后把 LUM-1105 的泛标题「pi」
