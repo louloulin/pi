@@ -9,6 +9,7 @@ members = [
     "crates/pi-extensions",
     "crates/pi-session",
     "crates/pi-mono",
+    "crates/pi-telemetry",
 ]
 
 [workspace.package]

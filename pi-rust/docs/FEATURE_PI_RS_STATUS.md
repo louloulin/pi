@@ -1765,3 +1765,85 @@ Suggested next dispatches (≤ 3 concurrent): Stage 10 = wire a
 `ToolExecutor` into `pi-agent-core` + drive it from `pi-coding-agent`;
 Stage 11 = pi packages manager + real provider selection in the CLI;
 Stage 12 = RPC mode over `pi-protocol` framing.
+
+## LUM-1058 round — Stage 13: `pi-telemetry` lands on `feature/pi.rs`
+
+LUM-1058 (2026-09-19 02:20 UTC) implemented the one parked Stage 13 item that
+was still unclaimed. Stage 10 (LUM-1051) and Stage 11 (LUM-1052) had already
+merged, Stage 12 (LUM-1053) was in flight in its own worktree, and LUM-1054 was
+already implementing the Gemini provider for LUM-1055 — so the `pi-telemetry`
+crate was the only additive, disjoint piece left inside the 3-concurrent cap.
+
+### What landed
+
+New crate `crates/pi-telemetry` — the Rust port of `packages/telemetry`, the
+last `packages/*` entry with no Rust counterpart:
+
+| Rust | Upstream | Contents |
+|------|----------|----------|
+| `src/context.rs`, `src/types.rs` | `index.ts` | `TelemetryContext` / `TelemetrySpan` / `SpanRef` / `SpanCallback`, `SpanOptions`, `AttributeValue`, `SpanAttributes`, `SpanStatus`, `SpanError`, `IntoTelemetryError`, plus `TelemetryContextExt::start_span_with` |
+| `src/noop.rs` | `noop.ts` | `NoopTelemetry` / `NOOP_TELEMETRY_CONTEXT` — zero-sized, reuses one inert span, retains nothing |
+| `src/memory.rs` | `memory.ts` | `MemoryTelemetry` — id/parent/`end_sequence`/attributes/events/status, detached `spans()` snapshots, automatic error status, settled-parent delegation to noop |
+| `src/testing.rs` | `testing/` | runner-independent conformance suite (6 cases: `callback lifecycle`, `status`, `recording`, `parentage`) |
+| `src/schema.rs` | `index.ts` schema types | serializable `TelemetrySchemaDefinition` data + `define_telemetry_schema` identity helper |
+| `README.md` | `README.md` | contract, adapters, conformance, wasm and upstream-mapping notes |
+
+Contract notes: a span is opened around a callback and settles when the
+callback's future settles (there is no public `end()`); recording is passive
+(`add_event` / `set_attributes` / `set_status` cannot fail and post-settlement
+calls are ignored); a failed callback records the automatic error status unless
+the callback set an explicit one, which always wins. Attributes are
+scalars/flat-arrays only, inserted in order.
+
+Registration: added to the workspace `members` list and re-exported as
+`pi_mono::telemetry`. No new third-party dependency and no vendor SDK —
+`futures` / `serde` / `thiserror` / `indexmap` are all already in the
+workspace's dependency set.
+
+### Drive-by: the workspace clippy gate was red
+
+`cargo clippy --workspace --all-targets -- -D warnings` (the
+`.github/workflows/rust-ci.yml` gate) failed on five lints the Stage 10/11
+merges had landed. Fixed with no behaviour change:
+
+- `pi-ai/src/providers/anthropic.rs`, `openai.rs` — `loop { let Some(..) = .. else { break } }` → `while let Some(..)` (`clippy::while_let_loop`)
+- `pi-session/src/error.rs` — `io::Error::new(io::ErrorKind::Other, ..)` → `io::Error::other(..)` (`clippy::io_other_error`)
+- `pi-coding-agent/src/file_processor.rs` — `(len + 2) / 3` → `len.div_ceil(3)` (`clippy::manual_div_ceil`)
+- `pi-coding-agent/src/packages/installer.rs` — `bool::then(..).unwrap_or_default()` → `if` / `else` (`clippy::obfuscated_if_else`)
+- `pi-coding-agent/src/tools/mod_ignore.rs` — `iter().any(|x| *x == name)` → `contains(&name)` (`clippy::manual_contains`)
+- `pi-coding-agent/src/tools/find.rs` — over-indented doc list item (`clippy::doc_overindented_list_items`)
+
+### Verification (this round, on the merged tree)
+
+```
+$ cargo clippy --workspace --all-targets -- -D warnings          # clean
+$ cargo test   --workspace                                        # 269 passed, 0 failed (baseline 250)
+$ cargo check  -p pi-telemetry --target wasm32-unknown-unknown    # clean
+$ cargo check  -p pi-ai -p pi-agent-core -p pi-protocol \
+      --target wasm32-unknown-unknown --features pi-agent-core/wasm   # clean (same command as rust-wasm.yml)
+$ cargo fmt    -p pi-telemetry -- --check                         # clean
+```
+
+Test count moved 250 → 269: 18 new `pi-telemetry` integration tests (contract,
+noop, memory, schema, conformance) plus its doc test.
+
+### Known gaps
+
+1. **Telemetry is not wired into pi core yet.** No crate emits spans.
+   LUM-1057's scope was the contract plus the adapters plus the conformance
+   suite; installing a host adapter and instrumenting the agent turn /
+   provider request / tool call is the natural next stage.
+2. **`cargo fmt --all -- --check` still reports drift** in files the Stage
+   10/11 merges landed unformatted. `rust-ci.yml` does not run `fmt`, so this
+   is not a CI gate; `scripts/ci.sh` does run it. Left alone this round to keep
+   the diff reviewable and avoid colliding with the in-flight Stage 12/13
+   branches.
+3. **Three upstream conformance cases are not ported** — they exercise
+   JavaScript-only throw / `Proxy` semantics (`ignores failed attribute calls
+   atomically`, `ignores failed status calls atomically`, `suppresses
+   unreadable telemetry payload failures`). Rust recording methods cannot
+   throw and attribute payloads cannot be unreadable, so there is no analogue;
+   the omission is documented in `src/testing.rs`.
+
+**Stage 13 remaining:** LUM-1055 (Gemini provider) and LUM-1056 (print mode on
+the `pi-session` SQLite store) were still in flight when this landed.

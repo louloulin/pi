@@ -1,0 +1,23 @@
+[package]
+name = "pi-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Vendor-neutral telemetry contracts, no-op and in-memory adapters (Rust port of packages/telemetry)."
+
+[lints]
+workspace = true
+
+# No feature gates: the crate is runtime-agnostic (no ambient context API, no
+# filesystem / clock / thread access), so the same code compiles for native
+# and `wasm32-unknown-unknown` targets without a `wasm` feature.
+
+[dependencies]
+futures.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+indexmap.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
