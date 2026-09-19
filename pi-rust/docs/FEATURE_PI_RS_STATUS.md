@@ -8340,3 +8340,25 @@ $ /tmp/rustup-home/toolchains/1.85.0-*/bin/rustfmt --edition 2021 --check \
     `MTIME = 0`；`node:zlib` 仍缺 async/stream/`unzipSync`。既有欠账（LUM-1130 记的
     `settings.rs` / `tests/settings_list.rs` rustfmt diff）维持不动。
 
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `d9c476ead`（6 个文件）、文档提交 `1245dbbfd`，都在 `work/lum-1131` 上，起点 `cca97f553`。
+- 合入前先 `git fetch`：`origin/feature/pi.rs` 已前进到 `b7c46b746`（LUM-1130 的 LaTeX 合并 + 补记）。
+  `git merge origin/feature/pi.rs` 进工作分支 → 合并提交 `7ec2557d8`，**无冲突**：LUM-1130 只碰
+  `pi-tui/src/latex.rs` / `markdown.rs` / `lib.rs` 与两个测试 + 本文档，两边在本文档都是**末尾追加**
+  （先合入它的节，再追加本轮的节，时间顺序自然成立）。
+- 推送：plumbing merge（`git merge-tree --write-tree` + `git commit-tree`，第一父 `b7c46b746`、
+  第二父 `1245dbbfd`，树 `c3d3c238a`）= `d1b1f5087`；
+  `git push origin d1b1f5087:refs/heads/feature/pi.rs` → **快进** `b7c46b746..d1b1f5087`。
+  `work/lum-1131` 一并推送（新分支 `@ 1245dbbfd`）。
+- `git diff --numstat b7c46b746 d1b1f5087`（本轮全部改动，8 个文件、**+1729 / −54**）：
+  `pi-extensions/src/deflate.rs` +834（新）、`pi-extensions/tests/zlib_deflate.rs` +608（新）、
+  `runtime/pi-ext-shim.mjs` +80 / −10、`src/host.rs` +59 / −24、`tests/zlib.rs` +20 / −7、
+  `crates/pi-extensions/docs/NODE_BUILTINS.md` +27 / −13、`src/lib.rs` +1、本节文档 +100。
+  **`pi-tui` 与其它 crate 一个文件都不在其中。**
+- 合并态复测（第四节）跑在**合并后的 `work/lum-1131`** 上（树 `c3d3c238a` 与此前的工作分支树同源），
+  数字即第四节所列。
+- 本轮**派发 1 个子任务**（收尾时 `running_task_count = 1`，空出 2 槽）：
+  `[Stage 37] pi-tui: 选区粒度（双击选词 / 三击选行）+ 拖拽边缘自动滚动` = **LUM-1133**
+  （`01a0baf8-1b64-778a-a2af-248a615dfcfe`，`priority = high`，无父级，与 Stage 33/34/36 同形）。
+  它从 `origin/feature/pi.rs @ d1b1f5087` 起分支——本轮先把推送落地，避免它从旧头起分支。
