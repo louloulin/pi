@@ -11,6 +11,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod autocomplete;
 pub mod dialog;
 pub mod editor;
 pub mod fuzzy;
@@ -28,6 +29,10 @@ pub mod undo_stack;
 pub mod word_navigation;
 
 pub use app::{App, AppConfig, RenderSnapshot};
+pub use autocomplete::{
+    ArgumentCompletions, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
+    CombinedAutocompleteProvider, CompletionResult, SlashCommand,
+};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
