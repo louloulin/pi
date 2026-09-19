@@ -20,6 +20,7 @@ pub mod prompt;
 pub mod selector;
 pub mod status;
 pub mod theme;
+pub mod undo_stack;
 
 pub use app::{App, AppConfig, RenderSnapshot};
 pub use dialog::{Dialog, DialogAction, DialogKind};
@@ -36,6 +37,7 @@ pub use theme::{
     resolve_theme_setting, ColorMode, ColorValue, TerminalTheme, Theme, ThemeBg, ThemeColor,
     ThemeController, ThemeError, ThemeJson,
 };
+pub use undo_stack::UndoStack;
 
 /// Re-export of the underlying terminal backend so binaries can pin a
 /// single version of `crossterm`.

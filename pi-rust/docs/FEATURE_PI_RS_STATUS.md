@@ -5632,3 +5632,98 @@ $ cargo test    --workspace --no-fail-fast --offline               # 844 passed 
   LUM-1090 维持「前提不成立」结论；**LUM-1099 与本轮是同模板的重复 autopilot 轮次**，
   它在另一 worktree 并发跑并落了 provider 补全（`7c5519a54`）—— 两轮实际没撞车，但同类重复
   轮次建议人工合流，避免重复占槽。
+
+## LUM-1103 round — 核验 `feature/pi.rs` + 编辑器 undo 栈 / `Ctrl+-`（Stage 4 后续第三切片）
+
+本轮（autopilot，2026-09-19 21:00 CST 触发）开工 `multica daemon status` =
+`running_task_count = 4`（上限 3），**不派发新子任务**；按前几轮做法改为一轮自包含实现 ——
+LUM-1102 frontier 里排第 3 的 **P2 编辑器 undo 栈**（与上一轮 kill ring 同一个文件、零新依赖、
+单轮可完成），并把它合入 `feature/pi.rs`。
+
+### 一、核验与在途盘点
+
+- 开工 `origin/feature/pi.rs = 2a5ec220e`（LUM-1100 的 `node:*` 内建模块收口，其中已含 LUM-1101
+  主题首个切片 / LUM-1102 kill ring）。`git fetch --all` 后逐分支核对「已提交但未合入」：
+  - `work/lum-1088`（本地 2 commits，项目信任门接扩展加载）：远端**不存在**该分支，本地那 2 个
+    commit 仍未推；对应 run 自 09-18 起卡在 `git rebase --continue` 的交互编辑器上
+    （PID 22034 / 22052 仍在）→ **不动**。
+  - `work/lum-1104`（1.2G workdir，本批 autopilot 兄弟 run）、LUM-1083（扩展宿主崩溃根因）在途
+    → **不动**。
+  - 其余 `origin/agent/devbox1/*` 均为已合并 lineage 或等价物，无新内容。
+- 槽位：4 路并行 > 3，且其中一路是卡死的 LUM-1088（长驻 `git` + 交互编辑器进程）—— 本轮不派发，
+  仅做实现 + 合并。
+
+### 二、本轮切片：编辑器 undo 栈（对齐 `packages/tui`）
+
+上游 `packages/tui` 有完整的 undo 契约（`undo-stack.ts` + `editor.ts` 的
+`pushUndoSnapshot` / `undo`，绑到 `tui.editor.undo = ctrl+-`），本仓 `Editor` 此前**完全没有**
+撤销能力（`Ctrl+-` 落进 `_ => EditorAction::None`）。本轮补齐：
+
+| File | Change |
+|------|--------|
+| `pi-tui/src/undo_stack.rs`（新增） | 移植 `packages/tui/src/undo-stack.ts`：泛型 `UndoStack<S>`，`push(&S)`（clone-on-push，放在 `impl<S: Clone>` 块）、`pop()`（直接返回入栈时已 detach 的快照，不再额外 clone）、`clear()` / `len()` / `is_empty()`、手写 `Default`；+7 单测（LIFO 顺序、空栈 pop、clone 隔离「入栈后改 live 值不影响快照」、pop 后栈仍空、len、clear、default） |
+| `pi-tui/src/editor.rs` | （1）新增私有 `EditorSnapshot { buffer, cursor }`（上游快照还含多行 `EditorState` 与 paste 表，单行编辑器只有这两项）；（2）`LastAction` 增加 `TypeWord`；（3）`push_undo_snapshot()` / `pub fn undo()` / `pub fn undo_len()`；（4）**fish-style 合并**：`insert_char` 仅在「是空白字符」或「上一个动作不是打字」时压快照 —— 空白先压，所以撤销一次会连空白带它后面的词一起去掉（与上游 `insertCharacter` 同序），连续 word 字符则合成一个 undo 单元；（5）压快照点：`insert_str`（一次一段 = 粘贴路径，原子撤销）、`backspace` / `delete`（真删了才压）、`kill_to_line_start` / `kill_to_line_end`、`yank` / `yank_pop`、`history_prev` 首次进入历史浏览、`set_text`（内容真变了才压）；（6）`set_text` 拆成公开 `set_text`（压快照 + 复位历史导航）与私有 `set_text_internal`（上下翻页用，否则每按一次 Up 都会把 `history_index` 复位）；（7）`clear()`（提交 / `/clear`）**同时清空 undo 栈**，对齐上游 `handleSubmit` 里的 `undoStack.clear()` —— 不能让 `Ctrl+-` 把已发出的 prompt 复活；（8）`handle_key`：`Ctrl+-` → `undo()`，`Ctrl+_` 为别名（两者 legacy 字节都是 `0x1F`，只有 kitty 协议才发 CSI-u `\x1b[45;5u` → `Char('-')` + CONTROL）；（9）模块文档补按键表与 undo 语义。+17 单测 |
+| `pi-tui/src/lib.rs` | 导出 `undo_stack` 模块与 `UndoStack` |
+| `pi-tui/tests/undo.rs`（新增） | 6 个集成测试（只走 `InputEvent` / `Prompt` 公开面）：逐字符输入的分词合并、粘贴式 `insert_str` 原子撤销、kill→yank→yank-pop 逆序撤销、历史浏览撤销回草稿、提交后清栈（`Prompt::clear` → undo 为 no-op）、`Ctrl+-` 经 crossterm → `InputEvent` 转换后仍可用 |
+
+已知偏差（本轮**不修**，进 frontier）：上游 `keybindings.ts` 把 `tui.editor.deleteCharForward`
+绑到 `delete` **与 `ctrl+d`**，而本仓 `Ctrl+D` 是「buffer 为空 → `EditorAction::Eof`，否则 no-op」，
+由 `pi-tui/src/app.rs:620`（退出）与 `dialog.rs:237`（关弹窗）消费成 readline 式 EOF。改绑会动到
+App 级退出语义，属跨 crate 决策，不塞进本切片。
+
+### 三、验证
+
+```
+$ cargo fmt    -p pi-tui -- --check                                   # clean
+$ cargo clippy -p pi-tui --all-targets --offline -- -D warnings       # 0 warnings
+$ cargo check  --workspace --all-targets --offline                    # 7m17s，0 error
+$ cargo test   -p pi-tui --offline                                    # 161 passed / 0 failed
+     （120 lib + 9 e2e + 7 selector_search + 9 snapshot + 9 theme + 6 undo + 1 doctest；
+       undo 前基线 96 lib + 34 integration + 1 doctest = 131）
+$ cargo test   --workspace --offline --no-fail-fast                   # 除下述 2 例高负载抖动外全绿
+$ cargo test   -p pi-coding-agent --doc --offline                     # 3 passed
+```
+
+全量 workspace 轮次的 2 个失败都在 `pi-coding-agent` 的集成测试里，与本轮改动无关，且**单跑即过**：
+
+- `tests/rpc.rs:401 rpc_flag_no_longer_prints_the_stage5_stub`：子进程 stderr 是
+  `free(): double free detected in tcache 2` —— LUM-1083 那条「扩展宿主关闭路径内存破坏」家族。
+- `tests/cli_provider.rs:168 anthropic_auth_token_is_an_accepted_credential`：loopback capture
+  server 30s 超时。两次全量跑失败的用例**并不相同**（第一次是 `xai_model_dials_the_responses_endpoint`
+  与 `set_model_rejects_unknown_model`），四个用例逐个单跑都过 → 负载抖动，非确定性回归；
+  `pi-tui` 全部用例两次都全绿。
+
+环境限制记一笔（与 LUM-1100 轮同源）：本轮第一次全量测试时共享盘再次被打满（100% / 余 247M），
+`pi-coding-agent` 的 doctest 出现**链接阶段 ENOSPC**；删掉本 run 自己的
+`target/debug/incremental`（1.9G）与已链接的测试可执行文件（3.1G）后重跑即通过。磁盘是这台机器
+上最紧的资源，建议后续轮次开工先看 `df -h /`，余量 < 2G 就先清自己 workdir 的 `target`。
+
+### 四、合并与推送
+
+- 工作分支 `work/lum-1103`：`33f8336eb`（实现）→ `dfafdd9d2`（merge `origin/feature/pi.rs`，零冲突）。
+- 合入 `feature/pi.rs`：`git merge --no-ff work/lum-1103`（含本轮 status 文档提交），非 force 推送。
+- 合并后在该树上复跑 `cargo test -p pi-tui --offline`（161 passed），确认合并没有破坏已验证结果。
+
+### 五、frontier（更新）
+
+已完成：LUM-1102 列表的第 3 项（编辑器 undo 栈）。按「插件生态兼容 > 核心 agent 能力 > 外观」重排：
+
+1. **P1 `.wasm` 扩展宿主**：`pi-extensions` 仍只有 QuickJS(JS) 宿主，`.wasm` 扩展枚举后被跳过；
+   体量 Stage 级（wasmtime/wasmi + 扩展 ABI 映射），且与在途的 `host.rs` 同文件，**必须等 LUM-1083 收口**。
+2. **P1 LUM-1083 扩展宿主崩溃**（`free(): double free`）：根因已收敛到 `host.rs` 丢弃
+   `tokio::spawn(runtime.drive())` 的 `JoinHandle`、无 shutdown 握手，修复在途（本轮全量测试又复现一次）。
+3. **P2 word kill / word move**（`Ctrl+W` / `Alt+D` / `Alt+B` / `Alt+F`）：上游用 `Intl.Segmenter`
+   分词，Rust 侧要自建分词 + 标点边界规则。**undo 落地后这是性价比最高的下一个单轮切片**：新的
+   word kill 路径只要记得压一次快照，撤销语义就天然可用（现有 `kill_to_line_*` 已是这个模式）。
+4. **P2 `pi-tui` 渲染 API 样式化**（`Span` + 主题消费方）：`theme.rs` 已就绪但组件仍是
+   `render_lines(width) -> Vec<String>` 纯文本，单独立项只会是死代码，需与渲染 API 一起改 → Stage 级。
+5. **P3 `node:child_process` / `node:util`**（LUM-1100 轮 frontier，仍是插件生态最大缺口；
+   `node:util` 是纯 JS、最便宜）。
+6. **P3 `Ctrl+D` 语义位置差异**（见上）：需要 App 级决策（EOF 与 forward-delete 的归属）。
+7. **P3 provider catalog**：仍缺上游 `data/*.json`（models.dev 生成），**没有 catalog 就不写猜测值**；
+   LUM-1090 维持「前提不成立」结论。
+
+并发：上限 3 路，同一文件（`pi-extensions/src/host.rs`、`FEATURE_PI_RS_STATUS.md`）一次只允许
+一路在写；本轮与 LUM-1100/1101/1102 分属不同文件（`pi-tui` vs `pi-extensions`），合并没有冲突。
+另：LUM-1088 的 run 已挂死近一天（交互式编辑器），它的 2 个 commit 既未推也未合，占着一个槽位 ——
+建议人工清理，否则每轮盘点都要重复这条结论。
