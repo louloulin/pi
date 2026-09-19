@@ -3,6 +3,8 @@
 
 use clap::{Parser, Subcommand};
 
+use crate::print_mode::OutputFormat;
+
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
 #[command(name = "pi", about = "Rust port of the Pi coding agent")]
@@ -17,8 +19,13 @@ pub struct Cli {
     pub extension: Vec<String>,
 
     /// Print events to stdout as JSON instead of rendering the TUI.
-    #[arg(long)]
-    pub print: bool,
+    ///
+    /// Accepts an optional inline prompt: `pi --print "hello"` runs a
+    /// single turn with the given prompt; `pi --print` (no argument)
+    /// reads the prompt from stdin (when piped) or fails with
+    /// `EX_USAGE` (64).
+    #[arg(long, value_name = "PROMPT", num_args = 0..=1, default_missing_value = "")]
+    pub print: Option<String>,
 
     /// RPC mode — stream JSON events on stdout and read JSON-RPC requests
     /// on stdin (matches `pi --rpc` in the TS CLI).
@@ -41,6 +48,30 @@ pub struct Cli {
     /// Resume a previous session by id or path.
     #[arg(long, value_name = "SESSION")]
     pub resume: Option<String>,
+
+    /// Continue the most recent session (print mode only). Shorthand
+    /// for `--session` with the most recently modified database.
+    #[arg(long, value_name = "SESSION", conflicts_with_all = ["resume"])]
+    pub r#continue_: Option<Option<String>>,
+
+    /// Attach a specific session by id or path (print mode only).
+    /// When omitted in `--print` mode the agent starts a fresh
+    /// session.
+    #[arg(long, value_name = "SESSION")]
+    pub session: Option<String>,
+
+    /// Output format for print mode. `text` streams the final reply on
+    /// stdout (default); `json` emits a single JSON object at the end
+    /// of the turn; `json-events` streams NDJSON event objects as they
+    /// arrive (matches the RPC-mode wire shape).
+    #[arg(long, value_name = "FORMAT", default_value = "text")]
+    pub output_format: OutputFormat,
+
+    /// Hard cap on the number of agent turns the print mode will run.
+    /// Exceeding the cap forces the turn to end and exits with code 1.
+    /// `0` disables the cap.
+    #[arg(long, value_name = "N", default_value_t = 0u32)]
+    pub max_turns: u32,
 }
 
 /// Subcommands — mirrors `pi <subcommand>` in the TS CLI.
