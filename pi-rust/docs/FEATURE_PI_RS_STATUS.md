@@ -11096,3 +11096,93 @@ crossterm 后端直接 `Print(cell.symbol())` 原样写终端。因此本轮把*
 `git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `222ea4fc3` **快进至 `c6787d1f8`**
 （`git ls-remote` 复查一致：`c6787d1f831f387cd020191d40dfc6676ec33de0`），
 留档分支 `work/lum-1152` 一并推送（同哈希）。
+
+## LUM-1153 round — `pi-coding-agent` read/write 工具渲染器（`highlight_code` + `get_language_from_path` 首个非 markdown 消费方，frontier 第 7 项收口）+ 合并推送 feature/pi.rs
+
+### 一、本轮切片
+
+LUM-1149（`highlight.rs`）与 LUM-1151（`get_language_from_path`）都已落地，但 `highlight_code`
+当时**只有 markdown 一个消费者** —— 自研高亮器的主路径从未被真实工具输出跑过。本轮把 read/write
+的工具结果接上「扩展名 → `supports_language` 闸 → `highlight_code`」链路，并落一条**真实展示路径**：
+`interactive.rs` 在 TUI 起不来时调用的 `run_text_fallback`。
+
+### 二、改动（4 个文件）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-coding-agent/src/tools/render.rs`（新，约 1060 行含 16 单测） | `ToolRenderer`（`render_call`/`render_result`）、`ToolRenderContext`/`ToolRenderOptions`、`ReadRenderer`、`WriteRenderer`、`WriteHighlightCache`、`ToolRenderSession`，以及纯文本/ANSI 两种输出与 `truncation_notice` |
+| `crates/pi-coding-agent/tests/tools_render.rs`（新，5 端到端） | 真实 `ReadTool`/`WriteTool` → `ToolRenderSession` → ANSI 断言 |
+| `crates/pi-coding-agent/src/tools/mod.rs` | `pub mod render;` + re-export（约 14 行） |
+| `crates/pi-coding-agent/src/text_fallback.rs` | 新增 `ToolRenderSession`、`fallback_theme()`、`emit_lines()`；事件循环新增 `ToolExecutionStart` / `ToolExecutionEnd` 分支，`TurnEnd` 时 `clear()` |
+
+**渲染器设计**：`render_call(args, ctx)` / `render_result(result, options, ctx)` 都返回 `Vec<StyledLine>`
+（主题槽，不是 ANSI），由调用方决定画法 —— `render_lines_ansi` 给文本终端、`render_lines_plain`
+丢样式、TUI 可直接塞进自己的 buffer。这与上游 `renderers/*.ts` 的 `renderCall`/`renderResult` 同构。
+`ToolRenderSession` 用 `HashMap<tool_call_id, Box<dyn ToolRenderer>>` 把「同一个 tool call 的
+start/end 事件」串起来：没有它，write 的增量高亮缓存在 `render_result` 时会丢。
+
+**语言选择**：`supported_language_for_path()` 一次性做 `get_language_from_path` + `supports_language`
+两道关（等价上游 `highlightCode` 内部先验 `supportsLanguage`）；不支持 / 没有扩展名 → 走
+`toolOutput` 纯文本。底样式用的是上游 `highlightCode` 默认的 `mdCodeBlock` 槽。
+
+**read**：折叠常量 10 行，尾部 `... (N more lines)`（muted）；`is_error` → 不高亮、不折叠
+（错误文本折叠掉就没用了）；`details.truncation` 有则再追一条 warning 提示，三种文案与上游
+`formatReadResult` 逐字一致，只是字段名沿用本 crate 的 snake_case。默认折叠显示前 10 行是
+**对上游的刻意偏离**（上游折叠态直接返回空字符串），按 issue 要求实现，已在模块头注释写明。
+
+**write**：`render_call` 输出 `write <path> (N lines, M bytes)` + 高亮预览（路径 + 行/字节摘要是
+issue 要求，上游没有）；`render_result` 只在 `is_error` 时输出（上游一致）。
+`WriteHighlightCache` 忠实移植 `updateWriteHighlightCacheIncremental`：同 path/lang 且新内容是
+旧内容**前缀追加**时才增量 —— 逐行只高亮 delta，再对前 `WRITE_PARTIAL_FULL_HIGHLIGHT_LINES = 50`
+行按整块重算（修多行构造：块注释 / 模板串）；其余情况全量重建。
+
+**未改**：`pi-tui/src/*`（只消费公共 API `highlight_code` / `get_language_from_path` /
+`supports_language` / `StyledLine` / `SpanStyle`），`tools/read.rs`、`tools/write.rs`（issue 允许但
+渲染器不需要动执行路径），`pi-ai` / `pi-agent-core` / `pi-extensions` / `pi-session`。
+
+### 三、验证
+
+- `cargo test -p pi-coding-agent --offline`：lib **288 passed / 0 failed**（含 render 的 16 个）+
+  全部集成 test 目标全绿（新增 `tools_render` 5 个：真读 `.rs` 出 `SyntaxKeyword` ANSI、真读 `.txt`
+  不出语法色、14 行折叠为 10 行 + `... (4 more lines)`、真写预览出语法色、错误读不高亮）。
+- `cargo clippy -p pi-coding-agent --all-targets --offline -- -D warnings`：**EXIT 0**。
+- 增量缓存断言不靠猜：测试注入计数高亮器，断言「追加后 `full_rebuilds` 仍为 1」、
+  「任何一次重算的行数 ≤ 50」、「恰好有一次 50 行整块重算」、「整段新旧内容都没被重算」。
+- 格式：只对改动文件 `rustfmt --edition 2021 --check`（`render.rs` / `text_fallback.rs` /
+  `tests/tools_render.rs`）**零 diff**；`mod.rs` 的手写插入与 rustfmt 对齐（见下）。
+- 合并 `origin/feature/pi.rs` @ `f44dcb3d`（Stage 44）后**复测**：`pi-coding-agent` clippy EXIT 0、
+  `cargo test -p pi-coding-agent` 全绿（Stage 44 改了 `pi-tui/src/styled.rs` / `lib.rs`，实测不破坏本切片）。
+
+### 四、fmt 事故与处置（新增判例：**不要跑 `cargo fmt -p <crate>`**）
+
+本轮第一次格式化用了 `cargo fmt -p pi-coding-agent -- <几个改动文件>`，以为 `--` 后面的参数是
+文件清单 —— 实际 `cargo fmt -p` 会格式**整个 crate**（`--` 后是 rustfmt 额外参数，不是选择器），
+一次性改写 **49 个文件**，其中还包括 `reorder_modules` 造成的 `mod mod_ignore;`/`mod ls;` 字母重排。
+已 `git status --porcelain` 过滤出本轮 4 个文件、其余 49 个 `git checkout --` 全部撤回；
+本轮改动行最终零漂移。教训并入 Stage 44 的 `lib.rs` 判例：**rustfmt 只传叶子文件路径**
+（`rustfmt --edition 2021 <file>`），crate root 与 `cargo fmt -p` 都会递归整包。`FEATURE_PI_RS_STATUS.md`
+属 `docs/`，不在 `cargo fmt` 的 rustfmt 范围内，追加正文本身不会引入漂移。
+
+### 五、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试**~~（LUM-1146/1147）。
+2. ~~**P3 OSC-8 hyperlink**~~（LUM-1152 Stage 44）。
+3. ~~**P2 `ToolCallDelta` 重复建块**~~（LUM-1152 Stage 44）。
+4. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在（本轮新增行零漂移）。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：剩 bedrock / mistral / azure / vertex / oauth / images。
+7. ~~**`pi-coding-agent` read/write 渲染器**~~ **本轮收口**：`highlight_code` 现在有 markdown +
+   read/write 两类真实消费者；`get_language_from_path` 也有了非 markdown 调用方。
+   仍未移植的上游渲染器：`edit` / `bash` / `find` / `grep` / `ls` 的 presentation 与
+   `render-utils.ts` 的其余工具（`renderToolPath` 已在本轮内部实现，未单独抽文件）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人只写
+`crates/pi-coding-agent/src/tools/render.rs`、`src/tools/mod.rs`、`src/text_fallback.rs`、
+`tests/tools_render.rs` 与本文档。
+
+**已知限制**：`show_images` 目前只把图片块折成 `[image: <mime>]` 一行 —— 图片子系统尚未移植，
+与 `read.rs` 的现有口径一致；`edit` / `bash` 等其余工具仍无渲染器，`ToolRenderSession` 对它们返回空
+（不打印），需要时按同一个 `ToolRenderer` trait 增补。文本回退的 ANSI 走 `SpanStyle::ansi`
+（`pi-tui` 未导出 `themed_text`），`NO_COLOR` 时退纯文本。
+
