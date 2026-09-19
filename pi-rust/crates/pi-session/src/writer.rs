@@ -252,6 +252,9 @@ fn classify(entry: &SessionEntry, current_session: Option<&str>) -> Result<Class
             chrono::Utc::now().timestamp_millis(),
         ),
         SessionEntry::Extension { .. } => ("extension".to_string(), chrono::Utc::now().timestamp_millis()),
+        SessionEntry::Compaction { .. } => {
+            ("compaction".to_string(), chrono::Utc::now().timestamp_millis())
+        }
     };
     let session_id = match entry {
         SessionEntry::Header { id, .. } => id.clone(),

@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{AssistantMessage, Message, ToolCall, ToolResult};
+use crate::{AssistantMessage, Message, ToolCall, ToolResult, Usage};
 
 /// A single row in a session log.
 ///
@@ -40,5 +40,27 @@ pub enum SessionEntry {
         kind: String,
         /// Arbitrary JSON payload.
         payload: serde_json::Value,
+    },
+    /// Compaction checkpoint written by `/compact`.
+    ///
+    /// Mirrors the `compaction` entry in
+    /// `packages/coding-agent/src/core/compaction`: everything up to
+    /// this point is replaced by `summary`, while `retained_tail` holds
+    /// the recent messages kept verbatim. Replaying a session resets
+    /// the conversation to the summary plus that tail.
+    Compaction {
+        /// Structured summary produced by the summarization model.
+        summary: String,
+        /// Recent messages kept verbatim after the summary.
+        #[serde(default)]
+        retained_tail: Vec<Message>,
+        /// Estimated context tokens before compaction.
+        tokens_before: u32,
+        /// Usage reported by the summarization call, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+        /// Extra details (read / modified file lists).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
     },
 }

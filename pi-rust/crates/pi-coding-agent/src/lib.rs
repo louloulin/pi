@@ -36,12 +36,16 @@
 //! Stage 23 wires [`trust`]: project-local `.pi` resources are only
 //! loaded once the directory is trusted, matching the upstream
 //! `core/trust-manager.ts` gate.
+//!
+//! Stage 24 wires [`compaction`], the `/compact` context summarizer
+//! (token estimation, cut-point selection, and the summarization call).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod cli;
 pub mod commands;
+pub mod compaction;
 pub mod config;
 pub mod context_files;
 pub mod extensions;
@@ -65,6 +69,13 @@ pub mod trust;
 
 pub use commands::resume::{list_resumable, resolve as resolve_resume, SessionRef};
 pub use commands::session::run as run_session_command;
+pub use compaction::{
+    calculate_context_tokens, compact, compact_history, estimate_context_tokens, estimate_tokens,
+    extract_summary, find_cut_point, format_file_operations, prepare_compaction,
+    replace_with_compaction, serialize_conversation, should_compact, summary_message, Compaction,
+    CompactionError, CompactionPreparation, CompactionSettings, CutPoint,
+    DEFAULT_COMPACTION_SETTINGS,
+};
 pub use context_files::{load_project_context_files, ContextFile};
 pub use file_processor::{
     expand_prompt, read_stdin_if_piped, ExpandedPrompt, FileError, MAX_FILE_BYTES,

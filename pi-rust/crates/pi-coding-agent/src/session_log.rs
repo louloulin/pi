@@ -99,6 +99,24 @@ impl SessionLog {
         })
     }
 
+    /// Append a compaction checkpoint (`/compact`).
+    pub fn append_compaction(
+        &self,
+        summary: impl Into<String>,
+        retained_tail: Vec<Message>,
+        tokens_before: u32,
+        usage: Option<pi_protocol::Usage>,
+        details: Option<serde_json::Value>,
+    ) -> std::io::Result<()> {
+        self.append(SessionEntry::Compaction {
+            summary: summary.into(),
+            retained_tail,
+            tokens_before,
+            usage,
+            details,
+        })
+    }
+
     fn append(&self, entry: SessionEntry) -> std::io::Result<()> {
         let mut guard = self.file.lock();
         if let Some(writer) = guard.as_mut() {
@@ -157,6 +175,41 @@ mod tests {
         assert!(contents.contains("\"type\":\"extension\""), "{contents}");
         assert!(contents.contains("\"extension\":\"echo\""), "{contents}");
         assert!(contents.contains("\"kind\":\"greeting\""), "{contents}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn appends_compaction_entries() {
+        let dir = env::temp_dir().join(format!("pi-session-compaction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = SessionLog::open(&dir, "compact-session").expect("open");
+        log.write_header("0.1.0").expect("header");
+        log.append_compaction(
+            "## Goal\nship it",
+            vec![user_message("kept")],
+            4_200,
+            Some(Usage::default()),
+            Some(serde_json::json!({"readFiles": [], "modifiedFiles": []})),
+        )
+        .expect("compaction");
+        log.close().expect("close");
+
+        let contents = std::fs::read_to_string(dir.join("compact-session.jsonl")).expect("read");
+        let line = contents.lines().nth(1).expect("compaction line");
+        let parsed: SessionEntry = serde_json::from_str(line).expect("parse");
+        match parsed {
+            SessionEntry::Compaction {
+                summary,
+                retained_tail,
+                tokens_before,
+                ..
+            } => {
+                assert_eq!(summary, "## Goal\nship it");
+                assert_eq!(retained_tail.len(), 1);
+                assert_eq!(tokens_before, 4_200);
+            }
+            other => panic!("expected compaction entry, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

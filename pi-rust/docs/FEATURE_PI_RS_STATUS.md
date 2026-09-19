@@ -4270,3 +4270,156 @@ $ cargo test   -p pi-coding-agent --lib                    # 176 passed
 解决方式见上面第 0 节。
 
 
+
+## LUM-1086 round — Stage 24：会话压缩（`/compact`）
+
+### 决策：跳过 vs 规划 + 实现
+
+本轮先按上一节（LUM-1084 的 frontier 清单）逐项判定，再决定做什么：
+
+1. **`resources_discover` 扩展钩子** — 已由 LUM-1084 落地在 `origin/feature/pi.rs`
+   （`79b5c850e`），不重复。
+2. **ESM 扩展加载**（`export default` + `node:path` / `node:url` 虚拟模块）— 上一节点名的
+   「Stage 24 候选」，也是插件生态兼容的最大缺口，**但本轮不能碰**：LUM-1084 的
+   `resources_discover` 轮正在 `pi-extensions`（host/bridge）与资源层上作业，ESM 加载要改的
+   正是同一批文件，并发改同一片区域只会互相覆盖。留作下一阶段首选项。
+3. **`/trust` + 项目本地 `.pi/SYSTEM.md`** — 已由 LUM-1085 落地（`7eff3b7c7` / `877acfc8b`）。
+4. **主题系统**（`themePaths` 有来源没消费方）— 纯外观，收益低于核心能力缺口。
+5. **`pi-client` / `pi-server` 提升** — 仍阻塞：`pi-rust/crates/` 下没有这两个 crate，
+   等 LUM-1068（Stage 19，`in_progress`）。
+6. **`.wasm` 扩展宿主** — 仍阻塞：`rustup` 不在 PATH、没有 wasm32 target、`wasmtime` 不在
+   `Cargo.lock`（需联网拉），且上游 pi 本身没有 `.wasm` ABI；LUM-986 仍 `in_progress`。
+7. **修 LUM-1083**（`pi --rpc` 扩展宿主堆破坏 / `event-listener` 计数下溢）— 根因已坐实成
+   一行（`intrusive.rs:341`），但修法（显式关停握手 + 字段顺序）横跨 `pi-extensions`，
+   风险独立、应当单独一轮做，不宜塞进本轮提交；依赖链上也没有可升的小版本。
+8. **provider 家族**（`mistral-conversations` / `azure-openai-responses` / `google-vertex` /
+   `openai-codex-responses` / `bedrock-converse`）— 仍阻塞：上游
+   `packages/ai/src/providers/*.models.ts` 依赖被 `.gitignore:11` 排除的 `./data/*.json`，
+   没有可信数据源。
+9. **会话压缩（`/compact`）** — 无阻塞、文件面独立（`pi-protocol::SessionEntry` /
+   `pi-session` reader-writer / `pi-coding-agent` 的 slash 与 session_log），与在途的
+   LUM-1084 / LUM-1068 / LUM-986 零重叠。
+
+`multica daemon status`：`active_task_count = 3`（LUM-1084 / LUM-1068 / LUM-986 占满），
+所以本轮**不派发**新子任务，按 LUM-1078 / LUM-1079 / LUM-1081 / LUM-1084 / LUM-1085 的先例
+由协调方直接落地 frontier 里排第 9、但**唯一完全无阻塞且零冲突**的这一项：会话压缩。
+
+它是「核心能力缺失」而不是外观打磨：`/compact` 是上游 CLI 的内置命令之一
+（`packages/coding-agent/src/core/slash-commands.ts` 的 `BUILTIN_SLASH_COMMANDS`），
+而 Rust 端口此前连 `SessionEntry::Compaction` 都不存在 —— 长会话必然撞上下文窗口，
+且没有 `/compact` 就没有任何手动兜底。
+
+### 实现
+
+新增 `crates/pi-coding-agent/src/compaction.rs`（约 1270 行含 15 个单测），逐条搬运
+`packages/coding-agent/src/core/compaction/compaction.ts` + `utils.ts`：
+
+- **阈值与常量**：`CompactionSettings { enabled, reserve_tokens, keep_recent_tokens }` +
+  `DEFAULT_COMPACTION_SETTINGS = { true, 16384, 20000 }`；`SUMMARIZATION_SYSTEM_PROMPT` /
+  `SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_INSTRUCTIONS` /
+  `TURN_PREFIX_SUMMARIZATION_PROMPT` 与上游**逐字一致**。
+- **token 估算**：`calculate_context_tokens`（`total` 优先，否则
+  `input + output + cache_read + cache_write`）、`estimate_tokens`（chars/4 启发式，图片按
+  4800 字符计）、`estimate_message_tokens`、`context_tokens_with_trailing`、
+  `should_compact(context_tokens, context_window, settings)`。
+- **切点选择**：`find_cut_point` / `find_turn_start_index` / `is_cut_point_message` /
+  `is_turn_start_message` —— 从最新消息往回累加，跨过 `keep_recent_tokens` 时取「不早于该
+  消息的最近合法切点」；tool result 永远不是切点（必须紧跟它的 tool call）。
+- **prepare / compact 两段式**：`prepare_compaction` 产出
+  `CompactionPreparation { first_kept_index, messages_to_summarize, turn_prefix_messages,
+  is_split_turn, tokens_before, previous_summary, file_ops }`；`compact` 驱动真实 `StreamFn`
+  拿摘要（一次调用；split turn 时第二次调用前缀摘要后用 `**Turn Context (split turn):**`
+  合并，两次 usage 相加）。
+- **文件清单**：`FileOperations` 扫描消息里的 `read` / `write` / `edit` tool call，生成
+  `<read-files>` / `<modified-files>` 段（`format_file_operations`），与上游 `utils.ts` 的
+  `createFileOps` / `extractFileOpsFromMessage` / `computeFileLists` 对应。
+- **迭代压缩**：历史头部若是本模块生成的摘要消息（`<summary>` 包裹），`prepare_compaction`
+  把它作为 `previous_summary` 并跳过（boundary 从 1 开始），下一次压缩走
+  `UPDATE_SUMMARIZATION_PROMPT` 分支合并而不是重写。
+- **失败口径**：`CompactionError::{NothingToCompact, Stream, Provider, Incomplete,
+  EmptySummary}`；摘要 `stop_reason == MaxTokens`（上游 `"length"`）直接判失败，不落半截摘要；
+  模型尝试调工具也判失败。
+
+接线：
+
+- `crates/pi-protocol/src/session.rs`：新增
+  `SessionEntry::Compaction { summary, retained_tail, tokens_before, usage, details }`
+  （flat-log 版 `CompactionEntry`，用 `retained_tail` 直存消息替代上游的 `firstKeptEntryId`）。
+- `crates/pi-session/src/writer.rs`：`classify()` 映射出 `"compaction"` 行；
+  `reader.rs` 的 `RawEntryShape` 加同名变体（fixture 兼容、`#[serde(default)]`）。
+- `crates/pi-coding-agent/src/session_log.rs`：`append_compaction(...)`。
+- `crates/pi-coding-agent/src/commands/slash.rs`：`SlashCommand::Compact { instructions }`，
+  `/compact [instructions]` 解析 + `/help` 文案。
+- `crates/pi-coding-agent/src/interactive.rs`：`run_compact` —— turn 在飞时拒绝、空历史拒绝、
+  成功后写 session entry、把 `state.messages` 换成 `summary + retained_tail`，并在 transcript
+  追加一行 `x → y est. tokens` 的 info（**滚动记录不清**：它是用户看到的会话日志，
+  被替换的只有喂给模型的消息）。
+- `crates/pi-coding-agent/src/print_mode.rs`：`load_history()` 遇到 compaction entry 会把历史
+  重置为 `summary + retained_tail`，所以 `--resume` 恢复的上下文与压缩后一致。
+
+### 验证
+
+```
+$ cargo clippy --workspace --all-targets -- -D warnings            # 0 warnings
+$ cargo test -p pi-coding-agent --lib compaction                   # 16 / 16 pass（15 个 compaction 用例 + session_log 的 append 用例）
+$ cargo test -p pi-coding-agent --lib                              # 205 passed
+$ cargo test -p pi-session                                         # 5 lib + 6 round_trip + 5 ts_compat
+$ cargo test --workspace --no-fail-fast                            # 63 targets，736 passed / 0 failed / 2 ignored
+```
+
+- 单测覆盖：`total` vs 分量 usage、chars/4 估算、`should_compact` 的 enabled / reserve 分支、
+  turn 边界切点、单轮超长时的 split turn（`turn_start_index == Some(0)`）、纯估算下
+  `prepare_compaction` 返回 `None`、`read` 文件清单提取、端到端压缩（摘要消息 = user +
+  `<summary>` 包裹、prompt 里带 `<conversation>` 与 `Additional focus:`）、split turn 的两次
+  调用与 `**Turn Context (split turn):**` 合并、迭代压缩（prompt 里出现
+  `<previous-summary>` + `NEW conversation messages`）、`MaxTokens` 判失败、空历史判
+  `NothingToCompact`、tool result 截断序列化。
+- `pi-session` 新增 `round_trip_compaction_entry`：summary / retained_tail / tokens_before /
+  usage / details 过 SQLite 往返；`session_log` 新增 `appends_compaction_entries` 校验 JSONL 行。
+- 全仓 63 个 target 本轮**全绿**（736 passed / 2 ignored）。不过这棵树上有既存的子进程崩溃
+  抖动：同一轮更早一次全量跑红在 `--test rpc` 的 `get_state_without_prompt_returns_empty_state`，
+  单跑 3 次里第 3 次又换成 `invalid_json_line_returns_parse_error_and_keeps_running`，子进程
+  stderr 指向 `event-listener-5.4.2/src/intrusive.rs:341`（LUM-1083 已坐实根因的 `pi --rpc`
+  扩展宿主堆破坏）。与本轮改动无关：rpc 路径不经过 compaction，且 `--test rpc` 单跑时也能过。
+
+### 与上游的刻意差异
+
+- **没有 `firstKeptEntryId`**：Rust 会话是扁平 `Vec<Message>`，没有上游的 session tree，
+  所以切点是消息下标，`retained_tail` 直接存进 session entry。这也是
+  `branch-summarization.ts` 没有搬的原因 —— 它摘要的是被放弃的树分支。
+- **`Message` 不带 usage**：上游 `estimateContextTokens` 用最后一条 assistant 消息的
+  `usage.input+output+...` 作为基数、只对尾部消息做估算；Rust 的 `pi_protocol::Message`
+  没有 usage 字段，所以 `estimate_context_tokens` 是**纯估算**。需要 provider 口径的调用方
+  可以用 `context_tokens_with_trailing(usage, trailing)`，`should_compact` 也已就位
+  （自动压缩的触发点接线留作后续，见下）。
+- **切点兜底方向相反**：累加跨过预算但「不存在 ≥ 该下标的合法切点」时，上游回退到
+  `cutPoints[0]`（→ `messagesToSummarize` 为空 → 放弃压缩），本模块回退到**最新**合法切点，
+  于是「一个 turn 太长、结束时还挂着 tool result」的会话仍可压缩（走 split turn 路径）。
+  已在模块文档里写明。
+- **摘要消息的渲染**：上游是把 `compactionSummary` 消息在 `convertToLlm` 时改成
+  `<summary>` 包裹的 user 消息；Rust 直接在压缩时就把摘要落成这种 user 消息，所以 provider
+  看到的内容一致，但 `SessionEntry::Compaction` 里存的是裸摘要文本。
+- Rust `pi-protocol::Content` 没有 `thinking` 块，`serialize_conversation` 里对应的
+  `[Assistant thinking]` 段自然缺席。
+
+### 剩余 frontier（本轮更新）
+
+1. **ESM 扩展加载**（`export default` + `node:path` / `node:url` 虚拟模块）—— 插件生态兼容的
+   最大缺口，Stage 25 首选，且要在 LUM-1084 的 `pi-extensions` 轮落地之后再做。
+2. **自动压缩接线**：`should_compact` / `context_tokens_with_trailing` / `CompactionSettings`
+   已落库，但 `pi-agent-core` 的 turn loop 还没在每轮结束后用 `AssistantMessage.usage`
+   触发压缩，`CompactionSettings` 也还没接 `settings.json`。这是 Stage 24 的收口项。
+3. **修 LUM-1083**（`pi --rpc` 扩展宿主堆破坏 / 算术溢出）。
+4. **主题系统**（`themePaths` 有来源没消费方）。
+5. **未信任项目的扩展加载门**（LUM-1084 记录的跨阶段缺口）。
+6. **`pi-client` 接进 `--rpc`**，以及 LUM-1068 落地后 promote LUM-1069
+   （`pi-server` / `pi-client` 端到端）。
+7. **`.wasm` 扩展宿主**（缺 wasm32 target + 上游无 ABI）。
+8. **provider 家族**（缺 `data/*.json` 数据源）。
+9. **dialog 剩余两项**（`input` 多行输入、鼠标点击/滚动）与 selector 描述列对齐。
+
+### Push status
+
+`feature/pi.rs`：本轮 1 个 commit（`feat(pi-protocol,pi-session,pi-coding-agent): Stage 24 会话压缩（/compact）`
++ 本节状态文档），基于 `origin/feature/pi.rs` 当时的 tip（`94ed782ed`，含 LUM-1083/1084/1085）
+落提交后 push。
