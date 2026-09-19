@@ -11521,3 +11521,90 @@ LUM-1090 置 `todo`），pi 项目内的在跑路数 = 本协调轮 + 2 = **3 �
 **已知限制**：coercion 只覆盖 JSON Schema 的类型层面；一个语义上非法、类型上合法的参数
 （例如 `read` 的 `offset: -3`）仍会在工具内部被拒，行为不变。扩展工具的 schema 若用了本模块
 不认识的关键字，coercion 会保守跳过（见第三节第 1 条）。
+
+## LUM-1090 round — `pi-coding-agent` RPC 客户端（`rpc-client.ts` 的 Rust 对应物，`tests/rpc.rs` 改为复用它）+ 合并推送 feature/pi.rs
+
+### 一、范围修正（issue 里已改写，本节留档）
+
+- 原描述「"把 Stage 12 内联 JSON-RPC **客户端**换成 `pi-client`"」前提是错的
+  （LUM-1155 协调轮核实后的结论）：
+  - `crates/pi-coding-agent/src/rpc/` 是 **server** 侧（`--rpc` 把 CLI 变成可被编辑器驱动的
+    stdio 服务，`server.rs` 的 `run_rpc_server`），上游对应 `modes/rpc/rpc-mode.ts`；
+  - 上游 RPC **客户端** 是另一个文件 `modes/rpc/rpc-client.ts`：它 `spawn` `pi --rpc` 子进程，
+    走**同一套 NDJSON stdio 协议**，**不**依赖 `packages/client`；
+  - `pi-client`（上游 `packages/client`）走 pi-server / Chord 那条线（`pi-protocol` 的
+    `rpc/{framing,codec,cbor}.rs` + unix socket + 另一套 method 集），与本 stdio 协议**不是同一条**。
+- 因此更正 LUM-1155 的 frontier 第 6 项：`rpc/` 与 `pi-client` 不是「两套 `--rpc` 实现」，
+  `rpc/` 是 server、缺的是**客户端**；`pi-client` 与本轮无关。本轮落地的是 `rpc-client.ts`
+  的 Rust 对应物，并让集成测试复用它。
+
+### 二、改动清单
+
+- **新增** `crates/pi-coding-agent/src/rpc/client.rs`（739 行）：
+  - `RpcClientOptions` + `StdinMode`（`Piped` / `Null`）：program / args（默认已带 `--rpc`）/ cwd / env / stdin / timeout；
+  - `RpcClient::spawn`：子进程 + stdout 逐行 reader 线程（LF 帧、空行忽略）+ stderr 收集线程；
+  - `call` / `call_with_timeout`：自增数字 id（1, 2, …）配对；等待期间经过的 `event` 通知
+    落地到 `events()` 日志并回调 `on_event` 监听者 —— 这正是「响应返回前事件已流到客户端」
+    的保证点；不匹配的帧（迟到响应、`-32700` 的 `id:null`、未知通知）进 unmatched 队列，
+    由 `recv_message` 取回，不会静默丢；
+  - `send_raw_line`：低层入口，保留「写脏字节」能力（`invalid_json_line_*` 用例）；
+  - 迭代器/回调面：`notify`、`wait_for_event`、`events` / `take_events`、`on_event` / `clear_event_listeners`；
+  - 类型化封装（= 本 crate server 现有 method 集）：`prompt` / `abort` / `get_state` /
+    `set_model`（`{"model"}` 形）/ `set_model_parts`（上游 `{"provider","modelId"}` 形）；
+  - 生命周期：`close_stdin`（EOF）/ `wait_for_exit` / `stderr`（join 线程）/ `kill` / `Drop`（kill + wait）；
+  - `RpcClientError`：`Io` / `StdinClosed` / `Timeout` / `Disconnected` / `NonJsonLine` /
+    `Protocol` / `JsonRpc`（`json_rpc_code()` 取码）。每条致命错误的 message 都带上 child stderr，
+    并保留原 harness 的 `--- child stderr ---` 分节，排障信息不降级。
+- `crates/pi-coding-agent/src/rpc/mod.rs`：`pub mod client;` + `pub use`（`RpcClient` /
+  `RpcClientOptions` / `ClientMessage` / `RpcClientError` / `StdinMode`）；模块文档新增
+  「Client usage」段（含 `no_run` 例子，参与 doc-test 编译）。
+- `crates/pi-coding-agent/tests/rpc.rs`：删掉原 150 行 `RpcHarness`
+  （`spawn` / `send_line` / `send_json` / `recv_line` / `recv_json` / `recv_until` /
+  `wait_for_exit` / `finish_stderr`），9 个用例全部改走共享客户端；用例数不变，
+  断言只增不减（`prompt_returns_response_and_streams_events` 现在额外断言 id 关联、
+  `error.is_none()`，以及 `text_delta < message_end < turn_end` 的相对顺序；
+  `rpc_flag_without_stdin_exits_zero` 额外断言未管道 stdin 时写入报 `StdinClosed`）。
+- **未改** `protocol.rs` / `server.rs` / `error.rs` / `events.rs`（连 additive 都没用上）；
+  `pi-protocol` / `pi-client` / `pi-server` 一行未动。
+
+### 三、与上游 `rpc-client.ts` 的偏差（都在 `client.rs` 文档里写明）
+
+1. **同步而非 async**：子进程 + reader 线程 + `recv_timeout`，不引入 async runtime；
+   上游的多监听者 EventEmitter 对应 `on_event` 闭包列表 + `events()` 日志。
+2. **method 面只覆盖 server 已实现的 4 个**（prompt / abort / getState / setModel）：
+   上游那 30 多个方法对应本 crate server 尚未实现的方法，按「不加死代码」不预先声明。
+3. **id 用自增数字而非 `req_N`**：JSON-RPC 两者都合法，数字 id 让「第一个请求 id==1」
+   这类关联断言与原用例等强。
+4. **事件通知在客户端暴露为 `params` 载荷**（`{"type": …}`）而不是整帧：与事件模型一致、便于断言。
+5. **`events()` 无界**：长跑嵌入方应走 `on_event`，或用 `take_events()` 主动清空；已写进文档。
+
+### 四、验证
+
+- `cargo test -p pi-coding-agent --test rpc --offline`：**9 passed / 0 failed**。
+- `cargo test -p pi-coding-agent --test rpc --offline -- --test-threads=1`：**9 passed / 0 failed**。
+- `cargo test -p pi-coding-agent --offline`：lib **294 passed / 0 failed**（288 + `client` 模块 6 个
+  `classify`/`options` 单测），15 个集成目标全绿（rpc 9 / print_mode 17 / tools 24 /
+  tools_navigation 29 / cli_provider 19 / keybindings 20 / cli_extensions 13 / tools_render 12 …），
+  doc-tests **6 passed / 0 failed**（新增的 `no_run` 例子参与编译）。
+- `cargo clippy -p pi-coding-agent --all-targets --offline -- -D warnings`：**EXIT 0**
+  （初稿各触发 1 条 `type_complexity` / `collapsible_match` / `single_match` /
+  `bool_assert_comparison`，已按建议改为类型别名 + `if let` + `assert!(!…)`）。
+- 格式：只对**叶子文件** `rustfmt --edition 2021`；`client.rs`（新增）/ `tests/rpc.rs` /
+  `mod.rs` 现在 `rustfmt --check` 零命中。**判例**：`rustfmt <mod.rs>` 会**递归**格式化它声明的
+  子模块，本轮第一次跑时顺带改了 `error.rs` / `events.rs` / `server.rs` 的既有漂移
+  （`git diff --stat` 发现后已 `git checkout --` 全部还原）；mod.rs 自身只留 1 处 `use` 排序，
+  属 rustfmt 对该叶子文件的正常结果。
+- **未复现** LUM-1083（`pi --rpc` 随机 SIGABRT）：本轮 9×2 次单目标 + 整包一轮共 18+ 次
+  真实 spawn 全绿；本客户端不碰 `rquickjs → async-lock → event-listener` 依赖链，未处理。
+- 未跑：`cargo test --workspace`（磁盘）、`cargo fmt`（全量漂移属 LUM-1138）。
+
+### 五、环境记录
+
+- 复用 **LUM-1153 检出内的 `pi-rust/target`**（`CARGO_TARGET_DIR` 显式指向）：本轮结束 6.5G；
+  未新建任何 target，也未删除任何 target。开工时根分区剩 16G，结束时 11G（测试二进制重链）。
+- `CARGO_HOME=/tmp/cargo-home`，所有 cargo 命令 `--offline`。
+- Git 身份用 worktree 级覆盖：`multica-agent <agent@multica.local>`。
+
+**已知限制**：未提供 `wait_for_idle` —— 上游等 `agent_settled` 事件，本 crate 的事件集里没有它；
+嵌入方用 `wait_for_event(|v| v["type"] == "turn_end", …)` 达到同样效果。客户端只覆盖 `--rpc`
+stdio；`pi-client` / Chord 那条线的客户端仍缺（与本 issue 不同协议，未纳入范围）。
