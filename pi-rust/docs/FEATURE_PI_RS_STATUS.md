@@ -10476,6 +10476,148 @@ LUM-1146 明确没碰的那块：**压缩摘要路径**（LUM-1146 的 numstat �
 `6e420761e` **快进至本补记提交**（`git ls-remote` 复查一致，哈希见本节末提交链），
 留档分支 `work/lum-1147` 一并推送（同哈希）。
 
+## LUM-1148 round — `pi-coding-agent` 工具输出截断（`core/tools/truncate.ts` 移植，read / grep / find / ls / bash 五处收口）+ `bash` 大输出管道死锁修复 + 合并推送 feature/pi.rs
+
+本轮起点 `910cd6f90`（LUM-1144 合并态）。先落代码提交 `e58e3d66c`（9 文件，+1524/-72），
+再合并 `origin/feature/pi.rs @ 127d07439`（LUM-1147 的压缩摘要重试接入），合并提交 `1be7f7016`，
+`git push origin work/lum-1148:refs/heads/feature/pi.rs` → `127d07439..1be7f7016`（快进），
+`git ls-remote` 复查 `refs/heads/feature/pi.rs = 1be7f7016`。
+
+### 一、选型：为什么是 `truncate.ts` + `bash` 输出管线
+
+开工时 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`
+（LUM-1146 + LUM-1147 + 本轮）——**槽位满，本轮不派发任何新 Stage，只收自己这一片**。
+
+| 候选 | 结论 |
+|------|------|
+| `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML） | 否——OSC-8 要把转义写进 ratatui `Buffer` 的 `Cell`，而 `Cell` 只存文本；语法高亮要引 highlight.js；两者都要动当时有写方的 `pi-tui/src/app.rs` |
+| `ScrollView` 独立组件 | 否——会写成死代码（当前只有消息日志一块可滚动区，且 LUM-1144 刚落地单份几何假设） |
+| `pi-ai` 上游剩余模块 | 否——LUM-1147 正在写 `pi-ai/src/retry.rs` 与 `pi-coding-agent/{compaction,config}.rs` |
+| 质量门（全仓 `cargo fmt` 归一） | 否——必须等所有写方收手，归 LUM-1138 |
+| **`truncate.ts` + `bash` 输出管线** | **选它**：截断是工具层「输出爆上下文」的真实防线，缺口是已确认的——本轮开工前 `read.rs` 模块注释白纸黑字写着 truncation「deliberately omitted」，`bash.rs` 完全没有截断 |
+
+### 二、实现（上游 → Rust 落点）
+
+| 上游 | Rust 落点 |
+|------|-----------|
+| `truncate.ts` 常量 `DEFAULT_MAX_LINES` / `DEFAULT_MAX_BYTES` / `GREP_MAX_LINE_LENGTH` | `tools/truncate.rs:28/32/35` |
+| `TruncatedBy` / `TruncationResult` / `TruncationOptions` | `truncate.rs:41/60/96`（serde 走 snake_case） |
+| `splitLinesForCounting` / `formatSize` / `truncateHead` / `truncateTail` / `truncateLine` | `truncate.rs` 同名 snake_case 函数 + 私有 `truncate_string_to_bytes_from_end` |
+| `read.ts` 的 `offset` / `limit` 参数（含 tool schema） | `read.rs:36-45`（负数按 0 处理），限位入口 `read.rs:145` |
+| `read.ts` 三条续读提示 | `read.rs:166` / `read.rs:170` / `read.rs:185`：`[Showing lines a-b of N. Use offset=X to continue.]`、`[Showing lines a-b of N (50.0KB limit). Use offset=X to continue.]`、`[N more lines in file. Use offset=X to continue.]` |
+| `read.ts` 超长首行兜底 | `read.rs:18` 文档 + 实现同段：`[Line N is xB, exceeds 50.0KB limit. Use bash: sed -n 'Np' <path> \| head -c 51200]` |
+| `grep.ts` 行截断 + 结果块截断 | `grep.rs:487` `render_matches(&page, context == 0) -> (String, bool)`，`grep.rs:493` 走 `truncate_line`（500 字符）；整块再走 `grep.rs:273` `truncate_head(bytes_only)` |
+| `grep.ts` 两条 notice | `grep.rs:282` `50.0KB limit reached`、`grep.rs:288` `Some lines truncated to 500 chars. Use read tool to see full lines` |
+| `find.ts:277` 结果块截断 | `find.rs:234` + `find.rs:245` notice |
+| `ls.ts:139-140` 列表截断 | `ls.rs:164` + notice；短列表**不下发** details |
+| `bash.ts:316-364` `formatOutput` + `output-accumulator.ts` 落盘 | `bash.rs:213` `combine_output`、`bash.rs:243` `format_output`、`bash.rs:301` `write_full_output`（`bash.rs:311` 拼 `$TMPDIR/pi-output-<16 hex>.log`） |
+| `bash.ts` 三条 notice | `bash.rs:275` / `bash.rs:283` / `bash.rs:267`：`[Showing lines a-b of N. Full output: <path>]`、`[Showing lines a-b of N (50.0KB limit). Full output: <path>]`、`[Showing last X of line N (line is Y). Full output: <path>]` |
+
+`details` 侧统一新增 `truncation`（read / grep / find / ls）与 `full_output_path`（bash），
+沿用既有 snake_case 契约；`find` / `ls` 只在命中时才下发 details（各有一条测试锁定）。
+
+### 三、关键口径与对上游的近似
+
+1. **`TruncationResult` 字段名用 snake_case**（上游 camelCase），与 `bash.rs` 既有的
+   `exit_code` / `elapsed_ms` 保持一致，避免同一工具层出现两套命名。
+2. **`truncate_line` 按 Unicode scalar（`chars()`）计数**，上游按 UTF-16 code unit 计数：含代理对
+   （emoji 等）的长行，上游会在第 500 个 code unit 处切得更早，Rust 版不会把字符切成半个。
+3. **`bash` 用 `[stderr]` 前缀标注 stderr**，上游把两路合并后再截断；因此
+   `total_lines` / `total_bytes` 的口径是「标注后的文本」，比上游多出前缀行与一个空行。
+4. **`bash` 的末行截断提示报真实末行长度**：上游用流式计数器，末行恰好以 `\n` 收尾时会报 `0B`，
+   这里刻意报真实值（可读性优先，也更容易被测试锁定）。
+5. **`(no output)` 空输出提示没有搬**：属于渲染层，不在本轮切片。
+6. **不再需要 `OutputAccumulator` 的滚动窗口**：内存里已有全量文本时，`truncate_tail` + 落盘在
+   Completed 路径上与上游行为等价；差异只出现在「进程还活着时的中间态」，而那部分没有对外接口。
+7. **`AbortLike` 仍然只在 spawn 前轮询**：命令跑起来之后 abort 不会杀子进程（既有行为，本轮只补了
+   模块注释说明）。
+
+### 四、修掉的两个真实 bug（`bash.rs`）
+
+原实现是「`try_wait()` 报 exit 之后才 `read_to_string` 两个管道」，有两个可复现故障：
+
+1. **>64KiB 输出死锁**：子进程写满管道缓冲区（Linux 64 KiB）后阻塞在 `write`，于是永不 exit、
+   `try_wait()` 永远返回 `None`，只能等满 120s 默认超时。新增集成测试
+   `bash_truncates_by_byte_limit_and_spills_the_full_output`（`head -c 100000 /dev/zero | tr '\0' 'x'`）
+   修复前实测 **120.17s 后失败**（拿到超时错误），修复后 **2.05s 通过**。
+2. **超时路径的孙进程挂死**：`sh -c 'seq 1 3; sleep 30'` 被 kill 后，`sleep` 仍持有管道写端，
+   父进程的 `read_to_string` 会一直阻塞到它结束——工具调用被拖住 30s。新实现把读端交给独立线程 +
+   `mpsc` 通道，`DRAIN_GRACE = 500ms`（`bash.rs:324`）之后不再等待，因此**永不 join 读线程**
+   （最坏情况留下一个空闲线程，由孙进程自行结束）。
+
+放弃的方案：POSIX 进程组 kill（`setsid` + `killpg`）需要 `libc` / `unsafe`，而 `tools/mod.rs` 是
+`#![forbid(unsafe_code)]`；通道排空不需要新依赖。
+
+### 五、测试
+
+- `tools/truncate.rs` 15 条内联单测：行限 / 字节限 / 尾部截断 / 单行截断 / `bytes_only` 关闭行限 /
+  `format_size` / 边界（空内容、恰好等于上限、超长首行）。
+- `tests/tools.rs` +13：`read` 9 条（未截断不动文件、行限、字节限、`offset`、`limit`、两者组合、
+  越界 offset 报错、超长首行的 sed 兜底、`limit` 覆盖全文件时无 notice）+ `bash` 4 条（短输出内联、
+  行限截断 + 落盘、字节限截断 + 落盘、超时带部分输出）。
+- `tests/tools_navigation.rs` +5：grep 长行截断（逐字节断言首行长度）、grep 结果块 50KB、
+  find 结果块 50KB、ls 列表 50KB、ls 短列表不下发 details。
+
+### 六、验证
+
+```
+$ rustc --version                                                   # 1.98.1
+$ export CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1148
+$ cargo test  -p pi-coding-agent --offline                          # 259 lib + 17 个 target 全绿（tools 20 / tools_navigation 29）
+$ cargo build --workspace  --offline                                # Finished（零 error）
+$ cargo clippy -p pi-coding-agent --all-targets --offline -- -D warnings   # exit 0
+$ # 合并 LUM-1147 之后在 merged tree 上复跑
+$ cargo test  -p pi-coding-agent --offline                          # 271 lib + 17 个 target 全绿
+$ cargo build --workspace  --offline                                # Finished
+```
+
+`cargo clippy` 报出并已修掉 1 条新代码问题：`clippy::ptr_arg`（`tests/tools.rs` 的 helper 形参
+`&PathBuf` → `&Path`）。
+
+`cargo fmt` 口径同 LUM-1145：**没有**对既有文件跑 `cargo fmt`——全仓既有漂移归 LUM-1138；
+本轮新增的 `truncate.rs` 与每个新增 diff 块本身是 rustfmt clean 的。中途曾误跑一次
+`cargo fmt -p pi-coding-agent`，它顺手「修」了 50 个文件里既有的漂移（`mod` 重排、`assert!` 折行等），
+已逐个回退，最终 diff 只剩本轮自己的改动。
+
+**已知并发抖动（与本次改动无关）**：默认线程数下 `pi-coding-agent/tests/print_mode.rs` 的
+`sigint_or_clean_exit` 偶发失败（SIGKILL 后 `status.code()` 为 `None`，与本文档「并发运行的抖动记录」
+段落（约 3552 行）里点名的 6 个用例同源）；重跑该文件 17/17 全绿，本轮没有碰 `print_mode` 路径。
+
+### 七、合并与推送
+
+- 代码提交 `e58e3d66c`（9 文件，+1524/-72；新增 `src/tools/truncate.rs`）。
+- 合并提交 `1be7f7016`：`git merge origin/feature/pi.rs @ 127d07439`（LUM-1147 的 `compaction.rs` /
+  `interactive.rs` / 文档）**零冲突**——本轮只碰 `pi-coding-agent/src/tools/*` 与两个 `tests/` 文件，
+  与在跑的另两路（`pi-agent-core`、`pi-ai` + `compaction` / `config`）零文件交集。
+- 推送：`git push origin work/lum-1148:refs/heads/feature/pi.rs` → `127d07439..1be7f7016`（快进），
+  随后本节文字的文档提交 `add630b62` 再以快进 `1be7f7016..add630b62` 追加到同一分支；
+  `git ls-remote origin feature/pi.rs` 复查为 `add630b62`（= 本轮 `work/lum-1148` 的 tip）。
+  真实哈希链：代码 `e58e3d66c` → 合并 `1be7f7016` → 本文档 `add630b62`。
+
+### 八、frontier（本轮更新）
+
+1. **新入账：`read` 的图片分支仍未移植**。上游 `read.ts` 对 png/jpg 走 attachment；本轮只做文本截断，
+   图片分支要碰 `pi-protocol` 的附件类型与 TUI 渲染，量级另算。当前 `read.rs` 的模块注释已写明这一缺口。
+2. `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）：仍要动 `app.rs` 写入路径，随本轮收口
+   `app.rs` 无写方；启动前仍须确认没有别的在跑任务正在改它。
+3. `utils/overflow.ts`（要 `AssistantMessage.errorMessage` 字段）、`utils/estimate.ts`（已落在
+   `compaction.rs`）、bedrock / mistral / azure / vertex / oauth / images、provider catalog（LUM-1090）、
+   `PLAN.md` 停在 Stage 14 —— 均照上一节不变。
+4. **质量门清偿** = LUM-1138（`backlog`）：`cargo fmt --all -- --check` 的既有漂移仍在。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写 `pi-coding-agent/src/tools/`
+（新增 `truncate.rs`，改 `read` / `grep` / `find` / `ls` / `bash` / `mod`）与两个集成测试文件，外加本文档。
+
+环境记录：本轮构建期间根分区两次撞到 100% 满。第一次全量 `cargo test --workspace` 因此在 `pi-tui` 的
+`e2e` / `selector_fuzzy` / `mouse_region` / `app_theme` 链接阶段失败（`cc` 报
+`No space left on device`，四个 target 本轮均未改动，与代码无关）；另一次连依赖 `reqwest` 的重新编译
+都起不来。处理：删掉本轮自己的 `target/debug/incremental` 与整个 `/tmp/pi-rust-target-lum1148`，并清掉
+LUM-1143 遗留的共享种子目录 `/tmp/pi-rust-target-lum1143`（5.7G；其分支已合并推送，随时可重建，
+下次播种建议改用 `/tmp/pi-rust-target-lum1147`）。此后只在与另两路隔离的 target 里跑
+`-p pi-coding-agent` 与 `cargo build --workspace`，全部通过；**全量 `cargo test --workspace`
+本轮未能跑通，是共享磁盘限制，不是代码问题**。
+
 ## LUM-1149 round — `pi-tui` 自研语法高亮（`highlight.rs`：`highlight.js` 子集 + markdown 代码块接线，frontier 第 2 项之一）+ 合并推送 feature/pi.rs
 
 本轮起点 `6e420761e`（LUM-1146 合并态）。先落代码提交 `dc553ff79`，再合并
