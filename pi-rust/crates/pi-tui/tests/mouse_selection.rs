@@ -79,7 +79,7 @@ fn release(x: u16, y: u16) -> InputEvent {
 }
 
 /// The rendered buffer for the App at its canonical test size.
-fn buffer(app: &App) -> Buffer {
+fn buffer(app: &mut App) -> Buffer {
     let area = Rect::new(0, 0, WIDTH, HEIGHT);
     let mut buf = Buffer::empty(area);
     app.render_to_buffer(area, &mut buf);
@@ -95,25 +95,26 @@ fn reversed(buf: &Buffer, x: u16, y: u16) -> bool {
 #[test]
 fn drag_selects_characters_and_reports_the_text() {
     let mut app = selection_app();
-    // Bottom of the log: visible rows are the tail, so row 0 is line 32.
+    // Rows 0 and 7 are the viewport edges, where a drag arms the autoscroll;
+    // row 1 selects plainly. Visible rows are the tail, so row 1 is line 33.
     assert_eq!(
-        app.step(press(2, 0)),
+        app.step(press(2, 1)),
         StepOutcome::Redraw,
         "a press starts a selection"
     );
-    assert_eq!(app.step(drag(8, 0)), StepOutcome::Redraw);
-    // Row 0 is "> line 32": columns 2..=8 are "line 32".
-    assert_eq!(app.selection_text().as_deref(), Some("line 32"));
+    assert_eq!(app.step(drag(8, 1)), StepOutcome::Redraw);
+    // Row 1 is "> line 33": columns 2..=8 are "line 33".
+    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
 }
 
 #[test]
 fn drag_across_lines_joins_them_with_newlines() {
     let mut app = selection_app();
-    app.step(press(2, 0));
-    app.step(drag(8, 1));
+    app.step(press(2, 1));
+    app.step(drag(8, 2));
     assert_eq!(
         app.selection_text().as_deref(),
-        Some("line 32\n> line 33"),
+        Some("line 33\n> line 34"),
         "the second entry keeps the rendered prefix"
     );
 }
@@ -121,9 +122,9 @@ fn drag_across_lines_joins_them_with_newlines() {
 #[test]
 fn selection_survives_scrolling_and_follows_the_viewport() {
     let mut app = selection_app();
-    app.step(press(2, 0));
-    app.step(drag(8, 0));
-    assert_eq!(app.selection_text().as_deref(), Some("line 32"));
+    app.step(press(2, 1));
+    app.step(drag(8, 1));
+    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
 
     // The selection is anchored to log lines, not screen rows: scrolling
     // keeps the text and carries the highlight along with the content.
@@ -134,15 +135,15 @@ fn selection_survives_scrolling_and_follows_the_viewport() {
         }),
         StepOutcome::Redraw
     );
-    assert_eq!(app.selection_text().as_deref(), Some("line 32"));
-    let buf = buffer(&app);
+    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
+    let buf = buffer(&mut app);
     assert!(
-        !reversed(&buf, 2, 0),
-        "one line further down means the first row is a different line"
+        !reversed(&buf, 2, 1),
+        "one line further down means the second row is a different line"
     );
     assert!(
-        reversed(&buf, 2, 1),
-        "the selected line is now the second visible row"
+        reversed(&buf, 2, 2),
+        "the selected line is now the third visible row"
     );
 
     // Scrolling the selection out of view drops the highlight without
@@ -154,26 +155,26 @@ fn selection_survives_scrolling_and_follows_the_viewport() {
         )),
         StepOutcome::Redraw
     );
-    assert_eq!(app.selection_text().as_deref(), Some("line 32"));
-    let buf = buffer(&app);
+    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
+    let buf = buffer(&mut app);
     assert!(
         !(0..VIEWPORT as u16).any(|y| reversed(&buf, 2, y)),
-        "line 32 scrolled off the top"
+        "line 33 scrolled off the top"
     );
 }
 
 #[test]
 fn selected_cells_are_rendered_in_reverse_video() {
     let mut app = selection_app();
-    app.step(press(2, 0));
-    app.step(drag(8, 0));
+    app.step(press(2, 1));
+    app.step(drag(8, 1));
 
-    let buf = buffer(&app);
+    let buf = buffer(&mut app);
     for x in 2..=8 {
-        assert!(reversed(&buf, x, 0), "column {x} is selected");
+        assert!(reversed(&buf, x, 1), "column {x} is selected");
     }
-    assert!(!reversed(&buf, 1, 0), "the prompt prefix is not selected");
-    assert!(!reversed(&buf, 9, 0), "one past the focus is not selected");
+    assert!(!reversed(&buf, 1, 1), "the prompt prefix is not selected");
+    assert!(!reversed(&buf, 9, 1), "one past the focus is not selected");
 }
 
 #[test]
