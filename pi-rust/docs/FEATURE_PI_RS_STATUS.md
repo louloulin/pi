@@ -6597,7 +6597,13 @@ $ cargo fmt -p pi-tui -- --check        # 干净
 
 ### 五、合并与推送
 
-见下方「合并与推送」小节；`work/lum-1115` 非 force 合入 `origin/feature/pi.rs` 并推送。
+- 工作分支 `work/lum-1115`，起点 `origin/feature/pi.rs` @ `009b4179d`；本轮提交 `63e65f3cb`。
+- `git merge-tree --write-tree 009b4179d work/lum-1115` → tree `96a06600a`，零冲突；
+  `git commit-tree` 得合并提交 `ad3fa9733`（父 `009b4179d` + `work/lum-1115`）。
+- `git push origin ad3fa9733:refs/heads/feature/pi.rs` → `009b4179d..ad3fa9733`；
+  `git push origin work/lum-1115`（新分支）。
+- 核对：合并后的 `pi-rust/crates/pi-tui` 子树与 `work/lum-1115` 完全一致
+  （`fbecd5874`），`diff --stat` 只含本轮 3 个文件。
 
 ### 六、frontier（本轮更新）+ 空槽派发
 
