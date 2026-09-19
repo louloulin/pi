@@ -9,9 +9,50 @@
 //! Concrete binaries embed the App in a `crossterm`-backed
 //! [`ratatui::Terminal`] and feed it events from the terminal input.
 //! See `crates/pi-coding-agent/src/interactive.rs` for the wiring.
+//!
+//! # Text selection
+//!
+//! The chat log owns its own selection because mouse capture takes the
+//! terminal's native text selection away. Upstream supports three
+//! granularities (double-click selects a word, triple-click a line —
+//! `SelectionGranularity`, `packages/tui/src/tui-alt-screen.ts:104`) and
+//! keeps scrolling while the drag pointer rests on a viewport edge
+//! (`updateSelectionAutoScroll`, `tui-alt-screen.ts:1264-1297`). This port
+//! mirrors both.
+//!
+//! Deliberate deviations, documented here rather than silently omitted:
+//!
+//! * **Click-count source.** Upstream reads `TuiMouseEvent.clickCount`,
+//!   which the engine synthesises; `crossterm` exposes no such field and
+//!   [`MouseGesture`] deliberately carries none, so the App reconstructs
+//!   the count itself from the same key upstream uses: a press within
+//!   [`DOUBLE_CLICK_INTERVAL`] of the previous one, on the same rendered
+//!   log line and the same word column range. The rule is upstream's
+//!   `getClickCount` (`tui-alt-screen.ts:1220-1245`); only the time source
+//!   differs (`std::time::Instant` instead of `Date.now()`).
+//! * **Word segmentation.** Word selection is built from
+//!   [`crate::word_navigation`]'s UAX #29 boundaries (`unicode_segmentation`,
+//!   already a dependency), not `Intl.Segmenter`, with `/` and `-` treated
+//!   as joiners exactly like upstream's `TERMINAL_WORD_SELECTION_JOINERS`
+//!   (`tui-alt-screen.ts:82`). The segmentation difference is the CJK one
+//!   `word_navigation` already documents: ICU's dictionary keeps `你好`
+//!   together, UAX #29 splits each ideograph, so double-click selects one
+//!   ideograph per hop.
+//! * **Columns are characters, not display cells.** The whole port tracks
+//!   selection columns as character offsets (see [`App::selection_text`]),
+//!   so word / line ranges are measured with `chars().count()` rather than
+//!   upstream's `visibleWidth`. Wide glyphs keep the existing behaviour of
+//!   the character-granularity path.
+//! * **Autoscroll beat.** There is no `setInterval` in Rust and this crate
+//!   must not spawn a timer thread, so the drag autoscroll advances one
+//!   line **per draw**. The driver redraws on a 50 ms interval
+//!   (`pi-coding-agent`'s render loop), which reproduces upstream's 50 ms
+//!   `setInterval`; on a stationary pointer, redraws are what keep the
+//!   viewport moving. [`App::advance_selection_autoscroll`] is public so
+//!   tests can step the beat deterministically.
 
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event as CtEvent, KeyModifiers as CtModifiers, MouseEventKind as CtMouseEventKind,
@@ -26,6 +67,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::dialog::{Dialog, DialogAction, DialogKind};
 use crate::editor::EditorAction;
@@ -49,6 +91,20 @@ const WHEEL_SCROLL_LINES: usize = 1;
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
 const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+
+/// Window in which two presses on the same word count as a double click
+/// (and three as a triple click). Upstream's `DOUBLE_CLICK_INTERVAL_MS`
+/// (`packages/tui/src/tui-alt-screen.ts:79`).
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Line-column segments that stay attached to a word when double-clicking,
+/// so paths and kebab-case tokens select whole. Upstream's
+/// `TERMINAL_WORD_SELECTION_JOINERS` (`packages/tui/src/tui-alt-screen.ts:82`).
+const TERMINAL_WORD_SELECTION_JOINERS: [&str; 2] = ["/", "-"];
+
+/// Lines a single autoscroll beat moves the viewport. Upstream scrolls one
+/// line per 50 ms `setInterval` tick (`tui-alt-screen.ts:1264-1297`).
+const SELECTION_AUTOSCROLL_LINES: usize = 1;
 
 /// Configuration knobs for the App.
 #[derive(Debug, Clone)]
@@ -108,28 +164,108 @@ pub struct TurnUsage {
     pub trailing: Vec<Message>,
 }
 
+/// Granularity of the active selection. Upstream's
+/// `SelectionGranularity` (`packages/tui/src/tui-alt-screen.ts:104`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionGranularity {
+    /// Cell-by-cell selection (a plain drag).
+    Character,
+    /// Whole-word selection (a double click, or a drag started by one).
+    Word,
+    /// Whole-line selection (a triple click, or a drag started by one).
+    Line,
+}
+
+/// One end of a selection, in absolute rendered-log coordinates.
+///
+/// [`SelectionPoint::boundary`] mirrors upstream's `SelectionPoint.boundary`
+/// (`packages/tui/src/tui-alt-screen.ts:104-110`): a word / line range ends
+/// *between* cells, so the end column is exclusive, while a character
+/// focus column is inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionPoint {
+    /// Index of a line in [`MessageView::render_styled_lines`].
+    line: usize,
+    /// Character column within that line.
+    col: usize,
+    /// True when `col` is an exclusive end (a word / line range edge).
+    boundary: bool,
+}
+
+impl SelectionPoint {
+    /// An inclusive cell (a character-granularity endpoint).
+    const fn cell(line: usize, col: usize) -> Self {
+        Self {
+            line,
+            col,
+            boundary: false,
+        }
+    }
+
+    /// An exclusive range edge (the end of a word / line range).
+    const fn boundary(line: usize, col: usize) -> Self {
+        Self {
+            line,
+            col,
+            boundary: true,
+        }
+    }
+
+    /// Reading-order key: line first, then column (the `boundary` flag does
+    /// not affect order, matching upstream's row/col comparison).
+    const fn order(&self) -> (usize, usize) {
+        (self.line, self.col)
+    }
+}
+
 /// A text selection in the chat log.
 ///
-/// Both ends are absolute coordinates in the *rendered log*: the first
-/// element is the index of a line as produced by
-/// [`MessageView::render_styled_lines`], the second a character column
-/// within that line. Absolute line indices (rather than screen rows) are
-/// what makes a selection survive scrolling and trailing output: the
-/// same text stays selected while the viewport moves.
+/// Both ends are absolute coordinates in the *rendered log*: the `line` of a
+/// line as produced by [`MessageView::render_styled_lines`], and a character
+/// column within it. Absolute line indices (rather than screen rows) are what
+/// makes a selection survive scrolling and trailing output: the same text
+/// stays selected while the viewport moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Selection {
-    /// Where the drag started (the mouse-down cell).
-    anchor: (usize, usize),
-    /// Where the pointer currently is (or was on release).
-    focus: (usize, usize),
+    /// Where the drag started (or the start of the press range).
+    anchor: SelectionPoint,
+    /// Where the pointer currently is (or the end of the press range).
+    focus: SelectionPoint,
+    /// Granularity the gesture started at; a drag recomputes the focus
+    /// range the same way (upstream's `selectionGranularity`).
+    granularity: SelectionGranularity,
+    /// The range captured on press for word / line granularity. Drags
+    /// recompute the focus range from the pointer and anchor against this
+    /// (upstream's `selectionInitialRange`,
+    /// `packages/tui/src/tui-alt-screen.ts:1193-1218`). `None` for
+    /// character selections.
+    initial: Option<(SelectionPoint, SelectionPoint)>,
 }
 
 impl Selection {
-    /// Construct a zero-length selection at `point` (a mouse press).
+    /// Construct a zero-length character selection at `point` (a mouse
+    /// press).
     const fn at(point: (usize, usize)) -> Self {
+        let point = SelectionPoint::cell(point.0, point.1);
         Self {
             anchor: point,
             focus: point,
+            granularity: SelectionGranularity::Character,
+            initial: None,
+        }
+    }
+
+    /// Construct a word / line selection from the range captured on press.
+    const fn range(
+        start: SelectionPoint,
+        end: SelectionPoint,
+        granularity: SelectionGranularity,
+    ) -> Self {
+        Self {
+            anchor: start,
+            focus: end,
+            granularity,
+            initial: Some((start, end)),
         }
     }
 
@@ -137,15 +273,84 @@ impl Selection {
     /// empty — upstream's `getSelectionBounds`
     /// (`packages/tui/src/tui-alt-screen.ts:1381-1397`) treats an
     /// anchor equal to the focus as "no selection".
-    fn bounds(&self) -> Option<((usize, usize), (usize, usize))> {
-        if self.anchor == self.focus {
+    fn bounds(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        if self.anchor.order() == self.focus.order() {
             return None;
         }
-        Some(if self.anchor < self.focus {
+        Some(if self.anchor.order() < self.focus.order() {
             (self.anchor, self.focus)
         } else {
             (self.focus, self.anchor)
         })
+    }
+}
+
+/// A press recorded for double / triple click detection (upstream's
+/// `ClickTarget`, `packages/tui/src/tui-alt-screen.ts:114-121`).
+#[derive(Debug, Clone, Copy)]
+struct ClickTarget {
+    /// When the press happened.
+    at: Instant,
+    /// Consecutive clicks so far (1, 2, 3, then back to 1).
+    count: usize,
+    /// Rendered-log line the press landed on.
+    row: usize,
+    /// First column of the word range the press resolved to.
+    word_start: usize,
+    /// Exclusive end column of that word range.
+    word_end: usize,
+}
+
+/// One UAX #29 segment of a rendered line, in character columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WordSegment {
+    /// First column of the segment (inclusive).
+    start: usize,
+    /// One past the last column of the segment (exclusive).
+    end: usize,
+    /// Whether the segment is pickable (word-like, or a joiner).
+    selectable: bool,
+    /// Whether the segment is one of [`TERMINAL_WORD_SELECTION_JOINERS`].
+    joiner: bool,
+}
+
+/// Split a rendered line into the segments upstream's `getWordSelection`
+/// walks (`packages/tui/src/tui-alt-screen.ts:1156-1197`).
+///
+/// Columns are character offsets, not terminal cells — see the module docs.
+fn word_segments(line: &str) -> Vec<WordSegment> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    for segment in line.split_word_bounds() {
+        let end = start + segment.chars().count();
+        let joiner = TERMINAL_WORD_SELECTION_JOINERS.contains(&segment);
+        let selectable = crate::word_navigation::is_word_like(segment) || joiner;
+        segments.push(WordSegment {
+            start,
+            end,
+            selectable,
+            joiner,
+        });
+        start = end;
+    }
+    segments
+}
+
+/// Upstream's `canJoin` (`packages/tui/src/tui-alt-screen.ts:1174-1177`):
+/// two pickable segments join when at least one of them is a joiner.
+fn word_segments_can_join(left: &WordSegment, right: &WordSegment) -> bool {
+    left.selectable && right.selectable && (left.joiner || right.joiner)
+}
+
+/// Exclusive end column of a selection end, clamped to `len` — upstream's
+/// `getSelectionColumns` end half (`packages/tui/src/tui-alt-screen.ts:1424-1432`):
+/// a boundary column is already one past the last selected cell, while an
+/// inclusive focus column selects the cell under it.
+fn selection_end_column(end: &SelectionPoint, len: usize) -> usize {
+    if end.boundary {
+        end.col.min(len)
+    } else {
+        end.col.saturating_add(1).min(len)
     }
 }
 
@@ -283,6 +488,16 @@ pub struct App {
     /// True between a left-button press and its release, so drags extend
     /// the selection without requiring the terminal to report the button.
     selection_dragging: bool,
+    /// Last press, kept for double / triple click detection (upstream's
+    /// `lastClick`, `packages/tui/src/tui-alt-screen.ts:114-121`).
+    last_click: Option<ClickTarget>,
+    /// Where the drag autoscroll is pulling: `-1` towards older output,
+    /// `1` towards the tail, `0` when it is stopped (`selectionAutoScrollDirection`).
+    selection_autoscroll_direction: i8,
+    /// The pointer cell a drag autoscroll is anchored to — absolute
+    /// terminal coordinates, `None` while stopped
+    /// (`selectionDragPointer`).
+    selection_autoscroll_pointer: Option<(u16, u16)>,
     /// Text waiting to be copied by the driver. Filled by copy-on-select;
     /// consumed with [`App::take_clipboard_request`].
     pending_clipboard: Option<String>,
@@ -333,6 +548,9 @@ impl App {
             selection: None,
             modal_mouse_press: None,
             selection_dragging: false,
+            last_click: None,
+            selection_autoscroll_direction: 0,
+            selection_autoscroll_pointer: None,
             pending_clipboard: None,
         }
     }
@@ -1030,21 +1248,27 @@ impl App {
     /// clear the chat-log text selection.
     ///
     /// Mirrors upstream's `handleSelectionMouseEvent`
-    /// (`packages/tui/src/tui-alt-screen.ts:1343-1379`): a press anchors a
-    /// character-granularity selection, a drag extends it, and a release
-    /// copies it when [copy-on-select](AppConfig::copy_on_select) is on.
-    /// A press and release on the same cell leaves an empty selection, so a
-    /// plain click clears whatever was selected before.
+    /// (`packages/tui/src/tui-alt-screen.ts:1300-1380`): a press anchors a
+    /// selection whose granularity comes from the click count (single →
+    /// character, double → word, triple → line), a drag extends it under
+    /// that same granularity, and a release copies it when
+    /// [copy-on-select](AppConfig::copy_on_select) is on. A press and
+    /// release on the same cell leaves an empty selection, so a plain
+    /// click clears whatever was selected before.
+    ///
+    /// While a drag is in flight and the pointer rests on the viewport's
+    /// top or bottom row, the gesture also arms the drag autoscroll; see
+    /// [`App::advance_selection_autoscroll`] for the beat.
     ///
     /// With a modal on screen the gesture is hit-tested against the modal
     /// overlays instead — see [`App::mouse_regions`] and
     /// [`App::step_modal_mouse_gesture`].
     ///
-    /// Deviations (deliberate, documented): only character granularity is
-    /// modelled — upstream adds double-click word and triple-click line
-    /// selection plus drag autoscroll at the viewport edges. Gestures
-    /// outside the message viewport (the prompt and status rows) are
-    /// ignored.
+    /// Deviations (deliberate, documented in the module docs): the click
+    /// count is reconstructed from press timing because `crossterm` has no
+    /// `clickCount` field; gestures that press outside the message viewport
+    /// (the prompt and status rows) are ignored, though an in-flight drag is
+    /// clamped back into the viewport so edge autoscroll keeps tracking.
     pub fn step_mouse_gesture(&mut self, gesture: MouseGesture) -> StepOutcome {
         // A modal owns the mouse exactly as it owns the keyboard
         // (`step_key`): gestures are hit-tested against the open overlays'
@@ -1054,12 +1278,30 @@ impl App {
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
-        let Some(point) = self.selection_point(gesture.x, gesture.y) else {
-            return StepOutcome::Idle;
-        };
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
-                let next = Selection::at(point);
+                self.stop_selection_autoscroll();
+                let Some(point) = self.selection_point(gesture.x, gesture.y) else {
+                    return StepOutcome::Idle;
+                };
+                // The click key is always the word under the pointer, even
+                // when the count resolves to a line selection (upstream
+                // `getClickCount(anchor, word)`,
+                // `packages/tui/src/tui-alt-screen.ts:1364-1367`).
+                let word = self.word_selection(point);
+                let click_count = self.next_click_count(point, word);
+                let next = match click_count {
+                    2 => word.map(|(start, end)| {
+                        Selection::range(start, end, SelectionGranularity::Word)
+                    }),
+                    3 => self.line_selection(point).map(|(start, end)| {
+                        Selection::range(start, end, SelectionGranularity::Line)
+                    }),
+                    _ => Some(Selection::at(point)),
+                };
+                let Some(next) = next else {
+                    return StepOutcome::Idle;
+                };
                 self.selection_dragging = true;
                 if self.selection == Some(next) {
                     return StepOutcome::Idle;
@@ -1070,11 +1312,32 @@ impl App {
             MouseGestureKind::Drag(MouseButton::Left) | MouseGestureKind::Move
                 if self.selection_dragging =>
             {
-                self.extend_selection(point)
+                // A drag is not a click: upstream clears `lastClick`
+                // (`tui-alt-screen.ts:1341`), so a click-drag-click is not a
+                // double click.
+                self.last_click = None;
+                // A drag can leave the viewport (onto the prompt / status
+                // rows or past the top); it is clamped back in so the focus
+                // still tracks, exactly like upstream's
+                // `getScrollSelectionPoint`.
+                let changed = self
+                    .selection_point_clamped(gesture.x, gesture.y)
+                    .map(|point| self.extend_selection(point) == StepOutcome::Redraw)
+                    .unwrap_or(false);
+                let armed = self.update_selection_autoscroll(gesture.x, gesture.y);
+                if changed || armed {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                }
             }
             MouseGestureKind::Release(MouseButton::Left) => {
                 self.selection_dragging = false;
-                let changed = self.extend_selection(point) == StepOutcome::Redraw;
+                self.stop_selection_autoscroll();
+                let changed = self
+                    .selection_point(gesture.x, gesture.y)
+                    .map(|point| self.extend_selection(point) == StepOutcome::Redraw)
+                    .unwrap_or(false);
                 if self.config.copy_on_select {
                     if let Some(text) = self.selection_text() {
                         self.pending_clipboard = Some(text);
@@ -1091,6 +1354,46 @@ impl App {
             // right button to paste on Windows only).
             _ => StepOutcome::Idle,
         }
+    }
+
+    /// Advance the pending edge autoscroll by one beat, returning whether
+    /// the viewport moved.
+    ///
+    /// Upstream runs this from a 50 ms `setInterval`
+    /// (`packages/tui/src/tui-alt-screen.ts:1292-1297`); this port has no
+    /// timer thread, so the beat is the draw itself —
+    /// [`App::render_to_buffer`] calls this once per frame, and the driver's
+    /// render loop is already throttled to 50 ms. A drag parked on an edge
+    /// therefore scrolls one line per redraw, and a stationary pointer keeps
+    /// moving because the driver keeps drawing.
+    ///
+    /// Stops when the viewport cannot move any further in the requested
+    /// direction (upstream's `remaining === direction`), which also means a
+    /// drag at the tail's bottom edge does not spin.
+    pub fn advance_selection_autoscroll(&mut self) -> bool {
+        let Some((x, y)) = self.selection_autoscroll_pointer else {
+            return false;
+        };
+        let direction = self.selection_autoscroll_direction;
+        if direction == 0 {
+            return false;
+        }
+        let moved = if direction < 0 {
+            self.scroll_viewport_up(SELECTION_AUTOSCROLL_LINES)
+        } else {
+            self.scroll_viewport_down(SELECTION_AUTOSCROLL_LINES)
+        };
+        if !moved {
+            self.stop_selection_autoscroll();
+            return false;
+        }
+        // The viewport moved, so the focus under the stationary pointer is a
+        // different log line now — recompute it like upstream's
+        // `autoScrollSelection`.
+        if let Some(point) = self.selection_point_clamped(x, y) {
+            let _ = self.extend_selection(point);
+        }
+        true
     }
 
     /// On-screen rectangles of the open modal overlays, topmost first.
@@ -1194,15 +1497,187 @@ impl App {
 
     /// Move the selection focus, returning whether the rendered highlight
     /// actually changed.
+    ///
+    /// For character selections the focus is the pointer cell. For word /
+    /// line selections the pointer is first resolved to the same granularity
+    /// range, then the selection is rebuilt against the range captured on
+    /// press — upstream's `updateSelectionFocus`
+    /// (`packages/tui/src/tui-alt-screen.ts:1200-1218`).
     fn extend_selection(&mut self, point: (usize, usize)) -> StepOutcome {
-        let Some(selection) = self.selection.as_mut() else {
+        let Some(selection) = self.selection else {
             return StepOutcome::Idle;
         };
-        if selection.focus == point {
+        let Some(updated) = self.updated_selection(selection, point) else {
+            return StepOutcome::Idle;
+        };
+        if updated == selection {
             return StepOutcome::Idle;
         }
-        selection.focus = point;
+        self.selection = Some(updated);
         StepOutcome::Redraw
+    }
+
+    /// Recompute `selection` with its focus dragged to `point`, or `None`
+    /// when the granularity range under the pointer cannot be resolved
+    /// (upstream leaves the focus untouched in that case).
+    fn updated_selection(
+        &self,
+        mut selection: Selection,
+        point: (usize, usize),
+    ) -> Option<Selection> {
+        let Some(initial) = selection.initial else {
+            selection.focus = SelectionPoint::cell(point.0, point.1);
+            return Some(selection);
+        };
+        let (start, end) = match selection.granularity {
+            SelectionGranularity::Word => self.word_selection(point)?,
+            SelectionGranularity::Line => self.line_selection(point)?,
+            SelectionGranularity::Character => {
+                selection.focus = SelectionPoint::cell(point.0, point.1);
+                return Some(selection);
+            }
+        };
+        // A target before the initial range swaps the ends, so dragging up
+        // past the anchor still selects from the new range to the anchor.
+        if start.order() < initial.0.order() {
+            selection.anchor = initial.1;
+            selection.focus = start;
+        } else {
+            selection.anchor = initial.0;
+            selection.focus = end;
+        }
+        Some(selection)
+    }
+
+    /// The rendered text of one log line, with styles stripped — upstream's
+    /// `getSelectionSourceLine` (`packages/tui/src/tui-alt-screen.ts:1145-1151`).
+    fn selection_line(&self, line: usize) -> Option<String> {
+        let (width, _) = self.viewport();
+        if width == 0 {
+            return None;
+        }
+        let lines = self.messages.render_styled_lines(width);
+        lines.get(line).map(|line| crate::styled::plain_text(line))
+    }
+
+    /// The word range under `point`, or `None` when the line has no
+    /// segment there (upstream's `getWordSelection`,
+    /// `packages/tui/src/tui-alt-screen.ts:1156-1197`).
+    ///
+    /// A pickable segment (word-like, or one of
+    /// [`TERMINAL_WORD_SELECTION_JOINERS`]) grows across adjacent pickable
+    /// segments whenever a joiner sits on one side, which is what keeps
+    /// `path/to/file` and `kebab-case` whole. The returned end carries an
+    /// exclusive boundary column.
+    fn word_selection(&self, point: (usize, usize)) -> Option<(SelectionPoint, SelectionPoint)> {
+        let line = self.selection_line(point.0)?;
+        let segments = word_segments(&line);
+        let clicked = segments
+            .iter()
+            .position(|segment| point.1 >= segment.start && point.1 < segment.end)?;
+        let mut start = segments[clicked].start;
+        let mut end = segments[clicked].end;
+        let mut index = clicked;
+        while index > 0 && word_segments_can_join(&segments[index - 1], &segments[index]) {
+            start = segments[index - 1].start;
+            index -= 1;
+        }
+        let mut index = clicked;
+        while index + 1 < segments.len()
+            && word_segments_can_join(&segments[index], &segments[index + 1])
+        {
+            end = segments[index + 1].end;
+            index += 1;
+        }
+        Some((
+            SelectionPoint::cell(point.0, start),
+            SelectionPoint::boundary(point.0, end),
+        ))
+    }
+
+    /// The whole visible line under `point` — upstream's `getLineSelection`
+    /// (`packages/tui/src/tui-alt-screen.ts:1193-1203`).
+    fn line_selection(&self, point: (usize, usize)) -> Option<(SelectionPoint, SelectionPoint)> {
+        let line = self.selection_line(point.0)?;
+        let width = line.chars().count();
+        Some((
+            SelectionPoint::cell(point.0, 0),
+            SelectionPoint::boundary(point.0, width),
+        ))
+    }
+
+    /// Consume the previous press and return this press's click count.
+    ///
+    /// Upstream's `getClickCount` (`packages/tui/src/tui-alt-screen.ts:1220-1245`):
+    /// a press repeats the count when it lands within
+    /// [`DOUBLE_CLICK_INTERVAL`] of the previous one, on the same line and
+    /// the same word column range; otherwise it restarts at `1`. The count
+    /// cycles `1 → 2 → 3 → 1`. The only deviation is the time source —
+    /// `std::time::Instant` rather than `Date.now()` — because `crossterm`
+    /// does not report `clickCount`.
+    fn next_click_count(
+        &mut self,
+        point: (usize, usize),
+        word: Option<(SelectionPoint, SelectionPoint)>,
+    ) -> usize {
+        let now = Instant::now();
+        let count = match (word, self.last_click) {
+            (Some((start, end)), Some(previous))
+                if now.duration_since(previous.at) <= DOUBLE_CLICK_INTERVAL
+                    && previous.row == point.0
+                    && previous.word_start == start.col
+                    && previous.word_end == end.col =>
+            {
+                (previous.count % 3) + 1
+            }
+            _ => 1,
+        };
+        self.last_click = word.map(|(start, end)| ClickTarget {
+            at: now,
+            count,
+            row: point.0,
+            word_start: start.col,
+            word_end: end.col,
+        });
+        count
+    }
+
+    /// Arm or disarm the edge autoscroll for a drag at `(x, y)`, returning
+    /// whether the autoscroll is now pulling.
+    ///
+    /// Upstream's `updateSelectionAutoScroll`
+    /// (`packages/tui/src/tui-alt-screen.ts:1247-1284`): a pointer at or
+    /// above the viewport top pulls towards older output, at or below the
+    /// bottom pulls towards the tail, and anywhere in between stops it.
+    fn update_selection_autoscroll(&mut self, x: u16, y: u16) -> bool {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            self.stop_selection_autoscroll();
+            return false;
+        }
+        let (_, origin_y) = self.viewport_origin();
+        let top = origin_y;
+        let bottom = origin_y.saturating_add(height).saturating_sub(1);
+        let direction = if y <= top {
+            -1
+        } else if y >= bottom {
+            1
+        } else {
+            0
+        };
+        if direction == 0 {
+            self.stop_selection_autoscroll();
+            return false;
+        }
+        self.selection_autoscroll_direction = direction;
+        self.selection_autoscroll_pointer = Some((x, y));
+        true
+    }
+
+    /// Stop the edge autoscroll, if one is pending.
+    fn stop_selection_autoscroll(&mut self) {
+        self.selection_autoscroll_direction = 0;
+        self.selection_autoscroll_pointer = None;
     }
 
     /// Map an absolute terminal cell onto a rendered-log coordinate, or
@@ -1213,11 +1688,31 @@ impl App {
         if width == 0 || height == 0 {
             return None;
         }
-        let (origin_x, origin_y) = self.viewport_origin();
+        let (_, origin_y) = self.viewport_origin();
         if y < origin_y || y >= origin_y.saturating_add(height) {
             return None;
         }
-        let row = (y - origin_y) as usize;
+        self.selection_point_clamped(x, y)
+    }
+
+    /// Like [`App::selection_point`], but clamps a pointer outside the
+    /// viewport back onto its nearest row.
+    ///
+    /// Upstream keeps tracking a drag that left the viewport and maps the
+    /// pointer through `getScrollSelectionPoint`, so the focus follows a
+    /// pointer resting on the status / prompt rows while the autoscroll
+    /// runs.
+    fn selection_point_clamped(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (origin_x, origin_y) = self.viewport_origin();
+        let row = if y < origin_y {
+            0
+        } else {
+            ((y - origin_y) as usize).min(height as usize - 1)
+        };
         let (start, lines) = self.messages.visible_lines(width, height);
         // Below the last rendered line (a short log): clamp to the last
         // line so a drag past the end still selects to the end of the text.
@@ -1229,7 +1724,8 @@ impl App {
     /// Start / end of the active selection in rendered-log coordinates, or
     /// `None` when nothing is selected.
     pub fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
-        self.selection?.bounds()
+        let (start, end) = self.selection?.bounds()?;
+        Some(((start.line, start.col), (end.line, end.col)))
     }
 
     /// True when there is a non-empty text selection.
@@ -1240,10 +1736,11 @@ impl App {
     /// The selected text, exactly as copy-on-select would hand it to the
     /// driver: one entry per rendered line, joined by `\n`, with trailing
     /// whitespace trimmed per line and the character under the focus cell
-    /// included (upstream `getActiveSelectionText`,
+    /// included. A word / line range ends on an exclusive boundary column,
+    /// so its end column is *not* widened (upstream `getActiveSelectionText`,
     /// `packages/tui/src/tui-alt-screen.ts:1412-1429`).
     pub fn selection_text(&self) -> Option<String> {
-        let ((start_line, start_col), (end_line, end_col)) = self.selection_bounds()?;
+        let (start, end) = self.selection?.bounds()?;
         let (width, _) = self.viewport();
         if width == 0 {
             return None;
@@ -1253,18 +1750,18 @@ impl App {
             return None;
         }
         let last = lines.len() - 1;
-        let end_line = end_line.min(last);
+        let end_line = end.line.min(last);
         let mut out: Vec<String> = Vec::new();
-        for (idx, line) in lines.iter().enumerate().take(end_line + 1).skip(start_line) {
+        for (idx, line) in lines.iter().enumerate().take(end_line + 1).skip(start.line) {
             let text = crate::styled::plain_text(line);
             let len = text.chars().count();
-            let from = if idx == start_line {
-                start_col.min(len)
+            let from = if idx == start.line {
+                start.col.min(len)
             } else {
                 0
             };
-            let to = if idx == end_line {
-                end_col.saturating_add(1).min(len)
+            let to = if idx == end.line {
+                selection_end_column(&end, len)
             } else {
                 len
             };
@@ -1284,9 +1781,15 @@ impl App {
     }
 
     /// Drop the active selection (and any highlight it produced).
+    ///
+    /// Mirrors upstream's `clearTextSelection`
+    /// (`packages/tui/src/tui-alt-screen.ts:865-874`), which stops the
+    /// autoscroll but deliberately keeps the click-count history: two clicks
+    /// separated by an intervening clear still count as a double click.
     pub fn clear_selection(&mut self) {
         self.selection = None;
         self.selection_dragging = false;
+        self.stop_selection_autoscroll();
     }
 
     /// Take the text the driver must copy to the clipboard, if a
@@ -1303,7 +1806,7 @@ impl App {
     /// Paint the active selection into the already-rendered message area by
     /// adding the reversed-video modifier to the selected cells.
     fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {
-        let Some(((start_line, start_col), (end_line, end_col))) = self.selection_bounds() else {
+        let Some((start, end)) = self.selection.and_then(|selection| selection.bounds()) else {
             return;
         };
         if area.width == 0 || area.height == 0 {
@@ -1311,8 +1814,8 @@ impl App {
         }
         let (visible_start, lines) = self.messages.visible_lines(area.width, area.height);
         let visible_end = visible_start + lines.len();
-        let first = start_line.max(visible_start);
-        let last = end_line.min(visible_end.saturating_sub(1));
+        let first = start.line.max(visible_start);
+        let last = end.line.min(visible_end.saturating_sub(1));
         if first > last {
             return;
         }
@@ -1321,13 +1824,13 @@ impl App {
             let y = area.y + row;
             let text = crate::styled::plain_text(&lines[row as usize]);
             let len = text.chars().count();
-            let from = if line_idx == start_line {
-                start_col.min(len)
+            let from = if line_idx == start.line {
+                start.col.min(len)
             } else {
                 0
             };
-            let to = if line_idx == end_line {
-                end_col.saturating_add(1).min(len)
+            let to = if line_idx == end.line {
+                selection_end_column(&end, len)
             } else {
                 len
             };
@@ -1428,7 +1931,23 @@ impl App {
     }
 
     /// Render the App into a `Buffer` at the given area.
-    pub fn render_to_buffer(&self, area: Rect, buf: &mut Buffer) {
+    ///
+    /// This is also the drag autoscroll's clock: a pending edge autoscroll
+    /// advances one line before the frame is painted, so the highlight in
+    /// the frame already reflects the moved viewport. The driver redraws on
+    /// a 50 ms interval, which is the beat upstream gets from
+    /// `setInterval(autoScrollSelection, 50)`
+    /// (`packages/tui/src/tui-alt-screen.ts:1264-1297`). The receiver is
+    /// `&mut self` for that reason; callers that only need pixels (snapshot
+    /// tests, `transcript` helpers) use [`App::render_snapshot`], which does
+    /// not tick.
+    pub fn render_to_buffer(&mut self, area: Rect, buf: &mut Buffer) {
+        let _ = self.advance_selection_autoscroll();
+        self.render_to_buffer_impl(area, buf);
+    }
+
+    /// Paint the App without advancing the autoscroll clock.
+    fn render_to_buffer_impl(&self, area: Rect, buf: &mut Buffer) {
         // Layout: message view fills the top, prompt the bottom row,
         // status bar the row above the prompt.
         let status_height = 1u16;
@@ -1561,7 +2080,7 @@ impl App {
             height,
         };
         let mut buf = Buffer::empty(area);
-        self.render_to_buffer(area, &mut buf);
+        self.render_to_buffer_impl(area, &mut buf);
         let lines = buf
             .content()
             .chunks(width as usize)
@@ -1684,5 +2203,103 @@ fn mouse_button(button: crossterm::event::MouseButton) -> MouseButton {
         crossterm::event::MouseButton::Left => MouseButton::Left,
         crossterm::event::MouseButton::Middle => MouseButton::Middle,
         crossterm::event::MouseButton::Right => MouseButton::Right,
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn plain_segments(line: &str) -> Vec<(usize, usize, bool, bool)> {
+        word_segments(line)
+            .into_iter()
+            .map(|segment| {
+                (
+                    segment.start,
+                    segment.end,
+                    segment.selectable,
+                    segment.joiner,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn word_segments_measure_character_columns() {
+        assert_eq!(
+            plain_segments("ab cd"),
+            vec![
+                (0, 2, true, false),
+                (2, 3, false, false),
+                (3, 5, true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn word_segments_mark_joiners_and_word_like_runs() {
+        // "/" and "-" are selectable joiners; punctuation and spaces are not.
+        // UAX #29 keeps `file.rs` together (`.` is a MidNumLet), while the
+        // `/` and `-` are the joiner segments.
+        assert_eq!(
+            plain_segments("path/to-file.rs"),
+            vec![
+                (0, 4, true, false),
+                (4, 5, true, true),
+                (5, 7, true, false),
+                (7, 8, true, true),
+                (8, 15, true, false),
+            ]
+        );
+        assert_eq!(plain_segments(" "), vec![(0, 1, false, false)]);
+    }
+
+    #[test]
+    fn joiners_glue_pickable_neighbours_but_not_punctuation() {
+        let segments = word_segments("a-b c");
+        // "a" joins "-"; "-" joins "b"; "b" and " " do not join.
+        assert!(word_segments_can_join(&segments[0], &segments[1]));
+        assert!(word_segments_can_join(&segments[1], &segments[2]));
+        assert!(!word_segments_can_join(&segments[2], &segments[3]));
+    }
+
+    #[test]
+    fn selection_end_column_is_exclusive_for_boundaries() {
+        let exclusive = SelectionPoint::boundary(0, 4);
+        assert_eq!(selection_end_column(&exclusive, 10), 4);
+        assert_eq!(
+            selection_end_column(&exclusive, 3),
+            3,
+            "clamped to the line"
+        );
+
+        let inclusive = SelectionPoint::cell(0, 4);
+        assert_eq!(selection_end_column(&inclusive, 10), 5);
+        assert_eq!(
+            selection_end_column(&inclusive, 5),
+            5,
+            "clamped to the line"
+        );
+    }
+
+    #[test]
+    fn selection_bounds_ignore_the_boundary_flag_when_ordering() {
+        let selection = Selection {
+            anchor: SelectionPoint::boundary(3, 0),
+            focus: SelectionPoint::cell(1, 5),
+            granularity: SelectionGranularity::Word,
+            initial: None,
+        };
+        let (start, end) = selection.bounds().expect("non-empty");
+        assert_eq!(start.line, 1);
+        assert_eq!(end.line, 3);
+        // Equal coordinates read as empty even when the flags differ.
+        let empty = Selection {
+            anchor: SelectionPoint::cell(2, 2),
+            focus: SelectionPoint::boundary(2, 2),
+            granularity: SelectionGranularity::Word,
+            initial: None,
+        };
+        assert!(empty.bounds().is_none());
     }
 }

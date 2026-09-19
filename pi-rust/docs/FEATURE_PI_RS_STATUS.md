@@ -8479,3 +8479,258 @@ CI 门（`scripts/ci.sh` 里的 `cargo fmt --all --check` 目前对全仓都是�
   = **LUM-1134**（`01a0bb07-e1cf-7b58-b1be-41b79574e23f`，`priority = high`，无父级，与 Stage 33/34/36/37 同形）。
   它从 `origin/feature/pi.rs @ b993f1541` 起分支——本轮先把合并推送落地再派发，避免它从旧头起分支。
   派发后 `running_task_count = 3`（LUM-1133 + LUM-1134 + 本轮收尾），正好在「最多 3 个并发」上限。
+
+## LUM-1133 round — pi-tui 选区粒度（双击选词 / 三击选行）+ 拖拽边缘自动滚动（frontier P1 第 2 项收口）
+
+本轮由 LUM-1131 协调轮派发（Stage 37），只做这一件事：把 frontier 第 2 项补上。改动全部落在 `pi-tui`，
+不碰 `pi-extensions` / `pi-coding-agent` / `pi-session`，不做第 9 项（滚条悬停 / 拖拽），不派发子任务。
+
+### 一、起点与分支
+
+- 派发时写的起点是 `origin/feature/pi.rs @ d1b1f5087`；开工 `git fetch` 时该分支已推进到 **`8b1ad7e13`**
+  （含 LUM-1132 的 `keybindings` 注册表与两条补记）。本轮把工作提交 **rebase** 到 `8b1ad7e13` 之上，
+  因此并入 `feature/pi.rs` 是**快进**，不需要 plumbing merge。
+- LUM-1132 只新增 `src/keybindings.rs` / `tests/keybindings.rs` 与 `src/lib.rs` 6 行；与本轮唯一触碰的
+  `src/app.rs` 无重叠（`lib.rs` 本轮未改），rebase 零冲突。
+
+### 二、上游语义逐条对齐（`packages/tui/src/tui-alt-screen.ts`）
+
+| 上游事实 | 锚点 | 本轮落地 |
+|---|---|---|
+| `SelectionGranularity = "character" / "word" / "line"`，默认 `character` | `:104`、`:213`（各 reset 路径 `:342`/`:672`/`:870`/`:1096` 清回字符） | `enum SelectionGranularity`；`Selection { anchor, focus, granularity, initial }`；`clear_selection` 一并丢弃粒度 |
+| 按下时按连击数选初始 range：`2 → word`、`3 → line`、否则 `character` | `:1364`–`:1367` | `step_mouse_gesture` 的 `Press(Left)` 分支：`next_click_count` → `Selection::at` / `Selection::range` |
+| `getClickCount`：`DOUBLE_CLICK_INTERVAL_MS = 500` + 同一 `row` + 同一 `scrollView` + 同一词起止列；命中 `count = (count % 3) + 1` | `:79`、`:1220`–`:1245` | `DOUBLE_CLICK_INTERVAL` + `ClickTarget { at, count, row, word_start, word_end }` + `App::next_click_count`（1→2→3→1 循环） |
+| `getWordSelection`：词粒度分段 + `TERMINAL_WORD_SELECTION_JOINERS`，相邻可选片段在 joiner 相邻时合并（`canJoin`） | `:82`、`:1156`–`:1197` | `word_segments()`（`unicode_segmentation::split_word_bounds` + `word_navigation::is_word_like`）+ `word_segments_can_join` + `App::word_selection` |
+| `getLineSelection`：`col 0` → 该行可见宽度，`boundary: true` | `:1193`–`:1198` | `App::line_selection`（按 `chars().count()`） |
+| `updateSelectionFocus`：按当前粒度从 pointer 重算 range，并对 `selectionInitialRange` 做端点翻转 | `:1200`–`:1218` | `App::updated_selection`（`initial` 字段；`start.order() < initial.0.order()` 时换端） |
+| `SelectionPoint.boundary`：range 末端列是**独占**的（`getSelectionColumns` 的 end 半边） | `:99`–`:110`、`:1424`–`:1432` | `SelectionPoint::cell` / `SelectionPoint::boundary` + `selection_end_column`（`boundary` 直接用列，否则 +1，皆钳到行宽） |
+| `updateSelectionAutoScroll`：指针落在可见区上/下边缘 → direction `-1`/`1`，`setInterval(..., 50)` 持续推进并重算 focus；离开边缘或 `remaining === direction`（滚不动）停表 | `:1246`–`:1297` | `App::update_selection_autoscroll` + `App::advance_selection_autoscroll`（每帧一步，见偏离 4） |
+| 拖拽时清 `lastClick`（点击-拖动-点击不算双击） | `:1341` | 拖拽分支 `self.last_click = None` |
+| 拖出视口仍持续追踪：pointer 经 `getScrollSelectionPoint` 钳回可见带 | `:1117`–`:1135` | `App::selection_point_clamped`（press/release 用严格命中，drag 用钳位） |
+
+### 三、刻意偏离（都写进 `app.rs` 的模块 / 函数文档，不是遗漏）
+
+1. **连击判定的时间源**：上游读引擎合成的 `TuiMouseEvent.clickCount`，本仓库的 `MouseGesture`
+   （`src/input.rs`）没有该字段，crossterm 也不提供。按 issue 允许的两条路选了后者：**不改 `MouseGesture`**
+   （避免动所有构造点），在 `App` 里用 `std::time::Instant` + 上游同一套判定键自行判定。规则照抄 `getClickCount`，
+   只有时间源从 `Date.now()` 换成 `Instant`。
+2. **分词用 UAX #29 而非 `Intl.Segmenter`**：复用 `src/word_navigation.rs`（上游 `word-navigation.ts` 的移植，
+   已有 `unicode_segmentation` 依赖）。差异照 `word_navigation.rs` 模块文档的口径：ICU 词典会把 `你好` 当一个词，
+   UAX #29 每个 ideograph 各成一段，所以双击 CJK 一次选一个字。`/`、`-` 的 joiner 语义与上游一致。
+3. **列按字符计，不按显示宽度**：`selection_text` 的全部既有口径就是「1 char = 1 列」（LUM-1124 已记）。
+   本轮的字 / 行 range 也用 `chars().count()` 度量，**没有**顺手做 `getGraphemeCellRange` 的宽字符整格扩边，
+   宽字符的选区行为与字符粒度路径保持完全一致。
+4. **autoscroll 的节拍挂在 draw 上**：Rust 侧没有 `setInterval`，本 crate 也不允许起 timer 线程，所以拖动自动滚动
+   **每次绘制推进一行**。`App::render_to_buffer` 每帧调一次 `advance_selection_autoscroll`，驱动（`pi-coding-agent`
+   的 50 ms 渲染循环）的重绘就是把上游 50 ms `setInterval` 变成「每帧一步」的那口气。为了让测试能确定性地步进，
+   `advance_selection_autoscroll` 是 `pub` 的。
+5. **`render_snapshot` 保持 `&self`**：`pi-coding-agent` 的 `transcript(app: &App)` 测试依赖它且该 crate 本轮不可改，
+   所以渲染实现抽到私有 `render_to_buffer_impl(&self, ...)`；`render_to_buffer` 改 `&mut self`（推进 autoscroll 需要可变借用）。
+6. **手势范围仍是消息视口**：落在状态行 / 输入行上的 press/release 被忽略；这沿用 LUM-1124 的收窄口径，
+   只有**已开始**的拖拽会被钳回视口（否则边缘自动滚动没法在指针停在状态行时干活）。
+
+### 四、改动清单（自 `8b1ad7e13`）
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-tui/src/app.rs` | 新增 `SelectionGranularity` / `SelectionPoint{line,col,boundary}` / 扩展 `Selection{anchor,focus,granularity,initial}` / `ClickTarget` / `WordSegment`；新增模块函数 `word_segments` / `word_segments_can_join` / `selection_end_column`；`App` 新增 `last_click` / `selection_autoscroll_direction` / `selection_autoscroll_pointer`；重写 `step_mouse_gesture`（press 建 range / drag 按粒度重算并 arming autoscroll / release 复制）；新增 `advance_selection_autoscroll`（pub）/ `updated_selection` / `selection_line` / `word_selection` / `line_selection` / `next_click_count` / `update_selection_autoscroll` / `stop_selection_autoscroll` / `selection_point_clamped`；`selection_point` 改为委托钳位版；`selection_text` 用 `selection_end_column`；`apply_selection_highlight` 走 `SelectionPoint`；`render_to_buffer` 改 `&mut self` 并抽出 `render_to_buffer_impl`；模块文档新增 `# Text selection` 一节 |
+| `crates/pi-tui/tests/selection_granularity.rs`（新） | 12 条：双击选词、joiner 跨 `-` 合并、三击选行、连击 1→2→3→1 循环、慢速（550 ms）第二击重置、异词第二击重置、双击后按词拖拽、词选区的反向视频逐格断言、拖到上边缘自动滚动且 focus 跟随、离开边缘停止、滚不动即停（短日志）、释放词选区复制 |
+| `crates/pi-tui/src/app.rs`（`#[cfg(test)] mod selection_tests`，文件内同一个） | 5 条：分词列宽、joiner/word_like 片段标记、joiner 只黏可选邻居、boundary 端列独占、`bounds()` 排序忽略 boundary |
+| `crates/pi-tui/tests/mouse_selection.rs` | 拖拽用例从视口边缘行 0/7 移到行 1（边缘行现在**如实**触发 autoscroll，会滚动视口），期望随之从 `line 32` 修成 `line 33` |
+| `crates/pi-tui/tests/app_theme.rs` | 渲染 helper 改收 `&mut App`（7 处调用点），因为 `render_to_buffer` 现在需要可变借用 |
+
+`copyOnSelect` / OSC 52 复制、`selection_bounds` / `selection_text` / `has_selection` / 高亮渲染的外部契约**没变**：
+粒度只改 range 的计算方式，复制路径与字符粒度完全同一条（有测试）。
+
+### 五、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  25 个 suite 共 505 passed / 0 failed      # 起点 24 suite / 488（= 505 − 本轮新增 5 单测 − 12 集成），+1 suite / +17 测试
+$ ... cargo test -p pi-coding-agent --offline
+  15 个 suite 共 360 passed / 0 failed      # driver 只因 render_to_buffer 变 &mut self 而适配，测试面不变
+$ ... cargo check --workspace --all-targets --offline
+  0 error / 0 warning                       # 8 个 crate 全过
+$ rustfmt 1.8.0（1.85.0 工具链）--edition 2021 --check <本轮 4 个文件>
+  0 diff
+```
+
+`+17` 的来源：`tests/selection_granularity.rs` 12（新 suite）+ `app.rs` 内 `selection_tests` 5（`lib` 从 214 → 219）。
+`tests/mouse_selection.rs` 与 `tests/app_theme.rs` 只改既有用例的形态，条数不变。
+
+**`-D warnings` 门的真实状态（如实记录）**：issue 里列的
+`cargo clippy --workspace --all-targets --offline -- -D warnings` 本轮**跑不出 exit 0**，但原因**与本轮无关**：
+在 1.85.0 工具链下，`pi-telemetry`（`memory.rs:228`、`noop.rs:37` 的 `needless_lifetimes`）、`pi-server`
+（重复属性）、`pi-extensions`（运算优先级）、以及 `pi-tui` **本轮一个字节都没碰**的两个文件
+（`autocomplete.rs:427` 的 `nonminimal_bool`、`theme.rs:213` 的 `needless_lifetimes`）本来就有 lint。
+用 `cargo clippy -p pi-tui --all-targets --no-deps -- -D warnings` 把依赖摘掉后，报错**只有**上面那两条既有项，
+`app.rs` 与 `tests/selection_granularity.rs` **一条新 lint 都没有**。按「只动 `pi-tui`、只做这一件事」的约束，
+本轮没有去改这些别人的 lint（改了也依然过不了 workspace 门），留作独立的技术债任务更合适。
+
+### 六、合并与推送
+
+`feature/pi.rs` 被别的 worktree 占着，本轮即便如此也**不需要** plumbing merge：工作提交 rebase 到
+`8b1ad7e13` 之后，`origin/feature/pi.rs` 就是 HEAD 的祖先，推送是快进。真实哈希与复测数字见本节末补记。
+
+### 七、frontier（本轮更新）
+
+1. ~~P1 选区粒度与边缘自动滚动~~ **本轮（Stage 37 / LUM-1133）收口**：双击选词 / 三击选行 / 连击循环 /
+   词粒度拖拽 / 拖边缘自动滚动 / 滚不动即停，全部有测试；连击判定、分词、节拍、列宽的偏离已写进
+   `app.rs` 模块文档。
+2. **P1 鼠标区域派发**：Stage 35 / LUM-1128 已收口。
+3. **P3 `alt-screen-search.ts`**：与新落地的选区有天然联动（命中高亮 = 另一种 reversed 高亮），需要 `app.rs` 钩子。
+4. **P3 `latex.ts` 剩余（OSC-8 hyperlink / 语法高亮 / 块级 HTML）**：OSC-8 要 `app.rs` 的 buffer 写入路径支持链接单元，
+   与第 1 项同属 `app.rs` 串行区，现在可以排了。
+5. **P3 X10 鼠标序列 / `updateScrollbarHover` 悬停高亮 / 滚条拖拽（frontier 第 9 项）**：本轮**未做**（issue 明确排除）。
+   它同样改 `app.rs` 的选择 / 渲染路径，与第 3、4 项串行排队。
+6. **keybindings 消费方（Stage 38/LUM-1134 的兄弟段）**：把 `app.rs` / `editor.rs` 里散落的硬编码和弦换成
+   `get_keybindings()`（含 `app.*` 动作分发）——同属 `app.rs` 串行区，等本项落地后单独排。
+7. **P2 `fetch` 全局 / P3 provider catalog**：维持原结论（要真实 HTTP 桥 / 无上游数据源，不猜）。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、`docs/FEATURE_PI_RS_STATUS.md`
+各自一次只允许一路在写。本轮未派发任何子任务。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `41d77c99d`（4 个文件），文档提交 `466144269`（本节 +119 行）；两者都在 rebase 后的工作分支上，
+  起点 `8b1ad7e13`。
+- 因为起点就是当时 `origin/feature/pi.rs` 的头，本次是**快进、无 merge 提交**，没用 plumbing：
+  `git push origin 466144269:refs/heads/feature/pi.rs` → `8b1ad7e13..466144269`（快进），
+  `work/lum-1133` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `466144269691380a5c361f8c2da49f6a5c658b90`。
+- `git diff --numstat 8b1ad7e13 466144269`（本轮全部改动，5 个文件、**+1109 / − 89**）：
+  `pi-tui/src/app.rs` +671/−54、`pi-tui/tests/selection_granularity.rs` +283（新）、
+  `pi-tui/tests/mouse_selection.rs` +28/−27、`pi-tui/tests/app_theme.rs` +8/−8、本节文档 +119。
+  **`pi-extensions` / `pi-coding-agent` / `pi-session` 一个文件都不在其中。**
+- 合并态复测（第五节）跑的树就是 rebase 后的工作树，与 `feature/pi.rs` 的新头 `466144269` 同源，数字即第五节所列。
+- 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节如实记录。
+
+---
+
+## LUM-1134 round — `pi-coding-agent` keybindings 配置层（`KEYBINDINGS` 覆盖表 + 旧名迁移 + `keybindings.json`）
+
+本轮由 LUM-1132 协调轮派发（Stage 38 的**配置层**），只做这一件事：把
+`packages/coding-agent/src/core/keybindings.ts`（401 行）的配置层落到 `pi-coding-agent`。
+**不碰消费方**（`app.rs` / `editor.rs` 里散落的硬编码和弦换成 `get_keybindings()`，那是 Stage 37 之后的串行项）、
+**不碰 `pi-tui`**、不加外部依赖、不派发子任务。
+
+### 一、起点与分支
+
+- 工作分支 `agent/devbox1/aa44dcc7d2f5`（`multica repo checkout` 落地），起点 `origin/feature/pi.rs @ b993f1541`
+  （含 LUM-1132 的 `pi-tui` keybindings 注册表）。
+- 开工 `git fetch` 时 `origin/feature/pi.rs` 已推进到 **`e5f5585d7`**（LUM-1133 的 Stage 37 + 补记）。
+  `git merge origin/feature/pi.rs` → 合并提交 `7019cebea`，**零冲突**：LUM-1133 只碰
+  `pi-tui/src/app.rs`、`pi-tui/tests/{selection_granularity,mouse_selection,app_theme}.rs` 与本文档，本轮只碰
+  `pi-coding-agent` 三个文件，两边在本文档都是**末尾追加**（先合入它的节，再追加本轮的节）。
+- 槽位：开工 `multica daemon status` 报 `running_task_count = 2`，本轮**未派发任何子任务**，总并发未超 3。
+
+### 二、本轮切片：`packages/coding-agent/src/core/keybindings.ts` 落到 `pi-coding-agent`
+
+选它的理由：LUM-1132 只把 `pi-tui` 那一半（`tui_default_keybindings` / `KeybindingsManager`）落了地，
+`coding-agent` 那一半在 Rust 侧**根本不存在**——`app.*` 覆盖表、Windows/WSL 默认集、旧名迁移、
+`keybindings.json` 加载与 `reload()` 全是缺口。它**整体落在一个新文件里**，与在途的 `app.rs` 零交集，
+是本轮唯一「不会撞车、又能一轮做完」的缺口。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/pi-coding-agent/src/keybindings.rs`（新，762 行） | `Platform`（`Win32` / `Linux` / `Darwin` / `Other`）+ `Env` / `process_env` + `windows_keybindings`（`useWindowsKeybindings`）；`APP_KEYBINDING_IDS`（**43**）+ `app_default_keybindings`（**7 条平台分叉**）；`merged_definitions`（= 上游 `KEYBINDINGS`：`pi-tui` 默认表 + **4 条 `tui.*` 覆盖** + `app.*`）；`KEYBINDING_NAME_MIGRATIONS`（**59** 条）+ `migrate_keybinding_name` / `is_legacy_keybinding_name`；`RawKeybindingsConfig` + `migrate_keybindings_config`（`_with_table`）/ `order_keybindings_config` / `to_keybindings_config` / `load_raw_config` / `load_from_file`（`_with_table`）；`KeybindingsManager`（`new` / `create` / `create_with_platform` / `create_default` / `reload` / `get_effective_config` / `config_path` / `definitions` / `inner` / `into_inner` + 对 `pi-tui` 管理器的全部委托，含 `matches`） |
+| `crates/pi-coding-agent/tests/keybindings.rs`（新，486 行，20 条用例） | 平台/WSL 判定（含 `WT_SESSION` 不算 WSL、空串不算存在）；`app` 表逐条 id / 描述 / 数量；合并表顺序与 `tui.*` 描述保留；原生 Windows / WSL / darwin+linux 三套默认；迁移（改名、新名优先、`migrated` 标志、表序+字典序）；旧表暴露；类型过滤（丢数字 / 对象 / 混合数组，保留空数组、len 3）；文件加载（缺失 / 非法 JSON / 非对象 / BOM）；管理器 create / reload / matches |
+| `crates/pi-coding-agent/src/lib.rs` | +8 行（`pub mod keybindings;` + 再导出块），改动面压到最小 |
+
+### 三、上游计数勘误（以源码为准，issue 与 LUM-1132 frontier 各差 1）
+
+- `interface AppKeybindings`（`keybindings.ts:14-58`）实际 **43 个** `app.*` id（issue / LUM-1132 frontier 写 44）。
+  本实现 `APP_KEYBINDING_IDS: [&str; 43]`，测试断言 id 集合与 `app_default_keybindings` 逐条一致。
+- `KEYBINDING_NAME_MIGRATIONS`（`keybindings.ts:240-301`）实际 **59 条**（issue 写 58）。
+  本实现 `[(&str, &str); 59]`，测试断言长度。
+- 4 条 `tui.*` 覆盖与 7 条平台分叉 `app.*` 与上游逐条相同：`tui.editor.undo`（win32 `ctrl+z` / WSL `alt+z` /
+  其余 `ctrl+-`）、`tui.altScreen.previousPrompt` / `nextPrompt` / `search`；`app.suspend`（win32 无绑定）、
+  `app.model.cycleBackward`、`app.message.followUp`、`app.message.dequeue`、`app.clipboard.pasteImage`、
+  `app.tree.foldOrUp` / `app.tree.unfoldOrDown`（darwin 换和弦顺序）。
+
+### 四、有意偏离（都写进了 `keybindings.rs` 的模块文档）
+
+1. **平台是值，不是进程全局**：上游在模块加载时算一次 `useWindowsKeybindings()` 并烤进 `KEYBINDINGS`；
+   Rust 侧 `Platform` / `Env` 是定义构造器的显式参数，win32、WSL、darwin 三套默认集在任何宿主上都能
+   构造与测试，`Platform::current()` / `process_env()` 复现上游检测。
+2. **`Platform::Darwin` 而非 `"macos"`**：`std::env::consts::OS` 报 `macos`、Node 报 `darwin`，
+   `Platform::from_name` 两个名字都收；未知平台存为 `Platform::Other`，行为同非 Windows。
+3. **`Env` 值按「存在且非空」判定**：上游 `Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP)` 把空串当缺失，
+   所以 `windows_keybindings` 也要求非空；`WT_SESSION` 有意**不**作为信号。
+4. **原始配置是有序 `Vec`**：`serde_json::Map` 在未开 `preserve_order` 时是 `BTreeMap`，表达不了
+   `order_keybindings_config` 的声明序，故原文配置用 `RawKeybindingsConfig = Vec<(String, Value)>`；
+   排序本身是**集合语义**（表序优先，未知 id 再字典序），与输入文件里的键顺序无关，与上游最终
+   `orderKeybindingsConfig` 的产物一致。
+5. **`get_effective_config` 返回 `Vec<(id, keys)>`**：`pi-tui` 管理器暴露的是 `get_resolved_bindings()`
+   而非上游的 `Record<Keybinding, KeyId | KeyId[]>`，本层与之对齐。
+6. **`KeybindingsManager` 是组合而非继承**：内部持一个 `pi_tui::keybindings::KeybindingsManager`，
+   委托 `matches` / `get_keys` / `get_conflicts` 等；额外提供 `reload()` / `get_effective_config()` /
+   `config_path()`（上游有 `reload()`，`config_path` 便于调用方定位文件）。
+
+### 五、验证
+
+```
+$ rustc --version
+  1.98.1 (48a229cea 2026-09-01)      # 本沙箱 stable，等于 CI 的 dtolnay/rust-toolchain@stable
+$ CARGO_HOME=/tmp/cargo-home cargo test -p pi-coding-agent --offline          # exit 0
+  16 个 suite 共 380 passed / 0 failed      # lib 236 不变；新增 tests/keybindings.rs 20（= +1 suite / +20）
+$ ... cargo clippy -p pi-coding-agent --all-targets --offline --no-deps -- -D warnings   # exit 0
+  0 warning（本 crate 与它自己的测试）
+$ rustfmt 1.8.0（1.85.0 工具链）--edition 2021 --check <本轮 3 个文件>
+  0 diff（keybindings.rs / tests/keybindings.rs；lib.rs 用 skip_children=true 单文件校验，见下）
+```
+
+**`-D warnings` 门的真实状态（如实记录，与 LUM-1133 第五节同一结论）**：issue 里列的
+`cargo clippy --workspace --all-targets --offline -- -D warnings` 在**未改动的基线** `b993f1541` / `e5f5585d7`
+上就跑不出 exit 0——`pi-telemetry`（`memory.rs:228`、`noop.rs:37` 的 `needless_lifetimes`）在 1.85.0 与 1.98.1
+两个工具链下都报，LUM-1133 另记 `pi-server` / `pi-extensions` / `pi-tui` 的既有 lint。用
+`--no-deps` 把依赖摘掉后，`pi-coding-agent` **一条 lint 都没有**。按「只做配置层、不扩大改动面」的约束，
+本轮没有去改别的 crate 的 lint（改了也依然过不了 workspace 门），留作独立技术债。
+
+另一条如实记录：`cargo test --workspace --offline` 本轮**没能跑完**——构建到 `pi-agent-core` 时 `/` 分区
+（50 G overlay，与其它并发 worktree 共用）被打到 100%，Cargo 报 `failed to create directory
+.../.fingerprint/pi-agent-core-...`。本轮只按需清掉了自己的 `CARGO_TARGET_DIR`（`/tmp/pi-rust-target-lum1134`），
+没有回收任何别的工作区的目录；相关 crate 的测试（`pi-coding-agent`）在 workspace 构建之前已单独全绿。
+
+`lib.rs` 的 rustfmt 说明：本轮只在自己的新文件上要求 0 diff。`rustfmt --check crates/pi-coding-agent/src/lib.rs`
+会递归下钻整棵模块树，报的是仓库既有的格式化欠账（`provider` / `rpc` / `prompt_templates` 等再导出的排序，
+LUM-1132 已记为全仓 122 文件），本轮**没有**顺手格式化它们；本轮新增的 keybindings 再导出块本身 0 diff
+（用 `--config skip_children=true` 单文件校验确认）。
+
+### 六、合并与推送
+
+工作分支已把 `e5f5585d7` 合入（合并提交 `7019cebea`），因此并入 `feature/pi.rs` 是**快进**，不需要 plumbing merge。
+真实哈希与 numstat 见本节末补记。
+
+### 七、frontier（本轮更新）
+
+1. ~~keybindings 配置层~~ **本轮（Stage 38 配置层 / LUM-1134）收口**：`app.*` 覆盖表、Windows/WSL 默认集、
+   4 条 `tui.*` 覆盖、59 条旧名迁移、`keybindings.json` 加载与 `reload()` 全部落地并逐条测试。
+2. **keybindings 消费方（Stage 38 消费方）**：把 `app.rs` / `editor.rs` 里散落的硬编码和弦换成
+   `get_keybindings()`（含 `app.*` 动作分发）——同属 `app.rs` 串行区，排在 Stage 37 之后，可单独排一轮。
+3. **P3 `alt-screen-search.ts` / OSC-8 hyperlink / 块级 HTML**：都需要 `app.rs` 的 buffer / 渲染钩子，与第 2 项串行。
+4. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：同上（改 `app.rs` 选择 / 渲染路径），等前述项落地。
+5. **P2 `fetch` 全局 / P3 provider catalog**：维持原结论（要真实 HTTP 桥 / 无上游数据源，不猜）。
+6. **新增欠账（本轮）**：`cargo clippy --workspace ... -- -D warnings` 在集成分支上为红（`pi-telemetry` 2 条
+   + LUM-1133 记的若干既有 lint），建议单开一个 lint 清偿任务；`pi-rust/docs/PLAN.md` 仍停在 Stage 14，
+   与 `FEATURE_PI_RS_STATUS.md` 的事实源继续分叉。既有欠账（`settings.rs` / `tests/settings_list.rs` 的 rustfmt diff、
+   全仓 122 文件 rustfmt 漂移、`pi-agent-core/src/tools.rs:13` 并行工具路径、`pi-ai` registry 缺
+   `openai-codex` / `kimi-coding`）维持不动。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `bbcd46cc8`（3 文件），文档提交 `288ec3781`（本节 +112 行），合并提交 `7019cebea`
+  （第一父 `bbcd46cc8`、第二父 `e5f5585d7`）。
+- 推送是**快进、无额外 merge**：`git push origin 288ec3781:refs/heads/feature/pi.rs` →
+  `e5f5585d7..288ec3781`，`work/lum-1134` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `288ec3781274419040d7d3e69168ae01c490e21f`。（推送时 git 打了 `unable to get credential storage lock` 的
+  提示，但 ref 已更新，事上为成功。）
+- `git diff --numstat e5f5585d7 288ec3781`（本轮全部改动，4 个文件、**+1368 / − 0**）：
+  `pi-coding-agent/src/keybindings.rs` +762（新）、`pi-coding-agent/tests/keybindings.rs` +486（新）、
+  `pi-coding-agent/src/lib.rs` +8、本节文档 +112。**`pi-tui` / `pi-extensions` / `pi-session` / `pi-ai`
+  一个文件都不在其中。**
+- 合并态复测（第五节）跑的树与 `feature/pi.rs` 的新头 `288ec3781` 同源，数字即第五节所列。
+- 本轮**未派发任何子任务**（issue 明确要求）；issue 里的 `clippy ... -- -D warnings` 门的真实状态已在第五节
+  如实记录（基线即红，与本轮无关；本 crate `--no-deps` 零 warning）。
+
