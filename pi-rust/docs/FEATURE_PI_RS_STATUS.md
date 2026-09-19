@@ -2755,3 +2755,87 @@ This branch (`agent/devbox1/5b45b672209a`) was cut from
 `origin/feature/pi.rs` at `751bbd6e4` (Stage 15) and rebased onto
 `4218c8992` (LUM-1070 doc round) before pushing, so the branch
 fast-forwards `feature/pi.rs` — no merge commit, no force push.
+
+## LUM-1071 round — Stage 17 收口：`pi-evals` 合入 `feature/pi.rs`，Stage 18 启动
+
+本轮（autopilot，2026-09-19 05:00Z）盘点 frontier，并把 Stage 17 的第二半
+（LUM-1066 `pi-evals`）从它的工作分支收进 trunk，然后放行 Stage 18。
+
+### 盘点结果
+
+| 任务 | 状态 | 处置 |
+|------|------|------|
+| LUM-1065 `pi-chord` core | 已合入并推送（`c9aedd0d9`，`origin/feature/pi.rs` tip） | 无动作 |
+| LUM-1066 `pi-evals` | 代码已提交在 `agent/devbox1/5b45b672209a`（`2678e7763`），但**其 run 卡死**，分支未合入 | 本轮代合 |
+| LUM-1067 Stage 18 `pi-chord services` | backlog | 本轮 promote → todo（派发） |
+| LUM-1068 / LUM-1069 Stage 19 | backlog | 保持 park，等 Stage 18 |
+
+### LUM-1066 的 run 卡死
+
+`multica issue runs` 显示 LUM-1066 的 run `01a0b7e5-780a-…` 仍是 `running`
+（`completed_at: null`，起于 04:21Z），并且进程表里有：
+
+```
+git commit -n --no-gpg-sign -F …/worktrees/pi52/rebase-merge/message -e
+/usr/bin/editor …/worktrees/pi52/COMMIT_EDITMSG
+```
+
+即它的 `git rebase` 在最后一个提交处打开了交互式编辑器（`-e`，未设
+`GIT_EDITOR`），在没有 tty 的环境里永久阻塞。`worktrees/pi52/rebase-merge/`
+留下 `orig-head = 2678e7763`、`onto = 9ff5851a4`、空的 `git-rebase-todo`，
+说明 rebase 实际已走完，只差最后那次 commit 落盘。
+
+处置：**不打断那个进程**（它不是本 run 拥有的子进程），而是从已存在的
+提交 `2678e7763` 在 trunk 上重放：
+
+```
+git cherry-pick 2678e7763      # onto c9aedd0d9
+```
+
+冲突只有两处，均为并行新增导致：
+
+1. `pi-rust/Cargo.lock` — `pi-mono` 的依赖列表：两侧分别加了 `pi-chord`
+   （LUM-1065）与 `pi-evals`（LUM-1066），取并集。
+2. `pi-rust/docs/FEATURE_PI_RS_STATUS.md` — 两侧都在 LUM-1070 章节后追加，
+   保留 LUM-1064 / LUM-1065 章节，再串上 LUM-1066 章节。
+
+### 本轮改动
+
+| 文件 | 改动 |
+|------|------|
+| `crates/pi-evals/**`（21 文件） | LUM-1066 的离线评测 harness 全量落进 trunk（源码、测试、README、example runner） |
+| `crates/pi-mono/{Cargo.toml,src/lib.rs}` | `pi-evals` re-export，`cfg(not(target_arch = "wasm32"))` 门控 |
+| `Cargo.toml` / `Cargo.lock` / `README.md` / `.gitignore` | workspace member、依赖锁、crate 表、`.eval/` 忽略 |
+
+### 验证（native，`feature/pi.rs` + 本轮）
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings
+$ cargo test   --workspace                                  # 475 passed / 0 failed
+$ cargo clippy --workspace --all-targets -- -D warnings      # 0 warnings
+```
+
+475 vs LUM-1070 记录的 370：`+91` 来自 Stage 17 的 `pi-chord`，`+14`
+来自本轮合入的 `pi-evals`（`tests/evals.rs` + 单测）。三者相加与 370 一致。
+
+### 并发与派发
+
+- 本轮实际只有 1 个 run 占槽：卡死的 LUM-1066。合入其分支后 Stage 17 两个
+  任务都到达终态，Stage 17 barrier 满足。
+- 放行 **LUM-1067（Stage 18，`pi-chord services`）**：它是 Stage 19
+  server/client 的直接前置，且不与其他在跑任务共享文件。
+- **LUM-1068 / LUM-1069 继续 park**：两者的任务书都写明前置是 Stage 18，
+  并行派发会让它们在 `pi-chord` services 缺失的接口上返工。等 Stage 18
+  合入后再按 barrier 放行。
+- 上限 3 槽：`1（LUM-1066 卡死，未清） + 1（LUM-1067） = 2`，不超限。
+
+### 已知限制
+
+1. LUM-1066 的 `pi-evals` 分支 rebase 目标停在 `9ff5851a4`（缺 LUM-1065），
+   本轮改以 cherry-pick 到 `c9aedd0d9` 的方式收口；`agent/devbox1/5b45b672209a`
+   保持原样未动，内容已在 trunk，无需再合。
+2. LUM-1066 的 run 仍显示 `running`，需要平台侧超时或人工清理；其交付物已
+   由本轮落地，不阻塞后续。
+3. `wasm32-unknown-unknown` 目标在当前环境未安装（`rustup target list
+   --installed` 为空），因此本轮只做了 `cfg` 门控的静态检查，未实跑 wasm
+   build。
