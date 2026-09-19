@@ -79,6 +79,12 @@ serde-wasm-bindgen = "0.6"
 getrandom = { version = "0.2", features = ["js"] }
 
 # Misc
+# Unicode word boundaries — used by `pi-tui` word navigation
+# (`packages/tui/src/word-navigation.ts` ports to UAX #29 boundaries).
+# This crate is already in the dependency graph (pulled in by `ratatui`
+# via `unicode-truncate`), so pinning it directly adds no new package to
+# the lockfile and keeps `--offline` builds working.
+unicode-segmentation = "=1.13.3"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.3", features = ["serde"] }
