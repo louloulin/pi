@@ -3,23 +3,27 @@
 //! and `prepare_next_turn` hook points.
 //!
 //! Stage 2 keeps the surface tight: the loop streams a single assistant
-//! turn per iteration, executes inline tool calls with stubbed results
-//! (Stage 3 wires the real `BeforeToolCall` / `AfterToolCall` adapter), and
-//! forwards `should_stop_after_turn` / `prepare_next_turn` decisions to
-//! the user-registered hooks. Stage 4 fills in queue draining and
-//! steering / follow-up message sources.
+//! turn per iteration, executes inline tool calls through the registered
+//! [`ToolExecutor`](crate::tools::ToolExecutor) (falling back to a stub when
+//! none is configured), and forwards `should_stop_after_turn` /
+//! `prepare_next_turn` decisions to the user-registered hooks. Stage 4 fills
+//! in queue draining and steering / follow-up message sources.
 
 use futures::StreamExt;
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{
-    AssistantMessage, AssistantMessageEvent, Context as AgentContext, Message, Role,
+    AssistantMessage, AssistantMessageEvent, Content, Context as AgentContext, Message, Role,
+    ToolCall, ToolResult,
 };
+use std::sync::Arc;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 use crate::hooks::{
     AgentHookAdapter, AgentLoopTurnUpdate, PrepareNextTurnContext, ShouldStopAfterTurnContext,
 };
 use crate::state::{AgentConfig, AgentState};
+use crate::tools::ToolExecutor;
 
 /// Errors the agent loop can surface to its caller.
 #[derive(Debug, Error)]
@@ -77,6 +81,7 @@ pub struct AgentLoop {
     state: AgentState,
     hooks: AgentHookAdapter,
     follow_up: Vec<Message>,
+    signal: CancellationToken,
 }
 
 impl AgentLoop {
@@ -88,6 +93,7 @@ impl AgentLoop {
             state,
             hooks,
             follow_up: Vec::new(),
+            signal: CancellationToken::new(),
         }
     }
 
@@ -123,6 +129,17 @@ impl AgentLoop {
     /// in mid-run.
     pub fn hooks_mut(&mut self) -> &mut AgentHookAdapter {
         &mut self.hooks
+    }
+
+    /// Cooperative cancellation handle handed to tool executors.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.signal.clone()
+    }
+
+    /// Replace the cancellation handle used for tool execution. A caller can
+    /// cancel the returned token to ask the active executor to stop.
+    pub fn set_cancellation_token(&mut self, signal: CancellationToken) {
+        self.signal = signal;
     }
 
     /// Add a user message to the log. Real draining happens during
@@ -165,7 +182,7 @@ impl AgentLoop {
         let mut current_context: AgentContext = AgentContext {
             system_prompt: self.state.system_prompt.clone(),
             messages: self.state.messages.clone(),
-            tools: Vec::new(),
+            tools: self.config.tool_definitions(),
         };
         let mut loop_config: LoopConfig = (&self.config).into();
 
@@ -197,6 +214,12 @@ impl AgentLoop {
                 }
 
                 // Step 4 — stream a single assistant response.
+                // `prepare_next_turn` may have replaced the context
+                // wholesale; re-advertise the registered tools unless the
+                // hook supplied its own list.
+                if current_context.tools.is_empty() {
+                    current_context.tools = self.config.tool_definitions();
+                }
                 let assistant_message = stream_assistant_response(
                     &self.config.stream_fn,
                     &current_context,
@@ -212,11 +235,16 @@ impl AgentLoop {
                 new_messages.push(assistant_log_message);
 
                 // Step 5 — execute any tool calls emitted by the model.
-                // Stage 2 uses a stub executor; the Stage 3 surface wires
-                // `BeforeToolCall` / `AfterToolCall` here.
-                let (tool_results, terminate) =
-                    execute_tool_calls(&current_context, &assistant_message).await?;
-                let mut has_errors = false;
+                // `BeforeToolCall` may block a call, the executor may fail,
+                // and `AfterToolCall` may rewrite the result — none of which
+                // aborts the turn.
+                let (tool_results, continue_loop) = execute_tool_calls(
+                    self.config.tool_executor.as_ref(),
+                    &self.hooks,
+                    &assistant_message,
+                    &self.signal,
+                )
+                .await;
                 let mut tool_result_messages: Vec<Message> = Vec::with_capacity(tool_results.len());
                 for result in tool_results {
                     let msg = Message {
@@ -226,12 +254,9 @@ impl AgentLoop {
                     };
                     current_context.messages.push(msg.clone());
                     new_messages.push(msg.clone());
-                    if result.is_error {
-                        has_errors = true;
-                    }
                     tool_result_messages.push(msg);
                 }
-                has_more_tool_calls = terminate && !has_errors;
+                has_more_tool_calls = continue_loop;
 
                 let outcome = TurnOutcome {
                     message: assistant_message.clone(),
@@ -393,44 +418,83 @@ async fn stream_assistant_response(
     })
 }
 
-/// Stub tool executor — Stage 3 wires the real adapter that calls
-/// `BeforeToolCall` / `AfterToolCall` and dispatches to registered tools.
-/// For now we return a synthetic text result so the loop can keep flowing.
+/// Execute the tool calls emitted by an assistant message.
 ///
-/// Returns `(results, continue_loop)`. `continue_loop` is `true` when the
-/// assistant message contained tool calls that did not all set
-/// `terminate = true`, signalling the inner loop to stream another
-/// assistant turn. When the assistant message had no tool calls the
-/// function returns `(vec![], false)` so the inner loop exits and the
-/// outer loop can poll for follow-ups.
+/// Each call runs in source order. For every call the loop:
+///
+/// 1. asks the `BeforeToolCall` hook for a decision — a `Block` decision
+///    turns into an `is_error: true` result without executing anything;
+/// 2. dispatches to the registered [`ToolExecutor`](crate::tools::ToolExecutor)
+///    — or, when none is registered, keeps the Stage 2 stub behaviour so
+///    callers that predate tool execution still work;
+/// 3. asks the `AfterToolCall` hook to rewrite the result.
+///
+/// Tool failures never abort the turn: they surface as `is_error: true`
+/// [`ToolResult`]s so the model can react to them. `continue_loop` mirrors
+/// the TypeScript loop's `!terminate` — it is `true` unless *every* tool in
+/// the batch requested termination through `BeforeToolCallDecision`.
 async fn execute_tool_calls(
-    _context: &AgentContext,
+    executor: Option<&Arc<dyn ToolExecutor>>,
+    hooks: &AgentHookAdapter,
     assistant_message: &AssistantMessage,
-) -> Result<(Vec<pi_protocol::ToolResult>, bool), AgentError> {
-    let tool_calls: Vec<&pi_protocol::ToolCall> = assistant_message
+    signal: &CancellationToken,
+) -> (Vec<ToolResult>, bool) {
+    let tool_calls: Vec<&ToolCall> = assistant_message
         .content
         .iter()
         .filter_map(|c| match c {
-            pi_protocol::Content::ToolCall(call) => Some(call),
+            Content::ToolCall(call) => Some(call),
             _ => None,
         })
         .collect();
 
     if tool_calls.is_empty() {
-        return Ok((Vec::new(), false));
+        return (Vec::new(), false);
     }
 
+    let mut all_terminate = true;
     let mut results = Vec::with_capacity(tool_calls.len());
     for call in tool_calls {
-        results.push(pi_protocol::ToolResult {
-            tool_call_id: call.id.clone(),
-            content: Box::new(pi_protocol::Content::text(format!(
-                "(stub) executed {}",
-                call.name
-            ))),
-            is_error: false,
-            details: None,
-        });
+        let decision = hooks.invoke_before_tool_call(call).await;
+        all_terminate &= decision.terminate;
+
+        if decision.block {
+            let reason = decision
+                .reason
+                .unwrap_or_else(|| "blocked by before_tool_call".to_string());
+            results.push(ToolResult {
+                tool_call_id: call.id.clone(),
+                content: Box::new(Content::text(format!("tool call blocked: {reason}"))),
+                is_error: true,
+                details: None,
+            });
+            continue;
+        }
+
+        let mut result = match executor {
+            Some(executor) => match executor.execute(call, signal.clone()).await {
+                Ok(result) => result,
+                // Executor-level failures become error results; the turn
+                // continues so the model can correct course.
+                Err(err) => ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content: Box::new(Content::text(err.to_string())),
+                    is_error: true,
+                    details: None,
+                },
+            },
+            // Backward compatibility: no executor registered, so keep the
+            // Stage 2 stub result the existing loop tests assert on.
+            None => ToolResult {
+                tool_call_id: call.id.clone(),
+                content: Box::new(Content::text(format!("(stub) executed {}", call.name))),
+                is_error: false,
+                details: None,
+            },
+        };
+        hooks.invoke_after_tool_call(&mut result).await;
+        results.push(result);
     }
-    Ok((results, true))
+
+    (results, !all_terminate)
 }
