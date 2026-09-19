@@ -8853,3 +8853,25 @@ POST body 的 UTF-8 往返、预中止信号、以及**飞行中中止**（用 `
 
 并发口径维持：上限 3 路；`pi-extensions/src/host.rs`、`pi-tui/src/app.rs`、`docs/FEATURE_PI_RS_STATUS.md`
 各自一次只允许一路在写（本轮只写前者与本文档）。
+
+**补记（推送后回填真实哈希）：**
+
+- 代码提交 `fcec9519f`（7 文件）、rustfmt 收尾 `d9ab3c001`（2 文件）、合并提交 `1f47a80bf`
+  （第一父 `fcec9519f`、第二父 `c880702e2`）、本节文档提交 `516a20e6c`（+119 行）。
+- 推送是**快进、无额外 merge**：`git push origin 516a20e6c:refs/heads/feature/pi.rs` →
+  `1f47a80bf..516a20e6c`，`work/lum-1135` 作为留档分支一并推送（同哈希）。`git ls-remote` 复查两者都是
+  `516a20e6cd4271288a46355ce9191584aa22bb0d`。（推送时 git 打了 `unable to get credential storage lock` 的
+  提示，但 ref 已更新，事上为成功。）
+- `git diff --numstat c880702e2 516a20e6c`（本轮全部改动，8 个文件、**+1144 / − 12**）：
+  `pi-extensions/runtime/pi-ext-shim.mjs` +306（新）、`pi-extensions/tests/fetch.rs` +395（新）、
+  `pi-extensions/src/host.rs` +264/−10、`pi-extensions/docs/EXTENSIONS.md` +53、
+  `pi-extensions/docs/NODE_BUILTINS.md` +2/−2、`pi-extensions/Cargo.toml` +4、`Cargo.lock` +1、
+  本节文档 +119。**`pi-tui` / `pi-coding-agent` / `pi-session` / `pi-ai` 一个文件都不在其中。**
+- 合并态复测（第四节）跑的树与 `feature/pi.rs` 的新头 `516a20e6c` 同源，数字即第四节所列。
+- 本轮**派发 1 个子任务**（接第 3 路并发位）：
+  `[Stage 39] pi-tui/pi-coding-agent: keybindings 消费方（app.rs/editor.rs 硬编码和弦 → get_keybindings() + app.* 动作分发）`
+  = **LUM-1137**（`01a0bb2c-62ee-74f0-9891-1157874e81d5`，priority `high`，`--status todo`，创建即起跑）。
+  另记 1 个 **backlog** 子任务（不占并发槽，等有空位再提升为 `todo`）：
+  `[Tech-debt] 清偿 workspace 质量门：cargo fmt 122 文件漂移 + clippy 8 处既有 lint`
+  = **LUM-1138**（`01a0bb2c-705a-7986-8caa-35e2b6de1fd7`，priority `medium`）。
+  派发后 `multica daemon status` 报 `running_task_count = 3`（满额）。
