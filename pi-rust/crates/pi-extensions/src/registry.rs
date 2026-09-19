@@ -30,6 +30,17 @@ impl ExtensionRegistry {
         self.by_id.contains_key(id)
     }
 
+    /// Replace the tool list of one extension, leaving every other
+    /// entry (and its tools) untouched.
+    ///
+    /// Loading a second extension must not drop the first one's tools,
+    /// so [`JsExtensionHost::load`](crate::JsExtensionHost::load) folds
+    /// each load's registrations into its own id instead of rebuilding
+    /// the whole registry.
+    pub fn set_tools(&mut self, id: &str, tools: Vec<ToolDefinition>) {
+        self.by_id.entry(id.to_string()).or_default().tools = tools;
+    }
+
     /// Iterator over all registered tools (across extensions).
     pub fn tools(&self) -> impl Iterator<Item = &ToolDefinition> {
         self.by_id.values().flat_map(|c| c.tools.iter())

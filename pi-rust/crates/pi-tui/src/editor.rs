@@ -35,7 +35,10 @@
 //!   destructive edits, and consecutive word characters coalesce into a
 //!   single undo unit (fish-style, mirroring upstream `insertCharacter`):
 //!   one undo removes a whole typed word, while every space stays
-//!   separately undoable. Submitting (`clear`) drops the stack.
+//!   separately undoable. Submitting (`clear`) drops the stack. Legacy
+//!   terminals send one `0x1F` byte for the chord, which upstream
+//!   normalizes to `ctrl+-` (`keys.ts:1277`) and crossterm reports as
+//!   `Ctrl+7`, so `Ctrl+7` / `Ctrl+_` are accepted as aliases of it.
 //!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
@@ -608,11 +611,18 @@ impl Editor {
                 KeyCode::Left => return self.move_word_left(),
                 KeyCode::Right => return self.move_word_right(),
                 KeyCode::Char('y') | KeyCode::Char('Y') => return self.yank(),
-                // `tui.editor.undo` is bound to `ctrl+-`. Kitty-protocol
-                // terminals send the CSI-u sequence for `-`, which lands
-                // here as `Ctrl+-`; `Ctrl+_` is accepted too because the
-                // legacy byte for both is `0x1F`.
-                KeyCode::Char('-') | KeyCode::Char('_') => return self.undo(),
+                // `tui.editor.undo` is bound to `ctrl+-`. Upstream
+                // normalizes the legacy `0x1F` control byte to `ctrl+-`
+                // (`packages/tui/src/keys.ts:1277`); crossterm instead
+                // decodes that byte as `Ctrl+7` (`0x1C..=0x1F` map to
+                // `Ctrl+4..=Ctrl+7`, `event/sys/unix/parse.rs`), while
+                // Kitty-protocol terminals deliver `Ctrl+-` directly and
+                // some frontends report `Ctrl+_` (the ASCII name of the
+                // same byte). Accept all three spellings so the binding
+                // works with and without the Kitty keyboard protocol.
+                KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('7') => {
+                    return self.undo();
+                }
                 _ => return EditorAction::None,
             }
         }
@@ -1300,6 +1310,17 @@ mod tests {
         let mut ed = Editor::new();
         type_chars(&mut ed, "ab");
         let action = ed.handle_key(Key::new(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(action, EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn ctrl_seven_is_the_legacy_undo_alias() {
+        // Without the Kitty keyboard protocol a terminal sends `0x1F`
+        // for `Ctrl+-`, and crossterm turns that byte into `Ctrl+7`.
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "ab");
+        let action = ed.handle_key(Key::new(KeyCode::Char('7'), KeyModifiers::CONTROL));
         assert_eq!(action, EditorAction::Changed);
         assert_eq!(ed.text(), "");
     }

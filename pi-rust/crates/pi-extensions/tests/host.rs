@@ -75,6 +75,47 @@ fn host_collects_tool_registration_via_shim() {
 }
 
 #[test]
+fn loading_a_second_extension_keeps_the_first_extensions_tools() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let first = r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "first",
+                    label: "First",
+                    description: "first tool",
+                    parameters: { type: "object" },
+                    execute: function () { return { content: [] }; },
+                });
+            };
+        "#;
+        let second = r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "second",
+                    label: "Second",
+                    description: "second tool",
+                    parameters: { type: "object" },
+                    execute: function () { return { content: [] }; },
+                });
+            };
+        "#;
+        host.load(entry("first_ext"), first).await.expect("load first");
+        host.load(entry("second_ext"), second)
+            .await
+            .expect("load second");
+
+        let names = host.registered_tool_names().await;
+        assert_eq!(
+            names,
+            vec!["first".to_string(), "second".to_string()],
+            "loading a second extension must not drop the first one's tools"
+        );
+    });
+}
+
+#[test]
 fn host_collects_tool_prompt_contributions() {
     let runtime = rt();
     runtime.block_on(async {
