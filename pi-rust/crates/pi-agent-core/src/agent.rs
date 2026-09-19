@@ -14,6 +14,7 @@ use crate::events::{AgentEvent, AssistantMessageUpdate};
 use crate::hooks::{AgentHookAdapter, PrepareHookFn, ShouldStopHookFn};
 use crate::queue::{MessageQueue, QueueMode};
 use crate::state::{AgentConfig, AgentState};
+use crate::tools::ToolExecutor;
 
 /// User-facing options for constructing an [`Agent`].
 ///
@@ -33,6 +34,9 @@ pub struct AgentOptions {
     /// Optional `prepare_next_turn` callback. When unset, the loop uses
     /// its default (`None`).
     pub prepare_next_turn: Option<PrepareHookFn>,
+    /// Optional tool executor. When set, the loop advertises its definitions
+    /// to the model and dispatches tool calls to it.
+    pub tool_executor: Option<Arc<dyn ToolExecutor>>,
 }
 
 impl std::fmt::Debug for AgentOptions {
@@ -49,6 +53,10 @@ impl std::fmt::Debug for AgentOptions {
                 "prepare_next_turn",
                 &self.prepare_next_turn.as_ref().map(|_| "…"),
             )
+            .field(
+                "tool_executor",
+                &self.tool_executor.as_ref().map(|_| "…"),
+            )
             .finish()
     }
 }
@@ -62,6 +70,7 @@ impl AgentOptions {
             system_prompt: system_prompt.into(),
             should_stop_after_turn: None,
             prepare_next_turn: None,
+            tool_executor: None,
         }
     }
 
@@ -74,6 +83,12 @@ impl AgentOptions {
     /// Builder-style setter for [`prepare_next_turn`](Self::prepare_next_turn).
     pub fn with_prepare_next_turn(mut self, hook: PrepareHookFn) -> Self {
         self.prepare_next_turn = Some(hook);
+        self
+    }
+
+    /// Builder-style setter for [`tool_executor`](Self::tool_executor).
+    pub fn with_tool_executor(mut self, executor: Arc<dyn ToolExecutor>) -> Self {
+        self.tool_executor = Some(executor);
         self
     }
 
@@ -113,6 +128,7 @@ impl Agent {
         let config = AgentConfig {
             stream_fn: options.stream_fn.clone(),
             model: options.model.clone(),
+            tool_executor: options.tool_executor.clone(),
         };
         let hooks = options.hook_adapter();
         Self {

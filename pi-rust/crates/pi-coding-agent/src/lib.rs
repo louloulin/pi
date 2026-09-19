@@ -28,6 +28,7 @@ pub mod interactive;
 pub mod print_mode;
 pub mod session_log;
 pub mod text_fallback;
+pub mod tool_executor;
 pub mod tools;
 
 pub use commands::resume::{list_resumable, resolve as resolve_resume, SessionRef};
@@ -38,3 +39,4 @@ pub use file_processor::{
 pub use print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions, PrintModeResult,
 };
+pub use tool_executor::{default_executor, BuiltinToolExecutor};
