@@ -82,11 +82,13 @@ pub use file_processor::{
     expand_prompt, read_stdin_if_piped, ExpandedPrompt, FileError, MAX_FILE_BYTES,
 };
 pub use keybindings::{
-    app_default_keybindings, is_legacy_keybinding_name, load_from_file, load_from_file_with_table,
-    load_raw_config, merged_definitions, migrate_keybinding_name, migrate_keybindings_config,
+    app_default_keybindings, install_keybindings, install_keybindings_from,
+    is_legacy_keybinding_name, load_from_file, load_from_file_with_table, load_raw_config,
+    merged_definitions, migrate_keybinding_name, migrate_keybindings_config,
     migrate_keybindings_config_with_table, order_keybindings_config, process_env,
-    to_keybindings_config, windows_keybindings, Env, KeybindingsManager, Platform,
-    RawKeybindingsConfig, APP_KEYBINDING_IDS, KEYBINDINGS_FILE_NAME, KEYBINDING_NAME_MIGRATIONS,
+    reload_keybindings, to_keybindings_config, windows_keybindings, Env, KeybindingsManager,
+    Platform, RawKeybindingsConfig, APP_KEYBINDING_IDS, KEYBINDINGS_FILE_NAME,
+    KEYBINDING_NAME_MIGRATIONS,
 };
 pub use print_mode::{
     run_print_mode, OutputFormat, PrintModeError, PrintModeOptions, PrintModeResult,

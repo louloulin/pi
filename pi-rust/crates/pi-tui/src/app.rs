@@ -51,6 +51,42 @@
 //!   viewport moving. [`App::advance_selection_autoscroll`] is public so
 //!   tests can step the beat deterministically.
 //!
+//! # Keybindings
+//!
+//! The global chords in [`App::step_key`] are resolved through the
+//! process-wide registry ([`crate::keybindings::get_keybindings`]), so an
+//! installed override (`pi-coding-agent`'s `KeybindingsManager::create`)
+//! reaches the App. With nothing installed the registry serves the
+//! defaults, which are the chords the hardcoded judgements spelled out.
+//!
+//! Consumed here:
+//!
+//! * `app.interrupt` (`escape`) — cancel the in-flight turn while busy.
+//! * `app.clear` (`ctrl+c`) — cancel while busy, otherwise exit, this
+//!   port's existing reading of upstream's `app.clear` + `app.exit`.
+//! * `tui.altScreen.pageUp` / `pageDown` (`pageUp` / `pageDown`) and
+//!   `tui.altScreen.top` / `bottom` (`home` / `end`) — viewport scrolling.
+//! * `tui.altScreen.search` / `searchClose` / `searchNext` /
+//!   `searchPrevious` — the transcript search overlay (see below).
+//!
+//! `app.exit` (`ctrl+d`) is consumed by [`crate::Editor`], which returns
+//! [`EditorAction::Eof`] on an empty buffer and falls through to
+//! `tui.editor.deleteCharForward` otherwise (upstream `CustomEditor` does
+//! the same). The remaining `app.*` / `tui.altScreen.*` ids in the merged
+//! table have **no consumer** in this port yet and are deliberately not
+//! implemented here: `app.suspend`, `app.thinking.cycle`,
+//! `app.thinking.save`, `app.model.cycleForward` / `cycleBackward` /
+//! `select`, `app.tools.expand`, `app.thinking.toggle`, the `app.session.*`,
+//! `app.tree.*`, `app.models.*`, `app.message.*`, `app.clipboard.*` and
+//! `app.editor.*` families, and `tui.altScreen.halfPageUp` / `halfPageDown`
+//! / `lineUp` / `lineDown` / `previousPrompt` / `nextPrompt`.
+//!
+//! One deliberate deviation: upstream's `app.model.select` also defaults to
+//! `ctrl+l`, but there it means "open the model selector"
+//! (`packages/coding-agent/src/core/keybindings.ts:101`). This port keeps
+//! `Ctrl+L` hardcoded as "clear the transcript", so the chord is not routed
+//! through `app.model.select`.
+//!
 //! # Transcript search
 //!
 //! `Ctrl+Shift+F` opens an in-transcript search overlay — the port of
@@ -107,7 +143,7 @@ use crate::editor::EditorAction;
 use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
-use crate::keybindings::get_keybindings;
+use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
 use crate::message::{MessageItem, MessageView};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
@@ -1183,6 +1219,22 @@ impl App {
         self.step_key(key)
     }
 
+    /// True when `key` triggers an `app.*` id.
+    ///
+    /// The `app.*` ids belong to the coding-agent config layer, so a bare
+    /// `pi-tui` registry (only the `tui.*` ids) leaves them unknown and the
+    /// port's built-in chords stand in — the pre-keybinding behaviour. A
+    /// table that defines the id (even deliberately unbound) takes over,
+    /// so rebinding works.
+    fn matches_app_key(
+        kb: &KeybindingsManager,
+        event: &InputEvent,
+        keybinding: &str,
+        builtin: &[&str],
+    ) -> bool {
+        matches_with_fallback(kb, event, keybinding, builtin)
+    }
+
     /// Process a single [`Key`]. Public so tests can step the App
     /// with explicit keys.
     pub fn step_key(&mut self, key: Key) -> StepOutcome {
@@ -1195,6 +1247,12 @@ impl App {
         if self.settings.is_some() {
             return self.step_settings(key);
         }
+        // Global keys. Resolved through the keybinding registry so an
+        // installed override reaches the App; with nothing installed the
+        // registry serves the defaults, so the behaviour below is the
+        // pre-keybinding behaviour (see the module docs).
+        let kb = get_keybindings();
+        let event = InputEvent::Key(key);
         // The transcript search overlay owns the keyboard while it is open,
         // except for the chords the viewport keeps for itself
         // (`shouldDeferViewportInputToOverlay`,
@@ -1209,97 +1267,76 @@ impl App {
         // overlay itself consumes the chord above (upstream checks the chord
         // before it checks whether the overlay holds focus,
         // `packages/tui/src/tui-alt-screen.ts:705-708`).
-        if get_keybindings().matches(&InputEvent::Key(key), "tui.altScreen.search") {
+        if kb.matches(&event, "tui.altScreen.search") {
             return if self.open_search() {
                 StepOutcome::Redraw
             } else {
                 StepOutcome::Idle
             };
         }
-        // Global keys first.
-        match key {
-            // Esc cancels the in-flight turn, otherwise dismisses
-            // selectors (handled above) or is a no-op.
-            Key {
-                code: KeyCode::Esc,
-                modifiers,
-            } if modifiers.is_empty() && self.is_busy() => {
+        // `app.interrupt` (`Escape`): cancel the in-flight turn. When the
+        // App is idle the chord falls through to the prompt, which is the
+        // pre-keybinding behaviour (selectors/settings got the key above).
+        if Self::matches_app_key(&kb, &event, "app.interrupt", &["escape"]) && self.is_busy() {
+            self.cancel();
+            return StepOutcome::Redraw;
+        }
+        // `app.clear` (`Ctrl+C`).
+        if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
+            if self.is_busy() {
                 self.cancel();
                 return StepOutcome::Redraw;
             }
-            // Global Ctrl+C.
-            Key {
-                code: KeyCode::Char('c'),
-                modifiers,
-            } if modifiers == KeyModifiers::CONTROL => {
-                if self.is_busy() {
-                    self.cancel();
-                    return StepOutcome::Redraw;
-                }
-                self.exit_requested = true;
-                return StepOutcome::Exit;
-            }
-            // Global Ctrl+L clears the screen.
-            Key {
-                code: KeyCode::Char('l'),
-                modifiers,
-            } if modifiers == KeyModifiers::CONTROL => {
-                self.messages.clear();
-                // The selected line indices point into the transcript that
-                // just disappeared.
-                self.clear_selection();
-                return StepOutcome::Redraw;
-            }
-            // Fullscreen chat-log scrolling. Upstream deliberately shadows
-            // the bare editor bindings for these chords in fullscreen mode
-            // (`packages/tui/src/keybindings.ts:159-165,208-209`: "These
-            // intentionally shadow the unmodified editor bindings in
-            // fullscreen mode"); `Ctrl+A` / `Ctrl+E` still reach the editor
-            // for start / end of line.
-            Key {
-                code: KeyCode::PageUp,
-                modifiers,
-            } if modifiers.is_empty() => {
-                let page = self.message_page();
-                return if self.scroll_viewport_up(page) {
-                    StepOutcome::Redraw
-                } else {
-                    StepOutcome::Idle
-                };
-            }
-            Key {
-                code: KeyCode::PageDown,
-                modifiers,
-            } if modifiers.is_empty() => {
-                let page = self.message_page();
-                return if self.scroll_viewport_down(page) {
-                    StepOutcome::Redraw
-                } else {
-                    StepOutcome::Idle
-                };
-            }
-            // `tui.altScreen.top` / `tui.altScreen.bottom`.
-            Key {
-                code: KeyCode::Home,
-                modifiers,
-            } if modifiers.is_empty() => {
-                return if self.scroll_viewport_to_top() {
-                    StepOutcome::Redraw
-                } else {
-                    StepOutcome::Idle
-                };
-            }
-            Key {
-                code: KeyCode::End,
-                modifiers,
-            } if modifiers.is_empty() => {
-                return if self.scroll_viewport_to_bottom() {
-                    StepOutcome::Redraw
-                } else {
-                    StepOutcome::Idle
-                };
-            }
-            _ => {}
+            self.exit_requested = true;
+            return StepOutcome::Exit;
+        }
+        // `Ctrl+L` stays hardcoded: upstream also defaults
+        // `app.model.select` to `ctrl+l`, but its meaning is "open the
+        // model selector", not "clear the transcript" (see the module
+        // docs).
+        if key == Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL) {
+            self.messages.clear();
+            // The selected line indices point into the transcript that
+            // just disappeared.
+            self.clear_selection();
+            return StepOutcome::Redraw;
+        }
+        // Fullscreen chat-log scrolling. Upstream deliberately shadows
+        // the bare editor bindings for these chords in fullscreen mode
+        // (`packages/tui/src/keybindings.ts:159-165,208-209`: "These
+        // intentionally shadow the unmodified editor bindings in
+        // fullscreen mode"); `Ctrl+A` / `Ctrl+E` still reach the editor
+        // for start / end of line.
+        if kb.matches(&event, "tui.altScreen.pageUp") {
+            let page = self.message_page();
+            return if self.scroll_viewport_up(page) {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        if kb.matches(&event, "tui.altScreen.pageDown") {
+            let page = self.message_page();
+            return if self.scroll_viewport_down(page) {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        // `tui.altScreen.top` / `tui.altScreen.bottom`.
+        if kb.matches(&event, "tui.altScreen.top") {
+            return if self.scroll_viewport_to_top() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        if kb.matches(&event, "tui.altScreen.bottom") {
+            return if self.scroll_viewport_to_bottom() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
         }
 
         match self.prompt.handle_key(key) {

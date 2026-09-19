@@ -1,5 +1,13 @@
 //! Single-line editor component with prompt history.
 //!
+//! Every chord below is resolved through the process-wide keybinding
+//! registry ([`crate::keybindings::get_keybindings`]) with
+//! `KeybindingsManager::matches`, so a user override installed with
+//! `set_keybindings` (see `pi-coding-agent`'s `keybindings` layer) reaches
+//! the editor. With nothing installed the registry serves
+//! [`crate::keybindings::tui_default_keybindings`], i.e. the chords the
+//! hardcoded judgements used to spell out — the default path is unchanged.
+//!
 //! Mirrors the prompt-history portion of `packages/tui/components/editor.ts`:
 //!
 //! * Plain character keys append to the buffer at the cursor.
@@ -17,12 +25,40 @@
 //!   first `Up` saves the current draft so `Down` past the bottom of
 //!   the history restores it.
 //! * `Enter` returns [`EditorAction::Submit`] with the buffer text.
-//! * `Ctrl+C` returns [`EditorAction::Interrupt`].
-//! * `Ctrl+D` is `tui.editor.deleteCharForward`'s second default
-//!   binding (`packages/tui/src/keybindings.ts:121`). On an empty
-//!   buffer it returns [`EditorAction::Eof`] so the caller can exit; on
-//!   a non-empty buffer it deletes the character at the cursor, exactly
-//!   like upstream's `custom-editor.ts:117` fall-through.
+//! * `Ctrl+C` is `tui.input.copy`. This editor has no selection model, so
+//!   there is never text to copy: the chord returns
+//!   [`EditorAction::Interrupt`], handing it back to the caller (the `App`
+//!   reaches `app.clear` / `app.interrupt` from there), exactly like
+//!   upstream `Editor.handleInput` returning immediately for
+//!   `tui.input.copy` and `CustomEditor` turning it into an app action.
+//! * `Ctrl+D` is `app.exit`: on an empty buffer it returns
+//!   [`EditorAction::Eof`] so the caller can exit; on a non-empty buffer it
+//!   falls through to `tui.editor.deleteCharForward`'s second default
+//!   binding (`packages/tui/src/keybindings.ts:121`), exactly like
+//!   upstream's `custom-editor.ts:117` fall-through. `app.exit` lives in
+//!   the coding-agent's `app.*` table, so a bare `pi-tui` registry does not
+//!   contain the id and the built-in `Ctrl+D` chord stands in for it.
+//!
+//! Chords that have **no consumer** in this single-line port, listed here
+//! rather than silently implemented:
+//!
+//! * `tui.input.newLine` (`shift+enter`, `ctrl+j`): the Rust editor is
+//!   single-line, so there is nowhere to insert a newline. `Shift+Enter`
+//!   therefore keeps its pre-keybinding behaviour and submits through the
+//!   `Enter` branch; `Ctrl+J` stays a no-op. `tui.input.submit` (`enter`)
+//!   is resolved first, so rebinding it changes the submit chord.
+//! * `tui.editor.pageUp` / `tui.editor.pageDown`: the viewport belongs to
+//!   the `App`, which consumes `tui.altScreen.pageUp` / `pageDown` before
+//!   the prompt sees the key, so the editor never scrolls.
+//! * `tui.editor.historyPrevious` / `historyNext`: unbound by default;
+//!   `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) drive the
+//!   single-line history instead.
+//!
+//! Legacy control-byte spellings that `keys.ts` normalises before matching
+//! (crossterm decodes them differently) are still accepted: `Ctrl+5` /
+//! `Ctrl+Alt+5` for `ctrl+]` / `ctrl+alt+]` and `Ctrl+7` / `Ctrl+_` for
+//! `ctrl+-`, but only while the id's resolved chords actually contain the
+//! canonical spelling.
 //! * `Ctrl+U` / `Ctrl+K` kill to the start / end of the buffer and push
 //!   the killed text onto the [`KillRing`]. Because the Rust editor is
 //!   single-line, "line start" and "line end" are the buffer corners
@@ -77,6 +113,7 @@ use std::sync::Arc;
 
 use crate::autocomplete::{AutocompleteItem, AutocompleteProvider};
 use crate::input::{InputEvent, Key, KeyCode};
+use crate::keybindings::{get_keybindings, KeybindingsManager};
 use crate::kill_ring::{KillDirection, KillRing};
 use crate::undo_stack::UndoStack;
 use crate::word_navigation::{find_word_backward, find_word_forward};
@@ -991,8 +1028,18 @@ impl Editor {
     /// and `Ctrl+Alt+]` (`tui.editor.jumpBackward`), together with the
     /// legacy `Ctrl+5` / `Ctrl+Alt+5` spellings crossterm produces for
     /// the `0x1D` / `ESC 0x1D` byte sequences.
-    fn is_jump_key(key: &Key) -> bool {
-        key.modifiers.control && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+    fn is_jump_binding(kb: &KeybindingsManager, key: &Key) -> bool {
+        Self::matches_binding(kb, key, "tui.editor.jumpForward")
+            || Self::matches_binding(kb, key, "tui.editor.jumpBackward")
+    }
+
+    /// True when `key` triggers `keybinding` under the installed table.
+    ///
+    /// The registry's [`KeybindingsManager::matches`] is the primary
+    /// judgement; the legacy control-byte spellings crossterm derives are
+    /// layered on top by [`legacy_key_spelling`].
+    fn matches_binding(kb: &KeybindingsManager, key: &Key, keybinding: &str) -> bool {
+        kb.matches(&InputEvent::Key(*key), keybinding) || legacy_key_spelling(kb, key, keybinding)
     }
 
     /// Move the cursor to the next (`Forward`) or previous (`Backward`)
@@ -1037,15 +1084,32 @@ impl Editor {
         self.handle_key(key)
     }
 
+    /// True when `key` triggers `app.exit` (`Ctrl+D`).
+    ///
+    /// `app.exit` belongs to the coding-agent's `app.*` table, so a bare
+    /// `pi-tui` registry does not contain it; the port's built-in chord then
+    /// stands in, keeping the standalone editor's behaviour (and its tests)
+    /// intact.
+    fn matches_app_exit(kb: &KeybindingsManager, key: &Key) -> bool {
+        crate::keybindings::matches_with_fallback(
+            kb,
+            &InputEvent::Key(*key),
+            "app.exit",
+            &["ctrl+d"],
+        )
+    }
+
     /// Process a key.
     pub fn handle_key(&mut self, key: Key) -> EditorAction {
+        let kb = get_keybindings();
+
         // An armed jump consumes this key: a printable character is the
         // target, the hotkey again (or anything that is not a plain
         // printable character) cancels the mode. Cancelling keys fall
         // through to their normal handling, mirroring upstream
         // `Editor.handleInput`.
         if let Some(direction) = self.jump_mode.take() {
-            if Self::is_jump_key(&key) {
+            if Self::is_jump_binding(&kb, &key) {
                 return EditorAction::None;
             }
             if !key.modifiers.control && !key.modifiers.alt {
@@ -1055,145 +1119,179 @@ impl Editor {
             }
         }
 
-        // `tui.editor.jumpForward` / `jumpBackward`: `Ctrl+]` arms a
-        // forward jump, `Ctrl+Alt+]` a backward one. Checked before the
-        // generic control chords so the Alt-modified spelling (which the
-        // `control` branch would otherwise drop) is recognised.
-        if Self::is_jump_key(&key) {
-            self.jump_mode = Some(if key.modifiers.alt {
-                JumpDirection::Backward
-            } else {
-                JumpDirection::Forward
-            });
+        // `tui.editor.jumpBackward` / `jumpForward`: arm a one-shot
+        // character jump. Checked before every other chord so the
+        // Alt-modified backward spelling (which the other branches would
+        // otherwise not recognise) is handled first.
+        if Self::matches_binding(&kb, &key, "tui.editor.jumpBackward") {
+            self.jump_mode = Some(JumpDirection::Backward);
+            return EditorAction::None;
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.jumpForward") {
+            self.jump_mode = Some(JumpDirection::Forward);
             return EditorAction::None;
         }
 
-        // Control chords first.
-        if key.modifiers.control {
-            match key.code {
-                KeyCode::Char('c') | KeyCode::Char('C') => return EditorAction::Interrupt,
-                // `tui.editor.deleteCharForward` defaults to
-                // `["delete", "ctrl+d"]` (`packages/tui/src/keybindings.ts:121`).
-                // The coding agent's custom editor only treats `Ctrl+D`
-                // as exit when the buffer is empty and otherwise falls
-                // through to the editor's delete-char-forward handler
-                // (`packages/coding-agent/src/modes/interactive/components/custom-editor.ts:117`).
-                KeyCode::Char('d') | KeyCode::Char('D') => {
-                    if self.buffer.is_empty() {
-                        return EditorAction::Eof;
-                    }
-                    return self.delete();
+        // `tui.input.copy` (`Ctrl+C`). There is no selection to copy in
+        // this editor, so the chord is handed back to the caller; see the
+        // module docs.
+        if Self::matches_binding(&kb, &key, "tui.input.copy") {
+            return EditorAction::Interrupt;
+        }
+
+        // `app.exit` (`Ctrl+D`): exit only while the buffer is empty,
+        // otherwise fall through to `tui.editor.deleteCharForward`,
+        // exactly like upstream `CustomEditor` (`custom-editor.ts:117`).
+        if Self::matches_app_exit(&kb, &key) && self.buffer.is_empty() {
+            return EditorAction::Eof;
+        }
+
+        // Autocomplete dropdown. Checked above the plain-key handling so
+        // the selection chords steer the candidate list while it is open,
+        // mirroring upstream `Editor.handleInput`'s autocomplete block
+        // (which runs after undo, before Tab and deletion).
+        if self.is_showing_autocomplete() {
+            if Self::matches_binding(&kb, &key, "tui.select.cancel") {
+                self.cancel_autocomplete();
+                return EditorAction::None;
+            }
+            if Self::matches_binding(&kb, &key, "tui.select.up") {
+                self.move_autocomplete(-1);
+                return EditorAction::Changed;
+            }
+            if Self::matches_binding(&kb, &key, "tui.select.down") {
+                self.move_autocomplete(1);
+                return EditorAction::Changed;
+            }
+            if Self::matches_binding(&kb, &key, "tui.input.tab") {
+                return self.accept_autocomplete();
+            }
+            if Self::matches_binding(&kb, &key, "tui.input.submit") {
+                let prefix = self.autocomplete_prefix.clone();
+                let applied = self.accept_autocomplete();
+                if applied == EditorAction::None {
+                    return EditorAction::None;
                 }
-                KeyCode::Char('u') | KeyCode::Char('U') => return self.kill_to_line_start(),
-                KeyCode::Char('a') | KeyCode::Char('A') => return self.move_home(),
-                // `tui.editor.cursorLeft` / `cursorRight` default to
-                // `["left", "ctrl+b"]` / `["right", "ctrl+f"]`
-                // (`packages/tui/src/keybindings.ts:82`), so the emacs
-                // aliases move one character, not one word.
-                KeyCode::Char('b') | KeyCode::Char('B') => return self.move_left(),
-                KeyCode::Char('f') | KeyCode::Char('F') => return self.move_right(),
-                KeyCode::Char('e') | KeyCode::Char('E') => return self.move_end(),
-                KeyCode::Char('k') | KeyCode::Char('K') => return self.kill_to_line_end(),
-                // `tui.editor.deleteWordBackward`.
-                KeyCode::Char('w') | KeyCode::Char('W') => return self.kill_word_backward(),
-                // `tui.editor.cursorWordLeft` / `cursorWordRight`.
-                KeyCode::Left => return self.move_word_left(),
-                KeyCode::Right => return self.move_word_right(),
-                KeyCode::Char('y') | KeyCode::Char('Y') => return self.yank(),
-                // `tui.editor.undo` is bound to `ctrl+-`. Upstream
-                // normalizes the legacy `0x1F` control byte to `ctrl+-`
-                // (`packages/tui/src/keys.ts:1277`); crossterm instead
-                // decodes that byte as `Ctrl+7` (`0x1C..=0x1F` map to
-                // `Ctrl+4..=Ctrl+7`, `event/sys/unix/parse.rs`), while
-                // Kitty-protocol terminals deliver `Ctrl+-` directly and
-                // some frontends report `Ctrl+_` (the ASCII name of the
-                // same byte). Accept all three spellings so the binding
-                // works with and without the Kitty keyboard protocol.
-                KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('7') => {
-                    return self.undo();
+                // A command name is still submitted: upstream falls
+                // through to the normal Enter handling when the
+                // prefix starts with `/`.
+                if prefix.starts_with('/') {
+                    return EditorAction::Submit(self.buffer.clone());
                 }
-                _ => return EditorAction::None,
+                return applied;
             }
         }
 
-        if key.modifiers.alt {
-            // Word navigation plus the yank-pop cycle; every other Alt
-            // chord this editor does not implement is a no-op.
-            return match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.yank_pop(),
-                // `tui.editor.cursorWordLeft` / `cursorWordRight`.
-                KeyCode::Char('b') | KeyCode::Char('B') | KeyCode::Left => self.move_word_left(),
-                KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Right => self.move_word_right(),
-                // `tui.editor.deleteWordBackward` / `deleteWordForward`.
-                KeyCode::Backspace => self.kill_word_backward(),
-                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
-                    self.kill_word_forward()
-                }
-                _ => EditorAction::None,
-            };
+        // Tab with the dropdown closed forces a completion
+        // (`tui.input.tab`).
+        if Self::matches_binding(&kb, &key, "tui.input.tab") && self.handle_tab_completion() {
+            return EditorAction::Changed;
         }
 
+        // Deletion chords.
+        if Self::matches_binding(&kb, &key, "tui.editor.deleteToLineStart") {
+            return self.kill_to_line_start();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.deleteToLineEnd") {
+            return self.kill_to_line_end();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.deleteWordBackward") {
+            return self.kill_word_backward();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.deleteWordForward") {
+            return self.kill_word_forward();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.deleteCharBackward") {
+            return self.backspace();
+        }
+        // `Delete` and `Ctrl+D` (the Latter already handled above while
+        // the buffer was empty).
+        if Self::matches_binding(&kb, &key, "tui.editor.deleteCharForward") {
+            return self.delete();
+        }
+
+        // Kill-ring chords.
+        if Self::matches_binding(&kb, &key, "tui.editor.yank") {
+            return self.yank();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.yankPop") {
+            return self.yank_pop();
+        }
+
+        // Cursor movement.
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorLineStart") {
+            return self.move_home();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorLineEnd") {
+            return self.move_end();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorWordLeft") {
+            return self.move_word_left();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorWordRight") {
+            return self.move_word_right();
+        }
+        // `Up` / `Down` browse the single-line prompt history, the
+        // roles the pre-keybinding editor gave them.
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorUp") {
+            return self.history_prev();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorDown") {
+            return self.history_next();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorLeft") {
+            return self.move_left();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.cursorRight") {
+            return self.move_right();
+        }
+
+        // `tui.editor.undo`.
+        if Self::matches_binding(&kb, &key, "tui.editor.undo") {
+            return self.undo();
+        }
+
+        // `tui.input.submit` (`Enter`).
+        if Self::matches_binding(&kb, &key, "tui.input.submit") {
+            return EditorAction::Submit(self.buffer.clone());
+        }
+
+        // Meta chords are not part of the default table; ignore them
+        // rather than inserting their character (the plain-key vocabulary
+        // below rejects control / Alt / meta input).
         if key.modifiers.meta {
             return EditorAction::None;
         }
 
-        // Autocomplete dropdown. Checked above the plain-key handling so
-        // Esc / Up / Down / Tab / Enter steer the candidate list while it
-        // is open, mirroring upstream `Editor.handleInput`'s autocomplete
-        // block (which runs after undo, before Tab and deletion).
-        if self.is_showing_autocomplete() && key.modifiers.is_empty() {
-            match key.code {
-                KeyCode::Esc => {
-                    self.cancel_autocomplete();
-                    return EditorAction::None;
-                }
-                KeyCode::Up => {
-                    self.move_autocomplete(-1);
-                    return EditorAction::Changed;
-                }
-                KeyCode::Down => {
-                    self.move_autocomplete(1);
-                    return EditorAction::Changed;
-                }
-                KeyCode::Tab => return self.accept_autocomplete(),
-                KeyCode::Enter => {
-                    let prefix = self.autocomplete_prefix.clone();
-                    let applied = self.accept_autocomplete();
-                    if applied == EditorAction::None {
-                        return EditorAction::None;
-                    }
-                    // A command name is still submitted: upstream falls
-                    // through to the normal Enter handling when the
-                    // prefix starts with `/`.
-                    if prefix.starts_with('/') {
-                        return EditorAction::Submit(self.buffer.clone());
-                    }
-                    return applied;
-                }
-                _ => {}
-            }
+        // A control or Alt chord that matched no binding never inserts
+        // its character.
+        if key.modifiers.control || key.modifiers.alt {
+            return EditorAction::None;
         }
 
-        // Tab with the dropdown closed forces a completion.
-        if key.code == KeyCode::Tab && key.modifiers.is_empty() && self.handle_tab_completion() {
-            return EditorAction::Changed;
-        }
-
+        // Shift-modified spellings of the chords above keep their
+        // pre-keybinding behaviour. The registry matches modifiers exactly,
+        // so `Shift+Up` is not `tui.editor.cursorUp`, yet the old plain
+        // match-arm fallback sent it to history navigation (`Shift+Home` to
+        // the line start, and so on). The bare keys — `Up`, `Backspace`,
+        // `Home`, ... — are the ids' own defaults and no longer reach here
+        // once the id is rebound or unbound, so they are deliberately
+        // absent.
         match key.code {
             KeyCode::Char(c) => self.insert_char(c),
-            KeyCode::Enter => {
+            // `Shift+Enter` is `tui.input.newLine`, which the single-line
+            // editor cannot honour; the pre-keybinding editor submitted on
+            // it, so it keeps submitting (see the module docs).
+            KeyCode::Enter if key.modifiers.shift => {
                 let submitted = self.buffer.clone();
                 EditorAction::Submit(submitted)
             }
-            KeyCode::Backspace => self.backspace(),
-            KeyCode::Delete => self.delete(),
-            KeyCode::Left => self.move_left(),
-            KeyCode::Right => self.move_right(),
-            KeyCode::Home => self.move_home(),
-            KeyCode::End => self.move_end(),
-            KeyCode::Up => self.history_prev(),
-            KeyCode::Down => self.history_next(),
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc => EditorAction::None,
+            KeyCode::Left if key.modifiers.shift => self.move_left(),
+            KeyCode::Right if key.modifiers.shift => self.move_right(),
+            KeyCode::Home if key.modifiers.shift => self.move_home(),
+            KeyCode::End if key.modifiers.shift => self.move_end(),
+            KeyCode::Up if key.modifiers.shift => self.history_prev(),
+            KeyCode::Down if key.modifiers.shift => self.history_next(),
             _ => EditorAction::None,
         }
     }
@@ -1254,6 +1352,34 @@ impl Editor {
         }
         p
     }
+}
+
+/// Accept the legacy control-byte spelling of a resolved chord.
+///
+/// `keys.ts` normalises the legacy bytes before matching: `0x1D` / `ESC
+/// 0x1D` become `ctrl+]` / `ctrl+alt+]` and `0x1F` becomes `ctrl+-`. The
+/// Rust port hands decoding to crossterm, which instead reports those bytes
+/// as `Ctrl+5` / `Ctrl+Alt+5` (`0x1C..=0x1F` map to `Ctrl+4..=Ctrl+7`,
+/// `event/sys/unix/parse.rs`) and `Ctrl+7` / `Ctrl+_`. Treat the two
+/// spellings as the same chord, but only while the id actually resolves to
+/// the canonical one — rebinding `tui.editor.undo` to `ctrl+z` must stop
+/// `Ctrl+7` from undoing.
+fn legacy_key_spelling(kb: &KeybindingsManager, key: &Key, keybinding: &str) -> bool {
+    let keys = kb.get_keys(keybinding);
+    let bound = |chord: &str| keys.iter().any(|candidate| candidate == chord);
+
+    if key.modifiers.control && !key.modifiers.alt {
+        if bound("ctrl+-") {
+            return matches!(key.code, KeyCode::Char('7') | KeyCode::Char('_'));
+        }
+        if bound("ctrl+]") {
+            return matches!(key.code, KeyCode::Char('5'));
+        }
+    }
+    if key.modifiers.control && key.modifiers.alt && bound("ctrl+alt+]") {
+        return matches!(key.code, KeyCode::Char('5'));
+    }
+    false
 }
 
 /// True when `bytes[pos]` is a UTF-8 character boundary. We can't use
