@@ -1005,6 +1005,150 @@ fn esm_without_default_export_is_reported() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Stage 26 follow-up: the `typebox` virtual module — `Type.Object(...)` →
+// the JSON Schema carried in `registerTool({ parameters })`.
+// ---------------------------------------------------------------------------
+
+/// Upstream extensions declare tool parameters with `Type.Object(...)`.
+/// The shim must turn that into the JSON Schema the host (and the model)
+/// consumes, with `Type.Optional` props excluded from `required`.
+#[test]
+fn esm_typebox_tool_parameters_reach_the_host() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            entry_at("typebox-tool", "/tmp/typebox-tool/index.mjs"),
+            r#"
+                import { Type } from "typebox";
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "read_file",
+                        label: "Read file",
+                        description: "Read a file",
+                        parameters: Type.Object({
+                            path: Type.String(),
+                            limit: Type.Optional(Type.Number({ description: "max lines" })),
+                            tags: Type.Array(Type.String()),
+                            mode: Type.Union([Type.Literal("fast"), Type.Literal("slow")]),
+                        }),
+                        execute: () => ({ content: [{ type: "text", text: "ok" }] }),
+                    });
+                }
+            "#,
+        )
+        .await
+        .expect("typebox extension should load");
+
+        let tools = host.registered_tools();
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        assert_eq!(
+            tools[0].parameters,
+            json!({
+                "type": "object",
+                "required": ["path", "tags", "mode"],
+                "properties": {
+                    "path": { "type": "string" },
+                    "limit": { "type": "number", "description": "max lines" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "mode": {
+                        "anyOf": [
+                            { "type": "string", "const": "fast" },
+                            { "type": "string", "const": "slow" }
+                        ]
+                    }
+                }
+            })
+        );
+    });
+}
+
+/// `@sinclair/typebox` is the historical package name for the same module,
+/// so both specifiers resolve to the same builder. The schema also has to
+/// stay JSON-serialisable: `JSON.stringify` drops the `Optional` symbol
+/// markers on the way to the host.
+#[test]
+fn esm_typebox_sinclair_alias_and_enum() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            entry_at("typebox-alias", "/tmp/typebox-alias/index.mjs"),
+            r#"
+                import { Type } from "@sinclair/typebox";
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "pick",
+                        label: "Pick",
+                        description: "Pick a level",
+                        parameters: Type.Object({
+                            level: Type.Enum({ Low: "low", High: "high" }),
+                            nested: Type.Object({ flag: Type.Boolean() }),
+                            blob: Type.Record(Type.String(), Type.Unknown()),
+                        }),
+                        execute: () => ({ content: [{ type: "text", text: "ok" }] }),
+                    });
+                }
+            "#,
+        )
+        .await
+        .expect("@sinclair/typebox alias should load");
+
+        let tools = host.registered_tools();
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        assert_eq!(
+            tools[0].parameters,
+            json!({
+                "type": "object",
+                "required": ["level", "nested", "blob"],
+                "properties": {
+                    "level": { "enum": ["low", "high"] },
+                    "nested": {
+                        "type": "object",
+                        "required": ["flag"],
+                        "properties": { "flag": { "type": "boolean" } }
+                    },
+                    "blob": {
+                        "type": "object",
+                        "patternProperties": { "^.*$": {} }
+                    }
+                }
+            })
+        );
+    });
+}
+
+/// A value TypeBox cannot turn into a literal (e.g. `null` or an object)
+/// fails at load with a readable message instead of emitting a schema the
+/// model can never satisfy.
+#[test]
+fn esm_typebox_rejects_invalid_literal() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let err = host
+            .load(
+                entry_at("bad-literal", "/tmp/bad-literal/index.mjs"),
+                r#"
+                    import { Type } from "typebox";
+                    export default function (pi) {
+                        pi.registerTool({
+                            name: "bad",
+                            label: "Bad",
+                            description: "bad literal",
+                            parameters: Type.Object({ x: Type.Literal(null) }),
+                            execute: () => ({ content: [] }),
+                        });
+                    }
+                "#,
+            )
+            .await
+            .expect_err("Type.Literal(null) must be rejected");
+        assert!(err.to_string().contains("Type.Literal"), "{err}");
+    });
+}
+
 /// Unsupported virtual modules (and relative specifiers) name the thing
 /// that failed instead of surfacing `undefined`.
 #[test]
@@ -1014,17 +1158,19 @@ fn esm_unsupported_imports_are_reported() {
         let host = JsExtensionHost::new().await.expect("host");
         let err = host
             .load(
-                entry_at("typebox-ext", "/tmp/typebox-ext/index.mjs"),
+                entry_at("api-ext", "/tmp/api-ext/index.mjs"),
                 r#"
-                    import { Type } from "typebox";
+                    import { defineTool } from "@earendil-works/pi-coding-agent";
                     export default function (pi) {}
                 "#,
             )
             .await
-            .expect_err("typebox is not a supported virtual module yet");
+            .expect_err("@earendil-works/* is not a supported virtual module yet");
         let message = err.to_string();
-        assert!(message.contains("typebox"), "{message}");
+        assert!(message.contains("@earendil-works/pi-coding-agent"), "{message}");
+        // The error names the supported set, now including `typebox`.
         assert!(message.contains("node:path"), "{message}");
+        assert!(message.contains("typebox"), "{message}");
 
         let err = host
             .load(

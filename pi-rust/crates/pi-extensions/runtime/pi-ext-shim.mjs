@@ -547,8 +547,9 @@ globalThis._pi_execute_tool = function _pi_execute_tool(name, argsJson) {
  * The ESM branch rewrites the `import` / `export default` statements and
  * `import.meta` references in place (see `__pi_analyze_module`) and then
  * runs the result through the same factory wrapper. No bundler and no
- * extra JS dependency is involved; only the `node:path` / `node:url`
- * slice of the upstream `VIRTUAL_MODULES` map is provided.
+ * extra JS dependency is involved; the `node:path` / `node:url` and
+ * `typebox` / `@sinclair/typebox` slice of the upstream `VIRTUAL_MODULES`
+ * map is provided.
  *
  * @param {string} source extension source text
  * @param {string} [path] absolute path of the extension file; backs
@@ -628,14 +629,15 @@ globalThis._pi_load_extension = function _pi_load_extension(source, path) {
 //   import.meta.url / import.meta.dirname / import.meta.filename
 //
 // Anything else fails with a readable error instead of running partial
-// code. The `typebox` / `@earendil-works/*` virtual modules stay out of
-// scope (separate task); importing them names the specifier and the
-// supported set.
+// code. The `@earendil-works/*` virtual modules stay out of scope
+// (separate task); importing them names the specifier and the supported
+// set.
 // ---------------------------------------------------------------------------
 
 /**
  * The virtual modules available to ESM extensions. Mirrors the
- * `node:path` / `node:url` slice of the upstream `VIRTUAL_MODULES` map in
+ * `node:path` / `node:url` / `typebox` slice of the upstream
+ * `VIRTUAL_MODULES` map in
  * `packages/coding-agent/src/core/extensions/loader.ts`. Assigned at the
  * bottom of this file, after the module objects are built.
  */
@@ -1285,6 +1287,239 @@ const __pi_url_module = (() => {
   mod.default = mod;
   return Object.freeze(mod);
 })();
+// ---------------------------------------------------------------------------
+// `typebox` virtual module — the schema builder upstream extensions use
+// for `pi.registerTool({ parameters })`. TypeBox is a *virtual* module
+// upstream too (`packages/coding-agent/src/core/extensions/loader.ts`
+// `VIRTUAL_MODULES`), so extensions import it by bare specifier and the
+// host resolves it; here that resolution is
+// `globalThis.__pi_virtual_modules`.
+//
+// This implements the subset of the TypeBox v1 `Type` namespace the pi
+// extension ecosystem actually calls (the examples under
+// `packages/coding-agent/examples/extensions/*`) and emits the same
+// plain JSON Schema TypeBox v1 produces, verified against
+// `typebox@1.3.7`:
+//
+//   Type.Object({ a: Type.String(), b: Type.Optional(Type.Number()) })
+//   => { type: 'object', required: ['a'], properties: { … } }
+//
+// `Optional` / `Readonly` are carried on non-enumerable symbol keys, so
+// `JSON.stringify` (the host's `registerTool` path) sees only the JSON
+// Schema — exactly like TypeBox's own `OptionalKind` symbol.
+// ---------------------------------------------------------------------------
+
+const __pi_typebox_module = (() => {
+  const OPTIONAL = Symbol.for("pi.typebox.optional");
+  const READONLY = Symbol.for("pi.typebox.readonly");
+
+  function mergeOptions(schema, options) {
+    if (options && typeof options === "object") {
+      for (const key of Object.keys(options)) {
+        const value = options[key];
+        if (value !== undefined) schema[key] = value;
+      }
+    }
+    return schema;
+  }
+
+  function withMarker(schema, marker) {
+    if (!schema || typeof schema !== "object") return schema;
+    const copy = Array.isArray(schema) ? schema.slice() : Object.assign({}, schema);
+    Object.defineProperty(copy, marker, { value: true, enumerable: false });
+    return copy;
+  }
+
+  function isOptional(schema) {
+    return !!schema && typeof schema === "object" && schema[OPTIONAL] === true;
+  }
+
+  /** `Type.Any()` / `Type.Unknown()` are `{}` plus options. */
+  function Any(options) {
+    return mergeOptions({}, options);
+  }
+
+  function typed(name) {
+    return function (options) {
+      return mergeOptions({ type: name }, options);
+    };
+  }
+
+  const NullType = typed("null");
+  const BooleanType = typed("boolean");
+  const StringType = typed("string");
+  const NumberType = typed("number");
+  const IntegerType = typed("integer");
+
+  function Literal(value, options) {
+    let name;
+    switch (typeof value) {
+      case "string":
+        name = "string";
+        break;
+      case "number":
+        name = "number";
+        break;
+      case "boolean":
+        name = "boolean";
+        break;
+      case "bigint":
+        name = "bigint";
+        break;
+      default:
+        throw new TypeError(
+          "Type.Literal: value must be a string, number, boolean, or bigint",
+        );
+    }
+    return mergeOptions({ type: name, const: value }, options);
+  }
+
+  function Enum(values, options) {
+    let list;
+    if (Array.isArray(values)) {
+      list = values.slice();
+    } else if (values && typeof values === "object") {
+      // A TS numeric enum carries reverse mappings (`{ 0: 'A', A: 0 }`);
+      // TypeBox keeps only the declared members, so drop a string value
+      // whose key it maps back to (`enum[enum[k]] === Number(k)`).
+      list = [];
+      for (const key of Object.keys(values)) {
+        const value = values[key];
+        if (typeof value === "string" && values[value] === Number(key)) continue;
+        if (!list.some((entry) => entry === value)) list.push(value);
+      }
+    } else {
+      throw new TypeError("Type.Enum: expected an enum object or array");
+    }
+    return mergeOptions({ enum: list }, options);
+  }
+
+  function ArrayType(items, options) {
+    return mergeOptions(
+      { type: "array", items: items === undefined ? {} : items },
+      options,
+    );
+  }
+
+  function TupleType(items, options) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    return mergeOptions(
+      { type: "array", additionalItems: false, items: list, minItems: list.length },
+      options,
+    );
+  }
+
+  function UnionType(schemas, options) {
+    return mergeOptions({ anyOf: Array.isArray(schemas) ? schemas.slice() : [] }, options);
+  }
+
+  function IntersectType(schemas, options) {
+    return mergeOptions({ allOf: Array.isArray(schemas) ? schemas.slice() : [] }, options);
+  }
+
+  function ObjectType(properties, options) {
+    const props = properties && typeof properties === "object" ? properties : {};
+    const schema = { type: "object" };
+    const required = Object.keys(props).filter((key) => !isOptional(props[key]));
+    if (required.length > 0) schema.required = required;
+    schema.properties = props;
+    return mergeOptions(schema, options);
+  }
+
+  /**
+   * Literal string keys of a record key schema, or `null` when the key
+   * is a pattern (`Type.String()` etc.) and TypeBox would emit
+   * `patternProperties` instead of `properties`.
+   */
+  function literalKeysOf(schema) {
+    if (!schema || typeof schema !== "object") return null;
+    if (typeof schema.const === "string") return [schema.const];
+    if (
+      Array.isArray(schema.enum) &&
+      schema.enum.every((value) => typeof value === "string")
+    ) {
+      return schema.enum.slice();
+    }
+    if (Array.isArray(schema.anyOf)) {
+      const keys = [];
+      for (const branch of schema.anyOf) {
+        const branchKeys = literalKeysOf(branch);
+        if (branchKeys === null) return null;
+        keys.push(...branchKeys);
+      }
+      return keys;
+    }
+    return null;
+  }
+
+  function RecordType(key, value, options) {
+    const schema = { type: "object" };
+    const keys = literalKeysOf(key);
+    if (keys !== null) {
+      const props = {};
+      for (const literal of keys) props[literal] = value;
+      schema.required = keys.slice();
+      schema.properties = props;
+    } else {
+      schema.patternProperties = { "^.*$": value };
+    }
+    return mergeOptions(schema, options);
+  }
+
+  function Optional(schema) {
+    return withMarker(schema, OPTIONAL);
+  }
+
+  function Readonly(schema) {
+    return withMarker(schema, READONLY);
+  }
+
+  /** `Type.Unsafe` returns the caller's schema untouched (options are ignored). */
+  function Unsafe(schema) {
+    return schema;
+  }
+
+  function Partial(schema) {
+    if (!schema || typeof schema !== "object" || !schema.properties) return schema;
+    const props = {};
+    for (const key of Object.keys(schema.properties)) {
+      props[key] = Optional(schema.properties[key]);
+    }
+    const copy = Object.assign({}, schema);
+    copy.properties = props;
+    delete copy.required;
+    return copy;
+  }
+
+  const Type = {
+    Any: Any,
+    Unknown: Any,
+    Null: NullType,
+    Boolean: BooleanType,
+    String: StringType,
+    Number: NumberType,
+    Integer: IntegerType,
+    Literal: Literal,
+    Enum: Enum,
+    Array: ArrayType,
+    Tuple: TupleType,
+    Union: UnionType,
+    Intersect: IntersectType,
+    Object: ObjectType,
+    Record: RecordType,
+    Optional: Optional,
+    Readonly: Readonly,
+    Unsafe: Unsafe,
+    Partial: Partial,
+  };
+
+  const mod = { Type: Type, Kind: Symbol.for("pi.typebox.Kind") };
+  // `import TypeBox from "typebox"` — mirror the CJS-interop default the
+  // other virtual modules use.
+  mod.default = mod;
+  return Object.freeze(mod);
+})();
+
 // Built last so the module objects above are initialized before they are
 // referenced (a `const` declared later in the file would otherwise throw
 // a TDZ ReferenceError here).
@@ -1293,4 +1528,6 @@ globalThis.__pi_virtual_modules = Object.freeze({
   path: __pi_path_module,
   "node:url": __pi_url_module,
   url: __pi_url_module,
+  typebox: __pi_typebox_module,
+  "@sinclair/typebox": __pi_typebox_module,
 });
