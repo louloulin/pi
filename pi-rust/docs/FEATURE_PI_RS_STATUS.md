@@ -1765,3 +1765,105 @@ Suggested next dispatches (≤ 3 concurrent): Stage 10 = wire a
 `ToolExecutor` into `pi-agent-core` + drive it from `pi-coding-agent`;
 Stage 11 = pi packages manager + real provider selection in the CLI;
 Stage 12 = RPC mode over `pi-protocol` framing.
+
+## LUM-1059 round — Stage 12 (RPC) merged into `feature/pi.rs`, Stage 13 promoted
+
+LUM-1059 (2026-09-19 10:40 Asia/Shanghai, autopilot template re-run)
+found the Stage 10/11/12 barrier closed except for one integration gap:
+Stage 12's RPC work had been committed on `agent/devbox1/9f0097e10886`
+(`b2037ea95` + merge `dc9bb1b5d`) and its task LUM-1053 was still
+`in_progress`, but the branch had never been merged back into
+`feature/pi.rs`. Stage 10 (LUM-1051) and Stage 11 (LUM-1052) were
+already on the integration branch.
+
+### Integration — Stage 12 (LUM-1053)
+
+Merged `agent/devbox1/9f0097e10886` into `feature/pi.rs` (merge commit
+`7a69335e7`). Exactly one conflict, in
+`pi-coding-agent/src/lib.rs`: both sides added `pub use` re-exports at
+the same offset. Resolution keeps both — Stage 10's
+`tool_executor::{default_executor, BuiltinToolExecutor}` and Stage 12's
+`rpc::{run_rpc_server, JsonRpcError, RpcOutcome, RpcServerError, RpcServerOptions}`.
+
+Stage 12 delta now on `feature/pi.rs`:
+
+- `pi-coding-agent/src/rpc/{mod,protocol,server,error,events}.rs` —
+  JSON-RPC 2.0 over stdio (NDJSON request/notification per line,
+  response + `event` notifications per agent event), methods
+  `prompt` / `abort` / `getState` / `setModel`, error codes
+  -32700 / -32601 / -32602 / -32603 / -32000, EOF drains and exits 0,
+  EPIPE-safe, tracing on stderr.
+- `pi-coding-agent/tests/rpc.rs` — 11 tests spawning the real binary.
+- `print_mode.rs` / `main.rs` / `lib.rs` wiring; the Stage 5
+  "rpc mode is a Stage 5 deliverable" stub is gone.
+- `rpc::events::agent_event_to_json` is now the single wire shape shared
+  by print mode (`json-events`) and RPC mode.
+
+### Clippy 1.98 cleanup (`f693264d4`)
+
+The sandbox's stable toolchain had moved to 1.98.1 and clippy was not
+installed; after `rustup component add clippy` the new lints flagged
+pre-existing code. Fixed minimally, no behaviour change:
+
+- `pi-ai` anthropic/openai SSE line splitter: `loop { let Some(..) else
+  { break } }` → `while let`.
+- `pi-session`: `io::Error::new(ErrorKind::Other, e)` → `io::Error::other(e)`.
+- `pi-coding-agent`: manual `div_ceil` (file_processor), manual
+  if/else chain (packages/installer), overindented doc list item
+  (tools/find), `iter().any()` → `contains()` (tools/mod_ignore).
+
+### Verification (native, on the merged tree)
+
+```
+$ cargo check    --workspace --all-targets                        # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings          # 0 errors, 0 warnings
+$ cargo test     --workspace                                       # 279 / 279 pass
+```
+
+279 tests vs 221 at LUM-1048 — the delta is Stage 10's `agent_tools`
+(20) + `tool_execution` (14), Stage 11's `packages` suite, Stage 12's
+`rpc` suite (11) and the `lib` unit tests.
+
+End-to-end RPC smoke test (faux provider):
+
+```
+$ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"getState"}' \
+                 '{"jsonrpc":"2.0","id":2,"method":"prompt","params":{"text":"hello"}}' \
+  | ./target/debug/pi --rpc
+{"id":1,... "result":{"messages":[],"model":{...},"sessionId":"session-..."}}
+{"jsonrpc":"2.0","method":"event","params":{"type":"user_message",...}}
+{"jsonrpc":"2.0","method":"event","params":{"type":"turn_start"}}
+{"jsonrpc":"2.0","method":"event","params":{"type":"message_start","model":"faux-model"}}
+{"jsonrpc":"2.0","method":"event","params":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"(faux) hello"}}}
+{"jsonrpc":"2.0","method":"event","params":{"type":"message_end","stop_reason":"stop",...}}
+{"jsonrpc":"2.0","method":"event","params":{"type":"turn_end","turn":1,...}}
+{"id":2,"jsonrpc":"2.0","result":{"stopReason":"stop","turn":1}}
+```
+
+### Stage 13 promoted (3 concurrent runs, cap = 3)
+
+With the Stage 10-12 barrier closed, this round flips the three parked
+Stage 13 tasks from `backlog` to `todo` so their workers start:
+
+| Stage | Issue | Scope |
+|-------|-------|-------|
+| 13 | LUM-1055 | `pi-ai`: Google Gemini provider (streaming + catalog + fixtures + `google_faux` e2e) |
+| 13 | LUM-1056 | `pi-coding-agent`: print mode on the `pi-session` SQLite store (closes LUM-1044's JSONL limitation) |
+| 13 | LUM-1057 | new `pi-telemetry` crate (the last `packages/*` with no Rust counterpart) |
+
+All three are additive and touch disjoint files; `feature/pi.rs` is the
+integration target for each. LUM-1053 flips to `in_review`.
+
+### Push status — UNBLOCKED, in-sync with GitHub
+
+```
+$ git ls-remote origin feature/pi.rs
+f693264d4dd0a897012d32653bdcfc67b6dbce23        refs/heads/feature/pi.rs
+
+$ git rev-parse HEAD
+f693264d4dd0a897012d32653bdcfc67b6dbce23
+```
+
+The credential-helper lock warning (`unable to get credential storage
+lock`) is the same benign noise documented in LUM-1039; the push itself
+succeeds.
