@@ -21,6 +21,7 @@ use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate};
 use pi_protocol::{Content, Message, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -28,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dialog::{Dialog, DialogAction, DialogKind};
 use crate::editor::EditorAction;
-use crate::input::{InputEvent, Key, KeyCode, KeyModifiers};
+use crate::input::{InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
 use crate::message::{MessageItem, MessageView};
 use crate::prompt::{Prompt, PromptAction};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
@@ -64,6 +65,14 @@ pub struct AppConfig {
     /// The switch can be flipped at runtime with [`App::set_markdown`];
     /// `/clear` and other transcript operations leave it untouched.
     pub markdown: bool,
+    /// Copy a finished chat-log text selection to the clipboard as soon as
+    /// the mouse button is released. On by default, matching upstream's
+    /// `copyOnSelect ?? true` (`packages/tui/src/tui-alt-screen.ts:272`).
+    ///
+    /// "Copy" here means "hand the selection text to the driver" (see
+    /// [`App::take_clipboard_request`]); the App never touches the
+    /// terminal or the system clipboard itself.
+    pub copy_on_select: bool,
 }
 
 impl Default for AppConfig {
@@ -73,6 +82,7 @@ impl Default for AppConfig {
             session_id: "local".to_string(),
             event_poll_interval: Duration::from_millis(50),
             markdown: true,
+            copy_on_select: true,
         }
     }
 }
@@ -92,6 +102,47 @@ pub struct TurnUsage {
     /// Messages that followed that assistant message in the turn (the
     /// tool results it produced), for `context_tokens_with_trailing`.
     pub trailing: Vec<Message>,
+}
+
+/// A text selection in the chat log.
+///
+/// Both ends are absolute coordinates in the *rendered log*: the first
+/// element is the index of a line as produced by
+/// [`MessageView::render_styled_lines`], the second a character column
+/// within that line. Absolute line indices (rather than screen rows) are
+/// what makes a selection survive scrolling and trailing output: the
+/// same text stays selected while the viewport moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    /// Where the drag started (the mouse-down cell).
+    anchor: (usize, usize),
+    /// Where the pointer currently is (or was on release).
+    focus: (usize, usize),
+}
+
+impl Selection {
+    /// Construct a zero-length selection at `point` (a mouse press).
+    const fn at(point: (usize, usize)) -> Self {
+        Self {
+            anchor: point,
+            focus: point,
+        }
+    }
+
+    /// Start / end in reading order, or `None` when the selection is
+    /// empty — upstream's `getSelectionBounds`
+    /// (`packages/tui/src/tui-alt-screen.ts:1381-1397`) treats an
+    /// anchor equal to the focus as "no selection".
+    fn bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+        if self.anchor == self.focus {
+            return None;
+        }
+        Some(if self.anchor < self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        })
+    }
 }
 
 /// Outcome returned by [`App::step`] after each key event.
@@ -197,6 +248,18 @@ pub struct App {
     /// Height of the message viewport as of the last render; the page size
     /// for `PageUp` / `PageDown`.
     viewport_height: AtomicU16,
+    /// Top-left cell of the message viewport as of the last render. Pointer
+    /// coordinates are absolute, so selection has to map them back into the
+    /// viewport the reader was actually looking at.
+    viewport_origin: (AtomicU16, AtomicU16),
+    /// Active chat-log text selection, if any.
+    selection: Option<Selection>,
+    /// True between a left-button press and its release, so drags extend
+    /// the selection without requiring the terminal to report the button.
+    selection_dragging: bool,
+    /// Text waiting to be copied by the driver. Filled by copy-on-select;
+    /// consumed with [`App::take_clipboard_request`].
+    pending_clipboard: Option<String>,
 }
 
 impl App {
@@ -237,6 +300,10 @@ impl App {
             exit_requested: false,
             viewport_width: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
+            viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
+            selection: None,
+            selection_dragging: false,
+            pending_clipboard: None,
         }
     }
 
@@ -629,6 +696,9 @@ impl App {
             }
         }
         let InputEvent::Key(key) = event else {
+            if let InputEvent::MouseGesture(gesture) = event {
+                return self.step_mouse_gesture(gesture);
+            }
             if let InputEvent::Mouse { up, alt } = event {
                 let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
                 let changed = if up {
@@ -684,6 +754,9 @@ impl App {
                 modifiers,
             } if modifiers == KeyModifiers::CONTROL => {
                 self.messages.clear();
+                // The selected line indices point into the transcript that
+                // just disappeared.
+                self.clear_selection();
                 return StepOutcome::Redraw;
             }
             // Fullscreen chat-log scrolling. Upstream deliberately shadows
@@ -795,6 +868,221 @@ impl App {
             self.viewport_width.load(Ordering::Relaxed),
             self.viewport_height.load(Ordering::Relaxed),
         )
+    }
+
+    /// Top-left cell of the message viewport as of the last render. Pointer
+    /// coordinates are absolute, so this is what maps them back in.
+    pub fn viewport_origin(&self) -> (u16, u16) {
+        (
+            self.viewport_origin.0.load(Ordering::Relaxed),
+            self.viewport_origin.1.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Feed a non-wheel mouse gesture to the App: start, extend, finish or
+    /// clear the chat-log text selection.
+    ///
+    /// Mirrors upstream's `handleSelectionMouseEvent`
+    /// (`packages/tui/src/tui-alt-screen.ts:1343-1379`): a press anchors a
+    /// character-granularity selection, a drag extends it, and a release
+    /// copies it when [copy-on-select](AppConfig::copy_on_select) is on.
+    /// A press and release on the same cell leaves an empty selection, so a
+    /// plain click clears whatever was selected before.
+    ///
+    /// Deviations (deliberate, documented): only character granularity is
+    /// modelled — upstream adds double-click word and triple-click line
+    /// selection plus drag autoscroll at the viewport edges. Gestures
+    /// outside the message viewport (the prompt and status rows) are
+    /// ignored.
+    pub fn step_mouse_gesture(&mut self, gesture: MouseGesture) -> StepOutcome {
+        let Some(point) = self.selection_point(gesture.x, gesture.y) else {
+            return StepOutcome::Idle;
+        };
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                let next = Selection::at(point);
+                self.selection_dragging = true;
+                if self.selection == Some(next) {
+                    return StepOutcome::Idle;
+                }
+                self.selection = Some(next);
+                StepOutcome::Redraw
+            }
+            MouseGestureKind::Drag(MouseButton::Left) | MouseGestureKind::Move
+                if self.selection_dragging =>
+            {
+                self.extend_selection(point)
+            }
+            MouseGestureKind::Release(MouseButton::Left) => {
+                self.selection_dragging = false;
+                let changed = self.extend_selection(point) == StepOutcome::Redraw;
+                if self.config.copy_on_select {
+                    if let Some(text) = self.selection_text() {
+                        self.pending_clipboard = Some(text);
+                    }
+                }
+                if changed {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                }
+            }
+            // Middle / right buttons and bare moves with no button held
+            // are not part of the selection gesture (upstream gives the
+            // right button to paste on Windows only).
+            _ => StepOutcome::Idle,
+        }
+    }
+
+    /// Move the selection focus, returning whether the rendered highlight
+    /// actually changed.
+    fn extend_selection(&mut self, point: (usize, usize)) -> StepOutcome {
+        let Some(selection) = self.selection.as_mut() else {
+            return StepOutcome::Idle;
+        };
+        if selection.focus == point {
+            return StepOutcome::Idle;
+        }
+        selection.focus = point;
+        StepOutcome::Redraw
+    }
+
+    /// Map an absolute terminal cell onto a rendered-log coordinate, or
+    /// `None` when it falls outside the message viewport or before the
+    /// first render.
+    fn selection_point(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (origin_x, origin_y) = self.viewport_origin();
+        if y < origin_y || y >= origin_y.saturating_add(height) {
+            return None;
+        }
+        let row = (y - origin_y) as usize;
+        let (start, lines) = self.messages.visible_lines(width, height);
+        // Below the last rendered line (a short log): clamp to the last
+        // line so a drag past the end still selects to the end of the text.
+        let row = row.min(lines.len().saturating_sub(1));
+        let col = x.saturating_sub(origin_x) as usize;
+        Some((start + row, col))
+    }
+
+    /// Start / end of the active selection in rendered-log coordinates, or
+    /// `None` when nothing is selected.
+    pub fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.selection?.bounds()
+    }
+
+    /// True when there is a non-empty text selection.
+    pub fn has_selection(&self) -> bool {
+        self.selection_bounds().is_some()
+    }
+
+    /// The selected text, exactly as copy-on-select would hand it to the
+    /// driver: one entry per rendered line, joined by `\n`, with trailing
+    /// whitespace trimmed per line and the character under the focus cell
+    /// included (upstream `getActiveSelectionText`,
+    /// `packages/tui/src/tui-alt-screen.ts:1412-1429`).
+    pub fn selection_text(&self) -> Option<String> {
+        let ((start_line, start_col), (end_line, end_col)) = self.selection_bounds()?;
+        let (width, _) = self.viewport();
+        if width == 0 {
+            return None;
+        }
+        let lines = self.messages.render_styled_lines(width);
+        if lines.is_empty() {
+            return None;
+        }
+        let last = lines.len() - 1;
+        let end_line = end_line.min(last);
+        let mut out: Vec<String> = Vec::new();
+        for (idx, line) in lines.iter().enumerate().take(end_line + 1).skip(start_line) {
+            let text = crate::styled::plain_text(line);
+            let len = text.chars().count();
+            let from = if idx == start_line {
+                start_col.min(len)
+            } else {
+                0
+            };
+            let to = if idx == end_line {
+                end_col.saturating_add(1).min(len)
+            } else {
+                len
+            };
+            let segment: String = text
+                .chars()
+                .skip(from)
+                .take(to.saturating_sub(from))
+                .collect();
+            out.push(segment.trim_end().to_string());
+        }
+        let text = out.join("\n");
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Drop the active selection (and any highlight it produced).
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selection_dragging = false;
+    }
+
+    /// Take the text the driver must copy to the clipboard, if a
+    /// copy-on-select release queued one.
+    ///
+    /// The App deliberately owns no terminal handle: the driver decides how
+    /// to copy (upstream defaults to an OSC 52 write, with an injectable
+    /// clipboard override — `packages/tui/src/tui-alt-screen.ts:1449-1462`).
+    /// See [`crate::clipboard::osc52_sequence`] for that default.
+    pub fn take_clipboard_request(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
+    }
+
+    /// Paint the active selection into the already-rendered message area by
+    /// adding the reversed-video modifier to the selected cells.
+    fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {
+        let Some(((start_line, start_col), (end_line, end_col))) = self.selection_bounds() else {
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let (visible_start, lines) = self.messages.visible_lines(area.width, area.height);
+        let visible_end = visible_start + lines.len();
+        let first = start_line.max(visible_start);
+        let last = end_line.min(visible_end.saturating_sub(1));
+        if first > last {
+            return;
+        }
+        for line_idx in first..=last {
+            let row = (line_idx - visible_start) as u16;
+            let y = area.y + row;
+            let text = crate::styled::plain_text(&lines[row as usize]);
+            let len = text.chars().count();
+            let from = if line_idx == start_line {
+                start_col.min(len)
+            } else {
+                0
+            };
+            let to = if line_idx == end_line {
+                end_col.saturating_add(1).min(len)
+            } else {
+                len
+            };
+            for col in from..to {
+                let x = area.x + col as u16;
+                if x >= area.x + area.width {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.modifier |= Modifier::REVERSED;
+                }
+            }
+        }
     }
 
     /// Lines per page — one message-viewport height, but never zero so a
@@ -913,9 +1201,18 @@ impl App {
         self.viewport_width.store(area.width, Ordering::Relaxed);
         self.viewport_height
             .store(message_height, Ordering::Relaxed);
+        self.viewport_origin
+            .0
+            .store(message_area.x, Ordering::Relaxed);
+        self.viewport_origin
+            .1
+            .store(message_area.y, Ordering::Relaxed);
 
         self.messages
             .render_to_buffer_themed(message_area, buf, &self.theme);
+        // Selection highlight goes on top of the message cells but under
+        // any modal, so an open selector or dialog stays readable.
+        self.apply_selection_highlight(message_area, buf);
         self.status_bar
             .render_to_buffer_themed(&self.status_data, status_area, buf, &self.theme);
 
@@ -1040,11 +1337,33 @@ impl App {
                     up: false,
                     alt: mouse.modifiers.contains(CtModifiers::ALT),
                 },
-                // Moves / clicks / drags stay unhandled until the App owns
-                // a scrollbar or text selection. Upstream dispatches those
-                // to the component under the pointer
-                // (`packages/tui/src/tui-alt-screen.ts:886-930`); we only
-                // consume the wheel today.
+                CtMouseEventKind::Down(button) => InputEvent::MouseGesture(MouseGesture::new(
+                    MouseGestureKind::Press(mouse_button(button)),
+                    mouse.column,
+                    mouse.row,
+                    mouse.modifiers.contains(CtModifiers::ALT),
+                )),
+                CtMouseEventKind::Up(button) => InputEvent::MouseGesture(MouseGesture::new(
+                    MouseGestureKind::Release(mouse_button(button)),
+                    mouse.column,
+                    mouse.row,
+                    mouse.modifiers.contains(CtModifiers::ALT),
+                )),
+                CtMouseEventKind::Drag(button) => InputEvent::MouseGesture(MouseGesture::new(
+                    MouseGestureKind::Drag(mouse_button(button)),
+                    mouse.column,
+                    mouse.row,
+                    mouse.modifiers.contains(CtModifiers::ALT),
+                )),
+                CtMouseEventKind::Moved => InputEvent::MouseGesture(MouseGesture::new(
+                    MouseGestureKind::Move,
+                    mouse.column,
+                    mouse.row,
+                    mouse.modifiers.contains(CtModifiers::ALT),
+                )),
+                // Horizontal wheel goes through the same `routeWheel`
+                // upstream ignores for the chat log: no horizontal
+                // scrolling exists yet.
                 _ => InputEvent::Ignored,
             },
             CtEvent::Resize(w, h) => InputEvent::Resize {
@@ -1073,3 +1392,12 @@ fn _keep_mutex_path() -> Arc<Mutex<()>> {
 // public method signature contract.
 #[allow(dead_code)]
 const _: EditorAction = EditorAction::None;
+
+/// Map a crossterm mouse button onto the component-level [`MouseButton`].
+fn mouse_button(button: crossterm::event::MouseButton) -> MouseButton {
+    match button {
+        crossterm::event::MouseButton::Left => MouseButton::Left,
+        crossterm::event::MouseButton::Middle => MouseButton::Middle,
+        crossterm::event::MouseButton::Right => MouseButton::Right,
+    }
+}

@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod autocomplete;
+pub mod clipboard;
 pub mod dialog;
 pub mod editor;
 pub mod fuzzy;
@@ -33,10 +34,11 @@ pub use autocomplete::{
     ArgumentCompletions, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
     CombinedAutocompleteProvider, CompletionResult, SlashCommand,
 };
+pub use clipboard::{base64_encode, osc52_sequence};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
-pub use input::{InputEvent, Key, KeyModifiers};
+pub use input::{InputEvent, Key, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
 pub use kill_ring::{KillDirection, KillRing};
 pub use markdown::{render_markdown, render_markdown_with_theme};
 pub use message::{MessageItem, MessageView};

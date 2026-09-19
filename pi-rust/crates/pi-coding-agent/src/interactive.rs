@@ -181,6 +181,8 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         session_id: options.session_id.clone(),
         event_poll_interval: Duration::from_millis(50),
         markdown: true,
+        // Upstream default: `copyOnSelect ?? true`.
+        copy_on_select: true,
     };
 
     let mut terminal = match setup_terminal() {
@@ -255,29 +257,13 @@ async fn run_loop(
             break;
         }
 
-        // Redraw.
+        // Redraw. The App's buffer path carries the theme *and* the
+        // chat-log selection highlight, so draw the App straight into the
+        // frame instead of round-tripping through plain snapshot lines.
         if last_render.elapsed() >= render_interval {
-            let snapshot = app.render_snapshot(terminal.size()?.width, terminal.size()?.height);
             terminal.draw(|frame| {
                 let area = frame.area();
-                let lines = snapshot.lines.clone();
-                for (idx, line) in lines.iter().enumerate() {
-                    let y = area.y + idx as u16;
-                    if y >= area.y + area.height {
-                        break;
-                    }
-                    for (col, ch) in line.chars().enumerate() {
-                        let x = area.x + col as u16;
-                        if x >= area.x + area.width {
-                            break;
-                        }
-                        frame
-                            .buffer_mut()
-                            .cell_mut((x, y))
-                            .expect("in-bounds cell")
-                            .set_char(ch);
-                    }
-                }
+                app.render_to_buffer(area, frame.buffer_mut());
             })?;
             last_render = std::time::Instant::now();
         }
@@ -295,6 +281,18 @@ async fn run_loop(
                     }
                 }
             }
+        }
+
+        // Copy-on-select: the App hands over the finished selection, the
+        // driver performs the terminal write (upstream's default is an
+        // OSC 52 sequence — `packages/tui/src/tui-alt-screen.ts:1459`).
+        if let Some(text) = app.take_clipboard_request() {
+            write!(
+                terminal.backend_mut(),
+                "{}",
+                pi_tui::clipboard::osc52_sequence(&text)
+            )?;
+            terminal.backend_mut().flush()?;
         }
     }
 
@@ -920,11 +918,12 @@ fn default_model(models: &Models) -> Model {
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // The alternate screen hides the terminal's own scrollback, so the App
-    // owns scrolling (`pi-tui/src/app.rs`). Mouse capture is what delivers
-    // the wheel: upstream turns it on for every alt-screen session
-    // (`packages/tui/src/tui-alt-screen.ts:168,265`, mouse sequence at
-    // `:353-362`) and so do we. Text selection by the terminal is therefore
+    // Mouse capture is what delivers the wheel and the drag gestures the
+    // chat-log selection consumes: upstream turns it on for every alt-screen
+    // session (`packages/tui/src/tui-alt-screen.ts:168,265`, mouse sequence
+    // at `:353-362`) and handles the terminal-side selection loss with its
+    // own selection + copy-on-select (`:1343-1379`, `:1449-1462`), which the
+    // App mirrors. Text selection by the terminal itself is therefore
     // unavailable, matching upstream.
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);

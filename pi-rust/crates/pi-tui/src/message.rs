@@ -442,6 +442,23 @@ impl MessageView {
         out
     }
 
+    /// The lines the message view shows for a viewport of `width` ×
+    /// `height`, together with the index of the first one in the full
+    /// rendered log.
+    ///
+    /// This is the single source of truth for the visible window:
+    /// [`MessageView::render_to_buffer`] draws it and the [`App`](crate::App)
+    /// maps pointer coordinates onto it for text selection, so a rendered
+    /// row and a selectable row can never drift apart.
+    pub fn visible_lines(&self, width: u16, height: u16) -> (usize, Vec<StyledLine>) {
+        let lines = self.render_styled_lines(width);
+        let total = lines.len();
+        let skip = total.saturating_sub(height as usize + self.scroll_from_bottom);
+        let start = skip.min(total);
+        let end = (start + height as usize).min(total);
+        (start, lines[start..end].to_vec())
+    }
+
     /// Render the trailing `height` lines of the log into a
     /// `ratatui::buffer::Buffer`. Used by the [`App`](crate::App) and
     /// by the snapshot tests in `tests/snapshot.rs`.
@@ -467,14 +484,8 @@ impl MessageView {
         buf: &mut ratatui::buffer::Buffer,
         theme: Option<&Theme>,
     ) {
-        let lines = self.render_styled_lines(area.width);
-        let height = area.height as usize;
-        let total = lines.len();
-        let skip = total.saturating_sub(height + self.scroll_from_bottom);
-        let visible_start = skip.min(total);
-        let visible_end = (visible_start + height).min(total);
-
-        for (row, line) in lines[visible_start..visible_end].iter().enumerate() {
+        let (_, lines) = self.visible_lines(area.width, area.height);
+        for (row, line) in lines.iter().enumerate() {
             let y = area.y + row as u16;
             if y >= area.y + area.height {
                 break;
