@@ -6640,3 +6640,162 @@ frontier 重排（`Ctrl+D` 已划掉；`jumpForward/Backward`、`node:child_proc
 
 并发建议（维持）：上限 3 路；`pi-extensions/src/host.rs` 与
 `docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。本轮开工 1 路、派发 2 路 → 满 3 路。
+
+## LUM-1118 round — 核验 `feature/pi.rs` + pi-tui App 聊天日志滚动（PageUp / PageDown / Home / End）+ 空槽派发 SDK 虚拟模块 与 markdown 上线
+
+（autopilot 协调轮；开工后把 LUM-1118 的泛标题「pi」改成本轮实际内容。）
+
+### 一、在途盘点与槽位决策
+
+- 开工 `multica daemon status` = `running_task_count = 1`（只有本 run；LUM-1116 / LUM-1117 的 run
+  已收工进 `in_review`）→ **有 2 个空槽**（上限 3）。
+- 进入本轮时 `origin/feature/pi.rs` = `2bb27c9d8`（`Merge branch 'work/lum-1116'`，父
+  `56bd949e1` = LUM-1117 的合并、`0d7d3a697` = LUM-1116 的实现提交），两条 Stage 31 轨道都已
+  合入，**没有遗留的合并债**。
+- 磁盘：本轮测试前 `/` 空闲 9.1G、跑完两 crate 后 8.2G。两个子任务都在各自 worktree 里构建但
+  共用 `/tmp/cargo-target`（10G），本轮不再新增 worktree。
+
+### 二、核验 `feature/pi.rs`
+
+在 `work/lum-1118`（起点 `origin/feature/pi.rs` @ `2bb27c9d8`）上复跑：
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/cargo-target \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui -p pi-coding-agent --offline --no-fail-fast
+  pi-tui         = lib 158 + app_scroll 9 + app_theme 5 + cursor_chords 5 + e2e 9
+                   + editor_ctrl_d 7 + editor_jump 14 + markdown 33 + selector_search 7
+                   + snapshot 9 + styles 9 + theme 9 + undo 7 + word_navigation 7 = **288**
+                   + doctest 3
+  pi-coding-agent= lib 221 + main 0 + agent_tools 6 + cli_extension_exec 4 + cli_extensions 13
+                   + cli_provider 17 + cli_tools 4 + extension_ui 4 + packages 7 + print_mode 17
+                   + rpc 9 + system_prompt_resources 5 + tools 11 + tools_navigation 24 = **342**
+                   + doctest 3
+  → 全绿 0 failed
+```
+
+**一例偶发失败（已排除与本轮改动有关）**：首轮并发跑时 `pi-coding-agent --test print_mode` 有 1 例
+失败；同一命令隔离复跑 17/17 通过，随后整轮 `--no-fail-fast` 复跑也全绿。三路 run 共享
+`/tmp/cargo-target` 与 HOME 下的 session 目录，判断为跨进程/并行测试竞争（本轮只动 `pi-tui` 与
+`slash.rs` 的帮助文本，`print_mode` 不触及这二者）。
+
+切片落地后另跑过全量 `cargo test --workspace --offline`（无失败）与
+`cargo clippy --workspace --all-targets --offline`（只剩 `vendor/rquickjs-core` 的历史告警，
+该 crate 不在 workspace 成员内）。
+
+`cargo fmt`：仓库历史漂移仍在（`cargo fmt -p pi-coding-agent -- --check` 有 211 处，全是本轮之前
+的文件；`cargo fmt --all` 全量 536 处），**非本轮引入**；本轮 4 个文件手动对齐后
+`cargo fmt -p pi-tui -p pi-coding-agent -- --check` 对 `pi-tui` 与 `slash.rs` 干净。
+
+### 三、根因：全屏 alt-screen 下根本没有回看通道
+
+LUM-981 的目标是「终端里的 pi 与上游等价」，而 Rust 版一进交互模式就把终端 scrollback 关掉了：
+
+```
+crates/pi-coding-agent/src/interactive.rs:920   execute!(stdout, EnterAlternateScreen)?;
+crates/pi-coding-agent/src/interactive.rs:928   execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+```
+
+`EnterAlternateScreen` 之后，终端自身的滚动条失效；而 `App` **从不调用任何滚动方法**，全仓库也没有
+任何 `PageUp` / `PageDown` 处理（`crates/pi-tui/src/editor.rs:784-785` 只处理裸 `Home` / `End`）。
+结果是：输出超过一屏后，用户没有任何办法回看早期内容——这是真实可用性缺陷，不是样式问题。
+
+上游的对应设计（`packages/tui/src/keybindings.ts:159-209`）：
+
+```
+:159  // These intentionally shadow the unmodified editor bindings in fullscreen mode.
+:160  "tui.altScreen.pageUp"   defaultKeys "pageUp"      "Scroll viewport up one page"
+:164  "tui.altScreen.pageDown" defaultKeys "pageDown"    "Scroll viewport down one page"
+:168  "tui.altScreen.halfPageUp" / :172 halfPageDown / :176 lineUp / :180 lineDown = []
+:208  "tui.altScreen.top"      defaultKeys "home"        "Scroll viewport to top"
+:209  "tui.altScreen.bottom"   defaultKeys "end"         "Scroll viewport to bottom"
+```
+
+也就是说 alt-screen 下裸 `Home` / `End` **有意**归聊天日志，而编辑器自己的行首/行尾还有
+`ctrl+a` / `ctrl+e`（`packages/tui/src/keybindings.ts:99` `lineStart = ["home","ctrl+home","ctrl+a"]`、
+`:103` `lineEnd = ["end","ctrl+end","ctrl+e"]`）。Rust 编辑器没有实现 `ctrl+home` / `ctrl+end`，
+所以这两条没有功能损失。
+
+### 四、本轮切片：App 聊天日志滚动
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/message.rs` | 新增 `detached: bool`（与「跟随尾部」反相，这样 `derive(Default)` 直接得到正确的默认值「跟随」）、`last_render_width: AtomicU16` 与 `last_render_lines: AtomicUsize`（用原子而非 `Cell`，避免把 `MessageView` / `App` 变成 `!Sync`）；因原子不 `Clone`，`#[derive(Clone)]` 换成手写 `impl Clone`。新公开 API：`is_following()` / `set_following(bool)` / `set_scroll_from_bottom(usize)` / `line_count(width)`。`repin_if_following()` 在 detached 时不再强行拉回尾部，而是按记录的渲染宽度与行数算出**行差并 re-anchor**；`scroll_up` 置 detached、`scroll_down` 在 offset 归零时重新跟随、`scroll_to_top` 保持 `usize::MAX` 哨兵、`scroll_to_bottom` / `clear` 重新跟随。`render_styled_lines` 记录本次渲染的宽度与行数 |
+| `crates/pi-tui/src/app.rs` | 新增 `viewport_width` / `viewport_height`（`AtomicU16`，`Relaxed`），在 `render_to_buffer` 里与既有的 `prompt_area` 一起记录；新 API `viewport()` / `message_page()` / `max_scroll()` / `resolved_scroll()`（把 `usize::MAX` 哨兵解析成当前真实 offset）/ `scroll_viewport_up(lines)` / `scroll_viewport_down(lines)` / `scroll_viewport_to_top()` / `scroll_viewport_to_bottom()`；`step_key`（`:605`）在 `Ctrl+L` 之后拦截裸 `PageUp` / `PageDown` / `Home` / `End`，命中时返回 `StepOutcome::Redraw`（无法滚动时 `Idle`），因此**不会**落到编辑器 |
+| `crates/pi-tui/tests/app_scroll.rs`（新增） | 9 个集成测试 |
+| `crates/pi-coding-agent/src/commands/slash.rs` | `/help` 图例补 `PgUp/PgDn` 与 `Home / End` 两行，并加测试 `help_text_documents_scroll_keys` |
+
+`app_scroll.rs` 钉住的语义（9 条）：一页 = 一个视口高度且上下对称；两端都 clamp（到顶后再
+`PageUp` 不动、到底自动恢复跟随）；`Home` / `End` 直达两端；**`Ctrl+A` / `Ctrl+E` 仍落到编辑器**
+（行首/行尾，验证遮蔽只针对裸键）；detached 时流式新增正文不会把视图拉回尾部；跟随态下新正文
+把视图钉在尾部；detached 状态下 resize 后视图不跳（re-anchor 生效）；首帧渲染前按滚动键是 no-op；
+`Ctrl+L` 清屏后回到跟随并把 offset 归零。
+
+### 五、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/cargo-target CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_INCREMENTAL=0 cargo test -p pi-tui --offline
+  lib 158 + app_scroll 9 + app_theme 5 + cursor_chords 5 + e2e 9 + editor_ctrl_d 7
+  + editor_jump 14 + markdown 33 + selector_search 7 + snapshot 9 + styles 9 + theme 9
+  + undo 7 + word_navigation 7 + doctest 3 = **291 passed / 0 failed**
+$ ... cargo test -p pi-coding-agent --offline        # 342 passed + doctest 3 / 0 failed
+$ ... cargo test --workspace --offline               # 全 workspace 无失败
+$ ... cargo clippy --workspace --all-targets --offline   # 仅 vendor/rquickjs-core 历史告警
+```
+
+行为兼容性：新键位只在 `App`（全屏 alt-screen）里生效，非全屏/打印模式与
+`Prompt` 层完全不受影响；`PageUp` / `PageDown` 此前**没有任何**处理方，`Home` / `End` 此前只被编辑器
+消费且在 alt-screen 下无法回看历史——本轮把这两组键的归属改成与上游一致，未删除任何既有功能。
+
+### 六、合并与推送
+
+- 工作分支 `work/lum-1118`，起点 `origin/feature/pi.rs` @ `2bb27c9d8`；本轮代码提交
+  `bee517360`（4 files, +508 / −5）。
+- `git merge-tree --write-tree 2bb27c9d8 work/lum-1118` → tree `3e7ca3d2b`，零冲突；
+  `git commit-tree` 得合并提交 `dc7d4ae78`（父 `2bb27c9d8` + `bee517360`）。
+- `git push origin dc7d4ae78:refs/heads/feature/pi.rs` → `2bb27c9d8..dc7d4ae78`；
+  `git push origin work/lum-1118`。
+- 核对：合并后的 `pi-rust/crates/pi-tui` 子树（`bb6ba723b`）与工作分支完全一致；
+  `diff --stat` 只含本轮 4 个文件。
+
+### 七、frontier（本轮更新）+ 空槽派发
+
+**本轮新发现的最大落差（写进 frontier P1）**：LUM-1117 交付的
+`crates/pi-tui/src/markdown.rs`（1057 行）**没有任何调用方**——`MessageView::with_markdown` /
+`set_markdown` 只出现在定义处（`crates/pi-tui/src/message.rs:134,140,145`），`App::new` 用
+`MessageView::new()`，`AppConfig` 也没有 markdown 字段。也就是说渲染器是死代码，助手正文仍走纯文本，
+而上游默认是用 markdown 渲染助手正文。
+
+frontier 重排（`pi.exec` 取消、`pi-tui` markdown 解析器、App 聊天日志滚动均已落地）：
+
+1. **P1 `@earendil-works/*` SDK 虚拟模块**：扩展真正 import 的是 SDK，不是 node 内建——本仓库自带
+   的 4 个扩展里 `redraws.ts:8` / `prompt-url-widget.ts:4-5` 就 import
+   `@earendil-works/pi-tui`（`Text` / `Container` / `hyperlink`）与 `@earendil-works/pi-coding-agent`
+   （`DynamicBorder`）；上游 69 个示例扩展里有 48 处非 type-only 的 SDK import
+   （pi-tui 22 / pi-coding-agent 17 / pi-ai 7 / pi-ai/compat 1 / gondolin 1）。而
+   `pi-ext-shim.mjs:4366` 的 `__pi_virtual_modules` 只桥接 node 内建与 typebox，其它 specifier
+   直接抛 `unsupported import`（`:895-900`）→ 本轮派发。
+2. **P1 markdown 上线**：见上，光有渲染器不算交付 → 本轮派发。
+3. **P2 `node:module` / `node:readline` / `node:zlib`**：仍要动 `pi-extensions/src/host.rs` 的 op 表
+   （zlib 还要新依赖）→ 与第 1 项排队（同一文件一次只允许一路在写）。
+4. **P2 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+5. **P3 `markdown.rs` 未覆盖子集**：表格 / LaTeX / OSC-8 hyperlink / 语法高亮（模块文档已明示），
+   等 markdown 真正上线后再做。
+6. **P3 鼠标滚轮滚动**：`interactive.rs:940` `CtEvent::Mouse(_) => Ok(None)`，且从未
+   `EnableMouseCapture`；与本轮切片相邻但属独立通道。
+7. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 不写猜测值）。
+
+空槽派发（parent LUM-981，`--status todo` → 即刻起跑，两路**零文件重叠**）：
+
+1. **LUM-1120** `[Stage 32] pi-extensions: @earendil-works/* SDK 虚拟模块（扩展直接 import
+   pi-coding-agent / pi-tui）` —— 改 `crates/pi-extensions/**`（shim 的模块注册表 + 文档 + 新测试），
+   明确禁止改 `crates/pi-tui/**` 与 `docs/FEATURE_PI_RS_STATUS.md`。
+2. **LUM-1121** `[Stage 32] pi-tui: 让 markdown 渲染真正上线（AppConfig.markdown + App 接入 +
+   默认开启）` —— 改 `crates/pi-tui/src/{app,message}.rs` 与受影响的快照/e2e 断言，明确禁止改
+   `crates/pi-extensions/**`、重写解析器、或动 `docs/FEATURE_PI_RS_STATUS.md`。
+
+本轮**只派发 1 路 `pi-extensions`**（`host.rs` 串行约束），另一路给 `pi-tui`——与上游「一次只允许
+一路在写 `host.rs`」的并发建议一致，整体开工 1 路 + 派发 2 路 = 3 路。派发后
+`multica daemon status` 报 `running_task_count = 4`（本 run + LUM-1120 + LUM-1121 + 1 路族外任务；
+`multica issue runs 01a0b4d6… --siblings --active` 只返回 LUM-1120/1121 两行），因此本轮不再追加派发。
