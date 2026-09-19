@@ -1,5 +1,5 @@
 //! End-to-end smoke test that drives `AnthropicProvider` against the
-//! real Anthropic Messages endpoint.
+//! real Anthropic Messages API.
 //!
 //! Reads the API key from `ANTHROPIC_API_KEY`, streams a single
 //! assistant turn, and prints the emitted `AssistantMessageEvent`s.
@@ -19,11 +19,10 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        "ANTHROPIC_API_KEY is not set; this example requires a real Anthropic API key"
-    })?;
+    let api_key = env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY is not set; this example requires a real Anthropic API key")?;
     let model_id =
-        env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string());
+        env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
 
     let model = Model {
         provider: ProviderId::new("anthropic"),
@@ -54,6 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pi_protocol::AssistantMessageEvent::TextDelta { delta } => {
                 print!("{delta}");
             }
+            pi_protocol::AssistantMessageEvent::ThinkingDelta { delta } => {
+                print!("[thinking] {delta}");
+            }
             pi_protocol::AssistantMessageEvent::ToolCallDelta { index, name, .. } => {
                 println!("[tool-call {index}] {name:?}");
             }
@@ -63,7 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 usage,
             } => {
                 println!();
-                println!("[done] stop_reason={stop_reason:?} usage={usage:?}");
+                println!("[done] stop_reason={stop_reason:?}");
+                println!(
+                    "[done] usage: input={} output={} cache_read={} cache_write={}",
+                    usage.input, usage.output, usage.cache_read, usage.cache_write
+                );
                 let text: String = content
                     .iter()
                     .filter_map(|c| match c {
@@ -72,9 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .collect();
                 println!("[done] final_text={text:?}");
-            }
-            pi_protocol::AssistantMessageEvent::ThinkingDelta { delta } => {
-                eprintln!("[think] {delta}");
             }
             pi_protocol::AssistantMessageEvent::Aborted => println!("[aborted]"),
             pi_protocol::AssistantMessageEvent::Error { message } => {

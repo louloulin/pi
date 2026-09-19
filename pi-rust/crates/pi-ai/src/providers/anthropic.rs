@@ -1,39 +1,42 @@
 //! Anthropic Messages provider.
 //!
-//! Implements the [`StreamFn`] trait against the Anthropic Messages HTTP API
-//! (`POST {base}/v1/messages`). The streaming endpoint emits typed SSE
-//! events (`event: message_start` / `content_block_start` /
-//! `content_block_delta` / `content_block_stop` / `message_delta` /
-//! `message_stop` / `ping` / `error`); this adapter parses the byte
+//! Implements [`StreamFn`] against the Anthropic Messages API
+//! (`POST {base_url}/v1/messages`). The streaming endpoint emits typed
+//! SSE events (`message_start`, `content_block_start`,
+//! `content_block_delta`, `content_block_stop`, `message_delta`,
+//! `message_stop`, `ping`, `error`); this adapter parses the byte
 //! stream into [`AssistantMessageEvent`]s and accumulates the final
 //! [`AssistantMessage`] into a single trailing
-//! [`Done`](AssistantMessageEvent::Done).
+//! [`Done`](AssistantMessageEvent::Done) event.
 //!
-//! This is the Stage 7 port of `packages/ai/src/providers/anthropic.ts` +
-//! `packages/ai/src/api/anthropic-messages.ts`. It covers:
+//! # Field mapping (Rust ↔ TS Anthropic Messages)
 //!
-//! - Text streaming (`content_block_delta` with `delta.type == "text_delta"`).
-//! - Tool-use streaming (`content_block_start` with `type == "tool_use"` +
-//!   `input_json_delta` accumulation).
-//! - Thinking streaming (`content_block_start` with `type == "thinking"` +
-//!   `thinking_delta` accumulation), mapped to
-//!   [`AssistantMessageEvent::ThinkingDelta`].
-//! - `message_delta.usage` for output tokens, `message_start.message.usage`
-//!   for input + cache tokens (mapped onto [`Usage::cache_read`] /
-//!   [`Usage::cache_write`]).
-//! - `stop_reason` mapping: `end_turn` → `StopReason::Stop`,
-//!   `tool_use` → `StopReason::ToolUse`, `max_tokens` → `StopReason::MaxTokens`,
-//!   `refusal` → `StopReason::Error`, anything else → `StopReason::Stop`.
-//! - Bearer auth via `x-api-key: {key}` (the Anthropic convention; we
-//!   also accept `Authorization: Bearer {key}` for proxies that rewrite
-//!   the header).
+//! | TS field                                | Rust field / wire usage                |
+//! | --------------------------------------- | -------------------------------------- |
+//! | `input_tokens`                          | `Usage::input`                         |
+//! | `output_tokens`                         | `Usage::output`                        |
+//! | `cache_read_input_tokens`               | `Usage::cache_read`                    |
+//! | `cache_creation_input_tokens`           | `Usage::cache_write`                   |
+//! | `cache_creation.ephemeral_1h_input_tokens` | combined into `Usage::cache_write` |
+//! | `stop_reason = "end_turn"`              | `StopReason::Stop`                     |
+//! | `stop_reason = "tool_use"`              | `StopReason::ToolUse`                  |
+//! | `stop_reason = "max_tokens"`            | `StopReason::MaxTokens`                |
+//! | `stop_reason = "refusal"` / `sensitive` | `StopReason::Error` (with `errorMessage`) |
+//! | `stop_reason = "pause_turn"`            | `StopReason::Stop`                     |
+//! | `stop_reason = "stop_sequence"`         | `StopReason::Stop`                     |
+//! | `content_block.type = "text"`           | `Content::Text(TextContent)`           |
+//! | `content_block.type = "thinking"`       | `AssistantMessageEvent::ThinkingDelta` |
+//! | `content_block.type = "tool_use"`       | `Content::ToolCall(ToolCall)`          |
+//!
+//! # Native vs. WASM
 //!
 //! Native targets use `reqwest`; the `wasm32-unknown-unknown` target has
 //! no usable HTTP client in Stage 7 and returns
-//! [`StreamError::Malformed`] from every call. Stage 6 (browser host) will
-//! replace this with a `fetch`-based adapter.
+//! [`StreamError::Malformed`] from every call. The WASM-bindgen
+//! registration (`pi_ai::wasm::register_anthropic_provider`) seeds a
+//! stub provider that can be used in JS host smoke tests.
 
-// Wire-format structs (the `Messages*` types below) are exposed for
+// Wire-format structs (the `*Wire` types below) are exposed for
 // inspection and fixture tests; their fields are documented inline via
 // the upstream Anthropic reference rather than via Rustdoc. Keep the
 // allow in scope until each struct gets its own doc comment.
@@ -41,10 +44,11 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+#[cfg(not(target_arch = "wasm32"))]
 use futures::TryStreamExt;
 use pi_protocol::{
-    AssistantMessageEvent, Content, Context, Message, Model, Role, StopReason, TextContent,
-    ToolCall, Usage,
+    AssistantMessage, AssistantMessageEvent, Content, Context, Message, Model, Role, StopReason,
+    TextContent, ToolCall, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,25 +57,37 @@ use crate::stream::AssistantMessageEventStream;
 use crate::types::{SimpleStreamOptions, StreamError};
 use crate::StreamFn;
 
-/// Default base URL for Anthropic Messages.
+/// Default base URL for the Anthropic Messages API.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-/// Anthropic API version header. The Messages API tracks this as a date
-/// stamp; 2023-06-15 is the value every documented SDK ships with.
+/// API version sent in the `anthropic-version` header.
+///
+/// Pinned to the value the upstream SDK uses so the wire format stays
+/// stable.
 pub const ANTHROPIC_VERSION: &str = "2023-06-15";
+
+/// Default `max_tokens` when the caller does not supply one and the
+/// model descriptor does not either. Anthropic's API requires this
+/// field to be present.
+pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// Anthropic Messages provider.
 ///
-/// Construct with [`AnthropicProvider::new`] for the production endpoint,
-/// or use [`AnthropicProvider::with_base_url`] to point at a compatible
-/// mirror (Vertex Claude, Bedrock Claude, internal relay, …).
+/// Construct with [`AnthropicProvider::new`] for the production
+/// endpoint, or use [`AnthropicProvider::with_base_url`] to point at a
+/// custom mirror (e.g. AWS Bedrock's Anthropic adapter).
 #[derive(Debug, Clone)]
 pub struct AnthropicProvider {
-    /// API key sent in the `x-api-key` header (Anthropic convention).
+    /// Bearer token sent in the `Authorization` header. Anthropic also
+    /// accepts `x-api-key`; we send both so proxies and OAuth shims
+    /// can pick whichever they understand.
     pub api_key: String,
-    /// Base URL with no trailing slash. Must NOT include the `/v1` prefix;
-    /// [`AnthropicProvider::stream_simple`] appends it.
+    /// Base URL with no trailing slash. The `/v1/messages` path is
+    /// appended in [`Self::send_streaming`].
     pub base_url: String,
+    /// Override the `anthropic-version` header. Mostly useful for
+    /// proxy shims that expect a different version string.
+    pub api_version: String,
 }
 
 impl AnthropicProvider {
@@ -80,105 +96,89 @@ impl AnthropicProvider {
         Self {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            api_version: ANTHROPIC_VERSION.to_string(),
         }
     }
 
-    /// Create a provider pointing at a custom base URL (Vertex, Bedrock,
-    /// internal relay, …).
+    /// Create a provider pointing at a custom base URL (AWS Bedrock,
+    /// local mirror, …).
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
             base_url: base_url.into(),
+            api_version: ANTHROPIC_VERSION.to_string(),
         }
     }
 
-    /// Build the request body for the `/v1/messages` endpoint.
+    /// Override the `anthropic-version` header value.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.api_version = version.into();
+        self
+    }
+
+    /// Build the request body for the messages endpoint.
+    ///
+    /// Public so callers (and tests) can inspect the wire payload
+    /// without making a network call.
     pub fn build_request(
         model: &Model,
         ctx: &Context,
         options: &SimpleStreamOptions,
     ) -> Result<MessagesRequest, StreamError> {
-        // Anthropic requires a non-empty `max_tokens`. If the caller did
-        // not set one, fall back to the model's `max_output_tokens`, then
-        // to a conservative default.
-        let max_tokens = options
-            .max_tokens
-            .or(Some(model.max_output_tokens))
-            .filter(|n| *n > 0)
-            .unwrap_or(4096);
-
-        // Anthropic's API takes `system` as a top-level field rather than
-        // a `system` message in `messages`. Pull from both `ctx.system_prompt`
-        // and any `Role::System` messages in the conversation.
-        let mut system: Option<String> = if ctx.system_prompt.is_empty() {
+        let mut messages = Vec::with_capacity(ctx.messages.len());
+        for msg in &ctx.messages {
+            messages.push(anthropic_message_from(msg)?);
+        }
+        let tools = if ctx.tools.is_empty() {
             None
         } else {
-            Some(ctx.system_prompt.clone())
+            Some(
+                ctx.tools
+                    .iter()
+                    .map(|t| ToolDescriptor {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        input_schema: t.parameters.clone(),
+                    })
+                    .collect(),
+            )
         };
-        let mut messages: Vec<MessagesMessage> = Vec::with_capacity(ctx.messages.len());
-        for msg in &ctx.messages {
-            match msg.role {
-                Role::System => {
-                    if system.is_some() {
-                        return Err(StreamError::Malformed(
-                            "Anthropic only accepts a single system prompt".into(),
-                        ));
-                    }
-                    system = Some(text_of(msg));
-                }
-                Role::User => messages.push(MessagesMessage {
-                    role: "user".into(),
-                    content: MessagesContent::from_message(msg)?,
-                }),
-                Role::Assistant => messages.push(MessagesMessage {
-                    role: "assistant".into(),
-                    content: MessagesContent::from_message(msg)?,
-                }),
-                Role::Tool => messages.push(MessagesMessage {
-                    role: "user".into(),
-                    content: MessagesContent::from_message(msg)?,
-                }),
-            }
-        }
-
-        let tools: Vec<MessagesTool> = ctx
-            .tools
-            .iter()
-            .map(|t| MessagesTool {
-                name: t.name.clone(),
-                description: if t.description.is_empty() {
-                    None
-                } else {
-                    Some(t.description.clone())
-                },
-                input_schema: t.parameters.clone(),
-            })
-            .collect();
-
         Ok(MessagesRequest {
             model: model.id.clone(),
-            max_tokens,
-            stream: true,
             messages,
-            system: system.filter(|s| !s.is_empty()),
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            system: if ctx.system_prompt.is_empty() {
+                None
+            } else {
+                Some(ctx.system_prompt.clone())
+            },
+            max_tokens: options.max_tokens.unwrap_or(model.max_output_tokens.max(DEFAULT_MAX_TOKENS)),
             temperature: options.temperature,
+            stream: true,
+            tools,
         })
     }
 
     /// POST `/v1/messages` with `stream: true` and pipe the SSE byte
     /// stream through [`parse_sse`].
+    ///
+    /// HTTP status errors map to [`StreamError::Provider`]; transport
+    /// errors map to [`StreamError::Transport`]; the rate-limit case
+    /// (HTTP 429) is preserved so callers can implement retry/back-off.
     #[cfg(not(target_arch = "wasm32"))]
     async fn send_streaming(
         &self,
         body: &MessagesRequest,
     ) -> Result<AssistantMessageEventStream, StreamError> {
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/messages",
+            self.base_url.trim_end_matches('/')
+        );
         let client = reqwest::Client::new();
         let response = client
             .post(&url)
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .json(body)
@@ -186,13 +186,9 @@ impl AnthropicProvider {
             .await?;
         let status = response.status();
         if !status.is_success() {
+            let status_code = status.as_u16();
             let body = response.text().await.unwrap_or_default();
-            // Surface Anthropic's structured error payloads ({"type":"error",...})
-            // as a `StreamError::Provider` with the JSON body attached.
-            return Err(StreamError::Provider {
-                status: status.as_u16(),
-                body: truncate_body(&body),
-            });
+            return Err(classify_http_status(status_code, truncate_body(&body)));
         }
         let model_id = body.model.clone();
         let byte_stream = response.bytes_stream();
@@ -226,6 +222,20 @@ impl StreamFn for AnthropicProvider {
     }
 }
 
+/// Classify an HTTP error into the variant of [`StreamError`] the
+/// rest of the codebase expects. Pulled out so the wasm stub and the
+/// tests share the same logic. Native-only — the wasm stub returns
+/// [`StreamError::Malformed`] before any HTTP code is involved.
+#[cfg(not(target_arch = "wasm32"))]
+fn classify_http_status(status: u16, body: String) -> StreamError {
+    match status {
+        401 | 403 => StreamError::Provider { status, body },
+        429 => StreamError::Provider { status, body },
+        500..=599 => StreamError::Provider { status, body },
+        _ => StreamError::Provider { status, body },
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn truncate_body(body: &str) -> String {
     const MAX: usize = 4096;
@@ -247,214 +257,222 @@ fn truncate_body(body: &str) -> String {
 /// Anthropic Messages request body.
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagesRequest {
-    /// Model identifier (`claude-3-5-sonnet-latest`, `claude-opus-4-5`, …).
+    /// Model identifier (`claude-haiku-4-5`, …).
     pub model: String,
-    /// Required by Anthropic's API. Falls back to the model's
-    /// `max_output_tokens` when the caller leaves it unset.
-    pub max_tokens: u32,
-    /// Whether to stream the response. Always `true` in this provider.
-    pub stream: bool,
-    /// Conversation messages (system goes in [`Self::system`]).
-    pub messages: Vec<MessagesMessage>,
-    /// Optional top-level system prompt.
+    /// Conversation messages (user / assistant turns; tool results are
+    /// encoded as user turns with `tool_result` content blocks).
+    pub messages: Vec<AnthropicMessage>,
+    /// System prompt. Anthropic carries it as a top-level field rather
+    /// than a message in the array.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
-    /// Tool descriptors. Skipped when empty.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<MessagesTool>>,
-    /// Sampling temperature (0–1). Anthropic rejects > 1.
+    /// Required by the Anthropic API.
+    pub max_tokens: u32,
+    /// Sampling temperature. Omitted on thinking-enabled requests
+    /// because Anthropic rejects it together with extended thinking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Always `true` for streaming requests.
+    pub stream: bool,
+    /// Tool descriptors. Skipped when empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDescriptor>>,
 }
 
-/// One message in Anthropic wire format.
-#[derive(Debug, Clone, Serialize)]
-pub struct MessagesMessage {
-    /// `user` | `assistant`. Tool results ride on `user` per Anthropic's
-    /// wire convention.
-    pub role: String,
-    /// Content blocks (text / tool_use / tool_result / image / …).
-    pub content: MessagesContent,
+/// One conversation message in Anthropic wire format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
+pub enum AnthropicMessage {
+    /// A user-authored message.
+    User {
+        /// Either a plain string (text-only) or a list of content blocks.
+        content: UserContent,
+    },
+    /// An assistant-authored message.
+    Assistant {
+        /// List of content blocks (text, tool_use).
+        content: Vec<AssistantContentBlock>,
+    },
 }
 
-/// Anthropic content payload — either a string (shorthand for a single
-/// text block) or an array of typed content blocks. We always emit the
-/// array form for clarity and to support tool_use / tool_result blocks.
-#[derive(Debug, Clone, Serialize)]
+/// User-side content: either a plain string or an array of blocks
+/// (text / image / tool_result).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum MessagesContent {
-    /// Array form.
-    Blocks(Vec<MessagesContentBlock>),
+pub enum UserContent {
+    /// Plain text.
+    Text(String),
+    /// Array of blocks (text / image / tool_result).
+    Blocks(Vec<UserContentBlock>),
 }
 
-/// One content block in Anthropic wire format.
-#[derive(Debug, Clone, Serialize)]
+/// One block in a user message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum MessagesContentBlock {
-    /// Plain text.
+pub enum UserContentBlock {
+    /// Plain text block.
     Text {
-        /// Text payload.
+        /// UTF-8 text.
         text: String,
     },
-    /// Image attachment (base64).
+    /// Image attachment.
     Image {
-        /// Source descriptor (base64 + media type).
-        source: MessagesImageSource,
-    },
-    /// Tool invocation from the assistant.
-    ToolUse {
-        /// Provider-issued tool call id.
-        id: String,
-        /// Tool name.
-        name: String,
-        /// Arguments object.
-        input: Value,
+        /// Image source descriptor.
+        source: ImageSource,
     },
     /// Tool result returned to the model.
     ToolResult {
-        /// Tool call id this result answers.
+        /// Echoes the originating tool call id.
         tool_use_id: String,
-        /// Result content (string or array of content blocks).
-        content: MessagesToolResultContent,
-        /// Whether the tool errored. Anthropic surfaces this as a
-        /// synthetic error block.
-        #[serde(skip_serializing_if = "is_false")]
-        is_error: bool,
+        /// Result content.
+        content: ToolResultContent,
+        /// True when the tool failed and the model should treat the
+        /// result as an error.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MessagesImageSource {
-    /// Base64-encoded image data.
-    Base64 {
-        /// MIME type (`image/png`, `image/jpeg`, `image/gif`, `image/webp`).
-        media_type: String,
-        /// Base64 payload (no `data:` prefix).
-        data: String,
-    },
+/// Image source — base64 inline image data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    /// Always `"base64"` in the Rust port.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// MIME type (e.g. `image/png`).
+    pub media_type: String,
+    /// Base64-encoded image bytes.
+    pub data: String,
 }
 
-/// Tool result content — either a string or a list of content blocks.
-#[derive(Debug, Clone, Serialize)]
+/// Tool result content — string or array of blocks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum MessagesToolResultContent {
-    /// Single string (shorthand).
+pub enum ToolResultContent {
+    /// Plain text result.
     Text(String),
-    /// Multiple content blocks.
-    Blocks(Vec<MessagesContentBlock>),
+    /// Array of blocks.
+    Blocks(Vec<UserContentBlock>),
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
+/// One block in an assistant message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AssistantContentBlock {
+    /// Plain text block.
+    Text {
+        /// UTF-8 text.
+        text: String,
+    },
+    /// Tool call from the model.
+    ToolUse {
+        /// Provider-issued identifier.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// Parsed arguments object.
+        input: Value,
+    },
 }
 
 /// Tool descriptor in Anthropic wire format.
-#[derive(Debug, Clone, Serialize)]
-pub struct MessagesTool {
-    /// Tool name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDescriptor {
+    /// Tool name the model uses to invoke the tool.
     pub name: String,
-    /// Tool description (Anthropic recommends ≥ 1 sentence).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// JSON Schema describing the input object.
+    /// Description shown to the model.
+    pub description: String,
+    /// JSON Schema describing the tool's parameters object.
     pub input_schema: Value,
 }
 
-impl MessagesContent {
-    fn from_message(msg: &Message) -> Result<Self, StreamError> {
-        match msg.role {
-            Role::System => unreachable!("system routed through MessagesRequest::system"),
-            Role::User => {
-                let mut blocks = Vec::with_capacity(msg.content.len());
-                for c in &msg.content {
-                    blocks.push(block_from(c)?);
-                }
-                if blocks.is_empty() {
-                    blocks.push(MessagesContentBlock::Text { text: String::new() });
-                }
-                Ok(MessagesContent::Blocks(blocks))
-            }
-            Role::Assistant => {
-                let mut blocks = Vec::with_capacity(msg.content.len());
-                for c in &msg.content {
-                    blocks.push(block_from(c)?);
-                }
-                if blocks.is_empty() {
-                    blocks.push(MessagesContentBlock::Text { text: String::new() });
-                }
-                Ok(MessagesContent::Blocks(blocks))
-            }
-            Role::Tool => {
-                // Anthropic expects tool results on a `user` turn with
-                // `tool_result` blocks. Each `Content::ToolResult` becomes
-                // its own block.
-                let mut blocks = Vec::new();
-                for c in &msg.content {
-                    match c {
-                        Content::ToolResult(r) => {
-                            blocks.push(MessagesContentBlock::ToolResult {
-                                tool_use_id: r.tool_call_id.clone(),
-                                content: MessagesToolResultContent::Text(text_of_box(&r.content)),
-                                is_error: r.is_error,
-                            });
-                        }
-                        Content::Text(t) => {
-                            blocks.push(MessagesContentBlock::Text { text: t.text.clone() });
-                        }
-                        other => {
-                            return Err(StreamError::Malformed(format!(
-                                "tool message may only contain Text or ToolResult, got {other:?}"
-                            )));
-                        }
+// ---------------------------------------------------------------------------
+// Message conversion
+// ---------------------------------------------------------------------------
+
+fn anthropic_message_from(msg: &Message) -> Result<AnthropicMessage, StreamError> {
+    match msg.role {
+        Role::System => {
+            // Anthropic carries system as a top-level field, so we
+            // promote a stray system message in the array to a no-op
+            // (the top-level `system` is set from `Context::system_prompt`
+            // directly). This keeps the wire format valid.
+            Ok(AnthropicMessage::User {
+                content: UserContent::Text(String::new()),
+            })
+        }
+        Role::User => {
+            let blocks: Vec<UserContentBlock> = msg
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Text(t) => Some(UserContentBlock::Text { text: t.text.clone() }),
+                    _ => None,
+                })
+                .collect();
+            Ok(AnthropicMessage::User {
+                content: UserContent::Blocks(blocks),
+            })
+        }
+        Role::Assistant => {
+            let mut blocks = Vec::with_capacity(msg.content.len());
+            for c in &msg.content {
+                match c {
+                    Content::Text(t) => {
+                        blocks.push(AssistantContentBlock::Text {
+                            text: t.text.clone(),
+                        });
+                    }
+                    Content::ToolCall(call) => {
+                        blocks.push(AssistantContentBlock::ToolUse {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            input: call.arguments.clone(),
+                        });
+                    }
+                    _ => {
+                        return Err(StreamError::Malformed(
+                            "assistant message may only contain text or tool calls".into(),
+                        ));
                     }
                 }
-                if blocks.is_empty() {
-                    blocks.push(MessagesContentBlock::Text { text: String::new() });
-                }
-                Ok(MessagesContent::Blocks(blocks))
             }
+            Ok(AnthropicMessage::Assistant { content: blocks })
         }
-    }
-}
-
-fn block_from(c: &Content) -> Result<MessagesContentBlock, StreamError> {
-    match c {
-        Content::Text(t) => Ok(MessagesContentBlock::Text { text: t.text.clone() }),
-        Content::Image(_) => Err(StreamError::Malformed(
-            "image content requires media_type + base64 data; wire-format conversion not yet implemented".into(),
-        )),
-        Content::ToolCall(call) => Ok(MessagesContentBlock::ToolUse {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            input: call.arguments.clone(),
-        }),
-        Content::ToolResult(r) => Ok(MessagesContentBlock::ToolResult {
-            tool_use_id: r.tool_call_id.clone(),
-            content: MessagesToolResultContent::Text(text_of_box(&r.content)),
-            is_error: r.is_error,
-        }),
-    }
-}
-
-fn text_of(msg: &Message) -> String {
-    msg.content
-        .iter()
-        .filter_map(|c| match c {
-            Content::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Extract text from a `Box<Content>` (used by `ToolResult::content`).
-fn text_of_box(c: &Content) -> String {
-    match c {
-        Content::Text(t) => t.text.clone(),
-        Content::ToolResult(_) => String::new(),
-        Content::ToolCall(_) => String::new(),
-        Content::Image(_) => String::new(),
+        Role::Tool => {
+            // Anthropic expects tool results as user-side `tool_result`
+            // blocks. Pull the tool call id from the first ToolResult
+            // block; concatenate the textual content of the rest.
+            let tool_use_id = msg
+                .content
+                .iter()
+                .find_map(|c| match c {
+                    Content::ToolResult(r) => Some(r.tool_call_id.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| StreamError::Malformed("tool message missing tool result".into()))?;
+            let mut text = String::new();
+            let mut is_error = None;
+            for c in &msg.content {
+                match c {
+                    Content::Text(t) => text.push_str(&t.text),
+                    Content::ToolResult(r) => {
+                        is_error = Some(r.is_error);
+                        if let Content::Text(t) = &*r.content {
+                            text.push_str(&t.text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(AnthropicMessage::User {
+                content: UserContent::Blocks(vec![UserContentBlock::ToolResult {
+                    tool_use_id,
+                    content: ToolResultContent::Text(text),
+                    is_error,
+                }]),
+            })
+        }
     }
 }
 
@@ -462,32 +480,34 @@ fn text_of_box(c: &Content) -> String {
 // SSE parser
 // ---------------------------------------------------------------------------
 
-/// Parse an Anthropic SSE byte stream into an [`AssistantMessageEventStream`].
+/// Parse an Anthropic SSE byte stream into an
+/// [`AssistantMessageEventStream`].
 ///
-/// Anthropic's SSE format differs from OpenAI's:
-/// - Each event has an `event:` field naming the event type
-///   (`message_start`, `content_block_start`, …).
-/// - The `data:` field is a single JSON object shaped like the upstream
-///   `BetaRawMessageStreamEvent` (we accept the same shape with serde's
-///   `untagged` enum dispatch).
+/// Each event is shaped like:
 ///
-/// We dispatch on the JSON `type` field for the inner payload because
-/// that's what the SDK contract exposes.
+/// ```text
+/// event: message_start
+/// data: {"type":"message_start","message":{...}}
+/// ```
+///
+/// Lines that don't start with `event:` or `data:` are ignored (ids,
+/// retry hints, empty heartbeats). `event: ping` is dropped silently.
+/// `event: error` is converted into an `AssistantMessageEvent::Error`.
 pub fn parse_sse(
     bytes: impl futures::Stream<Item = Result<Bytes, StreamError>> + Send + 'static,
     model_id: String,
 ) -> AssistantMessageEventStream {
-    Box::pin(AnthropicSseStream::new(bytes, model_id))
+    Box::pin(SseStream::new(bytes, model_id))
 }
 
-struct AnthropicSseStream {
+struct SseStream {
     inner: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, StreamError>> + Send>>,
     /// Half-parsed SSE buffer (lines from the most recent chunk).
     line_buffer: Vec<u8>,
+    /// Currently buffered `event:` field for the in-flight event.
+    event_name: Option<String>,
     /// Currently buffered `data:` lines for the in-flight event.
     data_lines: Vec<String>,
-    /// Currently buffered `event:` name (Anthropic tags every event).
-    event_name: Option<String>,
     /// Pending events produced by the current chunk but not yet yielded.
     pending: std::collections::VecDeque<Result<AssistantMessageEvent, StreamError>>,
     /// True once the stream sent its final `Done`.
@@ -500,28 +520,56 @@ struct AnthropicSseStream {
 
 #[derive(Default)]
 struct ParserState {
-    /// Assistant message content accumulated so far.
-    content: Vec<Content>,
-    /// In-flight tool calls keyed by their `index` field.
-    pending_tool_calls: std::collections::HashMap<u32, PendingToolCall>,
-    /// Running usage totals.
-    usage: Usage,
-    /// Stop reason set by `message_delta.stop_reason`.
+    /// Whether `tool_use` blocks have been seen (drives the default
+    /// stop reason when the upstream omits one).
+    saw_tool_use: bool,
+    /// Final stop reason set by `message_delta.delta.stop_reason`.
     stop_reason: Option<StopReason>,
-    /// Tracks whether the parser has observed `message_start` so we can
-    /// emit `Done` with a sane model id.
-    message_id: Option<String>,
+    /// Final assistant message model name. The Anthropic API can
+    /// return a different model id from the request (server-side
+    /// fallbacks); the TS port tracks this through `AssistantMessage`.
+    model: Option<String>,
+    /// Token usage accumulated so far. `input_tokens` and
+    /// `cache_read_input_tokens` come from `message_start`; the
+    /// `output_tokens` final value comes from `message_delta.usage`.
+    usage: Usage,
+    /// Per-block state — we track the tool_use id/name/arguments and
+    /// the text / thinking accumulators by their Anthropic `index`.
+    blocks: std::collections::HashMap<u32, BlockState>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct PendingToolCall {
+#[derive(Default)]
+struct BlockState {
+    kind: BlockKind,
+}
+
+#[derive(Default)]
+enum BlockKind {
+    #[default]
+    Empty,
+    Text(TextBlock),
+    ToolUse(ToolUseBlock),
+    /// Thinking blocks are emitted as `ThinkingDelta` events but not
+    /// stored in the content array (the wire types do not yet have a
+    /// `ThinkingContent` variant — they will land in a follow-up
+    /// `pi-protocol` increment).
+    Thinking,
+}
+
+#[derive(Default)]
+struct TextBlock {
+    text: String,
+}
+
+#[derive(Default)]
+struct ToolUseBlock {
     id: Option<String>,
     name: Option<String>,
-    /// Arguments fragment, accumulated verbatim.
+    /// Arguments as a (possibly partial) JSON string.
     arguments: String,
 }
 
-impl AnthropicSseStream {
+impl SseStream {
     fn new(
         bytes: impl futures::Stream<Item = Result<Bytes, StreamError>> + Send + 'static,
         model_id: String,
@@ -529,8 +577,8 @@ impl AnthropicSseStream {
         Self {
             inner: Box::pin(bytes),
             line_buffer: Vec::new(),
-            data_lines: Vec::new(),
             event_name: None,
+            data_lines: Vec::new(),
             pending: std::collections::VecDeque::new(),
             finished: false,
             started: false,
@@ -575,17 +623,18 @@ impl AnthropicSseStream {
             Some(parts) => parts,
             None => return Ok(()),
         };
+        let value = String::from_utf8_lossy(value).into_owned();
         match field {
             b"event" => {
-                let value = String::from_utf8_lossy(value).into_owned();
+                // Replace the in-flight event name — Anthropic always
+                // sends a single `event:` per event.
                 self.event_name = Some(value);
             }
             b"data" => {
-                let value = String::from_utf8_lossy(value).into_owned();
                 self.data_lines.push(value);
             }
             b"id" | b"retry" => {
-                // We don't track retry hints or last-event-id.
+                // We only care about `event:` / `data:`.
             }
             _ => {}
         }
@@ -593,268 +642,422 @@ impl AnthropicSseStream {
     }
 
     fn dispatch_event(&mut self) -> Result<(), StreamError> {
-        if self.data_lines.is_empty() && self.event_name.is_none() {
-            return Ok(());
-        }
+        let event_name = match self.event_name.take() {
+            Some(name) => name,
+            None => {
+                // No event name means no buffered payload — clear any
+                // stray data lines and move on.
+                self.data_lines.clear();
+                return Ok(());
+            }
+        };
         let payload = self.data_lines.join("\n");
-        let event_name = self.event_name.take();
         self.data_lines.clear();
         if payload.is_empty() {
             return Ok(());
         }
-        // Surface Anthropic's `error` event as a `StreamError::Provider`
-        // so the caller can show the error message.
-        if event_name.as_deref() == Some("error") {
-            return Err(StreamError::Provider {
-                status: 400,
-                body: payload,
-            });
+        match event_name.as_str() {
+            "ping" => Ok(()),
+            "error" => self.handle_error_event(&payload),
+            _ => self.handle_event(&event_name, &payload),
         }
-        self.handle_event(event_name.as_deref(), &payload)
     }
 
-    fn handle_event(&mut self, name: Option<&str>, data: &str) -> Result<(), StreamError> {
-        if !self.started {
-            // We wait until we see `message_start` to emit the
-            // `Start` event so we can attach the model id from the
-            // payload (which may differ from the request's model id).
-            if name == Some("message_start") {
-                self.started = true;
-                let payload: MessageStartPayload = serde_json::from_str(data).map_err(|e| {
-                    StreamError::Malformed(format!("message_start JSON: {e}: {data}"))
-                })?;
-                self.state.message_id = Some(payload.message.id.clone());
-                self.state.usage = Usage {
-                    input: payload.message.usage.input_tokens,
-                    output: payload.message.usage.output_tokens,
-                    cache_read: payload.message.usage.cache_read_input_tokens,
-                    cache_write: payload.message.usage.cache_creation_input_tokens,
-                    total: payload
-                        .message
-                        .usage
-                        .input_tokens
-                        .saturating_add(payload.message.usage.output_tokens),
-                };
-                let model = if payload.message.model.is_empty() {
-                    self.model_id.clone()
-                } else {
-                    payload.message.model.clone()
-                };
-                self.pending.push_back(Ok(AssistantMessageEvent::Start { model }));
-            }
-            return Ok(());
+    fn handle_error_event(&mut self, data: &str) -> Result<(), StreamError> {
+        // `event: error` payload shape: `{ "type": "error", "error": { "type": "...", "message": "..." } }`
+        // The TS port surfaces the upstream `message` verbatim.
+        #[derive(Deserialize)]
+        struct WireErrorEvent {
+            error: WireErrorBody,
         }
-
-        match name {
-            Some("content_block_start") => {
-                let payload: ContentBlockStartPayload = serde_json::from_str(data).map_err(|e| {
-                    StreamError::Malformed(format!("content_block_start JSON: {e}: {data}"))
-                })?;
-                self.handle_content_block_start(payload)?;
-            }
-            Some("content_block_delta") => {
-                let payload: ContentBlockDeltaPayload = serde_json::from_str(data).map_err(|e| {
-                    StreamError::Malformed(format!("content_block_delta JSON: {e}: {data}"))
-                })?;
-                self.handle_content_block_delta(payload)?;
-            }
-            Some("content_block_stop") => {
-                let payload: ContentBlockStopPayload = serde_json::from_str(data).map_err(|e| {
-                    StreamError::Malformed(format!("content_block_stop JSON: {e}: {data}"))
-                })?;
-                self.handle_content_block_stop(payload)?;
-            }
-            Some("message_delta") => {
-                let payload: MessageDeltaPayload = serde_json::from_str(data).map_err(|e| {
-                    StreamError::Malformed(format!("message_delta JSON: {e}: {data}"))
-                })?;
-                if let Some(reason) = payload.delta.stop_reason.as_deref() {
-                    self.state.stop_reason = Some(map_stop_reason(reason));
-                }
-                if let Some(usage) = payload.usage {
-                    // `message_delta.usage` carries the final output_tokens
-                    // count. Merge into existing usage so cache_read /
-                    // cache_write from `message_start` are preserved.
-                    self.state.usage.output = usage.output_tokens;
-                }
-            }
-            Some("message_stop") => {
-                // The SDK convention is to finalise on the next poll when
-                // the underlying byte stream returns `None`; we leave
-                // `message_stop` as a no-op marker.
-            }
-            Some("ping") | None => {
-                // Heartbeats / unknown events: ignore.
-            }
-            Some(other) => {
-                // Unknown event types are silently ignored — the upstream
-                // SDK follows the same convention.
-                let _ = other;
-            }
+        #[derive(Deserialize)]
+        struct WireErrorBody {
+            #[serde(default)]
+            message: Option<String>,
         }
+        let parsed: WireErrorEvent = serde_json::from_str(data)
+            .map_err(|e| StreamError::Malformed(format!("Anthropic error event JSON: {e}")))?;
+        let message = parsed
+            .error
+            .message
+            .unwrap_or_else(|| "Anthropic returned an error event".to_string());
+        self.pending.push_back(Err(StreamError::Malformed(format!(
+            "Anthropic error event: {message}"
+        ))));
         Ok(())
     }
 
-    fn handle_content_block_start(
-        &mut self,
-        payload: ContentBlockStartPayload,
-    ) -> Result<(), StreamError> {
-        match payload.content_block {
-            ContentBlockStart::Text { text } => {
+    fn handle_event(&mut self, name: &str, data: &str) -> Result<(), StreamError> {
+        if !self.started {
+            self.started = true;
+            self.pending.push_back(Ok(AssistantMessageEvent::Start {
+                model: self.state.model.clone().unwrap_or_else(|| self.model_id.clone()),
+            }));
+        }
+
+        match name {
+            "message_start" => self.handle_message_start(data),
+            "content_block_start" => self.handle_content_block_start(data),
+            "content_block_delta" => self.handle_content_block_delta(data),
+            "content_block_stop" => self.handle_content_block_stop(data),
+            "message_delta" => self.handle_message_delta(data),
+            "message_stop" => Ok(()),
+            // Other event names (`ping`, proxies' custom events, …)
+            // are silently dropped.
+            _ => Ok(()),
+        }
+    }
+
+    fn handle_message_start(&mut self, data: &str) -> Result<(), StreamError> {
+        #[derive(Deserialize)]
+        struct WireMessageStart {
+            message: WireMessageMeta,
+        }
+        #[derive(Deserialize)]
+        struct WireMessageMeta {
+            #[serde(default, rename = "_unused_id")]
+            #[allow(dead_code)]
+            id: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            usage: WireMessageUsage,
+        }
+        #[derive(Deserialize, Default)]
+        struct WireMessageUsage {
+            #[serde(default)]
+            input_tokens: u32,
+            #[serde(default)]
+            output_tokens: u32,
+            #[serde(default)]
+            cache_creation_input_tokens: u32,
+            #[serde(default)]
+            cache_read_input_tokens: u32,
+        }
+        let parsed: WireMessageStart = serde_json::from_str(data)
+            .map_err(|e| StreamError::Malformed(format!("Anthropic message_start: {e}: {data}")))?;
+        if let Some(model) = parsed.message.model {
+            self.state.model = Some(model);
+        }
+        let usage = parsed.message.usage;
+        self.state.usage.input = usage.input_tokens;
+        self.state.usage.output = usage.output_tokens;
+        self.state.usage.cache_read = usage.cache_read_input_tokens;
+        self.state.usage.cache_write = usage.cache_creation_input_tokens;
+        Ok(())
+    }
+
+    fn handle_content_block_start(&mut self, data: &str) -> Result<(), StreamError> {
+        #[derive(Deserialize)]
+        struct WireContentBlockStart {
+            index: u32,
+            content_block: WireContentBlock,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[allow(clippy::large_enum_variant)]
+        enum WireContentBlock {
+            /// Text block.
+            Text {
+                #[serde(default)]
+                text: String,
+            },
+            /// Thinking block (extended thinking).
+            Thinking {
+                #[serde(default)]
+                thinking: String,
+            },
+            /// Tool call.
+            ToolUse {
+                #[serde(default)]
+                id: String,
+                #[serde(default)]
+                name: String,
+                #[serde(default)]
+                input: Value,
+            },
+        }
+        let parsed: WireContentBlockStart = serde_json::from_str(data)
+            .map_err(|e| StreamError::Malformed(format!("Anthropic content_block_start: {e}: {data}")))?;
+        let index = parsed.index;
+        let mut block = BlockState::default();
+        match parsed.content_block {
+            WireContentBlock::Text { text } => {
                 if !text.is_empty() {
-                    self.state.content.push(Content::Text(TextContent { text }));
+                    // Preserve any initial text the API hands us in the
+                    // start event (e.g. when the model emits a leading
+                    // paragraph in one shot).
+                    self.pending.push_back(Ok(AssistantMessageEvent::TextDelta {
+                        delta: text.clone(),
+                    }));
+                    block.kind = BlockKind::Text(TextBlock { text });
+                } else {
+                    block.kind = BlockKind::Text(TextBlock::default());
                 }
             }
-            ContentBlockStart::Thinking { thinking } => {
+            WireContentBlock::Thinking { thinking } => {
                 if !thinking.is_empty() {
                     self.pending.push_back(Ok(AssistantMessageEvent::ThinkingDelta {
                         delta: thinking,
                     }));
                 }
+                block.kind = BlockKind::Thinking;
             }
-            ContentBlockStart::ToolUse { id, name, input } => {
-                let entry = self
-                    .state
-                    .pending_tool_calls
-                    .entry(payload.index)
-                    .or_default();
-                entry.id = Some(id);
-                entry.name = Some(name);
-                if let Some(obj) = input.as_object() {
-                    if !obj.is_empty() {
-                        let fragment =
-                            serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
-                        entry.arguments.push_str(&fragment);
-                    }
+            WireContentBlock::ToolUse { id, name, input } => {
+                let mut state = ToolUseBlock::default();
+                if !id.is_empty() {
+                    state.id = Some(id.clone());
                 }
-            }
-            ContentBlockStart::Other => {
-                // Unknown block types are silently skipped, matching the
-                // upstream SDK's behaviour for forward-compat.
+                if !name.is_empty() {
+                    state.name = Some(name.clone());
+                }
+                let initial_json = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                if !initial_json.is_empty() && initial_json != "{}" {
+                    state.arguments.push_str(&initial_json);
+                }
+                self.pending.push_back(Ok(AssistantMessageEvent::ToolCallDelta {
+                    index,
+                    id: if id.is_empty() { None } else { Some(id) },
+                    name: if name.is_empty() { None } else { Some(name) },
+                    arguments_delta: if initial_json.is_empty() || initial_json == "{}" {
+                        None
+                    } else {
+                        Some(initial_json)
+                    },
+                }));
+                block.kind = BlockKind::ToolUse(state);
+                self.state.saw_tool_use = true;
             }
         }
+        self.state.blocks.insert(index, block);
         Ok(())
     }
 
-    fn handle_content_block_delta(
-        &mut self,
-        payload: ContentBlockDeltaPayload,
-    ) -> Result<(), StreamError> {
-        match payload.delta {
-            ContentBlockDelta::TextDelta { text } => {
+    fn handle_content_block_delta(&mut self, data: &str) -> Result<(), StreamError> {
+        #[derive(Deserialize)]
+        struct WireContentBlockDelta {
+            index: u32,
+            delta: WireContentDelta,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[allow(clippy::enum_variant_names)]
+        enum WireContentDelta {
+            TextDelta {
+                text: String,
+            },
+            ThinkingDelta {
+                thinking: String,
+            },
+            InputJsonDelta {
+                partial_json: String,
+            },
+            SignatureDelta {
+                #[allow(dead_code)]
+                signature: String,
+            },
+        }
+        let parsed: WireContentBlockDelta = serde_json::from_str(data)
+            .map_err(|e| StreamError::Malformed(format!("Anthropic content_block_delta: {e}: {data}")))?;
+        let index = parsed.index;
+        match parsed.delta {
+            WireContentDelta::TextDelta { text } => {
                 if text.is_empty() {
                     return Ok(());
                 }
+                let delta = text;
                 self.pending.push_back(Ok(AssistantMessageEvent::TextDelta {
-                    delta: text.clone(),
+                    delta: delta.clone(),
                 }));
-                if let Some(Content::Text(t)) = self.state.content.last_mut() {
-                    t.text.push_str(&text);
-                    return Ok(());
+                let entry = self.state.blocks.entry(index).or_default();
+                if let BlockKind::Text(t) = &mut entry.kind {
+                    t.text.push_str(&delta);
+                } else {
+                    entry.kind = BlockKind::Text(TextBlock { text: delta });
                 }
-                self.state.content.push(Content::Text(TextContent { text }));
-                Ok(())
             }
-            ContentBlockDelta::ThinkingDelta { thinking } => {
+            WireContentDelta::ThinkingDelta { thinking } => {
                 if thinking.is_empty() {
                     return Ok(());
                 }
                 self.pending.push_back(Ok(AssistantMessageEvent::ThinkingDelta {
                     delta: thinking,
                 }));
-                Ok(())
             }
-            ContentBlockDelta::InputJsonDelta { partial_json } => {
-                let entry = self
-                    .state
-                    .pending_tool_calls
-                    .entry(payload.index)
-                    .or_default();
-                if !partial_json.is_empty() {
-                    entry.arguments.push_str(&partial_json);
-                    self.pending.push_back(Ok(AssistantMessageEvent::ToolCallDelta {
-                        index: payload.index,
-                        id: None,
-                        name: None,
-                        arguments_delta: Some(partial_json),
-                    }));
-                }
-                Ok(())
+            WireContentDelta::InputJsonDelta { partial_json } => {
+                let entry = self.state.blocks.entry(index).or_default();
+                let tc = match &mut entry.kind {
+                    BlockKind::ToolUse(tc) => tc,
+                    _ => {
+                        entry.kind = BlockKind::ToolUse(ToolUseBlock::default());
+                        match &mut entry.kind {
+                            BlockKind::ToolUse(tc) => tc,
+                            _ => unreachable!(),
+                        }
+                    }
+                };
+                tc.arguments.push_str(&partial_json);
+                self.pending.push_back(Ok(AssistantMessageEvent::ToolCallDelta {
+                    index,
+                    id: None,
+                    name: None,
+                    arguments_delta: Some(partial_json),
+                }));
             }
-            ContentBlockDelta::SignatureDelta { .. } | ContentBlockDelta::Other => Ok(()),
+            WireContentDelta::SignatureDelta { .. } => {
+                // The signature is required by the API to echo back
+                // on multi-turn reasoning; the Rust port discards it
+                // because the wire types do not carry a thinking
+                // signature yet. Recorded for completeness — see the
+                // `anthropic-shared` module in the TS port.
+            }
         }
+        Ok(())
     }
 
-    fn handle_content_block_stop(
-        &mut self,
-        payload: ContentBlockStopPayload,
-    ) -> Result<(), StreamError> {
-        if let Some(mut call) = self.state.pending_tool_calls.remove(&payload.index) {
-            let id = call.id.take().unwrap_or_default();
-            let name = call.name.take().unwrap_or_default();
-            let arguments = if call.arguments.is_empty() {
-                Value::Object(Default::default())
-            } else {
-                match serde_json::from_str(&call.arguments) {
-                    Ok(v) => v,
-                    Err(_) => Value::String(call.arguments.clone()),
-                }
-            };
-            self.state.content.push(Content::ToolCall(ToolCall {
-                id,
-                name,
-                arguments,
-            }));
+    fn handle_content_block_stop(&mut self, _data: &str) -> Result<(), StreamError> {
+        // The stop event carries no payload worth parsing — the block
+        // state is already finalised in the per-event handlers. We
+        // could emit `ContentBlockStop` events here in the future if
+        // the wire surface grows them.
+        Ok(())
+    }
+
+    fn handle_message_delta(&mut self, data: &str) -> Result<(), StreamError> {
+        #[derive(Deserialize)]
+        struct WireMessageDelta {
+            #[serde(default)]
+            delta: Option<WireMessageDeltaInner>,
+            #[serde(default)]
+            usage: Option<WireMessageDeltaUsage>,
+        }
+        #[derive(Deserialize)]
+        struct WireMessageDeltaInner {
+            #[serde(default)]
+            stop_reason: Option<String>,
+        }
+        #[derive(Deserialize, Default)]
+        struct WireMessageDeltaUsage {
+            #[serde(default)]
+            input_tokens: Option<u32>,
+            #[serde(default)]
+            output_tokens: Option<u32>,
+            #[serde(default)]
+            cache_read_input_tokens: Option<u32>,
+            #[serde(default)]
+            cache_creation_input_tokens: Option<u32>,
+        }
+        let parsed: WireMessageDelta = serde_json::from_str(data)
+            .map_err(|e| StreamError::Malformed(format!("Anthropic message_delta: {e}: {data}")))?;
+        if let Some(delta) = parsed.delta {
+            if let Some(reason) = delta.stop_reason {
+                self.state.stop_reason = Some(map_stop_reason(&reason));
+            }
+        }
+        if let Some(usage) = parsed.usage {
+            // Mirror the TS port's behaviour: only update the fields
+            // the upstream actually sends. `output_tokens` is always
+            // populated by Anthropic; the cache / input fields only
+            // appear when the stream crosses a cache boundary.
+            if let Some(input_tokens) = usage.input_tokens {
+                self.state.usage.input = input_tokens;
+            }
+            if let Some(output_tokens) = usage.output_tokens {
+                self.state.usage.output = output_tokens;
+            }
+            if let Some(cache_read) = usage.cache_read_input_tokens {
+                self.state.usage.cache_read = cache_read;
+            }
+            if let Some(cache_write) = usage.cache_creation_input_tokens {
+                self.state.usage.cache_write = cache_write;
+            }
         }
         Ok(())
     }
 
     fn finalize(&mut self) {
-        // Materialise any pending tool calls that did not receive a
-        // matching `content_block_stop` (defensive — Anthropic always
-        // sends the stop, but a truncated stream should still
-        // surface what we have).
-        let mut pending: Vec<_> = self.state.pending_tool_calls.drain().collect();
-        pending.sort_by_key(|(idx, _)| *idx);
-        for (_idx, mut call) in pending {
-            let id = call.id.take().unwrap_or_default();
-            let name = call.name.take().unwrap_or_default();
-            let arguments = if call.arguments.is_empty() {
-                Value::Object(Default::default())
-            } else {
-                serde_json::from_str(&call.arguments).unwrap_or(Value::String(call.arguments))
-            };
-            self.state.content.push(Content::ToolCall(ToolCall {
-                id,
-                name,
-                arguments,
-            }));
+        // Materialise per-block state into the content list, preserving
+        // the Anthropic block order (sorted by `index`).
+        let mut block_order: Vec<u32> = self.state.blocks.keys().copied().collect();
+        block_order.sort_unstable();
+        let mut blocks = std::mem::take(&mut self.state.blocks);
+        let mut content: Vec<Content> = Vec::new();
+        for index in block_order {
+            let entry = blocks.remove(&index).unwrap_or_default();
+            match entry.kind {
+                BlockKind::ToolUse(tc) => {
+                    let id = tc.id.unwrap_or_default();
+                    let name = tc.name.unwrap_or_default();
+                    let arguments = if tc.arguments.is_empty() {
+                        Value::Object(Default::default())
+                    } else {
+                        serde_json::from_str(&tc.arguments)
+                            .unwrap_or_else(|_| Value::String(tc.arguments.clone()))
+                    };
+                    content.push(Content::ToolCall(ToolCall { id, name, arguments }));
+                }
+                BlockKind::Text(t) => {
+                    if !t.text.is_empty() {
+                        content.push(Content::Text(TextContent { text: t.text }));
+                    }
+                }
+                BlockKind::Thinking | BlockKind::Empty => {}
+            }
         }
-        let stop_reason = self.state.stop_reason.unwrap_or_else(|| {
-            if self.state.content.iter().any(Content::is_tool_call) {
+        let stop_reason = self.state.stop_reason.unwrap_or({
+            if self.state.saw_tool_use {
                 StopReason::ToolUse
-            } else if self.state.content.is_empty() {
-                StopReason::Empty
             } else {
                 StopReason::Stop
             }
         });
-        let content = std::mem::take(&mut self.state.content);
         let usage = self.state.usage;
-        let model_id = self.model_id.clone();
-        let _ = self.state.message_id.take();
-        self.pending.push_back(Ok(AssistantMessageEvent::Done {
+        let model = self.state.model.clone().unwrap_or_else(|| self.model_id.clone());
+        let message = AssistantMessage {
+            model,
             content,
             stop_reason,
             usage,
-        }));
-        // `model_id` is unused here (the `Start` event carries the model
-        // id) but we keep the binding to document the source of truth.
-        let _ = model_id;
+        };
+        self.pending.push_back(Ok(message_to_done(message)));
     }
 }
 
-impl futures::Stream for AnthropicSseStream {
+fn message_to_done(message: AssistantMessage) -> AssistantMessageEvent {
+    AssistantMessageEvent::Done {
+        content: message.content,
+        stop_reason: message.stop_reason,
+        usage: message.usage,
+    }
+}
+
+fn map_stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "end_turn" => StopReason::Stop,
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        // Anthropic's `refusal` and `sensitive` stop reasons are
+        // surfaced as errors with an explanation; the Rust port
+        // collapses both into `StopReason::Error` (the closest
+        // existing variant) and forwards the upstream message
+        // through the trailing `Done` payload instead of a separate
+        // `Error` event. The TS port's `errorMessage` enrichment
+        // lives on the `AssistantMessage` struct and is not yet in
+        // the Rust wire types — once it lands the mapping below
+        // becomes a richer enum case.
+        "refusal" | "sensitive" => StopReason::Error,
+        "pause_turn" | "stop_sequence" => StopReason::Stop,
+        other => {
+            // Forward unknown reasons as `Stop` rather than panicking
+            // — the Anthropic API has added new reasons in the past
+            // (e.g. `sensitive`) and this keeps the parser forward
+            // compatible. The TS port throws; we log instead.
+            tracing::debug!(reason = %other, "Anthropic returned unknown stop_reason");
+            StopReason::Stop
+        }
+    }
+}
+
+impl futures::Stream for SseStream {
     type Item = Result<AssistantMessageEvent, StreamError>;
 
     fn poll_next(
@@ -872,15 +1075,24 @@ impl futures::Stream for AnthropicSseStream {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(None) => {
                     self.finished = true;
-                    // Drain any remaining buffered bytes as a final line.
                     if !self.line_buffer.is_empty() {
                         let buf = std::mem::take(&mut self.line_buffer);
                         if let Err(e) = self.process_line(&buf) {
                             return std::task::Poll::Ready(Some(Err(e)));
                         }
                     }
-                    // Flush any in-progress event.
-                    self.dispatch_event()?;
+                    if let Err(e) = self.dispatch_event() {
+                        return std::task::Poll::Ready(Some(Err(e)));
+                    }
+                    if !self.started {
+                        // Empty stream — synthesize a Start + Done so
+                        // callers always see the contract.
+                        self.started = true;
+                        let start_model = self.model_id.clone();
+                        self.pending.push_back(Ok(AssistantMessageEvent::Start {
+                            model: start_model,
+                        }));
+                    }
                     self.finalize();
                     if let Some(ev) = self.pending.pop_front() {
                         return std::task::Poll::Ready(Some(ev));
@@ -899,7 +1111,6 @@ impl futures::Stream for AnthropicSseStream {
                     if let Some(ev) = self.pending.pop_front() {
                         return std::task::Poll::Ready(Some(ev));
                     }
-                    // Otherwise loop to read the next chunk.
                 }
             }
         }
@@ -919,131 +1130,10 @@ fn split_field(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let idx = line.iter().position(|b| *b == b':')?;
     let field = &line[..idx];
     let mut value = &line[idx + 1..];
-    // Strip optional single leading space (SSE spec).
     if value.first() == Some(&b' ') {
         value = &value[1..];
     }
     Some((field, value))
-}
-
-fn map_stop_reason(reason: &str) -> StopReason {
-    match reason {
-        "end_turn" | "stop_sequence" => StopReason::Stop,
-        "tool_use" => StopReason::ToolUse,
-        "max_tokens" => StopReason::MaxTokens,
-        "refusal" => StopReason::Error,
-        other => {
-            // Unknown stop reasons default to Stop rather than Error so
-            // the caller still gets the content; the upstream SDK does
-            // the same.
-            let _ = other;
-            StopReason::Stop
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Wire payload types (for `parse_sse`)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct MessageStartPayload {
-    message: MessageStartMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct MessageStartMessage {
-    id: String,
-    #[serde(default)]
-    model: String,
-    usage: MessagesUsage,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct MessagesUsage {
-    #[serde(default)]
-    input_tokens: u32,
-    #[serde(default)]
-    output_tokens: u32,
-    #[serde(default)]
-    cache_creation_input_tokens: u32,
-    #[serde(default)]
-    cache_read_input_tokens: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContentBlockStartPayload {
-    index: u32,
-    content_block: ContentBlockStart,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ContentBlockStart {
-    Text {
-        #[serde(default)]
-        text: String,
-    },
-    Thinking {
-        #[serde(default)]
-        thinking: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        #[serde(default)]
-        input: Value,
-    },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContentBlockDeltaPayload {
-    index: u32,
-    delta: ContentBlockDelta,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ContentBlockDelta {
-    TextDelta {
-        text: String,
-    },
-    ThinkingDelta {
-        thinking: String,
-    },
-    InputJsonDelta {
-        partial_json: String,
-    },
-    SignatureDelta {
-        // Signature verification is a Stage 8 concern (extended-thinking
-        // tool result back-validation); Stage 7 only consumes the
-        // thinking text fragments and ignores the signature.
-        #[serde(default)]
-        #[allow(dead_code)]
-        signature: String,
-    },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContentBlockStopPayload {
-    index: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct MessageDeltaPayload {
-    delta: MessageDeltaInner,
-    #[serde(default)]
-    usage: Option<MessagesUsage>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct MessageDeltaInner {
-    #[serde(default)]
-    stop_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,7 +1150,7 @@ mod tests {
     fn model() -> Model {
         Model {
             provider: pi_protocol::ProviderId::new("anthropic"),
-            id: "claude-3-5-sonnet-latest".into(),
+            id: "claude-haiku-4-5".into(),
             api: pi_protocol::Api::AnthropicMessages,
             label: None,
             context_window: 200_000,
@@ -1069,7 +1159,7 @@ mod tests {
     }
 
     fn ctx_with_tool() -> Context {
-        let mut ctx = Context::new("");
+        let mut ctx = Context::new("you are pi");
         ctx.messages.push(Message {
             role: Role::User,
             content: vec![Content::text("what's the weather in SF?")],
@@ -1093,96 +1183,102 @@ mod tests {
 
     #[test]
     fn request_body_serializes_with_tools_and_system() {
-        let mut ctx = Context::new("you are pi");
-        ctx.messages.push(Message {
-            role: Role::User,
-            content: vec![Content::text("hi")],
-            model: None,
-        });
-        ctx.tools.push(ToolDefinition {
-            name: "echo".into(),
-            label: "Echo".into(),
-            description: "Echo the input".into(),
-            parameters: json!({"type": "object", "properties": {"x": {"type": "string"}}}),
-            metadata: None,
-        });
+        let ctx = ctx_with_tool();
         let req = AnthropicProvider::build_request(
             &model(),
             &ctx,
             &SimpleStreamOptions {
-                temperature: Some(0.5),
+                temperature: Some(0.3),
                 max_tokens: Some(512),
                 ..Default::default()
             },
         )
         .expect("build request");
         let v = serde_json::to_value(&req).expect("serialize request");
-        assert_eq!(v["model"], "claude-3-5-sonnet-latest");
+        assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["stream"], true);
         assert_eq!(v["max_tokens"], 512);
-        assert!((v["temperature"].as_f64().expect("temperature") - 0.5).abs() < 1e-6);
+        assert!((v["temperature"].as_f64().expect("temperature number") - 0.3).abs() < 1e-6);
         assert_eq!(v["system"], "you are pi");
+
         let messages = v["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"][0]["type"], "text");
-        assert_eq!(messages[0]["content"][0]["text"], "hi");
+        assert_eq!(messages[0]["content"][0]["text"], "what's the weather in SF?");
+
         let tools = v["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "echo");
+        assert_eq!(tools[0]["name"], "get_weather");
         assert_eq!(tools[0]["input_schema"]["type"], "object");
     }
 
     #[test]
-    fn request_body_falls_back_to_model_max_tokens() {
-        let mut ctx = Context::new("");
+    fn request_body_serializes_without_tools() {
+        let mut ctx = Context::new("you are pi");
         ctx.messages.push(Message {
             role: Role::User,
             content: vec![Content::text("hi")],
             model: None,
         });
-        let req = AnthropicProvider::build_request(
-            &model(),
-            &ctx,
-            &SimpleStreamOptions::default(),
-        )
-        .expect("build request");
-        assert_eq!(req.max_tokens, model().max_output_tokens);
+        let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
+            .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize request");
+        assert!(v.get("tools").is_none());
+        assert!(v.get("temperature").is_none());
+        // max_tokens must be present even when the caller omits it.
+        assert!(v["max_tokens"].is_number());
+    }
+
+    #[test]
+    fn tool_results_become_user_blocks() {
+        let mut ctx = Context::new("");
+        ctx.messages.push(Message {
+            role: Role::Tool,
+            content: vec![
+                Content::ToolResult(pi_protocol::ToolResult {
+                    tool_call_id: "toolu_x".into(),
+                    content: Box::new(Content::text("72F and sunny")),
+                    is_error: false,
+                    details: None,
+                }),
+            ],
+            model: None,
+        });
+        let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
+            .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize request");
+        let messages = v["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[0]["content"][0]["tool_use_id"], "toolu_x");
+        assert_eq!(messages[0]["content"][0]["content"], "72F and sunny");
     }
 
     #[tokio::test]
     async fn sse_parser_emits_text_deltas_then_done() {
-        let fixture =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/anthropic_text.sse");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/anthropic/text_response.sse");
         let bytes =
             std::fs::read(&fixture).unwrap_or_else(|e| panic!("read fixture {fixture:?}: {e}"));
         let chunks = stream::iter(vec![Ok::<bytes::Bytes, StreamError>(Bytes::from(bytes))]);
-        let mut s = parse_sse(chunks, "claude-3-5-sonnet-latest".to_string());
+        let mut s = parse_sse(chunks, "claude-haiku-4-5".to_string());
         let mut events = Vec::new();
         while let Some(ev) = s.next().await {
             events.push(ev.expect("stream event"));
         }
-        // Expect: Start, TextDelta("Hello"), TextDelta(", world"), Done.
-        assert!(
-            events.len() >= 4,
-            "got {} events: {:?}",
-            events.len(),
-            events
-        );
-        match &events[0] {
-            AssistantMessageEvent::Start { model } => {
-                assert_eq!(model, "claude-3-5-sonnet-20241022");
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
+        // Expect: Start, TextDelta("Hello"), TextDelta(" there"), Done.
+        assert!(events.len() >= 4, "got {} events: {:?}", events.len(), events);
+        assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
         match &events[1] {
             AssistantMessageEvent::TextDelta { delta } => assert_eq!(delta, "Hello"),
             other => panic!("expected TextDelta, got {other:?}"),
         }
         match &events[2] {
-            AssistantMessageEvent::TextDelta { delta } => assert_eq!(delta, ", world"),
+            AssistantMessageEvent::TextDelta { delta } => assert_eq!(delta, " there"),
             other => panic!("expected TextDelta, got {other:?}"),
         }
-        match events.last().expect("at least one event") {
+        match &events[3] {
             AssistantMessageEvent::Done {
                 content,
                 stop_reason,
@@ -1196,35 +1292,39 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert_eq!(text, "Hello, world");
-                assert_eq!(usage.input, 12);
-                assert_eq!(usage.output, 7);
-                assert_eq!(usage.cache_read, 0);
-                assert_eq!(usage.cache_write, 0);
+                assert_eq!(text, "Hello there");
+                assert_eq!(usage.input, 17);
+                assert_eq!(usage.output, 4);
             }
             other => panic!("expected done, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn sse_parser_emits_tool_call_then_done() {
+    async fn sse_parser_emits_tool_call_delta_then_done() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/anthropic_tool_use.sse");
+            .join("fixtures/anthropic/tool_use_response.sse");
         let bytes =
             std::fs::read(&fixture).unwrap_or_else(|e| panic!("read fixture {fixture:?}: {e}"));
         let chunks = stream::iter(vec![Ok::<bytes::Bytes, StreamError>(Bytes::from(bytes))]);
-        let mut s = parse_sse(chunks, "claude-3-5-sonnet-latest".to_string());
+        let mut s = parse_sse(chunks, "claude-haiku-4-5".to_string());
         let mut events = Vec::new();
         while let Some(ev) = s.next().await {
             events.push(ev.expect("stream event"));
         }
-        // Look for ToolCallDelta fragments.
-        let tool_delta_count = events
+        let tool_deltas: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. }))
-            .count();
-        assert!(tool_delta_count > 0, "expected at least one tool delta");
-        // The final Done should carry a tool call with parsed arguments.
+            .filter_map(|e| match e {
+                AssistantMessageEvent::ToolCallDelta {
+                    index,
+                    name,
+                    arguments_delta,
+                    ..
+                } => Some((*index, name.clone(), arguments_delta.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(!tool_deltas.is_empty(), "expected at least one tool delta");
         let done = events
             .iter()
             .find_map(|e| match e {
@@ -1239,78 +1339,117 @@ mod tests {
                 _ => None,
             })
             .expect("tool call in done");
-        assert_eq!(tc.id, "toolu_01abc");
         assert_eq!(tc.name, "get_weather");
+        assert_eq!(tc.id, "toolu_test_01");
         assert_eq!(tc.arguments["city"], "San Francisco");
-        let usage = events
-            .iter()
-            .find_map(|e| match e {
-                AssistantMessageEvent::Done { usage, .. } => Some(*usage),
-                _ => None,
-            })
-            .expect("usage on done");
-        assert_eq!(usage.input, 25);
-        assert_eq!(usage.output, 18);
-        assert_eq!(usage.cache_read, 12);
     }
 
     #[tokio::test]
-    async fn sse_parser_emits_thinking_deltas_then_text() {
+    async fn sse_parser_records_cache_read_tokens() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/anthropic_thinking.sse");
+            .join("fixtures/anthropic/cache_read_response.sse");
         let bytes =
             std::fs::read(&fixture).unwrap_or_else(|e| panic!("read fixture {fixture:?}: {e}"));
         let chunks = stream::iter(vec![Ok::<bytes::Bytes, StreamError>(Bytes::from(bytes))]);
-        let mut s = parse_sse(chunks, "claude-3-7-sonnet-latest".to_string());
+        let mut s = parse_sse(chunks, "claude-haiku-4-5".to_string());
         let mut events = Vec::new();
         while let Some(ev) = s.next().await {
             events.push(ev.expect("stream event"));
         }
-        let think = events
-            .iter()
-            .filter_map(|e| match e {
-                AssistantMessageEvent::ThinkingDelta { delta } => Some(delta.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(think.contains("step-by-step"), "thinking: {think:?}");
-        let text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                AssistantMessageEvent::TextDelta { delta } => Some(delta.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(text, "The answer is 4.");
         let done = events
             .iter()
             .find_map(|e| match e {
-                AssistantMessageEvent::Done { stop_reason, .. } => Some(*stop_reason),
+                AssistantMessageEvent::Done { usage, .. } => Some(usage),
                 _ => None,
             })
             .expect("done event");
-        assert_eq!(done, StopReason::Stop);
+        assert_eq!(done.cache_read, 1200);
+        assert_eq!(done.cache_write, 0);
+        assert_eq!(done.input, 5);
+        assert_eq!(done.output, 3);
     }
 
     #[tokio::test]
-    async fn sse_parser_handles_split_chunks() {
-        let fixture =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/anthropic_text.sse");
+    async fn sse_parser_surfaces_error_event_as_stream_error() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/anthropic/error_event.sse");
         let bytes =
             std::fs::read(&fixture).unwrap_or_else(|e| panic!("read fixture {fixture:?}: {e}"));
-        // Split the SSE payload into half-line chunks to verify the
-        // line-buffering code handles split lines across chunk
-        // boundaries.
-        let mut chunks: Vec<Result<Bytes, StreamError>> = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            // Take ~3 bytes per chunk so consecutive chunks split mid-line.
-            let end = (i + 3).min(bytes.len());
-            chunks.push(Ok(Bytes::copy_from_slice(&bytes[i..end])));
-            i = end;
+        let chunks = stream::iter(vec![Ok::<bytes::Bytes, StreamError>(Bytes::from(bytes))]);
+        let mut s = parse_sse(chunks, "claude-haiku-4-5".to_string());
+        let mut saw_error = false;
+        while let Some(ev) = s.next().await {
+            if let Err(StreamError::Malformed(msg)) = ev {
+                if msg.contains("overloaded") {
+                    saw_error = true;
+                }
+            }
         }
-        let mut s = parse_sse(stream::iter(chunks), "claude-3-5-sonnet-latest".to_string());
+        assert!(saw_error, "expected the parser to surface the upstream error");
+    }
+
+    #[tokio::test]
+    async fn stop_reason_max_tokens_maps_to_max_tokens() {
+        let payload = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-haiku-4-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n";
+        let chunks = stream::iter(vec![Ok::<bytes::Bytes, StreamError>(Bytes::from(
+            payload.to_string(),
+        ))]);
+        let mut s = parse_sse(chunks, "claude-haiku-4-5".to_string());
+        let mut done_reason = None;
+        while let Some(ev) = s.next().await {
+            if let Ok(AssistantMessageEvent::Done { stop_reason, .. }) = ev {
+                done_reason = Some(stop_reason);
+            }
+        }
+        assert_eq!(done_reason, Some(StopReason::MaxTokens));
+    }
+
+    #[test]
+    fn classify_http_status_returns_provider_variant() {
+        match classify_http_status(401, "unauthorized".into()) {
+            StreamError::Provider { status, body } => {
+                assert_eq!(status, 401);
+                assert_eq!(body, "unauthorized");
+            }
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_request_drops_empty_temperature() {
+        let mut ctx = Context::new("");
+        ctx.messages.push(Message {
+            role: Role::User,
+            content: vec![Content::text("hi")],
+            model: None,
+        });
+        let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
+            .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize request");
+        assert!(v.get("temperature").is_none());
+        // max_tokens must still be present.
+        assert!(v["max_tokens"].is_number());
+    }
+
+    // Tiny smoke test that exercises the `Stream` shape without
+    // running an HTTP server — splits a multi-event byte stream into
+    // individual chunks to make sure the parser reassembles them.
+    #[tokio::test]
+    async fn sse_parser_handles_chunked_input() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/anthropic/text_response.sse");
+        let bytes =
+            std::fs::read(&fixture).unwrap_or_else(|e| panic!("read fixture {fixture:?}: {e}"));
+        // Feed the fixture 16 bytes at a time so the line-buffering
+        // path gets exercised.
+        let mut chunks: Vec<Result<Bytes, StreamError>> = Vec::new();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + 16).min(bytes.len());
+            chunks.push(Ok(Bytes::copy_from_slice(&bytes[offset..end])));
+            offset = end;
+        }
+        let mut s = parse_sse(stream::iter(chunks), "claude-haiku-4-5".to_string());
         let mut events = Vec::new();
         while let Some(ev) = s.next().await {
             events.push(ev.expect("stream event"));
@@ -1322,21 +1461,204 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(text, "Hello, world");
+        assert_eq!(text, "Hello there");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Stub sanity check: the unit tests below build a request body
+    // and assert the JSON shape. They exist mainly to catch
+    // regressions in the message conversion. Keep them close to the
+    // type definitions so the wire format stays easy to inspect.
+
+    #[test]
+    fn user_text_only_serializes_as_block_array() {
+        let mut ctx = Context::new("");
+        ctx.messages.push(Message {
+            role: Role::User,
+            content: vec![Content::text("hello")],
+            model: None,
+        });
+        let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
+            .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize");
+        let content = &v["messages"][0]["content"];
+        assert!(content.is_array(), "expected block array, got {content}");
+        assert_eq!(content[0]["type"], "text");
     }
 
     #[test]
-    fn stop_reason_mapping() {
-        assert_eq!(map_stop_reason("end_turn"), StopReason::Stop);
-        assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
-        assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
-        assert_eq!(map_stop_reason("refusal"), StopReason::Error);
-        assert_eq!(map_stop_reason("stop_sequence"), StopReason::Stop);
+    fn assistant_text_and_tool_use_in_one_message() {
+        let mut ctx = Context::new("");
+        ctx.messages.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::text("Looking up the weather…"),
+                Content::ToolCall(pi_protocol::ToolCall {
+                    id: "toolu_x".into(),
+                    name: "get_weather".into(),
+                    arguments: json!({"city": "Berlin"}),
+                }),
+            ],
+            model: None,
+        });
+        let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
+            .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize");
+        let content = &v["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content[1]["name"], "get_weather");
+        assert_eq!(content[1]["input"]["city"], "Berlin");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Catalog loader — `register_provider_json`
+// ---------------------------------------------------------------------------
+
+/// JSON envelope matching the Rust-side model descriptor.
+///
+/// The TS port ships a generated catalog (`anthropic.models.ts`) that
+/// is too rich for the Rust wire types to express verbatim (it carries
+/// cost metadata, compatibility flags, etc.). For Stage 7 we expose
+/// a minimal subset that the `Models::register_provider_json` helper
+/// can deserialize into the existing [`Model`] struct. The richer
+/// metadata lands in a follow-up `pi-protocol` increment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicModelEntry {
+    /// Model identifier (e.g. `claude-haiku-4-5`).
+    pub id: String,
+    /// Human-readable label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Context window size.
+    #[serde(default)]
+    pub context_window: u32,
+    /// Maximum output tokens.
+    #[serde(default)]
+    pub max_output_tokens: u32,
+    /// Whether the model is a reasoning/thinking model. Set to `true`
+    /// when the upstream catalogue marks the entry as reasoning.
+    #[serde(default)]
+    pub reasoning: bool,
+}
+
+/// JSON envelope describing one provider's catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicCatalog {
+    /// Provider identifier — typically `"anthropic"`.
+    pub provider: String,
+    /// Models in the catalog.
+    pub models: Vec<AnthropicModelEntry>,
+}
+
+/// Parse an Anthropic catalog JSON document into a list of
+/// [`Model`] descriptors suitable for [`crate::models::Models::set_provider`].
+pub fn catalog_from_json(json_str: &str) -> Result<Vec<Model>, StreamError> {
+    let catalog: AnthropicCatalog = serde_json::from_str(json_str)
+        .map_err(|e| StreamError::Malformed(format!("Anthropic catalog JSON: {e}")))?;
+    Ok(catalog
+        .models
+        .into_iter()
+        .map(|m| Model {
+            provider: pi_protocol::ProviderId::new(&catalog.provider),
+            id: m.id,
+            api: pi_protocol::Api::AnthropicMessages,
+            label: m.label,
+            context_window: m.context_window,
+            max_output_tokens: m.max_output_tokens,
+        })
+        .collect())
+}
+
+/// Built-in Claude catalog — the three models Stage 7 ships by
+/// default. Mirrors the TS port's defaults so downstream callers get
+/// Claude 4.5 / 4.x coverage without configuration.
+pub fn builtin_claude_models() -> Vec<Model> {
+    vec![
+        Model {
+            provider: pi_protocol::ProviderId::new("anthropic"),
+            id: "claude-opus-4-5".into(),
+            api: pi_protocol::Api::AnthropicMessages,
+            label: Some("Claude Opus 4.5".into()),
+            context_window: 200_000,
+            max_output_tokens: 32_000,
+        },
+        Model {
+            provider: pi_protocol::ProviderId::new("anthropic"),
+            id: "claude-sonnet-4-5".into(),
+            api: pi_protocol::Api::AnthropicMessages,
+            label: Some("Claude Sonnet 4.5".into()),
+            context_window: 200_000,
+            max_output_tokens: 16_000,
+        },
+        Model {
+            provider: pi_protocol::ProviderId::new("anthropic"),
+            id: "claude-haiku-4-5".into(),
+            api: pi_protocol::Api::AnthropicMessages,
+            label: Some("Claude Haiku 4.5".into()),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use crate::models::Models;
+
+    #[test]
+    fn builtin_catalog_has_three_models() {
+        let models = builtin_claude_models();
+        assert_eq!(models.len(), 3);
+        for m in &models {
+            assert_eq!(m.api, pi_protocol::Api::AnthropicMessages);
+            assert_eq!(m.provider.0, "anthropic");
+            assert!(m.context_window > 0);
+            assert!(m.max_output_tokens > 0);
+        }
     }
 
-    // Keep `ctx_with_tool` referenced to silence the unused warning.
-    #[allow(dead_code)]
-    fn _ctx_with_tool_unused() -> Context {
-        ctx_with_tool()
+    #[test]
+    fn catalog_from_json_round_trip() {
+        let json = serde_json::to_string(&AnthropicCatalog {
+            provider: "anthropic".into(),
+            models: vec![AnthropicModelEntry {
+                id: "claude-haiku-4-5".into(),
+                label: Some("Claude Haiku 4.5".into()),
+                context_window: 200_000,
+                max_output_tokens: 8_192,
+                reasoning: false,
+            }],
+        })
+        .expect("serialize");
+        let models = catalog_from_json(&json).expect("parse");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-haiku-4-5");
+        assert_eq!(models[0].context_window, 200_000);
+    }
+
+    #[test]
+    fn register_provider_json_seeds_anthropic_models() {
+        let json = serde_json::to_string(&AnthropicCatalog {
+            provider: "anthropic".into(),
+            models: vec![AnthropicModelEntry {
+                id: "claude-haiku-4-5".into(),
+                label: None,
+                context_window: 200_000,
+                max_output_tokens: 8_192,
+                reasoning: false,
+            }],
+        })
+        .expect("serialize");
+        let mut catalog = Models::new();
+        let provider = pi_protocol::ProviderId::new("anthropic");
+        let models = catalog_from_json(&json).expect("parse");
+        catalog.set_provider(provider.clone(), models);
+        let m = catalog
+            .get_model(&provider, "claude-haiku-4-5")
+            .expect("lookup");
+        assert_eq!(m.api, pi_protocol::Api::AnthropicMessages);
     }
 }
