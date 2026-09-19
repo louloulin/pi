@@ -10978,3 +10978,121 @@ provider 与之无关但同属「大块」）。第 5 项（provider catalog）�
 `git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `513cd3409` **快进至 `59c0410a0`**
 （`git ls-remote` 复查一致：`59c0410a08228215ca12108c950638cb20434f49`）；
 留档分支 `work/lum-1151` 一并推送（同哈希）。
+
+## LUM-1152 round — `ToolCallDelta` 单块折叠 + OSC-8 hyperlink 渲染（frontier 第 2、3 两项收口）+ 合并推送 feature/pi.rs
+
+本轮起点 `513cd3409`（LUM-1150 补记态）。代码提交 `840385780`，随后合并
+`origin/feature/pi.rs`（已含 LUM-1151 `65bdfebb4` / `59c0410a0` / `222ea4fc3`，合并提交
+`c6787d1f8`），最后是本轮文档提交。真实推送哈希见本节末补记。
+
+第 2、3 项都落在 `pi-tui/src/app.rs`（事件流 → transcript 路径），受单写方约束必须同轮完成，
+因此合并为一次交付。
+
+### 一、`ToolCallDelta` 重复建块（P2，源自 LUM-1141）
+
+**现象**：provider 把一次工具调用拆成多个 `AgentEvent::MessageUpdate(ToolCallDelta)` 流式送出时，
+旧 `apply_event` 对**每个** delta 都调 `push_tool(... "(streaming)")`，于是同一次调用在 transcript 里
+留下多个块；随后 `ToolExecutionStart` / `ToolExecutionEnd` 又各自 `push_tool`，最终一个 call id
+对应 4+ 个块。LUM-1149 已把可疑行标注（`let _ = id; // placeholder`）但当时无法改。
+
+**上游语义**：`packages/coding-agent/src/modes/interactive/interactive-mode.ts:430` 起用
+`pendingTools`（`Map<toolCallId, {index, name}>`）登记**首个** delta 建的块（`:3325-3362`），
+后续 delta 只把 `arguments_delta` 追加到该块；execution/result 按 call id 就地改写同一块。
+Rust 侧本轮照此实现：
+
+- `MessageView` 新增 `tool_streams: HashMap<String, ToolStream>`（call id → item index），
+  新增 `begin_tool_stream` / `append_tool_stream_args` / `start_tool_execution` /
+  `finish_tool_execution`；`clear()` 与 `begin_assistant_stream` 一并清空。
+- 首个 delta 可能不带 `name`（provider 只带 `id`），`begin_tool_stream` 支持「后到的 name 回填」；
+  `start_tool_execution` 收到真实 `ToolCall` 时同样回填/新建。
+- 执行与结果**就地改写** `items[stream.index]`，且复用既有 `format_tool` 最终格式，
+  因此既有 snapshot 用例逐字节不变；只有流式中间态与最终态共用同一个块。
+- 孤儿结果（先到 `ToolExecutionEnd` 却没有任何 delta，例如失败的并行调用）仍回退
+  `push_tool("", "", body, is_error)` —— 不丢结果。
+
+**App 层索引**：provider 只在首个 delta 带 `id`，后续 delta 只有 `index`。`App` 因此维护
+`tool_call_ids: HashMap<u32, String>`（provider index → call id），首个 delta 登记，
+`MessageStart` / `MessageEnd` 清空；`ToolExecutionStart` 用 `call.id`、`ToolExecutionEnd` 用
+`result.tool_call_id` 直接定位块，不再依赖 index。
+
+**兼容性**：`pi-agent-core::emit_unstreamed_content`（faux/非流式 backfill）本就按 content index
+补发带 `id` + `name` + 完整 `arguments` 的 delta（`agent_loop.rs:791-798`），因此 faux 路径
+现在也走「一个 call 一个块」，且与流式路径同一套折叠逻辑。
+
+### 二、OSC-8 hyperlink（P3，LUM-1149 遗留）
+
+**机制**：`ratatui` 0.28 的 `Cell` 没有 hyperlink 通道——`Cell::symbol()` 是 `&str`，
+crossterm 后端直接 `Print(cell.symbol())` 原样写终端。因此本轮把**自包含的
+`open + glyph + close`**（`\x1b]8;;URL\x1b\\` … `\x1b]8;;\x1b\\`）写进 `Cell::symbol`，
+单元格仍恰好占 1 列，`Buffer` 的 diff 与所有宽度计算不受影响。逐 cell 包裹（而非整段包一次）
+是因为后端逐 cell 独立打印，只有这样才能保证每个已写序列都成对闭合、光标可寻址。
+
+- 新增 `pi-tui/src/hyperlink.rs`：`hyperlink()` / `open_hyperlink()` / `close_hyperlink()`、
+  `supports_hyperlinks()`（`OnceLock` 缓存）、`detect_hyperlinks_from_env()`、
+  `strip_ansi()`（CSI + OSC 解析）、`visible_width()`。
+- `StyledSpan` 新增 `link: Option<String>`；`themed_text` 与 buffer 写入路径
+  `write_styled_line_hyperlinked(buf, ..., hyperlinks)` 按能力输出序列，`link` 从不进入
+  `text`，所以宽度、换行、选择（都读 `plain_text`）天然看不到 URL。
+- markdown 解析**始终**在链接标签 span 上挂 `link`，同时保留内联 `(url)` 兜底 span；
+  渲染入口 `render_markdown_with_links(source, width, hyperlinks)` 再做 `apply_link_capability`：
+  能力开 → 丢弃 `MdLinkUrl` 兜底，能力关 → 清掉 `link`。`render_markdown` 即
+  `render_markdown_with_links(_, _, false)`，与改动前逐字节一致（不向 ~11 个解析签名透传 bool）。
+- live 帧（`render_to_buffer`）用能力结果；`/transcript` 快照导出
+  （`render_snapshot` → `render_to_buffer_impl(..., false, false)`）**永远纯文本**。
+- `AppConfig` 新增 `hyperlinks: Option<bool>`，`None` = 由 `supports_hyperlinks()` 从环境探测；
+  `pi-coding-agent` 驱动传 `None`（对齐上游在终端层探测）。
+
+### 三、刻意偏离（代码注释已同步）
+
+1. **不做 `tmux display-message` 子进程探测**：上游 `detectCapabilitiesFromEnvironment`
+   在 `TMUX` 下起子进程问 tmux 版本；Rust 侧无此权限且开销不可预期，改为
+   **tmux/screen 一律保守关闭**，可用 `PI_HYPERLINKS=1|0` 覆盖。
+2. **能力探测来源仅环境变量**：kitty/ghostty/wezterm/warp/iterm/WT/vscode/alacritty/zed 判为开，
+   jetbrains-jediterm 判为关，其余（含未知）默认关——宁可少给链接，不可给不能用的序列。
+3. **宽度口径**：`visible_width` 只剥 ANSI/OSC 后数 Unicode 宽度；OSC-8 序列本身零宽，因此
+   「OSC-8 单元格宽度 == 纯文本宽度」是可直接断言的等式（见测试）。
+
+### 四、测试与验证
+
+- 新增 `crates/pi-tui/tests/hyperlink.rs` **5 项**：OSC-8 输出剥序列后与纯文本逐字相等、
+  单元格数相等、选区不落入任何 `\x1b]8`、能力关时回退内联 URL、
+  能力开时 `/transcript` 快照仍不含转义。
+- 新增 `app.rs::tool_stream_tests` **4 项**：同 id 多次 delta 合一且内容按序拼接、
+  执行/结果就地改写同一块、两个调用各自成块、无 delta 的孤儿结果仍渲染。
+- 合并态复测：`cargo test -p pi-tui` 全绿（lib 265，共 **583** 项、0 失败）、
+  `cargo clippy -p pi-tui --all-targets` **0 告警**、`cargo test -p pi-coding-agent` 全绿
+  （lib 272 + 全部集成）、`cargo build --workspace` exit 0。
+- **fmt 纪律（吸取 LUM-1150 教训）**：只用 `rustfmt --edition 2021 <单文件>` 对**本轮 7 个文件**
+  局部格式化；`cargo fmt -p pi-tui -- --check` 复查时发现给出 crate root `lib.rs` 会让 rustfmt
+  递归格式整包、顺带重排了 `settings.rs` 的**既有**欠账，已 `git checkout --` 撤回。
+  最终 `cargo fmt -p pi-tui -- --check` 的剩余 `Diff in` 只落在 `settings.rs` /
+  `tests/settings_list.rs`（预存欠账，本轮未触碰），本轮改动行**零漂移**。
+  再次确认：**不要跑 `cargo fmt --all`，也不要给 rustfmt 传 `lib.rs` 这类 crate root**。
+
+### 五、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试**~~（LUM-1146/1147）。
+2. ~~**P3 OSC-8 hyperlink**~~ **本轮收口**（`pi-tui/src/hyperlink.rs` + markdown/styled/app 接线）。
+3. ~~**P2 `ToolCallDelta` 重复建块**~~ **本轮收口**（`MessageView::tool_streams` + App index→id）。
+4. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在（本轮新增行零漂移）。
+5. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+6. **未移植的 `pi-ai` 上游模块**：`utils/overflow.ts`（LUM-1150）、`utils/estimate.ts`（复核结案）已清；
+   剩 bedrock / mistral / azure / vertex / oauth / images。
+7. **`get_language_from_path` 消费方**：表已移植（LUM-1151 `65bdfebb4`），
+   `pi-coding-agent` read/write 工具输出仍未接 `highlight_code` + 该表；`lib.rs` 再导出已就位。
+   Stage 45（LUM-1153）据 LUM-1151 记录派发。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人写
+`pi-tui/src/{hyperlink,styled,markdown,message,app,lib}.rs`、`pi-tui/tests/hyperlink.rs`、
+`pi-coding-agent/src/interactive.rs`（仅 `AppConfig` 新增字段的初始化）与本文档。
+合并 `origin/feature/pi.rs` 时 `lib.rs` 再导出块与 LUM-1151 的 `get_language_from_path` 同行冲突，
+已手工合并为同一 `pub use highlight::{...}` + `pub use hyperlink::{...}`。
+
+环境记录：本轮使用检出内默认 `pi-rust/target`；测试环境 `TERM=xterm-ghostty`，
+能力探测默认判**开**，故所有断言到具体能力的用例都显式传 `hyperlinks: Some(true|false)`。
+
+补记（推送哈希）：本轮代码提交 `840385780` + 合并提交 `c6787d1f8` + 文档提交（本节所在提交），
+`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `222ea4fc3` **快进至 `c6787d1f8`**
+（`git ls-remote` 复查一致：`c6787d1f831f387cd020191d40dfc6676ec33de0`），
+留档分支 `work/lum-1152` 一并推送（同哈希）。

@@ -42,11 +42,14 @@
 //!
 //! # Deliberately not covered (degrade to plain text, never panic)
 //!
-//! Terminal images / OSC-8 hyperlinks, syntax highlighting, block HTML and the
-//! `transform` hooks are separate subsystems.
+//! Terminal images, syntax highlighting for the outer language, block HTML and
+//! the `transform` hooks are separate subsystems.
 //! A link whose target is not a plain `[label](url)` is emitted as its literal
-//! text, and the link URL is always rendered inline (`MdLinkUrl`) because
-//! hyperlink capability detection is not ported.
+//! text. A parsed link always carries its target on the label spans
+//! ([`StyledSpan::link`]) *and* the inline `MdLinkUrl` fallback; the two entry
+//! points pick which of the two is visible — [`render_markdown`] keeps the
+//! inline URL and drops the link, [`render_markdown_with_links`] keeps the
+//! OSC 8 link and drops the inline URL.
 //!
 //! Table *alignment* (`:---:`) is parsed and validated but not rendered —
 //! upstream's `renderTable` ignores `token.align` too, so a centred column is
@@ -97,6 +100,44 @@ const MAX_RULE_WIDTH: usize = 80;
 /// Malformed or half-streamed input (an unclosed fence, an unmatched `**`)
 /// degrades to literal text and never panics.
 pub fn render_markdown(source: &str, width: usize) -> Vec<StyledLine> {
+    render_markdown_with_links(source, width, false)
+}
+
+/// Render `source` as markdown at `width` columns, choosing the link style.
+///
+/// With `hyperlinks` false this is exactly [`render_markdown`] (label plus an
+/// inline `mdLinkUrl` suffix). With `hyperlinks` true every link label keeps
+/// its OSC 8 target and the inline suffix is dropped, matching upstream's
+/// `getCapabilities().hyperlinks` branch
+/// (`packages/tui/src/components/markdown.ts:689-706`).
+///
+/// The decision is made here rather than in [`parse_link`] so the parser can
+/// stay capability-agnostic and the same parse feeds both branches.
+pub fn render_markdown_with_links(source: &str, width: usize, hyperlinks: bool) -> Vec<StyledLine> {
+    let mut lines = render_markdown_inner(source, width);
+    apply_link_capability(&mut lines, hyperlinks);
+    lines
+}
+
+/// Apply the hyperlink capability to an already-rendered line set.
+///
+/// `mdLinkUrl` is emitted only by [`parse_link`] as the inline fallback, so
+/// dropping those spans is how the OSC 8 branch hides the URL. In the other
+/// direction the `link` field is cleared so [`crate::styled::themed_text`]
+/// never wraps a span the terminal cannot accept.
+fn apply_link_capability(lines: &mut [StyledLine], hyperlinks: bool) {
+    for line in lines.iter_mut() {
+        if hyperlinks {
+            line.retain(|span| span.style.fg != Some(ThemeColor::MdLinkUrl));
+        } else {
+            for span in line.iter_mut() {
+                span.link = None;
+            }
+        }
+    }
+}
+
+fn render_markdown_inner(source: &str, width: usize) -> Vec<StyledLine> {
     if source.trim().is_empty() {
         return Vec::new();
     }
@@ -1469,7 +1510,7 @@ fn parse_link(
 
     let label_style = with_fg(base, ThemeColor::MdLink).underline();
     for span in render_inline(&label, label_style) {
-        push_span(out, span.text, span.style);
+        push_linked_span(out, span.text, span.style, &url);
     }
     let compare = url.strip_prefix("mailto:").unwrap_or(&url);
     if label.trim() != url.as_str() && label.trim() != compare {
@@ -1644,12 +1685,30 @@ fn push_span(out: &mut StyledLine, text: impl Into<String>, style: SpanStyle) {
         return;
     }
     if let Some(last) = out.last_mut() {
-        if last.style == style {
+        // A linked run must never absorb (or be absorbed by) unlinked text:
+        // the span is the unit that carries the OSC 8 target.
+        if last.style == style && last.link.is_none() {
             last.text.push_str(&text);
             return;
         }
     }
     out.push(StyledSpan::new(text, style));
+}
+
+/// Push a run that renders as an OSC 8 hyperlink, merging into the previous
+/// span only when style *and* target match.
+fn push_linked_span(out: &mut StyledLine, text: impl Into<String>, style: SpanStyle, url: &str) {
+    let text = text.into();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = out.last_mut() {
+        if last.style == style && last.link.as_deref() == Some(url) {
+            last.text.push_str(&text);
+            return;
+        }
+    }
+    out.push(StyledSpan::linked(text, style, url));
 }
 
 // ---------------------------------------------------------------------------
@@ -1665,9 +1724,13 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
     if width == 0 {
         return vec![line.to_vec()];
     }
-    let chars: Vec<(char, SpanStyle)> = line
+    let chars: Vec<(char, SpanStyle, Option<&str>)> = line
         .iter()
-        .flat_map(|span| span.text.chars().map(move |c| (c, span.style)))
+        .flat_map(|span| {
+            span.text
+                .chars()
+                .map(move |c| (c, span.style, span.link.as_deref()))
+        })
         .collect();
     if chars.is_empty() {
         return vec![Vec::new()];
@@ -1680,7 +1743,7 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
     let mut i = 0usize;
 
     while i < chars.len() {
-        let (ch, _) = chars[i];
+        let (ch, _, _) = chars[i];
         if ch == '\n' {
             out.push(build_line(&chars[start..i]));
             start = i + 1;
@@ -1699,7 +1762,7 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
                     start = b + 1;
                     last_space = None;
                     if let Some(tail) = chars.get(start..i) {
-                        for (offset, (c, _)) in tail.iter().enumerate() {
+                        for (offset, (c, _, _)) in tail.iter().enumerate() {
                             if *c == ' ' {
                                 last_space = Some(start + offset);
                             }
@@ -1725,11 +1788,14 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
     out
 }
 
-/// Build a styled line from a char/style run, merging equal slots.
-fn build_line(chars: &[(char, SpanStyle)]) -> StyledLine {
+/// Build a styled line from a char/style/link run, merging equal slots.
+fn build_line(chars: &[(char, SpanStyle, Option<&str>)]) -> StyledLine {
     let mut out: StyledLine = Vec::new();
-    for (c, style) in chars {
-        push_span(&mut out, c.to_string(), *style);
+    for (c, style, link) in chars {
+        match link {
+            Some(url) => push_linked_span(&mut out, c.to_string(), *style, url),
+            None => push_span(&mut out, c.to_string(), *style),
+        }
     }
     out
 }
