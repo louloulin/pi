@@ -42,6 +42,18 @@
 //!   terminals send one `0x1F` byte for the chord, which upstream
 //!   normalizes to `ctrl+-` (`keys.ts:1277`) and crossterm reports as
 //!   `Ctrl+7`, so `Ctrl+7` / `Ctrl+_` are accepted as aliases of it.
+//! * `Ctrl+]` / `Ctrl+Alt+]` (`tui.editor.jumpForward` /
+//!   `tui.editor.jumpBackward`) arm "jump mode": the next printable
+//!   character moves the cursor to its next (resp. previous) occurrence
+//!   instead of inserting. Pressing either hotkey again, or any key that
+//!   is not a plain printable character, cancels the mode — and a
+//!   cancelling key still performs its normal action, exactly like
+//!   upstream `Editor.handleInput`. A typed character with no match
+//!   leaves the cursor where it was. Matching is case-sensitive and the
+//!   character under the cursor is never a match. Legacy terminals send
+//!   `0x1D` / `ESC 0x1D`, which crossterm decodes as `Ctrl+5` /
+//!   `Ctrl+Alt+5`, so both spellings are accepted — the same legacy
+//!   translation upstream performs in `packages/tui/src/keys.ts:1276`.
 //!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
@@ -96,6 +108,19 @@ enum LastAction {
     TypeWord,
 }
 
+/// Direction of a pending editor jump (`tui.editor.jumpForward` /
+/// `tui.editor.jumpBackward`).
+///
+/// While a jump is armed ([`Editor::jump_mode`]) the next printable key
+/// is consumed as the jump target rather than inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpDirection {
+    /// `Ctrl+]` — search towards the end of the buffer.
+    Forward,
+    /// `Ctrl+Alt+]` — search towards the start of the buffer.
+    Backward,
+}
+
 /// Editor state captured by an undo snapshot.
 ///
 /// Upstream stores its multi-line `EditorState` plus the paste tables;
@@ -130,6 +155,9 @@ pub struct Editor {
     last_yank_len: usize,
     /// Snapshots restored by `Ctrl+-` (`tui.editor.undo`).
     undo_stack: UndoStack<EditorSnapshot>,
+    /// Armed `tui.editor.jumpForward` / `jumpBackward` target, if any.
+    /// Set by `Ctrl+]` / `Ctrl+Alt+]` and consumed by the next key.
+    jump_mode: Option<JumpDirection>,
 }
 
 impl Default for Editor {
@@ -151,6 +179,7 @@ impl Editor {
             last_action: LastAction::Other,
             last_yank_len: 0,
             undo_stack: UndoStack::new(),
+            jump_mode: None,
         }
     }
 
@@ -194,6 +223,13 @@ impl Editor {
         self.history_draft = None;
         self.last_action = LastAction::Other;
         self.undo_stack.clear();
+        self.jump_mode = None;
+    }
+
+    /// The armed jump direction, if `Ctrl+]` / `Ctrl+Alt+]` is waiting
+    /// for its target character.
+    pub fn jump_mode(&self) -> Option<JumpDirection> {
+        self.jump_mode
     }
 
     /// True when the buffer is empty.
@@ -583,6 +619,47 @@ impl Editor {
         });
     }
 
+    /// True for the jump hotkeys: `Ctrl+]` (`tui.editor.jumpForward`)
+    /// and `Ctrl+Alt+]` (`tui.editor.jumpBackward`), together with the
+    /// legacy `Ctrl+5` / `Ctrl+Alt+5` spellings crossterm produces for
+    /// the `0x1D` / `ESC 0x1D` byte sequences.
+    fn is_jump_key(key: &Key) -> bool {
+        key.modifiers.control && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+    }
+
+    /// Move the cursor to the next (`Forward`) or previous (`Backward`)
+    /// occurrence of `needle`, mirroring upstream `Editor.jumpToChar`.
+    ///
+    /// The search skips the character under the cursor, is
+    /// case-sensitive, and leaves the cursor untouched when there is no
+    /// match. Returns [`EditorAction::Changed`] only when the cursor
+    /// actually moved; a jump is a pure cursor move, so it never
+    /// touches the undo stack.
+    pub fn jump_to_char(&mut self, needle: char, direction: JumpDirection) -> EditorAction {
+        // Upstream clears `lastAction` before searching, so even a failed
+        // jump breaks the kill / yank / typing chains.
+        self.last_action = LastAction::Other;
+        let target = match direction {
+            JumpDirection::Forward => {
+                let start = self.next_char_boundary(self.cursor);
+                self.buffer[start..]
+                    .find(needle)
+                    .map(|offset| start + offset)
+            }
+            JumpDirection::Backward => {
+                let end = self.cursor.min(self.buffer.len());
+                self.buffer[..end].rfind(needle)
+            }
+        };
+        match target {
+            Some(pos) => {
+                self.cursor = pos;
+                EditorAction::Changed
+            }
+            None => EditorAction::None,
+        }
+    }
+
     /// Process a key event. Returns the action the [`App`](crate::App)
     /// should take.
     pub fn handle_event(&mut self, event: InputEvent) -> EditorAction {
@@ -594,6 +671,35 @@ impl Editor {
 
     /// Process a key.
     pub fn handle_key(&mut self, key: Key) -> EditorAction {
+        // An armed jump consumes this key: a printable character is the
+        // target, the hotkey again (or anything that is not a plain
+        // printable character) cancels the mode. Cancelling keys fall
+        // through to their normal handling, mirroring upstream
+        // `Editor.handleInput`.
+        if let Some(direction) = self.jump_mode.take() {
+            if Self::is_jump_key(&key) {
+                return EditorAction::None;
+            }
+            if !key.modifiers.control && !key.modifiers.alt {
+                if let KeyCode::Char(c) = key.code {
+                    return self.jump_to_char(c, direction);
+                }
+            }
+        }
+
+        // `tui.editor.jumpForward` / `jumpBackward`: `Ctrl+]` arms a
+        // forward jump, `Ctrl+Alt+]` a backward one. Checked before the
+        // generic control chords so the Alt-modified spelling (which the
+        // `control` branch would otherwise drop) is recognised.
+        if Self::is_jump_key(&key) {
+            self.jump_mode = Some(if key.modifiers.alt {
+                JumpDirection::Backward
+            } else {
+                JumpDirection::Forward
+            });
+            return EditorAction::None;
+        }
+
         // Control chords first.
         if key.modifiers.control {
             match key.code {
