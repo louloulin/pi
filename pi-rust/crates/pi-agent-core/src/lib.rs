@@ -14,6 +14,7 @@ mod events;
 mod hooks;
 mod queue;
 mod state;
+pub mod tools;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -24,3 +25,4 @@ pub use events::*;
 pub use hooks::*;
 pub use queue::*;
 pub use state::*;
+pub use tools::*;
