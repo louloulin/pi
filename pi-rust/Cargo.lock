@@ -1131,6 +1131,7 @@ dependencies = [
  "parking_lot",
  "pi-agent-core",
  "pi-protocol",
+ "reqwest",
  "rquickjs-core",
  "serde",
  "serde_json",

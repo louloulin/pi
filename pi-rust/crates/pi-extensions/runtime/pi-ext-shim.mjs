@@ -6593,3 +6593,309 @@ if (typeof globalThis.Buffer === "undefined") {
 if (typeof globalThis.process === "undefined") {
   globalThis.process = __pi_process_module;
 }
+
+// ===========================================================================
+// `fetch` global — WHATWG subset backed by the host HTTP bridge
+//
+// Upstream extensions run in Node/Bun, so they get the platform `fetch`.
+// QuickJS ships none and a polyfill alone cannot reach the network; the repo's
+// own `.pi/extensions/import-repro.ts` fetches GitHub gists and issue comments.
+// `host_fetch` performs the request through the same `reqwest` stack the
+// agent's providers use (same rustls / proxy-env policy) and returns
+// `{status, statusText, url, redirected, headers, body(base64)}`; the classes
+// below rebuild a `Response` from it.
+//
+// Covered: `fetch(input, init)` with `method` / `headers` / `body` (string,
+// ArrayBuffer, TypedArray, URLSearchParams) / `signal` / non-standard
+// `timeout`; `Headers`; `Request` (URL or `Request` input); `Response.ok` /
+// `status` / `statusText` / `url` / `redirected` / `headers` / `bodyUsed` /
+// `text()` / `json()` / `arrayBuffer()` / `clone()`.
+//
+// Deliberately not covered (see `docs/EXTENSIONS.md`): streaming bodies
+// (`ReadableStream`, `Response.body`), `FormData` / `Blob` bodies, and the
+// `credentials` / `mode` / `cache` / `redirect` options.
+// ===========================================================================
+(function () {
+  // Never shadow an engine-provided implementation.
+  if (typeof globalThis.fetch !== "undefined") return;
+
+  const HEADER_INVALID = /[\r\n]/;
+
+  function normalizeHeaderName(name) {
+    return String(name).toLowerCase();
+  }
+
+  class HeadersPolyfill {
+    constructor(init) {
+      /** @type {Map<string, {name: string, values: string[]}>} */
+      this._map = new Map();
+      if (init == null) return;
+      if (init instanceof HeadersPolyfill) {
+        for (const pair of init._entries()) this.append(pair[0], pair[1]);
+      } else if (Array.isArray(init)) {
+        for (const pair of init) {
+          if (!Array.isArray(pair) || pair.length !== 2) {
+            throw new TypeError("Headers: each entry must be a [name, value] pair");
+          }
+          this.append(pair[0], pair[1]);
+        }
+      } else if (typeof init === "object") {
+        for (const name of Object.keys(init)) this.append(name, init[name]);
+      }
+    }
+
+    append(name, value) {
+      const key = normalizeHeaderName(name);
+      const text = String(value);
+      if (HEADER_INVALID.test(text)) {
+        throw new TypeError("Headers: invalid header value for " + name);
+      }
+      const existing = this._map.get(key);
+      if (existing) existing.values.push(text);
+      else this._map.set(key, { name: String(name), values: [text] });
+    }
+
+    set(name, value) {
+      const key = normalizeHeaderName(name);
+      const text = String(value);
+      if (HEADER_INVALID.test(text)) {
+        throw new TypeError("Headers: invalid header value for " + name);
+      }
+      this._map.set(key, { name: String(name), values: [text] });
+    }
+
+    get(name) {
+      const entry = this._map.get(normalizeHeaderName(name));
+      return entry ? entry.values.join(", ") : null;
+    }
+
+    has(name) {
+      return this._map.has(normalizeHeaderName(name));
+    }
+
+    delete(name) {
+      this._map.delete(normalizeHeaderName(name));
+    }
+
+    forEach(callback, thisArg) {
+      for (const pair of this._entries()) {
+        callback.call(thisArg, pair[1], pair[0], this);
+      }
+    }
+
+    keys() {
+      return this._entries()
+        .map((pair) => pair[0])
+        .values();
+    }
+
+    values() {
+      return this._entries()
+        .map((pair) => pair[1])
+        .values();
+    }
+
+    entries() {
+      return this._entries().values();
+    }
+
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+
+    /** @internal Flattened `[name, joinedValue]` pairs. */
+    _entries() {
+      const out = [];
+      for (const entry of this._map.values()) {
+        out.push([entry.name, entry.values.join(", ")]);
+      }
+      return out;
+    }
+  }
+
+  function requireBuffer() {
+    if (typeof globalThis.Buffer === "undefined") {
+      throw new Error("fetch: Buffer is not available in this host build");
+    }
+    return globalThis.Buffer;
+  }
+
+  function bodyToBase64(body) {
+    const BufferCtor = requireBuffer();
+    if (typeof body === "string") {
+      return BufferCtor.from(body, "utf8").toString("base64");
+    }
+    if (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) {
+      return BufferCtor.from(new Uint8Array(body)).toString("base64");
+    }
+    if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(body)) {
+      return BufferCtor.from(
+        new Uint8Array(body.buffer, body.byteOffset, body.byteLength),
+      ).toString("base64");
+    }
+    if (
+      typeof globalThis.URLSearchParams !== "undefined" &&
+      body instanceof globalThis.URLSearchParams
+    ) {
+      return BufferCtor.from(body.toString(), "utf8").toString("base64");
+    }
+    return BufferCtor.from(String(body), "utf8").toString("base64");
+  }
+
+  class ResponsePolyfill {
+    constructor(bodyBytes, init) {
+      const options = init || {};
+      this._bodyBytes = bodyBytes;
+      this.status = typeof options.status === "number" ? options.status : 200;
+      this.statusText = options.statusText || "";
+      this.ok = this.status >= 200 && this.status < 300;
+      this.url = options.url || "";
+      this.redirected = Boolean(options.redirected);
+      this.type = "basic";
+      this.bodyUsed = false;
+      this.headers =
+        options.headers instanceof HeadersPolyfill
+          ? options.headers
+          : new HeadersPolyfill(options.headers);
+      // No `ReadableStream` in this host; see the module banner.
+      this.body = null;
+    }
+
+    _takeBody() {
+      if (this.bodyUsed) {
+        throw new TypeError("Failed to execute: body stream already read");
+      }
+      this.bodyUsed = true;
+      return this._bodyBytes || new Uint8Array(0);
+    }
+
+    async arrayBuffer() {
+      const bytes = this._takeBody();
+      const offset = bytes.byteOffset || 0;
+      return bytes.buffer.slice(offset, offset + bytes.byteLength);
+    }
+
+    async text() {
+      const bytes = this._takeBody();
+      return new globalThis.TextDecoder("utf-8").decode(bytes);
+    }
+
+    async json() {
+      return JSON.parse(await this.text());
+    }
+
+    clone() {
+      if (this.bodyUsed) {
+        throw new TypeError("Failed to execute: body stream already read");
+      }
+      return new ResponsePolyfill(this._bodyBytes, {
+        status: this.status,
+        statusText: this.statusText,
+        url: this.url,
+        redirected: this.redirected,
+        headers: this.headers,
+      });
+    }
+  }
+
+  class RequestPolyfill {
+    constructor(input, init) {
+      const options = init || {};
+      if (input instanceof RequestPolyfill) {
+        this.url = input.url;
+        this.method = input.method;
+        this.headers = new HeadersPolyfill(input.headers);
+        this.body = input.body;
+        this.signal = options.signal !== undefined ? options.signal : input.signal;
+        if (options.headers !== undefined) this.headers = new HeadersPolyfill(options.headers);
+        if (options.body !== undefined) this.body = options.body;
+        if (options.method !== undefined) this.method = String(options.method).toUpperCase();
+        return;
+      }
+      if (typeof input !== "string") {
+        throw new TypeError("fetch: input must be a URL string or Request");
+      }
+      this.url = input;
+      this.method = options.method === undefined ? "GET" : String(options.method).toUpperCase();
+      this.headers = new HeadersPolyfill(options.headers);
+      this.body = options.body === undefined ? null : options.body;
+      this.signal = options.signal === undefined ? null : options.signal;
+    }
+  }
+
+  async function fetchPolyfill(input, init) {
+    const options = init || {};
+    const request =
+      input instanceof RequestPolyfill ? input : new RequestPolyfill(input, options);
+    const signal = options.signal !== undefined ? options.signal : request.signal;
+    if (signal && signal.aborted) throw makeAbortError();
+    if (typeof globalThis.host_fetch !== "function") {
+      throw new Error("fetch is not available in this host build");
+    }
+
+    const headers = [];
+    request.headers.forEach((value, name) => headers.push([name, value]));
+    const body = request.body == null ? null : bodyToBase64(request.body);
+    const timeout =
+      typeof options.timeout === "number" && options.timeout > 0 ? options.timeout : undefined;
+    // Shared with `pi.exec`: the shim allocates, `host_fetch` registers,
+    // `host_fetch_cancel` addresses.
+    const id = __pi_next_exec_id++;
+    let onAbort = null;
+    if (signal && typeof signal.addEventListener === "function") {
+      onAbort = () => {
+        if (typeof globalThis.host_fetch_cancel === "function") {
+          globalThis.host_fetch_cancel(id);
+        }
+      };
+      signal.addEventListener("abort", onAbort);
+    }
+    let raw;
+    try {
+      raw = await globalThis.host_fetch(
+        JSON.stringify({
+          id: id,
+          url: request.url,
+          method: request.method,
+          headers: headers,
+          body: body,
+          timeout: timeout,
+        }),
+      );
+    } finally {
+      if (signal && typeof signal.removeEventListener === "function" && onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+    // The host result can lose the race with an abort that landed while the
+    // promise was in flight; the signal's state is authoritative.
+    if (signal && signal.aborted) throw makeAbortError();
+
+    let result;
+    try {
+      result = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (_e) {
+      throw new Error("pi extension host returned malformed JSON for `fetch`");
+    }
+    if (!result || result.ok !== true) {
+      const error = new Error((result && result.message) || "fetch failed");
+      error.name = (result && result.name) || "TypeError";
+      throw error;
+    }
+
+    const buffer = requireBuffer().from(result.body || "", "base64");
+    const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    return new ResponsePolyfill(bytes, {
+      status: result.status,
+      statusText: result.statusText,
+      url: result.url,
+      redirected: result.redirected,
+      headers: result.headers,
+    });
+  }
+
+  globalThis.Headers = HeadersPolyfill;
+  globalThis.Request = RequestPolyfill;
+  globalThis.Response = ResponsePolyfill;
+  globalThis.fetch = fetchPolyfill;
+})();

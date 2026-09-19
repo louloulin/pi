@@ -33,6 +33,10 @@ once_cell = "1"
 # (`pi-session` compresses its payload column with it), so this adds no
 # crate to `Cargo.lock` — important for `--offline` builds.
 zstd.workspace = true
+# The `fetch` global's transport. The same `reqwest` build `pi-ai` uses, so the
+# extension HTTP bridge shares one TLS / proxy-env policy with the providers
+# instead of introducing a second HTTP stack.
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

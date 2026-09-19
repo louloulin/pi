@@ -36,6 +36,7 @@ CommonJS-shaped module whose default export is called with the host's
 - [Wire shapes](#wire-shapes)
   - [`pi` global (TS-side API mirror)](#pi-global-ts-side-api-mirror)
   - [Host imports (Rust → JS)](#host-imports-rust--js)
+  - [`fetch` (global)](#fetch-global)
   - [Events](#events)
   - [UI requests](#ui-requests)
 - [Loading extensions](#loading-extensions)
@@ -133,6 +134,8 @@ swapped for a `wasm32` binding later without touching the shim.
 | `host_set_session_name(name)`       | `(name: string) => void`             | Set the session display name.                                                                  |
 | `host_exec(command, argsJson)`      | `(command: string, argsJson: string) => Promise<string>` | Runs `command` with `argsJson` = `{ id?, args, cwd?, timeout? }` and returns the JSON `ExecResult` `{stdout, stderr, code, killed}`. Never rejects. `id` is cancellation/deadline bookkeeping and is optional. |
 | `host_exec_cancel(id)`              | `(id: number) => void`               | Cancel the `host_exec` call whose `argsJson.id` is `id`: kills the child and makes `host_exec` resolve with `{ code: -1, killed: true }`. A no-op for an unknown or finished `id`. The shim calls it when `options.signal` fires. |
+| `host_fetch(requestJson)`           | `(requestJson: string) => Promise<string>` | The `fetch` global's transport. `requestJson` = `{ id?, url, method?, headers?, body?(base64), timeout? }`; resolves with the JSON `{ ok, status, statusText, url, redirected, headers, body(base64) }` envelope, or `{ ok: false, name, message }`. Never rejects. |
+| `host_fetch_cancel(id)`             | `(id: number) => void`               | Cancel the `host_fetch` call whose `requestJson.id` is `id`: drops the in-flight request and makes `host_fetch` resolve with `{ ok: false, name: "AbortError", … }`. A no-op for an unknown or finished `id`. The shim calls it when the request's `signal` fires. |
 | `host_ui_notify(message, level)`    | `(message: string, level: string) => void` | Fire-and-forget notify. `level` ∈ `info`/`success`/`warning`/`error`.                          |
 | `host_ui_confirm(title, body)`      | `(title: string, body: string) => Promise<boolean>` | Async — resolves via `UiHandler::confirm`.                                          |
 | `host_ui_input(title, placeholder)` | `(title: string, placeholder: string) => Promise<string | null>` | Async — resolves via `UiHandler::input`.                                          |
@@ -182,6 +185,55 @@ polyfill (`aborted`, `reason`, `throwIfAborted()`, `addEventListener` /
 `AbortSignal.any()` statics). `AbortSignal.timeout(ms)` is **not**
 implemented — it needs a timer and the host exposes neither `setTimeout`
 nor `node:timers`; extensions should pass `options.timeout` instead.
+
+### `fetch` (global)
+
+Upstream extensions run in Node/Bun and therefore use the platform `fetch`;
+the repo's own `.pi/extensions/import-repro.ts` reads gists and issue comments
+with it. QuickJS ships no `fetch` and a JS-only polyfill cannot reach the
+network, so `fetch` is a host bridge: the shim serialises the request, the
+Rust side performs it with the same `reqwest` stack the `pi-ai` providers use
+(rustls TLS and the default proxy-env handling), and the shim rebuilds a
+`Response` from the returned bytes.
+
+Implemented surface:
+
+* `fetch(input, init)` where `input` is a URL string or a `Request`, and
+  `init.method` / `init.headers` / `init.body` / `init.signal` / `init.timeout`.
+* `Headers` (`append` / `set` / `get` / `has` / `delete` / `forEach` /
+  `keys` / `values` / `entries` / iterator), `Request`, and `Response`
+  (`ok` / `status` / `statusText` / `url` / `redirected` / `headers` /
+  `bodyUsed` / `text()` / `json()` / `arrayBuffer()` / `clone()`).
+* Bodies: `string`, `ArrayBuffer`, `TypedArray` / `DataView`,
+  `URLSearchParams`.
+* `init.signal` cancels out of band exactly like `pi.exec(options.signal)`: the
+  shim allocates an `id` from the same counter `pi.exec` uses, passes it in the
+  request JSON, and calls `host_fetch_cancel(id)` when the signal fires; the
+  promise then rejects with an `AbortError` (`name: "AbortError"`, DOM-shaped).
+  A non-standard `init.timeout` (ms) rejects with a `TimeoutError` and, like
+  `pi.exec`, raises the host per-call deadline to `timeout + 1 s` while in
+  flight. Both are clamped to the same 24 h ceiling.
+
+Divergences from upstream `fetch`, all deliberate:
+
+* no streaming: `Response.body` is `null` and there is no `ReadableStream`, so
+  the whole body is buffered host-side before the promise resolves;
+* no `FormData` / `Blob` bodies;
+* `credentials`, `mode`, `cache`, `redirect`, `keepalive` and
+  `referrer` are ignored (no browser origin, no cookie jar);
+* a network failure rejects with a `TypeError` whose message is the transport
+  error (`reqwest`'s text) rather than a `TypeError: fetch failed` plus a
+  `cause`;
+* `redirected` is derived as `finalUrl !== requestUrl` rather than reported as
+  a redirect count;
+* automatic content decompression is off (the workspace `reqwest` build has no
+  `gzip` feature), so no `Accept-Encoding` is sent and the caller sees the raw
+  bytes — decompress with `node:zlib` if a server ignores that and compresses
+  anyway.
+
+HTTP already-covered behaviour worth knowing: a 4xx/5xx response **resolves**
+with `ok: false` (never rejects), exactly like upstream, and the response
+headers are lower-cased by `reqwest` as HTTP requires.
 
 ### Node builtin virtual modules
 
@@ -423,6 +475,7 @@ or a Stage 4+ follow-up:
 | `node:fs` / `node:fs/promises`          | ✅ Subset      | Sync + promise + callback forms; see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md) for the op list and divergences. |
 | `node:os` / `node:buffer` / `node:crypto` / `node:process` / `node:util` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals; `node:util` is pure JS (`promisify` / `inspect` / `format` / `types` / `TextEncoder` / …) and installs `TextEncoder` / `TextDecoder` globally when the engine lacks them. |
 | `node:child_process`                    | ✅ Subset      | `spawn` / `execFile` / `exec` with streaming stdio; a live child outlives the creating call via `host_child_read` / `host_child_wait`. Extensions that only shell out should still prefer the documented `pi.exec` API. |
+| `fetch` / `Headers` / `Request` / `Response` | ✅ Subset | Backed by the `host_fetch` import over the same `reqwest` stack the providers use; `body` is buffered (no streams), `signal` and a non-standard `timeout` are honoured. See the [`fetch` section](#fetch-global). |
 | `@earendil-works/pi-tui`                | ✅ Subset      | Components (`Text` / `Box` / `Container` / `Markdown` / `SelectList` / `SettingsList` / `Editor` / `Input` / …) and the ANSI geometry helpers, as free-standing renderables — no live terminal. See [`docs/SDK_MODULES.md`](SDK_MODULES.md). |
 | `@earendil-works/pi-coding-agent`       | ✅ Subset      | `defineTool`, `getAgentDir`, `parseFrontmatter`, `truncateHead`/`truncateLine`, `formatSize`, `convertToLlm`, `serializeConversation`, `withFileMutationQueue`, `VERSION`, the theme getters and the loader/border components. The `create*Tool` factories are documented gaps (need a built-in tool-invocation bridge). |
 | `@earendil-works/pi-ai`                 | ✅ Subset      | `Type`, `StringEnum`, `uuidv7`, `calculateCost`, `contentText`. `createAssistantMessageEventStream` is a documented gap (needs the streaming bridge). |

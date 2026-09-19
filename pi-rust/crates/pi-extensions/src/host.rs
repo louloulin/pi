@@ -1194,17 +1194,17 @@ struct ExecOutcome {
     killed: bool,
 }
 
-/// Registry of in-flight `pi.exec` calls, keyed by the id the shim
-/// allocates. Two behaviours ride on it:
+/// Registry of in-flight `pi.exec` / `fetch` calls, keyed by the id the shim
+/// allocates (one monotonic counter serves both). Two behaviours ride on it:
 ///
-/// * **cancellation** — `host_exec_cancel(id)` (the shim calls it when the
-///   extension's `AbortSignal` fires) marks the slot; [`run_child`]'s wait
-///   loop sees the mark, `start_kill`s the child and reaps it; and
-/// * **the timeout extension** — an explicit `options.timeout` is a promise
-///   the host keeps, so while such a call is in flight the host per-call
-///   deadline is raised to `options.timeout + [`EXEC_TIMEOUT_GRACE`]`, and
-///   the child's own timeout decides the outcome (see
-///   [`drive_call`]).
+/// * **cancellation** — `host_exec_cancel(id)` / `host_fetch_cancel(id)` (the
+///   shim calls them when the extension's `AbortSignal` fires) marks the slot;
+///   [`run_child`]'s wait loop sees the mark, `start_kill`s the child and reaps
+///   it, and [`run_fetch`] sees it and drops the in-flight request; and
+/// * **the timeout extension** — an explicit `options.timeout` / `timeout` is
+///   a promise the host keeps, so while such a call is in flight the host
+///   per-call deadline is raised to `timeout + [`EXEC_TIMEOUT_GRACE`]`, and the
+///   call's own timeout decides the outcome (see [`drive_call`]).
 #[derive(Clone)]
 struct ExecBridge {
     state: Arc<Mutex<ExecState>>,
@@ -1454,6 +1454,240 @@ where
     let mut buffer = Vec::new();
     let _ = pipe.read_to_end(&mut buffer).await;
     String::from_utf8_lossy(&buffer).into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// `fetch` global — HTTP bridge
+//
+// Upstream extensions run inside Node/Bun, so they get the platform `fetch`.
+// QuickJS ships none, and a JS-only polyfill cannot reach the network, so the
+// shim's `fetch`/`Headers`/`Request`/`Response` are backed by this import: the
+// shim serialises the request to JSON, `host_fetch` performs it with the same
+// `reqwest` stack the `pi-ai` providers use (and therefore the same rustls +
+// proxy-env policy), and the response comes back as
+// `{status, statusText, url, redirected, headers, body(base64)}`.
+//
+// Cancellation and the timeout extension reuse [`ExecBridge`]: the shim
+// allocates the id from the same monotonic counter as `pi.exec`, passes it
+// here, and calls `host_fetch_cancel(id)` when the caller's `AbortSignal`
+// fires; an explicit `timeout` raises the host per-call deadline exactly like
+// `pi.exec`'s `options.timeout`.
+//
+// Documented divergences (see `docs/EXTENSIONS.md`): no streaming body /
+// `ReadableStream`, no `FormData`/`Blob` bodies, no automatic content
+// decompression (the workspace `reqwest` does not enable the `gzip` feature,
+// so no `Accept-Encoding` is sent), and `redirected` is reported as
+// `final_url != request_url` rather than a redirect count.
+// ---------------------------------------------------------------------------
+
+/// `fetch(url, init)` — request decoded from the JS shim.
+#[derive(Debug, Default, Deserialize)]
+struct FetchRequest {
+    /// Call id allocated by the shim; keys [`ExecBridge`] for cancellation
+    /// and the deadline extension. `None` disables both.
+    #[serde(default)]
+    id: Option<u64>,
+    /// Absolute request URL.
+    #[serde(default)]
+    url: String,
+    /// HTTP method; the shim upper-cases it.
+    #[serde(default = "default_fetch_method")]
+    method: String,
+    /// Request headers, in the order the shim saw them.
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+    /// Request body as base64 (`None` for GET / HEAD).
+    #[serde(default)]
+    body: Option<String>,
+    /// Reject after this many milliseconds (`None` = only the host deadline).
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
+fn default_fetch_method() -> String {
+    "GET".to_string()
+}
+
+/// The process-wide `reqwest` client. One client means one connection pool and
+/// one proxy/TLS configuration for every extension `fetch` — the same policy
+/// the provider calls get.
+fn fetch_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+/// Envelope the shim turns into a rejected `fetch` promise. `name` is the JS
+/// error name (`TypeError` / `AbortError` / `TimeoutError`).
+fn fetch_error_envelope(name: &str, message: &str) -> String {
+    serde_json::json!({ "ok": false, "name": name, "message": message }).to_string()
+}
+
+/// Sleep until `deadline`, or forever when there is none.
+async fn sleep_until_opt(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Body of the `host_fetch` import: perform the request and return the JSON
+/// envelope. Never rejects, so the shim always owns the JS error object.
+async fn host_fetch_impl(
+    bridge: &ExecBridge,
+    request_json: &str,
+) -> rquickjs_core::Result<String> {
+    let request: FetchRequest = match serde_json::from_str(request_json) {
+        Ok(request) => request,
+        Err(error) => {
+            return Ok(fetch_error_envelope(
+                "TypeError",
+                &format!("invalid fetch request: {error}"),
+            ))
+        }
+    };
+    let limit = request
+        .timeout
+        .filter(|ms| *ms > 0)
+        .map(|ms| Duration::from_millis(ms).min(MAX_EXEC_TIMEOUT));
+    let slot = Arc::new(ExecSlot {
+        cancel: AtomicBool::new(false),
+        notify: Notify::new(),
+        hard_deadline: limit.map(|limit| Instant::now() + limit + EXEC_TIMEOUT_GRACE),
+    });
+    // Register before sending so a cancel that races the first poll is seen
+    // (`register` returns `true` for an already-cancelled id).
+    if let Some(id) = request.id {
+        bridge.register(id, &slot);
+    }
+    let outcome = run_fetch(&request, &slot, limit).await;
+    if let Some(id) = request.id {
+        bridge.unregister(id);
+    }
+    Ok(outcome)
+}
+
+/// Perform one `fetch` request, honouring cancellation (`slot`) and an
+/// explicit `limit`. Returns the JSON envelope.
+async fn run_fetch(request: &FetchRequest, slot: &ExecSlot, limit: Option<Duration>) -> String {
+    if slot.cancel.load(Ordering::Relaxed) {
+        return fetch_error_envelope("AbortError", "This operation was aborted");
+    }
+    let method = match reqwest::Method::from_bytes(request.method.as_bytes()) {
+        Ok(method) => method,
+        Err(_) => {
+            return fetch_error_envelope(
+                "TypeError",
+                &format!("invalid HTTP method: {}", request.method),
+            )
+        }
+    };
+    let mut builder = fetch_client().request(method, &request.url);
+    for (name, value) in &request.headers {
+        match (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            (Ok(name), Ok(value)) => builder = builder.header(name, value),
+            _ => {
+                return fetch_error_envelope("TypeError", &format!("invalid header: {name}"));
+            }
+        }
+    }
+    if let Some(encoded) = &request.body {
+        match base64_decode(encoded) {
+            Some(bytes) => builder = builder.body(bytes),
+            None => {
+                return fetch_error_envelope("TypeError", "request body is not valid base64");
+            }
+        }
+    }
+
+    let deadline = limit.map(|limit| Instant::now() + limit);
+    // `send` and the body read are raced against the cancel notify, a 50 ms
+    // tick (a `notify_waiters` that lands between the flag check and the
+    // `notified()` registration would otherwise be missed) and the explicit
+    // timeout. The per-call host deadline still wraps the whole import.
+    let send = builder.send();
+    tokio::pin!(send);
+    let response = loop {
+        if slot.cancel.load(Ordering::Relaxed) {
+            return fetch_error_envelope("AbortError", "This operation was aborted");
+        }
+        tokio::select! {
+            result = &mut send => break result,
+            () = slot.notify.notified() => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+            () = sleep_until_opt(deadline) => {
+                return fetch_error_envelope("TimeoutError", "the operation timed out");
+            }
+        }
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            let name = if error.is_timeout() {
+                "TimeoutError"
+            } else {
+                "TypeError"
+            };
+            return fetch_error_envelope(name, &error.to_string());
+        }
+    };
+
+    // Capture the metadata before `bytes(self)` consumes the response.
+    let status = response.status();
+    let final_url = response.url().to_string();
+    let redirected = final_url != request.url;
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                value.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+
+    let body = response.bytes();
+    tokio::pin!(body);
+    let bytes = loop {
+        if slot.cancel.load(Ordering::Relaxed) {
+            return fetch_error_envelope("AbortError", "This operation was aborted");
+        }
+        tokio::select! {
+            result = &mut body => break result,
+            () = slot.notify.notified() => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+            () = sleep_until_opt(deadline) => {
+                return fetch_error_envelope("TimeoutError", "the operation timed out");
+            }
+        }
+    };
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let name = if error.is_timeout() {
+                "TimeoutError"
+            } else {
+                "TypeError"
+            };
+            return fetch_error_envelope(name, &error.to_string());
+        }
+    };
+
+    serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "status": status.as_u16(),
+        "statusText": status.canonical_reason().unwrap_or(""),
+        "url": final_url,
+        "redirected": redirected,
+        "headers": headers,
+        "body": base64_encode(&bytes),
+    }))
+    .unwrap_or_else(|_| fetch_error_envelope("TypeError", "failed to encode the response"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2414,6 +2648,29 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     };
     let exec_function = Function::new(ctx.clone(), Async(exec_fn))?;
     globals.set("host_exec", exec_function)?;
+
+    // host_fetch_cancel(id) — cancel a running `fetch`. The shim calls this
+    // when the request's `AbortSignal` fires; the host drops the in-flight
+    // request and `host_fetch` resolves with the `AbortError` envelope.
+    let fetch_cancel_bridge = inner.execs.clone();
+    let fetch_cancel_fn = Func::from(move |id: u64| -> rquickjs_core::Result<()> {
+        fetch_cancel_bridge.cancel(id);
+        Ok(())
+    });
+    globals.set("host_fetch_cancel", fetch_cancel_fn)?;
+
+    // host_fetch(requestJson) -> Promise<string> — the `fetch` global's
+    // transport. `requestJson` is
+    // `{id?, url, method?, headers?, body?(base64), timeout?}`; resolves with
+    // the JSON `{ok, status, statusText, url, redirected, headers, body}`
+    // envelope (or `{ok:false,name,message}`). Never rejects.
+    let fetch_bridge = inner.execs.clone();
+    let fetch_fn = move |request_json: String| {
+        let bridge = fetch_bridge.clone();
+        async move { host_fetch_impl(&bridge, &request_json).await }
+    };
+    let fetch_function = Function::new(ctx.clone(), Async(fetch_fn))?;
+    globals.set("host_fetch", fetch_function)?;
 
     Ok(())
 }
