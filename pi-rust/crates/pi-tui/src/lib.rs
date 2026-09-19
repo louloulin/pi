@@ -17,6 +17,7 @@ pub mod dialog;
 pub mod editor;
 pub mod fuzzy;
 pub mod input;
+pub mod keybindings;
 pub mod kill_ring;
 pub mod latex;
 pub mod markdown;
@@ -42,6 +43,11 @@ pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
 pub use input::{InputEvent, Key, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
+pub use keybindings::{
+    get_keybindings, key_matches, parse_key_id, reset_keybindings, set_keybindings,
+    tui_default_keybindings, KeybindingConflict, KeybindingDefinition, KeybindingsConfig,
+    KeybindingsManager,
+};
 pub use kill_ring::{KillDirection, KillRing};
 pub use markdown::{render_markdown, render_markdown_with_theme};
 pub use message::{MessageItem, MessageView};

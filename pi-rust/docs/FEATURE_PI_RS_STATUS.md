@@ -8362,3 +8362,101 @@ $ /tmp/rustup-home/toolchains/1.85.0-*/bin/rustfmt --edition 2021 --check \
   `[Stage 37] pi-tui: 选区粒度（双击选词 / 三击选行）+ 拖拽边缘自动滚动` = **LUM-1133**
   （`01a0baf8-1b64-778a-a2af-248a615dfcfe`，`priority = high`，无父级，与 Stage 33/34/36 同形）。
   它从 `origin/feature/pi.rs @ d1b1f5087` 起分支——本轮先把推送落地，避免它从旧头起分支。
+
+## LUM-1132 round — `pi-tui` keybindings 注册表（`TUI_KEYBINDINGS` + `KeybindingsManager` 全量移植）+ 派发 Stage 38
+
+### 一、起点与槽位
+
+- 工作分支 `work/lum-1132`，起点 `origin/feature/pi.rs` @ `4c0485378`（LUM-1131 的 `node:zlib` 合并 +
+  两条补记）。本轮只**新增** `pi-tui` 的文件：`src/keybindings.rs`（新）+ `tests/keybindings.rs`（新）+
+  `src/lib.rs` 两行（`pub mod` 与再导出），**一行都不碰 `app.rs` 与选区路径**——LUM-1133 / Stage 37 正在那里
+  施工（双击选词 / 三击选行 / 边缘自动滚动）。
+- 槽位：开工时 `multica daemon status` 报 `running_task_count = 3`（本轮 + 收尾中的 LUM-1131 + LUM-1133），
+  **开局不派发**；收尾时 LUM-1131 已 `in_review`（`running_task_count = 2`，即 LUM-1133 + 本轮），空出 1 槽 →
+  **收官派发 1 个**（第六节 Stage 38），总并发 3，未超上限。
+- 环境：`/` 开工 20 G 可用。构建复用 LUM-1122 那轮已完成、再无人占用的 `target`
+  （`CARGO_TARGET_DIR=<lum-1122>/workdir/pi/pi-work/pi-rust/target`），本轮**没有新建 target，也没有回收任何
+  目录**，收尾时 `/` 仍剩 18 G。
+
+### 二、本轮切片：`packages/tui/src/keybindings.ts`（320 行）落到 `pi-tui`
+
+选它的理由：它是**上游被下游大量引用的公共 API**（`coding-agent` 的 `user-message-selector` /
+`thinking-selector` / `extension-input` / `config-selector` / `tree-selector` 等都拿 `getKeybindings()`），
+而本仓库此前只有 `editor.rs` / `app.rs` 里散落的硬编码和弦——注册表本身在 `pi-rust` 里根本不存在。
+它又完全落在新文件里，与 Stage 37 在途的 `app.rs` 零交集，是本轮唯一「不会撞车、又能一轮做完」的缺口。
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/keybindings.rs`（新，约 700 行） | `KeybindingDefinition` / `KeybindingConflict` / `KeybindingsConfig`（含 `set` / `get` / `iter`，空数组 = 显式解绑、缺 id = 保留默认）/ `KeybindingsManager`（`new` / `tui_defaults` / `matches` / `get_keys` / `get_definition` / `get_conflicts` / `set_user_bindings` / `get_user_bindings` / `get_resolved_bindings` / `keybindings`）+ `tui_default_keybindings()`（**50 条默认表**，id / 默认和弦 / 描述与 `TUI_KEYBINDINGS` 逐条对齐，含 `historyPrevious` / `historyNext` / `halfPageUp` 等默认未绑定项）+ 全局 `get_keybindings()` / `set_keybindings()` / `reset_keybindings()` + key-id 词表 `parse_key_id` / `key_matches` |
+| `crates/pi-tui/tests/keybindings.rs`（新，16 条用例） | 默认表逐条（`ctrl+j` 换行别名、行首/行尾、pageUp/Down、alt-screen 全表、history 默认未绑定）；用户覆盖**不驱逐**他人默认（`tui.input.submit` vs `tui.select.confirm`、`tui.select.up` vs `tui.editor.cursorUp`）；用户间冲突上报但不驱逐默认；空数组解绑 + 同 id 去重；未知 id 覆盖被忽略；解析顺序 = 表序；`set_user_bindings` 替换语义；key-id 词表（含 `clear` / `f13` / 空串返回 `None`）；匹配规则；全局访问器回退默认 |
+| `crates/pi-tui/src/lib.rs` | +2 行（`pub mod keybindings;` + 再导出），把改动面压到最小，降低与 Stage 37 在 `lib.rs` 上的合并冲突概率 |
+
+### 三、有意偏离（都写进了模块文档）
+
+1. **匹配入口换成 `InputEvent`**：上游 `matches(data, key)` 吃的是终端原始字节（自己解 Kitty 协议 /
+   `modifyOtherKeys` / legacy 序列）；Rust 侧解码已交给 crossterm，所以 `KeybindingsManager::matches(event, id)`
+   吃规范化后的 `InputEvent`。非按键事件（`Mouse` / `Resize` / `Ignored`）一律不匹配。
+2. **字母的大小写代表 Shift**：`Char('A')` 就是 `shift+a`（不吃 Kitty 协议的终端把 `shift+a` 报成 `A` 且不置
+   shift 位），`a` 只匹配未按下 Shift 的小写形态——即上游 `normalizeShiftedLetterIdentityCodepoint` 的同一处歧义。
+3. **数字与符号自带 shift 身份**：`!` 就是 `shift+1`，比较时不看 shift 位（否则 `!` 在 Kitty 与非 Kitty 终端
+   上表现不一致）；`shift+a` 与 `A` 的等价只对字母生效。
+4. **`Shift+Tab`** 在多数终端落地为 `KeyCode::BackTab`（无 shift 位），所以 `shift+tab` 匹配 `BackTab`，而
+   `tab` 只匹配 `Tab`。
+5. **`super` → `KeyModifiers::meta`**（`InputEvent` 的转换把 `SUPER` / `META` 合并）；未知修饰名忽略，
+   `hyper+a` 等价于 `a`，与上游 `parseKeyId` 的宽松一致。
+6. **`KeyCode` 没有 `Clear`**：词表外的键名（`clear`）解析为 `None`，永不匹配；`f1`–`f12` 之外（`f13`）同样。
+7. **`get_resolved_bindings()` 返回 `Vec<(id, Vec<KeyId>)>`**（上游是对象）；内容与顺序等价（= 表序），
+   冲突顺序 = 用户配置里的首个声明顺序（上游 `Map` 插入序）。
+8. **全局是 `Mutex<Option<KeybindingsManager>>` + clone 语义**，并额外提供 `reset_keybindings()`（上游没有）；
+   上游 `getKeybindings()` 返回可变单例引用，Rust 侧不共享 `&mut`。
+9. `key_matches(key_id, key)` 的参数序与上游 `matchesKey(data, key)` 相反（第一个参数在上游是终端字节）。
+
+### 四、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=<lum-1122>/pi-rust/target \
+    cargo test --workspace --offline                    # exit 0
+  99 个测试二进制全绿 / 1315 passed / 0 failed（本轮 +1 suite、+16 用例）
+  其中 pi-tui：lib 214 passed（不变）、tests/keybindings.rs 16 passed（新）、
+  其余 25 个 suite（latex 24 / markdown 56 / app_scroll 9 / ...）逐条不变
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0
+$ rustfmt 1.8.0（1.85.0 工具链）--edition 2021 --check：
+  本轮的 src/keybindings.rs / tests/keybindings.rs / src/lib.rs 0 diff
+```
+
+顺带核了 rustfmt 欠账的真实规模：`cargo fmt --all -- --check` 在 rustfmt 1.85 与 1.98 下**都**报
+**122 个文件 / 543 处**漂移（`pi-tui` 只占 2 个：`src/settings.rs`、`tests/settings_list.rs`——即 LUM-1130
+记下的既有欠账）。也就是说格式化欠账是全仓性质的，不是 `pi-tui` 独有；本轮**没有**顺手格式化的两个文件
+（`git checkout` 还原了），因为 `cargo fmt --all` 会与在途分支及其他 120 个文件搅在一起，应该单开一个
+「格式化 debt」任务处理。`rust-ci.yml` 只跑 check / clippy / test / release build，**不含 fmt**，所以这不是
+CI 门（`scripts/ci.sh` 里的 `cargo fmt --all --check` 目前对全仓都是红）。
+
+### 五、合并与推送
+
+`work/lum-1132` → `feature/pi.rs`；真实哈希、合并树与推送结果见本节末补记。
+
+### 六、frontier（本轮更新）
+
+1. ~~P1 鼠标区域派发 / 点击命中~~ 已由 Stage 35 / LUM-1128 收口。
+2. **P1 选区粒度与边缘自动滚动**：LUM-1133 / Stage 37 在途（`app.rs`），本轮未碰。
+3. ~~P2 `node:module` / `node:readline`~~ 已落地（LUM-1129）。
+4. ~~P2 `node:zlib` gzip/deflate~~ 已落地（LUM-1131）。
+5. **P2 `fetch` 全局**：要真实 HTTP 桥（`host.rs` 新 op + 代理/证书策略），需要架构取舍，不在一轮内做。
+6. **P3 `alt-screen-search.ts`**：要 `app.rs` 钩子。
+7. **P3 `latex.ts`**：全量已落地（LUM-1130）；剩 **OSC-8 hyperlink / 语法高亮 / 块级 HTML**。其中 OSC-8 的
+   正确落法要 `app.rs` 的 buffer 写入路径支持链接单元（ratatui 0.28 的 `Cell` 不带 hyperlink），
+   与第 2 项同属 `app.rs` 串行区，排在 Stage 37 之后。
+8. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」。
+9. **P3 X10 鼠标序列 / 滚条悬停与拖拽**：等第 2 项落地后再排（同写选择路径）。
+10. **新增（本轮）**：**keybindings 的「配置层 + 消费方」两段**。
+    - 配置层 = coding-agent 的 `packages/coding-agent/src/core/keybindings.ts`（401 行）：`KEYBINDINGS`
+      覆盖表（44 个 `app.*` id + 4 条平台相关的 `tui.*` 覆盖）、`useWindowsKeybindings`、
+      `KEYBINDING_NAME_MIGRATIONS`（58 条旧名 → 新名）、`keybindings.json` 加载与 `reload()`。
+      `pi-tui` 的注册表本轮已落地，它现在**可以开工**——已派发（Stage 38，见补记）。
+    - 消费方 = `app.rs` / `editor.rs` 里散落的硬编码和弦换成 `get_keybindings()`（含 `app.*` 动作分发）。
+      与第 2、7 项同属 `app.rs` 串行区，等 Stage 37 落地后单独排。
+11. **新增欠账（本轮）**：全仓 rustfmt 漂移 122 文件（见第四节，建议单开任务）；`pi-rust/docs/PLAN.md`
+    仍停在 Stage 14（本程序已到 Stage 37/38），PLAN 与 `FEATURE_PI_RS_STATUS.md` 的事实源已分叉；
+    `pi-tui` 的 `clear` 键与上游 `keys.ts` 的完整词表差异只做了文档化（`KeyCode` 无对应变体）。
+    既有欠账（`settings.rs` / `tests/settings_list.rs` rustfmt diff、`pi-agent-core/src/tools.rs:13` 并行工具
+    路径、`pi-ai` registry 缺 `openai-codex` / `kimi-coding`）维持不动。
