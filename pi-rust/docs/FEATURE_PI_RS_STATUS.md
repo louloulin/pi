@@ -1250,3 +1250,157 @@ side of the protocol disagreement as canonical, rebase the
 Stage 1 / Stage 2 branches onto it, and merge. Once that's done,
 adding the Anthropic / Google / Bedrock provider bodies on top of
 the unified event protocol is a clean second pass.
+
+## LUM-1040 round — re-verify `feature/pi.rs`, no-op refresh, disk-full blocker noted
+
+LUM-1040 (2026-09-19 08:20 Asia/Shanghai / 00:20 UTC, autopilot template
+re-run with the same wording as LUM-982 / LUM-1011 / LUM-1012 / LUM-1013
+/ LUM-1015 / LUM-1017 / LUM-1018 / LUM-1019 / LUM-1022 / LUM-1028 /
+LUM-1029 / LUM-1037 / LUM-1038 / LUM-1039) checked `feature/pi.rs` on a
+fresh worktree (`agent/devbox1/0375ce601239`, cut from `origin/feature/pi.rs`
+at `b99d2f913`).
+
+### State when this round started
+
+```
+$ git rev-parse HEAD origin/feature/pi.rs mirror/feature/pi.rs
+b99d2f9134487de4c25db5763e667397624e4db2   # HEAD (LUM-1039 baseline)
+b99d2f9134487de4c25db5763e667397624e4db2   # origin/feature/pi.rs
+b99d2f9134487de4c25db5763e667397624e4db2   # mirror/feature/pi.rs
+```
+
+All three refs already point at the LUM-1039 round tip (`b99d2f913`).
+No fast-forward is needed; the LUM-1039 commit (status-doc refresh)
+and the LUM-1038 commit (rust-ci.yml) are already on GitHub.
+
+### This round's actions
+
+1. **Create a fresh worktree on `feature/pi.rs`.**
+
+   ```
+   $ git worktree add -f ../pi-feature-pi.rs feature/pi.rs
+   Preparing worktree (checking out 'feature/pi.rs')
+   HEAD is now at b99d2f913 docs(pi-rust): LUM-1039 round — push LUM-1038 commits to origin, re-verify feature/pi.rs in-sync
+   ```
+
+2. **Verify disk and run `cargo check`.** This round hit a disk-full
+   blocker that did not appear in LUM-1039 — the overlay filesystem
+   (`/`) was at 100% with 0 bytes free, so `cargo check` could not
+   create a temp dir for `vcpkg` / `zerocopy` intermediates:
+
+   ```
+   $ df -h /
+   Filesystem      Size  Used Avail Use% Mounted on
+   overlay          50G   47G     0 100% /
+
+   $ cargo check --workspace --all-targets
+   error: couldn't create a temp dir: No space left on device (os error 28) at path
+   "/home/devbox/multica_workspaces/lumos-659117e3ca3d/lum-1040-.../workdir/pi-feature-pi.rs/pi-rust/target/debug/deps/rmetaZ3OGSt"
+   ```
+
+   The `/` overlay holds all prior workers' `pi-rust/target/`
+   directories, each 0.3–2.3 GB of incremental build artifacts.
+   Removing the LUM-1040 worktree's own partial `target/` recovered
+   only 295 MB; the workspace-level filesystem stayed at 100%.
+
+   `cargo check` / `clippy` / `test` are therefore **not** re-run
+   this round. The last verified compile was LUM-1039 (`126/126` tests
+   green, clippy clean, all targets clean), which is the state the
+   branch is currently in. The pre-existing CI workflow
+   `.github/workflows/rust-ci.yml` (LUM-1038) continues to be the
+   authoritative check.
+
+3. **Refresh this doc + commit.**
+
+   The only delta this round is this LUM-1040 section; no source
+   files change.
+
+### Decision: skip new parallel dispatches (thirteenth identical call)
+
+LUM-1040's autopilot template wording is identical to LUM-982 /
+LUM-1011 / LUM-1012 / LUM-1013 / LUM-1015 / LUM-1017 / LUM-1018 /
+LUM-1019 / LUM-1022 / LUM-1028 / LUM-1029 / LUM-1037 / LUM-1038 /
+LUM-1039. The saturation analysis is unchanged from LUM-1039:
+
+| Issue | Status | Reality |
+|-------|--------|----------|
+| LUM-982 (workspace primer) | `in_progress` | Idle placeholder, never advanced. |
+| LUM-986 (Stage 3 — `pi-extensions` WASM host) | `in_progress` | **Done in LUM-1037** — placeholder should flip to `in_review`. |
+| LUM-991 (Stage 1 starter) | `in_progress` | Idle placeholder, slot held empty. |
+| LUM-992 (Stage 2 starter) | `in_progress` | Idle placeholder, slot held empty. |
+| LUM-1003 (P1 — real OpenAI/Anthropic providers) | `in_progress` | Idle placeholder, slot held empty. |
+| LUM-1023 (Stage 3 R2 — `pi-extensions` WASM host) | `in_review` | Work landed via LUM-1037 cherry-pick. |
+
+The 3-slot cap remains saturated by bookkeeping placeholders. Adding
+new sub-issues would still race on the same `AssistantMessageEvent`
+enum that LUM-984 / LUM-985 / LUM-996 all conflict with.
+
+### Why "skip new parallel dispatches" still wins
+
+Same reasoning as the prior twelve identical rounds. An autopilot
+template that re-fires on a stalled task queue produces zero
+forward motion; the counter-measure is one focused single-task
+dispatch (or recognising when a previously-deferred concrete
+merge has become conflict-resolved and finishing it). LUM-1040 is
+the former: no new code, just a doc refresh, because the cargo
+verification step is blocked by disk pressure rather than by a
+genuinely actionable task.
+
+The disk-full blocker is itself an operational concern, not a
+task-decomposition issue: until a sandbox GC reclaims `target/`
+directories from completed worktrees, future rounds will also skip
+`cargo check` and rely on the LUM-1038 CI workflow + the last
+verified LUM-1039 state.
+
+### LUM-981 plan — current status of acceptance criteria
+
+The LUM-981 plan ("基于rust实现pi 同时兼容pi的插件生态") has both
+acceptance criteria satisfied on `feature/pi.rs` as of LUM-1037,
+unchanged from LUM-1039:
+
+| Acceptance criterion | Status |
+|----------------------|--------|
+| "基于rust实现pi" (implement pi in Rust) | **Met** — Stage 0 (workspace) + Stage 2-equivalent (pi-agent-core event loop) + Stage 4 (pi-tui interactive CLI) + Stage 5 (pi-session rusqlite backend) + Stage 6 (wasm32 browser host) all merged. |
+| "兼容pi的插件生态" (compatible with pi plugin ecosystem) | **Met** — LUM-1037 cherry-pick landed `pi-extensions` QuickJS host + JS shim + e2e loading the verbatim TS extension examples (`hello`, `notify`, `custom-commands`, `summarize`, `notify-on-start`). |
+
+LUM-981 itself stays `in_review` until the human reviewer closes
+it, but its core deliverables are on `feature/pi.rs`. Remaining
+work is enhancement, not foundational.
+
+### Push status — UNBLOCKED, in-sync with GitHub
+
+```
+$ git ls-remote origin feature/pi.rs
+b99d2f9134487de4c25db5763e667397624e4db2        refs/heads/feature/pi.rs
+
+$ git rev-parse feature/pi.rs
+b99d2f9134487de4c25db5763e667397624e4db2
+```
+
+`origin/feature/pi.rs`, the local mirror, and the local branch are
+all at `b99d2f913`. The LUM-1040 doc-refresh commit (this section)
+will land on top of that after the push.
+
+### Round shape (this round)
+
+LUM-1040 did the minimum given the disk-full blocker: cut a fresh
+worktree, document the cargo-check blocker, refresh this doc, push
+the doc commit, post a one-line status comment. No new code, no
+new sub-issues, no parallel dispatches, and no local `cargo check`
+/ `clippy` / `test` (the LUM-1039 verification still stands).
+
+### Candidate concrete next run (single, unchanged)
+
+Unchanged from LUM-1017 / LUM-1018 / LUM-1019 / LUM-1022 / LUM-1028
+/ LUM-1029 / LUM-1037 / LUM-1038 / LUM-1039: **protocol
+reconciliation** between Stage 1 / Stage 2's `AssistantMessageEvent`
+extension and Stage 4 / Stage 6's `events.rs` enum is the single
+highest-value follow-up because it would let LUM-984 / LUM-985 /
+LUM-996 fold into `feature/pi.rs` and close the remaining LUM-981
+follow-up debt.
+
+A future coordinator round (not a 3-slot refill) should pick one
+side of the protocol disagreement as canonical, rebase the
+Stage 1 / Stage 2 branches onto it, and merge. Once that's done,
+adding the Anthropic / Google / Bedrock provider bodies on top of
+the unified event protocol is a clean second pass.
