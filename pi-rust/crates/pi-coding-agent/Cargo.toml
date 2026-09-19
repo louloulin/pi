@@ -27,6 +27,7 @@ serde_json.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -34,3 +35,6 @@ parking_lot.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3.10"
