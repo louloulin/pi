@@ -11608,3 +11608,9 @@ LUM-1090 置 `todo`），pi 项目内的在跑路数 = 本协调轮 + 2 = **3 �
 **已知限制**：未提供 `wait_for_idle` —— 上游等 `agent_settled` 事件，本 crate 的事件集里没有它；
 嵌入方用 `wait_for_event(|v| v["type"] == "turn_end", …)` 达到同样效果。客户端只覆盖 `--rpc`
 stdio；`pi-client` / Chord 那条线的客户端仍缺（与本 issue 不同协议，未纳入范围）。
+
+补记（推送哈希）：本轮代码 + 本节所在提交为 `cfb028ead`（`src/rpc/client.rs` +
+`src/rpc/mod.rs` + `tests/rpc.rs` + 本文档）；`git push origin HEAD:feature/pi.rs` 把
+`feature/pi.rs` 从 `5a23004d1`（LUM-1156 轮）**快进至 `cfb028ead`**，`git ls-remote` 复查一致：
+`cfb028ead19dd072128dd8de9ef2a230e3259de9`（本条哈希补记是紧随其后的纯文档提交）；
+留档分支 `work/lum-1090`（基于 `5a23004d1`）一并推送。
