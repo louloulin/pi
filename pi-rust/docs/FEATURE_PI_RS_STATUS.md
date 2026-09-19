@@ -7629,5 +7629,6 @@ $ ... cargo clippy --workspace --all-targets --offline -- -D warnings
   **LUM-1129**（Stage 36，`node:module` / `node:readline`，`pi-extensions`）。派发时
   `running_task_count = 3`（本 run + 两路新任务），正好到上限；两路之间零文件重叠
   （`app.rs`/`lib.rs` vs `host.rs`/shim/tests）。
-- 本节这批 docs 提交同样用 `git merge-tree` + `git commit-tree` 合并进 `feature/pi.rs`（零冲突），
-  推送后 `feature/pi.rs` 的 tree 与 `work/lum-1126` 保持一致。
+- 本节这批 docs 提交（`a969ff0c8`，以及把 `c7dec41bc` 合入工作分支的 `2816b458a`）直接以
+  `2816b458a` 快进推入 `feature/pi.rs`（`c7dec41bc..2816b458a`）——工作分支已包含 `c7dec41bc`，
+  无需再套一层空合并；推送后 `feature/pi.rs` 的 tree 与 `work/lum-1126` 一致。
