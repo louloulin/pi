@@ -15,6 +15,14 @@
 //! * `Ctrl+D` on an empty buffer returns [`EditorAction::Eof`]; on a
 //!   non-empty buffer it forwards the control event so the [`App`]
 //!   can decide what to do.
+//! * `Ctrl+U` / `Ctrl+K` kill to the start / end of the buffer and push
+//!   the killed text onto the [`KillRing`]. Because the Rust editor is
+//!   single-line, "line start" and "line end" are the buffer corners
+//!   (`tui.editor.deleteToLineStart` / `deleteToLineEnd`); consecutive
+//!   kills accumulate into one ring entry, exactly like upstream.
+//! * `Ctrl+Y` yanks the most recent ring entry at the cursor and
+//!   `Alt+Y` cycles through older entries (`tui.editor.yank` /
+//!   `tui.editor.yankPop`).
 //!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
@@ -24,6 +32,7 @@
 use std::collections::VecDeque;
 
 use crate::input::{InputEvent, Key, KeyCode};
+use crate::kill_ring::{KillDirection, KillRing};
 
 #[cfg(test)]
 use crate::input::KeyModifiers;
@@ -46,7 +55,22 @@ pub enum EditorAction {
     Eof,
 }
 
-/// Single-line text editor with prompt history.
+/// The previous editing action, used to decide whether a kill
+/// accumulates into the most recent ring entry and whether `Alt+Y` is
+/// allowed to cycle a fresh yank. Mirrors upstream's `lastAction`
+/// field (`"kill"` / `"yank"` / everything else).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastAction {
+    /// Anything that is not a kill or a yank — breaks both chains.
+    Other,
+    /// The previous action killed text, so the next kill accumulates.
+    Kill,
+    /// The previous action yanked text, so `Alt+Y` may cycle it.
+    Yank,
+}
+
+/// Single-line text editor with prompt history and an Emacs-style kill
+/// ring.
 #[derive(Debug, Clone)]
 pub struct Editor {
     buffer: String,
@@ -56,6 +80,14 @@ pub struct Editor {
     /// Draft saved when the user starts navigating history. Restored
     /// when the user navigates back below index 0.
     history_draft: Option<String>,
+    /// Emacs-style kill ring fed by `Ctrl+U` / `Ctrl+K` and drained by
+    /// `Ctrl+Y` / `Alt+Y`.
+    kill_ring: KillRing,
+    /// Previous editing action (see [`LastAction`]).
+    last_action: LastAction,
+    /// Byte length of the text inserted by the most recent yank, so
+    /// `Alt+Y` knows which range to replace.
+    last_yank_len: usize,
 }
 
 impl Default for Editor {
@@ -73,6 +105,9 @@ impl Editor {
             history: VecDeque::new(),
             history_index: None,
             history_draft: None,
+            kill_ring: KillRing::new(),
+            last_action: LastAction::Other,
+            last_yank_len: 0,
         }
     }
 
@@ -89,6 +124,7 @@ impl Editor {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.buffer = text.into();
         self.cursor = self.buffer.len();
+        self.last_action = LastAction::Other;
     }
 
     /// Clear the buffer without touching history.
@@ -97,6 +133,7 @@ impl Editor {
         self.cursor = 0;
         self.history_index = None;
         self.history_draft = None;
+        self.last_action = LastAction::Other;
     }
 
     /// True when the buffer is empty.
@@ -189,6 +226,7 @@ impl Editor {
         self.buffer.insert(self.cursor, c);
         self.cursor += c.len_utf8();
         self.reset_history_navigation();
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -200,6 +238,7 @@ impl Editor {
         self.buffer.insert_str(self.cursor, s);
         self.cursor += s.len();
         self.reset_history_navigation();
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -213,6 +252,7 @@ impl Editor {
         self.buffer.replace_range(prev..self.cursor, "");
         self.cursor = prev;
         self.reset_history_navigation();
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -224,6 +264,7 @@ impl Editor {
         let next = self.next_char_boundary(self.cursor);
         self.buffer.replace_range(self.cursor..next, "");
         self.reset_history_navigation();
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -233,6 +274,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.cursor = self.prev_char_boundary(self.cursor);
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -242,6 +284,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.cursor = self.next_char_boundary(self.cursor);
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -251,6 +294,7 @@ impl Editor {
             return EditorAction::None;
         }
         self.cursor = 0;
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
@@ -261,18 +305,93 @@ impl Editor {
             return EditorAction::None;
         }
         self.cursor = end;
+        self.last_action = LastAction::Other;
         EditorAction::Changed
     }
 
-    /// Clear the buffer (`Ctrl+U`).
-    pub fn kill_line(&mut self) -> EditorAction {
-        if self.buffer.is_empty() {
+    /// Kill from the start of the buffer up to the cursor (`Ctrl+U`,
+    /// `tui.editor.deleteToLineStart`). The killed text is prepended to
+    /// the most recent kill ring entry when the previous action was
+    /// also a kill, matching upstream's accumulation rule.
+    pub fn kill_to_line_start(&mut self) -> EditorAction {
+        if self.cursor == 0 {
             return EditorAction::None;
         }
-        self.buffer.clear();
+        let killed = self.buffer[..self.cursor].to_string();
+        let accumulate = self.last_action == LastAction::Kill;
+        self.buffer.replace_range(..self.cursor, "");
         self.cursor = 0;
+        self.kill_ring
+            .push(&killed, KillDirection::Prepend, accumulate);
+        self.last_action = LastAction::Kill;
         self.reset_history_navigation();
         EditorAction::Changed
+    }
+
+    /// Kill from the cursor to the end of the buffer (`Ctrl+K`,
+    /// `tui.editor.deleteToLineEnd`). The killed text is appended to the
+    /// most recent kill ring entry when the previous action was also a
+    /// kill.
+    pub fn kill_to_line_end(&mut self) -> EditorAction {
+        if self.cursor >= self.buffer.len() {
+            return EditorAction::None;
+        }
+        let killed = self.buffer[self.cursor..].to_string();
+        let accumulate = self.last_action == LastAction::Kill;
+        self.buffer.truncate(self.cursor);
+        self.kill_ring
+            .push(&killed, KillDirection::Append, accumulate);
+        self.last_action = LastAction::Kill;
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Yank the most recent kill ring entry at the cursor (`Ctrl+Y`,
+    /// `tui.editor.yank`). No-op when nothing has been killed yet.
+    pub fn yank(&mut self) -> EditorAction {
+        let Some(text) = self.kill_ring.peek().map(str::to_string) else {
+            return EditorAction::None;
+        };
+        self.buffer.insert_str(self.cursor, &text);
+        self.cursor += text.len();
+        self.last_yank_len = text.len();
+        self.last_action = LastAction::Yank;
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Replace the text inserted by the previous [`yank`](Self::yank)
+    /// with the next-older kill ring entry (`Alt+Y`,
+    /// `tui.editor.yankPop`). Only valid immediately after a yank, and
+    /// only when the ring holds more than one entry.
+    pub fn yank_pop(&mut self) -> EditorAction {
+        if self.last_action != LastAction::Yank || self.kill_ring.len() <= 1 {
+            return EditorAction::None;
+        }
+        // Remove the text the previous yank inserted; the cursor sits at
+        // its end, so the range is `cursor - last_yank_len .. cursor`.
+        let start = self.cursor.saturating_sub(self.last_yank_len);
+        self.buffer.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        // Rotate first, then read: the next entry to insert is now the
+        // most recent one (upstream `yankPop` order).
+        self.kill_ring.rotate();
+        let text = self
+            .kill_ring
+            .peek()
+            .map(str::to_string)
+            .unwrap_or_default();
+        self.buffer.insert_str(self.cursor, &text);
+        self.cursor += text.len();
+        self.last_yank_len = text.len();
+        self.last_action = LastAction::Yank;
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Number of entries in the kill ring (oldest to newest).
+    pub fn kill_ring_len(&self) -> usize {
+        self.kill_ring.len()
     }
 
     /// Process a key event. Returns the action the [`App`](crate::App)
@@ -296,15 +415,26 @@ impl Editor {
                     }
                     return EditorAction::None;
                 }
-                KeyCode::Char('u') | KeyCode::Char('U') => return self.kill_line(),
+                KeyCode::Char('u') | KeyCode::Char('U') => return self.kill_to_line_start(),
                 KeyCode::Char('a') | KeyCode::Char('A') => return self.move_home(),
                 KeyCode::Char('e') | KeyCode::Char('E') => return self.move_end(),
-                KeyCode::Char('k') | KeyCode::Char('K') => return self.kill_line(),
+                KeyCode::Char('k') | KeyCode::Char('K') => return self.kill_to_line_end(),
+                KeyCode::Char('y') | KeyCode::Char('Y') => return self.yank(),
                 _ => return EditorAction::None,
             }
         }
 
-        if key.modifiers.alt || key.modifiers.meta {
+        if key.modifiers.alt {
+            // `tui.editor.yankPop` is the only Alt binding this editor
+            // implements today; word-kill / word-move chords are still
+            // pending (see the kill-ring follow-ups).
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                return self.yank_pop();
+            }
+            return EditorAction::None;
+        }
+
+        if key.modifiers.meta {
             return EditorAction::None;
         }
 
@@ -544,5 +674,193 @@ mod tests {
             height: 24,
         });
         assert_eq!(action, EditorAction::None);
+    }
+
+    // -- kill ring / yank --------------------------------------------
+
+    fn ctrl(c: char) -> Key {
+        Key::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn alt(c: char) -> Key {
+        Key::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_start_and_ctrl_y_yanks_it_back() {
+        let mut ed = Editor::new();
+        ed.insert_str("hello world");
+        ed.move_home();
+        for _ in 0..6 {
+            ed.move_right();
+        }
+        assert_eq!(ed.cursor(), 6); // after "hello "
+
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.text(), "world");
+        assert_eq!(ed.cursor(), 0);
+
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 6);
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_end_and_ctrl_y_yanks_it_back() {
+        let mut ed = Editor::new();
+        ed.insert_str("hello world");
+        ed.move_home();
+
+        assert_eq!(ed.handle_key(ctrl('k')), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+    }
+
+    #[test]
+    fn ctrl_y_is_noop_when_kill_ring_is_empty() {
+        let mut ed = Editor::new();
+        ed.insert_str("test");
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::None);
+        assert_eq!(ed.text(), "test");
+    }
+
+    #[test]
+    fn consecutive_kills_accumulate_into_one_entry() {
+        let mut ed = Editor::new();
+        ed.insert_str("abcdef");
+        ed.move_home();
+        for _ in 0..3 {
+            ed.move_right();
+        }
+        assert_eq!(ed.cursor(), 3);
+
+        // Ctrl+U kills backwards ("abc"), Ctrl+K then kills forwards
+        // ("def") and accumulates onto the same ring entry because the
+        // previous action was also a kill.
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.text(), "def");
+        assert_eq!(ed.handle_key(ctrl('k')), EditorAction::Changed);
+        assert_eq!(ed.text(), "");
+        assert_eq!(ed.kill_ring_len(), 1);
+
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "abcdef");
+    }
+
+    #[test]
+    fn non_kill_action_breaks_accumulation() {
+        let mut ed = Editor::new();
+        ed.insert_str("ab");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed); // kill "ab"
+        ed.insert_str("cd");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed); // new entry
+        assert_eq!(ed.kill_ring_len(), 2);
+    }
+
+    #[test]
+    fn alt_y_cycles_through_kill_ring_after_yank() {
+        let mut ed = Editor::new();
+        for entry in ["first", "second", "third"] {
+            ed.insert_str(entry);
+            assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        }
+        assert_eq!(ed.kill_ring_len(), 3);
+
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "third");
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "second");
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "first");
+        // Rotation wraps back around to the most recent entry.
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "third");
+    }
+
+    #[test]
+    fn alt_y_is_noop_without_a_prior_yank() {
+        let mut ed = Editor::new();
+        ed.insert_str("first");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        ed.insert_str("second");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        ed.insert_str("draft");
+
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::None);
+        assert_eq!(ed.text(), "draft");
+    }
+
+    #[test]
+    fn alt_y_is_noop_with_a_single_entry() {
+        let mut ed = Editor::new();
+        ed.insert_str("only");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "only");
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::None);
+        assert_eq!(ed.text(), "only");
+    }
+
+    #[test]
+    fn typing_after_yank_breaks_the_yank_pop_chain() {
+        let mut ed = Editor::new();
+        ed.insert_str("first");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        ed.insert_str("second");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "second");
+        ed.insert_char('x');
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::None);
+        assert_eq!(ed.text(), "secondx");
+    }
+
+    #[test]
+    fn yank_and_yank_pop_in_the_middle_of_text() {
+        let mut ed = Editor::new();
+        ed.insert_str("one");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        ed.insert_str("two");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+
+        ed.insert_str("ab");
+        ed.move_home();
+        ed.move_right();
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "atwob");
+        assert_eq!(ed.handle_key(alt('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "aoneb");
+        assert_eq!(ed.cursor(), 4);
+    }
+
+    #[test]
+    fn kill_and_yank_are_utf8_safe() {
+        let mut ed = Editor::new();
+        ed.insert_str("héllo 世界");
+        ed.move_home();
+        // Walk to just after "héllo ".
+        for _ in 0..6 {
+            ed.move_right();
+        }
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.text(), "世界");
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "héllo 世界");
+        assert_eq!(ed.cursor(), "héllo ".len());
+    }
+
+    #[test]
+    fn up_down_history_navigation_breaks_kill_accumulation() {
+        let mut ed = Editor::new();
+        ed.push_history("older");
+        ed.insert_str("ab");
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        // History navigation is not a kill, so the next kill starts a
+        // new ring entry.
+        assert_eq!(ed.history_prev(), EditorAction::Changed);
+        assert_eq!(ed.handle_key(ctrl('u')), EditorAction::Changed);
+        assert_eq!(ed.kill_ring_len(), 2);
     }
 }
