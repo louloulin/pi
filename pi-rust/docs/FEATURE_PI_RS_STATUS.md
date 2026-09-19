@@ -10336,3 +10336,142 @@ issue 要求「分析后续哪些 feature 可规划可实现（上限 3 路并�
 补记（推送哈希）：本轮代码提交 `bbb73d083` + 合并提交 `521f0595c` + 文档提交 `32dfd2322`，
 `git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `910cd6f90` **快进至 `32dfd2322`**
 （`git ls-remote` 复查一致），留档分支 `work/lum-1146` 一并推送（同哈希）。
+
+## LUM-1147 round — 压缩摘要接入 agent 级重试（`completeSummarization` 补口 + 与 LUM-1146 撞车的处理）+ 合并推送 feature/pi.rs
+
+本轮起点 `6e420761e`（LUM-1146 合并态）。代码提交 `5be44d45a`，随后合并
+`origin/feature/pi.rs`，最后是本轮文档提交。真实推送哈希见本节末补记。
+
+### 一、撞车：LUM-1146 已经把 `retry.ts` 落了地，本轮改做缺口
+
+本 issue 的原始要求是把 `packages/ai/src/utils/retry.ts` 移植进 `pi-ai`，我按此实现完
+（pi-ai `retry.rs` 903 行 + 配置读取 + agent 循环接线 + 压缩接线，全量本地绿）后才
+`git fetch` 发现：**LUM-1146 在同一天把同一份上游移植落到了 `pi-agent-core`**
+（`bbb73d083`，28 项 `retry.test.ts` 镜像用例），并且**已经接好了** `settings.retry.*`
+读取（`config::load_agent_retry_policy`）与 agent 循环。两个 in_review 的 issue 各自
+实现了一遍同一个函数族。
+
+处理原则：**仓库里同语义的东西只留一份**。我把自己那份 `pi-ai` / `config` / `interactive` /
+`print_mode` / `main` 改动全部 `git checkout --` 撤回（补丁留档 `/tmp/lum-1147-work.patch`，
+不入库），只保留 `origin/feature/pi.rs` 的 `pi-agent-core` 实现作为唯一来源；本轮只补
+LUM-1146 明确没碰的那块：**压缩摘要路径**（LUM-1146 的 numstat 里没有 `compaction.rs`）。
+
+因此第 2~4 节的落点是「用 LUM-1146 的 `RetryPolicy` 把 `completeSummarization` 包起来」，
+而不是第二份 retry 实现。上游对应关系：`compaction.ts:138`
+`retryAssistantCall(produce, …)` 把单次摘要流调用包在 agent 级重试里，`getSummarizationFailure`
+（`compaction.ts:545`）负责判定 `error` / `length`。
+
+默认值口径也随来源走：issue 正文写的是默认 `false` / `maxRetries = 0`，但 LUM-1146 已按
+上游 `settings-manager.ts:915-932` 落成 `enabled ?? true` / `maxRetries ?? 3` /
+`baseDelayMs ?? 2000`，且那个读取器是唯一预算来源。本轮沿用后者，**不再改默认值**。
+
+### 二、切片：`complete_summarization` 的本地重试循环
+
+`crates/pi-coding-agent/src/compaction.rs`（+524 / −38）：
+
+- **`compact`（`compaction.rs:558`）、`compact_history`（`:630`）、`generate_summary`、
+  `generate_turn_prefix_summary` 各加一个 `retry: Option<RetryPolicy>` 形参**，一路透传到
+  `complete_summarization`（`:814`）。`None` 与 `enabled = false` 都退化为「首错即失败」，
+  即移植前行为（用例 `compact_fails_immediately_when_retrying_is_disabled` 锁住这一点）。
+- **分类器与退避不复制**：直接 `use pi_agent_core::{is_retryable_error_message,
+  retry_delay_ms, RetryPolicy}`，与 agent 循环共用一份文案表和同一套 `base * 2^(n-1)` 截断
+  规则，压缩与主循环不会出现「同一个错误一边重试一边不重试」。
+- **循环本身本地实现**（`compaction.rs:814-880` + `sleep_or_abort` `:995`），因为
+  `pi_agent_core::retry_assistant_call` 的形状是
+  `Result<AssistantMessage, AgentError>`、回调是 `Arc<dyn Fn>` 且要 `fallback_model`，而摘要
+  尝试产出的是文本 + `Usage`、错误是 `CompactionError`。新枚举 `AttemptOutcome`
+  （`compaction.rs:883`）承载三态：`Done` / `Failed { error, error_text }` / `Aborted`，
+  `summarize_once`（`:905`）只负责把流事件翻译成这三态，重试策略留在循环里。
+- **错误变体原样保留**：预算耗尽或文案不可重试时把 `CompactionError` 原封不动返回，
+  运输层仍是 `Stream(...)`、流内 provider 错误仍是 `Provider(...)`，既有断言语义不变。
+- **`stop_reason: MaxTokens` 不重试**（`:866` 附近，直接 `Err(CompactionError::Incomplete)`）：
+  截断是确定性的，重试只会再截断一次。
+- **abort 映射不变**：流内 abort 与退避期间取消都返回 `CompactionError::Provider("aborted")`。
+- 手动压缩（`interactive.rs:796`）与自动压缩（`interactive.rs:873`）从
+  `InteractiveOptions.retry` 取策略传入，用户关掉 `retry.enabled` 时压缩也不重试。
+
+### 三、刻意偏离（都写在代码注释里）
+
+1. **`Done { stop_reason: error }` 且无文案 ⇒ 按可重试处理**：本轮 issue 明确要求把这种
+   响应归到可重试分支并保留 provider 原话（无原话时用包装文案
+   `provider returned error`）。上游 `errorMessage === undefined` 走的是**不重试**。因为
+   LUM-1146 的默认值是「开启重试」，这个偏离现在会真的多打 1~3 次请求（每次退避 2s/4s/8s），
+   只影响「provider 用 `stop_reason: error` 结束且带不出任何文案」这一类响应；有文案时
+   完全按文案分类（确定性文案一次都不重试）。
+2. **压缩目前不可取消**：`complete_summarization` 构造的 `SimpleStreamOptions` 没接信号
+   （`interactive.rs` 的手动/自动压缩路径没有 abort token），所以 `sleep_or_abort` 现在只能
+   等到自然醒来；退避 sleep 已经是 signal-aware 的，等交互层把 abort token 接到
+   `SimpleStreamOptions.signal` 即可生效，无需再动循环。
+3. **不 `errorMessage` 上提**：仍然不去给 `pi-protocol::AssistantMessage` 加字段，文案从流的
+   `Error` 事件 / 包装错误里取，协议形状不变。
+
+### 四、测试与验证
+
+新增 7 项单测（`crates/pi-coding-agent/src/compaction.rs`，配 `ScriptedSummaryStream`
+脚本化 faux 流 `:1169`）：
+
+| 用例 | 锁定语义 |
+|------|----------|
+| `compact_retries_a_transient_stream_failure` | 运输层可重试文案 → 第二次成功，且不重头消耗已开流 |
+| `compact_retries_an_in_stream_provider_error` | 流内 `Error` 事件同样进重试循环 |
+| `compact_fails_immediately_when_retrying_is_disabled` | `enabled = false` 时调用次数仍为 1 |
+| `compact_does_not_retry_a_non_retryable_provider_error` | 额度类确定性文案一次都不重试 |
+| `compact_retries_an_error_stop_reason_without_wording` | `Done{error}` 无文案按可重试（第 1 条偏离） |
+| `compact_returns_the_error_stop_reason_wording_once_retries_run_out` | 预算耗尽后返回 provider 原话，不吞成 `EmptySummary` |
+| `compact_does_not_retry_a_truncated_summary` | `MaxTokens` 不重试 |
+
+全绿记录（`CARGO_HOME=/tmp/cargo-home`、`CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1147`，
+全程 `--offline`，均为合并态复测）：
+
+- `cargo test -p pi-coding-agent`：**405 项全过**（本轮前 398，`--lib` 250 → 257）。
+- `cargo test -p pi-agent-core` **75 项** / `cargo test -p pi-ai` **116 项** 全过。
+- `cargo test --workspace` 无失败；`cargo check --workspace --all-targets` exit 0。
+- `cargo clippy -p pi-coding-agent --all-targets -- -D warnings` exit 0
+  （`CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1147-clippy`）。
+- `cargo check -p pi-ai -p pi-agent-core -p pi-protocol --target wasm32-unknown-unknown
+  --features pi-agent-core/wasm` exit 0（本轮的压缩改动全在原生 crate，未碰 wasm 路径）。
+- `rustfmt --edition 2021 --check`（`1.9.0-stable`）：`compaction.rs` **整个文件 0 处
+  漂移**；`interactive.rs` 仍是那 6 处旧漂移（`:745, :993, :1330, :1500, :1520, :1583`，
+  与合并态逐条相同），本轮新增行零漂移。仓库整体 fmt 欠账仍是 LUM-1138。
+
+### 五、给后续轮的口径 / 遗留
+
+- **`pi-agent-core/src/retry.rs` 是唯一重试语义落点**（LUM-1146）。压缩侧现在复用它，
+  后续要让「重试语义」变化（session 级 `auto_retry_start/end`、
+  `pi-protocol::AssistantMessage.errorMessage` 上提、每次尝试的 span 命名）都应改在那里。
+- **该模块的 `regex` 依赖**：LUM-1146 给 `pi-agent-core` 加了无条件 `regex` 依赖，而
+  `pi-agent-core` 在 `rust-wasm.yml` 的 `.wasm < 500 KB` 断言路径上。本轮环境没有
+  `wasm-pack`，只能验到 `cargo check --target wasm32-unknown-unknown` 通过，**包体积未测**；
+  若 CI 的 stage 6 报超限，最便宜的修法是把 `retry.rs` 的两条表改回显式子串匹配
+  （我撤回的那份 pi-ai 实现即为此形状，见 `/tmp/lum-1147-work.patch` 的
+  `is_retryable_agent_error`）。
+- **`retry_delay_ms` 的溢出钳位**：LUM-1146 用 `u128::saturating_mul` 钳到 `u64::MAX`，上游
+  语义是钳到 `Number.MAX_SAFE_INTEGER`；两者都远大于 `max_agent_delay_ms`，实际无差别
+  （其用例 `retry_delay_ms(&RetryPolicy::new(3, 2_000), 6) == 60_000` 也覆盖不到溢出路径）。
+- **压缩不可取消**（第 3 节第 2 条）与 **`Done{error}` 无文案的额外重试**（第 3 节第 1 条）
+  是两个已知取舍，前者等交互层接 abort token，后者等 `errorMessage` 上提后即可按上游分类。
+
+### 六、frontier（本轮更新）
+
+1. ~~**P2 agent 级重试（`utils/retry.ts`）**~~ **已由 LUM-1146 收口**；本轮补齐其压缩
+   （`completeSummarization`）路径。第 2 项（`latex.ts` 剩余）与第 3 项
+   （`ToolCallDelta` 重复建块）照旧，落点都是 `pi-tui/src/app.rs`，必须串行。
+2. **质量门清偿** = LUM-1138（`backlog`）：`cargo fmt --all -- --check` 剩 122 文件漂移。
+   本轮新增行零漂移，`compaction.rs` 已整文件干净。
+3. **压缩取消能力**（新增，P3）：把交互层的 abort token 接到压缩用的
+   `SimpleStreamOptions.signal`，让退避 sleep 可被打断。落点
+   `pi-coding-agent/src/{compaction,interactive}.rs`，与本文档同属一路写方即可。
+4. 其余（provider catalog / LUM-1090、未移植的 `pi-ai` 模块、`PLAN.md` 停更）维持原状。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮只写
+`pi-coding-agent/src/{compaction,interactive}.rs` 与本文档，未碰 `pi-agent-core` / `pi-ai`。
+
+环境记录：本轮使用独立 target `/tmp/pi-rust-target-lum1147`（clippy 另用
+`-clippy` 目录），`CARGO_HOME=/tmp/cargo-home`，全程未触碰他路 target 目录。
+
+补记（推送哈希）：`origin/feature/pi.rs` 本轮未前进（仍 `6e420761e`，即本轮起点），
+因此**无需合并提交**（本轮提交直接快进）。本轮代码提交 `5be44d45a` + 文档提交
+`f3ca7df3c` + 本补记提交，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从
+`6e420761e` **快进至本补记提交**（`git ls-remote` 复查一致，哈希见本节末提交链），
+留档分支 `work/lum-1147` 一并推送（同哈希）。

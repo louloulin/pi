@@ -33,14 +33,38 @@
 //! * Branch summarization (`branch-summarization.ts`) is out of scope —
 //!   it summarises abandoned session-tree branches, and the Rust port has
 //!   no session tree yet.
+//! * Each summarization call ([`complete_summarization`], shared by the
+//!   main history summary and the split-turn prefix summary) runs inside
+//!   the agent-level retry loop from `utils/retry.ts`, bounded by the
+//!   [`RetryPolicy`] the caller passes to [`compact`]. `None` or a
+//!   disabled policy reproduces the pre-port "fail on the first error"
+//!   behaviour. Upstream classifies the failure via
+//!   `AssistantMessage.errorMessage`, which `pi-protocol` does not carry;
+//!   this port derives the text from the stream's own `Error` event instead
+//!   and falls back to the wrapper wording (`provider returned error`) when
+//!   a `Done` arrives with `stop_reason: error` and no wording.
+//!
+//!   The classifier and the backoff schedule are the shared agent-level
+//!   primitives (`pi_agent_core::{is_retryable_error_message,
+//!   retry_delay_ms}`), so compaction and the agent loop spend the same
+//!   [`RetryPolicy`] budget and agree on what counts as a transient
+//!   failure. Only the loop itself is local to this module: the agent
+//!   loop's [`pi_agent_core::retry_assistant_call`] is shaped around
+//!   `AssistantMessage` / `AgentError`, while a summarization attempt
+//!   yields text and keeps its [`CompactionError`] variant. The backoff
+//!   sleep is already signal-aware, but compaction is not cancellable today
+//!   ([`SimpleStreamOptions::signal`] is unset), so an abort can only arrive
+//!   from the stream itself.
 //! * The compaction summary is rendered as a `user` message wrapped in
 //!   the same `<summary>` tags upstream uses when it converts a
 //!   `compactionSummary` message for the provider.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use futures::StreamExt;
-use pi_ai::{SharedStreamFn, SimpleStreamOptions};
+use pi_agent_core::{is_retryable_error_message, retry_delay_ms, RetryPolicy};
+use pi_ai::{AbortSignal, SharedStreamFn, SimpleStreamOptions, StreamError};
 use pi_protocol::{AssistantMessageEvent, Content, Message, Model, Role, StopReason, Usage};
 
 /// Prefix of the synthetic user message that replaces the compacted history.
@@ -527,12 +551,17 @@ pub fn prepare_compaction(
 }
 
 /// Summarize the prepared span and return the compacted history.
+///
+/// `retry` is the agent-level retry budget applied to each summarization
+/// call ([`RetryPolicy`]); `None` (or a disabled policy) keeps the
+/// pre-port behaviour of failing on the first transient provider error.
 pub async fn compact(
     messages: &[Message],
     model: &Model,
     stream_fn: &SharedStreamFn,
     settings: CompactionSettings,
     custom_instructions: Option<&str>,
+    retry: Option<RetryPolicy>,
 ) -> Result<Compaction, CompactionError> {
     let preparation =
         prepare_compaction(messages, settings).ok_or(CompactionError::NothingToCompact)?;
@@ -550,6 +579,7 @@ pub async fn compact(
                     settings.reserve_tokens,
                     custom_instructions,
                     preparation.previous_summary.as_deref(),
+                    retry,
                 )
                 .await?;
                 (text, Some(usage))
@@ -559,6 +589,7 @@ pub async fn compact(
                 model,
                 stream_fn,
                 settings.reserve_tokens,
+                retry,
             )
             .await?;
             let merged =
@@ -574,6 +605,7 @@ pub async fn compact(
                 settings.reserve_tokens,
                 custom_instructions,
                 preparation.previous_summary.as_deref(),
+                retry,
             )
             .await?
         };
@@ -601,8 +633,17 @@ pub async fn compact_history(
     stream_fn: &SharedStreamFn,
     settings: CompactionSettings,
     custom_instructions: Option<&str>,
+    retry: Option<RetryPolicy>,
 ) -> Result<Vec<Message>, CompactionError> {
-    let compaction = compact(messages, model, stream_fn, settings, custom_instructions).await?;
+    let compaction = compact(
+        messages,
+        model,
+        stream_fn,
+        settings,
+        custom_instructions,
+        retry,
+    )
+    .await?;
     Ok(compaction.into_history())
 }
 
@@ -702,6 +743,7 @@ async fn generate_summary(
     reserve_tokens: u32,
     custom_instructions: Option<&str>,
     previous_summary: Option<&str>,
+    retry: Option<RetryPolicy>,
 ) -> Result<(String, Usage), CompactionError> {
     let max_tokens = summary_max_tokens(model, reserve_tokens, 0.8);
     let conversation = serialize_conversation(messages);
@@ -723,7 +765,8 @@ async fn generate_summary(
     }
     prompt.push_str(&base);
 
-    let (text, usage) = complete_summarization(model, stream_fn, &prompt, max_tokens).await?;
+    let (text, usage) =
+        complete_summarization(model, stream_fn, &prompt, max_tokens, retry).await?;
     Ok((text, usage))
 }
 
@@ -733,13 +776,14 @@ async fn generate_turn_prefix_summary(
     model: &Model,
     stream_fn: &SharedStreamFn,
     reserve_tokens: u32,
+    retry: Option<RetryPolicy>,
 ) -> Result<(String, Usage), CompactionError> {
     let max_tokens = summary_max_tokens(model, reserve_tokens, 0.5);
     let conversation = serialize_conversation(messages);
     let prompt = format!(
         "<conversation>\n{conversation}\n</conversation>\n\n{TURN_PREFIX_SUMMARIZATION_PROMPT}"
     );
-    complete_summarization(model, stream_fn, &prompt, max_tokens).await
+    complete_summarization(model, stream_fn, &prompt, max_tokens, retry).await
 }
 
 /// `min(floor(fraction * reserveTokens), model.maxTokens)`.
@@ -752,12 +796,27 @@ fn summary_max_tokens(model: &Model, reserve_tokens: u32, fraction: f32) -> u32 
     }
 }
 
-/// Drive the summarization stream to completion.
+/// One completed summarization stream, before its content is validated.
+struct SummarizationResponse {
+    content: Vec<Content>,
+    stop_reason: StopReason,
+    usage: Usage,
+}
+
+/// Drive the summarization stream to completion, retrying transient provider
+/// failures within `retry` — upstream `completeSummarization`, which wraps
+/// `retryAssistantCall` around the single stream call.
+///
+/// The classifier ([`is_retryable_error_message`]) and the backoff schedule
+/// ([`retry_delay_ms`]) are shared with the agent loop; the loop is local
+/// because a summarization attempt produces text and a [`CompactionError`]
+/// rather than an `AssistantMessage`.
 async fn complete_summarization(
     model: &Model,
     stream_fn: &SharedStreamFn,
     prompt: &str,
     max_tokens: u32,
+    retry: Option<RetryPolicy>,
 ) -> Result<(String, Usage), CompactionError> {
     let context = pi_protocol::Context {
         system_prompt: SUMMARIZATION_SYSTEM_PROMPT.to_string(),
@@ -773,52 +832,178 @@ async fn complete_summarization(
         ..SimpleStreamOptions::default()
     };
 
-    let mut stream = stream_fn
-        .stream_simple(model, &context, &options)
-        .await
-        .map_err(|err| CompactionError::Stream(err.to_string()))?;
-
-    let mut content: Option<Vec<Content>> = None;
-    let mut usage = Usage::default();
-    let mut stop_reason = StopReason::Empty;
-    while let Some(event) = stream.next().await {
-        match event.map_err(|err| CompactionError::Stream(err.to_string()))? {
-            AssistantMessageEvent::Start { .. } => {}
-            AssistantMessageEvent::Done {
-                content: blocks,
-                stop_reason: reason,
-                usage: reported,
-            } => {
-                content = Some(blocks);
-                usage = reported;
-                stop_reason = reason;
+    // Every attempt opens a fresh stream — the loop re-runs `summarize_once`,
+    // so a half-consumed stream is never resumed.
+    let policy = retry.filter(|policy| policy.enabled);
+    let max_attempts = policy.map_or(0, |policy| policy.max_retries);
+    let mut attempt = 0u32;
+    let response = loop {
+        match summarize_once(model, stream_fn, &context, &options).await {
+            AttemptOutcome::Done(response) => break response,
+            AttemptOutcome::Failed { error, error_text } => {
+                // Non-retryable, or budget exhausted: the original error goes
+                // back unchanged, variant included.
+                if attempt >= max_attempts || !is_retryable_error_message(&error_text) {
+                    return Err(error);
+                }
+                attempt += 1;
+                let policy = policy.expect("a retry implies an enabled policy");
+                let delay_ms = retry_delay_ms(&policy, attempt);
+                if !sleep_or_abort(delay_ms, options.signal.as_ref()).await {
+                    // Cancelled during the backoff: same error shape as a
+                    // stream that aborts mid-flight.
+                    return Err(CompactionError::Provider("aborted".to_string()));
+                }
             }
-            AssistantMessageEvent::Error { message } => {
-                return Err(CompactionError::Provider(message));
+            // An abort during the stream is terminal and never retried.
+            AttemptOutcome::Aborted => {
+                return Err(CompactionError::Provider("aborted".to_string()))
             }
-            AssistantMessageEvent::Aborted => {
-                return Err(CompactionError::Provider("aborted".to_string()));
-            }
-            AssistantMessageEvent::TextDelta { .. }
-            | AssistantMessageEvent::ThinkingDelta { .. }
-            | AssistantMessageEvent::ToolCallDelta { .. } => {}
         }
-    }
+    };
 
-    if stop_reason == StopReason::MaxTokens {
+    // A truncated summary is deterministic — retrying cannot help, and the
+    // caller reports it as an incomplete compaction (never retried).
+    if response.stop_reason == StopReason::MaxTokens {
         return Err(CompactionError::Incomplete);
     }
-    let blocks = content.ok_or(CompactionError::EmptySummary)?;
-    if blocks.iter().any(|block| block.is_tool_call()) {
+    if response.content.iter().any(|block| block.is_tool_call()) {
         return Err(CompactionError::Provider(
             "summarization attempted to call a tool".to_string(),
         ));
     }
-    let text = content_text(&blocks);
+    let text = content_text(&response.content);
     if text.trim().is_empty() {
         return Err(CompactionError::EmptySummary);
     }
-    Ok((text, usage))
+    Ok((text, response.usage))
+}
+
+/// What one summarization attempt reports to the retry loop.
+enum AttemptOutcome {
+    /// The stream produced a terminal response.
+    Done(SummarizationResponse),
+    /// The attempt failed; `error_text` is the provider wording the shared
+    /// classifier inspects.
+    Failed {
+        /// The error to return unchanged once retrying stops.
+        error: CompactionError,
+        /// The wording used for the retry decision.
+        error_text: String,
+    },
+    /// Cancelled — never retried.
+    Aborted,
+}
+
+/// One summarization attempt: open a fresh stream and drive it to a
+/// conclusion.
+///
+/// The terminal stream events are mapped onto [`AttemptOutcome`] so the retry
+/// loop sees the provider's wording, while the error carried alongside it
+/// keeps the [`CompactionError`] variant the pre-port code used (`Stream`
+/// for transport failures, `Provider` for in-stream provider errors).
+async fn summarize_once(
+    model: &Model,
+    stream_fn: &SharedStreamFn,
+    context: &pi_protocol::Context,
+    options: &SimpleStreamOptions,
+) -> AttemptOutcome {
+    let mut stream = match stream_fn.stream_simple(model, context, options).await {
+        Ok(stream) => stream,
+        Err(StreamError::Aborted) => return AttemptOutcome::Aborted,
+        Err(err) => {
+            let text = err.to_string();
+            return AttemptOutcome::Failed {
+                error: CompactionError::Stream(text.clone()),
+                error_text: text,
+            };
+        }
+    };
+
+    let mut response: Option<SummarizationResponse> = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(AssistantMessageEvent::Done {
+                content,
+                stop_reason,
+                usage,
+            }) => {
+                response = Some(SummarizationResponse {
+                    content,
+                    stop_reason,
+                    usage,
+                });
+            }
+            Ok(AssistantMessageEvent::Error { message }) => {
+                return AttemptOutcome::Failed {
+                    error: CompactionError::Provider(message.clone()),
+                    error_text: message,
+                };
+            }
+            Ok(AssistantMessageEvent::Aborted) => return AttemptOutcome::Aborted,
+            Ok(
+                AssistantMessageEvent::Start { .. }
+                | AssistantMessageEvent::TextDelta { .. }
+                | AssistantMessageEvent::ThinkingDelta { .. }
+                | AssistantMessageEvent::ToolCallDelta { .. },
+            ) => {}
+            Err(StreamError::Aborted) => return AttemptOutcome::Aborted,
+            Err(err) => {
+                let text = err.to_string();
+                return AttemptOutcome::Failed {
+                    error: CompactionError::Stream(text.clone()),
+                    error_text: text,
+                };
+            }
+        }
+    }
+
+    match response {
+        // `stop_reason: Error` with no `Error` event. `pi-protocol` has no
+        // `AssistantMessage.errorMessage`, so the provider's wording either
+        // rides in the content or is missing entirely; the fallback matches
+        // upstream's wrapper wording, which the classifier treats as
+        // retryable (see the module docs).
+        Some(SummarizationResponse {
+            stop_reason: StopReason::Error,
+            content,
+            ..
+        }) => {
+            let text = content_text(&content);
+            let text = if text.trim().is_empty() {
+                "provider returned error".to_string()
+            } else {
+                text
+            };
+            AttemptOutcome::Failed {
+                error: CompactionError::Provider(text.clone()),
+                error_text: text,
+            }
+        }
+        Some(response) => AttemptOutcome::Done(response),
+        // The stream ended without a `Done` event. Deterministic, and the
+        // text matches no retryable pattern, so it is reported as-is.
+        None => AttemptOutcome::Failed {
+            error: CompactionError::EmptySummary,
+            error_text: "summarization stream produced no result".to_string(),
+        },
+    }
+}
+
+/// Sleep `delay_ms` for a backoff, returning `false` when `signal` aborts
+/// first. Mirrors the provider layer's `sleep_or_abort`.
+async fn sleep_or_abort(delay_ms: u64, signal: Option<&AbortSignal>) -> bool {
+    let sleep = tokio::time::sleep(Duration::from_millis(delay_ms));
+    match signal {
+        Some(signal) => tokio::select! {
+            () = sleep => true,
+            () = signal.cancelled() => false,
+        },
+        None => {
+            sleep.await;
+            true
+        }
+    }
 }
 
 /// `combineUsage(first, second)` for the two summary calls of a split turn.
@@ -961,6 +1146,112 @@ mod tests {
 
         fn prompts(&self) -> Vec<String> {
             self.calls.lock().expect("lock").clone()
+        }
+    }
+
+    /// One scripted summarization attempt for the agent-level retry tests.
+    #[derive(Clone)]
+    enum Attempt {
+        /// Fail before the stream starts; `StreamError::Malformed` stands in
+        /// for a dropped transport because `StreamError::Transport` wraps a
+        /// `reqwest::Error` this crate cannot build in a test.
+        TransportFailure(&'static str),
+        /// Stream a single in-stream provider error and stop.
+        ProviderError(&'static str),
+        /// Stream `Done` with `stop_reason: error` and `text` as content.
+        DoneWithErrorStopReason(&'static str),
+        /// Stream a usable summary.
+        Summary(&'static str),
+    }
+
+    /// Stream that replays a script of [`Attempt`]s, repeating the last one
+    /// forever once the script drains.
+    struct ScriptedSummaryStream {
+        script: Mutex<std::collections::VecDeque<Attempt>>,
+        calls: Mutex<usize>,
+    }
+
+    impl ScriptedSummaryStream {
+        fn new(script: Vec<Attempt>) -> Self {
+            Self {
+                script: Mutex::new(script.into()),
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.lock().expect("lock")
+        }
+
+        fn next_attempt(&self) -> Attempt {
+            let mut script = self.script.lock().expect("lock");
+            if script.len() > 1 {
+                script.pop_front().expect("non-empty")
+            } else {
+                script.front().cloned().expect("a scripted attempt")
+            }
+        }
+    }
+
+    fn done_events(
+        model: &Model,
+        content: Vec<Content>,
+        stop_reason: StopReason,
+    ) -> Vec<Result<AssistantMessageEvent, StreamError>> {
+        vec![
+            Ok(AssistantMessageEvent::Start {
+                model: model.id.clone(),
+            }),
+            Ok(AssistantMessageEvent::Done {
+                content,
+                stop_reason,
+                usage: Usage {
+                    input: 10,
+                    output: 5,
+                    total: 15,
+                    ..Usage::default()
+                },
+            }),
+        ]
+    }
+
+    #[async_trait::async_trait]
+    impl StreamFn for ScriptedSummaryStream {
+        async fn stream_simple(
+            &self,
+            model: &Model,
+            _ctx: &pi_protocol::Context,
+            _options: &SimpleStreamOptions,
+        ) -> Result<AssistantMessageEventStream, StreamError> {
+            *self.calls.lock().expect("lock") += 1;
+            match self.next_attempt() {
+                Attempt::TransportFailure(text) => Err(StreamError::Malformed(text.to_string())),
+                Attempt::ProviderError(text) => Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(AssistantMessageEvent::Start {
+                        model: model.id.clone(),
+                    }),
+                    Ok(AssistantMessageEvent::Error {
+                        message: text.to_string(),
+                    }),
+                ]))),
+                Attempt::DoneWithErrorStopReason(text) => {
+                    let content = if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![Content::text(text)]
+                    };
+                    Ok(Box::pin(futures::stream::iter(done_events(
+                        model,
+                        content,
+                        StopReason::Error,
+                    ))))
+                }
+                Attempt::Summary(text) => Ok(Box::pin(futures::stream::iter(done_events(
+                    model,
+                    vec![Content::text(text)],
+                    StopReason::Stop,
+                )))),
+            }
         }
     }
 
@@ -1145,6 +1436,7 @@ mod tests {
                 ..CompactionSettings::default()
             },
             Some("keep the API notes"),
+            None,
         )
         .await
         .expect("compact");
@@ -1179,6 +1471,7 @@ mod tests {
                 ..CompactionSettings::default()
             },
             None,
+            None,
         )
         .await
         .expect("compact");
@@ -1212,6 +1505,7 @@ mod tests {
                 ..CompactionSettings::default()
             },
             None,
+            None,
         )
         .await
         .expect("compact");
@@ -1243,6 +1537,7 @@ mod tests {
                 ..CompactionSettings::default()
             },
             None,
+            None,
         )
         .await;
         assert_eq!(result.unwrap_err(), CompactionError::Incomplete);
@@ -1258,9 +1553,200 @@ mod tests {
             &(stream as SharedStreamFn),
             CompactionSettings::default(),
             None,
+            None,
         )
         .await;
         assert_eq!(result.unwrap_err(), CompactionError::NothingToCompact);
+    }
+
+    /// A history long enough that `prepare_compaction` always finds work.
+    fn long_history() -> Vec<Message> {
+        let mut messages = vec![user("first question")];
+        for index in 0..8 {
+            messages.push(assistant(&format!("answer {index} {}", "y".repeat(400))));
+            messages.push(user(&format!("follow-up {index} {}", "x".repeat(400))));
+        }
+        messages
+    }
+
+    fn compact_settings() -> CompactionSettings {
+        // A low retention keeps the cut at a turn boundary, so the run makes
+        // exactly one summarization call and the call count in the retry
+        // tests is not confused with the two calls of a split turn.
+        CompactionSettings {
+            keep_recent_tokens: 100,
+            ..CompactionSettings::default()
+        }
+    }
+
+    fn agent_retry(max_retries: u32) -> Option<RetryPolicy> {
+        // Zero base delay keeps the test's retries sleep-free.
+        Some(RetryPolicy::new(max_retries, 0))
+    }
+
+    #[tokio::test]
+    async fn compact_retries_a_transient_stream_failure() {
+        let stream = std::sync::Arc::new(ScriptedSummaryStream::new(vec![
+            Attempt::TransportFailure("socket connection was closed unexpectedly"),
+            Attempt::Summary("## Goal\nrecovered"),
+        ]));
+        let compacted = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            agent_retry(1),
+        )
+        .await
+        .expect("the retried compaction succeeds");
+
+        assert_eq!(stream.calls(), 2);
+        assert!(extract_summary(&compacted[0])
+            .expect("summary")
+            .contains("recovered"));
+    }
+
+    #[tokio::test]
+    async fn compact_fails_immediately_when_retrying_is_disabled() {
+        // Same transient wording as the test above, but no retry budget: the
+        // pre-port behaviour must be unchanged.
+        let stream = std::sync::Arc::new(ScriptedSummaryStream::new(vec![
+            Attempt::TransportFailure("socket connection was closed unexpectedly"),
+            Attempt::Summary("## Goal\nrecovered"),
+        ]));
+        let result = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(stream.calls(), 1);
+        let error = result.unwrap_err();
+        assert_eq!(
+            error,
+            CompactionError::Stream(
+                "malformed stream: socket connection was closed unexpectedly".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_retries_an_in_stream_provider_error() {
+        let stream = std::sync::Arc::new(ScriptedSummaryStream::new(vec![
+            Attempt::ProviderError("provider returned error"),
+            Attempt::Summary("## Goal\nrecovered"),
+        ]));
+        let compacted = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            agent_retry(2),
+        )
+        .await
+        .expect("the retried compaction succeeds");
+
+        assert_eq!(stream.calls(), 2);
+        assert!(extract_summary(&compacted[0])
+            .expect("summary")
+            .contains("recovered"));
+    }
+
+    #[tokio::test]
+    async fn compact_does_not_retry_a_non_retryable_provider_error() {
+        let stream = std::sync::Arc::new(ScriptedSummaryStream::new(vec![
+            Attempt::ProviderError("insufficient_quota"),
+            Attempt::Summary("## Goal\nrecovered"),
+        ]));
+        let result = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            agent_retry(3),
+        )
+        .await;
+
+        assert_eq!(stream.calls(), 1, "quota exhaustion is terminal");
+        assert_eq!(
+            result.unwrap_err(),
+            CompactionError::Provider("insufficient_quota".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_retries_an_error_stop_reason_without_wording() {
+        // `Done` with `stop_reason: error` and no content text has no
+        // provider wording to classify, so the wrapper wording (retryable)
+        // is used and the call is retried.
+        let stream = std::sync::Arc::new(ScriptedSummaryStream::new(vec![
+            Attempt::DoneWithErrorStopReason(""),
+            Attempt::Summary("## Goal\nrecovered"),
+        ]));
+        let compacted = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            agent_retry(1),
+        )
+        .await
+        .expect("the retried compaction succeeds");
+
+        assert_eq!(stream.calls(), 2);
+        assert!(extract_summary(&compacted[0])
+            .expect("summary")
+            .contains("recovered"));
+    }
+
+    #[tokio::test]
+    async fn compact_returns_the_error_stop_reason_wording_once_retries_run_out() {
+        let stream = std::sync::Arc::new(ScriptedSummaryStream::new(vec![
+            Attempt::DoneWithErrorStopReason("overloaded"),
+        ]));
+        let result = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            agent_retry(2),
+        )
+        .await;
+
+        assert_eq!(stream.calls(), 3, "1 initial + 2 retries");
+        assert_eq!(
+            result.unwrap_err(),
+            CompactionError::Provider("overloaded".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_does_not_retry_a_truncated_summary() {
+        // A `stop_reason: max_tokens` summary is deterministic, so the retry
+        // budget must not be spent on it.
+        let mut truncating = SummaryStream::new("partial");
+        truncating.stop_reason = StopReason::MaxTokens;
+        let stream = std::sync::Arc::new(truncating);
+        let result = compact_history(
+            &long_history(),
+            &model(),
+            &(stream.clone() as SharedStreamFn),
+            compact_settings(),
+            None,
+            agent_retry(3),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), CompactionError::Incomplete);
+        assert_eq!(stream.prompts().len(), 1, "no retry was attempted");
     }
 
     #[test]

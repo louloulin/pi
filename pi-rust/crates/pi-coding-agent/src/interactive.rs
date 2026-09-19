@@ -793,6 +793,7 @@ async fn run_compact(
         &options.stream_fn,
         options.compaction,
         instructions,
+        Some(options.retry),
     )
     .await
     {
@@ -863,7 +864,16 @@ async fn maybe_auto_compact(
         return false;
     }
 
-    let compaction = match compact(&history, &model, &options.stream_fn, settings, None).await {
+    let compaction = match compact(
+        &history,
+        &model,
+        &options.stream_fn,
+        settings,
+        None,
+        Some(options.retry),
+    )
+    .await
+    {
         Ok(compaction) => compaction,
         // The conversation already fits the retained window — nothing to do.
         Err(CompactionError::NothingToCompact) => return false,
