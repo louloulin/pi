@@ -5267,3 +5267,94 @@ LUM-1097 轮记录的「建议 0.9 → 0.14 迁移」本轮做了**反证**，�
 - LUM-1090：`--rpc` NDJSON/stdio 与 `pi-client` 带帧 socket 传输层不同，**前提不成立**的结论
   维持，建议重写定界或 `wontfix`。
 - 其余（主题系统 / provider 家族 / `.wasm` 宿主）体量大，仍不作为单轮 autopilot 目标。
+
+## LUM-1101 round — 核验 `feature/pi.rs` + 主题系统首个切片（`pi-tui/theme.rs`）+ 重复 autopilot 轮盘点
+
+开工 `origin/feature/pi.rs = b10f49088`（LUM-1098 协调轮）。本轮 `active = 5`，其中
+**三个是同一 autopilot 的重复协调轮**（LUM-1099 / LUM-1100 / LUM-1101，触发时间
+11:40 / 12:00 / 12:20），另加 LUM-1083（`in_progress`，~55min，0 commit）与 LUM-1088
+（`in_progress`，含未提交改动）。已超「最多 3 个并发」上限，故**本轮不派发新 issue**，
+只落一块**零文件重叠**的实现增量。
+
+### 一、本轮交付：主题系统第一个可验收切片
+
+`packages/coding-agent/src/modes/interactive/theme/` 在 TS 侧是 1234 行（`theme.ts`）+
+146 行（`theme-json.ts`）+ 2 份内置 JSON，LUM-1098 曾把它列为「体量大、不作为单轮目标」。
+本轮把它拆成可独立验收的第一块，落在 **`pi-tui`**（LUM-1083/1088 未触碰该 crate）：
+
+- 新增 `crates/pi-tui/assets/themes/{dark,light}.json`——与上游 `dark.json` / `light.json`
+  **逐字节一致**，通过 `include_str!` 编译进二进制（`BUILTIN_DARK_JSON` / `BUILTIN_LIGHT_JSON`）。
+- 新增 `crates/pi-tui/src/theme.rs`（约 1200 行，含 14 个内联单测）：
+  - `ThemeColor`（49 槽）/ `ThemeBg`（7 槽）+ `ALL` / `key()` / `fallback()` / `is_optional()`；
+  - `ColorValue` = `Reset("") | Hex | Index(u8) | Var`，自定义 `Deserialize`/`Serialize`
+    （字符串与 0..=255 数字两种 JSON 形态都吃，数字越界报错）；
+  - `ThemeJson::parse/validate/resolved_colors/css_colors`：`name` 不含 `/`、
+    51 个必填 token 的**全量缺失清单**（与上游 typebox 报错同格式）、多余 key 忽略、
+    `vars` 链式解引用（未找到 / 循环各有独立错误）；
+  - 颜色工具按上游逐行移植：`hex_to_rgb`、`CUBE_VALUES`/`GRAY_VALUES`、`rgb_to_256`
+    （含 `spread < 10 && grayDist < cubeDist` 才走灰阶的判定）、`hex_to_256`、
+    `fg_ansi`/`bg_ansi`（`\x1b[38;2;…` / `\x1b[38;5;…` / `\x1b[39m`、`\x1b[48;…` / `\x1b[49m`）、
+    `ansi256_to_hex`（16 基础色 + 6×6×6 cube + 24 级灰阶）；
+  - `Theme`：可选槽位 fallback（`scrollbarTrack←muted`、`scrollbarThumb←text`、
+    `searchMatchText←text`、`thinkingMax←thinkingXhigh`、`searchMatchBg←selectedBg`，
+    只在缺 token 时生效）、`fg`/`bg`/`bold`/`italic`/`underline`/`inverse`/`strikethrough`、
+    `thinking_border(ThinkingLevel)`（复用 `pi-agent-core` 的 `ThinkingLevel`）、`bash_mode_border`；
+  - 载入与设置解析：`builtin_theme` / `load_theme(name, mode, custom_dir)` /
+    `load_theme_from_path` / `available_themes`（内置 + 自定义目录，坏文件跳过，结果排序）/
+    `default_custom_themes_dir()`（`PI_CODING_AGENT_DIR` → `~/.pi/agent/themes`）/
+    `parse_auto_theme_setting` / `resolve_theme_setting` / `detect_terminal_background_from_env`
+    （`COLORFGBG` 从尾部扫描、`parseInt` 语义、`source`/`detail`/`confidence` 三字段与上游同构）/
+    `ThemeController`（`set_theme` 失败即回落 dark，与上游 `setTheme` 一致）。
+- `crates/pi-tui/src/lib.rs:30` 追加 `pub mod theme;` 与根级 re-export。
+- 新增 `crates/pi-tui/tests/theme.rs`（9 个集成测试）：两种模式 × 全槽位 ANSI 形态、
+  自定义目录加载与 `source_path`、缺失 token 清单、非法 JSON / 含 `/` 名称、
+  `available_themes` 排序与坏文件跳过、controller 切换与回落、`""`/数字索引渲染、
+  serde 往返、`COLORFGBG` 推导默认主题。
+
+**刻意未移植**（属于消费侧、且与 LUM-1083/1088 的在途文件相邻）：chalk 代理、
+`fs.watch` 热重载、shiki / CLI 高亮适配器、`MarkdownTheme`/`SelectListTheme`/`SettingsListTheme`
+适配器、全局 `theme` proxy；`theme.rs` 只依赖 `pi-agent-core`（`ThinkingLevel`）+ `serde`，
+不反向依赖 `pi-coding-agent`（避免 crate 环状依赖，自定义主题目录以参数 + 环境变量两种方式提供）。
+
+### 二、验证（`work/lum-1101`，native，复用已完成轮次的 `target` 缓存）
+
+```
+$ cargo check  -p pi-tui --all-targets --offline                          # 0 errors
+$ cargo clippy -p pi-tui --all-targets --offline -- -D warnings            # 0 warnings
+$ cargo fmt    -p pi-tui -- --check                                       # clean
+$ cargo test   -p pi-tui --offline                                        # 110 passed / 0 failed（含 1 doctest）
+$ cargo test   --workspace --no-fail-fast --offline                       # 859 passed / 2 failed
+```
+
+全量 859/2 中的 2 个失败**不是本轮改动**：`pi-coding-agent --test print_mode` 的
+`binary_json_events_mode_emits_ndjson` / `sigint_or_clean_exit`（见下节）；基线为 837/0，
+本轮 +24 个主题测试后为 859/2，差额与计数完全对得上。
+
+### 三、LUM-1083 崩溃：本轮又复现一次（新证据）
+
+- **只在 workspace 全量并行 + 高负载下出现**：单跑
+  `cargo test -p pi-coding-agent --test print_mode` 连跑 5 次全绿；
+  `target/debug/pi --print=hello --output-format=json-events` 并发 24 次 **0 崩溃**。
+- 失败形态与 panic 位置：子进程 `unix_wait_status(139)`（SIGSEGV）或 `exit code: None`，
+  同时在终端打出
+  `panicked at /tmp/cargo-home/.../event-listener-5.4.2/src/intrusive.rs:341:
+   attempt to subtract with overflow`（即 `self.notified -= 1`）。
+- 与 LUM-1098 的结论一致：`Cargo.lock` 里 `event-listener` 只由
+  `rquickjs-core ← async-lock`（`pi-extensions`）引入，LUM-1098 已实测把
+  `event-listener` 降到 5.3.1 只是把同一处下溢平移到 `std.rs:228`（5.3.1 无 `intrusive.rs`，
+  仍复现 6/20）。**换版本不是修法**，唯一可疑点仍是
+  `crates/pi-extensions/src/host.rs:384` 的 `tokio::spawn(runtime.drive())` 丢弃
+  `JoinHandle`、缺少显式 shutdown 握手。本轮不再重复该实验，也不改 `Cargo.lock`。
+- 判定条件（供 LUM-1083 验收沿用）：`cargo test -p pi-coding-agent --test rpc` 与
+  `--test print_mode` 在高负载下连跑 20 次无 abort/SIGSEGV。
+
+### 四、frontier 重估
+
+- **主题系统**：第一块（模型 / JSON / ANSI / 载入 / 设置解析）已合并；剩余
+  `markdown.rs`+`syntax` 高亮适配、`ThemeController` 接线到 `pi-tui/src/app.rs` 与
+  `pi-coding-agent` 的交互模式、以及 `fs.watch` 热重载，适合各自单独一轮（文件互不重叠）。
+- **LUM-1083**：根因未变（`host.rs` 缺 shutdown），是本轮唯一「进程级崩溃」。
+- **LUM-1088**（项目信任门接扩展加载）：在途，占 `pi-extensions` / `pi-coding-agent`。
+- **LUM-1099 / LUM-1100**：与 LUM-1101 同源重复轮，本轮不做（每个都会重复核验与推送，
+  建议 autopilot 侧对同一 issue 串行化）。
+- 其余大项（provider 家族、`.wasm` 宿主）仍不作为单轮 autopilot 目标。
