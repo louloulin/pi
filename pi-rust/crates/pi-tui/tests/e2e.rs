@@ -184,3 +184,172 @@ async fn agent_subscriber_receives_text_delta_and_turn_end() {
     let usage = Usage::default();
     let _ = usage;
 }
+
+// ---------------------------------------------------------------------------
+// Extension dialogs (LUM-1077): the App renders a `ctx.ui.*` request as a
+// modal, freezes the prompt underneath it and answers the host with the
+// key sequence the user pressed.
+// ---------------------------------------------------------------------------
+
+fn pending_confirm() -> (
+    pi_tui::dialog::Dialog,
+    tokio::sync::oneshot::Receiver<Option<pi_protocol::UiResponse>>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let dialog = pi_tui::dialog::Dialog::new(
+        pi_protocol::UiRequest::Confirm {
+            title: "Delete files?".into(),
+            body: "This cannot be undone.".into(),
+        },
+        tx,
+    );
+    (dialog, rx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dialog_modal_owns_the_keyboard_and_answers_the_host() {
+    let mut app = app();
+    let (dialog, mut reply) = pending_confirm();
+    assert!(app.open_dialog(dialog));
+    assert!(app.dialog_open());
+
+    // The prompt is frozen: typing goes to the dialog, not the editor.
+    let outcome = app.step_key(pi_tui::input::Key::new(
+        KeyCode::Char('z'),
+        KeyModifiers::NONE,
+    ));
+    assert_eq!(outcome, pi_tui::app::StepOutcome::Idle);
+    assert_eq!(app.prompt().text(), "");
+
+    // The modal is visible in the rendered snapshot.
+    let snapshot = app.render_snapshot(60, 12);
+    assert!(snapshot.dialog_open);
+    assert_eq!(snapshot.dialog_title.as_deref(), Some("Delete files?"));
+    assert!(snapshot.lines.join("\n").contains("This cannot be undone."));
+
+    // Enter accepts and closes the modal.
+    let outcome = app.step_key(pi_tui::input::Key::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(outcome, pi_tui::app::StepOutcome::Redraw);
+    assert!(!app.dialog_open());
+    assert_eq!(
+        reply.try_recv(),
+        Ok(Some(pi_protocol::UiResponse::Confirm { accepted: true }))
+    );
+    assert!(!app.render_snapshot(60, 12).dialog_open);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_c_cancels_the_dialog_instead_of_exiting() {
+    let mut app = app();
+    let (dialog, mut reply) = pending_confirm();
+    assert!(app.open_dialog(dialog));
+
+    let outcome = app.step_key(pi_tui::input::Key::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ));
+    assert_eq!(outcome, pi_tui::app::StepOutcome::Redraw);
+    assert!(!app.is_exit_requested(), "Ctrl+C must cancel, not exit");
+    assert_eq!(
+        reply.try_recv(),
+        Ok(Some(pi_protocol::UiResponse::Confirm { accepted: false }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_ui_dialogs_turns_requests_into_modals_and_notifications_into_lines() {
+    let (bridge, rx) = pi_tui_dialog_channel();
+    let mut app = app();
+    app.attach_ui_dialogs(rx);
+
+    // A notification becomes a transcript line…
+    bridge
+        .send(pi_tui::dialog::Dialog::new(
+            pi_protocol::UiRequest::Notify {
+                message: "extension says hi".into(),
+                level: pi_protocol::UiLevel::Warning,
+            },
+            tokio::sync::oneshot::channel().0,
+        ))
+        .expect("send notify");
+    assert!(app.poll_ui_dialogs());
+    assert!(!app.dialog_open());
+    assert!(
+        app.messages()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("extension says hi")),
+        "{:?}",
+        app.messages().items()
+    );
+
+    // …a prompt becomes a modal.
+    let (tx, mut reply) = tokio::sync::oneshot::channel();
+    bridge
+        .send(pi_tui::dialog::Dialog::new(
+            pi_protocol::UiRequest::Input {
+                title: "Branch".into(),
+                placeholder: None,
+            },
+            tx,
+        ))
+        .expect("send input");
+    assert!(app.poll_ui_dialogs());
+    assert!(app.dialog_open());
+    for ch in "feature/x".chars() {
+        app.step_key(pi_tui::input::Key::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        ));
+    }
+    app.step_key(pi_tui::input::Key::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        reply.try_recv(),
+        Ok(Some(pi_protocol::UiResponse::Input {
+            value: "feature/x".into()
+        }))
+    );
+
+    // A second request while a modal is open is denied, not queued.
+    let (tx, mut denied) = tokio::sync::oneshot::channel();
+    bridge
+        .send(pi_tui::dialog::Dialog::new(
+            pi_protocol::UiRequest::Confirm {
+                title: "First?".into(),
+                body: String::new(),
+            },
+            tx,
+        ))
+        .expect("send first confirm");
+    app.poll_ui_dialogs();
+    let (tx, mut rejected) = tokio::sync::oneshot::channel();
+    bridge
+        .send(pi_tui::dialog::Dialog::new(
+            pi_protocol::UiRequest::Confirm {
+                title: "Second?".into(),
+                body: String::new(),
+            },
+            tx,
+        ))
+        .expect("send second confirm");
+    app.poll_ui_dialogs();
+    assert_eq!(
+        rejected.try_recv(),
+        Ok(Some(pi_protocol::UiResponse::Confirm { accepted: false }))
+    );
+    assert!(
+        denied.try_recv().is_err(),
+        "the visible dialog is unaffected"
+    );
+    assert_eq!(app.dialog().map(|d| d.title()), Some("First?"));
+}
+
+/// The receiver side of a dialog channel, without pulling in
+/// `pi-coding-agent`'s bridge.
+#[allow(clippy::type_complexity)]
+fn pi_tui_dialog_channel() -> (
+    tokio::sync::mpsc::UnboundedSender<pi_tui::dialog::Dialog>,
+    tokio::sync::mpsc::UnboundedReceiver<pi_tui::dialog::Dialog>,
+) {
+    tokio::sync::mpsc::unbounded_channel()
+}

@@ -17,6 +17,8 @@
 //! | provider    | credential env vars (priority order)                              |
 //! |-------------|-------------------------------------------------------------------|
 //! | `openai`    | `OPENAI_API_KEY`                                                   |
+//! | `openai`    | `OPENAI_API_KEY`                                                   |
+//! | `openai-responses` | `OPENAI_API_KEY` (same credential, `/v1/responses` API)      |
 //! | `anthropic` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN` |
 //! | `google`    | `GEMINI_API_KEY`, `GOOGLE_API_KEY`                                 |
 //! | `faux`      | *(none — always registered)*                                       |
@@ -27,8 +29,10 @@
 //!
 //! The concrete provider list, credential env vars, base URLs and model
 //! catalogs all live in the data-driven
-//! [`pi_ai::providers::registry`]. Besides the four first-party
-//! providers above, the registry carries the OpenAI Chat
+//! [`pi_ai::providers::registry`]. Besides the first-party providers
+//! above (`openai` and `openai-responses` share a credential but speak
+//! different wire protocols, so they are two registry entries), the
+//! registry carries the OpenAI Chat
 //! Completions–compatible family (DeepSeek, Groq, Cerebras, Moonshot AI,
 //! Z.AI, OpenRouter, Together, Fireworks, Baseten, NVIDIA, Hugging Face,
 //! Xiaomi). All of those reuse [`OpenAiProvider`] and differ only by
@@ -51,6 +55,7 @@ use pi_ai::providers::anthropic::AnthropicProvider;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::providers::google::GoogleProvider;
 use pi_ai::providers::openai::OpenAiProvider;
+use pi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use pi_ai::providers::registry::{self, ProviderSpec, BUILTIN_PROVIDERS};
 use pi_ai::stream::AssistantMessageEventStream;
 use pi_ai::{SharedStreamFn, SimpleStreamOptions, StreamError, StreamFn};
@@ -83,9 +88,12 @@ fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Opti
     let adapter: SharedStreamFn = match spec.api {
         Api::Faux => Arc::new(FauxProvider::default()),
         Api::OpenAiChatCompletions => Arc::new(OpenAiProvider::with_base_url(api_key, base_url)),
+        Api::OpenAiResponses => {
+            Arc::new(OpenAiResponsesProvider::with_base_url(api_key, base_url))
+        }
         Api::AnthropicMessages => Arc::new(AnthropicProvider::with_base_url(api_key, base_url)),
         Api::GoogleGenerativeAi => Arc::new(GoogleProvider::with_base_url(api_key, base_url)),
-        Api::OpenAiResponses | Api::BedrockConverse | Api::CohereV2 => return None,
+        Api::BedrockConverse | Api::CohereV2 => return None,
     };
     Some(adapter)
 }
@@ -405,6 +413,42 @@ mod tests {
             ProviderError::MissingApiKey {
                 provider: "zai-coding-cn".to_string(),
                 vars: "ZAI_CODING_CN_API_KEY".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn openai_responses_shares_the_openai_credential_but_not_the_adapter() {
+        let router = ProviderRouter::from_env_with(|name| match name {
+            "OPENAI_API_KEY" => Some("sk-test".to_string()),
+            _ => None,
+        });
+        // One credential, both OpenAI API families registered.
+        assert!(router.has_provider("openai"));
+        assert!(router.has_provider("openai-responses"));
+        assert_eq!(
+            router.provider_ids(),
+            vec!["faux", "openai", "openai-responses"]
+        );
+        assert!(router
+            .require(&model("openai-responses", "gpt-5", Api::OpenAiResponses))
+            .is_ok());
+        assert_eq!(api_key_env_vars("openai-responses"), &["OPENAI_API_KEY"]);
+        assert_eq!(base_url_env_vars("openai-responses"), &["OPENAI_BASE_URL"]);
+    }
+
+    #[test]
+    fn openai_responses_without_a_key_names_the_shared_env_var() {
+        let router = ProviderRouter::from_env_with(empty_env);
+        let err = require_err(
+            &router,
+            &model("openai-responses", "gpt-5", Api::OpenAiResponses),
+        );
+        assert_eq!(
+            err,
+            ProviderError::MissingApiKey {
+                provider: "openai-responses".to_string(),
+                vars: "OPENAI_API_KEY".to_string(),
             }
         );
     }

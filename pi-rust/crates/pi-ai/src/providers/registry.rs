@@ -11,17 +11,19 @@
 //!
 //! The table mirrors the TypeScript upstream's `packages/ai/src/providers/*.ts`.
 //! The upstream ships dozens of providers; the Rust port currently covers
-//! the four first-party API families (`faux`, `openai`,
-//! `anthropic`, `google`) plus the OpenAI Chat Completions–compatible
-//! family, whose members only differ by base URL, credential and model
-//! ids. Providers that speak a different wire protocol (OpenAI Responses,
-//! Bedrock Converse, Cohere v2, Mistral conversations, Anthropic-native
-//! such as `kimi-coding`) are intentionally absent until their adapters
-//! land.
+//! the first-party API families (`faux`, `openai` Chat Completions,
+//! `openai-responses` Responses, `anthropic`, `google`) plus the OpenAI
+//! Chat Completions–compatible family, whose members only differ by base
+//! URL, credential and model ids. Providers that speak a wire protocol
+//! this build has no adapter for (Bedrock Converse, Cohere v2, Mistral
+//! conversations, Anthropic-native such as `kimi-coding`) are
+//! intentionally absent until their adapters land.
 //!
-//! All entries in [`BUILTIN_PROVIDERS`] use one of the four adapters in
+//! All entries in [`BUILTIN_PROVIDERS`] use one of the adapters in
 //! [`super`]: [`pi_protocol::Api::OpenAiChatCompletions`] maps to
-//! [`super::openai::OpenAiProvider`], and so on.
+//! [`super::openai::OpenAiProvider`],
+//! [`pi_protocol::Api::OpenAiResponses`] to
+//! [`super::openai_responses::OpenAiResponsesProvider`], and so on.
 
 use pi_protocol::Api;
 
@@ -267,11 +269,22 @@ const XIAOMI_MODELS: &[ModelSpec] = &[ModelSpec::new("mimo-v2.5-pro", "MiMo v2.5
 const FAUX_MODELS: &[ModelSpec] =
     &[ModelSpec::new("faux-model", "Faux test model").with_limits(8_192, 1_024)];
 
-/// The four first-party providers plus the OpenAI-compatible family.
+/// OpenAI Responses (`POST /v1/responses`).
 ///
-/// First-party providers (faux / openai / anthropic / google) come first
-/// so `pi list-models` and error messages keep their historical ordering;
-/// the family is appended alphabetically.
+/// Separate from the `openai` entry because the API family — and
+/// therefore the adapter and the request shape — differ, even though the
+/// credential and host are the same.
+const OPENAI_RESPONSES_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("gpt-5", "GPT-5").with_limits(400_000, 128_000),
+    ModelSpec::new("gpt-5-mini", "GPT-5 mini").with_limits(400_000, 128_000),
+    ModelSpec::new("o4-mini", "o4-mini").with_limits(200_000, 100_000),
+];
+
+/// The first-party providers plus the OpenAI-compatible family.
+///
+/// First-party providers (faux / openai / openai-responses / anthropic /
+/// google) come first so `pi list-models` and error messages keep their
+/// historical ordering; the family is appended alphabetically.
 pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
         id: "faux",
@@ -290,6 +303,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["OPENAI_API_KEY"],
         base_url_env: &["OPENAI_BASE_URL"],
         models: &[ModelSpec::new("gpt-4o-mini", "GPT-4o mini").with_limits(128_000, 16_384)],
+    },
+    ProviderSpec {
+        id: "openai-responses",
+        display_name: "OpenAI (Responses)",
+        api: Api::OpenAiResponses,
+        default_base_url: "https://api.openai.com/v1",
+        api_key_env: &["OPENAI_API_KEY"],
+        base_url_env: &["OPENAI_BASE_URL"],
+        models: OPENAI_RESPONSES_MODELS,
     },
     ProviderSpec {
         id: "anthropic",
@@ -559,6 +581,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn openai_responses_is_a_first_party_provider_on_the_responses_api() {
+        let spec = find_provider("openai-responses").expect("openai-responses provider");
+        assert_eq!(spec.api, Api::OpenAiResponses);
+        // Same credential as `openai`: one account, two wire protocols.
+        assert_eq!(spec.api_key_env, &["OPENAI_API_KEY"]);
+        assert_eq!(spec.base_url_env, &["OPENAI_BASE_URL"]);
+        assert!(!spec.models.is_empty());
+        assert!(
+            spec.models.iter().all(|m| m.context_window > 0),
+            "every responses model needs a context window"
+        );
+        // The Responses endpoint rejects tiny `max_output_tokens`; the
+        // catalog must not advertise a cap below the clamp.
+        assert!(spec
+            .models
+            .iter()
+            .all(|m| m.max_output_tokens >= crate::providers::openai_responses::MIN_OUTPUT_TOKENS));
     }
 
     #[test]

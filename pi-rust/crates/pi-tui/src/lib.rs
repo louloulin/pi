@@ -11,6 +11,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod dialog;
 pub mod editor;
 pub mod input;
 pub mod message;
@@ -19,6 +20,7 @@ pub mod selector;
 pub mod status;
 
 pub use app::{App, AppConfig, RenderSnapshot};
+pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction};
 pub use input::{InputEvent, Key, KeyModifiers};
 pub use message::{MessageItem, MessageView};
