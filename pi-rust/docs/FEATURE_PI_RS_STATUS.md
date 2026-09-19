@@ -3130,3 +3130,73 @@ coordinator 盘点时按 barrier 放行（本轮不主动派发，槽位仍满�
 4. `--rpc` 模式没有接 `ExtensionRuntime`（命令面板 / 副作用只覆盖 TUI 与 print
    两个模式）。
 5. `wasm32-unknown-unknown` 目标在当前环境仍未安装，本轮只做 native 验证。
+
+## LUM-1075 round — Stage 18 收口 + Stage 19 放行（`pi-server` / `pi-client`）
+
+本轮（autopilot，2026-09-19 06:00Z）盘点 frontier 后，把已经落地但还挂着
+`in_progress` 的 Stage 18 收口，并放行 Stage 19 的两个 crate。
+
+### 盘点结果
+
+| 任务 | 本轮开始时状态 | 处置 |
+|------|----------------|------|
+| LUM-1067 Stage 18 `pi-chord services` | `in_progress`，代码已在 `f3a781dc2` 并推送 | **收口 → `in_review`** |
+| LUM-1074 Stage 17（扩展命令 + session 副作用） | run 仍 running，worktree 在 rebase 收尾 | 等它自己推完，不干预 |
+| LUM-1066 `pi-evals` | run 自 04:21Z 起卡死在 `git rebase -e` 交互编辑器 | 代码已在 LUM-1071 合入 trunk，本轮 **cancel-task** 清掉占位 run |
+| LUM-1068 Stage 19 `pi-server` | `backlog` | **promote → `todo`（派发）** |
+| LUM-1069 Stage 19 `pi-client` | `backlog` | **promote → `todo`（派发）** |
+
+LUM-1074 在本轮进行中自行完成并推送了 `13b80b2b1`
+（`feat(pi-coding-agent): Stage 17 — extension commands + session side effects`），
+把 `pi-extensions` 的 `registerCommand` / `appendEntry` / `setSessionName`
+接进了 TUI 与 print 两个模式，补掉了 LUM-1072 遗留的 known gap #2。
+
+### 本轮改动
+
+`feature/pi.rs` 的代码增量全部来自 LUM-1074（1308 insertions / 38 deletions，
+12 文件）；本协调轮只追加本节状态文档，不改代码。
+
+### 验证（native，trunk = `13b80b2b1`）
+
+```
+$ cargo check  --workspace --all-targets                    # 0 errors, 0 warnings
+$ cargo clippy --workspace --all-targets -- -D warnings      # 0 warnings
+$ cargo test   --workspace --no-fail-fast                    # 543 passed / 0 failed / 2 ignored
+```
+
+543 vs LUM-1072 记录的 486：`+42` 来自 Stage 18（`pi-chord` services），
+`+15` 来自 LUM-1074 的扩展命令 / session 副作用测试。
+
+> 注：首次全量 `cargo test --workspace` 有 1 个用例失败，但在随后 4 次
+> `--no-fail-fast` 重跑中均未复现（疑似并发编译 + 加载下的时序抖动）。失败
+> 用例名未被捕获；后续 CI 若再出现，优先排查 `pi-extensions/tests/host.rs`
+> 的 5s 超时用例与 `cli_extensions.rs` 的二进制 + loopback SSE 用例。
+
+### 并发与派发
+
+- 派发前先 `cancel-task` 掉卡死的 LUM-1066 run，释放槽位。
+- 放行 **LUM-1068（`pi-server`）** 与 **LUM-1069（`pi-client`）**：两者接口都以
+  已冻结的 `pi-protocol` wire 类型为准，可并行；任务书明确写了
+  「Stage 19 并行任务，接口以 `pi-protocol` 为准」。
+- 派发后 `multica daemon status` 报 `active_task_count = 3`：
+  LUM-1075（本协调 run）+ LUM-1068 + LUM-1069，正好卡在「最多 3 槽」上限。
+- LUM-1074 在派发同时自行结束，未与新任务重叠。
+
+### 磁盘
+
+派发前 `/` 已到 97%（1.9G 可用），会直接卡死新的 cargo 链接。本轮删除了
+已完成任务的 `pi-rust/target` 构建缓存（LUM-1066 / LUM-1064 / LUM-1072 /
+LUM-1065 / LUM-1063），释放约 35G，之后 `/` 回到 51%（23G 可用）。
+只删 `target/`（可重建），未动任何源码或 worktree。
+
+### 剩余 frontier
+
+Stage 19 落地后，LUM-981 的「构建相同的 crates」在服务端 / 客户端两侧即闭合：
+
+1. `pi-server` / `pi-client` 之间用 `pi-protocol` + `pi-chord services` 端到端跑通
+   远程会话；
+2. 把 `pi-client` 接进 `pi-coding-agent` 的 `--rpc` 模式，替换 Stage 12 的内联
+   JSON-RPC 实现；
+3. `registerCommand` / 扩展 UI 的交互式确认（`confirm` / `input` / `select`）
+   仍未接 TUI；
+4. `.wasm` 扩展宿主仍未实现。
