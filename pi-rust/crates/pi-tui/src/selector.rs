@@ -43,6 +43,7 @@
 //!   counted in `char`s, exactly like the rest of this crate.
 
 use crate::input::{InputEvent, Key, KeyCode};
+use crate::styles::SelectListStyles;
 
 /// Default primary (label) column width, upstream
 /// `DEFAULT_PRIMARY_COLUMN_WIDTH`.
@@ -539,12 +540,17 @@ impl Selector {
     /// A row that has a description and enough horizontal room renders the
     /// description in a column that starts at the same offset on every row;
     /// otherwise it falls back to a width-clamped label alone.
+    ///
+    /// `styles` is the themed variant of the same layout: the selected row is
+    /// wrapped whole (upstream `select-list.ts:205,216`), a non-selected
+    /// description column is wrapped on its own (`select-list.ts:208`).
     fn render_row(
         &self,
         item: &SelectorItem,
         selected: bool,
         width: usize,
         primary_column_width: usize,
+        styles: Option<&SelectListStyles<'_>>,
     ) -> String {
         let marker = if selected { "❯ " } else { "  " };
         let prefix_width = display_width(marker);
@@ -564,18 +570,48 @@ impl Selector {
                 let remaining = width.saturating_sub(description_start + 2);
                 if remaining > MIN_DESCRIPTION_WIDTH {
                     let truncated_description = truncate_to_width(&description, remaining);
-                    return format!("{marker}{truncated}{spacing}{truncated_description}");
+                    let body = format!("{marker}{truncated}{spacing}{truncated_description}");
+                    return match styles {
+                        Some(styles) if selected => styles.selected_text(&body),
+                        // Upstream wraps the gap and the description together:
+                        // `this.theme.description(spacing + truncatedDesc)`
+                        // (`select-list.ts:208`).
+                        Some(styles) => format!(
+                            "{marker}{truncated}{}",
+                            styles.description(&format!("{spacing}{truncated_description}"))
+                        ),
+                        None => body,
+                    };
                 }
             }
         }
 
         let max_width = width.saturating_sub(prefix_width + 2).max(1);
-        format!("{marker}{}", truncate_to_width(display, max_width))
+        let body = format!("{marker}{}", truncate_to_width(display, max_width));
+        match styles {
+            Some(styles) if selected => styles.selected_text(&body),
+            _ => body,
+        }
     }
 
     /// Render the selector as a flat vector of lines (used by the App
     /// and by tests).
     pub fn render_lines(&self, width: u16) -> Vec<String> {
+        self.render_lines_impl(width, None)
+    }
+
+    /// Themed variant of [`Selector::render_lines`].
+    ///
+    /// The visible text is byte-for-byte the same as the plain render; the
+    /// no-match line, the selected row, the description column and the
+    /// `(n/total)` indicator additionally carry ANSI styling from `styles`.
+    /// A [`ColorMode::None`](crate::theme::ColorMode::None) theme makes this
+    /// identical to [`Selector::render_lines`].
+    pub fn render_lines_themed(&self, width: u16, styles: &SelectListStyles<'_>) -> Vec<String> {
+        self.render_lines_impl(width, Some(styles))
+    }
+
+    fn render_lines_impl(&self, width: u16, styles: Option<&SelectListStyles<'_>>) -> Vec<String> {
         let mut lines = Vec::new();
         let width = width as usize;
         lines.push(self.title.clone());
@@ -583,10 +619,14 @@ impl Selector {
         if self.filtered.is_empty() {
             // An empty list and a filter without matches read differently
             // to the user, so they keep different lines.
-            lines.push(if self.filter.is_empty() {
+            let line = if self.filter.is_empty() {
                 "(no items)".to_string()
             } else {
                 "  No matching items".to_string()
+            };
+            lines.push(match styles {
+                Some(styles) => styles.no_match(&line),
+                None => line,
             });
             return lines;
         }
@@ -594,10 +634,20 @@ impl Selector {
         let primary_column_width = self.primary_column_width();
         for row in start..end {
             let item = &self.items[self.filtered[row]];
-            lines.push(self.render_row(item, row == self.cursor, width, primary_column_width));
+            lines.push(self.render_row(
+                item,
+                row == self.cursor,
+                width,
+                primary_column_width,
+                styles,
+            ));
         }
         if start > 0 || end < self.filtered.len() {
-            lines.push(format!("  ({}/{})", self.cursor + 1, self.filtered.len()));
+            let indicator = format!("  ({}/{})", self.cursor + 1, self.filtered.len());
+            lines.push(match styles {
+                Some(styles) => styles.scroll_info(&indicator),
+                None => indicator,
+            });
         }
         lines
     }

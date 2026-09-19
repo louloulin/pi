@@ -5,6 +5,8 @@
 
 use std::fmt::Write as _;
 
+use crate::styles::SelectListStyles;
+
 /// Snapshot of the data the status bar renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusData {
@@ -57,6 +59,31 @@ impl StatusBar {
 
     /// Render the status bar as a single string for a given width.
     pub fn render(&self, data: &StatusData, width: u16) -> String {
+        self.render_impl(data, width, None)
+    }
+
+    /// Themed variant of [`StatusBar::render`].
+    ///
+    /// The visible text is identical to the plain render; the model is
+    /// `accent`, the session id `muted`, and the token/usage segment `dim`.
+    /// Upstream's two-line footer dims the whole stats line
+    /// (`footer.ts:236-240`); this single-line bar keeps the model readable by
+    /// putting it in `accent` instead — a deliberate simplification.
+    pub fn render_themed(
+        &self,
+        data: &StatusData,
+        width: u16,
+        styles: &SelectListStyles<'_>,
+    ) -> String {
+        self.render_impl(data, width, Some(styles))
+    }
+
+    fn render_impl(
+        &self,
+        data: &StatusData,
+        width: u16,
+        styles: Option<&SelectListStyles<'_>>,
+    ) -> String {
         let width = width as usize;
         let mut left = String::new();
         let _ = write!(&mut left, "{}", data.model);
@@ -82,18 +109,45 @@ impl StatusBar {
         let left_len = left.chars().count();
         let session_len = session.chars().count();
         let right_len = right.chars().count();
+        let pad_count = if left_len + session_len + right_len < width {
+            width - right_len - left_len - session_len
+        } else {
+            0
+        };
 
-        let mut out = String::with_capacity(width.max(left_len + session_len + right_len));
-        out.push_str(&left);
-        out.push_str(&session);
-        if left_len + session_len + right_len < width {
-            for _ in 0..(width - right_len - left_len - session_len) {
+        let Some(styles) = styles else {
+            let mut out = String::with_capacity(width.max(left_len + session_len + right_len));
+            out.push_str(&left);
+            out.push_str(&session);
+            for _ in 0..pad_count {
                 out.push(' ');
             }
+            out.push_str(&right);
+            if out.chars().count() > width {
+                out = out.chars().take(width).collect();
+            }
+            return out;
+        };
+
+        // Themed layout: clip each plain segment to the same visible budget
+        // the plain render would keep, then style the clipped text. Styling
+        // never changes the visible character count, so the result lines up
+        // with the plain render.
+        let padding = " ".repeat(pad_count);
+        let mut out = String::new();
+        let mut remaining = width;
+        let model = clip(&left, &mut remaining);
+        if !model.is_empty() {
+            out.push_str(&styles.accent(model));
         }
-        out.push_str(&right);
-        if out.chars().count() > width {
-            out = out.chars().take(width).collect();
+        let session = clip(&session, &mut remaining);
+        if !session.is_empty() {
+            out.push_str(&styles.muted(session));
+        }
+        out.push_str(clip(&padding, &mut remaining));
+        let stats = clip(&right, &mut remaining);
+        if !stats.is_empty() {
+            out.push_str(&styles.dim(stats));
         }
         out
     }
@@ -117,6 +171,24 @@ impl StatusBar {
             }
         }
     }
+}
+
+/// Take at most `*remaining` leading `char`s of `text` and decrement
+/// `*remaining` by the number taken. Used by the themed status-bar layout so
+/// the visible character budget matches the plain render.
+fn clip<'t>(text: &'t str, remaining: &mut usize) -> &'t str {
+    let count = text.chars().count();
+    if count <= *remaining {
+        *remaining -= count;
+        return text;
+    }
+    let end = text
+        .char_indices()
+        .nth(*remaining)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    *remaining = 0;
+    &text[..end]
 }
 
 #[cfg(test)]

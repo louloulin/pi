@@ -577,6 +577,15 @@ pub enum ColorMode {
     TrueColor,
     /// 8-bit `\x1b[38;5;Nm` output; hex colours are quantised.
     Ansi256,
+    /// No ANSI at all: every [`Theme`] markup method returns its input
+    /// unchanged and every slot's ANSI prefix is the empty string.
+    ///
+    /// Upstream has no such mode (`theme.ts:104` is
+    /// `"truecolor" | "256color"`), so this is a deliberate Rust addition for
+    /// callers that must emit plain text (`NO_COLOR`, piped output, tests).
+    /// It is what makes the component-style regression test
+    /// "`ColorMode::None` emits no `\x1b[`" expressible.
+    None,
 }
 
 impl ColorMode {
@@ -696,7 +705,13 @@ pub fn ansi256_to_hex(index: u8) -> String {
 }
 
 /// Foreground ANSI sequence for a resolved colour (upstream `fgAnsi`).
+///
+/// [`ColorMode::None`] resolves every colour to the empty string so a
+/// [`Theme`] built with it never contributes an escape sequence.
 pub fn fg_ansi(color: &ColorValue, mode: ColorMode) -> Result<String, ThemeError> {
+    if matches!(mode, ColorMode::None) {
+        return Ok(String::new());
+    }
     match color {
         ColorValue::Reset => Ok("\x1b[39m".to_string()),
         ColorValue::Index(index) => Ok(format!("\x1b[38;5;{index}m")),
@@ -706,13 +721,20 @@ pub fn fg_ansi(color: &ColorValue, mode: ColorMode) -> Result<String, ThemeError
                 Ok(format!("\x1b[38;2;{r};{g};{b}m"))
             }
             ColorMode::Ansi256 => Ok(format!("\x1b[38;5;{}m", hex_to_256(hex)?)),
+            ColorMode::None => Ok(String::new()),
         },
         ColorValue::Var(name) => Err(ThemeError::InvalidColorValue(name.clone())),
     }
 }
 
 /// Background ANSI sequence for a resolved colour (upstream `bgAnsi`).
+///
+/// [`ColorMode::None`] resolves every colour to the empty string so a
+/// [`Theme`] built with it never contributes an escape sequence.
 pub fn bg_ansi(color: &ColorValue, mode: ColorMode) -> Result<String, ThemeError> {
+    if matches!(mode, ColorMode::None) {
+        return Ok(String::new());
+    }
     match color {
         ColorValue::Reset => Ok("\x1b[49m".to_string()),
         ColorValue::Index(index) => Ok(format!("\x1b[48;5;{index}m")),
@@ -722,6 +744,7 @@ pub fn bg_ansi(color: &ColorValue, mode: ColorMode) -> Result<String, ThemeError
                 Ok(format!("\x1b[48;2;{r};{g};{b}m"))
             }
             ColorMode::Ansi256 => Ok(format!("\x1b[48;5;{}m", hex_to_256(hex)?)),
+            ColorMode::None => Ok(String::new()),
         },
         ColorValue::Var(name) => Err(ThemeError::InvalidColorValue(name.clone())),
     }
@@ -986,38 +1009,71 @@ impl Theme {
             .unwrap_or("\x1b[49m")
     }
 
+    /// True when this palette emits no escape sequences at all
+    /// ([`ColorMode::None`]).
+    pub fn is_plain(&self) -> bool {
+        matches!(self.mode, ColorMode::None)
+    }
+
     /// Wrap `text` in a foreground colour (resetting only the foreground).
+    ///
+    /// A plain theme ([`ColorMode::None`]) returns `text` unchanged, including
+    /// no trailing `\x1b[39m`.
     pub fn fg(&self, color: ThemeColor, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("{}{}\x1b[39m", self.get_fg_ansi(color), text)
     }
 
     /// Wrap `text` in a background colour (resetting only the background).
+    ///
+    /// A plain theme ([`ColorMode::None`]) returns `text` unchanged, including
+    /// no trailing `\x1b[49m`.
     pub fn bg(&self, color: ThemeBg, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("{}{}\x1b[49m", self.get_bg_ansi(color), text)
     }
 
     /// Bold `text` (chalk `bold`).
     pub fn bold(&self, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("\x1b[1m{text}\x1b[22m")
     }
 
     /// Italicise `text` (chalk `italic`).
     pub fn italic(&self, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("\x1b[3m{text}\x1b[23m")
     }
 
     /// Underline `text` (chalk `underline`).
     pub fn underline(&self, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("\x1b[4m{text}\x1b[24m")
     }
 
     /// Invert `text` (chalk `inverse`).
     pub fn inverse(&self, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("\x1b[7m{text}\x1b[27m")
     }
 
     /// Strike through `text` (chalk `strikethrough`).
     pub fn strikethrough(&self, text: &str) -> String {
+        if self.is_plain() {
+            return text.to_string();
+        }
         format!("\x1b[9m{text}\x1b[29m")
     }
 
