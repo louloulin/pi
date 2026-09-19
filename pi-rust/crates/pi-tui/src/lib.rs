@@ -25,7 +25,7 @@ pub use editor::{Editor, EditorAction};
 pub use input::{InputEvent, Key, KeyModifiers};
 pub use message::{MessageItem, MessageView};
 pub use prompt::{Prompt, PromptAction};
-pub use selector::{Selector, SelectorAction, SelectorItem};
+pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use status::{StatusBar, StatusData};
 
 /// Re-export of the underlying terminal backend so binaries can pin a

@@ -195,10 +195,7 @@ fn a_plain_selector_keeps_vim_navigation_and_ignores_typing() {
 
     // `j` moves the cursor instead of filtering (upstream
     // `ExtensionSelectorComponent`).
-    assert_eq!(
-        app.step(InputEvent::character('j')),
-        StepOutcome::Redraw,
-    );
+    assert_eq!(app.step(InputEvent::character('j')), StepOutcome::Redraw,);
     assert_eq!(app.selector().unwrap().cursor(), 1);
     // Printable keys that are not navigation are swallowed.
     assert_eq!(app.step(InputEvent::character('z')), StepOutcome::Idle);

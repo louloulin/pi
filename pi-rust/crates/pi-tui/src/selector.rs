@@ -36,11 +36,49 @@
 //!   and `description` — which is also how upstream's fuzzy model search
 //!   behaves in practice.
 //! * `SelectList` aligns descriptions into a primary column of its own;
-//!   this port still appends the description after two spaces. The
-//!   remaining cosmetic gap keeps the port free of a width-tracking
-//!   dependency.
+//!   [`Selector`] ports that layout, truncating both the label and the
+//!   description to the available width. Upstream fixes the primary
+//!   column at `DEFAULT_PRIMARY_COLUMN_WIDTH` columns unless the caller
+//!   overrides it with [`Selector::with_primary_column_width`]; widths are
+//!   counted in `char`s, exactly like the rest of this crate.
 
 use crate::input::{InputEvent, Key, KeyCode};
+
+/// Default primary (label) column width, upstream
+/// `DEFAULT_PRIMARY_COLUMN_WIDTH`.
+const DEFAULT_PRIMARY_COLUMN_WIDTH: usize = 32;
+/// Blank columns between the primary column and the description, upstream
+/// `PRIMARY_COLUMN_GAP`.
+const PRIMARY_COLUMN_GAP: usize = 2;
+/// A description is only rendered when at least this many columns remain,
+/// upstream `MIN_DESCRIPTION_WIDTH`.
+const MIN_DESCRIPTION_WIDTH: usize = 10;
+/// Rows narrower than this render the label alone (upstream `width > 40`).
+const MIN_DESCRIPTION_LIST_WIDTH: usize = 40;
+
+/// Primary-column width bounds for a [`Selector`] — the Rust equivalent of
+/// upstream `SelectListLayoutOptions`.
+///
+/// Upstream's default is a fixed 32-column primary column (the model and
+/// session pickers use it as-is). Callers that want the column to track the
+/// widest label pass explicit bounds through
+/// [`Selector::with_primary_column_width`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectorLayout {
+    /// Lower bound of the primary column, in `char` columns.
+    pub min_primary_column_width: usize,
+    /// Upper bound of the primary column, in `char` columns.
+    pub max_primary_column_width: usize,
+}
+
+impl Default for SelectorLayout {
+    fn default() -> Self {
+        Self {
+            min_primary_column_width: DEFAULT_PRIMARY_COLUMN_WIDTH,
+            max_primary_column_width: DEFAULT_PRIMARY_COLUMN_WIDTH,
+        }
+    }
+}
 
 /// Single item in a [`Selector`].
 #[derive(Debug, Clone, PartialEq)]
@@ -81,10 +119,14 @@ impl SelectorItem {
             return true;
         }
         let needle = query.to_lowercase();
-        [Some(self.value.as_str()), Some(self.label.as_str()), self.description.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|haystack| haystack.to_lowercase().contains(&needle))
+        [
+            Some(self.value.as_str()),
+            Some(self.label.as_str()),
+            self.description.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|haystack| haystack.to_lowercase().contains(&needle))
     }
 }
 
@@ -116,6 +158,8 @@ pub struct Selector {
     /// Scroll window size. `None` renders every match (the historical
     /// Rust behaviour, still used by the extension select dialog).
     max_visible: Option<usize>,
+    /// Bounds for the description column (upstream layout options).
+    layout: SelectorLayout,
     cursor: usize,
     /// Initial cursor position used when the selector is re-opened.
     initial_cursor: usize,
@@ -132,6 +176,7 @@ impl Selector {
             filter: String::new(),
             searchable: false,
             max_visible: None,
+            layout: SelectorLayout::default(),
             cursor: 0,
             initial_cursor: 0,
         }
@@ -154,6 +199,19 @@ impl Selector {
         self
     }
 
+    /// Builder: bound the primary (label) column width.
+    ///
+    /// Mirrors upstream `SelectListLayoutOptions`: the rendered column is the
+    /// widest visible label plus a [`PRIMARY_COLUMN_GAP`]-column gap, clamped
+    /// to `[min, max]`. Passing the same value for both pins the column.
+    pub fn with_primary_column_width(mut self, min: usize, max: usize) -> Self {
+        self.layout = SelectorLayout {
+            min_primary_column_width: min,
+            max_primary_column_width: max,
+        };
+        self
+    }
+
     /// Whether typed characters edit the filter.
     pub fn is_searchable(&self) -> bool {
         self.searchable
@@ -171,7 +229,9 @@ impl Selector {
 
     /// The items that pass the current filter, in list order.
     pub fn visible_items(&self) -> impl Iterator<Item = &SelectorItem> {
-        self.filtered.iter().filter_map(move |idx| self.items.get(*idx))
+        self.filtered
+            .iter()
+            .filter_map(move |idx| self.items.get(*idx))
     }
 
     /// Number of items, ignoring any filter.
@@ -451,6 +511,68 @@ impl Selector {
         (start, (start + max_visible).min(len))
     }
 
+    /// Width of the primary (label) column — upstream
+    /// `SelectList::getPrimaryColumnWidth`: the widest visible label plus
+    /// [`PRIMARY_COLUMN_GAP`], clamped to the configured bounds.
+    fn primary_column_width(&self) -> usize {
+        let (min, max) = self.primary_column_bounds();
+        let widest = self
+            .filtered
+            .iter()
+            .filter_map(|idx| self.items.get(*idx))
+            .map(|item| display_width(display_value(item)) + PRIMARY_COLUMN_GAP)
+            .max()
+            .unwrap_or(0);
+        widest.max(min).min(max)
+    }
+
+    /// Normalised `(min, max)` bounds for the primary column — upstream
+    /// `getPrimaryColumnBounds`.
+    fn primary_column_bounds(&self) -> (usize, usize) {
+        let raw_min = self.layout.min_primary_column_width;
+        let raw_max = self.layout.max_primary_column_width;
+        (raw_min.min(raw_max).max(1), raw_min.max(raw_max).max(1))
+    }
+
+    /// Render one row — upstream `SelectList::renderItem`.
+    ///
+    /// A row that has a description and enough horizontal room renders the
+    /// description in a column that starts at the same offset on every row;
+    /// otherwise it falls back to a width-clamped label alone.
+    fn render_row(
+        &self,
+        item: &SelectorItem,
+        selected: bool,
+        width: usize,
+        primary_column_width: usize,
+    ) -> String {
+        let marker = if selected { "❯ " } else { "  " };
+        let prefix_width = display_width(marker);
+
+        let display = display_value(item);
+        if let Some(description) = &item.description {
+            let description = normalize_single_line(description);
+            if !description.is_empty() && width > MIN_DESCRIPTION_LIST_WIDTH {
+                let column = primary_column_width
+                    .min(width.saturating_sub(prefix_width + 4))
+                    .max(1);
+                let label_width = column.saturating_sub(PRIMARY_COLUMN_GAP).max(1);
+                let truncated = truncate_to_width(display, label_width);
+                let truncated_width = display_width(&truncated);
+                let spacing = " ".repeat(column.saturating_sub(truncated_width).max(1));
+                let description_start = prefix_width + truncated_width + display_width(&spacing);
+                let remaining = width.saturating_sub(description_start + 2);
+                if remaining > MIN_DESCRIPTION_WIDTH {
+                    let truncated_description = truncate_to_width(&description, remaining);
+                    return format!("{marker}{truncated}{spacing}{truncated_description}");
+                }
+            }
+        }
+
+        let max_width = width.saturating_sub(prefix_width + 2).max(1);
+        format!("{marker}{}", truncate_to_width(display, max_width))
+    }
+
     /// Render the selector as a flat vector of lines (used by the App
     /// and by tests).
     pub fn render_lines(&self, width: u16) -> Vec<String> {
@@ -469,24 +591,40 @@ impl Selector {
             return lines;
         }
         let (start, end) = self.visible_range();
+        let primary_column_width = self.primary_column_width();
         for row in start..end {
             let item = &self.items[self.filtered[row]];
-            let marker = if row == self.cursor { "❯ " } else { "  " };
-            let mut line = format!("{marker}{}", item.label);
-            if let Some(desc) = &item.description {
-                let desc = normalize_single_line(desc);
-                let prefix_len = line.chars().count();
-                if !desc.is_empty() && width > prefix_len + 2 {
-                    line.push_str("  ");
-                    line.push_str(&desc);
-                }
-            }
-            lines.push(line);
+            lines.push(self.render_row(item, row == self.cursor, width, primary_column_width));
         }
         if start > 0 || end < self.filtered.len() {
             lines.push(format!("  ({}/{})", self.cursor + 1, self.filtered.len()));
         }
         lines
+    }
+}
+
+/// Layout width of a string: this crate counts `char`s (see `message` /
+/// `prompt`), so a wide glyph still counts as one column.
+fn display_width(text: &str) -> usize {
+    text.chars().count()
+}
+
+/// Truncate `text` to at most `max` columns, dropping the tail — upstream
+/// `truncateToWidth(text, max, "")`.
+fn truncate_to_width(text: &str, max: usize) -> String {
+    if display_width(text) <= max {
+        return text.to_string();
+    }
+    text.chars().take(max).collect()
+}
+
+/// Upstream `SelectList::getDisplayValue`: the label, falling back to the
+/// value for label-less rows.
+fn display_value(item: &SelectorItem) -> &str {
+    if item.label.is_empty() {
+        &item.value
+    } else {
+        &item.label
     }
 }
 
@@ -694,8 +832,63 @@ mod tests {
     fn multi_line_descriptions_render_on_one_line() {
         let items = vec![SelectorItem::new("a", "Alpha").with_description("first\nsecond")];
         let sel = Selector::new("Pick", items);
-        let lines = sel.render_lines(40);
-        assert_eq!(lines[2], "❯ Alpha  first second");
+        let lines = sel.render_lines(80);
+        assert_eq!(
+            lines[2].chars().skip(34).collect::<String>(),
+            "first second"
+        );
+    }
+
+    #[test]
+    fn descriptions_align_into_a_primary_column() {
+        let sel = Selector::new("Pick", items());
+        let lines = sel.render_lines(80);
+        let rows = &lines[2..5];
+        // Default layout: a fixed 32-column primary column, so the
+        // description starts at 2 (marker) + 32 = 34 on every row.
+        let starts: Vec<String> = rows
+            .iter()
+            .map(|row| row.chars().skip(34).collect())
+            .collect();
+        assert_eq!(starts, vec!["OpenAI", "Anthropic", "Test"]);
+        assert!(rows[0].starts_with("❯ gpt-4o"));
+        assert!(rows[1].starts_with("  claude-3.5-sonnet"));
+    }
+
+    #[test]
+    fn primary_column_width_tracks_the_widest_label_within_bounds() {
+        let items = vec![
+            SelectorItem::new("a", "Alpha").with_description("one"),
+            SelectorItem::new("b", "A Much Longer Label").with_description("two"),
+        ];
+        let sel = Selector::new("Pick", items).with_primary_column_width(10, 40);
+        // Widest label (19) + gap (2) = 21, inside [10, 40].
+        let lines = sel.render_lines(80);
+        assert_eq!(lines[2].chars().skip(23).collect::<String>(), "one");
+        assert_eq!(lines[3].chars().skip(23).collect::<String>(), "two");
+    }
+
+    #[test]
+    fn narrow_rows_render_the_label_without_the_description_column() {
+        let items = vec![SelectorItem::new("a", "Alpha").with_description("first second")];
+        let sel = Selector::new("Pick", items);
+        assert_eq!(sel.render_lines(40)[2], "❯ Alpha");
+    }
+
+    #[test]
+    fn long_labels_and_descriptions_are_clamped_to_the_width() {
+        let items = vec![SelectorItem::new(
+            "a",
+            "a-very-long-label-that-does-not-fit-in-the-primary-column",
+        )
+        .with_description("a description that is far too long for the remaining space")];
+        let sel = Selector::new("Pick", items);
+        let lines = sel.render_lines(60);
+        assert!(
+            lines[2].chars().count() <= 60,
+            "row overflows the width: {:?}",
+            lines[2]
+        );
     }
 
     #[test]
@@ -703,13 +896,13 @@ mod tests {
         let mut sel = Selector::new("Pick", items()).searchable(true);
         assert!(sel.is_searchable());
         // `j` filters instead of moving the cursor (upstream model-selector).
-        assert_eq!(
-            sel.handle_key(Key::char('j')),
-            SelectorAction::Changed
-        );
+        assert_eq!(sel.handle_key(Key::char('j')), SelectorAction::Changed);
         assert_eq!(sel.filter(), "j");
         assert_eq!(sel.filtered_len(), 0);
-        assert_eq!(sel.handle_key(Key::new(KeyCode::Backspace, KeyModifiers::NONE)), SelectorAction::Changed);
+        assert_eq!(
+            sel.handle_key(Key::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            SelectorAction::Changed
+        );
         assert_eq!(sel.filter(), "");
         assert_eq!(sel.filtered_len(), 3);
         assert_eq!(
@@ -717,12 +910,18 @@ mod tests {
             SelectorAction::None,
         );
         // Navigation still works, and Enter returns the highlighted row.
-        assert_eq!(sel.handle_key(Key::new(KeyCode::Down, KeyModifiers::NONE)), SelectorAction::Changed);
+        assert_eq!(
+            sel.handle_key(Key::new(KeyCode::Down, KeyModifiers::NONE)),
+            SelectorAction::Changed
+        );
         match sel.handle_key(Key::new(KeyCode::Enter, KeyModifiers::NONE)) {
             SelectorAction::Selected(value) => assert_eq!(value, "claude"),
             other => panic!("unexpected action: {:?}", other),
         }
-        assert_eq!(sel.handle_key(Key::new(KeyCode::Esc, KeyModifiers::NONE)), SelectorAction::Cancelled);
+        assert_eq!(
+            sel.handle_key(Key::new(KeyCode::Esc, KeyModifiers::NONE)),
+            SelectorAction::Cancelled
+        );
     }
 
     #[test]
