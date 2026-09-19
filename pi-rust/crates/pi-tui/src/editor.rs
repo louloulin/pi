@@ -6,7 +6,10 @@
 //! * `Backspace` deletes the character before the cursor.
 //! * `Delete` deletes the character at the cursor.
 //! * `Left` / `Right` move the cursor by one grapheme; `Home` / `End`
-//!   jump to the start / end.
+//!   jump to the start / end. `Alt+B` / `Alt+F` (also `Alt+Left` /
+//!   `Alt+Right` and `Ctrl+Left` / `Ctrl+Right`) move by one word
+//!   (`tui.editor.cursorWordLeft` / `cursorWordRight`) using the
+//!   boundaries from [`crate::word_navigation`].
 //! * `Up` / `Down` navigate the prompt history (most recent first). The
 //!   first `Up` saves the current draft so `Down` past the bottom of
 //!   the history restores it.
@@ -20,6 +23,10 @@
 //!   single-line, "line start" and "line end" are the buffer corners
 //!   (`tui.editor.deleteToLineStart` / `deleteToLineEnd`); consecutive
 //!   kills accumulate into one ring entry, exactly like upstream.
+//! * `Ctrl+W` / `Alt+Backspace` kill the word before the cursor and
+//!   `Alt+D` / `Alt+Delete` the word after it
+//!   (`tui.editor.deleteWordBackward` / `deleteWordForward`). Word kills
+//!   take part in the same accumulation chain as the line kills.
 //! * `Ctrl+Y` yanks the most recent ring entry at the cursor and
 //!   `Alt+Y` cycles through older entries (`tui.editor.yank` /
 //!   `tui.editor.yankPop`).
@@ -43,6 +50,7 @@ use std::collections::VecDeque;
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::kill_ring::{KillDirection, KillRing};
 use crate::undo_stack::UndoStack;
+use crate::word_navigation::{find_word_backward, find_word_forward};
 
 #[cfg(test)]
 use crate::input::KeyModifiers;
@@ -378,6 +386,32 @@ impl Editor {
         EditorAction::Changed
     }
 
+    /// Move the cursor one word to the left (`Alt+B`, `Alt+Left` or
+    /// `Ctrl+Left`, `tui.editor.cursorWordLeft`). Trailing whitespace is
+    /// skipped, then the cursor stops at the next word / punctuation
+    /// boundary.
+    pub fn move_word_left(&mut self) -> EditorAction {
+        if self.cursor == 0 {
+            return EditorAction::None;
+        }
+        self.cursor = find_word_backward(&self.buffer, self.cursor);
+        self.last_action = LastAction::Other;
+        EditorAction::Changed
+    }
+
+    /// Move the cursor one word to the right (`Alt+F`, `Alt+Right` or
+    /// `Ctrl+Right`, `tui.editor.cursorWordRight`). Leading whitespace is
+    /// skipped, then the cursor stops at the next word / punctuation
+    /// boundary.
+    pub fn move_word_right(&mut self) -> EditorAction {
+        if self.cursor >= self.buffer.len() {
+            return EditorAction::None;
+        }
+        self.cursor = find_word_forward(&self.buffer, self.cursor);
+        self.last_action = LastAction::Other;
+        EditorAction::Changed
+    }
+
     /// Kill from the start of the buffer up to the cursor (`Ctrl+U`,
     /// `tui.editor.deleteToLineStart`). The killed text is prepended to
     /// the most recent kill ring entry when the previous action was
@@ -410,6 +444,56 @@ impl Editor {
         let killed = self.buffer[self.cursor..].to_string();
         let accumulate = self.last_action == LastAction::Kill;
         self.buffer.truncate(self.cursor);
+        self.kill_ring
+            .push(&killed, KillDirection::Append, accumulate);
+        self.last_action = LastAction::Kill;
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Kill the word before the cursor (`Ctrl+W` / `Alt+Backspace`,
+    /// `tui.editor.deleteWordBackward`). The killed text is prepended to
+    /// the most recent kill ring entry when the previous action was also
+    /// a kill, matching upstream's accumulation rule.
+    pub fn kill_word_backward(&mut self) -> EditorAction {
+        if self.cursor == 0 {
+            return EditorAction::None;
+        }
+        let delete_from = find_word_backward(&self.buffer, self.cursor);
+        if delete_from == self.cursor {
+            return EditorAction::None;
+        }
+        self.push_undo_snapshot();
+        let killed = self.buffer[delete_from..self.cursor].to_string();
+        // Read the previous action *before* overwriting it: a kill that
+        // follows another kill accumulates into the same ring entry
+        // instead of opening a new chain (upstream `deleteWordBackwards`).
+        let accumulate = self.last_action == LastAction::Kill;
+        self.buffer.replace_range(delete_from..self.cursor, "");
+        self.cursor = delete_from;
+        self.kill_ring
+            .push(&killed, KillDirection::Prepend, accumulate);
+        self.last_action = LastAction::Kill;
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Kill the word after the cursor (`Alt+D` / `Alt+Delete`,
+    /// `tui.editor.deleteWordForward`). The killed text is appended to
+    /// the most recent kill ring entry when the previous action was also
+    /// a kill.
+    pub fn kill_word_forward(&mut self) -> EditorAction {
+        if self.cursor >= self.buffer.len() {
+            return EditorAction::None;
+        }
+        let delete_to = find_word_forward(&self.buffer, self.cursor);
+        if delete_to == self.cursor {
+            return EditorAction::None;
+        }
+        self.push_undo_snapshot();
+        let killed = self.buffer[self.cursor..delete_to].to_string();
+        let accumulate = self.last_action == LastAction::Kill;
+        self.buffer.replace_range(self.cursor..delete_to, "");
         self.kill_ring
             .push(&killed, KillDirection::Append, accumulate);
         self.last_action = LastAction::Kill;
@@ -521,6 +605,11 @@ impl Editor {
                 KeyCode::Char('a') | KeyCode::Char('A') => return self.move_home(),
                 KeyCode::Char('e') | KeyCode::Char('E') => return self.move_end(),
                 KeyCode::Char('k') | KeyCode::Char('K') => return self.kill_to_line_end(),
+                // `tui.editor.deleteWordBackward`.
+                KeyCode::Char('w') | KeyCode::Char('W') => return self.kill_word_backward(),
+                // `tui.editor.cursorWordLeft` / `cursorWordRight`.
+                KeyCode::Left => return self.move_word_left(),
+                KeyCode::Right => return self.move_word_right(),
                 KeyCode::Char('y') | KeyCode::Char('Y') => return self.yank(),
                 // `tui.editor.undo` is bound to `ctrl+-`. Upstream
                 // normalizes the legacy `0x1F` control byte to `ctrl+-`
@@ -539,13 +628,20 @@ impl Editor {
         }
 
         if key.modifiers.alt {
-            // `tui.editor.yankPop` is the only Alt binding this editor
-            // implements today; word-kill / word-move chords are still
-            // pending (see the kill-ring follow-ups).
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                return self.yank_pop();
-            }
-            return EditorAction::None;
+            // Word navigation plus the yank-pop cycle; every other Alt
+            // chord this editor does not implement is a no-op.
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.yank_pop(),
+                // `tui.editor.cursorWordLeft` / `cursorWordRight`.
+                KeyCode::Char('b') | KeyCode::Char('B') | KeyCode::Left => self.move_word_left(),
+                KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Right => self.move_word_right(),
+                // `tui.editor.deleteWordBackward` / `deleteWordForward`.
+                KeyCode::Backspace => self.kill_word_backward(),
+                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+                    self.kill_word_forward()
+                }
+                _ => EditorAction::None,
+            };
         }
 
         if key.modifiers.meta {
@@ -1244,5 +1340,180 @@ mod tests {
         assert_eq!(ed.text(), "héllo 世");
         assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
         assert_eq!(ed.text(), "héllo 世界");
+    }
+
+    #[test]
+    fn alt_b_and_alt_f_move_by_word() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+
+        assert_eq!(ed.handle_key(alt('b')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 6);
+        assert_eq!(ed.handle_key(alt('b')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 0);
+        // At the start of the buffer the move is a no-op.
+        assert_eq!(ed.handle_key(alt('b')), EditorAction::None);
+
+        assert_eq!(ed.handle_key(alt('f')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 5);
+        assert_eq!(ed.handle_key(alt('f')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 11);
+        // At the end of the buffer the move is a no-op.
+        assert_eq!(ed.handle_key(alt('f')), EditorAction::None);
+    }
+
+    #[test]
+    fn alt_arrows_and_ctrl_arrows_move_by_word() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "path/to/file");
+
+        assert_eq!(
+            ed.handle_key(Key::new(KeyCode::Left, KeyModifiers::ALT)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.cursor(), 8); // start of "file"
+        assert_eq!(
+            ed.handle_key(Key::new(KeyCode::Left, KeyModifiers::ALT)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.cursor(), 7); // the "/" boundary
+        assert_eq!(
+            ed.handle_key(Key::new(KeyCode::Right, KeyModifiers::CONTROL)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.cursor(), 8);
+        assert_eq!(
+            ed.handle_key(Key::new(KeyCode::Right, KeyModifiers::ALT)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.cursor(), 12);
+    }
+
+    #[test]
+    fn ctrl_w_kills_the_word_before_the_cursor() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello ");
+        assert_eq!(ed.cursor(), 6);
+        // The killed word went onto the ring, so Ctrl+Y restores it.
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 11);
+    }
+
+    #[test]
+    fn alt_backspace_is_a_kill_word_backward_alias() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "one two");
+        assert_eq!(
+            ed.handle_key(Key::new(KeyCode::Backspace, KeyModifiers::ALT)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.text(), "one ");
+        assert_eq!(ed.cursor(), 4);
+    }
+
+    #[test]
+    fn alt_d_kills_the_word_after_the_cursor() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+        ed.move_home();
+
+        assert_eq!(ed.handle_key(alt('d')), EditorAction::Changed);
+        assert_eq!(ed.text(), " world");
+        assert_eq!(ed.cursor(), 0);
+        // The kill is forward, so the ring entry is the whole word.
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+    }
+
+    #[test]
+    fn alt_delete_is_a_kill_word_forward_alias() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "one two");
+        ed.move_home();
+        assert_eq!(
+            ed.handle_key(Key::new(KeyCode::Delete, KeyModifiers::ALT)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.text(), " two");
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn consecutive_word_kills_accumulate_into_one_ring_entry() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "one two three");
+
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::Changed);
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::Changed);
+        assert_eq!(ed.text(), "one ");
+        assert_eq!(ed.kill_ring_len(), 1);
+        // One yank restores both words, in reading order.
+        assert_eq!(ed.handle_key(ctrl('y')), EditorAction::Changed);
+        assert_eq!(ed.text(), "one two three");
+    }
+
+    #[test]
+    fn word_kills_are_undoable() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "hello world");
+
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::Changed);
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 11);
+
+        ed.move_home();
+        assert_eq!(ed.handle_key(alt('d')), EditorAction::Changed);
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "hello world");
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn word_kills_at_the_buffer_corners_are_noops() {
+        let mut ed = Editor::new();
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::None);
+        assert_eq!(ed.handle_key(alt('d')), EditorAction::None);
+        assert_eq!(ed.kill_ring_len(), 0);
+
+        type_chars(&mut ed, "word");
+        assert_eq!(ed.handle_key(alt('d')), EditorAction::None);
+        assert_eq!(ed.kill_ring_len(), 0);
+        assert_eq!(ed.text(), "word");
+    }
+
+    #[test]
+    fn word_kills_are_utf8_safe() {
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "héllo wörld");
+
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::Changed);
+        assert_eq!(ed.text(), "héllo ");
+        assert_eq!(ed.cursor(), "héllo ".len());
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "héllo wörld");
+        assert_eq!(ed.cursor(), "héllo wörld".len());
+    }
+
+    #[test]
+    fn word_kill_lands_on_a_char_boundary_for_cjk() {
+        // UAX #29 splits each ideograph while ICU's dictionary groups
+        // them into words, so the exact split is engine-dependent. What
+        // must hold either way: the cursor stays on a char boundary and
+        // the kill is undoable.
+        let mut ed = Editor::new();
+        type_chars(&mut ed, "你好 世界");
+
+        assert_eq!(ed.handle_key(ctrl('w')), EditorAction::Changed);
+        assert!(ed.text().is_char_boundary(ed.cursor()));
+        assert!(ed.text().starts_with("你好 "));
+        assert!(ed.text().len() < "你好 世界".len());
+        assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
+        assert_eq!(ed.text(), "你好 世界");
+        assert_eq!(ed.cursor(), "你好 世界".len());
     }
 }
