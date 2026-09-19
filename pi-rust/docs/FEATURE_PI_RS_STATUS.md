@@ -11294,3 +11294,8 @@ issue 要求，上游没有）；`render_result` 只在 `is_error` 时输出（�
 **已知限制**：未跑 `cargo test --workspace`；`pi-ai/compat` 的内置 provider 工厂与
 `pi.registerProvider` 宿主桥仍未实现，所以 `custom-provider-*` 例子仍只能用到
 「扩展自己注册 + 自己调用」这一半。
+补记（推送哈希）：本轮代码提交 `78d2e3977`（`pi-extensions` shim + 测试 + crate 文档）
++ 文档提交 `ad5aac35d`（本节所在提交）+ 合并提交 `181831594`（合并 LUM-1153 的
+`969bfcee6`）。`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从
+`969bfcee6` **快进至 `181831594`**（`git ls-remote` 复查一致：
+`181831594dc2fa9c4b305de820622dd6f8ef9aa3`），留档分支 `work/lum-1154` 一并推送。
