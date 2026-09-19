@@ -6385,3 +6385,126 @@ frontier 重排（`ctrl+b`/`ctrl+f` 已划掉）：
 真正产出新可合并内容的只有 LUM-1107（`pi.exec`）、LUM-1109（合入 LUM-1083）、
 LUM-1110（`node:child_process`）、LUM-1111（本轮 `Ctrl+B`/`Ctrl+F`），
 **仍建议人工把这串协调轮合流**，否则每轮都在重估同一批候选。
+
+## LUM-1113 round — 核验 `feature/pi.rs` + 编辑器 jump mode（`Ctrl+]` / `Ctrl+Alt+]`）+ 修正 LUM-1111 的错误结论
+
+### 一、起点核验（本轮与 LUM-1111 轮之间的状态变化）
+
+| 引用 | 提交 | 说明 |
+|------|------|------|
+| `origin/feature/pi.rs`（进入本轮时） | `58e619f94` | LUM-1112 主题消费层 |
+| `origin/feature/pi.rs`（本轮写入时） | `4161c6c73` | **LUM-1110 已自行合入并推送**：`node:child_process` 虚拟模块（`3449e2a03`） |
+| 本地 `feature/pi.rs` / `mirror/feature/pi.rs` | `6423677ab` | 陈旧（LUM-1106 轮的合并点），落后 origin 两个合并层级 |
+
+结论：**LUM-1110（`node:child_process`）已经落到 `feature/pi.rs` 并推送**，本轮开始时担心的
+「唯一未合入的活跃分支」不再存在，因此本轮没有遗留的合并债可收。`work/lum-1110` 在远端
+`feature/pi.rs` 之上只多一个已合并的 merge 提交（`4161c6c73`），不再是分叉点。
+
+`.git` 是共享 bare 仓库的 worktree（`worktrees/pi97`），所以其它并发轮次 fetch/push 会直接
+更新本 worktree 看到的 `origin/*` 引用 —— 这也是本轮能在不显式 fetch 的情况下立刻觉察到
+LUM-1110 已推送的原因。
+
+### 二、本轮切片：编辑器 jump mode
+
+**先修正 LUM-1111 轮留下的一处事实错误。** 该轮 frontier 写道
+「`jumpForward` / `jumpBackward` 上游只登记键位没有实现，需要先定语义」。核实上游源码后
+该说法不成立 —— 上游有完整实现：
+
+```
+packages/tui/src/components/editor.ts:342        private jumpMode: "forward" | "backward" | null
+packages/tui/src/components/editor.ts:687-705    handleInput() 消费 jump mode（热键再次按下取消 / 可打印字符执行 / 控制字符取消并继续）
+packages/tui/src/components/editor.ts:958-965    触发点：jumpForward → "forward"，jumpBackward → "backward"
+packages/tui/src/components/editor.ts:2126-2155  jumpToChar()：大小写敏感、跳过光标自身、无匹配则原地不动
+packages/tui/src/keybindings.ts:106,110          jumpForward = "ctrl+]"，jumpBackward = "ctrl+alt+]"
+packages/tui/src/keys.ts:1276,1280               传统终端：0x1D → "ctrl+]"，ESC 0x1D → "ctrl+alt+]"
+```
+
+因此 `jumpForward` / `jumpBackward` 不需要「先定语义」，可以按上游逐条移植 —— 这是 frontier
+P2「编辑器剩余键位」里唯一还剩的无歧义项（`ctrl+d` 的 EOF vs forward-delete 语义仍需单独决策）。
+
+| File | Change |
+|------|--------|
+| `crates/pi-tui/src/editor.rs` | 新增 `JumpDirection { Forward, Backward }`、`Editor::jump_mode()` 访问器与 `Editor::jump_to_char()`；`handle_key()` 顶端新增「已武装的 jump 消费本键」分支（热键再次按下取消；无 control / alt 的 `Char` 作为目标；其余键取消并**继续走原有处理**），随后新增 jump 热键触发分支（在通用 control 分支之前，否则 `Ctrl+Alt+]` 会被 control 分支吞掉）；`clear()` 丢弃待决 jump；模块文档补一条 bullet |
+| `crates/pi-tui/src/lib.rs` | 重导出 `JumpDirection` |
+| `crates/pi-tui/tests/editor_jump.rs`（新增） | 14 个集成测试（公共 `Editor` / `Prompt` 事件面 + crossterm 转换） |
+
+与上游逐条对齐的语义（集成测试逐条钉住）：
+
+* 搜索方向：`Forward` 从光标**之后**一个字符开始，`Backward` 从光标**之前**一个字符开始
+  （上游 `indexOf(char, cursorCol + 1)` / `lastIndexOf(char, cursorCol - 1)`）；光标自身永不匹配。
+* 大小写敏感；带 `Shift` 的可打印字符（`'A'`）仍算可打印，照常跳转。
+* 无匹配 → 光标原地不动，但**模式已退出**（下一个字符恢复为插入）。
+* 热键再次按下（含正向 ↔ 反向互换）→ 取消，光标不动。
+* 非可打印键（`Enter` / 控制 chord / 带 `Alt` 的键）→ 取消，**并继续执行它原本的动作**
+  （`Enter` 仍然提交）。
+* 跳转是纯光标移动：不改缓冲区、不压 undo 快照；按上游 `jumpToChar` 在搜索前清 `lastAction`，
+  所以失败/成功的跳转都会打断 kill / yank / 打字链（`last_action = Other`）。
+* 传统终端（非 Kitty 协议）的 `0x1D` / `ESC 0x1D` 被 crossterm 解成 `Ctrl+5` / `Ctrl+Alt+5`
+  （`crossterm-0.28.1/src/event/sys/unix/parse.rs:110`，`0x1C..=0x1F → Ctrl+4..=Ctrl+7`），
+  两个拼写与 Kitty 的 `Char(']')` 一并接受 —— 与 LUM-1104 为 `Ctrl+-` 处理 `Ctrl+7` 的做法一致。
+
+### 三、验证
+
+```
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-tui --offline
+  lib 155 + cursor_chords 5 + e2e 9 + editor_jump 14 + selector_search 7 + snapshot 9
+  + styles 9 + theme 9 + undo 7 + word_navigation 7 + doctest 2 = **233 passed / 0 failed**
+
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo clippy -p pi-tui --all-targets --offline -- -D warnings
+  Finished，0 warnings
+
+$ cargo fmt -p pi-tui -- --check
+  干净
+```
+
+改动只新增 API（`JumpDirection`、`jump_mode()`、`jump_to_char()`）并调整 `editor.rs` 内部
+分支顺序，没有任何签名变更，因此对下游 `pi-coding-agent` 是纯增量；本轮**没有重跑全量
+workspace**：LUM-1110 正在自己的 worktree 里重建 `pi-extensions`（quickjs + wasmtime），
+并发跑第二个全量 workspace 构建会同时压 CPU 与磁盘，而本 crate 的编译门（含全部
+`--all-targets`）已单独跑过 —— 与 LUM-1111 轮的取舍一致。
+
+### 四、磁盘
+
+本轮开始时空闲 2.8G，编译前清理了**已收工（`in_review`）的 LUM-1083 worktree 的
+`pi-rust/target`（12G）**，空闲恢复到 12G。只删构建产物、不动任何 worktree 的源码与提交；
+被删对象的代码早已合入 `feature/pi.rs`（LUM-1109 轮），可随时重建。
+
+### 五、合并与推送
+
+工作分支 `work/lum-1113`（起点 `origin/feature/pi.rs` @ `58e619f94`）→ 先把本地
+`feature/pi.rs` 快进到 `origin/feature/pi.rs`（`4161c6c73`）→ 再非 force 合入
+`feature/pi.rs` 并推送；`work/lum-1113` 同步留在远端。
+
+### 六、frontier（本轮更新）+ 空槽派发
+
+空槽派发 **LUM-1114**（`[Stage 30] pi-tui: 让 App 渲染管线消费主题`，parent LUM-981，
+`--status todo` → 即刻起跑）：LUM-1112 交付的 `SelectListStyles` / `*_themed` 渲染方法目前
+**只把 ANSI 序列塞进字符串**，而 `App::render_to_buffer` 仍然逐字符 `cell.set_char`，主题在
+交互渲染里实际上没被消费。该任务把样式化渲染接进 App 的缓冲区渲染路径（含主题热切换后
+的重绘），落 `app.rs` + `message.rs` / `status.rs` / `selector.rs` 的渲染函数 —— 明确避开
+`editor.rs`（本轮刚改）与 `pi-extensions/**`（LUM-1110）。这是唯一一个既有具体缺口、
+又不需要先做设计决策、且不与在跑任务冲突的空槽。
+
+frontier 重排（`jumpForward` / `jumpBackward` 已划掉；`node:child_process` 已随 LUM-1110 落地）：
+
+1. **P2 主题消费层接入 App 渲染** → 本轮派发 LUM-1114（Stage 级，`pi-tui`）。
+2. **P1 `.wasm` 扩展宿主**：`pi-extensions` 仍只有 QuickJS(JS) 宿主；Stage 级、改 `host.rs`。
+   LUM-1110 的 `node:child_process` 已合入，`host.rs` 现在空闲，但 `.wasm` 宿主需要先定
+   「wasmtime 组件模型 op 表 vs QuickJS op 表如何共存」→ 下一轮可派发的最大项。
+3. **P1 `pi.exec` 的 `signal` + 超时放开**：依赖 LUM-1110 已定下的子进程生命周期语义（已合入），
+   现在可以接续，与第 2 项同文件 `host.rs`，两者需排队。
+4. **P2 `pi-tui` markdown 渲染**（上游 1015 行 `components/markdown.ts`，Rust 侧完全缺失；
+   需先定「自研 vs `pulldown-cmark` + 版本锁定」）：Stage 级，LUM-1114 之后。
+5. **P2 剩余键位**：只剩 `ctrl+d` 的 EOF vs forward-delete 语义需要决策，不做机械移植。
+6. **P3 `node:zlib` / `node:readline` / `node:module`**：动 `host.rs` 的 op 表 → 与第 2/3 项排队。
+7. **P3 `fetch` 全局**：`.pi/extensions/import-repro.ts` 只差它，要真实 HTTP 桥（不是 polyfill）。
+8. **P3 provider catalog / LUM-1090**：结论维持（没有上游 `data/*.json` 不写猜测值）。
+
+并发建议（维持）：上限 3 路；`pi-extensions/src/host.rs` 与
+`docs/FEATURE_PI_RS_STATUS.md` 一次只允许一路在写。LUM-1104 → 1113 这一串 autopilot 轮里，
+真正产出新可合并内容的只有 LUM-1107（`pi.exec`）、LUM-1109（合入 LUM-1083 + 全量核验）、
+LUM-1110（`node:child_process`，已自行合入推送）、LUM-1111（`Ctrl+B`/`Ctrl+F`）、
+LUM-1112（主题消费层）与 LUM-1113（本轮 jump mode）；**仍建议人工把这串协调轮合流**，
+否则每轮都在重估同一批候选。

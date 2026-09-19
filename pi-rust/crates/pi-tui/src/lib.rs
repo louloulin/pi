@@ -26,7 +26,7 @@ pub mod word_navigation;
 
 pub use app::{App, AppConfig, RenderSnapshot};
 pub use dialog::{Dialog, DialogAction, DialogKind};
-pub use editor::{Editor, EditorAction};
+pub use editor::{Editor, EditorAction, JumpDirection};
 pub use input::{InputEvent, Key, KeyModifiers};
 pub use kill_ring::{KillDirection, KillRing};
 pub use message::{MessageItem, MessageView};
