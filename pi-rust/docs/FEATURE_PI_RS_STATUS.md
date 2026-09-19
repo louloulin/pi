@@ -4686,3 +4686,76 @@ $ cargo test   --workspace --no-fail-fast --offline                 # 仅 LUM-10
 
 `feature/pi.rs`：代码面 `12b458844` 已与 `origin/feature/pi.rs` 同步，无待推代码；
 本轮只追加本节状态文档并 push 到 `origin/feature/pi.rs`。
+
+## LUM-1092 round — 核验 `feature/pi.rs` + 在途盘点（LUM-1091 正在实现 `pi-client`）+ 派发 Stage 26 ESM 扩展加载
+
+本轮（autopilot，2026-09-19 10:00Z）先核验远程、再从**进程视角**看清「谁在跑什么」，
+最后按 3 槽上限派发。
+
+### 一、远程核验：没有新的「已提交未合并」实现
+
+- `origin/feature/pi.rs = 50b19c90f`（LUM-1089 的状态文档轮）；`crates/pi-server/`（20 文件）、
+  `pi-protocol/src/rpc/*`、Stage 23 `resources_discover`、Stage 24 压缩都已在树上。
+- 遍历全部 98 个 remote 分支求 `origin/feature/pi.rs..<branch>` 差集，`ahead > 0` 只剩 5 条，
+  全部是文档已判定「重复落地 / 刻意跳过」的：`agent/devbox1/lum-1058`(+2)、
+  `agent/devbox1/9f0097e10886`(+2)、`agent/devbox1/lum-1023`(+1)、`agent/devbox1/lum-1020`(+1)、
+  `agent/devbox1/e3a55b14fe9d`(+1)。**本轮没有代码需要合并。**
+
+### 二、在途盘点：`pi-client` 已由 LUM-1091 在做，LUM-1069 是空转的 `in_progress`
+
+这是本轮最有价值的一条修正，前几轮只从 issue 状态推断，看不出这条：
+
+- 进程视角：LUM-1091 的 run 正在 `lum-1091-7635cbe1387f/workdir/pi-feature`（分支
+  `work/lum-1091`）里**实现 `crates/pi-client`** —— `cargo test -p pi-client` 在跑、
+  `pi-rust/Cargo.toml` + `Cargo.lock` 已改、工作区里已有 `pi-client/` 目录。
+  也就是说 Stage 19 的 client 侧**已经有人在实现**。
+- 因此 **LUM-1069（`[Stage 19] pi-client`，`in_progress`）没有活跃 run**：它的 run 目录最后
+  活动时间是 09:26–09:31，进程表里没有对应进程。它的工作实际上被 LUM-1091 顶替了。
+  本轮**不重复派发** `pi-client`，也不改 LUM-1069 的状态（留给 LUM-1091 的轮次收口）。
+- `multica daemon status`：本轮开工时 `active_task_count = 2`（本协调 run + LUM-1091），
+  只有 1 个空槽。
+
+### 三、验证（`50b19c90f`，native，`--offline`）
+
+```
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0，0 warnings
+$ cargo test   -p pi-protocol -p pi-server --offline                # 25 + 21 passed / 0 failed
+$ cargo test   --workspace --no-fail-fast --offline                 # 66 targets：766 passed / 2 failed / 2 ignored
+```
+
+`pi-protocol` 25 = 14 单测 + 10 RPC codec + 1；`pi-server` 21 = 1 错误映射 + 18 一致性 +
+2 真实 socket 传输（与分支记录一致）。
+
+两个失败仍是文档多处记录的**概率性**子进程崩溃（LUM-1083），不是本轮引入：
+
+| target | 本轮结果 | 失败形态 | 串行复跑 |
+|--------|----------|----------|----------|
+| `pi-coding-agent --test print_mode` | 16 passed / 1 failed（`binary_text_mode_emits_faux_reply`） | `binary exited non-zero: ExitStatus(unix_wait_status(139))` = SIGSEGV(-11) | 第 2 次 17/17 绿 |
+| `pi-coding-agent --test rpc` | 8 passed / 1 failed（`rpc_flag_without_stdin_exits_zero`） | 子进程无 exit status（被信号杀死） | 第 2 次 9/9 绿 |
+
+证据形态与 LUM-1083 / LUM-1086 / LUM-1089 节一致：`pi-extensions → rquickjs-core → async-lock
+→ event-listener` 链上的宿主堆破坏，高负载下概率触发、随机挂不同用例。本轮不碰扩展宿主代码
+（只派发、只改文档），故与本轮无关。
+
+### 四、派发（3 槽上限内）
+
+1. **启动：LUM-1094 `[Stage 26] pi-extensions: ESM 扩展加载`** —— 这是 frontier 的第 1 项，也是
+   插件生态兼容目前**最大的缺口**：上游 `loader.ts:501` 用 `jiti.import(path, { default: true })`
+   吃的是 ESM（`export default` + `node:path` / `node:url` + `import.meta.url`），而 Rust 侧
+   `host.rs:547` 的 `JsExtensionHost::load` 只认 `module.exports = function (pi) {}`
+   （LUM-1084 的集成用例因此只能写 CommonJS 等价体）。与在途的 `pi-client` 文件面零重叠。
+2. **新立项（backlog 停放）：LUM-1093 `[Stage 27] pi-coding-agent: 自动压缩接线`** —— Stage 24
+   的收口项：`should_compact` / `context_tokens_with_trailing` / `CompactionSettings` 已落库但
+   **没有调用点**，`run_compact` 还硬编 `DEFAULT_COMPACTION_SETTINGS`；settings.json 的
+   `compaction.reserveTokens` / `keepRecentTokens` / `autoCompact` 也没接。等槽位空出再 promote。
+3. 既有 backlog 继续排队：**LUM-1090**（Stage 25：用 `pi-client` 替换内联 JSON-RPC，依赖正在
+   被 LUM-1091 实现的 `crates/pi-client`）、**LUM-1088**（项目信任门接
+   `loadProjectTrustExtensions` bootstrap pass）、**LUM-1083**（`--rpc` 子进程崩溃，无上游小版本可升）。
+
+`.wasm` 扩展宿主仍受环境阻塞（缺 `wasm32-unknown-unknown` target 与 `wasmtime`），不立项。
+
+### Push status
+
+`feature/pi.rs`：代码面与 `origin/feature/pi.rs`（`50b19c90f`）一致，无可合并代码；本轮只追加
+本节状态文档并 push。push 前先 `git fetch origin feature/pi.rs`，若 LUM-1091 的 `pi-client`
+轮已先落地则先合入再 push。
