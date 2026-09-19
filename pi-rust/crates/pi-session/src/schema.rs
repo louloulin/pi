@@ -150,10 +150,16 @@ pub struct SessionRow {
 impl SessionRow {
     /// Map the stored row back to the protocol-level
     /// [`SessionEntry::Header`](pi_protocol::SessionEntry::Header) payload.
+    ///
+    /// `created_at` is stored as milliseconds since the unix epoch (see
+    /// [`now_millis`] and [`SessionWriter::write_header`]), so it is
+    /// converted with `from_timestamp_millis`.
+    ///
+    /// [`SessionWriter::write_header`]: crate::SessionWriter::write_header
     pub fn to_header(&self) -> pi_protocol::SessionEntry {
         pi_protocol::SessionEntry::Header {
             id: self.id.clone(),
-            created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(self.created_at, 0)
+            created_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(self.created_at)
                 .unwrap_or_else(chrono::Utc::now),
             version: self.version.clone().unwrap_or_default(),
         }
@@ -186,6 +192,26 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn to_header_reads_created_at_as_milliseconds() {
+        let row = SessionRow {
+            id: "ms-id".into(),
+            created_at: 1_700_000_000_123,
+            parent_session: None,
+            cwd: None,
+            version: Some("0.1.0".into()),
+            metadata: None,
+        };
+        match row.to_header() {
+            pi_protocol::SessionEntry::Header { created_at, .. } => {
+                // Regression: the column is milliseconds, so a second-based
+                // conversion lands ~1000x in the future (+58299-…).
+                assert_eq!(created_at.timestamp_millis(), 1_700_000_000_123);
+            }
+            other => panic!("expected header, got {other:?}"),
+        }
     }
 
     fn tempdir() -> std::path::PathBuf {

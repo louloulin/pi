@@ -85,6 +85,19 @@ impl SessionReader {
         Ok(None)
     }
 
+    /// Single session row by id. Returns `None` when the database has no
+    /// session with that id.
+    pub fn session_row(&self, session_id: &str) -> Result<Option<SessionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, parent_session, cwd, version, metadata FROM sessions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([session_id])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(row_to_session(row)?));
+        }
+        Ok(None)
+    }
+
     /// All sessions stored in this database, ordered by `created_at`
     /// ascending.
     pub fn list_sessions(&self) -> Result<Vec<SessionRow>> {
