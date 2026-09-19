@@ -9,12 +9,12 @@
 //! # Filtering and scrolling
 //!
 //! [`Selector::set_filter`] ports the upstream `SelectList::setFilter`
-//! behaviour: the list is narrowed to the matches, the cursor resets to
-//! the first row, and an empty result renders a no-match line instead of
-//! an empty box. [`Selector::with_max_visible`] ports upstream's
-//! `maxVisible` window: only `maxVisible` rows around the cursor are
-//! drawn, followed by a `(n/total)` indicator whenever the window does
-//! not cover the whole list.
+//! behaviour: the list is narrowed to the matches and the cursor resets to
+//! the first row. An empty result renders a no-match line instead of an
+//! empty box. [`Selector::with_max_visible`] ports upstream's `maxVisible`
+//! window: only `maxVisible` rows around the cursor are drawn, followed by
+//! a `(n/total)` indicator whenever the window does not cover the whole
+//! list.
 //!
 //! [`Selector::searchable`] additionally routes typed characters into the
 //! filter (arrows/`PageUp`/`PageDown` still move, `Backspace` deletes,
@@ -26,15 +26,24 @@
 //! dialog stays non-searchable, matching upstream's
 //! `ExtensionSelectorComponent`.
 //!
+//! Filtering itself is the real fuzzy matcher from [`crate::fuzzy`]
+//! (upstream `packages/tui/src/fuzzy.ts`), not a substring probe: every
+//! whitespace- or slash-separated query token must match the item's search
+//! text in order, and the matches are sorted best-first — exactly what
+//! upstream's `model-selector`, `settings-list` and session search do with
+//! `fuzzyFilter`. Items that score equally keep their list order. Because
+//! the extension `ctx.ui.select` dialog is non-searchable its filter never
+//! leaves the empty string and its order is untouched.
+//!
 //! Deliberate deviations from upstream, both documented for the review
 //! trail:
 //!
 //! * `SelectList` matches the filter as a case-insensitive **prefix of
 //!   `item.value`**. The Rust pickers encode an opaque payload in `value`
 //!   (`model:gpt-5`, `resume:<id>`), so [`SelectorItem::matches`] instead
-//!   does a case-insensitive **substring** search over `value`, `label`
-//!   and `description` — which is also how upstream's fuzzy model search
-//!   behaves in practice.
+//!   fuzzy-matches `value`, `label` and `description` together — which is
+//!   the surface upstream's searchable selectors expose through
+//!   `fuzzyFilter`.
 //! * `SelectList` aligns descriptions into a primary column of its own;
 //!   [`Selector`] ports that layout, truncating both the label and the
 //!   description to the available width. Upstream fixes the primary
@@ -111,25 +120,39 @@ impl SelectorItem {
         self
     }
 
+    /// Search text used by the fuzzy filter: `value`, `label` and
+    /// `description` joined by single spaces, upstream
+    /// `model-selector`'s `getModelSelectorSearchText(...)`.
+    pub fn search_text(&self) -> String {
+        let mut out = String::with_capacity(self.value.len() + self.label.len() + 8);
+        out.push_str(&self.value);
+        out.push(' ');
+        out.push_str(&self.label);
+        if let Some(description) = &self.description {
+            out.push(' ');
+            out.push_str(description);
+        }
+        out
+    }
+
+    /// Fuzzy match score for `query`, `None` when the item does not match.
+    ///
+    /// Lower is better. An empty query (or one made only of separators)
+    /// matches everything with score `0.0`; every whitespace- or
+    /// slash-separated token must match [`SelectorItem::search_text`].
+    pub fn match_score(&self, query: &str) -> Option<f64> {
+        crate::fuzzy::fuzzy_match_all(query, &self.search_text())
+    }
+
     /// True when `query` matches this item.
     ///
-    /// An empty query matches everything. Otherwise the query is matched
-    /// case-insensitively as a substring of the value, the label or the
-    /// description (see the module docs for why this is a substring
-    /// match rather than upstream's `value` prefix match).
+    /// An empty query matches everything. Otherwise the query is a fuzzy
+    /// match (characters in order, not necessarily consecutive) over the
+    /// item's search text — see [`crate::fuzzy`] for the scoring, and the
+    /// module docs for why this replaces upstream `SelectList`'s
+    /// `value`-prefix rule.
     pub fn matches(&self, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        let needle = query.to_lowercase();
-        [
-            Some(self.value.as_str()),
-            Some(self.label.as_str()),
-            self.description.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|haystack| haystack.to_lowercase().contains(&needle))
+        self.match_score(query).is_some()
     }
 }
 
@@ -298,14 +321,12 @@ impl Selector {
     }
 
     /// Recompute the filtered view and reset the cursor to the first row.
+    ///
+    /// The result is ordered best-match-first (upstream `fuzzyFilter`),
+    /// with ties keeping their original list position.
     fn refilter(&mut self) {
-        self.filtered = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.matches(&self.filter))
-            .map(|(idx, _)| idx)
-            .collect();
+        self.filtered =
+            crate::fuzzy::fuzzy_rank(&self.items, &self.filter, |item| item.search_text());
         self.cursor = 0;
     }
 
@@ -830,9 +851,46 @@ mod tests {
         sel.set_filter("ANTHROPIC");
         assert_eq!(sel.filtered_len(), 1);
         assert_eq!(sel.selected_value(), Some("model:claude-4"));
-        // Substring, not prefix: upstream `SelectList` would not match this.
+        // Fuzzy, not prefix: characters may be non-adjacent, so this
+        // still finds the `5` in `gpt-5`.
         sel.set_filter("5");
         assert_eq!(sel.filtered_len(), 1);
+    }
+
+    #[test]
+    fn filter_ranks_the_best_match_first() {
+        let items = vec![
+            SelectorItem::new("a_p_p", "a_p_p"),
+            SelectorItem::new("app", "app"),
+            SelectorItem::new("application", "application"),
+        ];
+        let mut sel = Selector::new("Pick", items);
+        sel.set_filter("app");
+        // `app` is an exact match, `application` a plain prefix, and
+        // `a_p_p` is scattered — so the order is no longer the input one.
+        assert_eq!(
+            sel.visible_items()
+                .map(|i| i.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app", "application", "a_p_p"]
+        );
+    }
+
+    #[test]
+    fn filter_tokens_match_across_value_label_and_description() {
+        let items = vec![
+            SelectorItem::new("model:gpt-5", "GPT-5").with_description("openai"),
+            SelectorItem::new("model:claude-4", "Claude 4").with_description("anthropic"),
+        ];
+        let mut sel = Selector::new("Pick", items);
+        // Slash-separated provider/model query, like upstream session
+        // search.
+        sel.set_filter("openai/gpt");
+        assert_eq!(sel.filtered_len(), 1);
+        assert_eq!(sel.selected_value(), Some("model:gpt-5"));
+        // Every token must match.
+        sel.set_filter("anthropic gpt");
+        assert_eq!(sel.filtered_len(), 0);
     }
 
     #[test]

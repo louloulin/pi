@@ -178,6 +178,7 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         prompt_placeholder: "type a prompt — /help for commands".into(),
         session_id: options.session_id.clone(),
         event_poll_interval: Duration::from_millis(50),
+        markdown: true,
     };
 
     let mut terminal = match setup_terminal() {

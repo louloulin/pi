@@ -94,8 +94,12 @@ fn app_buffer_cells_carry_the_theme_colours() {
     // Message rows: `> hello` (row 0) and `  hi` (row 1).
     assert_eq!(symbol_at(&buf, 0, 0), ">");
     assert_eq!(style_at(&buf, 0, 0).fg, Some(ACCENT));
-    assert_eq!(style_at(&buf, 2, 0).fg, Some(TEXT)); // userMessageText
-    assert_eq!(style_at(&buf, 2, 1).fg, Some(TEXT)); // assistant body
+    // The user body takes `userMessageText`. The assistant body renders as
+    // markdown by default (`AppConfig::markdown`), and a markdown paragraph
+    // carries no theme slot — upstream's `Markdown` inherits the terminal's
+    // default text style — so those cells stay unstyled.
+    assert_eq!(style_at(&buf, 2, 0).fg, Some(TEXT));
+    assert!(is_unstyled(style_at(&buf, 2, 1)));
 
     // Status row (y = height - 2): model accent, session muted, stats dim.
     assert_eq!(symbol_at(&buf, 0, 2), "F");
