@@ -53,7 +53,7 @@ fn app() -> App {
     App::new(&agent, config)
 }
 
-fn render(app: &App, width: u16, height: u16) -> Buffer {
+fn render(app: &mut App, width: u16, height: u16) -> Buffer {
     let area = Rect {
         x: 0,
         y: 0,
@@ -89,7 +89,7 @@ fn app_buffer_cells_carry_the_theme_colours() {
     let mut app = app();
     app.messages_mut().push(MessageItem::user("hello"));
     app.messages_mut().push(MessageItem::assistant("hi"));
-    let buf = render(&app, 40, 4);
+    let buf = render(&mut app, 40, 4);
 
     // Message rows: `> hello` (row 0) and `  hi` (row 1).
     assert_eq!(symbol_at(&buf, 0, 0), ">");
@@ -118,11 +118,11 @@ fn set_theme_hot_swaps_the_next_render() {
     let mut app = app();
     app.messages_mut().push(MessageItem::user("hello"));
 
-    let dark = render(&app, 40, 4);
+    let dark = render(&mut app, 40, 4);
     assert_eq!(style_at(&dark, 0, 0).fg, Some(ACCENT));
 
     app.set_theme(builtin_theme("light", ColorMode::TrueColor).expect("light theme"));
-    let light = render(&app, 40, 4);
+    let light = render(&mut app, 40, 4);
     assert_eq!(style_at(&light, 0, 0).fg, Some(LIGHT_ACCENT));
     // The visible text is unchanged by the palette.
     assert_eq!(symbol_at(&light, 0, 0), ">");
@@ -130,7 +130,7 @@ fn set_theme_hot_swaps_the_next_render() {
 
     // Switching back restores the dark accent on the same App instance.
     app.set_theme_by_name("dark").expect("built-in dark");
-    let back = render(&app, 40, 4);
+    let back = render(&mut app, 40, 4);
     assert_eq!(style_at(&back, 0, 0).fg, Some(ACCENT));
 }
 
@@ -139,7 +139,7 @@ fn a_plain_theme_renders_unstyled_cells() {
     let mut app = app();
     app.messages_mut().push(MessageItem::user("hello"));
     app.set_theme(builtin_theme("dark", ColorMode::None).expect("plain theme"));
-    let buf = render(&app, 40, 4);
+    let buf = render(&mut app, 40, 4);
 
     assert_eq!(symbol_at(&buf, 0, 0), ">");
     assert!(is_unstyled(style_at(&buf, 0, 0)));
@@ -155,7 +155,7 @@ fn selector_overlay_uses_the_title_border_and_selected_row_slots() {
         SelectorItem::new("beta", "Beta").with_description("two"),
     ];
     app.open_selector(Selector::new("Pick", items));
-    let buf = render(&app, 60, 12);
+    let buf = render(&mut app, 60, 12);
 
     // The selector overlays starting one row below the message area's top.
     let title = style_at(&buf, 0, 1);
@@ -188,7 +188,7 @@ fn selector_ansi_strings_match_the_styled_buffer_text() {
         vec![SelectorItem::new("alpha", "Alpha").with_description("one")],
     ));
     let snapshot = app.render_snapshot(60, 12);
-    let buf = render(&app, 60, 12);
+    let buf = render(&mut app, 60, 12);
 
     let title_row: String = (0..60)
         .map(|x| symbol_at(&buf, x, 1))
