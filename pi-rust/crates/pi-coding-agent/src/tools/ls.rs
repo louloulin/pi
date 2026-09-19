@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::mod_ignore::relativize_for_search;
+use super::truncate::{format_size, truncate_head, TruncationOptions, DEFAULT_MAX_BYTES};
 use super::{AbortLike, AgentTool, ToolError, ToolOutput};
 use pi_protocol::ToolExecutionMode;
 
@@ -57,8 +58,8 @@ impl AgentTool for LsTool {
          hides dotfiles; pass `all: true` to show them. With `detail: \
          true`, each entry prints as '<type> <size> <mtime> <name>' \
          (similar to `ls -l`). Directories sort before files, then \
-         alphabetically. `path` must be relative to cwd and may not \
-         contain '..' or be absolute."
+         alphabetically. The listing is truncated to 50KB. `path` must be \
+         relative to cwd and may not contain '..' or be absolute."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -158,7 +159,33 @@ impl AgentTool for LsTool {
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join("\n")
         };
 
-        Ok(ToolOutput::text(text))
+        // Byte-limit the listing. There is no separate line limit because the
+        // entry count is already capped (`ls.ts:139-140`).
+        let truncation = truncate_head(&text, TruncationOptions::bytes_only(DEFAULT_MAX_BYTES));
+        let mut text = truncation.content.clone();
+        let mut notices: Vec<String> = Vec::new();
+        let mut details = serde_json::json!({});
+        if truncation.truncated {
+            notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));
+            details["truncation"] = serde_json::to_value(&truncation)
+                .map_err(|e| ToolError::Execution(format!("details encode: {}", e)))?;
+        }
+        if !notices.is_empty() {
+            text.push_str("\n[");
+            text.push_str(&notices.join(". "));
+            text.push(']');
+        }
+
+        let details = if details.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            None
+        } else {
+            Some(details)
+        };
+
+        Ok(match details {
+            Some(d) => ToolOutput::text(text).with_details(d),
+            None => ToolOutput::text(text),
+        })
     }
 }
 

@@ -752,3 +752,152 @@ fn default_tool_bundle_lists_seven_tools() {
         assert!(!t.description().is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Output truncation (`core/tools/truncate.ts`)
+//
+// `find` / `grep` / `ls` all byte-limit their rendered block at 50KB and the
+// grep tool additionally cuts long match lines at 500 chars. Both paths add an
+// actionable notice so the model knows the output is incomplete.
+// ---------------------------------------------------------------------------
+
+/// A file name padded to ~50 bytes so a directory listing crosses the 50KB
+/// byte limit without needing tens of thousands of entries.
+fn padded_name(i: usize) -> String {
+    let name = format!("entry-{:05}-{}", i, "p".repeat(40));
+    assert!(name.len() <= 255, "name must fit a filesystem entry");
+    name
+}
+
+#[tokio::test]
+async fn grep_truncates_long_match_lines() {
+    let keep = Tmp::new("grep-long-lines");
+    let dir = keep.path().to_path_buf();
+    std::fs::write(
+        dir.join("long.txt"),
+        format!("needle {}\n", "x".repeat(600)),
+    )
+    .unwrap();
+
+    let out = GrepTool
+        .execute(
+            json!({ "pattern": "needle", "path": "long.txt" }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("grep should succeed");
+    let text = first_text(&out);
+
+    assert!(text.contains("... [truncated]"), "missing marker: {text}");
+    assert!(
+        text.contains("[Some lines truncated to 500 chars. Use read tool to see full lines]"),
+        "missing truncation notice: {text}"
+    );
+    // The rendered match line keeps exactly 500 characters before the marker.
+    let first_line = text.lines().next().expect("a match line");
+    assert!(first_line.ends_with("... [truncated]"));
+    assert_eq!(
+        first_line.len(),
+        "long.txt:1:".len() + 500 + "... [truncated]".len()
+    );
+}
+
+#[tokio::test]
+async fn grep_truncates_the_result_block_at_the_byte_limit() {
+    let keep = Tmp::new("grep-byte-limit");
+    let dir = keep.path().to_path_buf();
+    let body = (1..=300)
+        .map(|i| format!("needle {} {}", i, "y".repeat(600)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(dir.join("many.txt"), body).unwrap();
+
+    let out = GrepTool
+        .execute(
+            json!({ "pattern": "needle", "path": "many.txt", "limit": 300 }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("grep should succeed");
+    let text = first_text(&out);
+
+    assert!(
+        text.contains("50.0KB limit reached"),
+        "missing notice: {text}"
+    );
+    let details = out.details.expect("details");
+    assert_eq!(details["truncation"]["truncated"], true);
+    assert_eq!(details["truncation"]["truncated_by"], "bytes");
+    assert!(details["truncation"]["output_bytes"].as_u64().unwrap() <= 50 * 1024);
+}
+
+#[tokio::test]
+async fn find_truncates_the_result_block_at_the_byte_limit() {
+    let keep = Tmp::new("find-byte-limit");
+    let dir = keep.path().to_path_buf();
+    for i in 0..1300 {
+        std::fs::write(dir.join(padded_name(i)), b"").unwrap();
+    }
+
+    let out = FindTool
+        .execute(
+            json!({ "pattern": "entry-*", "path": ".", "limit": 5000 }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("find should succeed");
+    let text = first_text(&out);
+
+    assert!(
+        text.contains("50.0KB limit reached"),
+        "missing notice: {text}"
+    );
+    assert!(
+        !text.contains("results limit reached"),
+        "limit was not hit: {text}"
+    );
+    let details = out.details.expect("details");
+    assert_eq!(details["truncation"]["truncated_by"], "bytes");
+    assert!(details["truncation"]["output_bytes"].as_u64().unwrap() <= 50 * 1024);
+}
+
+#[tokio::test]
+async fn ls_truncates_the_listing_at_the_byte_limit() {
+    let keep = Tmp::new("ls-byte-limit");
+    let dir = keep.path().to_path_buf();
+    for i in 0..1300 {
+        std::fs::write(dir.join(padded_name(i)), b"").unwrap();
+    }
+
+    let out = LsTool
+        .execute(json!({ "path": ".", "all": true }), AbortLike::none())
+        .await
+        .expect("ls should succeed");
+    let text = first_text(&out);
+
+    assert!(
+        text.contains("50.0KB limit reached"),
+        "missing notice: {text}"
+    );
+    let details = out.details.expect("details");
+    assert_eq!(details["truncation"]["truncated_by"], "bytes");
+}
+
+#[tokio::test]
+async fn ls_does_not_load_details_for_a_short_listing() {
+    let keep = Tmp::new("ls-short");
+    let dir = keep.path().to_path_buf();
+    std::fs::write(dir.join("only.txt"), b"").unwrap();
+
+    let out = LsTool
+        .execute(json!({ "path": "." }), AbortLike::none())
+        .await
+        .expect("ls should succeed");
+
+    assert_eq!(first_text(&out), "only.txt");
+    assert!(
+        out.details.is_none(),
+        "no details expected: {:?}",
+        out.details
+    );
+}

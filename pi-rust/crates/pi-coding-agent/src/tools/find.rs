@@ -36,6 +36,7 @@ use serde_json::json;
 use walkdir::WalkDir;
 
 use super::mod_ignore::{relativize_for_search, to_posix_relative, DEFAULT_IGNORE_NAMES};
+use super::truncate::{format_size, truncate_head, TruncationOptions, DEFAULT_MAX_BYTES};
 use super::{AbortLike, AgentTool, ToolError, ToolOutput};
 use pi_protocol::ToolExecutionMode;
 
@@ -87,7 +88,8 @@ impl AgentTool for FindTool {
          'src/**/*.toml', '**/*.json'. `path` must be relative to the \
          agent's current working directory (no '..', no absolute paths). \
          Ignores build / VCS directories (.git, node_modules, target, \
-         dist, build, .pi). Results are sorted lexicographically."
+         dist, build, .pi). Results are sorted lexicographically and \
+         truncated to 50KB."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -227,6 +229,10 @@ impl AgentTool for FindTool {
         }
 
         let mut text = page.join("\n");
+        // Byte-limit the result list; the result limit already capped the row
+        // count, so there is no separate line limit (`find.ts:277`).
+        let truncation = truncate_head(&text, TruncationOptions::bytes_only(DEFAULT_MAX_BYTES));
+        text = truncation.content.clone();
         let mut notices: Vec<String> = Vec::new();
         let mut details = serde_json::json!({});
         // Limit is reached when the caller asked for one and we have
@@ -234,6 +240,11 @@ impl AgentTool for FindTool {
         if parsed.limit.is_some() && skipped + page.len() < total {
             notices.push(format!("{} results limit reached", effective_limit));
             details["resultLimitReached"] = serde_json::json!(effective_limit);
+        }
+        if truncation.truncated {
+            notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));
+            details["truncation"] = serde_json::to_value(&truncation)
+                .map_err(|e| ToolError::Execution(format!("details encode: {}", e)))?;
         }
         if !notices.is_empty() {
             text.push_str("\n[");
