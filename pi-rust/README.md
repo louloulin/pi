@@ -19,6 +19,7 @@ that can load the existing pi extension ecosystem (or close-enough facades of it
 | `pi-tui` | `packages/tui` | scaffolded | Terminal UI primitives |
 | `pi-coding-agent` | `packages/coding-agent` | scaffolded | Interactive CLI binary |
 | `pi-mono` | root monorepo meta | scaffolded | Workspace glue, CLI entry point |
+| `pi-evals` | `packages/evals` | active | Offline-first eval harness + regression suites |
 
 ## Building
 
@@ -42,7 +43,8 @@ pi-rust/
 │   ├── pi-tui/
 │   ├── pi-protocol/
 │   ├── pi-extensions/
-│   └── pi-mono/
+│   ├── pi-mono/
+│   └── pi-evals/
 └── docs/
     ├── PLAN.md                 # staged delivery plan
     └── ARCHITECTURE.md         # cross-crate design notes

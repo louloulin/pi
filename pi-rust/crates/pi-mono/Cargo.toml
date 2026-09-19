@@ -20,3 +20,8 @@ pi-chord = { path = "../pi-chord" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+
+# The eval harness is native-only (loopback fixtures + filesystem), so it is
+# not linked into wasm builds of the glue crate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pi-evals = { path = "../pi-evals" }

@@ -8,5 +8,7 @@ pub use pi_agent_core as agent_core;
 pub use pi_ai as ai;
 pub use pi_chord as chord;
 pub use pi_extensions as extensions;
+#[cfg(not(target_arch = "wasm32"))]
+pub use pi_evals as evals;
 pub use pi_protocol as protocol;
 pub use pi_telemetry as telemetry;

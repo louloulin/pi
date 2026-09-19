@@ -1088,6 +1088,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-evals"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "pi-agent-core",
+ "pi-ai",
+ "pi-coding-agent",
+ "pi-extensions",
+ "pi-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "pi-extensions"
 version = "0.1.0"
 dependencies = [
@@ -1115,6 +1133,7 @@ dependencies = [
  "pi-agent-core",
  "pi-ai",
  "pi-chord",
+ "pi-evals",
  "pi-extensions",
  "pi-protocol",
  "pi-telemetry",

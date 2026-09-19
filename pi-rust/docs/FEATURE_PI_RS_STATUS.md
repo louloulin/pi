@@ -2645,3 +2645,113 @@ This round is committed on `agent/devbox1/ddf6de23c30b`, cut from
 branch tip as of this round (`9ff5851a4`, after the Stage 16 telemetry and
 tool-wiring commits), then fast-forwarded into `feature/pi.rs`.
 
+## LUM-1066 round — `pi-evals`: offline-first eval harness + regression suites
+
+LUM-1066 (2026-09-19, same autopilot template as LUM-982 /
+LUM-1011…LUM-1070) took the measurement gap rather than another feature
+tick. The TS monorepo ships `packages/evals` (~1.3k LOC across
+`pi-harness.ts`, `smoke.eval.ts`, `models.eval.ts`, `providers.eval.ts`,
+`extensions.eval.ts`, `docs.eval.ts` and a small vitest reporter layer),
+but the Rust port had no analogue. Stages 1–16 were each verified by the
+PR that landed them; nothing measured them *afterwards*, so a regression
+in a provider request shape, the model catalog, the JS extension host or
+the documentation could only be caught by a human reading a diff. This
+round ports the harness plus every suite that can run without a network.
+
+### Change
+
+| File | Change |
+|------|--------|
+| `crates/pi-evals/Cargo.toml` | **new** — deps `pi-protocol` / `pi-ai` / `pi-agent-core` / `pi-coding-agent` / `pi-extensions`; `async-trait`, `serde`, `serde_json`, `thiserror`, `chrono`, `tokio-util`; target-gated `tokio` (native only); workspace lints |
+| `crates/pi-evals/src/harness.rs` | **new** — `Case` / `CaseBuilder`, `EvalSuite`, `CaseOutput` (text, usage, transcript, artifacts), `Judge` / `AssertionJudge` / `AcceptAllJudge`, `CaseStatus`, `SuiteReport`, `ReportTotals`, `EvalReport` (`to_json` / `to_text` / `write`), `RunOptions`, `run_case`, `run_suites` |
+| `crates/pi-evals/src/fixture.rs` | **new** — `FixtureServer` on `std::net::TcpListener` (ephemeral port, `Drop` unblocks `accept`), `RecordedRequest`, `FixtureResponse`, SSE builders `sse_text` / `sse_tool_call` / `sse_from_chunks` |
+| `crates/pi-evals/src/support.rs` | **new** — env flags, faux/`Api` model builders, `run_agent` (subscribes to `AgentEvent::MessageEnd` for usage + stop reason), transcript and usage extraction helpers |
+| `crates/pi-evals/src/suites/{mod,smoke,models,providers,extensions,docs}.rs` | **new** — `all_suites()` / `suite_named()` and the 16 cases below |
+| `crates/pi-evals/src/lib.rs` | **new** — crate root with `#![forbid(unsafe_code)]` + `#![warn(missing_docs)]`, re-exports fixture + harness surface |
+| `crates/pi-evals/examples/run_evals.rs` | **new** — CLI runner (`--suite`, `--case`, `--repetitions`, `--live`, `--out`, `--json`), non-zero exit on failure |
+| `crates/pi-evals/tests/evals.rs` | **new** — offline green gate, artifact round-trip, filter/repetition/threshold/skip semantics, fixture-server test, `#[ignore]` live test |
+| `crates/pi-evals/README.md` | **new** — suite/case tables, upstream file→case mapping, live-eval env vars, 9 documented divergences |
+| `Cargo.toml` (workspace) | `crates/pi-evals` member |
+| `README.md` (pi-rust) | `pi-evals` crate-map row |
+| `crates/pi-mono/Cargo.toml`, `crates/pi-mono/src/lib.rs` | `pub use pi_evals as evals;`, target-gated so wasm builds never link the native-only harness |
+| `.gitignore` | `.eval/` (runner artifact directory) |
+
+### Cases
+
+| Suite | Cases | Offline mechanism |
+|-------|-------|-------------------|
+| `smoke` | `smoke-faux-answer`, `smoke-openai-fixture-answer`, `smoke-openai-fixture-tool-turn` | `FauxProvider` script; loopback SSE answer; loopback tool-call turn driven through `HelloTool` (2 requests, 22 scripted tokens) |
+| `models` | `models-registry-invariants`, `models-add-model-to-existing-provider`, `models-api-inference` | in-process registry + `Models::register_provider_json` |
+| `providers` | `providers-openai-compatible-request`, `providers-router-dispatch`, `providers-model-metadata-divergence`, `providers-live-openai` | loopback Acme handler validating path/method/content-type/auth/body; `ProviderRouter::from_env_with` with scrubbed env; **skipped** live probe |
+| `extensions` | `extensions-load-registers-tool`, `extensions-execute-hello-tool`, `extensions-agent-hello-round-trip` | `JsExtensionHost` + `HELLO_JS`, model-issued tool call executed by the QuickJS host |
+| `docs` | `docs-relative-links-resolve`, `docs-code-fences-balanced`, `docs-readme-crate-map` | walks `pi-rust/docs/**`, `pi-rust/README.md` and the repo `README.md` |
+
+Skipped cases are first-class: the live probe is declared like any other
+case and carries a skip reason, so an offline run prints
+`SKIP providers-live-openai — set PI_EVAL_LIVE=1 to run live provider
+evals` instead of silently dropping the coverage. `PI_EVAL_LIVE=1` plus
+`OPENAI_API_KEY` turns it into a real Chat Completions probe
+(`PI_EVAL_MODEL`, `OPENAI_BASE_URL` / `PI_EVAL_BASE_URL` override the
+model and endpoint).
+
+### Design notes
+
+* **No new third-party crates.** The fixture server is raw `std::net`,
+  not `wiremock`; the harness reuses `tokio` / `tokio-util` /
+  `serde_json` / `chrono` / `thiserror` / `async-trait`, all already
+  workspace dependencies.
+* **Usage and stop reason come from events.** `Message` carries neither,
+  so `support::run_agent` subscribes to `AgentEvent::MessageEnd` and
+  reads `usage` + `stop_reason` from the `AssistantMessage`.
+* **Current-thread tokio in tests.** The extension cases drive QuickJS
+  through `JsExtensionHost`, whose `AsyncRuntime` driver is a
+  `tokio::spawn`ed task; a multi-thread test flavour polled that driver
+  on a different thread than the JS evaluation and produced an
+  intermittent SIGSEGV during development. `tests/evals.rs` therefore
+  stays on the default current-thread runtime, matching
+  `crates/pi-extensions/tests/*.rs`.
+
+### Verification (rebased onto `4218c8992`)
+
+```
+$ cargo check    --workspace --all-targets                      # 0 errors, 0 warnings
+$ cargo clippy   --workspace --all-targets -- -D warnings        # 0 errors, 0 warnings
+$ cargo test     --workspace                                     # 378 passed, 0 failed, 1 ignored
+$ cargo test     -p pi-evals                                     # 8 passed, 1 ignored
+$ cargo run      -p pi-evals --example run_evals                 # 15 passed, 0 failed, 1 skipped
+```
+
+378 tests vs the 370 at `4218c8992`: the delta is exactly this round's
+`tests/evals.rs` (8 tests, plus the 1 ignored live test) — the 16 eval
+cases themselves run inside
+`offline_suites_are_green`, which asserts the offline report has no
+failures, at least ten passes, and the network case marked `skipped`.
+The example runner writes `report.json`, `report.txt` and
+`runs.jsonl` (one JSON object per case run) to `.eval/` by default.
+
+### Known gaps (next candidates)
+
+1. **Only OpenAI Chat Completions has a live probe.** The other provider
+   families (Anthropic, Google, the Stage 15 OpenAI-compatible registry)
+   are covered by loopback fixtures only.
+2. **The documentation audit is mechanical.** Upstream reads each page
+   with a model and submits a structured verdict; the Rust cases only
+   check link resolution, fence balance and the README crate map.
+   Prose-vs-code auditing still needs a live model.
+3. **The `Model` metadata gap is recorded, not closed**
+   (`name`/`reasoning`/`input`/`cost.*`/`maxTokens` absent).
+4. **No custom streaming-provider adapter path** (upstream's second
+   `providers.eval.ts` case) and **no run-over-run trend tracking** —
+   `runs.jsonl` is per-run.
+5. **Crate READMEs are outside the audited page set.** Widening the walk
+   would immediately flag one pre-existing broken relative link in
+   `crates/pi-session/README.md`
+   (`../../packages/session-backends/sqlite-node`); it was left alone to
+   keep this round additive.
+
+### Push status
+
+This branch (`agent/devbox1/5b45b672209a`) was cut from
+`origin/feature/pi.rs` at `751bbd6e4` (Stage 15) and rebased onto
+`4218c8992` (LUM-1070 doc round) before pushing, so the branch
+fast-forwards `feature/pi.rs` — no merge commit, no force push.
