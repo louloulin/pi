@@ -104,7 +104,7 @@ back to the host invokes a host import (see below).
 | `pi.sendMessage(message)`       | `host_send_message(json)`       | Custom messages routed back to the agent.                            |
 | `pi.sendUserMessage(text)`      | `host_send_user_message(json)`  | User messages enqueued as turn input.                                |
 | `pi.setSessionName(name)`       | `host_set_session_name(name)`   | Sets the session display name.                                       |
-| `pi.exec(command, args, opts)`  | `host_exec(command, json)`      | Runs a child process; resolves with `{ stdout, stderr, code, killed }`. |
+| `pi.exec(command, args, opts)`  | `host_exec(command, json)`      | Runs a child process; resolves with `{ stdout, stderr, code, killed }`. `opts.signal` cancels via `host_exec_cancel(id)`. |
 | `ctx.ui.notify(msg, level)`     | `host_ui_notify(msg, level)`    | Fire-and-forget notification. `level` ∈ `info`/`warning`/`success`/`error`. |
 | `ctx.ui.confirm(title, body)`   | `host_ui_confirm(title, body)`  | Returns `Promise<boolean>`. Resolves via `UiHandler::confirm`.       |
 | `ctx.ui.input(title, ph)`       | `host_ui_input(title, ph)`      | Returns `Promise<string | null>`. Resolves via `UiHandler::input`.   |
@@ -128,7 +128,8 @@ swapped for a `wasm32` binding later without touching the shim.
 | `host_send_message(json)`           | `(json: string) => void`             | Push a `CustomMessage` payload back to the agent.                                              |
 | `host_send_user_message(json)`      | `(json: string) => void`             | Push a user message (string or content array) into the queue.                                  |
 | `host_set_session_name(name)`       | `(name: string) => void`             | Set the session display name.                                                                  |
-| `host_exec(command, argsJson)`      | `(command: string, argsJson: string) => Promise<string>` | Runs `command` with `argsJson` = `{ args, cwd?, timeout? }` and returns the JSON `ExecResult` `{stdout, stderr, code, killed}`. Never rejects. |
+| `host_exec(command, argsJson)`      | `(command: string, argsJson: string) => Promise<string>` | Runs `command` with `argsJson` = `{ id?, args, cwd?, timeout? }` and returns the JSON `ExecResult` `{stdout, stderr, code, killed}`. Never rejects. `id` is cancellation/deadline bookkeeping and is optional. |
+| `host_exec_cancel(id)`              | `(id: number) => void`               | Cancel the `host_exec` call whose `argsJson.id` is `id`: kills the child and makes `host_exec` resolve with `{ code: -1, killed: true }`. A no-op for an unknown or finished `id`. The shim calls it when `options.signal` fires. |
 | `host_ui_notify(message, level)`    | `(message: string, level: string) => void` | Fire-and-forget notify. `level` ∈ `info`/`success`/`warning`/`error`.                          |
 | `host_ui_confirm(title, body)`      | `(title: string, body: string) => Promise<boolean>` | Async — resolves via `UiHandler::confirm`.                                          |
 | `host_ui_input(title, placeholder)` | `(title: string, placeholder: string) => Promise<string | null>` | Async — resolves via `UiHandler::input`.                                          |
@@ -148,16 +149,36 @@ git-merge-and-resolve}.ts`). The child is spawned directly (no shell) with
 `cwd` defaulting to the session working directory, so extensions that used
 `pi.exec` upstream run unmodified. Divergences from upstream `execCommand`:
 
-* `options.signal` is accepted but ignored (no `AbortSignal` in QuickJS);
-  the call is still bounded by the host per-call timeout —
-  [`DEFAULT_TIMEOUT`](../src/host.rs) (5 s) in print / RPC, 300 s in the
-  interactive TUI — so a long `git fetch` needs an interactive session or a
-  raised `HostOptions::timeout`.
+* `options.signal` works, out of band: a signal is not JSON, so the shim
+  allocates a call `id`, passes it in `argsJson`, and calls
+  `host_exec_cancel(id)` when the signal fires. The host kills the child and
+  the promise resolves with `{ code: -1, killed: true }` (never rejects) —
+  the same contract as upstream. An already-aborted signal resolves
+  immediately without spawning anything.
+* `options.timeout` (ms) is a promise the host keeps: while such a call is
+  in flight the host per-call deadline is raised to `options.timeout + 1 s`
+  ([`EXEC_TIMEOUT_GRACE`](../src/host.rs)), so the child's own timeout is
+  what ends the call. Without an explicit `options.timeout` the host per-call
+  timeout still applies unchanged — [`DEFAULT_TIMEOUT`](../src/host.rs)
+  (5 s) in print / RPC, 300 s in the interactive TUI — so a long `git fetch`
+  needs `options.timeout` or an interactive session. `options.timeout` is
+  clamped to 24 h.
+* killing a child kills only that process, not its descendants: a
+  `sh -c '…'` wrapper leaves grandchildren alive, and because they inherit
+  the stdio pipes the call still waits for them to exit (Node behaves the
+  same way).
 * a timeout kills with `SIGKILL` (upstream sends `SIGTERM`, then `SIGKILL`
   after 5 s) and reports `code: -1`; Node collapses the missing exit code
   to `0`, which would make a killed command look successful.
 * a spawn failure (`ENOENT`) reports the OS error in `stderr` with
   `code: 1` instead of dropping the message.
+
+QuickJS ships no `AbortController`, so the shim installs a DOM-shaped
+polyfill (`aborted`, `reason`, `throwIfAborted()`, `addEventListener` /
+`removeEventListener` / `onabort`, plus the `AbortSignal.abort()` and
+`AbortSignal.any()` statics). `AbortSignal.timeout(ms)` is **not**
+implemented — it needs a timer and the host exposes neither `setTimeout`
+nor `node:timers`; extensions should pass `options.timeout` instead.
 
 ### Node builtin virtual modules
 
@@ -330,7 +351,14 @@ pumping dialogs, so the wider budget only applies to a visible modal.
   so an infinite `while(true)` aborts at the next bytecode boundary
   once the deadline is exceeded. The interrupt fires within a few
   thousand opcodes of the deadline.
-- Timeouts surface as `ExtensionError::Timeout`; never panic.
+- Timeouts surface as `ExtensionError::Timeout`; never panic. One
+  exception: while a `pi.exec` call that passed an explicit
+  `options.timeout` is in flight, the host deadline is raised to that
+  timeout plus 1 s so the child's own timeout and the extension's cancel
+  handling get to decide the outcome — the host never cuts the call short
+  before the deadline the extension asked for (`drive_call` in
+  `src/host.rs`). A cancellation is not a timeout: it resolves the
+  `pi.exec` promise with `{ code: -1, killed: true }`.
 - Each `JsExtensionHost` owns one `AsyncRuntime` / `AsyncContext`
   pair. Cloning the host shares the pair. Drives one `runtime.drive()`
   task that pumps JS promises.
@@ -351,7 +379,7 @@ or a Stage 4+ follow-up:
 | `pi.on(eventName, handler)`             | ✅ Supported    | Event tags are free-form strings; the host dispatches anything.        |
 | `pi.registerTool(...)` + `execute(...)` | ✅ Supported    | JSON Schema `parameters` round-trip; result shape matches TS.          |
 | `pi.registerCommand(...)`               | ✅ Supported    | Dispatched by the TUI (`/name args`) and by `pi --print "/name args"`; the JS handler runs in the host. |
-| `pi.exec(command, args, options)`        | ✅ Supported    | Spawns directly (no shell); `cwd` defaults to the session cwd; resolves with `{ stdout, stderr, code, killed }`. `signal` is ignored and every call rides the host per-call timeout (see [Host imports](#host-imports-rust--js)). |
+| `pi.exec(command, args, options)`        | ✅ Supported    | Spawns directly (no shell); `cwd` defaults to the session cwd; resolves with `{ stdout, stderr, code, killed }`. `options.signal` cancels the child, `options.timeout` replaces the host per-call timeout (see [Host imports](#host-imports-rust--js)). |
 | `ctx.ui.confirm / input / select`       | ✅ Supported    | Async; the host awaits the user's `UiHandler` reply. The TUI renders a real modal dialog; print / rpc / non-TTY runs deny (`false` / `null`) and report the denial through `ctx.ui.notify`. |
 | `ctx.ui.notify(...)`                    | ✅ Supported    | Fire-and-forget; logged on the `pi_extension` tracing target.          |
 | `pi.sendMessage / sendUserMessage`      | ✅ Supported    | Persisted as session entries by the TUI and print modes; `sendUserMessage` is not re-injected as a new turn yet. |

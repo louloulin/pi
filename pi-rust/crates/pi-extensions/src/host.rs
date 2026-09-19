@@ -10,7 +10,7 @@
 //! when the agent calls a tool, the host invokes the JS-side execute
 //! function via [`JsExtensionHost::execute_tool`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -27,7 +27,7 @@ use rquickjs_core::promise::MaybePromise;
 use rquickjs_core::{async_with, Ctx, Function};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::api::{ExtensionCapabilities, ExtensionEntry};
 use crate::error::ExtensionError;
@@ -36,6 +36,18 @@ use crate::shim::SHIM_SOURCE;
 
 /// Default timeout applied to every host import and event dispatch.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Extra time the host grants an explicit `pi.exec` `options.timeout`
+/// before its own per-call deadline fires. The child kills itself at
+/// `options.timeout`; the host deadline is raised past that so the
+/// extension still receives the `killed: true` result instead of a
+/// host-level `ExtensionError::Timeout`.
+pub const EXEC_TIMEOUT_GRACE: Duration = Duration::from_secs(1);
+
+/// Upper bound on a single `pi.exec` `options.timeout`. A larger value is
+/// clamped so `Instant + timeout` can never overflow (the JS side may pass
+/// any number).
+const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// User-supplied UI handler. The host calls these when a JS extension
 /// requests user interaction via `ctx.ui.{confirm,input,select}` or
@@ -332,6 +344,9 @@ struct Inner {
     /// Wall-clock nanos deadline the JS interrupt handler checks on
     /// every iteration. `u64::MAX` means "no deadline active".
     deadline_nanos: Arc<AtomicU64>,
+    /// In-flight `pi.exec` calls: the cancel channel and the deadline
+    /// extension (see [`ExecBridge`]).
+    execs: ExecBridge,
 }
 
 #[derive(Default)]
@@ -355,6 +370,62 @@ impl Drop for Inner {
             if let Some(kill) = child.kill_tx.lock().take() {
                 let _ = kill.send(());
             }
+        }
+        // `pi.exec` children are owned by [`run_child`]'s future rather
+        // than by a dedicated wait task, so ask every surviving call to
+        // kill its child too.
+        self.execs.cancel_all();
+    }
+}
+
+impl Inner {
+    /// Arm the JS interrupt deadline for one host call and return it, so
+    /// the interrupt handler and [`drive_call`] agree on the base.
+    fn arm_deadline(&self) -> Instant {
+        let deadline = Instant::now() + self.timeout;
+        self.deadline_nanos
+            .store(system_time_nanos(deadline), Ordering::Relaxed);
+        deadline
+    }
+
+    /// Clear the per-call deadline — both the base and any `pi.exec`
+    /// extension armed during the call — once the host call returns.
+    fn disarm_deadline(&self) {
+        self.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
+        self.execs.reset_deadline();
+    }
+}
+
+/// Drive one host call to completion under the host deadline.
+///
+/// This is the previous `tokio::time::timeout(inner.timeout, future)` with
+/// one addition: while an in-flight `pi.exec` that passed an explicit
+/// `options.timeout` is registered, the deadline is raised to that
+/// `options.timeout + [`EXEC_TIMEOUT_GRACE`]` so the child's own timeout
+/// decides the outcome — the host must not cut a call short before the
+/// deadline the extension asked for.
+///
+/// `Err(())` means the deadline fired; the future is dropped (as
+/// `tokio::time::timeout` did) and every exec still in flight is killed
+/// first, because a `host_exec` future lives on in the QuickJS async pool
+/// after the JS call that awaited it is dropped.
+async fn drive_call<F>(inner: &Inner, base_deadline: Instant, future: F) -> Result<F::Output, ()>
+where
+    F: std::future::Future,
+{
+    tokio::pin!(future);
+    loop {
+        let deadline = match inner.execs.deadline() {
+            Some(exec) if exec > base_deadline => exec,
+            _ => base_deadline,
+        };
+        if Instant::now() >= deadline {
+            inner.execs.cancel_all();
+            return Err(());
+        }
+        tokio::select! {
+            output = &mut future => return Ok(output),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
         }
     }
 }
@@ -384,6 +455,7 @@ impl JsExtensionHost {
         let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiRequestEnvelope>();
         let state = Arc::new(Mutex::new(HostState::default()));
         let deadline_nanos = Arc::new(AtomicU64::new(u64::MAX));
+        let execs = ExecBridge::new();
         let inner = Arc::new(Inner {
             runtime: runtime.clone(),
             children: Arc::new(Mutex::new(HashMap::new())),
@@ -394,6 +466,7 @@ impl JsExtensionHost {
             timeout,
             tool_context: opts.tool_context.clone(),
             deadline_nanos: deadline_nanos.clone(),
+            execs,
         });
 
         // Install host imports + shim.
@@ -419,14 +492,24 @@ impl JsExtensionHost {
         // within a few thousand opcodes rather than blocking the host
         // forever.
         let interrupt_deadline = deadline_nanos.clone();
+        let interrupt_exec_deadline = inner.execs.deadline_nanos.clone();
         runtime
             .set_interrupt_handler(Some(Box::new(move || {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0);
-                let deadline = interrupt_deadline.load(Ordering::Relaxed);
-                deadline != u64::MAX && now >= deadline
+                let base = interrupt_deadline.load(Ordering::Relaxed);
+                let exec = interrupt_exec_deadline.load(Ordering::Relaxed);
+                // `u64::MAX` means "unarmed": take whichever deadline *is*
+                // armed, and the later one when both are.
+                let deadline = match (base, exec) {
+                    (u64::MAX, u64::MAX) => return false,
+                    (u64::MAX, exec) => exec,
+                    (base, u64::MAX) => base,
+                    (base, exec) => base.max(exec),
+                };
+                now >= deadline
             })))
             .await;
 
@@ -504,13 +587,13 @@ impl JsExtensionHost {
             "cwd": cwd,
         })
         .to_string();
-        // Arm interrupt deadline.
-        let deadline = Instant::now() + timeout;
-        self.inner
-            .deadline_nanos
-            .store(system_time_nanos(deadline), Ordering::Relaxed);
-        let result = tokio::time::timeout(
-            timeout,
+        // Arm the interrupt deadline, then drive the whole call under it.
+        // `drive_call` extends the deadline while a `pi.exec` with an
+        // explicit `options.timeout` is in flight.
+        let base_deadline = self.inner.arm_deadline();
+        let result = drive_call(
+            &self.inner,
+            base_deadline,
             async_with!(context => |ctx| {
                 let exec: Function = ctx
                     .globals()
@@ -530,12 +613,11 @@ impl JsExtensionHost {
             }),
         )
         .await;
-        // Disarm.
-        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
+        self.inner.disarm_deadline();
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
-            Err(_) => Err(ExtensionError::Timeout(timeout)),
+            Err(()) => Err(ExtensionError::Timeout(timeout)),
         }
     }
 
@@ -613,15 +695,14 @@ impl JsExtensionHost {
                 .register(entry.clone(), ExtensionCapabilities::default());
         }
 
-        // Arm the JS interrupt handler with the call deadline.
-        let deadline = Instant::now() + timeout;
-        let deadline_nanos_value = system_time_nanos(deadline);
-        self.inner
-            .deadline_nanos
-            .store(deadline_nanos_value, Ordering::Relaxed);
+        // Arm the JS interrupt handler with the call deadline, then drive
+        // the load under it (`drive_call` extends it for an in-flight
+        // `pi.exec` with an explicit `options.timeout`).
+        let base_deadline = self.inner.arm_deadline();
 
-        let result = tokio::time::timeout(
-            timeout,
+        let result = drive_call(
+            &self.inner,
+            base_deadline,
             async_with!(context => |ctx| {
                 let load: Function = ctx
                     .globals()
@@ -638,8 +719,7 @@ impl JsExtensionHost {
         )
         .await;
 
-        // Disarm the interrupt deadline regardless of outcome.
-        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
+        self.inner.disarm_deadline();
 
         match result {
             Ok(Ok(())) => {
@@ -655,7 +735,7 @@ impl JsExtensionHost {
                 Ok(())
             }
             Ok(Err(e)) => Err(ExtensionError::Load(format!("{}: {}", entry_clone.id, e))),
-            Err(_) => Err(ExtensionError::Timeout(timeout)),
+            Err(()) => Err(ExtensionError::Timeout(timeout)),
         }
     }
 
@@ -689,13 +769,13 @@ impl JsExtensionHost {
         let event_json = serde_json::to_string(&envelope).map_err(ExtensionError::from)?;
         let context = self.inner.context.clone();
         let timeout = self.inner.timeout;
-        // Arm interrupt deadline.
-        let deadline = Instant::now() + timeout;
-        self.inner
-            .deadline_nanos
-            .store(system_time_nanos(deadline), Ordering::Relaxed);
-        let result = tokio::time::timeout(
-            timeout,
+        // Arm the interrupt deadline, then drive the dispatch under it
+        // (`drive_call` extends it for an in-flight `pi.exec` with an
+        // explicit `options.timeout`).
+        let base_deadline = self.inner.arm_deadline();
+        let result = drive_call(
+            &self.inner,
+            base_deadline,
             async_with!(context => |ctx| {
                 let dispatch: Function = ctx
                     .globals()
@@ -714,12 +794,11 @@ impl JsExtensionHost {
             }),
         )
         .await;
-        // Disarm.
-        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
+        self.inner.disarm_deadline();
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
-            Err(_) => Err(ExtensionError::Timeout(timeout)),
+            Err(()) => Err(ExtensionError::Timeout(timeout)),
         }
     }
 
@@ -735,13 +814,13 @@ impl JsExtensionHost {
         let timeout = self.inner.timeout;
         let name = name.to_string();
         let args = args_json.to_string();
-        // Arm interrupt deadline.
-        let deadline = Instant::now() + timeout;
-        self.inner
-            .deadline_nanos
-            .store(system_time_nanos(deadline), Ordering::Relaxed);
-        let result = tokio::time::timeout(
-            timeout,
+        // Arm the interrupt deadline, then drive the tool under it
+        // (`drive_call` extends it for an in-flight `pi.exec` with an
+        // explicit `options.timeout`).
+        let base_deadline = self.inner.arm_deadline();
+        let result = drive_call(
+            &self.inner,
+            base_deadline,
             async_with!(context => |ctx| {
                 let exec: Function = ctx
                     .globals()
@@ -761,12 +840,11 @@ impl JsExtensionHost {
             }),
         )
         .await;
-        // Disarm.
-        self.inner.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
+        self.inner.disarm_deadline();
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
-            Err(_) => Err(ExtensionError::Timeout(timeout)),
+            Err(()) => Err(ExtensionError::Timeout(timeout)),
         }
     }
 
@@ -1083,12 +1161,18 @@ async fn host_select_impl(
 
 /// `pi.exec(command, args, options)` — request decoded from the JS shim.
 ///
-/// Mirrors upstream `ExecOptions` (`packages/coding-agent/src/core/exec.ts`)
-/// minus `signal` (QuickJS ships no `AbortSignal`, and the host call is
-/// already bounded by [`HostOptions::timeout`]). `cwd` is filled in by the
-/// shim with the session cwd when the extension omits it.
+/// Mirrors upstream `ExecOptions` (`packages/coding-agent/src/core/exec.ts`).
+/// `signal` cannot cross the host ABI (QuickJS has no `AbortSignal`, and a
+/// signal is not JSON), so cancellation travels out of band: the shim
+/// allocates `id`, passes it here, and calls `host_exec_cancel(id)` when
+/// the extension's signal fires. `cwd` is filled in by the shim with the
+/// session cwd when the extension omits it.
 #[derive(Debug, Default, Deserialize)]
 struct ExecRequest {
+    /// Call id allocated by the shim; keys [`ExecBridge`] for cancellation
+    /// and the deadline extension. `None` disables both.
+    #[serde(default)]
+    id: Option<u64>,
     /// Arguments passed to the child process, never through a shell.
     #[serde(default)]
     args: Vec<String>,
@@ -1109,28 +1193,191 @@ struct ExecOutcome {
     killed: bool,
 }
 
+/// Registry of in-flight `pi.exec` calls, keyed by the id the shim
+/// allocates. Two behaviours ride on it:
+///
+/// * **cancellation** — `host_exec_cancel(id)` (the shim calls it when the
+///   extension's `AbortSignal` fires) marks the slot; [`run_child`]'s wait
+///   loop sees the mark, `start_kill`s the child and reaps it; and
+/// * **the timeout extension** — an explicit `options.timeout` is a promise
+///   the host keeps, so while such a call is in flight the host per-call
+///   deadline is raised to `options.timeout + [`EXEC_TIMEOUT_GRACE`]`, and
+///   the child's own timeout decides the outcome (see
+///   [`drive_call`]).
+#[derive(Clone)]
+struct ExecBridge {
+    state: Arc<Mutex<ExecState>>,
+    /// Wall-clock nanos of the furthest explicit exec deadline, in the same
+    /// encoding as [`Inner::deadline_nanos`] (`u64::MAX` = unarmed). The JS
+    /// interrupt handler takes the later of the two.
+    deadline_nanos: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct ExecState {
+    /// Live calls, keyed by the shim-allocated id.
+    live: HashMap<u64, Arc<ExecSlot>>,
+    /// Ids cancelled before their call registered. An `async` host import
+    /// creates its future when JS calls it but is not polled until the JS
+    /// job yields, so an extension that aborts synchronously after
+    /// `pi.exec(...)` can beat the first poll; the cancel is remembered and
+    /// applied on registration.
+    cancelled: HashSet<u64>,
+    /// Furthest explicit `options.timeout` (+ grace) armed by a live call,
+    /// kept as an [`Instant`] for the host call deadline.
+    deadline: Option<Instant>,
+}
+
+/// One in-flight `pi.exec` call.
+struct ExecSlot {
+    /// Set by [`ExecBridge::cancel`] (or by a pre-registration cancel).
+    cancel: AtomicBool,
+    /// Wakes [`run_child`]'s wait loop the moment a cancel lands.
+    notify: Notify,
+    /// Host deadline this call asks for: `spawn + options.timeout +`
+    /// [`EXEC_TIMEOUT_GRACE`]. `None` when the extension passed no
+    /// `options.timeout` — the host deadline then applies unchanged.
+    hard_deadline: Option<Instant>,
+}
+
+impl ExecBridge {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ExecState::default())),
+            deadline_nanos: Arc::new(AtomicU64::new(u64::MAX)),
+        }
+    }
+
+    /// Register a live call. Returns `true` when the shim had already
+    /// cancelled its id (the abort beat the host future's first poll).
+    fn register(&self, id: u64, slot: &Arc<ExecSlot>) -> bool {
+        let mut state = self.state.lock();
+        let cancelled = state.cancelled.remove(&id);
+        if cancelled {
+            slot.cancel.store(true, Ordering::Relaxed);
+        }
+        state.live.insert(id, slot.clone());
+        if let Some(deadline) = slot.hard_deadline {
+            let newer = match state.deadline {
+                Some(current) => deadline > current,
+                None => true,
+            };
+            if newer {
+                state.deadline = Some(deadline);
+                self.deadline_nanos
+                    .store(system_time_nanos(deadline), Ordering::Relaxed);
+            }
+        }
+        cancelled
+    }
+
+    /// Unregister a finished call. The deadline high-water mark is *not*
+    /// lowered here: the extension still has to resume JS after the
+    /// `await` to see the result, and that resume must not be killed by
+    /// the (by then elapsed) base deadline. [`Inner::disarm_deadline`]
+    /// clears it once the whole host call returns.
+    fn unregister(&self, id: u64) {
+        self.state.lock().live.remove(&id);
+    }
+
+    /// Furthest explicit exec deadline armed so far, if any.
+    fn deadline(&self) -> Option<Instant> {
+        self.state.lock().deadline
+    }
+
+    /// `host_exec_cancel(id)` — remember the cancel and poke the running
+    /// call, if any.
+    fn cancel(&self, id: u64) {
+        let mut state = self.state.lock();
+        match state.live.get(&id) {
+            Some(slot) => {
+                slot.cancel.store(true, Ordering::Relaxed);
+                slot.notify.notify_waiters();
+            }
+            None => {
+                // Bound the set so a stray id cannot grow it without
+                // limit; the shim's ids are monotonic, so a clear only
+                // ever drops already-finished ids.
+                if state.cancelled.len() >= 1024 {
+                    state.cancelled.clear();
+                }
+                state.cancelled.insert(id);
+            }
+        }
+    }
+
+    /// Kill every call still in flight. Used when the host call deadline
+    /// fires: no live call has an unexpired explicit `options.timeout`
+    /// left at that point, so every survivor is a runaway.
+    fn cancel_all(&self) {
+        let state = self.state.lock();
+        for slot in state.live.values() {
+            slot.cancel.store(true, Ordering::Relaxed);
+            slot.notify.notify_waiters();
+        }
+    }
+
+    /// Clear the deadline high-water mark (end of a host call).
+    fn reset_deadline(&self) {
+        self.state.lock().deadline = None;
+        self.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
+    }
+}
+
 /// Body of the `host_exec` import: run the requested command and return
 /// the `ExecResult` as JSON. Never rejects — upstream `pi.exec` resolves
 /// on every outcome and extensions branch on `code` / `killed`.
-async fn host_exec_impl(command: String, args_json: String) -> rquickjs_core::Result<String> {
+async fn host_exec_impl(
+    bridge: &ExecBridge,
+    command: String,
+    args_json: String,
+) -> rquickjs_core::Result<String> {
     let request: ExecRequest = serde_json::from_str(&args_json).unwrap_or_default();
-    let outcome = run_child(&command, &request).await;
+    // `options.timeout` is clamped so the host deadline cannot overflow.
+    let limit = request
+        .timeout
+        .filter(|ms| *ms > 0)
+        .map(|ms| Duration::from_millis(ms).min(MAX_EXEC_TIMEOUT));
+    let slot = Arc::new(ExecSlot {
+        cancel: AtomicBool::new(false),
+        notify: Notify::new(),
+        hard_deadline: limit.map(|limit| Instant::now() + limit + EXEC_TIMEOUT_GRACE),
+    });
+    // Register before spawning so a cancel that races the first poll is
+    // seen (`register` returns `true` for an already-cancelled id).
+    if let Some(id) = request.id {
+        bridge.register(id, &slot);
+    }
+    let outcome = run_child(&command, &request, &slot, limit).await;
+    if let Some(id) = request.id {
+        bridge.unregister(id);
+    }
     Ok(serde_json::to_string(&outcome)
         .unwrap_or_else(|_| r#"{"stdout":"","stderr":"","code":1,"killed":false}"#.to_string()))
 }
 
 /// Spawn `command` with `args` (no shell, like upstream `spawn(..., {shell:
-/// false})`), capture stdout / stderr and enforce `request.timeout`.
+/// false})`), capture stdout / stderr and enforce `limit` (`options.timeout`)
+/// plus cancellation via `slot`.
 ///
-/// Divergences from upstream, both recorded in `docs/EXTENSIONS.md`:
+/// The child is polled with `try_wait` (rather than `Child::wait`) so the
+/// same `&mut child` can both enforce the timeout and react to a cancel —
+/// the `node:child_process` wait loop uses the same shape.
 ///
-/// * a timeout kills the child with `SIGKILL` (upstream escalates
-///   `SIGTERM` → `SIGKILL` after 5 s) and reports `code = -1`, where Node
-///   collapses the missing exit code to `0`; a killed run must never look
-///   like a success to `if (code !== 0)` callers.
+/// Divergences from upstream, recorded in `docs/EXTENSIONS.md`:
+///
+/// * a timeout or a cancel kills the child with `SIGKILL` (upstream
+///   escalates `SIGTERM` → `SIGKILL` after 5 s) and reports `code = -1`,
+///   where Node collapses the missing exit code to `0`; a killed run must
+///   never look like a success to `if (code !== 0)` callers.
 /// * a spawn failure (`ENOENT`) puts the OS error into `stderr` instead of
 ///   dropping it, with `code = 1` like upstream.
-async fn run_child(command: &str, request: &ExecRequest) -> ExecOutcome {
+async fn run_child(
+    command: &str,
+    request: &ExecRequest,
+    slot: &ExecSlot,
+    limit: Option<Duration>,
+) -> ExecOutcome {
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(&request.args)
         .stdin(Stdio::null())
@@ -1142,6 +1389,7 @@ async fn run_child(command: &str, request: &ExecRequest) -> ExecOutcome {
     if let Some(cwd) = request.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
         cmd.current_dir(cwd);
     }
+    let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -1160,19 +1408,27 @@ async fn run_child(command: &str, request: &ExecRequest) -> ExecOutcome {
     let stdout_task = tokio::spawn(read_pipe(child.stdout.take()));
     let stderr_task = tokio::spawn(read_pipe(child.stderr.take()));
 
-    let limit = request
-        .timeout
-        .filter(|ms| *ms > 0)
-        .map(Duration::from_millis);
-    let (status, killed) = match limit {
-        Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
-            Ok(status) => (status.ok(), false),
-            Err(_elapsed) => {
-                let _ = child.start_kill();
-                (child.wait().await.ok(), true)
-            }
-        },
-        None => (child.wait().await.ok(), false),
+    let mut killed = false;
+    let mut kill_sent = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(_) => break None,
+        }
+        let cancelled = slot.cancel.load(Ordering::Relaxed);
+        let expired = limit.is_some_and(|limit| started.elapsed() >= limit);
+        if !kill_sent && (cancelled || expired) {
+            killed = true;
+            kill_sent = true;
+            let _ = child.start_kill();
+        }
+        // 5 ms poll keeps the loop cheap; the `Notify` makes a cancel
+        // immediate instead of waiting for the next tick.
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            () = slot.notify.notified() => {}
+        }
     };
 
     ExecOutcome {
@@ -2137,10 +2393,24 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     let select_function = Function::new(ctx.clone(), Async(select_fn))?;
     globals.set("host_ui_select", select_function)?;
 
+    // host_exec_cancel(id) — cancel a running `pi.exec`. The shim calls
+    // this when the extension's `options.signal` fires; the host kills the
+    // child and `host_exec` resolves with `killed: true`.
+    let cancel_bridge = inner.execs.clone();
+    let cancel_fn = Func::from(move |id: u64| -> rquickjs_core::Result<()> {
+        cancel_bridge.cancel(id);
+        Ok(())
+    });
+    globals.set("host_exec_cancel", cancel_fn)?;
+
     // host_exec(command, argsJson) -> Promise<string> — the `pi.exec`
     // bridge. Resolves with the JSON `ExecResult`
     // (`{stdout, stderr, code, killed}`); never rejects, like upstream.
-    let exec_fn = |command: String, args_json: String| host_exec_impl(command, args_json);
+    let exec_bridge = inner.execs.clone();
+    let exec_fn = move |command: String, args_json: String| {
+        let bridge = exec_bridge.clone();
+        async move { host_exec_impl(&bridge, command, args_json).await }
+    };
     let exec_function = Function::new(ctx.clone(), Async(exec_fn))?;
     globals.set("host_exec", exec_function)?;
 
