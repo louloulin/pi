@@ -3484,3 +3484,89 @@ stderr 与退出信号（本轮已经给 `print_mode.rs` 补了）。
 ### Push status
 
 `feature/pi.rs`，commit 见本轮 push（Stage 21 代码 + 本节状态文档）。
+
+## LUM-1081 round — Stage 22：资源层收口（prompt templates / skills ignore / 扩展 prompt snippet）
+
+Stage 21（LUM-1078）把系统提示 / 项目上下文 / skills 注入落地后，资源层还剩三个缺口
+（见上一节的「已知限制」）。本轮按 LUM-1080 的范围把这三点补齐，仍不引入新依赖。
+
+### 1. prompt templates（`--prompt-template` / `--no-prompt-templates` / `-np`）
+
+- 新文件 `pi-rust/crates/pi-coding-agent/src/prompt_templates.rs`：`PromptTemplate`、
+  `PromptTemplateSource`（`User` / `Project` / `Path`）、`parse_command_args`、
+  `substitute_args`、`load_prompt_templates`、`find_prompt_template`、
+  `expand_prompt_template`，逐条对齐 `packages/coding-agent/src/core/prompt-templates.ts`。
+  参数替换覆盖 `${1}` / `${@}` / `$1` / `$@` / `$ARGUMENTS` / `${ARGUMENTS:-默认值}` /
+  `${@:-默认值}` / `${@:1}` / `${@:1:2}`，正则用 `OnceLock` 只编译一次。
+- frontmatter 复用 `src/frontmatter.rs`（不引入 YAML 依赖）。发现顺序与上游一致：
+  `~/.pi/agent/prompts` → `<cwd>/.pi/prompts` → 显式 `--prompt-template <PATH>`（可重复）；
+  同名首个生效，后续记为 collision diagnostic。
+- CLI：`src/cli.rs:79` / `:84` 新增两个 flag；`-np` 是 TS 的多字符短 flag，clap 无法表达，
+  故加 `normalize_arg`（`src/cli.rs:135`）在 `parse_from` 之前把 `-np` 改写成
+  `--no-prompt-templates`，`main.rs` 改用 `Cli::try_parse_with_aliases()`。
+- 三个入口都生效：`main.rs` 打出 diagnostics 后，print 用
+  `expand_prompt_template(&expanded.text, …)`；interactive 在
+  `StepOutcome::Submitted` 分支**先查模板表再落内置 slash 命令**
+  （`src/interactive.rs`）；rpc 在 `handle_prompt` 里展开（`src/rpc/server.rs`）。
+- `--no-prompt-templates` 只关闭默认目录发现，显式 `--prompt-template` 仍然生效
+  （与上游 `resource-loader.ts` 对 `noPromptTemplates` 的处理一致）。
+
+### 2. skills 的 ignore 过滤（`git check-ignore`）
+
+- `src/skills.rs:226` 起：`load_skills_from_dir` 先用 `collect_skill_candidates`
+  （同一套结构剪枝：`.` 前缀、`node_modules`、「目录含 `SKILL.md` 即停止下探」）列出整棵
+  候选树，再由 `git_ignored_paths`（`src/skills.rs:282`）**一次**
+  `git -C <root> check-ignore --stdin -z` 批量判定，然后才走加载遍历。
+- 失败即「不忽略」：`git` 缺失、不在 work tree（exit 128）、无匹配（exit 1）、读写异常
+  一律返回空集合，绝不因此报错或丢 skill。
+- **取舍**：上游用的是 npm `ignore` 包（自己读 `.gitignore` / `.ignore` / `.fdignore`），
+  Rust 侧走 git 子进程。两点故意的不一致：git 会额外读 `.git/info/exclude`、
+  `core.excludesFile` 与索引；但不读 `.ignore` / `.fdignore`。选择 git 子进程是因为
+  LUM-1080 明确「不要引入新依赖」，而 `ignore` crate 会连带拉入 `globset` / `crossbeam` 等
+  一串依赖；自写 gitignore 匹配器则容易在 `**` / 否定 / 目录专属规则上出微妙的错。
+
+### 3. 扩展工具的 prompt snippet
+
+- `runtime/pi-ext-shim.mjs`：`registerTool` 现在捕获 `promptSnippet`（字符串）与
+  `promptGuidelines`（字符串数组，非字符串项丢弃），并新增
+  `_pi_registered_tool_prompts()` 返回 `{tools:[{name,snippet,guidelines}]}`。
+- `pi-extensions/src/host.rs:149` 新增 `RegisteredToolPrompt`，
+  `:714` 新增 `JsExtensionHost::registered_tool_prompts()`；
+  `pi-coding-agent/src/extensions/wiring.rs:115` 在 `ExtensionRuntime` 上缓存并暴露
+  `tool_prompts()`（加载时读一次，之后同步访问）。
+- 提示词合并放在 `resource_loader::LoadedResources::build_system_prompt_with_extension_tools`
+  （`src/resource_loader.rs:100`）：内置工具在前、扩展工具在后，有非空 `promptSnippet`
+  的才进 `Available tools:`，`promptGuidelines` 追加到指南段。**没有改动**
+  `pi-protocol::ToolDefinition`——加字段会波及 15 处结构体字面量（含 LUM-1079 的
+  `pi-ai/src/providers/*`），刻意避开以免制造合并冲突。
+- `main.rs` 因此把 `build_cli_system_prompt` 的调用从「三模式统一算一次」改成各模式
+  在 `load_extensions` 之后调用 `build_system_prompt_for(&cli, runtime.tool_prompts())`，
+  这样扩展贡献才能进提示词。
+
+### 验证
+
+```
+$ cargo clippy -p pi-extensions -p pi-coding-agent --all-targets -- -D warnings  # 0 warnings
+$ cargo test   -p pi-extensions         # 27 passed（host 14 为新增 1 个）
+$ cargo test   -p pi-coding-agent       # 169 lib + 各集成 target 全绿
+```
+
+- lib 测试 151（Stage 21）→ **169**：prompt templates 9 个、`parse_frontmatter` 对齐 1 个、
+  CLI 别名 1 个、resource loader 3 个、skills gitignore 3 个、扩展 prompt 捕获 1 个等。
+- 新增集成用例 `tests/rpc.rs::prompt_template_expands_slash_invocations`：写一个临时
+  `.md` 模板，`pi --rpc --prompt-template <path>` 发 `/greet world`，断言 `getState`
+  里出现展开后的 `hello-template:world` 且原始 `/greet world` 不泄漏。
+- 本轮两次踩到文档已记录的子进程用例抖动：`tests/rpc.rs::rpc_flag_without_stdin_exits_zero`
+  与 `tests/print_mode.rs::sigint_or_clean_exit` 各挂一次，单独重跑即绿（高负载抖动）。
+
+### 仍未做（与上游的刻意差异，另行立项）
+
+- `/trust` + 项目本地 `.pi/SYSTEM.md`、`.wasm` 扩展宿主、会话压缩；
+- 扩展 `resources_discover` 钩子：扩展工具现在能进提示词了，但扩展还不能注入
+  skills / context files / prompt templates；
+- `interactive` 模式的模板展开只有单测级覆盖（`find_prompt_template` 分发路径），
+  没有 TUI 端到端脚本。
+
+### Push status
+
+`feature/pi.rs`，commit 见本轮 push（Stage 22 代码 + 本节状态文档）。
