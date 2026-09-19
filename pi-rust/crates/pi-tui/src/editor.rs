@@ -5,11 +5,14 @@
 //! * Plain character keys append to the buffer at the cursor.
 //! * `Backspace` deletes the character before the cursor.
 //! * `Delete` deletes the character at the cursor.
-//! * `Left` / `Right` move the cursor by one grapheme; `Home` / `End`
-//!   jump to the start / end. `Alt+B` / `Alt+F` (also `Alt+Left` /
-//!   `Alt+Right` and `Ctrl+Left` / `Ctrl+Right`) move by one word
-//!   (`tui.editor.cursorWordLeft` / `cursorWordRight`) using the
-//!   boundaries from [`crate::word_navigation`].
+//! * `Left` / `Right` move the cursor by one grapheme, with `Ctrl+B` /
+//!   `Ctrl+F` as the emacs aliases (`tui.editor.cursorLeft` /
+//!   `cursorRight` default to `["left", "ctrl+b"]` /
+//!   `["right", "ctrl+f"]`); `Home` / `End` jump to the start / end.
+//!   `Alt+B` / `Alt+F` (also `Alt+Left` / `Alt+Right` and `Ctrl+Left` /
+//!   `Ctrl+Right`) move by one word (`tui.editor.cursorWordLeft` /
+//!   `cursorWordRight`) using the boundaries from
+//!   [`crate::word_navigation`].
 //! * `Up` / `Down` navigate the prompt history (most recent first). The
 //!   first `Up` saves the current draft so `Down` past the bottom of
 //!   the history restores it.
@@ -603,6 +606,12 @@ impl Editor {
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') => return self.kill_to_line_start(),
                 KeyCode::Char('a') | KeyCode::Char('A') => return self.move_home(),
+                // `tui.editor.cursorLeft` / `cursorRight` default to
+                // `["left", "ctrl+b"]` / `["right", "ctrl+f"]`
+                // (`packages/tui/src/keybindings.ts:82`), so the emacs
+                // aliases move one character, not one word.
+                KeyCode::Char('b') | KeyCode::Char('B') => return self.move_left(),
+                KeyCode::Char('f') | KeyCode::Char('F') => return self.move_right(),
                 KeyCode::Char('e') | KeyCode::Char('E') => return self.move_end(),
                 KeyCode::Char('k') | KeyCode::Char('K') => return self.kill_to_line_end(),
                 // `tui.editor.deleteWordBackward`.
@@ -853,6 +862,42 @@ mod tests {
         assert_eq!(ed.cursor(), 0);
         ed.move_end();
         assert_eq!(ed.cursor(), 5);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_move_one_char() {
+        let mut ed = Editor::new();
+        ed.insert_str("hello");
+        // `Ctrl+B` / `Ctrl+F` are the emacs aliases of `Left` / `Right`
+        // (`tui.editor.cursorLeft` / `cursorRight`).
+        assert_eq!(ed.handle_key(ctrl('b')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 4);
+        // A one-character move, not the word move `Alt+B` performs.
+        assert_eq!(ed.handle_key(ctrl('f')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 5);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_are_noops_at_the_edges() {
+        let mut ed = Editor::new();
+        ed.insert_str("ab");
+        ed.move_home();
+        assert_eq!(ed.handle_key(ctrl('b')), EditorAction::None);
+        assert_eq!(ed.cursor(), 0);
+        ed.move_end();
+        assert_eq!(ed.handle_key(ctrl('f')), EditorAction::None);
+        assert_eq!(ed.cursor(), 2);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_step_over_a_multibyte_char() {
+        let mut ed = Editor::new();
+        ed.insert_str("é");
+        ed.move_end();
+        assert_eq!(ed.handle_key(ctrl('b')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), 0);
+        assert_eq!(ed.handle_key(ctrl('f')), EditorAction::Changed);
+        assert_eq!(ed.cursor(), "é".len());
     }
 
     #[test]
