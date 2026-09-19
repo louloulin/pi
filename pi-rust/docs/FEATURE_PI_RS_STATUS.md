@@ -7921,3 +7921,18 @@ setPrompt, getPrompt, prompt, close, on/once/off, Symbol.asyncIterator}`。
 
 并发建议维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
 `docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写（本轮 `host.rs` 零改动，未占用）。
+
+**补记（推送后回填真实哈希）：**
+
+- `git merge-tree --write-tree ffe2a68cf work/lum-1129` → tree `2d0ce08aef`，与 `work/lum-1129` 的 tree
+  **逐字节一致**（零冲突）。开工时先合入的 `origin/feature/pi.rs`（合并提交 `7bc482efa`，含 LUM-1127 的
+  `f9603e753` + docs 补记 `ffe2a68cf`）已经把上游整条链带进工作分支，因此这次合并**没有内容要合**。
+- 推送：`git push origin work/lum-1129:refs/heads/feature/pi.rs` → **快进** `ffe2a68cf..09bb2cb80`
+  （工作分支已包含 `ffe2a68cf`，再套一层空合并只会留合并债——与 LUM-1126/LUM-1127 的 docs 推送同一处理），
+  同时推送新分支 `work/lum-1129` @ `09bb2cb80`。
+- `git diff --numstat ffe2a68cf 09bb2cb80`（本轮全部改动，5 个文件、+1290 / −92）；
+  **`crates/pi-extensions/src/host.rs` 不在其中**（第四节的理由）：
+  `runtime/pi-ext-shim.mjs` +524 / −80（含 `Emitter` 提层的搬移行）、`tests/node_module_readline.rs` +498、
+  `docs/NODE_BUILTINS.md` +75 / −6、`tests/node_builtins.rs` +32 / −6、本节文档 +161。
+- 推送前复查 `origin/feature/pi.rs` 仍为 `ffe2a68cf`（LUM-1127 已合入、LUM-1128 的鼠标区域派发尚未推送），
+  因此这次推送**没有覆盖任何在途工作**；Stage 35 只写 `pi-tui`，与本轮文件零重叠。
