@@ -79,6 +79,10 @@ chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.3", features = ["serde"] }
 parking_lot = "=0.12"
 walkdir = "2.5"
+# Regex matching — required by the Stage 9 `grep` tool. `regex-automata`
+# and `regex-syntax` are already present transitively via `tracing-subscriber`,
+# so adding the top-level crate is essentially free.
+regex = "1"
 notify = "6.1"
 dirs = "5.0"
 which = "6.0"
