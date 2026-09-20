@@ -254,3 +254,26 @@ fn missing_and_malformed_sessions_keep_the_upstream_error_text() {
         )
     );
 }
+
+#[test]
+fn exporting_never_rewrites_the_input_session_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // No trailing newline: upstream's loader appends one while reading. The
+    // exporter must leave the bytes it was asked to export alone.
+    let body = SESSION_JSONL.trim_end_matches('\n');
+    let input = write_session(dir.path(), "no-trailing-newline.jsonl", body);
+    let output = dir.path().join("out.html");
+    export_from_file(&input, Some(&output)).expect("export");
+    assert_eq!(
+        std::fs::read_to_string(&input).expect("read input"),
+        body,
+        "exporter modified the input session file"
+    );
+
+    // Upstream would rewrite a zero-byte file with a fresh header; we reject
+    // it (documented divergence) and leave it untouched.
+    let empty = write_session(dir.path(), "empty.jsonl", "");
+    assert!(export_from_file(&empty, None).is_err());
+    assert!(std::fs::read(&empty).expect("read empty").is_empty());
+}
