@@ -17,6 +17,20 @@ pub enum SessionError {
     #[error("session database is corrupt: {0}")]
     Corrupt(String),
 
+    /// The session file uses the pre-Stage-55 Rust layout, which the
+    /// writer no longer appends to. The file is still readable; convert
+    /// it with `pi session migrate <path>` (or
+    /// [`crate::migrate::migrate_file`]) before writing.
+    #[error(
+        "session database {0} uses the Rust legacy layout; run `pi session migrate <path>` to convert it to the upstream v4 format"
+    )]
+    LegacyLayout(PathBuf),
+
+    /// The requested migration destination already exists; the migrate
+    /// helpers never overwrite an existing file.
+    #[error("refusing to overwrite existing file: {0}")]
+    AlreadyExists(PathBuf),
+
     /// I/O error (open / read / write / rename).
     #[error("session I/O error: {0}")]
     Io(#[from] io::Error),
@@ -33,8 +47,9 @@ pub enum SessionError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Migration from a JSONL session file failed; the original JSONL is
-    /// preserved untouched on disk.
+    /// Migration from a JSONL session file — or from a Rust legacy
+    /// database — failed; the original file is preserved untouched on
+    /// disk.
     #[error("migration error: {0}")]
     Migration(String),
 

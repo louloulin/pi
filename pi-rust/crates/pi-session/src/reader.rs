@@ -3,9 +3,10 @@
 //! [`SessionReader::open`] probes the file's structure ([`SchemaLayout`])
 //! and then reads either on-disk layout:
 //!
-//! * [`SchemaLayout::RustLegacy`] — the narrow layout written by this
-//!   crate's [`SessionWriter`](crate::SessionWriter): `entries.payload` is
-//!   a zstd BLOB holding a serialized [`SessionEntry`](pi_protocol::SessionEntry).
+//! * [`SchemaLayout::RustLegacy`] — the narrow Stage 5 layout this
+//!   crate used to write: `entries.payload` is a zstd BLOB holding a
+//!   serialized [`SessionEntry`](pi_protocol::SessionEntry). Read-only as
+//!   of Stage 55 (convert with `pi session migrate`).
 //! * [`SchemaLayout::UpstreamV4`] — the upstream TS
 //!   `packages/session-backends/sqlite-node` format (AgentHarness storage
 //!   format 4 / `storageVersion 1`): `entries.payload` is plain JSON text
@@ -14,10 +15,11 @@
 //!   [`SessionEntry`](pi_protocol::SessionEntry) here.
 //!
 //! The two layouts share nothing but the file extension — see
-//! [`crate::schema`] for the column-by-column comparison. Read support
-//! for upstream files is this stage's deliverable; **writing** upstream
-//! files is a later slice, so [`SessionWriter`](crate::SessionWriter)
-//! still emits the Rust legacy layout.
+//! [`crate::schema`] for the column-by-column comparison. Since Stage 55
+//! [`SessionWriter`](crate::SessionWriter) writes the upstream layout and
+//! refuses to append to a Rust legacy file
+//! ([`SessionError::LegacyLayout`](crate::SessionError::LegacyLayout));
+//! the reader keeps both paths so legacy files stay readable.
 //!
 //! # Upstream mapping
 //!

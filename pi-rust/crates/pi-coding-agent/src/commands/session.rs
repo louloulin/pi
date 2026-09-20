@@ -1,21 +1,29 @@
 //! `pi session` subcommand handlers.
 //!
-//! Stage 5 introduces the SQLite-backed `pi-session` crate; the binary
-//! still ships a JSONL fallback for users who want to migrate Stage 4
-//! sessions. The handlers in this module wire the binary's CLI flags to
-//! the [`pi_session`] API and print machine-readable output (one JSON
-//! object per line) on stdout.
+//! Stage 5 introduced the SQLite-backed `pi-session` crate and this
+//! module wires the binary's CLI flags to the [`pi_session`] API, printing
+//! machine-readable output (one JSON object per line) on stdout.
+//!
+//! `pi session migrate` accepts both inputs: a Stage 4 JSONL file and a
+//! pre-Stage-55 **Rust legacy** SQLite database (detected from the
+//! `SQLite format 3` magic). A legacy database is converted to the
+//! upstream v4 layout without modifying the original; a JSONL file is
+//! replayed into a fresh v4 database. In both cases the source stays on
+//! disk.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use pi_session::{
-    default_destination, export_jsonl, migrate_jsonl, render_jsonl, ExportReport, MigrationReport,
-    SessionError, SessionReader,
+    default_destination, export_jsonl, migrate_file, migrate_jsonl, render_jsonl, ExportReport,
+    FileMigrationReport, MigrationReport, SessionError, SessionReader,
 };
 
 use crate::cli::SessionCommand;
+
+/// First 16 bytes of every SQLite database file.
+const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
 /// Run a `pi session ...` subcommand. Returns 0 on success, non-zero on
 /// error.
@@ -122,7 +130,64 @@ fn export(database: &Path, session_id: &str, output: Option<&Path>) -> anyhow::R
     Ok(())
 }
 
-fn migrate(jsonl_path: &Path, to: Option<&Path>) -> anyhow::Result<()> {
+fn migrate(source: &Path, to: Option<&Path>) -> anyhow::Result<()> {
+    if source.exists() && is_sqlite_file(source)? {
+        return migrate_sqlite_layout(source, to);
+    }
+    migrate_jsonl_command(source, to)
+}
+
+/// True when the file starts with the SQLite magic header.
+fn is_sqlite_file(path: &Path) -> anyhow::Result<bool> {
+    use std::io::Read as _;
+
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut magic = [0u8; 16];
+    let read = file.read(&mut magic).unwrap_or(0);
+    Ok(read >= SQLITE_MAGIC.len() && &magic[..SQLITE_MAGIC.len()] == SQLITE_MAGIC)
+}
+
+/// Convert a Rust legacy SQLite database into the upstream v4 layout.
+/// The source is never modified; the default destination is a sibling
+/// `<stem>.upstream.sqlite`.
+fn migrate_sqlite_layout(source: &Path, to: Option<&Path>) -> anyhow::Result<()> {
+    let report: FileMigrationReport = match migrate_file(source, to) {
+        Ok(report) => report,
+        Err(SessionError::NotFound(path)) => {
+            anyhow::bail!("session file not found: {}", path.display());
+        }
+        Err(SessionError::AlreadyExists(path)) => {
+            anyhow::bail!(
+                "destination already exists, refusing to overwrite: {}",
+                path.display()
+            );
+        }
+        Err(other) => {
+            anyhow::bail!("session migration failed; original preserved: {other}");
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    writeln!(
+        out,
+        "{}",
+        serde_json::json!({
+            "kind": "sqlite-layout",
+            "source": report.source.display().to_string(),
+            "destination": report.destination.display().to_string(),
+            "sessions_migrated": report.sessions_migrated,
+            "entries_migrated": report.entries_migrated,
+            "layout_before": format!("{:?}", report.layout_before),
+            "layout_after": format!("{:?}", report.layout_after),
+            "already_upstream": report.already_upstream,
+            "source_preserved": report.source_preserved,
+        })
+    )?;
+    Ok(())
+}
+
+fn migrate_jsonl_command(jsonl_path: &Path, to: Option<&Path>) -> anyhow::Result<()> {
     let destination = match to {
         Some(path) => path.to_path_buf(),
         None => default_destination(jsonl_path),
@@ -146,6 +211,7 @@ fn migrate(jsonl_path: &Path, to: Option<&Path>) -> anyhow::Result<()> {
         out,
         "{}",
         serde_json::json!({
+            "kind": "jsonl",
             "source": report.source.display().to_string(),
             "destination": report.destination.display().to_string(),
             "entries_migrated": report.entries_migrated,

@@ -8,28 +8,35 @@
 //! different tables and different payload encodings.
 //!
 //! | | Upstream `session-backends/sqlite-node` (AgentHarness storage
-//! format 4 / `storageVersion 1`) | `pi-session` (this crate) |
+//! format 4 / `storageVersion 1`) | `pi-session` Rust legacy |
 //! | --- | --- | --- |
 //! | session row | `sessions(id, created_at, parent_session_id, storage_version, metadata, message_count, usage_payload, next_seq)` | `sessions(id, created_at, parent_session, cwd, version, metadata)` |
 //! | entry row | `entries(session_id, id, parent_id, seq, type, custom_type, timestamp, payload TEXT)`, PK `(session_id, id)` | `entries(session_id, seq, parent_seq, entry_id, parent_entry_id, type, timestamp, payload BLOB)`, PK `(session_id, seq)` |
 //! | payload | plain JSON text (`entries.ts` `JSON.parse(row.payload)`) | zstd (level 3) compressed JSON BLOB |
-//! | other tables | `scalar_values`, `list_values`, `usage_ledger`, `branch_entries`, `branch_meta` + 3 triggers | `meta(key, value)` |
+//! | other tables | `scalar_values`, `list_values`, `usage_ledger`, `branch_entries`, `branch_meta` + 2 triggers | `meta(key, value)` |
 //! | version marker | `sessions.storage_version = 1` column (does **not** write `PRAGMA user_version`) | `PRAGMA user_version = 1` |
 //!
-//! [`detect_layout`] probes the *structure* of the `sessions` / `entries`
-//! tables — never `PRAGMA user_version`, which the upstream writer does
-//! not set — and the reader dispatches on the result. Relying on
-//! `user_version` alone would classify every upstream file as version 0.
+//! Stage 55 moved the write path onto the upstream layout: [`open_and_init`]
+//! now creates the upstream v4 tables from [`UPSTREAM_INITIAL_SQL`] (a
+//! verbatim copy of
+//! `packages/session-backends/sqlite-node/src/sqlite/migrations/001_initial.sql`),
+//! and [`detect_layout`] dispatches on the *structure* of the
+//! `sessions` / `entries` tables — never `PRAGMA user_version`, which the
+//! upstream writer does not set. Relying on `user_version` alone would
+//! classify every upstream file as version 0.
 //!
-//! # Rust layout versioning
+//! # Rust legacy layout
 //!
 //! The narrow Rust layout ("Rust legacy" here, because it predates
-//! upstream-format support) is versioned via `PRAGMA user_version`.
-//! Stage 5 shipped version 1; future stages can add `v2_initial.sql`
-//! migrations without breaking older readers (an older reader on a newer
-//! file emits [`SessionError::Corrupt`](crate::SessionError::Corrupt)
-//! with the observed `user_version`). Upstream files carry their version
-//! in `sessions.storage_version` instead.
+//! upstream-format support) is **read-only** as of Stage 55: existing
+//! files still open through [`SessionReader`](crate::SessionReader), but
+//! [`SessionWriter`](crate::SessionWriter) refuses to append to one and
+//! returns [`SessionError::LegacyLayout`](crate::SessionError::LegacyLayout).
+//! Convert them with `pi session migrate <path>` or
+//! [`crate::migrate::migrate_file`]. The legacy DDL stays in
+//! [`INITIAL_SQL`] so the migration fixtures can reproduce the old shape;
+//! it is still versioned via `PRAGMA user_version` exactly as it was in
+//! Stage 5.
 
 use rusqlite::Connection;
 
@@ -41,6 +48,11 @@ pub const SCHEMA_VERSION: i64 = 1;
 
 /// DDL applied to a fresh database. Idempotent — safe to run on every
 /// `open`.
+///
+/// This is the **Rust legacy** shape. As of Stage 55 the writer defaults
+/// to [`UPSTREAM_INITIAL_SQL`]; this constant is kept so the reader
+/// fixtures and the `pi session migrate` tests can reproduce a legacy
+/// file, and so [`detect_layout`] has a second shape to recognise.
 pub const INITIAL_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     id              TEXT PRIMARY KEY,
@@ -76,6 +88,137 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) WITHOUT ROWID;
+"#;
+
+/// DDL of the upstream TS `packages/session-backends/sqlite-node`
+/// session backend — AgentHarness storage format 4 / `storageVersion 1`.
+///
+/// Copied **verbatim** (byte-for-byte, tab indentation and comments
+/// included) from
+/// `packages/session-backends/sqlite-node/src/sqlite/migrations/001_initial.sql`.
+/// `pi-session`'s `tests/write_path.rs` re-reads that file and fails if
+/// the two drift apart.
+pub const UPSTREAM_INITIAL_SQL: &str = r#"-- AgentHarness storage format 4 / storageVersion 1.
+-- A SQLite database file is a session container. The current default repo
+-- placement still creates one file per session, but the schema supports any
+-- number of sessions per file by scoping every durable row with session_id.
+-- Authoritative durable state is entries + scalar_values + list_values +
+-- usage_ledger; branch_* and stats columns on sessions are maintained
+-- projections/caches.
+
+CREATE TABLE IF NOT EXISTS sessions (
+	id TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL,
+	parent_session_id TEXT,
+	storage_version INTEGER NOT NULL,
+	metadata TEXT,
+	message_count INTEGER NOT NULL,
+	usage_payload TEXT NOT NULL,
+	next_seq INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS entries (
+	session_id TEXT NOT NULL,
+	id TEXT NOT NULL,
+	parent_id TEXT,
+	seq INTEGER NOT NULL,
+	type TEXT NOT NULL,
+	custom_type TEXT,
+	timestamp INTEGER NOT NULL,
+	payload TEXT NOT NULL,
+	PRIMARY KEY (session_id, id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS ix_entry_parent ON entries(session_id, parent_id);
+CREATE INDEX IF NOT EXISTS ix_entry_seq ON entries(session_id, seq, type);
+
+CREATE TABLE IF NOT EXISTS scalar_values (
+	session_id TEXT NOT NULL,
+	namespace TEXT NOT NULL,
+	key TEXT NOT NULL,
+	seq INTEGER NOT NULL,
+	value TEXT NOT NULL,
+	PRIMARY KEY (session_id, namespace, key)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS list_values (
+	session_id TEXT NOT NULL,
+	namespace TEXT NOT NULL,
+	key TEXT NOT NULL,
+	seq INTEGER NOT NULL,
+	value TEXT NOT NULL,
+	PRIMARY KEY (session_id, namespace, key, seq)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS usage_ledger (
+	session_id TEXT NOT NULL,
+	id TEXT NOT NULL,
+	seq INTEGER NOT NULL,
+	entry_id TEXT,
+	adjustment INTEGER NOT NULL,
+	usage TEXT NOT NULL,
+	details TEXT,
+	PRIMARY KEY (session_id, id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS ix_usage_seq ON usage_ledger(session_id, seq);
+
+-- Storage-level integrity that spans rows/tables. Primary keys enforce
+-- same-table duplicate ids; these triggers enforce the shared entry/usage id
+-- namespace and ordered parent insertion without a TypeScript preflight pass.
+CREATE TRIGGER IF NOT EXISTS trg_entries_validate
+BEFORE INSERT ON entries
+BEGIN
+	SELECT RAISE(ABORT, 'missing parent entry')
+	WHERE NEW.parent_id IS NOT NULL
+		AND NOT EXISTS (
+			SELECT 1 FROM entries WHERE session_id = NEW.session_id AND id = NEW.parent_id
+		);
+
+	SELECT RAISE(ABORT, 'duplicate entry or usage id')
+	WHERE EXISTS (
+		SELECT 1 FROM usage_ledger WHERE session_id = NEW.session_id AND id = NEW.id
+	);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_usage_ledger_validate
+BEFORE INSERT ON usage_ledger
+BEGIN
+	SELECT RAISE(ABORT, 'duplicate entry or usage id')
+	WHERE EXISTS (
+		SELECT 1 FROM entries WHERE session_id = NEW.session_id AND id = NEW.id
+	);
+END;
+
+-- Private branch index. Not values/lists; no equivalent in the other backends.
+CREATE TABLE IF NOT EXISTS branch_entries (
+	session_id TEXT NOT NULL,
+	branch_id TEXT NOT NULL,
+	entry_id TEXT NOT NULL,
+	entry_seq INTEGER NOT NULL,
+	entry_type TEXT NOT NULL,
+	PRIMARY KEY (session_id, branch_id, entry_id)
+) WITHOUT ROWID;
+
+-- Ordered scans. entry_seq must follow session_id, branch_id directly or ORDER
+-- BY needs a temp b-tree; entry_id and entry_type trail so the index covers
+-- id-only reads.
+CREATE INDEX IF NOT EXISTS ix_be_seq ON branch_entries(session_id, branch_id, entry_seq, entry_id, entry_type);
+-- Type-filtered scans.
+CREATE INDEX IF NOT EXISTS ix_be_type ON branch_entries(session_id, branch_id, entry_type, entry_seq, entry_id);
+CREATE INDEX IF NOT EXISTS ix_be_entry ON branch_entries(session_id, entry_id);
+
+CREATE TABLE IF NOT EXISTS branch_meta (
+	session_id TEXT NOT NULL,
+	branch_id TEXT NOT NULL,
+	tip_entry_id TEXT NOT NULL,
+	tip_seq INTEGER NOT NULL,
+	base_branch_id TEXT,
+	base_seq INTEGER,
+	PRIMARY KEY (session_id, branch_id)
+) WITHOUT ROWID;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ix_bm_tip ON branch_meta(session_id, tip_entry_id);
 "#;
 
 /// On-disk layout of a session database.
@@ -199,39 +342,36 @@ pub fn detect_layout(conn: &Connection) -> Result<SchemaLayout> {
     }
 }
 
-/// Open or create a database at `path` and run `INITIAL_SQL`.
+/// Open or create a database at `path`, returning the connection and the
+/// detected [`SchemaLayout`].
 ///
-/// The returned connection has `PRAGMA user_version = SCHEMA_VERSION`
-/// applied when the database was previously empty.
-///
-/// An existing upstream-format file is left untouched: `INITIAL_SQL`'s
-/// `CREATE TABLE IF NOT EXISTS` is a no-op there, and stamping
-/// `user_version = 1` onto it would mutate a file the Rust writer does
-/// not own. Writing upstream files lands in a later stage; until then
-/// the guard below keeps `SessionWriter` from corrupting them.
-pub fn open_and_init(path: impl AsRef<std::path::Path>) -> Result<Connection> {
+/// * A fresh (or empty) file gets [`UPSTREAM_INITIAL_SQL`] applied and is
+///   reported as [`SchemaLayout::UpstreamV4`]. No `PRAGMA user_version`
+///   is written — upstream identifies the format by
+///   `sessions.storage_version` instead.
+/// * An existing upstream file is left as-is (the DDL is
+///   `CREATE TABLE IF NOT EXISTS`).
+/// * An existing Rust legacy file is **not** modified — the layout is
+///   probed before any pragma is applied — and yields
+///   [`SessionError::LegacyLayout`](crate::SessionError::LegacyLayout) so
+///   the caller can point at `pi session migrate`.
+pub fn open_and_init(path: impl AsRef<std::path::Path>) -> Result<(Connection, SchemaLayout)> {
+    let path = path.as_ref();
     let conn = Connection::open(path)?;
+    let session_columns = table_columns(&conn, "sessions")?;
+    if session_columns.is_empty() {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.execute_batch(UPSTREAM_INITIAL_SQL)?;
+        return Ok((conn, SchemaLayout::UpstreamV4));
+    }
+    let layout = detect_layout(&conn)?;
+    if layout == SchemaLayout::RustLegacy {
+        return Err(crate::error::SessionError::LegacyLayout(path.to_path_buf()));
+    }
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute_batch(INITIAL_SQL)?;
-
-    // Only stamp the Rust version marker when the `sessions` table is
-    // actually the Rust shape. A fresh file created by INITIAL_SQL above
-    // always is; an upstream file never is.
-    let session_columns = table_columns(&conn, "sessions")?;
-    if !has_all(&session_columns, LEGACY_SESSION_COLUMNS) {
-        return Ok(conn);
-    }
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 0 {
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    } else if version > SCHEMA_VERSION {
-        return Err(crate::error::SessionError::Corrupt(format!(
-            "schema version {version} is newer than the reader ({SCHEMA_VERSION})"
-        )));
-    }
-    Ok(conn)
+    Ok((conn, layout))
 }
 
 /// Open an existing database read-only and detect its layout.
@@ -268,7 +408,10 @@ pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Connection> {
     Ok(open_read_only_with_layout(path)?.0)
 }
 
-/// Stored row matching `SELECT * FROM entries`.
+/// Stored row matching `SELECT * FROM entries` in the **Rust legacy**
+/// layout. Upstream rows are decoded into
+/// [`DecodedEntry`](crate::DecodedEntry) directly and never surface as
+/// an `EntryRow`.
 #[derive(Debug, Clone)]
 pub struct EntryRow {
     /// Session identifier (foreign key into `sessions.id`).
@@ -286,10 +429,13 @@ pub struct EntryRow {
     /// Wall-clock timestamp in milliseconds since the unix epoch.
     pub timestamp: i64,
     /// zstd-compressed JSON payload (see [`crate::writer::ZSTD_LEVEL`]).
+    /// Only ever set for the Rust legacy layout.
     pub payload: Vec<u8>,
 }
 
-/// Stored row matching `SELECT * FROM sessions`.
+/// Stored row matching `SELECT * FROM sessions` in the **Rust legacy**
+/// layout. The upstream `sessions` row has different columns and is
+/// decoded by the reader instead of through this struct.
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     /// Session identifier (primary key).
@@ -335,22 +481,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_and_init_creates_schema() {
+    fn open_and_init_creates_the_upstream_schema() {
         let dir = tempdir();
         let path = dir.join("session.sqlite");
-        let conn = open_and_init(&path).expect("open");
-        let count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name IN ('sessions','entries','meta')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count");
-        assert_eq!(count, 3);
+        let (conn, layout) = open_and_init(&path).expect("open");
+        assert_eq!(layout, SchemaLayout::UpstreamV4);
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .expect("prepare");
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("collect");
+        for expected in [
+            "sessions",
+            "entries",
+            "scalar_values",
+            "list_values",
+            "usage_ledger",
+            "branch_entries",
+            "branch_meta",
+        ] {
+            assert!(tables.iter().any(|t| t == expected), "missing {expected}");
+        }
+        assert!(
+            !tables.iter().any(|t| t == "meta"),
+            "a fresh database must not create the Rust legacy `meta` table"
+        );
+
+        // Upstream identifies the format via `sessions.storage_version`;
+        // the file must not carry a `PRAGMA user_version` marker.
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(version, 0);
+    }
+
+    #[test]
+    fn open_and_init_refuses_legacy_files_without_touching_them() {
+        let dir = tempdir();
+        let path = dir.join("legacy.sqlite");
+        // Build a legacy database the same way Stage 5 did.
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(INITIAL_SQL).expect("ddl");
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .expect("stamp");
+        }
+        let before = std::fs::read(&path).expect("read");
+        let err = open_and_init(&path).expect_err("legacy must be rejected");
+        assert!(
+            matches!(err, crate::error::SessionError::LegacyLayout(_)),
+            "expected LegacyLayout, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            before,
+            "rejecting a legacy file must not modify it"
+        );
     }
 
     #[test]
@@ -386,7 +576,7 @@ mod tests {
     /// Minimal upstream-format DDL: a subset of
     /// `packages/session-backends/sqlite-node/src/sqlite/migrations/001_initial.sql`
     /// (the real file also ships `scalar_values` / `list_values` /
-    /// `usage_ledger` / `branch_*` and three triggers).
+    /// `usage_ledger` / `branch_*` and two triggers).
     const UPSTREAM_TEST_SESSION_DDL: &str = r#"
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
