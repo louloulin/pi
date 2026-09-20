@@ -8,8 +8,8 @@
 //! | [`stdio`] | — | parent-process pipes |
 
 pub mod memory;
-pub(crate) mod stream;
 pub mod stdio;
+pub(crate) mod stream;
 pub mod tcp;
 #[cfg(unix)]
 pub mod unix;

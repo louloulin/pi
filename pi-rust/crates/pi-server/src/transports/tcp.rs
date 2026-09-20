@@ -73,7 +73,9 @@ impl ServerListener for TcpServerListener {
         }
         let listener = tokio::net::TcpListener::bind(self.address)
             .await
-            .map_err(|error| ServerError::internal(format!("TCP listener failed to bind: {error}")))?;
+            .map_err(|error| {
+                ServerError::internal(format!("TCP listener failed to bind: {error}"))
+            })?;
         let local_addr = listener
             .local_addr()
             .map_err(|error| ServerError::internal(error.to_string()))?;

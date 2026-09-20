@@ -111,10 +111,7 @@ async fn handshake_rejects_a_version_mismatch() {
     match answer {
         ServerMessage::HelloError { error } => {
             assert_eq!(error.code, "version");
-            assert_eq!(
-                error.message,
-                "Unsupported protocol version 7; expected 8"
-            );
+            assert_eq!(error.message, "Unsupported protocol version 7; expected 8");
         }
         other => panic!("unexpected answer: {other:?}"),
     }
@@ -136,7 +133,9 @@ async fn first_message_must_be_hello() {
         ))
         .expect("send");
     let answer = client
-        .next_from(0, |message| matches!(message, ServerMessage::HelloError { .. }))
+        .next_from(0, |message| {
+            matches!(message, ServerMessage::HelloError { .. })
+        })
         .await
         .expect("answer");
     match answer {
@@ -155,11 +154,11 @@ async fn hello_may_only_be_sent_once() {
     let client = fixture.connect();
     client.hello(8).await.expect("hello");
     let index = client.messages().len();
-    client
-        .send_message(&ClientMessage::hello(8))
-        .expect("send");
+    client.send_message(&ClientMessage::hello(8)).expect("send");
     let answer = client
-        .next_from(index, |message| matches!(message, ServerMessage::HelloError { .. }))
+        .next_from(index, |message| {
+            matches!(message, ServerMessage::HelloError { .. })
+        })
         .await
         .expect("answer");
     match answer {
@@ -177,7 +176,9 @@ async fn handshake_times_out() {
     let fixture = Fixture::start(Some(30)).await;
     let client = fixture.connect();
     let answer = client
-        .next_from(0, |message| matches!(message, ServerMessage::HelloError { .. }))
+        .next_from(0, |message| {
+            matches!(message, ServerMessage::HelloError { .. })
+        })
         .await
         .expect("answer");
     match answer {
@@ -202,7 +203,12 @@ async fn session_request_round_trip() {
     assert!(attach.ok, "attach failed: {:?}", attach.error);
     client
         .next_from(0, |message| {
-            matches!(message, ServerMessage::Attachment { attachment: Some(_) })
+            matches!(
+                message,
+                ServerMessage::Attachment {
+                    attachment: Some(_)
+                }
+            )
         })
         .await
         .expect("attachment");
@@ -272,9 +278,10 @@ async fn invalid_service_call_maps_to_invalid_request() {
         ))
         .expect("send");
     let response = client
-        .next_from(0, |message| {
-            matches!(message, ServerMessage::Response { id, .. } if id == "req-1")
-        })
+        .next_from(
+            0,
+            |message| matches!(message, ServerMessage::Response { id, .. } if id == "req-1"),
+        )
         .await
         .expect("response");
     match response {
@@ -483,7 +490,10 @@ async fn connection_count_observer_sees_connect_and_disconnect() {
 async fn invalid_server_id_is_rejected() {
     let listener = MemoryListener::new();
     let host = Arc::new(TestServerHost::new());
-    let options = ServerOptions::new("not-a-uuid", vec![Arc::clone(&listener) as Arc<dyn ServerListener>]);
+    let options = ServerOptions::new(
+        "not-a-uuid",
+        vec![Arc::clone(&listener) as Arc<dyn ServerListener>],
+    );
     match Server::new(Arc::clone(&host) as Arc<dyn ServerHost<SessionId>>, options) {
         Ok(_) => panic!("expected an invalid-server-id failure"),
         Err(error) => assert!(error.to_string().contains("canonical lowercase UUIDv4")),
@@ -509,9 +519,10 @@ async fn fragmented_frames_are_reassembled() {
         )
         .expect("send");
     let response = client
-        .next_from(index, |message| {
-            matches!(message, ServerMessage::Response { id, .. } if id == "req-frag")
-        })
+        .next_from(
+            index,
+            |message| matches!(message, ServerMessage::Response { id, .. } if id == "req-frag"),
+        )
         .await
         .expect("response");
     match response {

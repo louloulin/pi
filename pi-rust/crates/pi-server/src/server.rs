@@ -33,7 +33,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use pi_chord::context::{background_context, todo_context, with_abort_signal, AbortSignal, Context};
+use pi_chord::context::{
+    background_context, todo_context, with_abort_signal, AbortSignal, Context,
+};
 use pi_chord::services::{
     decode_service_control_call, parse_service_call, parse_service_subscription_snapshot,
     ServiceCall, ServiceControlCall, ServiceProviderUpdate, ServiceStateEncoder,
@@ -179,10 +181,13 @@ pub struct Server<TMetadata: SessionMetadata> {
 
 impl<TMetadata: SessionMetadata> Server<TMetadata> {
     /// Creates an unstarted server.
-    pub fn new(host: Arc<dyn ServerHost<TMetadata>>, options: ServerOptions) -> Result<Arc<Self>, ServerError> {
-        let max_frame_length = options.max_frame_length.unwrap_or(
-            pi_protocol::rpc::DEFAULT_MAX_FRAME_LENGTH,
-        );
+    pub fn new(
+        host: Arc<dyn ServerHost<TMetadata>>,
+        options: ServerOptions,
+    ) -> Result<Arc<Self>, ServerError> {
+        let max_frame_length = options
+            .max_frame_length
+            .unwrap_or(pi_protocol::rpc::DEFAULT_MAX_FRAME_LENGTH);
         if !pi_protocol::rpc::is_server_id(&options.server_id) {
             return Err(ServerError::internal(
                 "serverId must be a canonical lowercase UUIDv4",
@@ -193,7 +198,9 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
                 "Server maxFrameLength must be an integer between 1 and {MAX_UINT32}"
             )));
         }
-        let handshake_timeout_ms = options.handshake_timeout_ms.unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT_MS);
+        let handshake_timeout_ms = options
+            .handshake_timeout_ms
+            .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT_MS);
         if handshake_timeout_ms == 0 || handshake_timeout_ms > MAX_TIMER_DELAY_MS {
             return Err(ServerError::internal(format!(
                 "Server handshakeTimeoutMs must be an integer between 1 and {MAX_TIMER_DELAY_MS}"
@@ -352,7 +359,10 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
     }
 
     /// Accepts one authorized byte connection.
-    pub fn accept(self: &Arc<Self>, connection: Arc<dyn ByteConnection>) -> Arc<dyn ByteConnectionHandler> {
+    pub fn accept(
+        self: &Arc<Self>,
+        connection: Arc<dyn ByteConnection>,
+    ) -> Arc<dyn ByteConnectionHandler> {
         if self.is_closing() {
             self.spawn(async move {
                 let _ = connection.close(None).await;
@@ -418,11 +428,7 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
     }
 
     /// Sends one protocol message, returning whether it was queued.
-    fn send_message(
-        self: &Arc<Self>,
-        conn: &Arc<Connection>,
-        message: &ServerMessage,
-    ) -> bool {
+    fn send_message(self: &Arc<Self>, conn: &Arc<Connection>, message: &ServerMessage) -> bool {
         if conn.is_terminal() || conn.connection.closed() {
             return false;
         }
@@ -558,9 +564,11 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
         let sink: Arc<dyn AttachmentSink> = {
             let server = Arc::clone(self);
             let conn = Arc::clone(conn);
-            Arc::new(SinkFn(Arc::new(move |attachment: Option<SessionTarget>| {
-                server.send_message(&conn, &ServerMessage::attachment(attachment));
-            })))
+            Arc::new(SinkFn(Arc::new(
+                move |attachment: Option<SessionTarget>| {
+                    server.send_message(&conn, &ServerMessage::attachment(attachment));
+                },
+            )))
         };
         let presentation: Arc<dyn RoutedServerPresentation> = Arc::new(ServerPresentation {
             server: Arc::clone(self),
@@ -662,14 +670,18 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
                 return;
             }
         }
-        if target_session(&envelope.target).is_none() && conn.inner.lock().server_services.is_none() {
+        if target_session(&envelope.target).is_none() && conn.inner.lock().server_services.is_none()
+        {
             self.send_message(
                 &conn,
                 &ServerMessage::response_error(
                     envelope.id.clone(),
                     ProtocolError {
                         code: "invalid_request".to_owned(),
-                        message: format!("Unknown service member {}.{}", call.service_id, call.member),
+                        message: format!(
+                            "Unknown service member {}.{}",
+                            call.service_id, call.member
+                        ),
                     },
                 ),
             );
@@ -703,7 +715,9 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
                     let mut guard = state.lock();
                     if let Some(target) = &subscribing {
                         if subscription_id == target && !guard.ready {
-                            guard.pending.push((subscription_id.to_owned(), update.clone()));
+                            guard
+                                .pending
+                                .push((subscription_id.to_owned(), update.clone()));
                             return Ok(());
                         }
                     }
@@ -731,7 +745,9 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
         .await;
 
         let outcome: RequestOutcome = match joined {
-            Err(error) => Err(RequestFailure::Server(ServerError::internal(error.to_string()))),
+            Err(error) => Err(RequestFailure::Server(ServerError::internal(
+                error.to_string(),
+            ))),
             Ok(result) => result,
         };
         if signal.is_aborted() {
@@ -760,11 +776,17 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
                     }
                 } else {
                     if let Some(ServiceControlCall::Unsubscribe { subscription_id }) = &control {
-                        conn.inner.lock().service_state_encoders.remove(subscription_id);
+                        conn.inner
+                            .lock()
+                            .service_state_encoders
+                            .remove(subscription_id);
                     }
                     result
                 };
-                self.send_message(&conn, &ServerMessage::response_ok(envelope.id.clone(), Some(response)));
+                self.send_message(
+                    &conn,
+                    &ServerMessage::response_ok(envelope.id.clone(), Some(response)),
+                );
                 if subscribing.is_some() {
                     let pending = {
                         let mut guard = state.lock();
@@ -779,13 +801,22 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
             }
             Ok(None) => {
                 if let Some(ServiceControlCall::Unsubscribe { subscription_id }) = &control {
-                    conn.inner.lock().service_state_encoders.remove(subscription_id);
+                    conn.inner
+                        .lock()
+                        .service_state_encoders
+                        .remove(subscription_id);
                 }
-                self.send_message(&conn, &ServerMessage::response_ok(envelope.id.clone(), None));
+                self.send_message(
+                    &conn,
+                    &ServerMessage::response_ok(envelope.id.clone(), None),
+                );
             }
             Err(error) => {
                 if let Some(subscription_id) = &subscribing {
-                    conn.inner.lock().service_state_encoders.remove(subscription_id);
+                    conn.inner
+                        .lock()
+                        .service_state_encoders
+                        .remove(subscription_id);
                 }
                 self.respond_failure(&conn, &envelope.id, &signal, error);
             }
@@ -919,7 +950,10 @@ impl<TMetadata: SessionMetadata> Server<TMetadata> {
         let proceed = {
             let mut inner = conn.inner.lock();
             if inner.disconnected
-                || matches!(inner.stage, ConnectionStage::Closing | ConnectionStage::Closed)
+                || matches!(
+                    inner.stage,
+                    ConnectionStage::Closing | ConnectionStage::Closed
+                )
             {
                 false
             } else {
@@ -1030,16 +1064,23 @@ struct ServerPresentation<TMetadata: SessionMetadata> {
 
 impl<TMetadata: SessionMetadata> RoutedServerPresentation for ServerPresentation<TMetadata> {
     fn attach_session(&self, session_id: &str, context: &Context) -> Result<(), ServerError> {
-        self.server
-            .sessions
-            .attach_client(self.conn.id, session_id, context, Arc::clone(&self.sink))
+        self.server.sessions.attach_client(
+            self.conn.id,
+            session_id,
+            context,
+            Arc::clone(&self.sink),
+        )
     }
 
     fn detach_session(&self, context: &Context) -> Result<(), ServerError> {
         self.server.sessions.detach_client(self.conn.id, context)
     }
 
-    fn prepare_session_removal(&self, session_id: &str, context: &Context) -> Result<(), ServerError> {
+    fn prepare_session_removal(
+        &self,
+        session_id: &str,
+        context: &Context,
+    ) -> Result<(), ServerError> {
         self.server.sessions.remove_session(session_id, context)
     }
 }
@@ -1080,7 +1121,10 @@ impl ByteConnectionHandler for RejectHandler {
     }
 }
 
-async fn write_loop(connection: Arc<dyn ByteConnection>, mut receiver: UnboundedReceiver<Outbound>) {
+async fn write_loop(
+    connection: Arc<dyn ByteConnection>,
+    mut receiver: UnboundedReceiver<Outbound>,
+) {
     while let Some(item) = receiver.recv().await {
         match item {
             Outbound::Message(frame) => {

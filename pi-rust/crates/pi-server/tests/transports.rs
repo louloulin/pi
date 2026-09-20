@@ -54,10 +54,7 @@ where
         }
     }
 
-    async fn next_matching(
-        &mut self,
-        predicate: impl Fn(&ServerMessage) -> bool,
-    ) -> ServerMessage {
+    async fn next_matching(&mut self, predicate: impl Fn(&ServerMessage) -> bool) -> ServerMessage {
         loop {
             if let Some(index) = self.pending.iter().position(&predicate) {
                 return self.pending.remove(index);
@@ -80,12 +77,7 @@ where
         .await
     }
 
-    async fn request(
-        &mut self,
-        id: &str,
-        target: RpcTarget,
-        call: ServiceCall,
-    ) -> ServerMessage {
+    async fn request(&mut self, id: &str, target: RpcTarget, call: ServiceCall) -> ServerMessage {
         self.send(&ClientMessage::request(id, target, call.to_json()))
             .await;
         self.next_matching(|message| {
@@ -95,22 +87,20 @@ where
     }
 }
 
-async fn start_server(listener: Arc<dyn ServerListener>) -> (Arc<TestServerHost>, Arc<Server<SessionId>>) {
+async fn start_server(
+    listener: Arc<dyn ServerListener>,
+) -> (Arc<TestServerHost>, Arc<Server<SessionId>>) {
     let host = Arc::new(TestServerHost::new());
     host.seed("session-1");
     let options = ServerOptions::new(SERVER_ID, vec![listener]);
-    let server = Server::new(Arc::clone(&host) as Arc<dyn ServerHost<SessionId>>, options)
-        .expect("server");
+    let server =
+        Server::new(Arc::clone(&host) as Arc<dyn ServerHost<SessionId>>, options).expect("server");
     server.start().await.expect("start");
     (host, server)
 }
 
 fn attach_call() -> ServiceCall {
-    ServiceCall::new(
-        "pi.session-management",
-        "attach",
-        vec![json!("session-1")],
-    )
+    ServiceCall::new("pi.session-management", "attach", vec![json!("session-1")])
 }
 
 fn server_target() -> RpcTarget {
@@ -143,11 +133,18 @@ async fn tcp_transport_handshakes_and_routes() {
 
     let attachment = client
         .next_matching(|message| {
-            matches!(message, ServerMessage::Attachment { attachment: Some(_) })
+            matches!(
+                message,
+                ServerMessage::Attachment {
+                    attachment: Some(_)
+                }
+            )
         })
         .await;
     let attachment = match attachment {
-        ServerMessage::Attachment { attachment: Some(value) } => value,
+        ServerMessage::Attachment {
+            attachment: Some(value),
+        } => value,
         other => panic!("unexpected message: {other:?}"),
     };
 
@@ -159,7 +156,9 @@ async fn tcp_transport_handshakes_and_routes() {
         )
         .await;
     match response {
-        ServerMessage::Response { ok, result, error, .. } => {
+        ServerMessage::Response {
+            ok, result, error, ..
+        } => {
             assert!(ok, "session request failed: {error:?}");
             assert_eq!(result, Some(json!(true)));
         }

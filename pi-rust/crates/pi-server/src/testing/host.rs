@@ -233,7 +233,10 @@ impl RoutedSessionAttachment for HarnessAttachment {
 struct HarnessHandle(Arc<TestHarness>);
 
 impl RoutedSessionHandle for HarnessHandle {
-    fn attach_client(&self, _context: &Context) -> Result<Arc<dyn RoutedSessionAttachment>, ServerError> {
+    fn attach_client(
+        &self,
+        _context: &Context,
+    ) -> Result<Arc<dyn RoutedSessionAttachment>, ServerError> {
         if let Some(error) = self.0.next_attach_error.lock().take() {
             return Err(error);
         }
@@ -400,7 +403,11 @@ impl ServerHost<SessionId> for TestServerHost {
         Arc::clone(&self.server_services) as Arc<dyn RoutedServerServiceHost>
     }
 
-    fn resolve_session(&self, session_id: &str, _context: &Context) -> Result<SessionId, ServerError> {
+    fn resolve_session(
+        &self,
+        session_id: &str,
+        _context: &Context,
+    ) -> Result<SessionId, ServerError> {
         self.sessions
             .lock()
             .get(session_id)
