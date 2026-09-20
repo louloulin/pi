@@ -12583,3 +12583,131 @@ cargo test -p pi-ai --test images  --offline  #  15 passed
   未触碰 LUM-1153 / LUM-1163 的 target（LUM-1163 的 run 正在写自己的 target）。
 - Git 身份沿用 worktree 级 `multica-agent <agent@multica.local>`；本轮本人只写
   `crates/pi-ai/src/providers/mistral.rs`（2 行补字段）与本文档，其余全部是合并带入。
+
+---
+
+## LUM-1167 round — `pi-ai` Azure OpenAI Responses provider（`azure-openai-responses.ts` 移植 + 38 部署目录）+ 修 HEAD 的 `pi-evals` 编译缺口 + 派发 LUM-1168 / LUM-1169（2 路并发）+ 合并推送 feature/pi.rs
+
+基线 `origin/feature/pi.rs` @ `0745b31bc`（LUM-1163 收尾）。父 issue 无子任务，槽位
+`active_task_count=1`（本人），可用 2 路。
+
+### 一、本轮判断
+
+frontier 第 1 项里「`Api` 枚举中无实现的只剩 bedrock / azure / vertex」三选一。
+vertex 需要 gcloud ADC / service-account JWT，bedrock 需要 SigV4 云凭据，**两者在本环境
+都无法离线验证**；azure 只需要 `api-key`（静态 header），wire 协议与已落地的
+`OpenAiResponsesProvider` 同源（复用 `build_request` + `parse_sse`），**可离线验证**，
+故选 azure 作为本人本轮的垂直切片。
+
+其余两项 frontier 拆成两个文件范围不冲突的子任务并发派发（见第六节）。
+
+### 二、交付：`azure-openai-responses` provider
+
+上游对标 `packages/ai/src/api/azure-openai-responses.ts`（338 行）+ `providers/azure-openai-responses.ts`。
+
+**新增** `crates/pi-ai/src/providers/azure_openai_responses.rs`：
+
+- `AzureOpenAiResponsesProvider { api_key, base_url, api_version, deployment_names, deployment_name }`。
+- 与 OpenAI Responses 的三处差异（其余复用）：
+  1. URL：`{base}/deployments/{deployment}/responses?api-version={version}`；
+  2. 鉴权：`api-key` header（非 `Authorization: Bearer`）；
+  3. wire `model` 字段 = Azure **deployment** 名（显式 override → `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`
+     → catalog model id）。
+- 复用面：`OpenAiResponsesProvider::build_request`（换 `effective.id` = deployment，
+  `stream: true`，`max_output_tokens` 仍走 `MIN_OUTPUT_TOKENS` clamp）与
+  `parse_sse`（`model_id` 传 catalog id，保证返回的 `AssistantMessage.model` 与上游一致）。
+- 配置解析：base URL 取 `AZURE_OPENAI_BASE_URL`，否则 `AZURE_OPENAI_RESOURCE_NAME`
+  展开为 `https://{resource}.openai.azure.com/openai/v1`（缺两者报
+  `StreamError::Malformed`）；`api-version` 取 `AZURE_OPENAI_API_VERSION`，缺省 `v1`；
+  `normalize_base_url` 对裸 Azure host / `/openai` 补 `/openai/v1`，其余 path 原样保留。
+- 有意差异（写进模块文档）：`onPayload`/`onResponse`/`fetch`/`timeoutMs`/`samplingParams`
+  与 reasoning-effort 不在窄化的 `SimpleStreamOptions` 内，故不发；上游 Azure 恒
+  `stream: true`，故不做 OpenAI Responses 那条 400 非流式回退；wasm32 无 HTTP transport，
+  与原 Responses 适配器一样返回 `Malformed`。
+
+**扩面改动**（新 `Api` 变体必然触达的穷尽匹配）：
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-protocol/src/model.rs` | 新增 `Api::AzureOpenAiResponses`，`#[serde(rename = "azure-openai-responses")]`（对齐上游 kebab-case wire 串） |
+| `crates/pi-ai/src/providers/mod.rs` | `pub mod azure_openai_responses` + re-export |
+| `crates/pi-ai/src/providers/registry.rs` | `AZURE_OPENAI_RESPONSES_MODELS`（**38 个**部署，取自 `@earendil-works/pi-ai` dist 的 `providers/data/azure-openai-responses.json`，cost 换算成 micro-USD）+ `azure-openai-responses` `ProviderSpec`（`api_key_env=[AZURE_OPENAI_API_KEY]`、`base_url_env=[AZURE_OPENAI_BASE_URL]`、`default_base_url=""`）+ 1 个目录测试，并给既有 `credentialed_providers_have_a_default_base_url` 加 azure 例外 |
+| `crates/pi-ai/src/models.rs` | `infer_api`：provider id + `api` hint 都路由到 `AzureOpenAiResponses`（原先 azure id 落到 `OpenAiResponses`） |
+| `crates/pi-agent-core/src/telemetry.rs` | `api_name` → `"azure_openai_responses"` |
+| `crates/pi-coding-agent/src/provider.rs` | `build_adapter` 新分支构造 `AzureOpenAiResponsesProvider::new(api_key, base_url)` |
+| `crates/pi-evals/src/suites/{models,providers}.rs` | api-name 匹配补 `AzureOpenAiResponses`；`models` 的 registry 不变式对 azure 放行「无默认 base URL」 |
+
+`ModelSpec` 表达不了上游的 `reasoning` / `input` 模态 / `compat` / `thinkingLevelMap`，
+与既有 registry 的记录口径一致，已在 catalog 注释里注明。
+
+### 三、验证（全离线）
+
+```bash
+export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-fresh-1160 CARGO_INCREMENTAL=0
+cargo check  --workspace --all-targets --offline -j 2   # Finished, 0 error
+cargo clippy -p pi-ai -p pi-protocol -p pi-agent-core -p pi-coding-agent -p pi-evals \
+      --all-targets --offline -j 2 -- -D warnings        # Finished, 0 warning
+cargo test -p pi-ai --offline                            # 111 lib + 各集成目标全绿
+cargo test -p pi-protocol -p pi-agent-core -p pi-coding-agent -p pi-evals --offline  # 全绿
+```
+
+- `pi-ai` 新增 8 个单测（endpoint 形状、deployment 优先级、`AZURE_OPENAI_DEPLOYMENT_NAME_MAP`
+  容错、`normalize_base_url`、base URL 回退与报错、请求体复用 Responses 形状、serde wire 串）
+  + 1 个 registry 目录测试，全部通过。
+- 顺带复核：`cargo clippy -p pi-ai --all-targets -D warnings` 现在**干净**
+  （`utils/deferred_tools.rs` 的 `needless_lifetimes` 已不再触发，LUM-1166 记录里的
+  「仍被挡住」已过期）。
+
+### 四、发现并修复：HEAD 上 `pi-evals` 本就编不过
+
+`LUM-1163` 给 `Api` 加了 `MistralConversations`，但 `crates/pi-evals/src/suites/{models,providers}.rs`
+的两处 `match api` **没有同步加 arm**，而 `Api` 非 `#[non_exhaustive]`：
+
+```
+HEAD: registry.rs MistralConversations=2，pi-protocol enum=1，pi-evals/suites/models.rs=0
+```
+
+即 `feature/pi.rs` 的 `cargo check --workspace --all-targets`（CI 第一步）在 HEAD 上会
+报 non-exhaustive。LUM-1163 的轮次只跑了 `-p pi-ai -p pi-protocol -p pi-coding-agent
+-p pi-agent-core`，漏了 `-p pi-evals`，所以没暴露。本轮补上 `MistralConversations`
+与 `AzureOpenAiResponses` 两个 arm 后 workspace 全绿。**建议后续轮次把
+`cargo check --workspace --all-targets` 作为最低验证面。**
+
+### 五、frontier（本轮后）
+
+1. **`pi-ai` provider 家族**：`openai` / `openai-responses` / `anthropic` / `google` /
+   `cohere(未实现)` / `mistral` / `faux` + 本轮 **azure** 齐备。`Api` 枚举中仍无实现的：
+   **bedrock-converse / cohere-v2 / google-vertex**（均需本环境拿不到的云凭据后端或签名）。
+2. **`pi-ai/utils/` 缺口**：由 **LUM-1169** 承接（`headers` / `abort` / `abort-signals` /
+   `provider-env` / `pi-user-agent`）。
+3. **图像 provider 运行时集合**（`images-models.ts`）：由 **LUM-1168** 承接
+   （`ImagesProvider` / `ImagesModels` / `createImagesProvider`，auth 子系统首个消费方）。
+4. **auth 接线**（LUM-1160 遗留）：`pi-coding-agent/src/provider.rs` 仍未消费
+   `pi_ai::auth::resolve_provider_auth` / `find_env_keys`。**仍未派发**，且与本轮
+   `provider.rs` 改动同文件，留给下一轮。
+5. **质量门 LUM-1138**（`backlog`）：`cargo clippy -D warnings` 在受影响 crate 上已通过；
+   `cargo fmt` 仍有既有漂移（`providers/{anthropic,google,openai_responses}.rs` 等，
+   CI 不跑 fmt）。本轮新增/改动行零 fmt 漂移（用 rustfmt 单独跑过新文件）。
+
+### 六、派发与并发（本轮派发 2 路，共 3/3 满槽）
+
+| issue | 内容 | 文件范围（互不重叠） |
+| --- | --- | --- |
+| **LUM-1168** | `pi-ai` 图像 provider 运行时集合（`images-models.ts`） | `pi-ai/src/images/**` + `tests/` |
+| **LUM-1169** | `pi-ai/utils/` 五件套（headers / abort / abort-signals / provider-env / pi-user-agent） | `pi-ai/src/utils/**` + `tests/` |
+
+两者都**明确禁止**改 `pi-ai/src/lib.rs` / `providers/**` / `models.rs`，并要求只推自己的
+分支（合并由父任务/下一协调轮完成），避免与本人本轮 `providers/**` + `models.rs` 撞车。
+开工时 `active_task_count=2`，派发后 `running_task_count=2`（+ 本人 = 3）。
+
+### 七、磁盘与环境记录（对外部目录的写操作备案）
+
+- 根分区开工时 `46G/50G`（仅 **1.5G** 可用），是本轮真正的约束。
+- 删除两处**已完成任务**的闲置构建缓存（均为 `in_review`、源码已并入 `feature/pi.rs`、
+  无 cargo 进程占用，删除对象仅 `target/`，可重新构建恢复）：
+  - `lum-1163-.../workdir/pi/pi-rust/target`（**11G**）
+  - `lum-1153-.../workdir/pi/pi-rust/target`（**15G**）
+  删除后 `21G` 可用，为两路并发子任务留出余量（删前 LUM-1169 的 target 已长到 1.6G）。
+- 本人全程 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1160`
+  （复用外部依赖，只有本地 crate 重编）+ `--offline -j 2`；测试阶段 `CARGO_INCREMENTAL=0`。
+- Git 身份沿用 worktree 级设置；本轮本人提交 `Azure` provider 与 `Api` 变体接线 + 本文档。

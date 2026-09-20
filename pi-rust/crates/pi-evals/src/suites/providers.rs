@@ -290,6 +290,8 @@ fn metadata_divergence_case() -> Case {
                         Api::GoogleGenerativeAi => "google_generative_ai",
                         Api::BedrockConverse => "bedrock_converse",
                         Api::CohereV2 => "cohere_v2",
+                        Api::MistralConversations => "mistral_conversations",
+                        Api::AzureOpenAiResponses => "azure_openai_responses",
                         Api::Faux => "faux",
                     },
                     "requires_api_key": spec.requires_api_key(),

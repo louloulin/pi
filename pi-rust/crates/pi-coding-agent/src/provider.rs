@@ -53,6 +53,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_ai::providers::anthropic::AnthropicProvider;
+use pi_ai::providers::azure_openai_responses::AzureOpenAiResponsesProvider;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::providers::google::GoogleProvider;
 use pi_ai::providers::mistral::MistralProvider;
@@ -95,6 +96,7 @@ fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Opti
         Api::OpenAiResponses => {
             Arc::new(OpenAiResponsesProvider::with_base_url(api_key, base_url))
         }
+        Api::AzureOpenAiResponses => Arc::new(AzureOpenAiResponsesProvider::new(api_key, base_url)),
         Api::AnthropicMessages => Arc::new(AnthropicProvider::with_base_url(api_key, base_url)),
         Api::GoogleGenerativeAi => Arc::new(GoogleProvider::with_base_url(api_key, base_url)),
         Api::MistralConversations => Arc::new(MistralProvider::with_base_url(api_key, base_url)),
