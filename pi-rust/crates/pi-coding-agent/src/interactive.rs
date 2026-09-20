@@ -347,7 +347,13 @@ async fn run_loop(
         }
     }
 
-    let mut last_render = std::time::Instant::now();
+    // `None` until the first frame is on screen: the loop must draw one
+    // frame before it starts honouring `render_interval`, otherwise a
+    // keystroke already waiting in the tty makes the very first `poll`
+    // return instantly and the alternate screen stays blank until a full
+    // render interval has elapsed (LUM-1233 measured an entirely empty
+    // screen when input was queued at launch).
+    let mut last_render: Option<std::time::Instant> = None;
     let render_interval = Duration::from_millis(50);
 
     loop {
@@ -391,18 +397,24 @@ async fn run_loop(
         // Redraw. The App's buffer path carries the theme *and* the
         // chat-log selection highlight, so draw the App straight into the
         // frame instead of round-tripping through plain snapshot lines.
-        if last_render.elapsed() >= render_interval {
+        let render_due = last_render
+            .map(|at| at.elapsed() >= render_interval)
+            .unwrap_or(true);
+        if render_due {
             terminal.draw(|frame| {
                 let area = frame.area();
                 app.render_to_buffer(area, frame.buffer_mut());
             })?;
-            last_render = std::time::Instant::now();
+            last_render = Some(std::time::Instant::now());
         }
 
-        // Poll for crossterm events with a short timeout so the
-        // render loop continues to tick.
+        // Poll for crossterm events with a short timeout so the render
+        // loop continues to tick, then drain whatever is already
+        // buffered without blocking. `Event::read` blocks until the next
+        // event, so it may only ever be called after `poll` reported one
+        // (see `drain_ready_events`).
         if ct_event::poll(config.event_poll_interval)? {
-            while let Some(event) = read_event()? {
+            for event in drain_ready_events(ct_event::poll, ct_event::read)? {
                 let translated = App::translate_event(event);
                 if let Some(action) =
                     handle_input_event(&mut app, &agent, &mut options, &mut bash, translated)
@@ -2302,15 +2314,30 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyho
     Ok(())
 }
 
-fn read_event() -> anyhow::Result<Option<CtEvent>> {
-    match ct_event::read()? {
-        event @ (CtEvent::Key(_)
-        | CtEvent::Mouse(_)
-        | CtEvent::Resize(_, _)
-        | CtEvent::FocusGained
-        | CtEvent::FocusLost
-        | CtEvent::Paste(_)) => Ok(Some(event)),
+/// Drain the crossterm events that are **already buffered**, and return as
+/// soon as the queue is empty.
+///
+/// `crossterm::event::read` is a blocking call — it waits for the *next*
+/// event when nothing is pending — so it must only be used after
+/// `Event::poll(Duration::ZERO)` reported `true`. The previous version of the
+/// interactive loop was `while let Some(event) = read_event()? { .. }`, where
+/// `read_event` always returned `Ok(Some(_))` (the `Event` enum has no `None`
+/// variant). The first ordinary key press therefore parked the render loop
+/// inside a blocking `read()` forever: no more frames, no more agent events,
+/// no `Esc` feedback (LUM-1233).
+///
+/// `poll` / `read` are injected so the contract — *never read an empty
+/// queue* — is assertable without a real terminal.
+fn drain_ready_events<P, R>(mut poll: P, mut read: R) -> anyhow::Result<Vec<CtEvent>>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<CtEvent>,
+{
+    let mut events = Vec::new();
+    while poll(Duration::ZERO)? {
+        events.push(read()?);
     }
+    Ok(events)
 }
 
 // Quiet unused-import warnings for `AgentEvent` / `SyncMutex` /
@@ -2403,6 +2430,51 @@ mod tests {
         assert_eq!(locale_from_env(Some("zh-CN")), pi_tui::Locale::Zh);
         assert_eq!(locale_from_env(Some("fr")), pi_tui::Locale::En);
         assert_eq!(locale_from_env(None), pi_tui::Locale::En);
+    }
+
+    // -----------------------------------------------------------------------
+    // Interactive input loop — LUM-1235 P0 regression
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn draining_events_reads_every_buffered_event() {
+        let queued = std::cell::Cell::new(3usize);
+        let events = drain_ready_events(
+            |_| Ok(queued.get() > 0),
+            || {
+                assert!(queued.get() > 0, "read() must not run on an empty queue");
+                queued.set(queued.get() - 1);
+                Ok(CtEvent::FocusGained)
+            },
+        )
+        .expect("drain");
+        assert_eq!(events.len(), 3);
+        assert_eq!(queued.get(), 0);
+    }
+
+    #[test]
+    fn draining_events_returns_immediately_when_nothing_is_buffered() {
+        let mut reads = 0usize;
+        let events = drain_ready_events(
+            |_| Ok(false),
+            || {
+                reads += 1;
+                Ok(CtEvent::FocusLost)
+            },
+        )
+        .expect("drain");
+        assert!(events.is_empty());
+        assert_eq!(reads, 0, "an empty queue must never be read");
+    }
+
+    #[test]
+    fn draining_events_propagates_a_poll_error() {
+        let err = drain_ready_events(
+            |_| Err(io::Error::other("boom")),
+            || Ok(CtEvent::FocusGained),
+        )
+        .expect_err("poll error");
+        assert!(err.to_string().contains("boom"), "{err}");
     }
 
     // -----------------------------------------------------------------------

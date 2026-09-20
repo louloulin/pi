@@ -591,6 +591,9 @@ tip 的门已由 LUM-1225 实跑（147 / 2202 / 0 / 2）。磁盘剩 25G，无�
 全都「接好了线但不显示」——因为在按键那一刻，渲染循环已经卡死在 crossterm 的阻塞读取里。
 本轮因此没有产出「交互截图」（拿不到），产出的是这一条可复现证据链 + 一行修复补丁。
 
+> **后续（LUM-1235，见第十三节）**：10.3 的补丁已落地并由同一套 PTY harness 复验通过，
+> 实机截图已提交到 `screenshots/`；上面「没有产出交互截图」的结论只对**未修复**的 tip 成立。
+
 ### 10.1 方法（可复现）
 
 - harness（临时脚本，只存在于本轮协调工作目录、未入库）：`pty.openpty` + `fork` + `setsid` + `TIOCSCTTY` 把真实二进制跑在
@@ -851,3 +854,116 @@ Stage 65 范围内的 `app.session.fork` / `app.session.resume`。
 -- -D warnings` 退出码 0；`cargo test --workspace` **2238 passed / 0 failed**（其中 `pi-tui` 728、
 `pi-coding-agent` 664）；`cargo test -p pi-evals` 8 passed（含 `docs-code-fences-balanced`，本节与
 新文件都在审计范围内）。
+
+## 十三、第九轮（LUM-1235）：P0 补丁落地 —— 交互 TUI 第一次真的出帧
+
+第八轮（第十节）只交了一行补丁和一条证据链，本轮把在飞的 Stage 65 / 66 分支合进
+`feature/pi.rs`（对应第十一、十二节），落地该补丁，并用**同一套 PTY harness** 复验；
+实机驱动又暴露出第二个只在真实终端下才看得见的缺陷（选择器覆盖层），一并修掉。
+本节所有截图都是把真实二进制放进 PTY 驱动的产物，不是单元测试画出来的 buffer。
+
+### 13.1 P0：输入循环不再阻塞在 `read()`（第十节 10.3 的补丁）
+
+两处语义修改，都在 `crates/pi-coding-agent/src/interactive.rs`：
+
+```rust
+// 旧：read_event() 永远返回 Ok(Some(_))（crossterm::Event 没有 None 变体），
+// 第一次普通按键之后，while let Some(event) 会立刻再进一次阻塞 read()，
+// 渲染循环从此停在 ep_poll 上：不再成帧、不再处理 agent 事件、Esc 无反馈。
+if ct_event::poll(config.event_poll_interval)? {
+    while let Some(event) = read_event()? { ... }
+}
+
+// 新：poll 只说「现在有货」，drain 只读「已缓冲」的事件，队列空立即返回。
+if ct_event::poll(config.event_poll_interval)? {
+    for event in drain_ready_events(ct_event::poll, ct_event::read)? { ... }
+}
+```
+
+```rust
+// 首帧：last_render 由 Instant 变成 Option<Instant>，未成帧时恒为 due。
+// 否则启动瞬间就有待处理输入 → 第一次 poll 立即返回 → 首个 render 间隔内
+// 整屏是空的（第八轮实测：完全空白，只有光标）。
+let mut last_render: Option<std::time::Instant> = None;
+let render_due = last_render.map(|at| at.elapsed() >= render_interval).unwrap_or(true);
+```
+
+`drain_ready_events` 把 `poll` / `read` 做成注入参数，于是「绝不读空队列」这条契约
+不需要真终端也能断言（真 PTY 测试需要新增 `libc` / `nix` 开发依赖，本轮不引入）：
+
+| 断言 | 位置 |
+| --- | --- |
+| 已缓冲的每个事件都被读出、顺序不变 | `crates/pi-coding-agent/src/interactive.rs` 单测 `draining_events_reads_every_buffered_event` |
+| 队列空时不调用 `read`（旧实现在此阻塞） | 同文件 `draining_events_returns_immediately_when_nothing_is_buffered` |
+| `poll` 报错向上传递、不吞掉 | 同文件 `draining_events_propagates_a_poll_error` |
+
+### 13.2 P1：选择器覆盖层锚在消息视口、且先清行再绘制
+
+实机跑 `/model` 时看到的不是「缺功能」，而是**画错位置**：选择器从终端第 1 行开始画，
+盖住了 20 行启动头；同时因为 ratatui 只输出本帧变化的 cell，被盖住的行没有清空，
+底下的字透出来，标题渲染成 `Pick a modelerrupt`（`errupt` 来自启动头里的
+`Esc to interrupt`）。修 `crates/pi-tui/src/app.rs`：
+
+```rust
+// 旧：锚到终端原点、用绝对行号和「高度」比较 → 画到启动头上；
+//     且不清行 → 覆盖行下的旧文本透出。
+let start_row = area.y + 1;
+if y >= area.y + message_height { break; }
+
+// 新：锚到消息视口（上一节已记录的约定），并按视口的绝对底边裁剪；
+//     每行先 reset 再画，顺带丢掉被覆盖 cell 的颜色。
+let start_row = message_area.y + 1;
+if y >= message_area.y + message_area.height { break; }
+for col in 0..area.width {
+    if let Some(cell) = buf.cell_mut((area.x + col, y)) { cell.reset(); }
+}
+```
+
+回归测试 `crates/pi-tui/tests/selector_overlay_anchor.rs` 用 `App::viewport_origin()` /
+`App::viewport()` 取真实几何，四条断言在回退到旧实现时**有三条会失败**（另有一条裁剪
+契约在两侧都成立）：
+
+| 断言 | 回退旧实现 |
+| --- | --- |
+| 消息视口以上的每一行都不被改动（启动头不被盖） | 失败 |
+| 选择器首行正好落在视口顶行 + 1 | 失败 |
+| 被覆盖的行在绘制前被清空（无 `W` 透出） | 失败 |
+| 选择器不越过视口底边 | 通过（旧代码也裁剪） |
+
+### 13.3 实机对照（PTY）
+
+harness 是 `pty.fork` + `TIOCSWINSZ` + 自写 VT/CSI/OSC 解析（**只在协调侧，不入库**）；
+被测二进制是同一棵树的两次构建：`work/LUM-1228`（Stage 66，未修）与 `work/LUM-1235`（已修）。
+两次运行都开在 `--model faux/faux-model`，送同一串按键 `explain the fix` + `Enter`。
+
+| 画面 | 观察 |
+| --- | --- |
+| 未修版：启动帧 | 启动头、键位提示、onboarding、footer 都在 |
+| 未修版：按键后 | **字符网格与启动帧逐字节相同**（同一次运行内屏幕 md5 一致）——按键与 Enter 都没产生任何帧，会话 `.jsonl` 0 字节，进程 `wchan=ep_poll`、CPU 0.0% |
+| 已修版：按键后 | 回显、`>` 提示符与整轮回答（faux 的 `(faux) hello`）都出现，footer 显示 `in/out` 计数 |
+| 已修版：`/model` | 选择器画在消息视口内：启动头 20 行原样可见，被覆盖的转写行已清空，无串字 |
+
+![未修版：启动帧、按键后（屏幕未变）、已修版按键后](screenshots/p0-no-frames-after-first-key.png)
+
+![已修版：启动头 + 一轮完整回答](screenshots/tui-fixed.png)
+
+![已修版：`/model` 选择器锚在消息视口内](screenshots/selector-overlay.png)
+
+三张图由 `docs/screenshots/` 下同名文件提供；生成脚本是协调侧的临时工具，
+没有进仓库，理由是它依赖 `pyte` 风格的终端仿真与 PIL，不适合成为构建门槛。
+
+### 13.4 本轮实测
+
+`cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui -p pi-coding-agent --all-targets
+-- -D warnings` 退出码 0；`cargo test -p pi-tui -p pi-coding-agent` **1412 passed / 0 failed**
+（含本节新增的 4 条覆盖层断言与 3 条输入循环断言）；`cargo test -p pi-evals` 仍含
+`docs-code-fences-balanced` 与相对链接两个 case，本节与两个新文件都在审计范围内。
+
+### 13.5 仍然缺的（顺延）
+
+1. **resume / 回放保真度**：`/resume` 与 `--continue` 的转写重建仍只覆盖文本，工具卡片、
+   思考块、耗时统计不回放（第六、七轮记录）。
+2. **`initial_prompt` / 扩展的可见性**：`-e` 装载的扩展在启动头与 `/extensions` 里仍不可见。
+3. **`app.editor.external`（`Ctrl+G`）**：需要终端 teardown / restore 交接，仍未消费。
+4. **`/tree` 在无持久化会话时只回 `no session database`**：实机可见，但属于 Stage 65 的
+   会话库范围，本轮不改。

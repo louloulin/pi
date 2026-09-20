@@ -4027,13 +4027,33 @@ impl App {
 
         // Selector overlay — when open, draw on top of everything
         // except the prompt and status.
+        //
+        // Anchored to the **message viewport**, one row below its top, and
+        // clipped to it: the startup header above and the prompt / status rows
+        // below are not the selector's to overwrite. Anchoring to `area`
+        // instead painted the picker over the header — with the 20-row startup
+        // header the `/model` list covered the key hints while the transcript
+        // underneath was left untouched, and the clip compared an absolute row
+        // against a height (LUM-1235 PTY capture).
         if let Some(selector) = &self.selector {
             let lines = selector.render_styled_lines(area.width);
-            let start_row = area.y + 1;
+            let start_row = message_area.y + 1;
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
-                if y >= area.y + message_height {
+                if y >= message_area.y + message_area.height {
                     break;
+                }
+                // Blank the row first: a picker line is shorter than the
+                // transcript line it covers, and ratatui only emits the cells
+                // this buffer changed — an unblanked row left the old text
+                // bleeding through the picker (`Pick a model` + `errupt` from
+                // the header hint underneath). `reset` also drops the covered
+                // cell's colours so a picked-over selection highlight cannot
+                // tint the modal.
+                for col in 0..area.width {
+                    if let Some(cell) = buf.cell_mut((area.x + col, y)) {
+                        cell.reset();
+                    }
                 }
                 write_styled_line(buf, area.x, y, area.width, line, &self.theme);
             }
