@@ -354,16 +354,19 @@ impl ToolExecutor for ExtensionToolExecutor {
         };
         let args = arguments.to_string();
         match self.host.execute_tool(&call.name, &args).await {
-            Ok(outcome) => Ok(ToolResult {
-                tool_call_id: call.id.clone(),
-                content: Box::new(fold_content(content_blocks_from_json(&outcome.content))),
-                is_error: outcome.is_error,
-                details: outcome.details,
-                // Extension tools cannot advertise deferred tools yet —
-                // `pi_extensions::ToolExecutionOutcome` has no
-                // `addedToolNames` field (see `deferred_tools` module docs).
-                added_tool_names: None,
-            }),
+            Ok(outcome) => {
+                let (content, image_text) = fold_content(content_blocks_from_json(&outcome.content));
+                Ok(ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content: Box::new(content),
+                    is_error: outcome.is_error,
+                    details: with_image_text(outcome.details, image_text),
+                    // Extension tools cannot advertise deferred tools yet —
+                    // `pi_extensions::ToolExecutionOutcome` has no
+                    // `addedToolNames` field (see `deferred_tools` module docs).
+                    added_tool_names: None,
+                })
+            }
             // A host-level failure (timeout, JS exception, missing
             // execute function) is reported as an error *result*, not a
             // fatal loop error — the model gets to react to it, exactly
@@ -445,16 +448,19 @@ impl ToolExecutor for BuiltinToolExecutor {
         // still comes from each tool's own `serde_json::from_value`.
         let arguments = coerce_tool_arguments(&tool.parameters(), &call.arguments);
         match tool.execute(arguments, abort).await {
-            Ok(output) => Ok(ToolResult {
-                tool_call_id: call.id.clone(),
-                content: Box::new(fold_content(output.content)),
-                is_error: false,
-                details: output.details,
-                // Built-in tools return a `ToolOutput`, which carries no
-                // `addedToolNames` equivalent (upstream `AgentToolResult`);
-                // none of them load tools mid-transcript.
-                added_tool_names: None,
-            }),
+            Ok(output) => {
+                let (content, image_text) = fold_content(output.content);
+                Ok(ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content: Box::new(content),
+                    is_error: false,
+                    details: with_image_text(output.details, image_text),
+                    // Built-in tools return a `ToolOutput`, which carries no
+                    // `addedToolNames` equivalent (upstream `AgentToolResult`);
+                    // none of them load tools mid-transcript.
+                    added_tool_names: None,
+                })
+            }
             // Cancellation keeps a dedicated error path so callers can tell
             // an abort apart from a tool that legitimately failed.
             Err(ToolError::Aborted) => Err(AgentError::Tool {
@@ -476,32 +482,89 @@ impl ToolExecutor for BuiltinToolExecutor {
 /// [`ToolResult::content`] carries.
 ///
 /// Every built-in tool emits exactly one text block, so the common path just
-/// moves it. Multi-block outputs (an image plus a caption, say) are flattened
-/// into one text block so nothing is silently dropped.
-fn fold_content(blocks: Vec<Content>) -> Content {
+/// moves it. Multi-block output is folded differently depending on whether an
+/// image is involved:
+///
+/// * an image block wins the single `content` slot (upstream sends
+///   `[text note, image]` for `read`, but `ToolResult::content` is one block)
+///   and every sibling text block is returned as the second element so the
+///   caller can park it under `details.image_text`;
+/// * without an image, the blocks flatten into one text block as before, so
+///   nothing is silently dropped.
+fn fold_content(blocks: Vec<Content>) -> (Content, Option<String>) {
     let mut iter = blocks.into_iter();
     match (iter.next(), iter.next()) {
-        (None, _) => Content::text(""),
-        (Some(only), None) => only,
+        (None, _) => (Content::text(""), None),
+        (Some(only), None) => match only {
+            Content::Image(image) => (Content::Image(image), None),
+            other => (other, None),
+        },
         (Some(first), Some(second)) => {
-            let mut text = block_text(&first);
-            for block in std::iter::once(second).chain(iter) {
-                text.push('\n');
-                text.push_str(&block_text(&block));
+            let rest: Vec<Content> = std::iter::once(second).chain(iter).collect();
+            let image = match &first {
+                Content::Image(_) => Some(0usize),
+                _ => rest
+                    .iter()
+                    .position(|block| matches!(block, Content::Image(_)))
+                    .map(|idx| idx + 1),
+            };
+            match image {
+                Some(0) => (first, Some(fold_text(&rest))),
+                Some(idx) => {
+                    let mut blocks: Vec<Content> = std::iter::once(first).chain(rest).collect();
+                    let image_block = blocks.remove(idx);
+                    (image_block, Some(fold_text(&blocks)))
+                }
+                None => {
+                    let mut text = block_text(&first);
+                    text.push('\n');
+                    text.push_str(&fold_text(&rest));
+                    (Content::text(text), None)
+                }
             }
-            Content::text(text)
         }
     }
+}
+
+/// Join blocks' human-readable text with newlines.
+fn fold_text(blocks: &[Content]) -> String {
+    blocks
+        .iter()
+        .map(block_text)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Render a single content block as text for [`fold_content`].
 fn block_text(block: &Content) -> String {
     match block {
         Content::Text(text) => text.text.clone(),
-        Content::Image(image) => format!("[image {}]", image.mime_type),
+        Content::Image(image) => pi_tui::image_fallback(
+            &image.mime_type,
+            pi_tui::get_image_dimensions(&image.data, &image.mime_type),
+            None,
+        ),
         Content::ToolCall(call) => format!("[tool call {}]", call.name),
         Content::ToolResult(result) => format!("[tool result {}]", result.tool_call_id),
     }
+}
+
+/// Park the text that accompanied an image block under `details.image_text`.
+fn with_image_text(details: Option<serde_json::Value>, text: Option<String>) -> Option<serde_json::Value> {
+    let Some(text) = text else {
+        return details;
+    };
+    let mut object = match details {
+        Some(serde_json::Value::Object(object)) => object,
+        Some(other) => {
+            let mut object = serde_json::Map::new();
+            object.insert("details".to_string(), other);
+            object
+        }
+        None => serde_json::Map::new(),
+    };
+    object.insert("image_text".to_string(), serde_json::Value::String(text));
+    Some(serde_json::Value::Object(object))
 }
 
 #[cfg(test)]
@@ -561,5 +624,35 @@ mod tests {
             extension_execution_mode(&builtin, "read"),
             ToolExecutionMode::Parallel
         );
+    }
+
+    #[test]
+    fn an_image_block_wins_the_single_content_slot() {
+        let image = Content::Image(pi_protocol::ImageContent {
+            mime_type: "image/png".to_string(),
+            data: "iVBORw0KGgoAAAANSUhEUgAAAUAAAADw".to_string(),
+        });
+        let (content, image_text) = fold_content(vec![
+            Content::text("Read image file [image/png]"),
+            image.clone(),
+        ]);
+        assert_eq!(content, image, "the image must stay the content block");
+        assert_eq!(
+            image_text.as_deref(),
+            Some("Read image file [image/png]"),
+            "the caption moves to details.image_text"
+        );
+
+        // `ToolResult::content` is one block, so `details.image_text` is where
+        // the caption survives to the renderers.
+        let details = with_image_text(Some(serde_json::json!({ "truncation": 1 })), image_text)
+            .expect("details");
+        assert_eq!(details["image_text"], "Read image file [image/png]");
+        assert_eq!(details["truncation"], 1);
+
+        // Without an image the old text folding is unchanged.
+        let (content, image_text) = fold_content(vec![Content::text("a"), Content::text("b")]);
+        assert_eq!(content, Content::text("a\nb"));
+        assert!(image_text.is_none());
     }
 }
