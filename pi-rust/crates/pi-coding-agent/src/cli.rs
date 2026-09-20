@@ -71,6 +71,15 @@ pub struct Cli {
     #[arg(long = "no-context-files")]
     pub no_context_files: bool,
 
+    /// Export a session file to HTML and exit.
+    ///
+    /// Usage: `pi --export <session.jsonl> [output.html]`. Without an
+    /// output path the HTML is written in the current working directory as
+    /// `pi-session-<input-basename>.html`. Mirrors `pi --export` in the TS
+    /// CLI. `--export` runs before any provider credentials are resolved.
+    #[arg(long = "export", value_names = ["SESSION", "OUTPUT"], num_args = 1..=2)]
+    pub export: Option<Vec<std::path::PathBuf>>,
+
     /// Load a prompt template file or directory for this run only. The
     /// default locations (`~/.pi/agent/prompts` and `.pi/prompts`) are
     /// always searched unless `--no-prompt-templates` is set.
@@ -149,7 +158,18 @@ impl Cli {
     /// Same as [`Self::parse_with_aliases`] but returns clap's error
     /// instead of exiting, so the caller can control the exit code.
     pub fn try_parse_with_aliases() -> Result<Self, clap::Error> {
-        Self::try_parse_from(std::env::args_os().map(normalize_arg))
+        Self::try_parse_from_args(std::env::args_os())
+    }
+
+    /// Parse an explicit argument list, applying the same TS short-flag
+    /// normalisation as [`Self::parse_with_aliases`]. Used by tests (and
+    /// embedders) that build their own argv.
+    pub fn try_parse_from_args<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Self::try_parse_from(args.into_iter().map(|arg| normalize_arg(arg.into())))
     }
 }
 
@@ -168,6 +188,7 @@ fn normalize_arg(arg: std::ffi::OsString) -> std::ffi::OsString {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     #[test]
     fn ts_short_prompt_template_flags_are_normalised() {
@@ -180,6 +201,28 @@ mod tests {
             OsString::from("--no-approve")
         );
         assert_eq!(normalize_arg(OsString::from("--print")), OsString::from("--print"));
+    }
+
+    #[test]
+    fn parses_the_export_flag() {
+        let cli = Cli::try_parse_from(["pi", "--export", "session.jsonl"]).expect("parses");
+        assert_eq!(cli.export, Some(vec![PathBuf::from("session.jsonl")]));
+
+        let cli =
+            Cli::try_parse_from(["pi", "--export", "session.jsonl", "out.html"]).expect("parses");
+        assert_eq!(
+            cli.export,
+            Some(vec![
+                PathBuf::from("session.jsonl"),
+                PathBuf::from("out.html")
+            ])
+        );
+
+        // The optional second value must not swallow the next flag.
+        let cli = Cli::try_parse_from(["pi", "--export", "session.jsonl", "--print", "hi"])
+            .expect("parses");
+        assert_eq!(cli.print.as_deref(), Some("hi"));
+        assert_eq!(cli.export, Some(vec![PathBuf::from("session.jsonl")]));
     }
 
     #[test]

@@ -498,6 +498,34 @@ async fn run_slash_command(
                 agent_guard.model().id
             ));
         }
+        SlashCommand::Export { path } => {
+            // Upstream `handleExportCommand`: `.jsonl` writes the session
+            // branch as JSONL, anything else writes self-contained HTML.
+            // The running TUI theme is forwarded so the export matches
+            // what the user sees.
+            let agent_guard = agent.lock().await;
+            let state = agent_guard.state();
+            let tools = options.tool_executor.definitions();
+            let theme_name = app.theme().name().map(str::to_string);
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let request = crate::commands::export::ActiveSession {
+                session_id: &options.session_id,
+                cwd: &cwd,
+                messages: &state.messages,
+                system_prompt: &state.system_prompt,
+                tools: &tools,
+            };
+            let result = crate::commands::export::run_slash_export(
+                request,
+                path.as_deref(),
+                theme_name.as_deref(),
+            );
+            drop(agent_guard);
+            match result {
+                Ok(file_path) => app.info(format!("Session exported to: {}", file_path.display())),
+                Err(err) => app.info(format!("Failed to export session: {err}")),
+            }
+        }
         SlashCommand::Resume => {
             // Stage 5: drive the selector from the SQLite reader via
             // `pi_coding_agent::list_resumable` so the user sees

@@ -39,6 +39,9 @@
 //!
 //! Stage 24 wires [`compaction`], the `/compact` context summarizer
 //! (token estimation, cut-point selection, and the summarization call).
+//!
+//! Stage 25 wires [`export`]: the self-contained HTML / JSONL session
+//! export behind the `/export` slash command and `pi --export`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -48,6 +51,7 @@ pub mod commands;
 pub mod compaction;
 pub mod config;
 pub mod context_files;
+pub mod export;
 pub mod extensions;
 pub mod file_processor;
 pub mod frontmatter;
@@ -79,6 +83,11 @@ pub use compaction::{
     DEFAULT_COMPACTION_SETTINGS,
 };
 pub use context_files::{load_project_context_files, ContextFile};
+pub use export::{
+    export_active_session_html, export_active_session_jsonl, export_from_file, generate_html,
+    generate_jsonl, read_session_file, session_data_from_messages, ExportError, SessionData,
+    ToolInfo,
+};
 pub use file_processor::{
     expand_prompt, read_stdin_if_piped, ExpandedPrompt, FileError, MAX_FILE_BYTES,
 };

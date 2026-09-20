@@ -47,6 +47,16 @@ fn main() -> ExitCode {
         }
     };
 
+    // `pi --export <session.jsonl> [output.html]` is a pure file
+    // transform: handle it before the provider router so it works with no
+    // API key configured (upstream `main.ts` does the same, printing
+    // `Exported to: <path>` / `Error: <message>`).
+    if let Some(export) = cli.export.as_ref() {
+        let input = &export[0];
+        let output = export.get(1).map(std::path::PathBuf::as_path);
+        return run_export_cli(input, output);
+    }
+
     let models = build_default_models();
     let model_override = cli
         .model
@@ -347,6 +357,23 @@ enum ModeTarget {
     Rpc,
     Session,
     Packages,
+}
+
+/// Run `pi --export <session.jsonl> [output.html]` and exit.
+///
+/// Output strings match upstream `main.ts`: `Exported to: <path>` on
+/// stdout with exit 0, `Error: <message>` on stderr with exit 1.
+fn run_export_cli(input: &std::path::Path, output: Option<&std::path::Path>) -> ExitCode {
+    match pi_coding_agent::commands::export::run_cli_export(input, output) {
+        Ok(path) => {
+            println!("Exported to: {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("Error: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Build the system prompt for one agent mode, folding in the prompt
