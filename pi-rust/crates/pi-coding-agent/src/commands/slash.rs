@@ -171,6 +171,69 @@ pub fn help_text() -> String {
     out
 }
 
+/// The composer's autocomplete index: one row per command this binary
+/// actually implements, in the order [`help_text`] prints them.
+///
+/// The dropdown must list exactly the commands [`handle_command`] accepts —
+/// advertising a command that does not run is worse than advertising
+/// nothing. `autocomplete_commands_lists_every_implemented_command` pins
+/// both ends of that contract.
+pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
+    ("help", "Show this help text", None),
+    ("clear", "Clear the message view", None),
+    ("new", "Start a new session", None),
+    ("copy", "Copy last agent message to clipboard", None),
+    ("name", "Set session display name", Some("<name>")),
+    (
+        "model",
+        "Select model (opens selector UI)",
+        Some("<provider/model>"),
+    ),
+    ("session", "Show session info and stats", None),
+    (
+        "export",
+        "Export session (HTML default, or a .jsonl path)",
+        Some("[path]"),
+    ),
+    ("resume", "Resume a different session", None),
+    ("tree", "Navigate session tree (switch branches)", None),
+    ("fork", "Create a new fork from a previous user message", None),
+    (
+        "clone",
+        "Duplicate the current session at the current position",
+        None,
+    ),
+    ("settings", "Open settings menu", None),
+    ("trust", "Show or set project trust", Some("yes|no")),
+    (
+        "compact",
+        "Manually compact the session context",
+        Some("[instructions]"),
+    ),
+    ("hotkeys", "Show all keyboard shortcuts", None),
+    ("exit", "Quit the interactive session", None),
+];
+
+/// Build the [`pi_tui::autocomplete`] command list for
+/// [`AUTOCOMPLETE_COMMANDS`].
+///
+/// No argument completions are registered: the port has no argument
+/// completer for any of these (upstream ships one only for `/model`'s
+/// provider list, which the selector owns).
+pub fn autocomplete_commands() -> Vec<pi_tui::autocomplete::SlashCommand> {
+    AUTOCOMPLETE_COMMANDS
+        .iter()
+        .map(|(name, description, hint)| {
+            let command =
+                pi_tui::autocomplete::SlashCommand::new(*name).with_description(*description);
+            match hint {
+                Some(hint) => command.with_argument_hint(*hint),
+                None => command,
+            }
+        })
+        .collect()
+}
+
 /// The `/hotkeys` overview for the process-wide (installed) keybindings.
 ///
 /// The interactive TTY path installs the merged coding-agent table
@@ -552,5 +615,90 @@ mod tests {
     #[test]
     fn rejects_non_slash_input() {
         assert!(handle_command("hello").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Composer autocomplete index (LUM-1236)
+    // -----------------------------------------------------------------------
+
+    /// Every command the parser accepts must be offered, and nothing that
+    /// does not run may be. The dropdown is a contract with
+    /// [`handle_command`], not a wish list.
+    #[test]
+    fn autocomplete_commands_match_the_parser_exactly() {
+        const IMPLEMENTED: &[&str] = &[
+            "help", "clear", "new", "copy", "name", "model", "session", "export", "resume",
+            "tree", "fork", "clone", "settings", "trust", "compact", "hotkeys", "exit",
+        ];
+        let names: Vec<String> = autocomplete_commands()
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(names, IMPLEMENTED);
+        for name in IMPLEMENTED {
+            let parsed = handle_command(&format!("/{name}"))
+                .unwrap_or_else(|error| panic!("/{name} is offered but rejected: {error}"));
+            assert!(
+                !matches!(parsed, SlashCommand::Unknown(_)),
+                "/{name} is offered but the parser does not know it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_offered_command_carries_a_description() {
+        for command in autocomplete_commands() {
+            let description = command.description.unwrap_or_default();
+            assert!(
+                !description.is_empty(),
+                "/{} would show a blank row in the dropdown",
+                command.name
+            );
+        }
+        let with_hints: Vec<String> = autocomplete_commands()
+            .into_iter()
+            .filter(|command| command.argument_hint.is_some())
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(with_hints, ["name", "model", "export", "trust", "compact"]);
+    }
+
+    /// The installed list has to produce candidates through the same trait
+    /// the editor drives — a table nobody can complete from is still a
+    /// dead feature.
+    #[test]
+    fn the_offered_list_completes_a_command_prefix() {
+        use pi_tui::autocomplete::{AutocompleteProvider, CombinedAutocompleteProvider};
+
+        let provider = CombinedAutocompleteProvider::new(autocomplete_commands(), ".");
+        let lines = ["/com".to_string()];
+        let suggestions = provider
+            .get_suggestions(&lines, 0, 4, false)
+            .expect("a candidate for /com");
+        let values: Vec<&str> = suggestions
+            .items
+            .iter()
+            .map(|item| item.value.as_str())
+            .collect();
+        // `compact` matches the name directly and wins; a description-only
+        // hit (`fork`: "…a new fork from a previous user message") is still
+        // surfaced, which is the port's documented superset over upstream's
+        // name-only filter.
+        assert_eq!(values.first(), Some(&"compact"));
+        assert!(values.contains(&"copy"), "{values:?}");
+
+        // A description-only hit still resolves to the command name that
+        // gets typed into the buffer.
+        let lines = ["/clip".to_string()];
+        let suggestions = provider
+            .get_suggestions(&lines, 0, 5, false)
+            .expect("a candidate for /clip");
+        let copy = suggestions
+            .items
+            .iter()
+            .find(|item| item.value == "copy")
+            .expect("the copy candidate");
+        let applied = provider.apply_completion(&lines, 0, 5, copy, &suggestions.prefix);
+        assert_eq!(applied.lines, ["/copy ".to_string()]);
     }
 }

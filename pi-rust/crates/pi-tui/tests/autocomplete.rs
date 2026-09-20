@@ -495,3 +495,135 @@ fn argument_completion_uses_the_argument_prefix() {
         .get_suggestions(&["/trust ye".to_string()], 0, 9, true)
         .is_none());
 }
+
+// -- App painting (LUM-1236) -------------------------------------------
+//
+// The engine above was fully covered while the feature was invisible: the
+// `App` owns the composer but never painted the dropdown, so installing a
+// provider changed nothing on screen. The port had the editor state and
+// the keymap but no painter. These tests pin the painter's placement:
+// the list sits immediately above the prompt and grows towards older
+// output, and closing it hands the rows back to the transcript.
+
+fn faux_model() -> pi_protocol::Model {
+    pi_protocol::Model {
+        provider: pi_protocol::ProviderId::new("faux"),
+        id: "faux-model".into(),
+        api: pi_protocol::Api::Faux,
+        label: Some("Faux".into()),
+        context_window: 1024,
+        max_output_tokens: 256,
+    }
+}
+
+fn app_with(commands: Vec<SlashCommand>, base: &TempDir) -> pi_tui::app::App {
+    let agent = pi_agent_core::Agent::new(pi_agent_core::AgentOptions::new(
+        faux_model(),
+        Arc::new(pi_ai::providers::faux::FauxProvider::default()),
+        "you are pi",
+    ));
+    let mut app = pi_tui::app::App::new(&agent, pi_tui::app::AppConfig::default());
+    app.prompt_mut()
+        .editor_mut()
+        .set_autocomplete_provider(Arc::new(provider_of(commands, base)));
+    app
+}
+
+fn type_into(app: &mut pi_tui::app::App, text: &str) {
+    for c in text.chars() {
+        app.step(pi_tui::InputEvent::Key(key(KeyCode::Char(c))));
+    }
+}
+
+#[test]
+fn the_app_paints_the_dropdown_directly_above_the_prompt() {
+    let dir = TempDir::new("app-paint");
+    let mut app = app_with(
+        vec![
+            SlashCommand::new("help").with_description("show help"),
+            SlashCommand::new("hotkeys").with_description("list shortcuts"),
+        ],
+        &dir,
+    );
+
+    // Nothing is painted until the trigger is typed.
+    let before = app.render_snapshot(48, 12).lines.join("\n");
+    assert!(!before.contains('❯'), "{before}");
+
+    type_into(&mut app, "/h");
+    let snapshot = app.render_snapshot(48, 12);
+    let selected: Vec<&String> = snapshot
+        .lines
+        .iter()
+        .filter(|line| line.contains('❯'))
+        .collect();
+    assert_eq!(selected.len(), 1, "{:?}", snapshot.lines);
+
+    let selected_at = snapshot
+        .lines
+        .iter()
+        .position(|line| line.contains('❯'))
+        .expect("selected row");
+    let prompt_at = snapshot
+        .lines
+        .iter()
+        .position(|line| line.contains("> /h"))
+        .expect("prompt row");
+    // The list is bottom-anchored: its last row is the one directly above
+    // the prompt, and it grows from there towards older output.
+    assert!(selected_at < prompt_at, "{:?}", snapshot.lines);
+    assert_eq!(
+        snapshot.lines[prompt_at - 1].trim_end(),
+        "  hotkeys  list shortcuts",
+        "{:?}",
+        snapshot.lines
+    );
+}
+
+#[test]
+fn closing_the_dropdown_gives_the_rows_back_to_the_transcript() {
+    let dir = TempDir::new("app-close");
+    let mut app = app_with(
+        vec![SlashCommand::new("help").with_description("show help")],
+        &dir,
+    );
+    app.messages_mut()
+        .push(pi_tui::message::MessageItem::assistant("transcript body"));
+
+    type_into(&mut app, "/h");
+    assert!(app.render_snapshot(48, 12).lines.join("\n").contains('❯'));
+
+    app.step(pi_tui::InputEvent::Key(key(KeyCode::Esc)));
+    let after = app.render_snapshot(48, 12).lines.join("\n");
+    assert!(!after.contains('❯'), "{after}");
+    // `Esc` closed the list without rewriting the input.
+    assert!(after.contains("> /h"), "{after}");
+}
+
+#[test]
+fn dropdown_rows_are_opaque_over_the_transcript() {
+    let dir = TempDir::new("app-opaque");
+    let mut app = app_with(
+        vec![SlashCommand::new("help").with_description("show help")],
+        &dir,
+    );
+    // `render_snapshot` trims trailing cells, so a row that is *not* padded
+    // to the editor width would still show the transcript's characters to
+    // the right of the candidate. Six full-width rows guarantee the
+    // dropdown lands on top of text.
+    for _ in 0..6 {
+        app.messages_mut().push(pi_tui::message::MessageItem::assistant(
+            "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        ));
+    }
+
+    type_into(&mut app, "/h");
+    let snapshot = app.render_snapshot(48, 12);
+    let row = snapshot
+        .lines
+        .iter()
+        .find(|line| line.contains('❯'))
+        .expect("dropdown row");
+    assert!(!row.contains('X'), "transcript bled through: {row:?}");
+    assert!(row.contains("help"), "{row:?}");
+}
