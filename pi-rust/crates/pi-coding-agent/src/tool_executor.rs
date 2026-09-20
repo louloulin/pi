@@ -16,6 +16,7 @@ use pi_extensions::JsExtensionHost;
 use pi_protocol::{Content, ToolCall, ToolDefinition, ToolExecutionMode, ToolResult};
 use tokio_util::sync::CancellationToken;
 
+use crate::tool_validation::coerce_tool_arguments;
 use crate::tools::{default_tool_bundle, AbortLike, DynAgentTool, ToolError};
 
 /// [`ToolExecutor`] backed by the built-in [`AgentTool`] bundle.
@@ -201,7 +202,18 @@ impl ToolExecutor for ExtensionToolExecutor {
             });
         }
 
-        let args = call.arguments.to_string();
+        // Extension tools declare their schema in the same JSON Schema dialect,
+        // so they get the same coercion as the built-ins before the arguments
+        // cross into the QuickJS host.
+        let arguments = match self
+            .extension_tools
+            .iter()
+            .find(|definition| definition.name == call.name)
+        {
+            Some(definition) => coerce_tool_arguments(&definition.parameters, &call.arguments),
+            None => call.arguments.clone(),
+        };
+        let args = arguments.to_string();
         match self.host.execute_tool(&call.name, &args).await {
             Ok(outcome) => Ok(ToolResult {
                 tool_call_id: call.id.clone(),
@@ -282,7 +294,13 @@ impl ToolExecutor for BuiltinToolExecutor {
             AbortLike::none()
         };
 
-        match tool.execute(call.arguments.clone(), abort).await {
+        // Coerce the model's arguments against the tool's JSON Schema before
+        // the tool parses them. Models routinely emit `"5"` for an integer or
+        // `"true"` for a flag; upstream's `validateToolArguments` coerces those
+        // and every tool here matches upstream's acceptance. Final strictness
+        // still comes from each tool's own `serde_json::from_value`.
+        let arguments = coerce_tool_arguments(&tool.parameters(), &call.arguments);
+        match tool.execute(arguments, abort).await {
             Ok(output) => Ok(ToolResult {
                 tool_call_id: call.id.clone(),
                 content: Box::new(fold_content(output.content)),

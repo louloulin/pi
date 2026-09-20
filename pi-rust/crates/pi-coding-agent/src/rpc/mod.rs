@@ -26,6 +26,38 @@
 //! `-32603`, malformed JSON `-32700`, and a second `prompt` while a turn
 //! is in flight `-32000`.
 //!
+//! # Client usage
+//!
+//! [`client::RpcClient`] is the Rust counterpart of the upstream
+//! `rpc-client.ts`: it spawns `pi --rpc`, writes requests, pairs each
+//! response to its `id`, and streams the `event` notifications to
+//! callbacks or the [`client::RpcClient::events`] log. The integration
+//! tests in `tests/rpc.rs` are built on it, so an embedder gets the same
+//! client the tests exercise.
+//!
+//! ```no_run
+//! use std::time::Duration;
+//! use pi_coding_agent::rpc::{RpcClient, RpcClientOptions};
+//!
+//! let options = RpcClientOptions::new("target/debug/pi");
+//! let mut client = RpcClient::spawn(&options).expect("spawn pi --rpc");
+//! let result = client.prompt("hello").expect("one turn"); // response paired by id
+//! let state = client.get_state().expect("state");          // {"model", "messages", "sessionId"}
+//! for event in client.events() {
+//!     println!("{} / {}", event["type"], event["turn"]);
+//! }
+//! client.close_stdin();                                     // EOF → server drains and exits 0
+//! let status = client.wait_for_exit(Duration::from_secs(30)).expect("exit");
+//! assert_eq!(status.code(), Some(0));
+//! # let _ = result;
+//! ```
+//!
+//! Events also stream to [`client::RpcClient::on_event`] callbacks while a
+//! [`client::RpcClient::call`] is waiting, which is what
+//! `prompt_returns_response_and_streams_events` asserts. This client speaks
+//! only this stdio protocol — the `pi-protocol` / `pi-client` framing and
+//! unix-socket transport are a separate line.
+//!
 //! # Concurrency
 //!
 //! [`run_rpc_server`] allows exactly one in-flight turn. It rejects a
@@ -41,19 +73,21 @@
 
 #![deny(missing_docs)]
 
+pub mod client;
 pub mod error;
 pub mod events;
 pub mod protocol;
 pub mod server;
 
+pub use client::{ClientMessage, RpcClient, RpcClientError, RpcClientOptions, StdinMode};
 pub use error::{codes, JsonRpcError};
 pub use events::agent_event_to_json;
 pub use protocol::{Incoming, Notification, Request, Response, JSONRPC_VERSION};
 pub use server::{run_rpc_server, RpcServerError};
 
+use pi_agent_core::tools::ToolExecutor;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
-use pi_agent_core::tools::ToolExecutor;
 use pi_protocol::Model;
 use std::sync::Arc;
 
