@@ -20,6 +20,7 @@ pub mod extension_ui;
 pub mod fuzzy;
 pub mod highlight;
 pub mod hyperlink;
+pub mod image;
 pub mod input;
 pub mod keybindings;
 pub mod kill_ring;
@@ -56,6 +57,7 @@ pub use highlight::{
     get_language_from_path, highlight_code, supports_language, tokenize, Token, TokenKind,
 };
 pub use hyperlink::{close_hyperlink, hyperlink, open_hyperlink, visible_width};
+pub use image::{truncate_to_width, Image, ImageOptions, ImageTheme};
 pub use input::{
     is_mouse_sequence, parse_mouse_sequence, InputEvent, Key, KeyModifiers, MouseButton,
     MouseGesture, MouseGestureKind,
