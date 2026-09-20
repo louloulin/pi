@@ -324,6 +324,38 @@ async fn run_loop(
     // adapter and the App owns the folding (collapsed preview, Ctrl+O,
     // click-to-toggle). Print mode keeps its own session in `text_fallback`.
     let tool_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // Composer autocomplete (LUM-1238). The engine (`pi_tui::autocomplete`) and
+    // the Editor's dropdown have existed since the TUI port, but no caller
+    // ever installed a provider — `set_autocomplete_provider` had zero
+    // production call sites — so typing `/`, `/he` or `@src/` on the real
+    // binary produced no candidates. The command half is the table `/help`
+    // documents plus whatever the loaded extensions register; the file half
+    // resolves `@` paths against the cwd and is only consulted once a path
+    // prefix is actually typed.
+    let autocomplete_commands = {
+        let mut commands = crate::commands::slash::autocomplete_commands();
+        if let Some(runtime) = options.extensions.as_ref() {
+            commands.extend(runtime.commands().iter().map(|command| {
+                let entry = pi_tui::autocomplete::SlashCommand::new(command.name.clone());
+                if command.description.is_empty() {
+                    entry
+                } else {
+                    entry.with_description(command.description.clone())
+                }
+            }));
+        }
+        commands
+    };
+    app.prompt_mut()
+        .editor_mut()
+        .set_autocomplete_provider(Arc::new(
+            pi_tui::autocomplete::CombinedAutocompleteProvider::new(
+                autocomplete_commands,
+                tool_cwd.clone(),
+            ),
+        ));
+
     app.set_tool_block_renderer(Box::new(crate::tools::InteractiveToolRenderer::new(
         tool_cwd,
     )));
@@ -1623,7 +1655,10 @@ async fn run_slash_command(
                 help_text_with_extensions(commands),
                 &options.prompt_templates,
             );
-            app.info(help);
+            // Command-reference output, not user input: the info prefix keeps
+            // `/help`'s body from reading as something the user typed
+            // (LUM-1238 §15.4).
+            app.info_block(help);
         }
         SlashCommand::Clear => {
             app.messages_mut().clear();
@@ -1665,7 +1700,7 @@ async fn run_slash_command(
             }
         }
         SlashCommand::Hotkeys => {
-            app.info(crate::commands::slash::hotkeys_text());
+            app.info_block(crate::commands::slash::hotkeys_text());
         }
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;

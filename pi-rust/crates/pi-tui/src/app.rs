@@ -97,8 +97,11 @@
 //! Consumed here:
 //!
 //! * `app.interrupt` (`escape`) — cancel the in-flight turn while busy.
-//! * `app.clear` (`ctrl+c`) — cancel while busy, otherwise exit, this
-//!   port's existing reading of upstream's `app.clear` + `app.exit`.
+//! * `app.clear` (`ctrl+c`) — cancel while busy; when idle, the first
+//!   press clears the composer and a second press inside
+//!   [`CLEAR_EXIT_WINDOW`] exits. Matches upstream `handleCtrlC`
+//!   (`interactive-mode.ts:3931-3939`), whose 500 ms window is what the
+//!   startup header's `Ctrl+C to clear` / `Ctrl+C twice to exit` promises.
 //! * `tui.altScreen.pageUp` / `pageDown` (`pageUp` / `pageDown`) and
 //!   `tui.altScreen.top` / `bottom` (`home` / `end`) — viewport scrolling.
 //! * `tui.altScreen.search` / `searchClose` / `searchNext` /
@@ -285,7 +288,7 @@ use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine, StyledSpan};
-use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeColor, ThemeError};
+use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeBg, ThemeColor, ThemeError};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -295,6 +298,17 @@ const WHEEL_SCROLL_LINES: usize = 1;
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
 const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+
+/// How long a second `app.clear` (`Ctrl+C`) press after the first still
+/// counts as a double press.
+///
+/// Upstream keeps the window in `lastSigintTime` and exits when
+/// `now - lastSigintTime < 500` (`interactive-mode.ts:3931-3939`); the
+/// startup header advertises the same contract as `Ctrl+C twice to exit`.
+/// The window is compared against the timestamp [`App::step_key_at`]
+/// receives, so tests drive it deterministically instead of racing a real
+/// clock.
+pub const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
 
 /// `round(value / divisor)` for unsigned integers, matching the `Math.round`
 /// calls in upstream's scrollbar maths
@@ -965,6 +979,15 @@ pub struct App {
     /// Set when the App should exit at the next opportunity. The TUI
     /// exit path checks this between key events.
     exit_requested: bool,
+    /// When the last idle `app.clear` (`Ctrl+C`) press landed. A second
+    /// press within [`CLEAR_EXIT_WINDOW`] exits; see [`App::step_key_at`].
+    /// `None` before the first press of the session.
+    last_clear_at: Option<Instant>,
+    /// Geometry of the jump-to-latest indicator painted on the viewport's
+    /// bottom edge, in absolute terminal cells. `width == 0` means the
+    /// last frame did not paint one (the viewport was following the tail),
+    /// which is also what the mouse hit test reads.
+    jump_indicator: (AtomicU16, AtomicU16, AtomicU16),
     /// Width of the message viewport as of the last render. Scroll keys use
     /// it to wrap the log exactly like the renderer does, so a "page" is a
     /// real screenful.
@@ -1111,6 +1134,8 @@ impl App {
             last_turn_usage: None,
             turn_busy: Arc::new(AtomicBool::new(false)),
             exit_requested: false,
+            last_clear_at: None,
+            jump_indicator: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             viewport_width: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
@@ -2286,8 +2311,19 @@ impl App {
     }
 
     /// Process a single [`Key`]. Public so tests can step the App
-    /// with explicit keys.
+    /// with explicit keys. Equivalent to [`App::step_key_at`] with the
+    /// current wall clock; the production render loop goes through here.
     pub fn step_key(&mut self, key: Key) -> StepOutcome {
+        self.step_key_at(key, Instant::now())
+    }
+
+    /// Process a single [`Key`] at the caller-supplied instant.
+    ///
+    /// The instant is what the `app.clear` (`Ctrl+C`) double-press window is
+    /// measured against, so tests can drive the window without sleeping;
+    /// nothing else reads it. `Instant::now()` must not appear in the
+    /// decision itself (LUM-1238 acceptance 2).
+    pub fn step_key_at(&mut self, key: Key, now: Instant) -> StepOutcome {
         // A transient status message lives for exactly one key press
         // (upstream's `showStatus` clears on a timer; this port has no timer
         // in the App, and a key press is the next thing the reader does).
@@ -2339,14 +2375,28 @@ impl App {
             self.cancel();
             return StepOutcome::Redraw;
         }
-        // `app.clear` (`Ctrl+C`).
+        // `app.clear` (`Ctrl+C`): cancel while a turn is in flight; when
+        // idle, clear the composer on the first press and exit on a second
+        // press inside [`CLEAR_EXIT_WINDOW`] — upstream `handleCtrlC`
+        // (`interactive-mode.ts:3931-3939`). Only the composer is touched by
+        // the clearing press (`Prompt::clear` drops the draft text, chips,
+        // history browsing and undo stack), so nothing else about the
+        // session changes.
         if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
             if self.is_busy() {
                 self.cancel();
                 return StepOutcome::Redraw;
             }
-            self.exit_requested = true;
-            return StepOutcome::Exit;
+            let double_press = self
+                .last_clear_at
+                .is_some_and(|last| now.saturating_duration_since(last) < CLEAR_EXIT_WINDOW);
+            if double_press {
+                self.exit_requested = true;
+                return StepOutcome::Exit;
+            }
+            self.last_clear_at = Some(now);
+            self.prompt.clear();
+            return StepOutcome::Redraw;
         }
         // `Ctrl+L` stays hardcoded: upstream also defaults
         // `app.model.select` to `ctrl+l`, but its meaning is "open the
@@ -2992,6 +3042,13 @@ impl App {
         self.messages.push_info(text);
     }
 
+    /// Append a system info block — command-reference output such as
+    /// `/help` / `/hotkeys` — with the `· ` prefix instead of the composer's
+    /// `> ` (LUM-1238 §15.4).
+    pub fn info_block(&mut self, text: impl Into<String>) {
+        self.messages.push_info_block(text);
+    }
+
     /// Size of the message viewport as of the last render — `(0, 0)`
     /// before the first one.
     pub fn viewport(&self) -> (u16, u16) {
@@ -3252,6 +3309,14 @@ impl App {
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
+        // The jump-to-latest indicator is hit-tested before the scrollbar and
+        // the selection path (upstream `handleScrollToEndIndicatorMouseEvent`,
+        // `packages/tui/src/tui-alt-screen.ts:914,1016-1022`).
+        if let Some(outcome) = self.step_jump_indicator_mouse_gesture(&gesture) {
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
+            return outcome;
+        }
         // The scrollbar is hit-tested before the selection path, exactly
         // like upstream (`handleScrollbarMouseEvent` runs before
         // `handleSelectionMouseEvent`). While a drag owns the pointer the
@@ -3271,6 +3336,28 @@ impl App {
         } else {
             outcome
         }
+    }
+
+    /// A primary press inside the jump-to-latest indicator jumps the viewport
+    /// back to the tail, exactly like `tui.altScreen.bottom` — upstream
+    /// `handleScrollToEndIndicatorMouseEvent`
+    /// (`packages/tui/src/tui-alt-screen.ts:1016-1022`).
+    ///
+    /// Returns `None` when the gesture is not a primary press or the last
+    /// frame painted no indicator, so the caller keeps routing normally.
+    fn step_jump_indicator_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        if !matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)) {
+            return None;
+        }
+        let (x, y, width) = self.jump_to_latest_indicator();
+        if width == 0 || gesture.y != y || gesture.x < x || gesture.x >= x + width {
+            return None;
+        }
+        Some(if self.scroll_viewport_to_bottom() {
+            StepOutcome::Redraw
+        } else {
+            StepOutcome::Idle
+        })
     }
 
     /// Route a non-wheel gesture through the chat-log text selection: start,
@@ -4022,12 +4109,140 @@ impl App {
 
     /// Jump the chat log back to the tail — `tui.altScreen.bottom`. New
     /// output pins the viewport again.
+    ///
+    /// Returns `false` only when the viewport is already following the tail
+    /// and pinned to it; a detached viewport whose offset happens to be `0`
+    /// (possible through [`MessageView::set_following`]) is still re-attached
+    /// so the jump-to-latest indicator always clears.
     pub fn scroll_viewport_to_bottom(&mut self) -> bool {
-        if self.messages.scroll_offset() == 0 {
+        if self.messages.is_following() && self.messages.scroll_offset() == 0 {
             return false;
         }
         self.messages.scroll_to_bottom();
         true
+    }
+
+    /// The jump-to-latest label for the current viewport state, or `None`
+    /// while the viewport follows the tail.
+    ///
+    /// `" ↓ Jump to latest message · End "` mirrors upstream
+    /// `scrollToEndIndicator`
+    /// (`packages/coding-agent/src/modes/interactive/tui-renderer.ts:29-33`),
+    /// with the effective `tui.altScreen.bottom` chord in place of
+    /// `keyDisplayText`. The shortcut is omitted when the id is unbound.
+    pub fn jump_to_latest_label(&self) -> Option<String> {
+        if self.messages.is_following() {
+            return None;
+        }
+        let shortcut = get_keybindings()
+            .get_keys("tui.altScreen.bottom")
+            .first()
+            .map(|chord| format_chord(chord));
+        Some(match shortcut {
+            Some(shortcut) => format!(" ↓ Jump to latest message · {shortcut} "),
+            None => " ↓ Jump to latest message ".to_string(),
+        })
+    }
+
+    /// The rectangle of the jump-to-latest indicator as of the last painted
+    /// frame — `(x, y, width)`, with `width == 0` when no indicator was
+    /// painted. Used by the mouse hit test and by tests.
+    pub fn jump_to_latest_indicator(&self) -> (u16, u16, u16) {
+        (
+            self.jump_indicator.0.load(Ordering::Relaxed),
+            self.jump_indicator.1.load(Ordering::Relaxed),
+            self.jump_indicator.2.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Remember (or clear, with `None`) the indicator rectangle the frame
+    /// just painted. Interior mutability because the paint path takes
+    /// `&self`, like the other render-recorded geometry.
+    fn record_jump_indicator(&self, rect: Option<(u16, u16, u16)>) {
+        let (x, y, width) = rect.unwrap_or((0, 0, 0));
+        self.jump_indicator.0.store(x, Ordering::Relaxed);
+        self.jump_indicator.1.store(y, Ordering::Relaxed);
+        self.jump_indicator.2.store(width, Ordering::Relaxed);
+    }
+
+    /// Paint the composer's autocomplete dropdown above the prompt.
+    ///
+    /// [`Editor::autocomplete_render_lines`] supplies the visible window
+    /// (already centred on the selection and carrying the `❯` marker); the
+    /// highlighted row additionally gets the list-selection background.
+    /// Nothing is painted while the dropdown is closed, so a caller that
+    /// never installs a provider keeps the pre-autocomplete frame byte for
+    /// byte.
+    fn apply_autocomplete(&self, area: Rect, buf: &mut Buffer) {
+        let editor = self.prompt.editor();
+        if !editor.is_showing_autocomplete() || area.width == 0 || area.height == 0 {
+            return;
+        }
+        let rows = editor.autocomplete_render_lines(area.width as usize);
+        if rows.is_empty() {
+            return;
+        }
+        let height = rows.len().min(area.height as usize);
+        let selected = editor.autocomplete_selected_row();
+        let top = area.y + area.height - height as u16;
+        let body = SpanStyle::fg(ThemeColor::Text).to_style(&self.theme);
+        let highlight =
+            SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg).to_style(&self.theme);
+        for (offset, row) in rows.iter().take(height).enumerate() {
+            let is_selected = selected == Some(offset);
+            let y = top + offset as u16;
+            let mut text: String = row.chars().take(area.width as usize).collect();
+            if is_selected {
+                let width = text.chars().count();
+                text.extend(std::iter::repeat(' ').take(area.width as usize - width));
+            }
+            for (col, ch) in text.chars().enumerate() {
+                if let Some(cell) = buf.cell_mut((area.x + col as u16, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(if is_selected { highlight } else { body });
+                }
+            }
+        }
+    }
+
+    /// Paint the jump-to-latest indicator on the viewport's bottom edge and
+    /// record its rectangle for the mouse hit test.
+    ///
+    /// Right-aligned so it reads as an affordance on the tail the reader
+    /// scrolled away from; the last column stays free for the scrollbar when
+    /// one is on screen. Mirrors upstream's `ScrollView` overlay
+    /// (`packages/tui/src/tui-alt-screen.ts:1618-1634`).
+    fn apply_jump_to_latest(&self, area: Rect, buf: &mut Buffer) {
+        let Some(label) = self.jump_to_latest_label() else {
+            self.record_jump_indicator(None);
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            self.record_jump_indicator(None);
+            return;
+        }
+        // The scrollbar owns the rightmost column; keep the label off it.
+        let available = if self.scrollbar_geometry().is_some() {
+            area.width.saturating_sub(1)
+        } else {
+            area.width
+        } as usize;
+        if available == 0 {
+            self.record_jump_indicator(None);
+            return;
+        }
+        let label: String = label.chars().take(available).collect();
+        let width = label.chars().count() as u16;
+        let y = area.y + area.height - 1;
+        let x = area.x + available as u16 - width;
+        let style = SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg).to_style(&self.theme);
+        for (offset, ch) in label.chars().enumerate() {
+            if let Some(cell) = buf.cell_mut((x + offset as u16, y)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
+        }
+        self.record_jump_indicator(Some((x, y, width)));
     }
 
     /// Render the App into a `Buffer` at the given area.
@@ -4160,7 +4375,17 @@ impl App {
         // (upstream paints it from the scroll view, before the overlays).
         if scrollbar {
             self.apply_scrollbar(message_area, buf);
+            // Viewport furniture follows the scrollbar's live-frame-only rule:
+            // `render_snapshot` stays content-only (see the module docs).
+            self.apply_jump_to_latest(message_area, buf);
         }
+
+        // The composer's autocomplete dropdown hangs off the bottom edge of
+        // the message viewport, directly above the prompt, and is painted
+        // over the indicator when both are on screen. Unlike the pointer
+        // overlay it is part of the composer, so it is painted on both the
+        // live and snapshot paths.
+        self.apply_autocomplete(message_area, buf);
 
         // The editor region: a custom component (a non-overlay `custom`
         // session or `set_editor_component`) replaces the prompt line

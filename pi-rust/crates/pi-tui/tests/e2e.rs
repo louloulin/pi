@@ -10,7 +10,7 @@ use pi_agent_core::{Agent, AgentEvent, AgentOptions, AssistantMessageUpdate};
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId, Role, StopReason, Usage};
 use pi_tui::app::{App, AppConfig};
-use pi_tui::input::{InputEvent, KeyCode, KeyModifiers};
+use pi_tui::input::{InputEvent, Key, KeyCode, KeyModifiers};
 use tokio::sync::Mutex as AsyncMutex;
 
 fn faux_model() -> Model {
@@ -172,13 +172,23 @@ async fn exit_short_circuits_via_ctrl_d_on_empty_buffer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ctrl_c_on_idle_exits() {
+async fn ctrl_c_on_idle_clears_once_and_exits_on_the_second_press() {
     let mut app = app();
-    let outcome = app.step(InputEvent::Key(pi_tui::input::Key::new(
-        KeyCode::Char('c'),
-        KeyModifiers::CONTROL,
-    )));
-    assert_eq!(outcome, pi_tui::app::StepOutcome::Exit);
+    let ctrl_c = Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let start = std::time::Instant::now();
+    // The first idle press clears the composer instead of quitting
+    // (LUM-1238; upstream `handleCtrlC`).
+    assert_eq!(
+        app.step_key_at(ctrl_c, start),
+        pi_tui::app::StepOutcome::Redraw
+    );
+    assert!(!app.is_exit_requested());
+    // The second press inside the 500 ms window exits.
+    assert_eq!(
+        app.step_key_at(ctrl_c, start + std::time::Duration::from_millis(100)),
+        pi_tui::app::StepOutcome::Exit
+    );
+    assert!(app.is_exit_requested());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

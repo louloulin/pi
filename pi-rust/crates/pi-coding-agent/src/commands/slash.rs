@@ -163,7 +163,9 @@ pub fn help_text() -> String {
     out.push_str("  Up / Down   navigate prompt history\n");
     out.push_str("  PgUp/PgDn   scroll the chat log one page\n");
     out.push_str("  Home / End  jump to the start / end of the chat log\n");
-    out.push_str("  Ctrl+C      abort the current turn (or exit on idle)\n");
+    out.push_str(
+        "  Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)\n",
+    );
     out.push_str("  Ctrl+D      exit on an empty prompt\n");
     out.push_str("  Ctrl+L      clear the screen\n");
     out.push_str("  Ctrl+U      clear the prompt buffer\n");
@@ -171,8 +173,53 @@ pub fn help_text() -> String {
     out
 }
 
-/// The `/hotkeys` overview for the process-wide (installed) keybindings.
+/// The composer autocomplete table: every slash command with the argument
+/// hint and description the dropdown shows.
 ///
+/// The engine (`pi_tui::autocomplete`) and the `Editor` dropdown existed but
+/// had no production caller (LUM-1238 §12.3); `interactive.rs` installs this
+/// list into the composer through a [`CombinedAutocompleteProvider`].
+///
+/// The descriptions mirror [`help_text`]'s rows rather than being generated
+/// from them: `help_text` is column-aligned for a fixed-width block and the
+/// dropdown wants a short, hint-carrying label. The
+/// `autocomplete_commands_match_the_slash_command_table` test keeps the two
+/// from drifting — every entry here must parse through [`handle_command`]
+/// and every command `help_text` documents must appear here.
+///
+/// [`CombinedAutocompleteProvider`]: pi_tui::autocomplete::CombinedAutocompleteProvider
+pub fn autocomplete_commands() -> Vec<pi_tui::autocomplete::SlashCommand> {
+    use pi_tui::autocomplete::SlashCommand as Entry;
+    vec![
+        Entry::new("help").with_description("show this help text"),
+        Entry::new("clear").with_description("clear the message view"),
+        Entry::new("new").with_description("start a new session"),
+        Entry::new("copy").with_description("copy the last assistant message to the clipboard"),
+        Entry::new("name")
+            .with_argument_hint("[name]")
+            .with_description("show or set the session display name"),
+        Entry::new("model").with_description("pick a model (opens selector)"),
+        Entry::new("session").with_description("show the current session info"),
+        Entry::new("export")
+            .with_argument_hint("[path]")
+            .with_description("export the session (HTML, or JSONL for a .jsonl path)"),
+        Entry::new("resume").with_description("resume a previous session"),
+        Entry::new("tree").with_description("navigate the session tree and switch branches"),
+        Entry::new("fork").with_description("branch a new session from a user message"),
+        Entry::new("clone").with_description("copy the current session into a new session file"),
+        Entry::new("settings").with_description("show or change interface settings"),
+        Entry::new("trust")
+            .with_argument_hint("yes|no")
+            .with_description("show or set project trust"),
+        Entry::new("compact")
+            .with_argument_hint("[instructions]")
+            .with_description("summarize the conversation prefix to free context"),
+        Entry::new("hotkeys").with_description("list the keyboard shortcuts"),
+        Entry::new("exit").with_description("quit the interactive session"),
+    ]
+}
+
+/// The `/hotkeys` overview for the process-wide (installed) keybindings.
 /// The interactive TTY path installs the merged coding-agent table
 /// (`crate::keybindings::install_keybindings_from`), so this resolves the
 /// same chords the components do — including any `keybindings.json`
@@ -347,6 +394,53 @@ fn format_chord(chord: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autocomplete_commands_match_the_slash_command_table() {
+        // Every candidate the composer offers must actually parse, and every
+        // command `/help` documents must be offered — the two lists are
+        // written separately for layout reasons (see `autocomplete_commands`),
+        // so this is the invariant that keeps them from drifting.
+        let commands = autocomplete_commands();
+        assert!(!commands.is_empty());
+        for command in &commands {
+            assert!(
+                handle_command(&format!("/{}", command.name)).is_ok(),
+                "autocomplete offers /{} but the parser does not know it",
+                command.name
+            );
+        }
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        let help = help_text();
+        let documented: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('/'))
+            .map(|rest| rest.split_whitespace().next().unwrap_or_default())
+            .collect();
+        assert!(!documented.is_empty());
+        for name in documented {
+            assert!(
+                names.contains(&name),
+                "/help documents /{name} but the autocomplete table omits it"
+            );
+        }
+    }
+
+    #[test]
+    fn autocomplete_commands_carry_hints_and_descriptions() {
+        let commands = autocomplete_commands();
+        let compact = commands
+            .iter()
+            .find(|command| command.name == "compact")
+            .expect("compact is offered");
+        assert_eq!(compact.argument_hint.as_deref(), Some("[instructions]"));
+        assert!(compact.description.is_some());
+        let help = commands
+            .iter()
+            .find(|command| command.name == "help")
+            .expect("help is offered");
+        assert_eq!(help.argument_hint, None);
+    }
 
     #[test]
     fn parses_known_commands() {

@@ -433,9 +433,14 @@ fn viewport_chords_still_work_while_the_bar_is_focused() {
         StepOutcome::Redraw
     );
     assert_eq!(app.search_query(), Some("needle"));
-    // Ctrl+C stays global: it exits rather than typing a character.
+    // Ctrl+C stays global: it clears the composer rather than typing a
+    // character, and only the second press inside the window exits
+    // (LUM-1238).
+    let ctrl_c = Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let start = std::time::Instant::now();
+    assert_eq!(app.step_key_at(ctrl_c, start), StepOutcome::Redraw);
     assert_eq!(
-        app.step(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        app.step_key_at(ctrl_c, start + std::time::Duration::from_millis(100)),
         StepOutcome::Exit
     );
 }

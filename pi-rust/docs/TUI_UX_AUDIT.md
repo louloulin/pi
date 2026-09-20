@@ -966,6 +966,10 @@ transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后
 - **`/help` 正文与用户输入共用 `> ` 前缀**：截图里 `/help` 的输出块和 composer 一样以 `> ` 开头，
   与用户消息难以区分（上游用 info 块）。低风险、纯渲染层的收尾项。
 
+> **落地（LUM-1238，第十五节）**：以上四条已在 Stage 70 全部关掉 —— `app.clear` 改为 500 ms 双击窗口
+> （`App::CLEAR_EXIT_WINDOW`）、补全 provider 真正挂到 composer、jump-to-latest 指示器上屏
+> （含鼠标命中与 `End` 重挂尾）、`/help` 改用 `· ` 信息块前缀。真实 PTY 证据见 15.5。
+
 ### 12.5 追加：把已交付的 Stage 63（LUM-1224）与 Stage 66（LUM-1228）也合进 `feature/pi.rs`
 
 交接物只合并了一节 65，本节补上另外两个**已在 `origin` 上、且已跑过绿门**的交付分支：
@@ -1179,3 +1183,159 @@ harness 是 `pty.fork` + `TIOCSWINSZ` + 自写 VT/CSI/OSC 解析（**只在协�
 3. **`app.editor.external`（`Ctrl+G`）**：需要终端 teardown / restore 交接，仍未消费。
 4. **`/tree` 在无持久化会话时只回 `no session database`**：实机可见，但属于 Stage 65 的
    会话库范围，本轮不改。
+
+## 十五、Stage 70 交付（LUM-1238）：TUI 输入面收尾
+
+第十二节 12.3 / 12.4 记下的四条输入面缺口本轮全部关掉。四处改动都在同一条链路上
+（`Editor` → `App::step` → 消息视口 / footer），没有新增模块，也没有新依赖。
+
+### 15.1 P1：补全从「零接线」到「实机出候选」（12.3 的落地）
+
+12.3 的诊断（引擎与下拉层完整、生产调用点为零）按原计划落地，只加了一张表和一处装配：
+
+- **命令表** `crates/pi-coding-agent/src/commands/slash.rs:191 autocomplete_commands()`：17 条内置命令，
+  带参数提示（`export [path]`、`trust yes|no`、`compact [instructions]`）与短描述。它与 `help_text()`
+  **故意不共享字符串**：`help_text` 是固定列宽的对齐块，下拉要的是「短标签 + 描述」。两者不许漂移
+  这件事交给单测：`autocomplete_commands_match_the_slash_command_table`（`slash.rs:399`，每条表项都要能过
+  `handle_command`，`/help` 里每个 `/xxx` 行都必须出现在表里）与
+  `autocomplete_commands_carry_hints_and_descriptions`（`slash.rs:430`）。
+- **装配** `crates/pi-coding-agent/src/interactive.rs:336-355`：内置表 + 已加载扩展注册的命令
+  （`runtime.commands()` 映射成 `SlashCommand`），一起交给
+  `CombinedAutocompleteProvider::new(commands, tool_cwd)`，通过
+  `app.prompt_mut().editor_mut().set_autocomplete_provider(...)` 装上。provider 是 opt-in 的
+  （`editor.rs:101-103` 自己写着「没有调用点就保持补全前的行为」），这就是 12.3 里「引擎在、屏幕上没有」的根因。
+- **上屏** `crates/pi-tui/src/app.rs:4176 apply_autocomplete`：下拉挂在消息视口底边（紧贴 prompt），
+  候选行取自 `Editor::autocomplete_render_lines(width)`，选中行由
+  `crates/pi-tui/src/editor.rs:1154 autocomplete_selected_row()`（复用滚动窗口的居中规则）整行铺选中底。
+  标签是**裸命令名**（`help`，不带 `/`），与上游 `packages/tui/src/autocomplete.ts:318-328` 的
+  `label: name` 一致；描述只在宽度 44 列以上才追加。
+- 与滚动条 / jump-to-latest 不同，下拉属于 composer，所以 live frame 与 `render_snapshot`
+  **都画**（`app.rs:4388`，在 `if scrollbar` 之外）。
+
+真实二进制行为见 15.5 的 a1–a3：`/` 出 5 条候选、`/he` 把 `help` 排到第一（命令匹配走的是
+`fuzzy_rank`，与上游 `fuzzyFilter` 同源，`copy`/`exit` 也会因为描述里含 `h…e` 而入选，这是上游行为不是退化）、
+`@src/` 出 `src/app.rs` 等文件候选。
+
+### 15.2 P1：`app.clear` 的 500 ms 双击窗口
+
+12.4 第一条：idle 时一次 Ctrl+C 直接 `exit_requested = true`，草稿随退出一起丢；上游
+`interactive-mode.ts:3931-3939 handleCtrlC` 是「第一次清编辑器、500 ms 内第二次才退出」。
+
+```rust
+// crates/pi-tui/src/app.rs:311
+pub const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
+
+// crates/pi-tui/src/app.rs:2384-2399（判定分支内没有任何时钟调用）
+if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
+    if self.is_busy() {
+        self.cancel();                      // 忙时语义不变
+        return StepOutcome::Redraw;
+    }
+    let double_press = self
+        .last_clear_at
+        .is_some_and(|last| now.saturating_duration_since(last) < CLEAR_EXIT_WINDOW);
+    if double_press {
+        self.exit_requested = true;
+        return StepOutcome::Exit;
+    }
+    self.last_clear_at = Some(now);
+    self.prompt.clear();
+    return StepOutcome::Redraw;
+}
+```
+
+- 时钟从 `App::step_key_at(key, now)`（`app.rs:2326`）注入，`App::step_key`（`app.rs:2316`）才是调用
+  `Instant::now()` 的那一层。验收要求的「判定分支里不出现 `Instant::now()`」因此由类型直接保证，
+  也让 500 ms 边界、第三次按键重新计时这些用例可以在单测里精确构造。
+- **空 composer 也照样清、照样记时间**（与上游 `handleCtrlC` 一致）：慢速双击（第一次 → 停顿 →
+  第二次）仍然能退出，而不是变成「第一次被空草稿吃掉」。
+- 键位描述同步：`crates/pi-coding-agent/src/keybindings.rs:228` 从 `Clear editor` 改成
+  `Clear the prompt (twice to exit)`；`/help` 的 Ctrl+C 行也改成
+  `abort the current turn (or clear the prompt on idle; twice exits)`（`slash.rs:166-168`）。
+- 回归测试（`crates/pi-tui/tests/input_surface.rs`）：窗口内双击退出、恰好 500 ms 视为窗口
+  **外**（边界为左闭右开）、超窗后第三次按键重新计时、空 composer 双击、忙时仍是 `cancel()`。
+
+### 15.3 P1：jump-to-latest 指示器
+
+`MessageView` 的 `is_following()` / `set_following()` 已经把「视口脱钩」这件事补掉了，但屏幕上
+没有任何提示（12.4 第二条）。本轮把上游 `scrollToEndIndicator` 落到既有的
+`tui.altScreen.bottom` 槽位上：
+
+- **文案** `app.rs:4133 jump_to_latest_label()` 生成 `" ↓ Jump to latest message · <shortcut> "`
+  （文案取自 `tui-renderer.ts:29-33`），`<shortcut>` 由 `tui.altScreen.bottom` 的按键经
+  `format_chord` 本地化（en 下是 `End`）；该键位未绑定时省略后半段；跟随底部时返回 `None`。
+- **绘制** `app.rs:4215 apply_jump_to_latest()`：右对齐在消息视口最后一行，存在滚动条时让出最右一列
+  （与 14.2 的滚动条共用几何），宽度不足时先截断。配色 `ThemeColor::Text` on `ThemeBg::SelectedBg`。
+- **几何** 绘制路径拿的是 `&self`，矩形经 `jump_indicator` 原子量对外暴露
+  （`app.rs:4150 jump_to_latest_indicator()` / `:4161 record_jump_indicator()`；`width == 0` 表示本帧没画）。
+- **鼠标** `app.rs:3348 step_jump_indicator_mouse_gesture()`：主键**按下**即命中（上游
+  `handleScrollToEndIndicatorMouseEvent` 只在 press 分支返回 true，release 不处理），命中后
+  `scroll_viewport_to_bottom()` 并清掉滚动条 hover/drag。判定顺序是「模态 → 搜索栏 → 指示器 →
+  滚动条 → 选词」（`app.rs:3315`），对应 `tui-alt-screen.ts:914,1016-1022`。
+- **顺带修掉的一个死结**：`scroll_viewport_to_bottom()`（`app.rs:4117`）此前只判断
+  `is_following() && scroll_offset() == 0`，一个 offset 恰好为 0 的「脱钩」视口会被误判成「已到底、
+  无需重绘」，指示器点不掉也消不掉；现在只有真正处于跟随态且 offset 为 0 才是 no-op。
+- 指示器只在 live frame 画（与 `apply_scrollbar` 同一处的 `scrollbar` 标志，`app.rs:4377-4381`），
+  `render_snapshot` 仍是「只有内容」，既有快照测试不受影响。
+
+### 15.4 P1：`/help` 输出改用信息块前缀
+
+`MessageView::push_info` 的 `> ` 前缀被大量测试当成转录填充物（`tests/app_scroll.rs`、
+`mouse_scroll.rs`、`alt_screen_search.rs`、`extension_ui.rs`、`snapshot.rs::info_message_uses_user_prefix`），
+不能动。所以新增的是一条平行路径而不是改旧语义：
+
+- `crates/pi-tui/src/message.rs:39` 新增 `Role::Info`，`:1120` 的前缀是 `"· "`（`Muted` 色），
+  正文色用 `CustomMessageText`；`Role` 的穷尽匹配只有 `item_lines` 一处，改动面可控。
+- `MessageView::push_info_block`（`message.rs:910`）是唯一入口，`App::info_block`（`app.rs:3048`）
+  是唯一的应用层 API。
+- 调用点只有两处：`/help`（`interactive.rs:1661`）与 `/hotkeys`（`interactive.rs:1703`）。
+
+因此截图里 `/help` 的正文块以 `· ` 开头，composer 仍是 `> `，两者一眼可辨（15.5 的 c3）。
+
+### 15.5 实机证据（真实 PTY）
+
+harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流（本轮补了一层
+`\x1b[?1049h` / `\x1b[?1049l` 的主/备屏切换，退出那一刻的画面才是真实的「终端已还原」），
+再用 PIL 把字符网格渲染成 PNG。被测对象是 `work/LUM-1238` 上编译出的真二进制，
+`--model faux/faux-model`，每张图都是**断言通过后**才落盘：
+
+| 场景 | 送键 | 断言 |
+| --- | --- | --- |
+| a 补全 | `/` → Ctrl+U → `/he` → Ctrl+U → `@src/`（cwd `crates/pi-tui`） | `/` 出现 `help`/`clear`/`new`；`/he` 首行是 `❯ help`；`@src/` 出现 `.rs` 候选 |
+| b Ctrl+C | 输入 `hello draft` → Ctrl+C → 132 ms 后第二次 Ctrl+C（由 bash 包一层，退出后打印状态码） | 第一次后进程仍活着且草稿消失；第二次后进程退出、还原后的主屏出现 `pi exited with status 0` |
+| c 视口 / 信息块 | 7 轮 `hello` → `PgUp` → `End` → `/help`（再把窗口拉到 100x44） | 脱钩时出现 `↓ Jump to latest message · End`；`End` 后该行消失；`/help` 输出以 `· ` 开头（`· slash commands:` / `· keys:`） |
+
+![输入面：`/`、`/he`、`@src/` 三档候选](screenshots/input-surface-autocomplete.png)
+
+![输入面：草稿存活 → 第一次 Ctrl+C 只清草稿 → 500 ms 内第二次退出并还原终端](screenshots/input-surface-ctrl-c-window.png)
+
+![输入面：jump-to-latest 指示器、`End` 重挂尾、`/help` 信息块前缀](screenshots/input-surface-jump-to-latest.png)
+
+同名的 `.txt`（`docs/screenshots/input-surface-*.txt`）是上面三张图的逐字符网格文本，便于在
+代码评审 / 检索里直接看到内容，也给测试与截图之间留一份可 diff 的中间产物。
+
+### 15.6 本轮实测
+
+- `cargo fmt --all -- --check`：干净。
+- `cargo clippy -p pi-tui -p pi-coding-agent --all-targets --offline -- -D warnings`：退出码 0
+  （输出里只剩 vendored `rquickjs-core` 的既有 warning，不在本仓库代码范围内）。
+- `cargo test -p pi-tui --lib --test input_surface --test e2e --test alt_screen_search
+  --test scrollbar --test startup_header --offline`：全绿（344 + 12 + 9 + 10 + 10 + 3）。
+- `cargo test -p pi-coding-agent --lib --test keybindings --test cli_extensions --offline`：
+  全绿（447 + 13 + 20）。新增的两条表一致性单测在 `--lib` 里。
+- 全量 `cargo test -p pi-tui` 与 `-p pi-coding-agent` 在本轮**全部源码改动落地之后**各跑过一次全绿；
+  之后只把两个测试文件里的 `ctrl_c.clone()` 换成直接复用（clippy `clone_on_copy`，`Key: Copy`），
+  并重跑了受影响的 target。50G 卷被并行工作区占满（本轮为腾空间清掉过两次 `target/debug/deps`
+  下的测试可执行文件），无法再链接第三遍整棵测试树，因此这里给的是「全量一次 + 定向重跑」。
+- `pi-evals` 的两个文档 case（`docs-code-fences-balanced` / `docs-relative-links-resolve`）本轮
+  **没能用 cargo 跑**：链接 `pi-evals` 测试目标要重新编译一大批依赖，卷在 `ld` 阶段报
+  `Bus error`。改用等价脚本核对：9 页文档、7 条相对链接全部可解析、每页 fence 计数均为偶数；
+  新增的三张截图与三份 `.txt` 都在 `docs/screenshots/` 内，链接目标存在。
+
+### 15.7 仍然缺的（顺延）
+
+1. **补全的 `Tab` 接受路径未做真机验证**：`tui.input.tab` 已有映射、下拉也已出候选，但本轮
+   只截了候选框，没有把「Tab 补全成 `/help `」也放进 PTY 断言（单测层由 `tests/autocomplete.rs` 覆盖）。
+2. **扩展命令的中文/多字节标签**：下拉宽度按列截断，未验证 CJK 命令名。
+3. 14.5 的四条（resume 保真度、扩展可见性、`Ctrl+G` 外部编辑器、`/tree` 无会话）维持原状。
+
