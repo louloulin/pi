@@ -13499,3 +13499,86 @@ LUM-1188 用 `--assignee pi` 创建时，fuzzy match 命中的是 **`编程助�
 处理：`multica issue cancel-task 01a0bd4a-d482 --issue LUM-1188`（run `dispatched 05:29:53` → `cancelled`），再 `multica issue assign LUM-1188 --to-id 22e8b20d-84ea-43e9-b535-2f76e4aee397` 重派（新 run `01a0bd4f-1848`，`05:34:32`）。取消前先 `git ls-remote origin|mirror refs/heads/work/lum-1188` 确认为空 —— 被取消的那路**没有**推任何分支，不会和重派后的同名分支撞车。
 
 **后续轮次照做**：派发一律 `--assignee-id 22e8b20d-84ea-43e9-b535-2f76e4aee397`（或 `--assignee 编程助手-devbox1` 的全名），**不要**写 `--assignee pi`；创建后立刻用 `multica issue get <新号> --output json` 核对 `assignee_id` 与 `multica issue runs <新号> --active` 的 `agent_id`/`dispatched_at`（后者的 `attribution.delegated_from_task_id` 就是本轮 run 的 id）。派发前 `multica daemon status` 的 `running_task_count` 是**本机**的计数，不含其它 runtime 上的任务——所以「本机 3 路」与「全工作区 3 路」并不等价。
+
+## LUM-1189 round — 合并 LUM-1180（`@earendil-works/pi-ai/compat` 内建 provider 工厂 + host 流式事件桥）→ 全量实跑 **130 / 1999**；发现 LUM-1188 上一 run「completed 但零产物」并重派；派发 `ctx.ui.*` 端到端接线（LUM-1190）
+
+本轮是 **LUM-981** 的推进/协调轮。硬职责（合并 LUM-1180 + 补跑全量测试）已完成并推送；两个空槽投给**文件面零重叠**的两条切片（LUM-1190 = `pi-extensions` + `pi-coding-agent`，LUM-1188 重派 = `pi-tui`）。
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `d11c3190f`（LUM-1187 的文档提交），`origin` 与工作区 `mirror` 同位同 SHA。
+* `multica daemon status --output json`：`running_task_count = 1`、`active_task_count = 1` —— **只有本协调轮在跑**。上一轮的 LUM-1180 run 已 `completed`，LUM-1188 的 run 也已 `completed`（但零产物，见第四节）→ 头上 **2 个空槽**。
+
+### 二、可合并性扫描：本轮命中 `work/LUM-1180`（唯一新增非祖先分支）
+
+1. `git fetch --all --prune` + 双向扫（`origin` + `mirror`）：
+   * `origin/work/LUM-1180` = `8bc0956d3`（`feat(pi-extensions): LUM-1180 内置 pi-ai provider 工厂（host streaming 桥）`），`mirror/work/LUM-1180` 同 SHA。**这是 LUM-1187 留下的硬职责目标，本轮合并它。**
+   * 其余 `work/*`（`lum-1183-integrate` / `lum-1185` / `lum-1186` / `lum-1187`）都已是 `feature/pi.rs` 祖先。
+2. `git merge-base --is-ancestor` 全量非祖先分支逐个核实，**全部是被 tip 取代的旧树**（`git diff --stat feature/pi.rs <ref>` 只显示删除）：`origin/work/lum-1173`(11) / `mirror/work/lum-1177`(4) / `mirror/backup/lum-1163-local`(4) / `origin/agent/devbox1/lum-1058`(2) / `9f0097e10886`(2) / `b662db4686e7`(2) / `d9d635156aaa`(1，LUM-1179 的 `fs.createWriteStream`) / `142cee5d0ed9`(1，LUM-1160 auth) / `lum-1023`(1) / `lum-1020`(1) / `e3a55b14fe9d`(1) → 均**不合并**。
+3. 全 workdir HEAD 对账：`lum-1188/workdir/pi` 的 HEAD = `d11c3190f`、工作区 clean、无 stash 新增 → **没有「做完但没推」的隐藏树**。
+
+### 三、合并与验证（合并树 `bb9331f06`）
+
+```console
+$ git merge --no-ff origin/work/LUM-1180 -m "Merge work/LUM-1180: …"
+ 17 files changed, 3011 insertions(+), 51 deletions(-)
+```
+
+新增物：`pi-ai/src/ext_bridge.rs`（980 行，`@earendil-works/pi-ai/compat` 内建 provider 工厂 + 流式桥）、`pi-extensions/src/pi_ai.rs`（286 行）、`pi-coding-agent/src/extensions/pi_ai_runner.rs`（149 行）+ `tests/pi_ai_runner.rs`（353 行）、`pi-extensions/tests/pi_ai_provider.rs`（683 行），以及 `pi-ext-shim.mjs`（+290）、`host.rs`（+122）的接线。
+
+全量质量门在本轮合并树上**实跑**（frugal 配置）：`CARGO_HOME=/tmp/cargo-home CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0`：
+
+```console
+$ cargo fmt --all -- --check                         # exit 0
+$ cargo test --workspace --offline                   # exit 0
+  130 suites / 1999 passed / 0 failed / 2 ignored
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0
+```
+
+**passed 增量核对**：对 LUM-1186 的基线 `128 / 1981` 是 **+2 套件 / +18 passed**。两个新套件实测 `pi_ai_runner` **6 passed**、`pi_ai_provider` **5 passed**（合计 11），其余 **+7** 来自 `pi-extensions/tests/{host.rs,sdk_modules.rs}` 与 `pi-ai` 既有套件的扩充 —— 与 LUM-1180 的改动面相符，**没有静默丢测**。LUM-1185/1186/1187 累积的「全量欠账」在本轮**清零**。
+
+### 四、本轮新发现：LUM-1188 的上一 run 是「`completed` 但零产物」
+
+LUM-1187 派发的 LUM-1188（pi-tui 终端图片子系统）有两个 run：
+
+| run | 时间 | 结果 |
+| --- | --- | --- |
+| `01a0bd4a-d482` | 05:29:53 | `cancelled`（`--assignee pi` 误命中 winpi，LUM-1187 已处理） |
+| `01a0bd4f-1848` | 05:34:32 → `completed 05:39:06` | **零产物**：`result.output = ""`、`delivered_comment_ids = []`、issue 上 0 条评论 |
+
+核实「零产物」的四条证据：`work/lum-1188` 在 `origin` 与 `mirror` **都不存在**；workdir 分支 `agent/devbox1/9f787be6f0ce` 停在 `d11c3190f`（**零新提交**）；workdir 工作区 clean（`git status --porcelain` 空、无 diff、无 untracked）；session `20260920T053446.790120778.jsonl`（63 条）最后一条是 **assistant `thinking`**（正在设计 `getPngDimensions` 的 base64 解码与 `truncate_to_width` helper），说明 run 在**实现中途被终止**，既没落盘也没回评论。
+
+**教训（建议并入协调轮开工例程）**：上一轮派发的 run，`status=completed` **不等于**交付 —— 要额外核对 `result.output` / `delivered_comment_ids` / issue 是否真有评论 / `work/*` 分支是否存在。本轮的处置是 `multica issue rerun LUM-1188`（新 run `01a0bd5c-3d07`，05:48:53）。
+
+### 五、派发（本轮 2 路，加本 run = 3/3）
+
+| issue | 内容 | 文件面 | run |
+| --- | --- | --- | --- |
+| **LUM-1190** | `ctx.ui.*` 端到端接线：`custom()` + `setWidget`/`setHeader`/`setFooter`/`setEditorComponent`（消费 LUM-1184 已合入的 pi-tui 宿主面） | `pi-extensions/src/{host.rs,lib.rs}` + `pi-ext-shim.mjs` + `pi-coding-agent/src/extensions/{ui_bridge.rs,wiring.rs}` + 可选 `pi-protocol/src/events.rs` | `01a0bd5c-08ac` @ 05:48:40 |
+| **LUM-1188**（重派） | pi-tui 终端图片子系统（`terminal-image.ts` + `components/image.ts`） | 仅 `pi-tui/**` | `01a0bd5c-3d07` @ 05:48:53 |
+
+* 两路文件面**零重叠**（`pi-extensions`+`pi-coding-agent` vs `pi-tui`），且都禁止触碰对方的路径（LUM-1190 明令禁改 `pi-tui/**`）。
+* 派发一律用 `--assignee-id 22e8b20d-84ea-43e9-b535-2f76e4aee397`（LUM-1187 第六节的教训）；创建后核对 `multica issue runs`：两路都落在 runtime `0d113b34-…`（`Pi (devbox1)`）✓。
+* 派发后 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`（LUM-1190 + LUM-1188 + 本协调轮）。
+
+### 六、frontier（本轮后）
+
+1. **质量门**：合并树 `bb9331f06` 上 fmt / clippy / **全量 test 全部实跑**：`130 / 1999 / 0 / 2`。下一欠账点 = LUM-1190、LUM-1188 任一合入时。
+2. **`ctx.ui.*` 端到端接线**：**本轮已派发 LUM-1190**（LUM-1180 合入后阻塞解除，文件面写死）。
+3. **pi-tui 终端图片子系统**：**LUM-1188 重派中**。
+4. **`pi-ai` 请求级 telemetry span（下一轮的首选新切片）**：`pi-agent-core` 已有 telemetry，`pi-ai` 侧仍全无 `pi.ai.request` span；注意这是横切 pi-ai 全 provider 的改动，`lum-1061` 旧分支不可复用（LUM-1187 第二节已定性）。文件面 = `pi-ai/**` + `pi-telemetry` 只读消费，与在飞两路零重叠 → **下一轮有空槽即可派发**。
+5. **`@earendil-works/pi-ai/compat` 的后半**（`pi.registerProvider(...)` host 桥）：LUM-1180 已交付内建工厂 + 流式桥，剩余部分应基于合并后的 `ext_bridge.rs` 重新评估，不再作为独立 blocker。
+6. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert` 全局）、**provider 家族**（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1185 / 1177 结论不变（环境做不了 / 无凭据无消费方）。
+
+### 七、下一轮动作（按优先级）
+
+1. **LUM-1190 / LUM-1188 任一推分支就合并它**：双向扫（`origin` + `mirror`，注意 `work/lum-XXXX` 与 `work/LUM-XXXX` 两种写法），合并后**必须补跑一次全量 `cargo test --workspace`（frugal 配置）**；两路文件面不相交，可分别合并。
+2. **开工先核对上一轮派发的 run 是否真有产物**（本轮第四节新增）：`result.output` / `delivered_comment_ids` / issue 评论 / `work/*` 分支四查，零产物的直接 `rerun`。
+3. **有空槽时派发 `pi-ai` 请求级 telemetry span**（第六节第 4 条），文件面 `pi-ai/**`。
+4. **协调轮开工例程**：`git fetch --all` → 双向 + 大小写扫 `work/*` → 全 workdir HEAD 对账 → **上一轮 run 产物四查（本轮新增）** → `multica daemon status --output json` 核对 `running_task_count` → `df -h /`（余量 < 5G 先清陈旧 target dir）→ 再决定派发。
+
+### 八、磁盘（本轮清理与实测）
+
+* 清理：`/tmp/pi-fresh-1179`（**18G**，LUM-1180 的 `CARGO_TARGET_DIR`，其 issue 已 `in_review` 且无持有进程）→ 释放 18G；`lum-1184/workdir/pi/pi-rust/target`（**4.4G**，LUM-1184 已 `in_review`）→ 释放 4.4G。根分区 `6.1G / 88%` → **`28G / 42%`**。
+* 本轮 frugal 全量构建后 target dir 仅 **2.2G**，构建结束余量 `26G / 46%` —— 再次印证 LUM-1186 的结论：`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0` 下「全量 test 需要 15G 余量」的硬约束已降为 2–3G。
+* **新增运维结论**：在飞的 `CARGO_TARGET_DIR` 一旦其 owner issue 进 `in_review` 且 `/proc/*/cwd` 无命中，即可安全回收（`/tmp/pi-fresh-1179` 这类 18G 大目录是磁盘主要占用源）。
