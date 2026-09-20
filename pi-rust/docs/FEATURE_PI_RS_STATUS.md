@@ -14133,3 +14133,106 @@ origin|mirror/agent/devbox1/*                # 旧树（behind 85–437），无
 
 * 开工 `26G / 50G`（54%），余 22G；本轮自建 `/tmp/pi-target-1201`（fmt/clippy/test 后 **2.2G**）。
 * 收尾已清本 run 私有 target dir；**保留** `/tmp/pi-target-1192`（863M，LUM-1192 run 已 `completed`，无进程持有 —— 但按例程应由下一轮清理）与 `/tmp/lum-1197-target`（2.4G，LUM-1197 run 已 `completed`）。
+
+## LUM-1202 round — 合并 LUM-1199 切片 1（native Provider 对象 + `oauth` + `streamSimple` 桥）+ LUM-1200 全片（图片消费三点 + markdown 图片）→ 全量实跑 **138 套件 / 2070 passed / 0 failed / 2 ignored**；停放 Stage 53（LUM-1204）
+
+### 一、开工盘点（与 LUM-1201 的差异）
+
+```
+git ls-remote origin feature/pi.rs   → 40460dba9  （= LUM-1201 收尾 tip，与文档一致）
+mirror/feature/pi.rs                 → 陈旧，忽略
+origin/work/lum-1199                 → 不存在（worker 只推了 mirror，61afe3031，1 commit）
+origin|mirror/work/lum-1200          → mirror e5d374c15（2 commits）+ 工作区未提交的 pi-tui 改动
+```
+
+上一轮派发的两个 Stage（51 / 52）都在飞：**LUM-1199 仍 `in_progress`**（只推了切片 1），**LUM-1200 `todo`**（2 commits + 未提交改动）。本轮按第七节（LUM-1201）第 1 条直读 `origin`，再用 `git cherry` 逐 commit 核实可合并性后合并。
+
+### 二、合并（3 个 merge，全部 `--no-ff`，无冲突）
+
+| merge | 来源 | 内容 |
+| --- | --- | --- |
+| `a69711af8` | `mirror/work/lum-1199` = `61afe3031` | 切片 1：`pi-ext-shim.mjs` native `Provider` 对象重载 + `oauth` 块 + `streamSimple` 流桥；`host.rs` +350；新增 `pi-extensions/tests/register_provider.rs` 217 行（`host.rs` 测试 +110） |
+| `e453b66aa` | `mirror/work/lum-1200` = `e5d374c15` | 切片 1/2：`tool_executor.rs` 工具结果图片块 → `pi-tui` `Image`；`tools/render.rs`；新增 `pi-coding-agent/tests/tool_result_images.rs` |
+| `81acd7335` | `origin/work/lum-1200` = `bce4942bc` | 切片 3：`pi-tui/src/{markdown.rs,message.rs}` markdown 图片渲染 + `pi-tui/tests/markdown_images.rs`（165 行）；外加 worker 自查的 rustfmt commit |
+
+→ 本轮 tip = `9639b3fae`，**已推 `origin` 与 `mirror` 的 `feature/pi.rs`（fast-forward，非 force）**，同时推了 `work/LUM-1202`。
+
+### 三、跨 crate 破口与告警（合并后必须自己修，不能让 worker 背）
+
+1. **`pi-coding-agent/tests/register_provider.rs` 编译不过**：LUM-1199 给 `RegisteredProviderConfig` 加了 `native` / `has_stream_simple` / `oauth` 三个字段，跨 crate 的测试构造点漏改 → 补 `e5a2130c1`。
+2. **rustfmt 基线**：两个 worker 的分支各自只 fmt 了自己的文件，合并后 `cargo fmt --all -- --check` 不干净 → `ac17fcc62` 统一基线。
+3. **`clippy::await_holding_lock`**（`tool_result_images.rs`）：跨 `await` 持有 `MutexGuard` → 加 `#[allow]` + 理由注释（测试内故意的串行化）。
+4. **`clippy::empty_line_after_doc_comments`**（`pi-tui/src/markdown.rs`）：LUM-1200 把「Images」分节头插到了 `maybe_blank` 的 doc comment 与函数体之间，doc comment 悬空 → `9639b3fae` 把 doc comment 移回函数上方。
+
+→ **`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` exit 0**（仅剩 `rquickjs-core` 依赖自带的 12 条 warning，非本仓代码）。
+
+### 四、质量门（`feature/pi.rs` = `9639b3fae`）
+
+```
+CARGO_TARGET_DIR=/tmp/pi-target-1202 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --workspace --offline --no-fail-fast     # exit 0
+→ 138 套件 / 2070 passed / 0 failed / 2 ignored
+```
+
+对照基线（LUM-1201 的 `40460dba9`：136 / 2051 / 0 / 2）**+2 套件 / +19 passed**：
+
+* LUM-1199 切片 1：+5（`pi-extensions/tests/register_provider.rs` 已是既有套件，属追加用例）
+* LUM-1200：+5（新套件 `tool_result_images.rs`）+ +4（`tools.rs` / `host.rs` 追加）+ `markdown_images.rs`（新套件）
+* 套件数 +2 = 新增 `tool_result_images.rs` + `markdown_images.rs`（`pi-extensions/tests/register_provider.rs` 在 LUM-1197 已建，属追加）
+
+**一次已知 flake（不是回归）**：`pi-extensions/tests/pi_ai_provider.rs::a_live_stream_extends_the_host_call_deadline` 在**全量并发**下偶发 `runtime error: Error: interrupted`（这是唯一失败点，日志 `/tmp/lum1202-tests*.log`）。判定依据：
+
+* 该二进制**单独跑 5 次全绿**（`5 passed; 0 failed`，每次 ~0.8s）；
+* 失败那两次的机器 load average ≈ 14.5（两个 worker run 正在 `cargo test`，外加本 run），该用例依赖 50ms/120ms 级别的 wall-clock 超时；
+* 去掉负载后（本 run 最后一次全量）**2070 passed / 0 failed**。
+
+→ 结论：**环境竞争导致的 flake**，用例语义（live stream 抬高 host deadline）未被破坏；不记入回归。
+
+### 五、可合并性扫描（`origin` + `mirror`，两种大小写）
+
+```
+origin|mirror/work/lum-1173   ahead=11   cherry 10 个 `-`，唯一 `+` 是 rustfmt commit（已被 tip fmt 基线覆盖）
+origin|mirror/work/lum-1177   ahead=4    cherry 4/4 全 `-`
+origin|mirror/work/lum-1186/1187/1189/1190/1193/1195/1197  均为已合入分支（`-` 全命中）
+origin/work/lum-1199          不存在（worker 只推 mirror）
+mirror/work/lum-1199          已全量合并（cherry 全 `-`）
+origin|mirror/work/lum-1200   已全量合并（bce4942bc 为本片最后 commit）
+```
+
+→ 零独有产物，无遗漏分支。
+
+### 六、派发（本轮 **0 路新 run**，理由如下）
+
+* 槽位：LUM-1199（`in_progress`）+ 本协调轮 = 2；LUM-1200 本轮出轮（`in_review`）。**另有一个并发同名 issue LUM-1203 正在跑**（PID 34792，`CARGO_TARGET_DIR=/tmp/pi-target-1203`，无 comment、无分支）——即 **Autopilot 又对本 issue 家族起了第二个协调轮**，实际并发数已达 3。
+* LUM-1199 的 issue 正文把「`@earendil-works/pi-ai/compat` 其余八个 lazy api family」显式排除（"第 4 项另开 slice"），而这八项与 LUM-1199 **同改 `pi-extensions/runtime/pi-ext-shim.mjs`**；在 LUM-1199 未落盘前派发必然在同一文件上打架（LUM-1198 轮已记录同因）。
+* 因此本轮选择**只计划、不实现**：新建 **LUM-1204（Stage 53，`backlog` 停放）**，等 LUM-1199 合入后由协调轮晋升。
+
+### 七、并发提醒：LUM-1203 与本轮同刻
+
+`multica daemon status` 报 `running_task_count=3`，其中一个是 **LUM-1203**（标题仍为 `pi`，无 parent，`in_progress`）。本轮收尾时它**尚未推任何分支、未发 comment**。风险与处置：
+
+* 若 LUM-1203 之后也把 `feature/pi.rs` 往前推，会以它自己的合并树为准（两侧都是非 force，后推者必须自己 merge，不会互相覆盖）；
+* 本轮的 tip = `9639b3fae`，**`origin/feature/pi.rs` 收尾复核仍是它**；
+* **建议 owner**：对同一 autopilot 目标串行化（同一时刻只允许一个协调轮），否则两轮会重复做「扫分支 → 合并 → 全量门」，白烧一次全量编译。
+
+### 八、frontier（本轮后）
+
+1. **质量门基线** = **138 套件 / 2070 passed / 0 failed / 2 ignored（`9639b3fae`）**。
+2. **Stage 51（LUM-1199）**：切片 1 已合入；**native `Provider` 对象 + `oauth` + `streamSimple`** 的验收（端到端用例 + `EXTENSIONS.md` 兼容表 + 全量门）仍欠，等 worker 收尾。
+3. **Stage 52（LUM-1200）已交付**：图片子系统最后一环（三个消费点接线）合入，`pi-tui` 图片链路**闭环**。
+4. **Stage 53（LUM-1204，`backlog` 停放）**：compat 八个 lazy api family 的 host 桥接。要点：host 侧**已有** `openai-completions` / `google-generative-ai` / `openai-responses` adapter，缺的只是 shim 的最后一跳；无 adapter 的（bedrock-converse / google-vertex）只做准确化文档。
+5. **pi-extensions 引擎级残余**（`fs.watch` / key-based WebCrypto / `node:test`）与 provider 家族（`bedrock-converse` / `cohere-v2`）：维持 LUM-1185 / 1177 结论，不复活。
+6. **merge 后必须自跑 fmt + clippy + 全量门**：本轮 4 处破口（跨 crate 字段、fmt、两条 clippy）**全部来自合并**，没有一处是单个 worker 自己能看见的。
+
+### 九、下一轮动作（按优先级）
+
+1. **LUM-1199 推分支就合并**（`git ls-remote origin feature/pi.rs` 读基线 → 双向扫 `work/*` → `git cherry` → 合并 → fmt/clippy/全量门），合入后**晋升 LUM-1204**。
+2. **先确认 LUM-1203 是否已推 tip**：若已推，读它的 tip 与本文档的 `9639b3fae` 对账，避免重复合并。
+3. 若 LUM-1203 与本轮都存活，**只保留一个继续**（owner 裁决），另一个转 `in_review` 归档。
+4. **Autopilot 节奏**：`1189→1191→1193→1195→1196→1198→1201→1202|1203` 已出现**同一目标双轮并发**，建议 ≥1h 周期或同 issue 串行化。
+
+### 十、磁盘（本轮）
+
+* 开工 `26G / 50G`，收尾 `33G / 50G`（70%），余 15G；本轮自建 `/tmp/pi-target-1202`（2.4G）。
+* 可清理（run 已结束、无进程持有）：`/tmp/lum-1197-target`（2.4G）、`/tmp/pi-target-1192`（863M）、`/tmp/lum-1200-target`（2.6G）。
+* **保留** `/tmp/pi-target-lum1199`（LUM-1199 在飞）。本轮未执行删除（只报告，交由下一轮按例程清理）。
