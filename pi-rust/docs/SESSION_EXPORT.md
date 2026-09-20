@@ -43,8 +43,8 @@ into a linear chain, terminated by a newline.
 The user-facing strings match upstream so scripts keep working:
 
 - `File not found: <path>` — `--export` target missing
-- `Session file is not a valid pi session: <path>` — first JSONL line is
-  not a session header
+- `Session file is not a valid pi session: <path>` — the file is empty, or
+  its first JSONL line is not a session header
 - `Nothing to export yet - start a conversation first` — `/export` before
   any message
 - `Failed to export session: <message>` — `/export` failure in the TUI
@@ -87,3 +87,10 @@ upstream.
    accepts the Rust `type: "header"` spelling produced by
    `pi session export`, so a session can be round-tripped from either
    backend.
+5. **The reader never mutates the input file.** Upstream's
+   `SessionManager.open` treats a zero-byte file as a brand-new session and
+   rewrites it with a fresh header (and a missing trailing newline is
+   appended) before the export runs. Here a zero-byte file is rejected with
+   `Session file is not a valid pi session: <path>` like any other file
+   without a session header, and the input is only ever read — exporting a
+   session must not modify the session it was asked to export.
