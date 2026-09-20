@@ -24,6 +24,10 @@ use pi_tui::keybindings::{
 const WIDTH: u16 = 100;
 const HEIGHT: u16 = 32;
 
+/// A terminal too short for the expanded hint list — the 120×23 PTY capture
+/// of LUM-1260 §3.
+const SHORT_HEIGHT: u16 = 23;
+
 /// The chords the header should resolve, one row per id it names.
 const APP_CHORDS: &[(&str, &str)] = &[
     ("app.interrupt", "escape"),
@@ -297,4 +301,57 @@ fn an_extension_header_still_overrides_the_extension_summary() {
 
     assert!(text.contains("-- custom header --"), "{text}");
     assert!(!text.contains("extension(s)"), "{text}");
+}
+
+/// The driver's table makes the expanded header ~21 rows tall. A 23-row
+/// terminal cannot hold it *and* the composer *and* the status bar, so the
+/// App folds the hint list for that frame rather than budget it all to the
+/// header and clip the prompt off the bottom (LUM-1260 §3, LUM-1266).
+#[test]
+fn the_header_folds_on_a_terminal_that_cannot_hold_it() {
+    let _guard = lock_registry();
+    install(&[]);
+    let agent = Agent::new(AgentOptions::new(
+        faux_model(),
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ));
+    let app = App::new(
+        &agent,
+        AppConfig {
+            session_id: "startup-header".into(),
+            startup_header: true,
+            ..AppConfig::default()
+        },
+    );
+    let lines = app.render_snapshot(WIDTH, SHORT_HEIGHT).lines;
+    let text = lines.join("\n");
+
+    // The title and the way back to the hints survive; the hints themselves
+    // do not (they cost 19 of the 23 rows).
+    assert!(text.contains("pi v"), "{text}");
+    assert!(
+        text.contains("hints hidden on a short terminal — Alt+H shows them"),
+        "{text}"
+    );
+    assert!(!text.contains("to interrupt"), "folded:\n{text}");
+
+    // The composer is painted on the row above the status bar, and the
+    // transcript keeps a real viewport instead of a single row.
+    let prompt_row = lines
+        .iter()
+        .position(|line| line.contains("type a prompt"))
+        .unwrap_or_else(|| panic!("no composer painted:\n{text}"));
+    assert_eq!(prompt_row, SHORT_HEIGHT as usize - 2);
+    assert!(
+        !lines[SHORT_HEIGHT as usize - 1].trim().is_empty(),
+        "the status bar is painted below the composer:\n{text}"
+    );
+    assert!(
+        app.viewport().1 >= 3,
+        "the transcript keeps at least the floor of rows: {:?}",
+        app.viewport()
+    );
+
+    reset_keybindings();
 }

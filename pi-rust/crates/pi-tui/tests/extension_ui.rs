@@ -261,16 +261,22 @@ fn an_over_tall_region_is_truncated_and_the_message_view_survives() {
         "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10",
     ]))));
 
-    // height 5 → status 1 + one reserved message row leave 3 for the header,
-    // and the tail of the header is dropped. The later chrome regions (the
-    // prompt included) get nothing.
+    // height 5 → status 1 + the composer's row + one reserved message row
+    // leave 2 for the header, and the tail of the header is dropped. The
+    // later chrome regions (Below widgets, the footer) still get nothing —
+    // but the prompt is never one of them (LUM-1266).
     let snapshot = app.render_snapshot(30, 5);
     assert_eq!(snapshot.lines[0], "h1");
-    assert_eq!(snapshot.lines[2], "h3");
-    assert_eq!(snapshot.lines[3].trim(), "> hello", "message row survives");
+    assert_eq!(snapshot.lines[1], "h2");
+    assert_eq!(snapshot.lines[2].trim(), "> hello", "message row survives");
+    assert!(
+        snapshot.lines[3].starts_with('>'),
+        "the composer keeps its row too, got {:?}",
+        snapshot.lines[3]
+    );
     assert!(snapshot.lines[4].contains("Faux"));
     assert!(
-        !snapshot.lines.iter().any(|line| line.contains("h4")),
+        !snapshot.lines.iter().any(|line| line.contains("h3")),
         "the header tail must be dropped: {:?}",
         snapshot.lines
     );

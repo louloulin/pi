@@ -1,0 +1,73 @@
+# lum1266-short-22.png — chars, 120x22 cells
+
+===== LUM-1266: 120x22 — the composer is on screen even though the startup hint list cannot fit  |  [1] 1. idle at 120x22: the header folds its hint list into one line and the composer + status bar stay on screen (LUM-1260 shipped 0 composer rows here)  (cursor 120,21, frame 0c9daefe4217, px f73528d8cf7b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d725e3f2ee3252                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x22 — the composer is on screen even though the startup hint list cannot fit  |  [2] 2. a draft typed at 120x22 is visible in the composer instead of being typed blind  (cursor 36,20, frame 55b93f701458, px 2d3f7d16781d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> typed at 22 rows▍
+Faux test model  session-18d725e3f2ee3252                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x22 — the composer is on screen even though the startup hint list cannot fit  |  [3] 3. Enter runs the turn: the reply lands in the transcript and the composer is still there  (cursor 36,20, frame 25f991284b9a, px e99290a3c5b9, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> typed at 22 rows
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d725e3f2ee3252                                                  in 0 out 0 ?/8.2k  ? for help

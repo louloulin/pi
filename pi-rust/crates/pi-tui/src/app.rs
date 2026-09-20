@@ -283,8 +283,8 @@ use crate::input::{
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
 use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
 use crate::locale::{
-    format_chord, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH, HEADER_ONBOARDING_EN,
-    HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
+    format_chord, HeaderKey, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH,
+    HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
 };
 use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
@@ -412,6 +412,24 @@ const TERMINAL_WORD_SELECTION_JOINERS: [&str; 2] = ["/", "-"];
 /// Lines a single autoscroll beat moves the viewport. Upstream scrolls one
 /// line per 50 ms `setInterval` tick (`tui-alt-screen.ts:1264-1297`).
 const SELECTION_AUTOSCROLL_LINES: usize = 1;
+
+/// Transcript rows the built-in startup header must leave behind before it is
+/// allowed to show its full hint list: the composer's row, the status row and
+/// this many message rows. A shorter terminal folds the hints for that frame
+/// (LUM-1266).
+const MIN_TRANSCRIPT_ROWS: u16 = 3;
+
+/// Rows below the message view that are never an extension region's to take:
+/// the composer and the status bar. Mirrors the reservation in
+/// [`crate::extension_ui::plan_chrome`].
+const RESERVED_CHROME_ROWS: u16 = 2;
+
+/// Rows the expanded startup header must leave for the rest of the frame.
+const HEADER_RESERVED_ROWS: u16 = MIN_TRANSCRIPT_ROWS + RESERVED_CHROME_ROWS;
+
+/// Columns the chat-log scrollbar occupies at the right edge of the frame when
+/// it is drawn.
+const SCROLLBAR_COLUMNS: u16 = 1;
 
 /// Leading half of the "jump to latest" pill's label. Kept as one string so the
 /// shortcut half can be appended (` · <shortcut> `) or dropped when the
@@ -1040,6 +1058,13 @@ pub struct App {
     /// it to wrap the log exactly like the renderer does, so a "page" is a
     /// real screenful.
     viewport_width: AtomicU16,
+    /// Columns of the frame's right edge the scrollbar took out of
+    /// [`App::viewport_width`] on the last render.
+    ///
+    /// The transcript is laid out one column narrower while the bar is
+    /// visible, so the bar never lands on the last character of a wrapped
+    /// line; pointer and scroll math that needs the bar itself adds this back.
+    viewport_reserved: AtomicU16,
     /// Height of the message viewport as of the last render; the page size
     /// for `PageUp` / `PageDown`.
     viewport_height: AtomicU16,
@@ -1212,6 +1237,7 @@ impl App {
             exit_requested: false,
             last_clear_at: None,
             viewport_width: AtomicU16::new(0),
+            viewport_reserved: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -1446,10 +1472,14 @@ impl App {
     /// [`plan_chrome`] has to budget the header's rows before the message
     /// viewport is sized, otherwise the built-in lines would be painted into a
     /// zero-height region.
-    fn composed_frame(&self, width: u16) -> ExtensionFrame {
+    ///
+    /// `total_height` is the frame height the header is being composed for:
+    /// a terminal too short for the full hint list gets the folded header
+    /// instead (see [`App::builtin_header_lines`]).
+    fn composed_frame(&self, width: u16, total_height: u16) -> ExtensionFrame {
         let mut frame = self.extension.frame(width);
         if frame.header.is_empty() {
-            frame.header = self.builtin_header_lines();
+            frame.header = self.builtin_header_lines(total_height);
         }
         frame
     }
@@ -1460,13 +1490,47 @@ impl App {
     /// rows. The hint rows come from [`STARTUP_HINTS`] resolved against the
     /// live keybinding table, so an override in `keybindings.json` shows up
     /// here exactly as it does in `/hotkeys`.
-    fn builtin_header_lines(&self) -> Vec<StyledLine> {
+    ///
+    /// The hint list is tall (a row per bound hint) and the terminal is not
+    /// always: when the expanded list would leave fewer than
+    /// [`MIN_TRANSCRIPT_ROWS`] transcript rows above the composer and the
+    /// status bar, this frame drops the hints and keeps the title (plus, when
+    /// it still fits, one row naming the chord that brings them back). The
+    /// user's own fold state is untouched — `app.header` still expands on a
+    /// short terminal, where the list is simply truncated (LUM-1266).
+    fn builtin_header_lines(&self, total_height: u16) -> Vec<StyledLine> {
         if !self.config.startup_header || !self.header_expanded {
             return Vec::new();
         }
+        let mut lines = self.header_title_lines();
+        let hints = self.header_hint_lines();
+        if hints.is_empty() {
+            return lines;
+        }
+        let expanded_rows = lines.len() as u16 + u16::try_from(hints.len()).unwrap_or(u16::MAX);
+        if expanded_rows.saturating_add(HEADER_RESERVED_ROWS) <= total_height {
+            lines.extend(hints);
+            return lines;
+        }
+        // Short terminal: the title survives, the hints fold away, and the
+        // row that says so is dropped too if even that does not fit.
         let kb = get_keybindings();
-        let locale = self.config.locale;
-        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 4);
+        let folded = HeaderKey::Chord("app.header")
+            .label(|id| kb.get_keys(id))
+            .map(|keys| crate::locale::header_folded_line(self.config.locale, &keys));
+        let folded_rows = lines.len() as u16 + u16::from(folded.is_some());
+        if folded_rows.saturating_add(HEADER_RESERVED_ROWS) <= total_height {
+            if let Some(text) = folded {
+                lines.push(vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Dim))]);
+            }
+        }
+        lines
+    }
+
+    /// The header rows that survive a short terminal: the product line and,
+    /// when an extension header was replaced, its summary.
+    fn header_title_lines(&self) -> Vec<StyledLine> {
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(2);
         // Logo, upstream `interactive-mode.ts:913`.
         lines.push(vec![
             StyledSpan::new(
@@ -1486,6 +1550,15 @@ impl App {
                 SpanStyle::fg(ThemeColor::Muted),
             )]);
         }
+        lines
+    }
+
+    /// The expanded header's tail: one row per resolvable hint, a blank row
+    /// and the onboarding line.
+    fn header_hint_lines(&self) -> Vec<StyledLine> {
+        let kb = get_keybindings();
+        let locale = self.config.locale;
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 2);
         for hint in STARTUP_HINTS {
             // Two filters: the id must resolve to a chord in the live table
             // *and* name an action this port consumes. The second is what
@@ -1505,6 +1578,9 @@ impl App {
                     SpanStyle::fg(ThemeColor::Muted),
                 ),
             ]);
+        }
+        if lines.is_empty() {
+            return lines;
         }
         lines.push(Vec::new());
         lines.push(vec![StyledSpan::new(
@@ -3288,7 +3364,9 @@ impl App {
             return;
         }
         let available = match self.scrollbar_geometry() {
-            Some(geometry) if geometry.column > message_area.x => geometry.column - message_area.x,
+            Some(geometry) if geometry.column > message_area.x => {
+                (geometry.column - message_area.x).min(message_area.width)
+            }
             _ => message_area.width,
         };
         let label = self.scroll_to_end_label();
@@ -3367,7 +3445,11 @@ impl App {
         let thumb_top = origin_y + round_div(scroll_top * max_thumb_top, max_scroll) as u16;
 
         Some(ScrollbarGeometry {
-            column: origin_x + width - 1,
+            // `width` is the transcript's wrap width, one column short of the
+            // frame while the bar is visible: the bar owns the frame's right
+            // edge, not the text's last column (see
+            // [`App::viewport_for_render`]).
+            column: origin_x + width + self.viewport_reserved.load(Ordering::Relaxed) - 1,
             track_top: origin_y,
             track_height: height,
             thumb_top,
@@ -4392,11 +4474,12 @@ impl App {
         // Render the extension regions and budget the chrome before anything
         // else: the message viewport this frame paints is what the scroll,
         // selection and search paths must index.
-        let frame = self.composed_frame(area.width);
+        let frame = self.composed_frame(area.width, area.height);
         let layout = plan_chrome(area.height, &frame);
         // Record the geometry first so the refresh below indexes the exact
         // viewport this frame is about to paint.
-        self.record_viewport(message_rect(area, &layout));
+        let (message_area, reserved) = self.viewport_for_render(message_rect(area, &layout), true);
+        self.record_viewport(message_area, reserved);
         // Keep the search results in step with the transcript they indexed —
         // streaming output and `/clear` both change the corpus under an open
         // bar, which is where upstream refreshes it too (from `render`).
@@ -4404,12 +4487,49 @@ impl App {
         self.render_to_buffer_impl(area, buf, true, self.messages.hyperlinks(), &frame, &layout);
     }
 
+    /// The message viewport a frame paints into, narrowed by the chat-log
+    /// scrollbar's column when the bar is going to be drawn.
+    ///
+    /// The bar is painted on the frame's right edge, so on a transcript whose
+    /// rows use the full width it used to land on top of the last character of
+    /// every wrapped line — one lost character per line on exactly the rows
+    /// `/help` emits (LUM-1238 §15.4, LUM-1262 §2). Narrowing the viewport
+    /// instead keeps the text and the bar side by side, and
+    /// [`App::scrollbar_geometry`] adds the reserved column back to find the
+    /// bar's own cell.
+    ///
+    /// The decision is stable by construction: only a transcript that already
+    /// overflows at the full width reserves a column, and wrapping one column
+    /// earlier can only add lines, never remove them.
+    fn viewport_for_render(&self, area: Rect, scrollbar: bool) -> (Rect, u16) {
+        let reserved = if scrollbar
+            && area.width > SCROLLBAR_COLUMNS
+            && area.height > 0
+            && self.messages.line_count(area.width) > area.height as usize
+        {
+            SCROLLBAR_COLUMNS
+        } else {
+            0
+        };
+        (
+            Rect {
+                width: area.width - reserved,
+                ..area
+            },
+            reserved,
+        )
+    }
+
     /// Remember the message viewport's geometry as of a render: the width the
     /// log wraps at, its height (the page size), and its top-left cell so
     /// pointer coordinates can be mapped back into it.
-    fn record_viewport(&self, message_area: Rect) {
+    ///
+    /// `reserved` is the width [`App::viewport_for_render`] took off `area`
+    /// for the scrollbar, kept only so the bar can find its own column.
+    fn record_viewport(&self, message_area: Rect, reserved: u16) {
         self.viewport_width
             .store(message_area.width, Ordering::Relaxed);
+        self.viewport_reserved.store(reserved, Ordering::Relaxed);
         self.viewport_height
             .store(message_area.height, Ordering::Relaxed);
         self.viewport_origin
@@ -4441,7 +4561,8 @@ impl App {
         // least one row. See the module docs for the order and
         // [`crate::extension_ui::plan_chrome`] for the budget.
         let message_height = layout.message;
-        let message_area = message_rect(area, layout);
+        let (message_area, reserved) =
+            self.viewport_for_render(message_rect(area, layout), scrollbar);
         let header_area = Rect {
             x: area.x,
             y: area.y,
@@ -4482,7 +4603,7 @@ impl App {
         // Record the viewport the scroll keys clamp against. Keys arrive
         // between renders, so the previous render's geometry is what they
         // see — exactly what the reader was looking at.
-        self.record_viewport(message_area);
+        self.record_viewport(message_area, reserved);
 
         // Header, then the above-editor widgets (insertion order).
         self.paint_extension_lines(header_area, &frame.header, buf);
@@ -4788,7 +4909,7 @@ impl App {
         // `/transcript` (and the snapshot tests) want plain text, never
         // OSC 8 escapes, so links fall back to the inline `(url)` form
         // regardless of the live capability.
-        let frame = self.composed_frame(width);
+        let frame = self.composed_frame(width, height);
         let layout = plan_chrome(height, &frame);
         self.render_to_buffer_impl(area, &mut buf, false, false, &frame, &layout);
         let lines = buf

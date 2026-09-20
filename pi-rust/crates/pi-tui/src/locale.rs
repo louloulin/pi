@@ -233,6 +233,18 @@ pub const HEADER_ONBOARDING_EN: &str =
 pub const HEADER_ONBOARDING_ZH: &str =
     "Pi 可以讲解自身功能并检索文档。直接问它「怎么用」或「怎么扩展」。";
 
+/// Startup-header row shown when the terminal is too short for the full hint
+/// list and the header folded itself for this frame (LUM-1266).
+///
+/// `keys` is the resolved `app.header` chord — the action that expands the
+/// header again — so the row stays honest when the binding is overridden.
+pub fn header_folded_line(locale: Locale, keys: &str) -> String {
+    match locale {
+        Locale::En => format!("hints hidden on a short terminal — {keys} shows them"),
+        Locale::Zh => format!("终端太矮，键位提示已折叠 — {keys} 展开"),
+    }
+}
+
 /// Startup-header copy for `--no-extensions`.
 ///
 /// Kept in the `extensions: none` shape the audit pins, with the flag that

@@ -1,0 +1,15 @@
+{
+  "cols": 120,
+  "rows": 23,
+  "caption": "LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs"],
+  "distinct_panels": true,
+  "panels": [
+    {"label": "1. idle at 120x23: folded header (title + folded-hints row), composer, status bar — the LUM-1260 build had 0 composer rows here", "send": "", "wait": 2.5},
+    {"label": "2. a real turn lands in the transcript", "send": "hi<Enter>", "wait": 4.0},
+    {"label": "3. /help<Enter> -> command surface fills the transcript; every row keeps its last character", "send": "/help<Enter>", "wait": 1.5},
+    {"label": "4. /hotkeys<Enter> -> the transcript now overflows, so the scrollbar is drawn on the frame's last column", "send": "/hotkeys<Enter>", "wait": 1.5},
+    {"label": "5. PgUp -> scrolled back: the thumb moves off the bottom, no text row lost a character to the bar", "send": "<PgUp>", "wait": 1.2}
+  ]
+}

@@ -28,17 +28,23 @@
 //!
 //! Height budgeting (`plan_chrome`):
 //!
-//! * The status row (1 row) and at least one message row are reserved first;
-//!   the message view therefore never disappears, however tall the extension
-//!   regions are.
+//! * Three regions are reserved before any extension region gets a say: the
+//!   status row (1 row), the editor region's own row and at least one message
+//!   row. The composer — the row the user types into — and the transcript
+//!   therefore never disappear, however tall the extension regions are
+//!   (LUM-1266: a 22-row built-in startup header used to take the editor's
+//!   row on a 23-row terminal and the prompt was never painted). Below three
+//!   rows there is no room for both, and the leftover row stays with the
+//!   message view.
 //! * The remaining rows are handed to the chrome regions in render order —
 //!   header, Above widgets, editor, Below widgets, footer — each taking at
-//!   most what its component asked for.
+//!   most what its component asked for. The editor's request is met from its
+//!   reservation first, so a region above it cannot starve it.
 //! * A region that does not fit in what is left is **truncated to the
 //!   remaining rows (its tail is dropped)** and every later region renders
 //!   nothing. This is the "truncate the tail" policy: upstream's `Container`
 //!   renders every child and lets the terminal clip, which is the same
-//!   observable result as long as the message view keeps its reserved row.
+//!   observable result as long as the reserved rows survive.
 //!
 //! # Widget ordering
 //!
@@ -400,12 +406,25 @@ pub(crate) struct ChromeLayout {
 /// extension regions.
 ///
 /// See the module docs for the policy; the short version is "reserve the
-/// status row and one message row, then hand out the rest in render order,
-/// truncating the tail".
+/// status row, the composer's row and one message row, then hand out the rest
+/// in render order, truncating the tail".
 pub(crate) fn plan_chrome(total: u16, frame: &ExtensionFrame) -> ChromeLayout {
     let status = 1u16.min(total);
+    let mut budget = total.saturating_sub(status);
+    // The prompt always needs a row, and a component that renders nothing
+    // would otherwise make the editor region disappear entirely. Reserve it
+    // (plus one message row) *before* the extension regions: an expanded
+    // startup header taller than the terminal used to swallow both and leave
+    // the user typing into an invisible composer.
+    let editor_want = frame
+        .editor
+        .as_ref()
+        .map_or(1, |lines| lines_height(lines).max(1));
+    let editor_reserved = editor_want.min(budget.saturating_sub(1));
+    budget -= editor_reserved;
     // One row stays with the message view so it never vanishes.
-    let mut budget = total.saturating_sub(status).saturating_sub(1);
+    let message_reserved = 1u16.min(budget);
+    budget -= message_reserved;
     let mut take = |want: u16| {
         let got = want.min(budget);
         budget -= got;
@@ -414,14 +433,9 @@ pub(crate) fn plan_chrome(total: u16, frame: &ExtensionFrame) -> ChromeLayout {
 
     let header = take(lines_height(&frame.header));
     let above = take(lines_height(&frame.above));
-    // The prompt always needs a row, and a component that renders nothing
-    // would otherwise make the editor region disappear entirely.
-    let editor = take(
-        frame
-            .editor
-            .as_ref()
-            .map_or(1, |lines| lines_height(lines).max(1)),
-    );
+    // The editor already owns `editor_reserved` rows; the rest of its request
+    // competes with the regions below it, as before.
+    let editor = editor_reserved + take(editor_want - editor_reserved);
     let below = take(lines_height(&frame.below));
     let footer = take(lines_height(&frame.footer));
     let used = header + above + editor + below + footer;
@@ -720,13 +734,36 @@ mod tests {
 
     #[test]
     fn plan_chrome_truncates_the_tail_when_the_chrome_overflows() {
-        // 5 rows total: 1 status + 1 message leave 3 for chrome, all of
-        // which the header claims, starving the prompt and the footer.
+        // 5 rows total: 1 status + 1 message + 1 prompt are reserved, so the
+        // header gets 2 of the 10 rows it wants and the footer none. The
+        // header still loses its tail first (it is above the composer), but
+        // the composer itself survives (LUM-1266).
         let layout = plan_chrome(5, &frame_with(10, 2, None, 2, 4));
-        assert_eq!(layout.header, 3);
-        assert_eq!((layout.above, layout.editor, layout.below), (0, 0, 0));
+        assert_eq!(layout.header, 2);
+        assert_eq!((layout.above, layout.editor, layout.below), (0, 1, 0));
         assert_eq!((layout.status, layout.footer), (1, 0));
         assert_eq!(layout.message, 1);
+    }
+
+    #[test]
+    fn plan_chrome_never_starves_the_composer() {
+        // A header far taller than the terminal: the prompt keeps its row and
+        // so does the message view, whatever the header wants. Two rows are
+        // the one exception — with only `status + one row` left there is no
+        // room for both, and the row stays with the transcript (the terminal
+        // is unusable either way).
+        for total in 2..24u16 {
+            let layout = plan_chrome(total, &frame_with(22, 0, None, 0, 0));
+            assert_eq!(layout.status, 1.min(total), "total {total}");
+            let expected_editor = u16::from(total >= 3);
+            assert_eq!(
+                layout.editor, expected_editor,
+                "the composer keeps a row at total {total}"
+            );
+            if total >= 3 {
+                assert!(layout.message >= 1, "total {total}");
+            }
+        }
     }
 
     #[test]

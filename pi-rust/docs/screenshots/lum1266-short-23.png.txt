@@ -1,0 +1,126 @@
+# lum1266-short-23.png — chars, 120x23 cells
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [1] 1. idle at 120x23: folded header (title + folded-hints row), composer, status bar — the LUM-1260 build had 0 composer rows here  (cursor 120,22, frame fad20f1094c8, px c1b71e159cdf, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d72601b87d9ab3                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [2] 2. a real turn lands in the transcript  (cursor 25,3, frame 457da095fad6, px 8f5dcfff516b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hi
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d72601b87d9ab3                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [3] 3. /help<Enter> -> command surface fills the transcript; every row keeps its last character  (cursor 96,14, frame 087605abe335, px e1673b9c5264, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hi
+  faux-model (faux) hello
+· slash commands: /help show this help text /clear clear the message view /new start a new session /copy copy the last
+· assistant message to the clipboard /name [name] show or set the session display name /model pick a model (opens
+· selector) /session show the current session info /export [path] export the session (HTML, or JSONL for a .jsonl path)
+· /resume resume a previous session /tree navigate the session tree and switch branches /fork branch a new session from
+· a user message /clone copy the current session into a new session file /settings show or change interface settings
+· /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project trust
+· (/trust yes|no) /compact summarize the conversation prefix to free context /hotkeys list the keyboard shortcuts
+· /extensions list loaded extensions and what they register /exit quit the interactive session keys: Enter submit prompt
+· Up / Down navigate prompt history PgUp/PgDn scroll the chat log one page Home / End jump to the start / end of the
+· chat log Ctrl+C abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit on an empty prompt
+· Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close selector / cancel turn
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d72601b87d9ab3                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [4] 4. /hotkeys<Enter> -> the transcript now overflows, so the scrollbar is drawn on the frame's last column  (cursor 120,20, frame 7c8bc52e3860, px 47ac85654513, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+· cursor left Right / Ctrl+F move cursor right Alt+Left / Ctrl+Left / Alt+B move by word (left) Alt+Right / Ctrl+Right │
+· / Alt+F move by word (right) Home / Ctrl+Home / Ctrl+A start of line End / Ctrl+End / Ctrl+E end of line Ctrl+] jump │
+· forward to character Ctrl+Alt+] jump backward to character PgUp / Ctrl+PgUp prompt page up PgDn / Ctrl+PgDn prompt   │
+· page down editing: Enter send message Shift+Enter / Ctrl+J insert a newline backspace delete character backwards     │
+· delete / Ctrl+D delete character forwards Ctrl+W / Alt+backspace delete word backwards Alt+D / Alt+delete delete word│
+· forwards Ctrl+U delete to start of line Ctrl+K delete to end of line Ctrl+Y paste the most-recently-deleted text     │
+· Alt+Y cycle through pasted deleted text Ctrl+- undo chat log: PgUp scroll up one page PgDn scroll down one page Home │
+· jump to the start of the chat log End jump to the end of the chat log Ctrl+Shift+Up / Ctrl+Up jump to the previous   │
+· prompt Ctrl+Shift+Down / Ctrl+Down jump to the next prompt Ctrl+Shift+F search the chat log Enter / Ctrl+G next      ┃
+· search hit Shift+Enter / Ctrl+Shift+G previous search hit Esc close the search bar app: Esc cancel autocomplete /    ┃
+· abort streaming Ctrl+C clear the prompt (twice: exit) Ctrl+D exit when the prompt is empty Shift+Tab cycle the       ┃
+· thinking level Ctrl+P cycle to the next model Shift+Ctrl+P cycle to the previous model Ctrl+X copy the last assistant┃
+· message Alt+Enter queue a follow-up message Alt+Up restore queued messages to the editor Ctrl+T show or hide thinking┃
+· blocks Ctrl+O expand or collapse tool output (Ctrl+O by default) Alt+H expand or collapse the startup header (Alt+H  ┃
+· by default) Ctrl+L open the model selector Alt+N start a new session Alt+T open the session tree Alt+F fork a session┃
+· from a message Alt+R resume a session Ctrl+V attach a clipboard image (falls back to pasting text) selectors and     ┃
+· completion: Up move the selection up Down move the selection down PgUp selection page up PgDn selection page down    ┃
+· Enter confirm the selection Esc / Ctrl+C close the selection list Tab path completion / accept autocomplete commands:┃
+· / slash commands (/help, /model, /hotkeys, …) Esc close the selector / overlay first                                 ┃
+> type a prompt — /help for commands
+Faux test model  session-18d72601b87d9ab3                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [5] 5. PgUp -> scrolled back: the thumb moves off the bottom, no text row lost a character to the bar  (cursor 120,20, frame c2ea11f89242, px f0479775c05d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hi                                                                                                                   ┃
+  faux-model (faux) hello                                                                                              ┃
+· slash commands: /help show this help text /clear clear the message view /new start a new session /copy copy the last ┃
+· assistant message to the clipboard /name [name] show or set the session display name /model pick a model (opens      ┃
+· selector) /session show the current session info /export [path] export the session (HTML, or JSONL for a .jsonl path)┃
+· /resume resume a previous session /tree navigate the session tree and switch branches /fork branch a new session from┃
+· a user message /clone copy the current session into a new session file /settings show or change interface settings   ┃
+· /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project trust ┃
+· (/trust yes|no) /compact summarize the conversation prefix to free context /hotkeys list the keyboard shortcuts      ┃
+· /extensions list loaded extensions and what they register /exit quit the interactive session keys: Enter submit      ┃
+· prompt Up / Down navigate prompt history PgUp/PgDn scroll the chat log one page Home / End jump to the start / end of┃
+· the chat log Ctrl+C abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit on an empty prompt │
+· Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close selector / cancel turn                       │
+· keyboard shortcuts: navigation: Up previous line / prompt history Down next line / prompt history Left / Ctrl+B move │
+· cursor left Right / Ctrl+F move cursor right Alt+Left / Ctrl+Left / Alt+B move by word (left) Alt+Right / Ctrl+Right │
+· / Alt+F move by word (right) Home / Ctrl+Home / Ctrl+A start of line End / Ctrl+End / Ctrl+E end of line Ctrl+] jump │
+· forward to character Ctrl+Alt+] jump backward to character PgUp / Ctrl+PgUp prompt page up PgDn / Ctrl+PgDn prompt   │
+· page down editing: Enter send message Shift+Enter / Ctrl+J insert a newline backspace delete character backwards     │
+· delete / Ctrl+D delete character forwards ↓ Jump to latest message · End ord backwards Alt+D / Alt+delete delete word│
+> type a prompt — /help for commands
+Faux test model  session-18d72601b87d9ab3                                                  in 0 out 0 ?/8.2k  ? for help
