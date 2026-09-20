@@ -306,9 +306,9 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | 63（LUM-1224，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧；62 已落地，可开工 |
 | 65（LUM-1226，已派发 `todo`） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼；`/fork` 选 user message 建新会话；`/clone` 原位复制；源会话零改写（`verify_stats` 断言） | 读路径已由 Stage 56 备齐（`branch_meta`/`branch_entries`/`scan_branch`）；写路径需新增「拷前 N 条到新会话」（上游 `SessionManager.forkFrom`，`session-manager.ts:1611`）；与 Stage 62 共用 `interactive.rs` 的命令分支，按现有顺序追加 |
 | 66（LUM-1226，停放 `backlog`） | 流式反馈与可发现性：spinner + 轮耗时 + 启动头 key hints + `app.header` | `spinner` 全仓命中从 0 到有；耗时与 Stage 64 同 footer 行；启动头可折叠且不占行 | 对照 Martty `src/app.rs` 的 `SPINNER`/`spinner_idx`/`spinner()` 与测试 `a_running_subagent_keeps_the_spinner_advancing`；文案对照 Martty `src/locale.rs`，用常量表不引 i18n 框架 |
-| 67（LUM-1229，停放 `backlog`） | 思考级别：`/thinking [level]` + `app.thinking.cycle`（`shift+tab`）/ `app.thinking.save`（`ctrl+s`）+ 编辑器边框随级别着色 +「当前模型不支持思考」提示 | 4 个入口全部接线；`/thinking` 与键位走同一段切换代码；边框色用 `Theme::thinking_border`；不支持时给状态行而非静默 | 上游 `interactive-mode.ts:2884`（cycle）、`:2986`（`/thinking` 选择器）、`:2139`（边框色）、`:4170`（不支持提示）；`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`）与 `Theme::thinking_border`（`pi-tui/src/theme.rs:1108`）已在位，缺的是 App/session 之间的级别贯通；`slash.rs` / `interactive.rs` 与 Stage 65 同文件，须排在 65 之后 |
-| 68（LUM-1229，停放 `backlog`） | 斜杠命令第二批：`/reload`、`/changelog`、`/import`、`/login`、`/logout`、`/scoped-models` | 解析分支 + 实际行为 + `/help` 文案；`/reload` 重载 keybindings/extensions/skills/prompts/themes/context 至少覆盖已实现的子集 | 上游 `slash-commands.ts:24-42`；auth 子系统（LUM-1171 / LUM-1180）与 session 导入导出（LUM-1174）已在位；`/share` 需 GitHub gist + 凭据，单独停放；与 Stage 67 同文件，串联在 67 之后 |
-| 69（LUM-1229，停放 `backlog`） | Martty 风格会话级持久 shell：`!` 命令之间保留 `cd` / 环境变量，退出 TUI 时回收 | 连续 `!cd sub` + `!pwd` 看到目录延续；一个 `!export X=1` 在下一个 `!` 可见；`Esc` 仍可中断；进程随 TUI 退出而终止；`!!` 语义不变 | **非上游对齐**（上游 `bash-executor.ts:50` 每条命令新起进程），属「最佳体验」增强，需先决定默认开/关；实现对标 Martty `src/app.rs:718-835`（`PersistentShell` + 控制 fd 9 + `shell_quote`）；与 Stage 62 的 `BashRunner` 同文件 |
+| 67（LUM-1230，停放 `backlog`） | 思考级别：`/thinking [level]` + `app.thinking.cycle`（`shift+tab`）/ `app.thinking.save`（`ctrl+s`）+ 编辑器边框随级别着色 +「当前模型不支持思考」提示 | 4 个入口全部接线；`/thinking` 与键位走同一段切换代码；边框色用 `Theme::thinking_border`；不支持时给状态行而非静默 | 上游 `interactive-mode.ts:2884`（cycle）、`:2986`（`/thinking` 选择器）、`:2139`（边框色）、`:4170`（不支持提示）；`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`）与 `Theme::thinking_border`（`pi-tui/src/theme.rs:1108`）已在位，缺的是 App/session 之间的级别贯通；`slash.rs` / `interactive.rs` 与 Stage 65 同文件，须排在 65 之后 |
+| 68（LUM-1231，停放 `backlog`） | 斜杠命令第二批：`/reload`、`/changelog`、`/import`、`/login`、`/logout`、`/scoped-models` | 解析分支 + 实际行为 + `/help` 文案；`/reload` 重载 keybindings/extensions/skills/prompts/themes/context 至少覆盖已实现的子集 | 上游 `slash-commands.ts:24-42`；auth 子系统（LUM-1171 / LUM-1180）与 session 导入导出（LUM-1174）已在位；`/share` 需 GitHub gist + 凭据，单独停放；与 Stage 67 同文件，串联在 67 之后 |
+| 69（LUM-1232，停放 `backlog`） | Martty 风格会话级持久 shell：`!` 命令之间保留 `cd` / 环境变量，退出 TUI 时回收 | 连续 `!cd sub` + `!pwd` 看到目录延续；一个 `!export X=1` 在下一个 `!` 可见；`Esc` 仍可中断；进程随 TUI 退出而终止；`!!` 语义不变 | **非上游对齐**（上游 `bash-executor.ts:50` 每条命令新起进程），属「最佳体验」增强，需先决定默认开/关；实现对标 Martty `src/app.rs:718-835`（`PersistentShell` + 控制 fd 9 + `shell_quote`）；与 Stage 62 的 `BashRunner` 同文件 |
 
 并发约束：LUM-1219 轮是 3 worker 在飞的重复轮（零派发）；LUM-1221 开工时在飞 2 个
 （LUM-1214 Stage 58、LUM-1220 协调轮），LUM-1214 与 LUM-1220 均在本轮内收工（且 LUM-1214 的
@@ -568,7 +568,8 @@ LUM-1171 / LUM-1180，导入导出在 LUM-1174），合并为 Stage 68；`/share
 
 ### 9.4 本轮动作
 
-docs-only：新增本节 + 第五节 3 行 stage 表（67 / 68 / 69）。**未跑全量门** —— 两个 worker 正在
+docs-only：新增本节 + 第五节 3 行 stage 表（67 / 68 / 69）。停放编号：Stage 67 = LUM-1230、
+Stage 68 = LUM-1231、Stage 69 = LUM-1232（均 `backlog`，未启动 run，符合「最多 3 个并发」）。**未跑全量门** —— 两个 worker 正在
 编译（1227 的 `target` 502M、1228 的 845M，均 12:37 仍在写入），第三方构建会争磁盘与 CPU；
 tip 的门已由 LUM-1225 实跑（147 / 2202 / 0 / 2）。磁盘剩 25G，无陈旧 target 可回收
 （只有这两个活跃 workdir 带 `target`，无其它任务残留）。校验：
