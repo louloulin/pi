@@ -242,10 +242,14 @@ fn indicator_appears_when_detached_and_clears_when_following() {
     let (x, y, width) = app.jump_to_latest_indicator();
     assert_eq!(y, VIEWPORT_BOTTOM);
     assert!(width > 0, "the indicator rectangle was recorded");
-    assert_eq!(
-        x + width,
-        WIDTH - 1,
-        "right-aligned, clear of the scrollbar"
+    // Centred in the scrollbar-free width, exactly like upstream
+    // (`compositeScrollToEndIndicator`: `clip.x + floor((availableWidth -
+    // textWidth) / 2)`, `packages/tui/src/tui-alt-screen.ts:1626-1631`).
+    let available = (WIDTH - 1) as i32;
+    let centre = available - width as i32;
+    assert!(
+        (2 * x as i32 - centre).abs() <= 2,
+        "centred, clear of the scrollbar: x={x} width={width}"
     );
 
     // `tui.altScreen.bottom` (`End`) re-pins and the indicator goes away.
