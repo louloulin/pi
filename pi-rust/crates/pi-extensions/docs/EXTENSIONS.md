@@ -280,9 +280,9 @@ doc), and any other unknown name throws `ERR_PI_SDK_UNKNOWN_EXPORT` — a
 missing name is never silently `undefined`. `import type { … }` is
 erased by the loader, so type-only imports need no binding.
 
-The per-specifier inventory, the documented gaps (the `create*Tool`
-factories, the streaming / provider entries, the third-party `gondolin`
-sandbox) and every divergence are in
+The per-specifier inventory, the documented gaps (the streaming /
+provider entries, the third-party `gondolin` sandbox) and every
+divergence are in
 [`docs/SDK_MODULES.md`](SDK_MODULES.md). `globalThis.__pi_sdk_manifest()`
 exposes the same inventory as JSON, and `tests/sdk_modules.rs` checks it
 against the upstream examples so a new import cannot outrun the bridge.
@@ -485,7 +485,7 @@ or a Stage 4+ follow-up:
 | `node:child_process`                    | ✅ Subset      | `spawn` / `execFile` / `exec` with streaming stdio; a live child outlives the creating call via `host_child_read` / `host_child_wait`. Extensions that only shell out should still prefer the documented `pi.exec` API. |
 | `fetch` / `Headers` / `Request` / `Response` | ✅ Subset | Backed by the `host_fetch` import over the same `reqwest` stack the providers use; `body` is buffered (no streams), `signal` and a non-standard `timeout` are honoured. See the [`fetch` section](#fetch-global). |
 | `@earendil-works/pi-tui`                | ✅ Subset      | Components (`Text` / `Box` / `Container` / `Markdown` / `SelectList` / `SettingsList` / `Editor` / `Input` / …) and the ANSI geometry helpers, as free-standing renderables — no live terminal. See [`docs/SDK_MODULES.md`](SDK_MODULES.md). |
-| `@earendil-works/pi-coding-agent`       | ✅ Subset      | `defineTool`, `getAgentDir`, `parseFrontmatter`, `truncateHead`/`truncateLine`, `formatSize`, `convertToLlm`, `serializeConversation`, `withFileMutationQueue`, `VERSION`, the theme getters and the loader/border components. The `create*Tool` factories are documented gaps (need a built-in tool-invocation bridge). |
+| `@earendil-works/pi-coding-agent`       | ✅ Subset      | `defineTool`, `getAgentDir`, `parseFrontmatter`, `truncateHead`/`truncateLine`, `formatSize`, `convertToLlm`, `serializeConversation`, `withFileMutationQueue`, `VERSION`, the theme getters, the loader/border components, and the seven `create*Tool` built-in tool factories (`createReadTool` / `createWriteTool` / `createEditTool` / `createBashTool` / `createFindTool` / `createGrepTool` / `createLsTool`), which delegate to the host's own tool bundle through the `host_builtin_tool` bridge. See [`docs/SDK_MODULES.md`](SDK_MODULES.md) for the `cwd` rebasing divergence and the ignored `spawnHook`. |
 | `@earendil-works/pi-ai`                 | ✅ Subset      | `Type`, `StringEnum`, `uuidv7`, `calculateCost`, `contentText`, and the pure-JS event-stream trio (`EventStream` / `AssistantMessageEventStream` / `createAssistantMessageEventStream`). |
 | `@earendil-works/pi-ai/compat`          | ✅ Subset      | The pure-JS provider registry (`registerApiProvider` / `unregisterApiProviders` / `getApiProvider(s)` / `stream(Simple)` / `complete(Simple)`) and the event-stream factory. The builtin provider factories (`anthropicMessagesApi`, `openAIResponsesApi`, `registerBuiltInApiProviders`, `resetApiProviders`) need the host streaming bridge and stay `ERR_PI_SDK_UNIMPLEMENTED`. |
 | `@earendil-works/pi-agent-core`         | ✅ Supported   | Resolves; upstream imports here are type-only and erased. |

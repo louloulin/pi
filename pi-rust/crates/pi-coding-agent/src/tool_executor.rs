@@ -7,12 +7,17 @@
 //! the model and execute the calls it emits.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent_core::tools::ToolExecutor;
 use pi_agent_core::AgentError;
-use pi_extensions::JsExtensionHost;
+use pi_extensions::{
+    BuiltinToolDefinition, BuiltinToolOutcome, BuiltinToolRunner, JsExtensionHost,
+};
 use pi_protocol::{Content, ToolCall, ToolDefinition, ToolExecutionMode, ToolResult};
 use tokio_util::sync::CancellationToken;
 
@@ -60,6 +65,135 @@ pub fn default_executor() -> Arc<dyn ToolExecutor> {
     Arc::new(BuiltinToolExecutor::with_default_tools())
 }
 
+/// Adapts the built-in tool bundle to the extension host's
+/// [`BuiltinToolRunner`] bridge.
+///
+/// The host has to run a built-in tool from JavaScript (the JS
+/// `create*Tool` factories), but `pi-extensions` must not depend on this
+/// crate, so the bundle is injected as `Arc<dyn BuiltinToolRunner>`. A
+/// single [`BuiltinToolExecutor`] is shared between the agent loop and
+/// this bridge, so an extension that re-registers `read` delegates to the
+/// exact same implementation the model calls.
+pub struct BuiltinToolBridge {
+    executor: Arc<BuiltinToolExecutor>,
+}
+
+impl BuiltinToolBridge {
+    /// Wrap a shared built-in executor.
+    pub fn new(executor: Arc<BuiltinToolExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+impl std::fmt::Debug for BuiltinToolBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltinToolBridge")
+            .field("executor", &self.executor)
+            .finish()
+    }
+}
+
+impl BuiltinToolRunner for BuiltinToolBridge {
+    fn definition(&self, name: &str) -> Option<BuiltinToolDefinition> {
+        let tool = self
+            .executor
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == name)?;
+        Some(BuiltinToolDefinition {
+            name: tool.name().to_string(),
+            label: tool.label().to_string(),
+            description: tool.description().to_string(),
+            parameters: tool.parameters(),
+        })
+    }
+
+    fn run<'a>(
+        &'a self,
+        name: String,
+        mut args: serde_json::Value,
+        cwd: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<BuiltinToolOutcome, String>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(cwd) = cwd.as_deref().filter(|value| !value.is_empty()) {
+                rebase_arguments(&name, &mut args, cwd);
+            }
+            // The extension's own tool-call id is not forwarded across the
+            // bridge, so the built-in result gets a synthetic one. Only the
+            // extension that re-registers the tool can observe it, and the
+            // shim keeps its own result shape.
+            let call = ToolCall {
+                id: format!("extension:{name}"),
+                name,
+                arguments: args,
+            };
+            match ToolExecutor::execute(self.executor.as_ref(), &call, CancellationToken::new())
+                .await
+            {
+                Ok(result) => Ok(BuiltinToolOutcome {
+                    content: vec![
+                        serde_json::to_value(&*result.content).unwrap_or(serde_json::Value::Null)
+                    ],
+                    is_error: result.is_error,
+                    details: result.details,
+                }),
+                // `BuiltinToolExecutor` reports an unknown name — and any
+                // tool-level failure it could not fold into a result — as a
+                // host-level error. Surface it as a structured `is_error`
+                // outcome so the extension sees a failed tool, not a broken
+                // bridge (mirrors `ToolExecutionOutcome`).
+                Err(err) => Ok(BuiltinToolOutcome {
+                    content: vec![serde_json::json!({"type": "text", "text": err.to_string()})],
+                    is_error: true,
+                    details: None,
+                }),
+            }
+        })
+    }
+}
+
+/// Rebase the extension-supplied `cwd` into the argument shape a built-in
+/// tool understands.
+///
+/// `createReadTool(cwd)` promises that relative paths resolve against
+/// `cwd`, but the Rust file tools resolve them against the *process* cwd
+/// and `find` / `grep` / `ls` reject absolute paths outright. This helper
+/// therefore makes `path` absolute for the tools that accept it and sets
+/// `bash`'s own `cwd`; the navigation tools are left untouched and stay
+/// anchored at the pi process cwd (documented divergence in
+/// `docs/SDK_MODULES.md`).
+fn rebase_arguments(name: &str, args: &mut serde_json::Value, cwd: &str) {
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+    if name == "bash" {
+        let already_set = object
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty());
+        if !already_set {
+            object.insert(
+                "cwd".to_string(),
+                serde_json::Value::String(cwd.to_string()),
+            );
+        }
+        return;
+    }
+    if !matches!(name, "read" | "write" | "edit") {
+        return;
+    }
+    let Some(path) = object.get("path").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    if Path::new(path).is_relative() {
+        let joined = Path::new(cwd).join(path);
+        object.insert(
+            "path".to_string(),
+            serde_json::Value::String(joined.to_string_lossy().into_owned()),
+        );
+    }
+}
+
 /// Execution mode for a name resolved against the built-in bundle of an
 /// [`ExtensionToolExecutor`]: a built-in keeps its declared mode, and every
 /// other name is an extension tool — or a stale call — which is serialized
@@ -89,7 +223,7 @@ fn extension_execution_mode(
 /// by the same tokio runtime that runs the agent loop (the host spawns
 /// its promise driver on the runtime it was created in).
 pub struct ExtensionToolExecutor {
-    builtin: BuiltinToolExecutor,
+    builtin: Arc<BuiltinToolExecutor>,
     host: JsExtensionHost,
     extension_tools: Vec<ToolDefinition>,
 }
@@ -98,8 +232,12 @@ impl ExtensionToolExecutor {
     /// Combine a built-in bundle with the tools an extension host has
     /// registered. Extension tools whose name collides with a built-in
     /// are dropped (see the type docs).
+    ///
+    /// The built-in bundle is shared (`Arc`) so the same instance backs
+    /// [`BuiltinToolBridge`], i.e. a `createReadTool(cwd)` an extension
+    /// obtained runs the very tool the model calls.
     pub fn new(
-        builtin: BuiltinToolExecutor,
+        builtin: Arc<BuiltinToolExecutor>,
         host: JsExtensionHost,
         extension_tools: Vec<ToolDefinition>,
     ) -> Self {
