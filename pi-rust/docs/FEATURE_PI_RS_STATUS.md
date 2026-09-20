@@ -12123,3 +12123,162 @@ tips 再前进一格后以 `git ls-remote` 为准。
 - 本轮本人只写 `crates/pi-extensions/{src/digest.rs,src/lib.rs,src/host.rs,runtime/pi-ext-shim.mjs,
   tests/web_globals.rs,docs/NODE_BUILTINS.md,docs/EXTENSIONS.md}` 与本文档；
   **未碰** `pi-coding-agent/**`、`pi-ai/**`、`pi-tui/**`、`pi-protocol/**`。
+
+## LUM-1163 round — `pi-ai` Mistral 原生适配器（`mistral-conversations.ts` 移植 + 32 模型目录）+ 合并推送 feature/pi.rs（3 路已满，本轮不派发）
+
+本轮起点 `9816266c0`（LUM-1159 轮文档）。本轮**只自实现一刀**：`pi-ai` 的第 5 个
+provider 家族 —— Mistral 原生 Chat Completions（`packages/ai/src/api/mistral-conversations.ts`，
+上游 941 行）。**未派发新子任务**，理由见第七节。
+
+### 一、本轮定位与选型
+
+- **为什么是 Mistral**：LUM-1159 的 frontier 第 3 项列着 bedrock / mistral / azure / vertex /
+  oauth / images。`oauth` 已被 LUM-1160（Stage 48）占住；剩下四项里 Mistral 是唯一**纯 API key**
+  的（azure 要 Entra/云凭据链，vertex 要 GCP 服务账号，bedrock 要 SigV4 —— 三条都需要本环境
+  拿不到的凭据/签名后端），而且它是**非 OpenAI 形状**的第二套自有 SSE 协议
+  （content 有「裸字符串」和「分块数组」两种编码、tool_calls 按 `index` 增量折叠、thinking 分块、
+  6 种 cached-token 字段变体），移植它能真正拓宽 frontier，而不是再包一层 OpenAI 兼容。
+- **离线可回归**：全部测试用录制的 SSE 帧驱动（`FixtureStreamFn`），不需要网络与凭据 ——
+  这是本轮能「当天做完并验证」的前提。
+- **数据来源不违反「无上游数据源，不猜」**：`MISTRAL_MODELS` 的 32 条逐字段抄自本机已安装的
+  **同版本**快照 `@earendil-works/pi-ai@0.85.1` → `dist/providers/data/mistral.json`
+  （`packages/ai/package.json` 同为 `0.85.1`，即 TS 构建的输入产物，由 models.dev 生成），
+  并在 `registry.rs` 的注释里写明出处与「上游版本升级时同步」。**没有任何字段来自推测。**
+- **本轮不碰**：`pi-ai/src/auth/**`（LUM-1160 Stage 48）、`pi-extensions/**`（刚由 LUM-1159 合并）、
+  `pi-agent-core/src/agent_loop.rs` / `retry.rs`、`pi-protocol/src/{content,events}.rs`
+  （LUM-1162 正在这些文件上改）。对 `pi-protocol` 只加了 `Api::MistralConversations`
+  一个枚举变体（`model.rs`），与 LUM-1162 的落点不重叠。
+
+### 二、改动清单（14 文件，+2096 / −0，对 `9816266c0`）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-ai/src/providers/mistral.rs`（新，1490 行） | `MistralProvider`（`new` / `with_base_url` / `build_url` / `build_request` / `send_streaming`）+ `StreamFn` 实现 + 请求/流式两套 wire 类型 + `to_chat_messages` / `to_function_tool` + `MistralToolCallIdNormalizer` / `derive_mistral_tool_call_id` / `short_hash` / `to_base36` + `parse_sse` / `MistralSseStream` + `map_stop_reason`；文内 9 条单测 |
+| `crates/pi-ai/src/providers/registry.rs`（+148） | `MISTRAL_MODELS`（32 个模型：limits + micro-USD 定价）+ `ProviderSpec { id: "mistral", api: MistralConversations, default_base_url: "https://api.mistral.ai", api_key_env: ["MISTRAL_API_KEY"], base_url_env: ["MISTRAL_BASE_URL"] }` + 2 条 registry 测试 |
+| `crates/pi-ai/src/providers/mod.rs`（+1） | `pub mod mistral;` |
+| `crates/pi-protocol/src/model.rs`（+2） | `Api::MistralConversations`（`mistral_conversations`） |
+| `crates/pi-agent-core/src/telemetry.rs`（+1） | `api_name` 补 `MistralConversations => "mistral_conversations"` |
+| `crates/pi-coding-agent/src/provider.rs`（+24） | `ProviderRouter` 补 `Api::MistralConversations => Arc::new(MistralProvider::with_base_url(...))` + 1 条路由测试 |
+| `crates/pi-ai/fixtures/mistral/*.sse`（新，7 个） | text / tool_call / thinking / cache_read / error_stop / no_finish_reason / malformed_event |
+| `crates/pi-ai/tests/mistral.rs`（新，378 行） | 9 条端到端：文本往返、工具调用、thinking 只流不存、cache_read + 模型长度、provider 错误、缺 finish_reason、非法事件、CRLF + 跨行 `data:`、逐字节分块 |
+
+### 三、设计取舍
+
+1. **URL 约定 = 裸 host**：上游是 `new URL("v1/chat/completions", baseUrl)`，即 baseUrl 不含
+   `/v1`，适配器自己拼 `/v1/chat/completions`（先 trim 尾部 `/`）。`DEFAULT_BASE_URL` 因此是
+   `https://api.mistral.ai`。与 `anthropic.rs` 同款；`openai.rs` 的 baseUrl 含 `/v1` 是上游差异，
+   不是不一致。registry 测试里有 `!base_url.ends_with("/v1")` 这条断言把这个约定钉住。
+2. **请求侧 tool-call id 归一化搬进适配器**：上游把它放在 `transformMessages` 里（把 >9 字符的
+   tool call id 压成 `shortHash(id) + index`），Rust 侧没有那一层，于是做成
+   `MistralToolCallIdNormalizer`（**每个请求一个**，`&mut` 传递，无 `UnsafeCell`），
+   对同一次请求里的 assistant `ToolCall` 及其 `ToolResult` 用同一张表映射 —— 否则重放历史
+   时 Mistral 会因为两侧 id 不一致而报「tool call not found」。tool result 的 `name` 由
+   先前的 assistant `ToolCall` 反查得到。
+   `derive_mistral_tool_call_id` / `shortHash` 用 Node 侧实跑向量逐位对齐，例如
+   `shortHash("toolcall:0") == "1nlso9v7di2pi"`、`derive("abcdefghij", 0) == "5vtivddm0"`、
+   `derive("!@#$%", 0) == "83fvtmv73"`、`derive("🙈", 0) == "kphsz0153"` —— `shortHash` 的
+   base36 编码与上游 `toBase36` 逐位一致（`shortHash("") == "k4n83c7h0j2b"` 是空串边界，
+   `derive("abcdefghi", 0) == "abcdefghi"` 是「不超过 9 字符则原样保留」的边界）。
+3. **错误帧策略故意与兄弟适配器不同**：anthropic / google / openai 把错误的 stop reason 折叠成
+   `Done { stop_reason: Error }` 并**丢掉 message**；Mistral 先发
+   `AssistantMessageEvent::Error { message: "Provider stopped with: {reason}" }` 再发
+   `Done { stop_reason: Error }`。原因：`agent_loop.rs:707` 把 `Error` 事件转成
+   `Err(AgentError::Provider(message))`，`retry.rs` 才能按文本判定可重试（与上游重试语义一致），
+   同时不丢服务端的错误原因。Stage 47 给 `AssistantMessage` 加上 `error_message` 后，
+   这里可以改成写字段、与兄弟适配器收敛。
+4. **thinking 只流不存**：`AssistantMessageEvent::ThinkingDelta` 照发，但 `AssistantMessage.content`
+   里不保留（`pi-protocol` 没有 `Content::Thinking`）。另外 `push_text` 对**连续的文本 delta
+   合并进同一个文本块**，只有 thinking / tool-call delta 才关闭当前文本块 —— 否则
+   `text → toolCall → text` 这种交错会被粘成一个块。
+5. **明确不移植的部分**（文件头逐条列了理由）：`tool_choice`、`prompt_mode` / `reasoning_effort`、
+   `prompt_cache_key` / `x-affinity` 亲和、`strict: true`、非流式回退、`sanitizeSurrogates`
+   （Rust `String` 必然是合法 UTF-8）。都是 Rust 侧 `Model` / `SimpleStreamOptions` 没有对应
+   字段，不是遗漏。
+6. **行分隔与 SSE 分帧**：上游按 `/\r\n|\r|\n/` 断行。解析器必须把 `\r\n` 当成**一个**换行，
+   并且当 `\r` 是缓冲区最后一字节时要等下一块（`\r\n` 可能被网络切在中间）—— 早期实现把 `\r`
+   当独立终止符，会凭空多产生一个空行、提前 dispatch 事件。回归断言用**内联字节**构造 CRLF +
+   跨行 `data:` 载荷而不是 fixture 文件：仓库 `.gitattributes` 是 `* text=auto eol=lf`，
+   入库会把 CRLF 归一化成 LF，测试就测不到 CRLF 了。
+7. **免费模型不写 pricing**：目录里 `labs-devstral-small-2512` 上游费率为全 0；registry 既有
+   不变量 `priced_models_have_positive_input_and_output_rates` 要求 `Some(pricing)` 必须为正，
+   而「免费/无公开价」本来就是用 `None` 表达的，所以去掉 `with_pricing` 并加注释说明。
+
+### 四、验证
+
+- `cargo test -p pi-ai --offline -j 4`：**103 条 lib + 8 个集成目标全绿**
+  （mistral 9、anthropic 12、google 13、openai 10、cohere 10…），`0 failed`。
+- `cargo test -p pi-coding-agent -p pi-agent-core --offline -j 4`：全绿
+  （含 `mistral_key_registers_the_native_adapter`：`provider_ids() == ["faux", "mistral"]`、
+  `!has_provider("openai")`、`MISTRAL_API_KEY` / `MISTRAL_BASE_URL` 解析）。
+- 关键向量：`shortHash` / `deriveMistralToolCallId` 共 15 组（Node 侧实跑对照）；
+  `cache_read` 用 6 种 cached-token 字段变体各一条断言（顺序与上游 `getMistralCachedPromptTokens`
+  逐字一致）；`temperature` 用 `0.25`（f32 精确可表示，避免 `0.2 → 0.20000000298023224` 的
+  序列化噪声）。
+- `cargo clippy -p pi-ai -p pi-coding-agent -p pi-agent-core -p pi-protocol --all-targets --offline`：
+  本轮文件**零告警**；剩余全是既有 `vendor/rquickjs-core` 告警。
+- 格式：本轮两个新文件（`providers/mistral.rs`、`tests/mistral.rs`）已用 `rustfmt 1.9.0-stable`
+  跑干净（`--check` 零命中）；`registry.rs` / `provider.rs` 里既有的漂移**未顺手清**（留给 LUM-1138，
+  免得制造 3 个文件的无关噪声），只把本轮新增目录项里的免费模型一行压成 rustfmt 想要的形式。
+- **未验证**：`cargo test --workspace`（磁盘不允许，见第八节）、wasm32 构建、真实 Mistral API 调用。
+
+### 五、已知限制 / 接线前置
+
+- **`Usage` 无 cost 字段**，`responseId` / `rawStopReason` / 消息 `timestamp` 也未落（`AssistantMessage`
+  现在没有这些字段）——上游写了但 Rust 协议层还没有，属 Stage 47 之后的收口项。
+- **图片一律内联成 data URL**：Rust `Model` 没有 modality 列表，无法判断「这个模型不吃图，
+  应该降级成文本」，于是不做降级。
+- **无 prompt 缓存亲和**：`prompt_cache_key` / `x-affinity` 需要 `sessionId` / `cacheRetention`，
+  `SimpleStreamOptions` 里没有；`cache_read` 只做**读取**统计。
+- **没有 `tool_choice`**：无法强制 `required` / 指定函数（`Context` / 选项里没有该字段）。
+- **`strict` 恒为 `false`**：上游的严格 tool schema 开关依赖 provider 级 `strict` 支持，
+  Rust 侧 `ToolDefinition` 没有该旋钮。
+- tool result 的 `name` 是反查出来的，上游 `transformMessages` 还会处理 `added_tool_names`
+  等更多重放情形（Stage 47 的 `ToolResult.added_tool_names` 落地后可对齐）。
+
+### 六、frontier（本轮更新）
+
+1. **~~Mistral provider~~**：**本轮收口**（适配器 + 目录 + fixture + 集成测试 + registry/router 接线）。
+2. **未移植的 `pi-ai` 上游模块**：剩 bedrock / azure / vertex / images 四项
+   （`oauth` 在 LUM-1160 Stage 48）。其中 **azure（`openai-compatible` + `api-key` 头差异）
+   和 vertex（`google-vertex` = Google 适配器 + 不同的鉴权/URL 前缀）** 是两个「已有适配器的
+   变体」，可以复用现成解析器，**不需要新目录数据**，是下一步成本最低的两项；
+   bedrock 需要 SigV4 签名，images 需要先看 `packages/ai/src/images/` 的实际形状。
+3. **协议层两处缺口**（`AssistantMessage.error_message` / `ToolResult.added_tool_names`）：
+   LUM-1158 派的 **Stage 47** 仍在跑（LUM-1162 正在改这两个结构体）；落地后第 3 节的
+   Mistral 错误帧策略可以收敛回写字段，别忘了一起改。
+4. **质量门清偿** = LUM-1138（`backlog`）：`registry.rs` / `provider.rs` 的既有 fmt 漂移仍在外，
+   本轮新增文件零漂移。
+5. **`pi-ai` 提供商家族现状**（本轮后）：`openai` / `anthropic` / `google` / `cohere` /
+   **`mistral`** / `faux` 六个实现齐备，`Api` 枚举里仍无实现的只剩 bedrock / azure / vertex。
+
+### 七、派发与协调（本轮不派发）
+
+- **不派发**：本轮开工 `multica daemon status` → `running_task_count=2` / `active_task_count=2`
+  （本人 + LUM-1162 的 workspace 全量测试进程），且 LUM-1159（`in_review`）、LUM-1160（Stage 48
+  已提交待合）两条支线还在收尾窗口内，按 3 路预算已满 —— 与其硬塞一路挤掉正在跑的，
+  不如把这一轮全部算力投到一条能当天验证完的适配器上。
+- **撞车检查（按 LUM-1159 的教训先 fetch 再动手）**：开工先 `git fetch origin` +
+  `git log --oneline origin/feature/pi.rs -4` → tip `9816266c0`（LUM-1159），与本人落点无重叠；
+  提交后 `git rebase origin/feature/pi.rs` **无冲突**。
+- **给 LUM-1162 的提醒**（会读本文档的人注意）：本轮把 `Api` 枚举加了一个变体，
+  `telemetry.rs` / `provider.rs` 的两处 `match` 已补齐；若后续还有新增 provider，
+  这两处是编译期会报错的锚点，不会静默漏掉。
+
+### 八、环境与并发记录
+
+- **磁盘（本轮唯一的对外部目录写操作，备案）**：开工时工作区只剩 **135M** 可用 ——
+  `cargo test` 因 `couldn't create a temp dir: No space left on device (os error 28)` 直接失败
+  （LUM-1162 正在 `cargo test --workspace` 链接 18G 依赖目录）。确认没有任何 cargo 进程在用
+  LUM-1153 检出的 target 之后，删除了 **`lum-1153-adfb89732938/workdir/pi/pi-rust/target/debug/incremental`
+  （5.9G，纯增量重建缓存，非源码、非 `deps`）** → **5.5G 可用**（50G 盘）。
+  未触碰 LUM-1162 的 target（它在跑）、未删任何源码/分支/提交。后续轮次若再遇打满，
+  可考虑的下一个目标是 `/tmp/pi-fresh-1160`（2.2G），本轮保留作为 LUM-1162 的余量。
+- 构建：`CARGO_HOME=/tmp/cargo-home`、`CARGO_TARGET_DIR=$PWD/target`、全部 `--offline -j 4`；
+  `cargo check -p pi-ai --offline` ≈ 6.8s（增量）。
+- Git 身份沿用 worktree 级 `multica-agent <agent@multica.local>`（与 `feature/pi.rs` 历史一致）。
+- 合并：本分支基于 `9816266c0`，提交后 rebase 到 `origin/feature/pi.rs` 最新 tip 再推送，
+  随后快进合并 `feature/pi.rs` 并推送（与 LUM-1152…LUM-1159 同款流程）。
+- 本轮本人只写 `crates/pi-ai/{src/providers/mistral.rs,src/providers/mod.rs,src/providers/registry.rs,
+  fixtures/mistral/**,tests/mistral.rs}`、`crates/pi-protocol/src/model.rs`、
+  `crates/pi-agent-core/src/telemetry.rs`、`crates/pi-coding-agent/src/provider.rs` 与本文档；
+  **未碰** `pi-ai/src/auth/**`、`pi-extensions/**`、`pi-tui/**`、`pi-protocol/src/{content,events}.rs`。
