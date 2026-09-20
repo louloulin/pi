@@ -108,7 +108,9 @@ pub use rpc::{
 };
 pub use skills::{load_skills, LoadSkillsOptions, Skill, SkillsLoadResult};
 pub use system_prompt::{build_system_prompt, SystemPromptOptions};
-pub use tool_executor::{default_executor, BuiltinToolExecutor, ExtensionToolExecutor};
+pub use tool_executor::{
+    default_executor, BuiltinToolBridge, BuiltinToolExecutor, ExtensionToolExecutor,
+};
 pub use trust::{
     has_trust_requiring_project_resources, resolve_project_trusted, DefaultProjectTrust,
     ProjectTrustDecision, ProjectTrustStore, ProjectTrustStoreEntry, ProjectTrustUpdate,

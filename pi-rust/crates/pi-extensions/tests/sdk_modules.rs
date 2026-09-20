@@ -457,14 +457,6 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                     execute: (args, ctx) => {
                         const captured = {};
                         try {
-                            coding.createReadTool;
-                        } catch (err) {
-                            captured.gapCode = err.code;
-                            captured.gapName = err.exportName;
-                            captured.gapSpecifier = err.specifier;
-                            captured.gapNamesDoc = err.message.indexOf("SDK_MODULES.md") !== -1;
-                        }
-                        try {
                             coding.noSuchHelper;
                         } catch (err) {
                             captured.unknownCode = err.code;
@@ -474,6 +466,8 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                             compat.anthropicMessagesApi;
                         } catch (err) {
                             captured.streamCode = err.code;
+                            captured.streamExportName = err.exportName;
+                            captured.streamNamesDoc = err.message.indexOf("SDK_MODULES.md") !== -1;
                         }
                         try {
                             gondolin.VM;
@@ -502,7 +496,19 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                                     coding.toJSON === undefined &&
                                     coding.default === coding &&
                                     Object.keys(coding).indexOf("defineTool") !== -1,
-                                gapNotInKeys: Object.keys(coding).indexOf("createReadTool") === -1,
+                                factoriesInKeys: [
+                                    "createBashTool",
+                                    "createEditTool",
+                                    "createFindTool",
+                                    "createGrepTool",
+                                    "createLsTool",
+                                    "createReadTool",
+                                    "createWriteTool",
+                                ].every((name) => Object.keys(coding).indexOf(name) !== -1),
+                                factoryTypes: [
+                                    typeof coding.createReadTool,
+                                    typeof coding.createBashTool,
+                                ],
                             },
                         };
                     },
@@ -524,12 +530,10 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
         assert!(!outcome.is_error, "{outcome:?}");
         let d = outcome.details.expect("details");
 
-        assert_eq!(d["gapCode"], "ERR_PI_SDK_UNIMPLEMENTED");
-        assert_eq!(d["gapName"], "createReadTool");
-        assert_eq!(d["gapSpecifier"], "@earendil-works/pi-coding-agent");
-        assert_eq!(d["gapNamesDoc"], true);
         assert_eq!(d["unknownCode"], "ERR_PI_SDK_UNKNOWN_EXPORT");
         assert_eq!(d["streamCode"], "ERR_PI_SDK_UNIMPLEMENTED");
+        assert_eq!(d["streamExportName"], "anthropicMessagesApi");
+        assert_eq!(d["streamNamesDoc"], true);
         assert_eq!(
             d["streamFactoryType"], "function",
             "createAssistantMessageEventStream is implemented now"
@@ -542,7 +546,15 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
             "theme helpers are identity functions"
         );
         assert_eq!(d["protocolInert"], true);
-        assert_eq!(d["gapNotInKeys"], true, "gaps are not enumerable exports");
+        assert_eq!(
+            d["factoriesInKeys"], true,
+            "the built-in tool factories are enumerable implementations now"
+        );
+        assert_eq!(
+            d["factoryTypes"],
+            json!(["function", "function"]),
+            "create*Tool are callable"
+        );
     });
 }
 
@@ -557,7 +569,7 @@ fn top_level_gap_import_fails_the_load() {
         let host = host_with_cwd(&scratch.as_str()).await;
 
         let source = r##"
-            import { createReadTool } from "@earendil-works/pi-coding-agent";
+            import { anthropicMessagesApi } from "@earendil-works/pi-ai/compat";
             export default function () {}
         "##;
 
@@ -570,11 +582,11 @@ fn top_level_gap_import_fails_the_load() {
             .expect_err("load must fail");
         let message = format!("{error}");
         assert!(
-            message.contains("createReadTool"),
+            message.contains("anthropicMessagesApi"),
             "error names the export: {message}"
         );
         assert!(
-            message.contains("@earendil-works/pi-coding-agent"),
+            message.contains("@earendil-works/pi-ai/compat"),
             "error names the specifier: {message}"
         );
     });
@@ -831,12 +843,10 @@ fn upstream_sdk_imports_are_all_bridged_or_documented() {
             "docs/SDK_MODULES.md must document the gondolin gap"
         );
 
-        // The tool factories are the other documented frontier.
-        let factories = manifest_names(
-            &manifest,
-            "@earendil-works/pi-coding-agent",
-            "unimplemented",
-        );
+        // The tool factories are wired to the host's built-in bundle as of
+        // LUM-1175; the upstream examples import all seven, so a regression
+        // that drops one from the implemented set must fail here.
+        let factories = manifest_names(&manifest, "@earendil-works/pi-coding-agent", "implemented");
         for factory in [
             "createReadTool",
             "createWriteTool",
@@ -848,7 +858,7 @@ fn upstream_sdk_imports_are_all_bridged_or_documented() {
         ] {
             assert!(
                 factories.contains(factory),
-                "`{factory}` must be a documented gap"
+                "`{factory}` must be an implemented export"
             );
         }
 

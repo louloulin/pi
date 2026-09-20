@@ -25,7 +25,7 @@ use pi_protocol::{ExtensionEvent, ResourcesDiscoverReason, UiLevel};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
 use crate::extensions::ui_bridge::TuiUiBridge;
-use crate::tool_executor::{BuiltinToolExecutor, ExtensionToolExecutor};
+use crate::tool_executor::{BuiltinToolBridge, BuiltinToolExecutor, ExtensionToolExecutor};
 
 /// Timeout used for interactive extension calls.
 ///
@@ -260,10 +260,10 @@ pub fn load(
     runtime: &tokio::runtime::Runtime,
     options: &ExtensionLoadOptions,
 ) -> ExtensionLoadOutcome {
-    let builtin = BuiltinToolExecutor::with_default_tools();
+    let builtin = Arc::new(BuiltinToolExecutor::with_default_tools());
     if options.disabled {
         return ExtensionLoadOutcome {
-            executor: Arc::new(builtin),
+            executor: builtin,
             runtime: ExtensionRuntime::empty(),
             loaded: Vec::new(),
             tools: Vec::new(),
@@ -299,14 +299,16 @@ pub fn load(
                 mode: mode.clone(),
                 has_ui,
                 cwd: cwd.clone(),
-            }),
+            })
+            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone()))),
         None => HostOptions::default()
             .with_ui_handler(Arc::new(StderrUiHandler))
             .with_tool_context(ToolContext {
                 mode: mode.clone(),
                 has_ui,
                 cwd: cwd.clone(),
-            }),
+            })
+            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone()))),
     };
 
     let result = runtime.block_on(async {
@@ -346,7 +348,8 @@ pub fn load(
                 .map(|(p, e)| (p.clone(), e.to_string()))
                 .collect();
             let registered = host.registered_tools();
-            let executor = ExtensionToolExecutor::new(builtin, host.clone(), registered.clone());
+            let executor =
+                ExtensionToolExecutor::new(builtin.clone(), host.clone(), registered.clone());
             let shadowed: Vec<String> = registered
                 .iter()
                 .map(|tool| tool.name.clone())
@@ -376,7 +379,7 @@ pub fn load(
             }
         }
         Err(err) => ExtensionLoadOutcome {
-            executor: Arc::new(builtin),
+            executor: builtin,
             runtime: ExtensionRuntime::empty(),
             loaded: Vec::new(),
             tools: Vec::new(),

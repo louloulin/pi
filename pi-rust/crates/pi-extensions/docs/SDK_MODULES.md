@@ -31,10 +31,12 @@ getAgentDir()                   __pi_os_module.homedir() ───────�
 ```
 
 Unlike `node:*`, most SDK modules are **pure JS**: the components and
-helpers live in the shim itself and need no host import. The only
-exceptions are `getAgentDir()` (reads `os.homedir()` through
-`host_node_call`) and the unimplemented tool factories / streaming
-entries, which would need host bridges that do not exist yet.
+helpers live in the shim itself and need no host import. Two families
+cross into Rust: `getAgentDir()` (reads `os.homedir()` through
+`host_node_call`) and the built-in tool factories (`createReadTool` …),
+which run a built-in tool through the `host_builtin_tool_definition` /
+`host_builtin_tool` bridge described under
+[`@earendil-works/pi-coding-agent`](#earendil-workspi-coding-agent--helpers-bridged-tool-factories-bridged).
 
 ### Every specifier is registered under three names
 
@@ -128,7 +130,7 @@ Divergences from upstream `pi-tui`:
   the `escape`↔`esc` and `return`↔`enter` aliases. `isKeyRelease` /
   `isKeyRepeat` *do* understand the `:3`/`:2` Kitty suffixes.
 
-### `@earendil-works/pi-coding-agent` — helpers bridged, tool factories are gaps
+### `@earendil-works/pi-coding-agent` — helpers bridged, tool factories bridged
 
 | Export | Notes |
 |---|---|
@@ -141,13 +143,35 @@ Divergences from upstream `pi-tui`:
 | `parseFrontmatter`, `stripFrontmatter` | `{ frontmatter, body }` with upstream's delimiter and newline/BOM normalisation. |
 | `withFileMutationQueue` | Serialises `fn()` per resolved file path. |
 | `convertToLlm`, `serializeConversation` | Message conversion and the summarisation text format, including the compaction / branch summary prefixes. |
+| `createReadTool`, `createWriteTool`, `createEditTool`, `createBashTool`, `createFindTool`, `createGrepTool`, `createLsTool` | Factories for the host's built-in tools (`createXTool(cwd?)`). `parameters` is the exact schema the Rust executor coerces arguments against, and `execute` runs the *same* built-in the model calls, so an extension can re-register a built-in with custom rendering but the original behaviour (upstream's `built-in-tool-renderer.ts`). |
 | `BorderedLoader`, `CustomEditor`, `DynamicBorder`, `getEditorTheme`, `getMarkdownTheme`, `getSelectListTheme`, `getSettingsListTheme` | Re-exported from the shim's component set. |
 
-Documented gaps (throw `ERR_PI_SDK_UNIMPLEMENTED`):
+Documented gaps (throw `ERR_PI_SDK_UNIMPLEMENTED`): none — every export
+the upstream examples import from this package is bridged.
 
-| Export | Why |
-|---|---|
-| `createBashTool`, `createEditTool`, `createFindTool`, `createGrepTool`, `createLsTool`, `createReadTool`, `createWriteTool` | These wrap the built-in tools, but the host exposes no import for *invoking* a built-in tool from JS — extensions should register their own tool through `pi.registerTool` until that bridge lands. |
+Tool factories:
+
+* `createXTool(cwd?)` takes the working directory the tool should resolve
+  relative paths against. The host rebases `path` to an absolute path for
+  `read` / `write` / `edit` and sets `bash`'s `cwd`, so a relative path in
+  the tool call resolves against `cwd` as it does upstream.
+* The navigation tools (`find` / `grep` / `ls`) take an optional `path`
+  and reject absolute paths in the Rust port, so they stay anchored at the
+  pi process cwd; `cwd` is not applied to them.
+* `execute` resolves to `{ content, details, isError }` — the same shape
+  `pi.registerTool` returns — with `isError` set for a tool that failed.
+  It *rejects* only when the bridge is unusable (no runner installed,
+  unknown tool name, malformed host reply), and then with
+  `ERR_PI_BUILTIN_TOOL`.
+* A factory still returns a usable object when no runner is installed
+  (permissive `{ "type": "object" }` schema); only `execute` rejects. This
+  keeps an extension that merely *builds* a tool loadable in a host that
+  has no built-in bundle.
+* Upstream's `createBashTool(cwd, { spawnHook })` second argument is
+  accepted and ignored: the Rust `BashTool` has no spawn hook.
+* The tool-call id the extension passes to `execute(toolCallId, params, …)`
+  is not forwarded across the bridge (the built-in result gets a synthetic
+  id); only the re-registering extension can observe it.
 
 Divergences:
 
