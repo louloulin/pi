@@ -27,6 +27,9 @@
 //!    timeout, so a slow provider does not cut a model turn short;
 //! 5. without a runner the factories still import, but the stream terminates
 //!    with a named error event instead of evaluating to `undefined`.
+//! 6. every bridged api family — not just the two from LUM-1180 — drives the
+//!    same host bridge: `openAICompletionsApi` / `googleGenerativeAIApi` /
+//!    `azureOpenAIResponsesApi` (LUM-1204) each stream `text_delta` … `done`.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -414,6 +417,138 @@ fn builtin_provider_stream_delivers_events_one_at_a_time() {
             requests[0].options.get("signal").is_none(),
             "the AbortSignal stays on the JS side; it must not be serialised"
         );
+    });
+}
+
+/// The three families LUM-1204 bridges on top of LUM-1180, all through the
+/// same host bridge: `openAICompletionsApi` (Chat Completions wire shape),
+/// `googleGenerativeAIApi` and `azureOpenAIResponsesApi` (the
+/// deployment-scoped Responses dialect, a distinct `api` id with its own
+/// registry entry).
+const BRIDGED_FAMILIES_SOURCE: &str = r##"
+    import {
+        azureOpenAIResponsesApi, completeSimple, getApiProvider, googleGenerativeAIApi,
+        openAICompletionsApi,
+    } from "@earendil-works/pi-ai/compat";
+
+    const FAMILIES = [
+        { api: "openai-completions", provider: "deepseek", id: "deepseek-chat", factory: openAICompletionsApi },
+        { api: "google-generative-ai", provider: "google", id: "gemini-2.0-flash", factory: googleGenerativeAIApi },
+        { api: "azure-openai-responses", provider: "azure", id: "gpt-4o", factory: azureOpenAIResponsesApi },
+    ];
+
+    export default function (pi) {
+        pi.registerTool({
+            name: "family_probe",
+            label: "family probe",
+            description: "streams one turn from every bridged api family",
+            parameters: { type: "object", properties: {} },
+            execute: async () => {
+                const context = { messages: [{ role: "user", content: "hi" }] };
+                const families = [];
+                for (const family of FAMILIES) {
+                    const model = { id: family.id, provider: family.provider, api: family.api };
+                    const streams = family.factory();
+                    const registered = getApiProvider(family.api);
+                    const stream = streams.streamSimple(model, context, { apiKey: "test-key" });
+                    const events = [];
+                    for await (const event of stream) events.push(event.type);
+                    const message = await stream.result();
+                    const completed = await completeSimple(model, context, { apiKey: "test-key" });
+                    families.push({
+                        api: family.api,
+                        streamKeys: Object.keys(streams).sort(),
+                        registeredApi: registered && registered.api,
+                        events: events,
+                        text: message.content.map((c) => c.text).join(""),
+                        stopReason: message.stopReason,
+                        completeText: completed.content.map((c) => c.text).join(""),
+                    });
+                }
+                return { content: [{ type: "text", text: "ok" }], details: { families: families } };
+            },
+        });
+    }
+"##;
+
+#[test]
+fn every_bridged_api_family_streams_through_the_host_bridge() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("families");
+        let runner = FakeRunner::new(Script::Stream {
+            ticks: 3,
+            delay: Duration::ZERO,
+        });
+        let host = host_with_runner(&scratch.as_str(), runner.clone(), None).await;
+
+        host.load(
+            entry_at("family_probe", "/tmp/pi_ai_provider/families.mjs"),
+            BRIDGED_FAMILIES_SOURCE,
+        )
+        .await
+        .expect("load family probe extension");
+
+        let outcome = host
+            .execute_tool("family_probe", &json!({}).to_string())
+            .await
+            .expect("execute family probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+        let d = outcome.details.expect("details");
+        let families = d["families"].as_array().expect("families");
+        assert_eq!(families.len(), 3, "one entry per bridged family");
+
+        for family in families {
+            let api = family["api"].as_str().expect("api");
+            assert_eq!(
+                family["streamKeys"],
+                json!(["stream", "streamSimple"]),
+                "{api} hands back a ProviderStreams"
+            );
+            assert_eq!(
+                family["registeredApi"], family["api"],
+                "{api} is registered by registerBuiltInApiProviders at module init"
+            );
+            assert_eq!(
+                family["events"],
+                json!(["text_delta", "text_delta", "text_delta", "done"]),
+                "{api} streams every event in order"
+            );
+            assert_eq!(family["stopReason"], "stop", "{api}");
+            assert_eq!(family["text"], "chunk-0chunk-1chunk-2", "{api}");
+            assert_eq!(
+                family["completeText"], "chunk-0chunk-1chunk-2",
+                "{api}: completeSimple() folds the same stream"
+            );
+        }
+
+        // `streamSimple` + `completeSimple` per family: two streams each.
+        let requests = runner.requests.lock().expect("requests lock").clone();
+        let apis: Vec<&str> = requests.iter().map(|request| request.api.as_str()).collect();
+        assert_eq!(
+            apis,
+            vec![
+                "openai-completions",
+                "openai-completions",
+                "google-generative-ai",
+                "google-generative-ai",
+                "azure-openai-responses",
+                "azure-openai-responses",
+            ],
+            "every family reaches the runner under its own api id"
+        );
+        assert_eq!(
+            requests[4].model["api"], "azure-openai-responses",
+            "the model's api is what the shim validates before streaming"
+        );
+        assert_eq!(requests[4].options["apiKey"], "test-key");
+        assert_eq!(
+            runner.live.load(Ordering::SeqCst),
+            0,
+            "every stream is released"
+        );
+        assert_eq!(runner.dropped.load(Ordering::SeqCst), 6);
+        assert_eq!(runner.max_in_flight.load(Ordering::SeqCst), 1);
     });
 }
 

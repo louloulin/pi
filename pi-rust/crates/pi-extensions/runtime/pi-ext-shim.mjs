@@ -7767,8 +7767,9 @@ function __pi_sdk_create_assistant_message_event_stream() {
 // extension can plug its own streaming implementation in — that is exactly
 // what `packages/coding-agent/examples/extensions/custom-provider-*` does.
 // The registry itself is pure JS. The *builtin* provider factories
-// (`anthropicMessagesApi` / `openAIResponsesApi`) are driven over the host
-// streaming bridge below, so they no longer need to stay gaps.
+// (`anthropicMessagesApi` / `openAIResponsesApi` / `openAICompletionsApi` /
+// `googleGenerativeAIApi` / `azureOpenAIResponsesApi`) are driven over the
+// host streaming bridge below, so they no longer need to stay gaps.
 const __pi_sdk_api_providers = new Map();
 
 function __pi_sdk_wrap_api_stream(api, stream) {
@@ -7857,9 +7858,19 @@ function __pi_sdk_compat_complete_simple(model, context, options) {
 // exactly like upstream — setup failures and transport errors terminate the
 // stream with an `error` event instead of throwing.
 //
-// Only the two apis the Rust providers implement are built in; the other
-// eight upstream lazy factories stay documented gaps.
-const __pi_sdk_builtin_api_apis = ["anthropic-messages", "openai-responses"];
+// The built-in apis whose Rust adapter the host can run: upstream's
+// `azureOpenAIResponsesApi` / `googleGenerativeAIApi` / `openAICompletionsApi`
+// join `anthropicMessagesApi` / `openAIResponsesApi` here (LUM-1204). The
+// remaining five upstream lazy factories stay documented gaps — no Rust
+// adapter the bridge can reach, except `mistral-conversations`, whose adapter
+// exists but is not routed yet (see `__pi_sdk_stream_gaps` below).
+const __pi_sdk_builtin_api_apis = [
+  "anthropic-messages",
+  "openai-responses",
+  "openai-completions",
+  "google-generative-ai",
+  "azure-openai-responses",
+];
 
 // Mirrors upstream `builtinApiProviderInstances`: the registry entry each
 // builtin api owns, so a later re-register can be told apart.
@@ -8076,6 +8087,22 @@ function __pi_sdk_openai_responses_api() {
   return __pi_sdk_builtin_provider_streams("openai-responses");
 }
 
+function __pi_sdk_openai_completions_api() {
+  return __pi_sdk_builtin_provider_streams("openai-completions");
+}
+
+function __pi_sdk_google_generative_ai_api() {
+  return __pi_sdk_builtin_provider_streams("google-generative-ai");
+}
+
+// Azure is the deployment-scoped dialect of the Responses API: it is a
+// separate `api` id (and therefore a separate provider registry entry), but
+// it travels the same host bridge. The host's Azure adapter owns the
+// deployment-name / api-version resolution.
+function __pi_sdk_azure_openai_responses_api() {
+  return __pi_sdk_builtin_provider_streams("azure-openai-responses");
+}
+
 // Upstream `registerBuiltInApiProviders`: register without clobbering an
 // existing entry, because compat can load after a test or extension already
 // registered an override for a builtin api id.
@@ -8259,8 +8286,21 @@ const __pi_sdk_pi_coding_agent = __pi_sdk_module(
   {},
 );
 
-const __pi_sdk_stream_gap =
-  "this builtin api needs a provider implementation the extension host does not bundle; only `anthropic-messages` and `openai-responses` are bridged";
+// The five upstream lazy apis this build still cannot run. Each reason names
+// the missing piece — a concrete Rust adapter the host does not have — instead
+// of the flat "needs a provider implementation" a reader cannot act on.
+const __pi_sdk_stream_gaps = {
+  bedrockConverseStreamApi:
+    "the host has no `bedrock-converse-stream` adapter: Bedrock authenticates with AWS SigV4 credentials and a region, which the Rust credential path does not carry",
+  googleVertexApi:
+    "the host has no `google-vertex` adapter: Vertex needs a GCP project plus location and ADC/access-token credentials, which the Rust credential path does not carry; use `googleGenerativeAIApi` (Gemini API key) instead",
+  mistralConversationsApi:
+    "the host adapter exists (`pi_ai::providers::MistralProvider`, api `mistral-conversations`) but the extension bridge does not route to it yet, so the factory stays a gap until a follow-up slice wires, tests and documents it",
+  openAICodexResponsesApi:
+    "the host has no `openai-codex-responses` adapter: the Codex Responses dialect is authenticated with a ChatGPT account token rather than an API key, and the Rust port implements neither that auth path nor the dialect",
+  piMessagesApi:
+    "the host has no `pi-messages` adapter: it is the first-party pi gateway protocol and this build has no endpoint or credential for it",
+};
 
 const __pi_sdk_pi_ai = __pi_sdk_module("@earendil-works/pi-ai", {
   AssistantMessageEventStream: AssistantMessageEventStream,
@@ -8277,11 +8317,14 @@ const __pi_sdk_pi_ai_compat = __pi_sdk_module(
   "@earendil-works/pi-ai/compat",
   {
     anthropicMessagesApi: __pi_sdk_anthropic_messages_api,
+    azureOpenAIResponsesApi: __pi_sdk_azure_openai_responses_api,
     complete: __pi_sdk_compat_complete,
     completeSimple: __pi_sdk_compat_complete_simple,
     createAssistantMessageEventStream: __pi_sdk_create_assistant_message_event_stream,
     getApiProvider: __pi_sdk_get_api_provider,
     getApiProviders: __pi_sdk_get_api_providers,
+    googleGenerativeAIApi: __pi_sdk_google_generative_ai_api,
+    openAICompletionsApi: __pi_sdk_openai_completions_api,
     openAIResponsesApi: __pi_sdk_openai_responses_api,
     registerApiProvider: __pi_sdk_register_api_provider,
     registerBuiltInApiProviders: __pi_sdk_register_built_in_api_providers,
@@ -8291,14 +8334,11 @@ const __pi_sdk_pi_ai_compat = __pi_sdk_module(
     unregisterApiProviders: __pi_sdk_unregister_api_providers,
   },
   {
-    azureOpenAIResponsesApi: __pi_sdk_stream_gap,
-    bedrockConverseStreamApi: __pi_sdk_stream_gap,
-    googleGenerativeAIApi: __pi_sdk_stream_gap,
-    googleVertexApi: __pi_sdk_stream_gap,
-    mistralConversationsApi: __pi_sdk_stream_gap,
-    openAICodexResponsesApi: __pi_sdk_stream_gap,
-    openAICompletionsApi: __pi_sdk_stream_gap,
-    piMessagesApi: __pi_sdk_stream_gap,
+    bedrockConverseStreamApi: __pi_sdk_stream_gaps.bedrockConverseStreamApi,
+    googleVertexApi: __pi_sdk_stream_gaps.googleVertexApi,
+    mistralConversationsApi: __pi_sdk_stream_gaps.mistralConversationsApi,
+    openAICodexResponsesApi: __pi_sdk_stream_gaps.openAICodexResponsesApi,
+    piMessagesApi: __pi_sdk_stream_gaps.piMessagesApi,
   },
 );
 
