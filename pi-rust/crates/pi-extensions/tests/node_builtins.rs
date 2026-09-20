@@ -527,6 +527,187 @@ fn node_fs_create_read_stream_replays_the_file() {
     });
 }
 
+/// `fs.createWriteStream` — the write side of the blocking bridge. Chunks are
+/// accepted into memory and flushed in one `fs.writeFile` / `fs.appendFile`
+/// hop on `end()`, so `finish` (and the `end()` callback) are the only
+/// "it is on disk now" signals; the file is read back from the real filesystem
+/// to prove it, instead of trusting `details`.
+#[test]
+fn node_fs_create_write_stream_flushes_on_end() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("write-stream");
+        let host = host_with_cwd(&scratch.as_str()).await;
+        let truncate_file = scratch.path().join("truncate.txt");
+        let append_file = scratch.path().join("append.txt");
+        std::fs::write(&truncate_file, "old contents\n").expect("write truncate fixture");
+        std::fs::write(&append_file, "first\n").expect("write append fixture");
+
+        let source = r#"
+            import { createWriteStream, existsSync, readFileSync, WriteStream } from "node:fs";
+            import { join } from "node:path";
+            import { Buffer } from "node:buffer";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "write_stream_probe",
+                    label: "write stream probe",
+                    description: "exercises fs.createWriteStream",
+                    parameters: { type: "object", properties: { dir: { type: "string" } } },
+                    execute: async (args) => {
+                        const dir = args.dir;
+
+                        // "w" truncates; string and Buffer chunks both land; and
+                        // the `write` callbacks precede `finish`, which precedes
+                        // the `end()` callback, which precedes `close`.
+                        const events = [];
+                        const writeCallbacks = [];
+                        const closedDestroyed = [];
+                        const truncate = createWriteStream(join(dir, "truncate.txt"));
+                        const instance = truncate instanceof WriteStream;
+                        truncate.on("open", () => events.push("open"));
+                        truncate.on("ready", () => events.push("ready"));
+                        truncate.on("finish", () => events.push("finish"));
+                        truncate.on("close", () => {
+                            events.push("close");
+                            closedDestroyed.push(truncate.destroyed);
+                        });
+                        const result = await new Promise((resolve, reject) => {
+                            truncate.on("error", reject);
+                            const first = truncate.write("new ", () => writeCallbacks.push("one"));
+                            const second = truncate.write(Buffer.from("bytes"), () => writeCallbacks.push("two"));
+                            const noBackpressure = first && second;
+                            truncate.end(() => {
+                                events.push("endCallback");
+                                resolve({
+                                    noBackpressure,
+                                    bytesWritten: truncate.bytesWritten,
+                                    writableEnded: truncate.writableEnded,
+                                    writableFinished: truncate.writableFinished,
+                                    destroyed: truncate.destroyed,
+                                    path: truncate.path,
+                                    flags: truncate.flags,
+                                });
+                            });
+                        });
+
+                        // "a" keeps the existing content and appends.
+                        const append = await new Promise((resolve, reject) => {
+                            const stream = createWriteStream(join(dir, "append.txt"), { flags: "a" });
+                            stream.on("error", reject);
+                            stream.write("second\n");
+                            stream.on("finish", () => resolve(stream.bytesWritten));
+                            stream.end();
+                        });
+
+                        // The flush is the only thing that can fail, and it must
+                        // surface both ways: `error` event and `end()` callback.
+                        const failure = await new Promise((resolve) => {
+                            const stream = createWriteStream(join(dir, "missing-dir", "x.txt"));
+                            let eventCode = null;
+                            let finished = false;
+                            stream.on("error", (err) => { eventCode = err.code; });
+                            stream.on("finish", () => { finished = true; });
+                            stream.write("data");
+                            stream.end((err) => resolve({
+                                eventCode,
+                                callbackCode: err ? err.code : null,
+                                finished,
+                            }));
+                        });
+
+                        // The documented refusal throws at the call site.
+                        let badFlag = null;
+                        try { createWriteStream(join(dir, "x.txt"), { flags: "r" }); }
+                        catch (err) { badFlag = err.message.includes("only supports the `w`"); }
+
+                        // destroy() drops the buffered bytes and emits close.
+                        const destroyed = [];
+                        const abandoned = createWriteStream(join(dir, "abandoned.txt"));
+                        abandoned.on("close", () => destroyed.push("close"));
+                        abandoned.write("never flushed");
+                        abandoned.destroy();
+
+                        return {
+                            content: [{ type: "text", text: "write stream probe" }],
+                            details: {
+                                events,
+                                writeCallbacks,
+                                result,
+                                append,
+                                failure,
+                                badFlag,
+                                destroyed,
+                                closedDestroyed,
+                                instance,
+                                truncateText: readFileSync(join(dir, "truncate.txt"), "utf8"),
+                                appendText: readFileSync(join(dir, "append.txt"), "utf8"),
+                                abandonedExists: existsSync(join(dir, "abandoned.txt")),
+                            },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("write_stream_probe", "/tmp/pi_node_builtins/write_stream_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load write stream probe extension");
+
+        let outcome = host
+            .execute_tool("write_stream_probe", &json!({ "dir": scratch.as_str() }).to_string())
+            .await
+            .expect("execute write stream probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(
+            details["events"],
+            json!(["open", "ready", "finish", "endCallback", "close"]),
+            "{details}"
+        );
+        assert_eq!(details["writeCallbacks"], json!(["one", "two"]), "{details}");
+        assert_eq!(details["result"]["noBackpressure"], true, "{details}");
+        assert_eq!(details["result"]["bytesWritten"], 9, "{details}");
+        assert_eq!(details["result"]["writableEnded"], true, "{details}");
+        assert_eq!(details["result"]["writableFinished"], true, "{details}");
+        // Auto-destroy lands after the `end()` callback, exactly like Node:
+        // the stream is torn down only once `finish` listeners have run.
+        assert_eq!(details["result"]["destroyed"], false, "{details}");
+        assert_eq!(details["closedDestroyed"], json!([true]), "{details}");
+        assert_eq!(details["result"]["flags"], "w", "{details}");
+        assert_eq!(
+            details["result"]["path"],
+            truncate_file.to_string_lossy().as_ref(),
+            "{details}"
+        );
+        assert_eq!(details["append"], 7, "{details}");
+        assert_eq!(details["failure"]["eventCode"], "ENOENT", "{details}");
+        assert_eq!(details["failure"]["callbackCode"], "ENOENT", "{details}");
+        assert_eq!(details["failure"]["finished"], false, "{details}");
+        assert_eq!(details["badFlag"], true, "{details}");
+        assert_eq!(details["destroyed"], json!(["close"]), "{details}");
+        assert_eq!(details["instance"], true, "{details}");
+        assert_eq!(details["abandonedExists"], false, "{details}");
+        assert_eq!(details["truncateText"], "new bytes", "{details}");
+        assert_eq!(details["appendText"], "first\nsecond\n", "{details}");
+
+        // The same content, read straight off the filesystem.
+        assert_eq!(
+            std::fs::read_to_string(&truncate_file).expect("read truncate"),
+            "new bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&append_file).expect("read append"),
+            "first\nsecond\n"
+        );
+        assert!(!scratch.path().join("abandoned.txt").exists());
+    });
+}
+
 /// `Buffer` / `process` are globals on Node, so an extension that never
 /// imports them must still find them — and a builtin that is *not* bridged
 /// must fail loudly, naming what is available.
