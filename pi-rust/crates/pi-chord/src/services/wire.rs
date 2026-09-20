@@ -229,7 +229,12 @@ impl<O: WireOpCodec> InstanceSnapshot<O> {
     /// Parses and validates an instance snapshot.
     pub fn from_json(value: &JsonValue) -> Result<Self, ServiceError> {
         let map = object(value, "service instance snapshot")?;
-        assert_keys(map, &["members"], &["instance"], "service instance snapshot")?;
+        assert_keys(
+            map,
+            &["members"],
+            &["instance"],
+            "service instance snapshot",
+        )?;
         let instance = match map.get("instance") {
             Some(value) => Some(parse_address(value)?),
             None => None,
@@ -269,7 +274,12 @@ impl<O: WireOpCodec> SubscriptionSnapshot<O> {
         map.insert("mode".into(), Value::String(self.mode.as_str().into()));
         map.insert(
             "instances".into(),
-            Value::Array(self.instances.iter().map(InstanceSnapshot::to_json).collect()),
+            Value::Array(
+                self.instances
+                    .iter()
+                    .map(InstanceSnapshot::to_json)
+                    .collect(),
+            ),
         );
         Value::Object(map)
     }
@@ -284,7 +294,8 @@ impl<O: WireOpCodec> SubscriptionSnapshot<O> {
             "service subscription snapshot",
         )?;
         let service_id = id_string(map, "serviceId", "service subscription snapshot")?;
-        let mode = parse_mode(map.get("mode")).ok_or_else(|| invalid("service subscription snapshot"))?;
+        let mode =
+            parse_mode(map.get("mode")).ok_or_else(|| invalid("service subscription snapshot"))?;
         let instances = map
             .get("instances")
             .and_then(Value::as_array)
@@ -457,7 +468,11 @@ pub struct ServiceCall {
 
 impl ServiceCall {
     /// Creates a call.
-    pub fn new(service_id: impl Into<String>, member: impl Into<String>, args: Vec<JsonValue>) -> Self {
+    pub fn new(
+        service_id: impl Into<String>,
+        member: impl Into<String>,
+        args: Vec<JsonValue>,
+    ) -> Self {
         Self {
             service_id: service_id.into(),
             instance: None,
@@ -481,7 +496,12 @@ impl ServiceCall {
     /// Parses and validates a call.
     pub fn from_json(value: &JsonValue) -> Result<Self, ServiceError> {
         let map = object(value, "service call")?;
-        assert_keys(map, &["serviceId", "member", "args"], &["instance"], "service call")?;
+        assert_keys(
+            map,
+            &["serviceId", "member", "args"],
+            &["instance"],
+            "service call",
+        )?;
         let service_id = id_string(map, "serviceId", "service call")?;
         let member = id_string(map, "member", "service call")?;
         let args = map
@@ -591,7 +611,9 @@ pub fn decode_service_control_call(call: &ServiceCall) -> Option<ServiceControlC
 }
 
 /// Parses a decoded subscription snapshot from JSON (upstream `parseServiceSubscriptionSnapshot`).
-pub fn parse_service_subscription_snapshot(value: &JsonValue) -> Result<ServiceSubscriptionSnapshot, ServiceError> {
+pub fn parse_service_subscription_snapshot(
+    value: &JsonValue,
+) -> Result<ServiceSubscriptionSnapshot, ServiceError> {
     SubscriptionSnapshot::from_json(value)
 }
 
@@ -603,12 +625,16 @@ pub fn parse_wire_service_subscription_snapshot(
 }
 
 /// Parses a decoded provider update from JSON (upstream `parseServiceProviderUpdate`).
-pub fn parse_service_provider_update(value: &JsonValue) -> Result<ServiceProviderUpdate, ServiceError> {
+pub fn parse_service_provider_update(
+    value: &JsonValue,
+) -> Result<ServiceProviderUpdate, ServiceError> {
     ProviderUpdate::from_json(value)
 }
 
 /// Parses a wire provider update from JSON (upstream `parseWireServiceProviderUpdate`).
-pub fn parse_wire_service_provider_update(value: &JsonValue) -> Result<WireServiceProviderUpdate, ServiceError> {
+pub fn parse_wire_service_provider_update(
+    value: &JsonValue,
+) -> Result<WireServiceProviderUpdate, ServiceError> {
     ProviderUpdate::from_json(value)
 }
 
@@ -618,7 +644,9 @@ pub fn parse_service_call(value: &JsonValue) -> Result<ServiceCall, ServiceError
 }
 
 /// Parses a provider catalogue from JSON (upstream `parseServiceCatalogue`).
-pub fn parse_service_catalogue(value: &JsonValue) -> Result<Vec<ServiceCatalogueEntry>, ServiceError> {
+pub fn parse_service_catalogue(
+    value: &JsonValue,
+) -> Result<Vec<ServiceCatalogueEntry>, ServiceError> {
     let items = value
         .as_array()
         .ok_or_else(|| invalid("service catalogue"))?;
@@ -697,7 +725,9 @@ fn parse_ops_generic<O: WireOpCodec>(
 }
 
 /// Parses a service instance address (upstream `assertAddress`).
-pub fn parse_service_instance_address(value: &JsonValue) -> Result<ServiceInstanceAddress, ServiceError> {
+pub fn parse_service_instance_address(
+    value: &JsonValue,
+) -> Result<ServiceInstanceAddress, ServiceError> {
     parse_address(value)
 }
 
@@ -738,7 +768,10 @@ fn invalid(description: &str) -> ServiceError {
     ServiceError::message(format!("Invalid {description}"))
 }
 
-fn object<'a>(value: &'a JsonValue, description: &str) -> Result<&'a Map<String, JsonValue>, ServiceError> {
+fn object<'a>(
+    value: &'a JsonValue,
+    description: &str,
+) -> Result<&'a Map<String, JsonValue>, ServiceError> {
     match value {
         Value::Object(map) => Ok(map),
         _ => Err(invalid(description)),
@@ -820,7 +853,10 @@ mod tests {
                 "instances": [{ "members": [{ "name": "state", "kind": "state", "sequence": 0, "ops": [["r", {"revision": 1}]] }] }],
             })
         );
-        assert_eq!(ServiceSubscriptionSnapshot::from_json(&json).unwrap(), snapshot);
+        assert_eq!(
+            ServiceSubscriptionSnapshot::from_json(&json).unwrap(),
+            snapshot
+        );
 
         let update = ProviderUpdate::State {
             instance: None,
@@ -831,7 +867,10 @@ mod tests {
                 serde_json::json!(2),
             )],
         };
-        assert_eq!(ServiceProviderUpdate::from_json(&update.to_json()).unwrap(), update);
+        assert_eq!(
+            ServiceProviderUpdate::from_json(&update.to_json()).unwrap(),
+            update
+        );
     }
 
     #[test]
@@ -916,9 +955,14 @@ mod tests {
 
     #[test]
     fn member_kinds_match_their_strings() {
-        assert_eq!(ServiceMemberKind::parse("method"), Some(ServiceMemberKind::Method));
+        assert_eq!(
+            ServiceMemberKind::parse("method"),
+            Some(ServiceMemberKind::Method)
+        );
         assert_eq!(ServiceMemberKind::State.to_string(), "state");
-        let member = MemberSnapshot::<WireOp>::Method { name: "select".into() };
+        let member = MemberSnapshot::<WireOp>::Method {
+            name: "select".into(),
+        };
         assert_eq!(member.kind(), ServiceMemberKind::Method);
         assert_eq!(
             member.to_json(),

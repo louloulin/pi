@@ -247,10 +247,8 @@ impl RemoteServiceBinding {
         let binding = match existing {
             Some(binding) => binding,
             None => {
-                let candidate = Arc::new(SingletonBinding::new(
-                    service.id(),
-                    Arc::clone(&self.inner),
-                ));
+                let candidate =
+                    Arc::new(SingletonBinding::new(service.id(), Arc::clone(&self.inner)));
                 let mut singletons = self.inner.singletons.lock();
                 match singletons.get(service.id()).cloned() {
                     Some(existing) => existing,
@@ -456,11 +454,12 @@ fn start_singleton(binding: &Arc<SingletonBinding>, revision: u64) -> Result<(),
         }
         Ok(())
     });
-    let subscription = binding.inner.transport.subscribe(
-        &service_id,
-        ServiceMode::Singleton,
-        listener,
-    )?;    if binding.subscription.lock().is_some()
+    let subscription =
+        binding
+            .inner
+            .transport
+            .subscribe(&service_id, ServiceMode::Singleton, listener)?;
+    if binding.subscription.lock().is_some()
         || !binding.active.load(Ordering::SeqCst)
         || binding.inner.disposed.load(Ordering::SeqCst)
         || !binding.inner.bound.load(Ordering::SeqCst)
@@ -628,9 +627,7 @@ impl KeyedBinding {
                 }
                 Ok(())
             }
-            ProviderUpdate::State {
-                instance: None, ..
-            } => Err(ServiceError::message(
+            ProviderUpdate::State { instance: None, .. } => Err(ServiceError::message(
                 "Keyed service state update has no instance address",
             )),
             ProviderUpdate::State {
@@ -1287,9 +1284,7 @@ fn addresses_match(
 ) -> bool {
     match (left, right) {
         (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.key == right.key && left.generation == right.generation
-        }
+        (Some(left), Some(right)) => left.key == right.key && left.generation == right.generation,
         _ => false,
     }
 }

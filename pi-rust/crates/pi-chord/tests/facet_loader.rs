@@ -120,10 +120,7 @@ fn combined_loaders_load_in_order_and_dispose_in_reverse() {
     assert_eq!(ids, ["a", "b"]);
 
     assert!(block_on(loaded.dispose()).is_ok());
-    assert_eq!(
-        seen(&log),
-        ["load:a", "load:b", "dispose:b", "dispose:a"]
-    );
+    assert_eq!(seen(&log), ["load:a", "load:b", "dispose:b", "dispose:a"]);
     // Idempotent.
     assert!(block_on(loaded.dispose()).is_ok());
     assert_eq!(seen(&log).len(), 4);

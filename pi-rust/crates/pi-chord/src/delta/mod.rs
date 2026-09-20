@@ -46,9 +46,7 @@ pub mod tracker;
 
 pub use apply::{apply, apply_immutable};
 pub use codec::{Decoder, Encoder};
-pub use diff::{
-    diff, diff_with_scan, json_equal, overlap, overlap_with, DEFAULT_MAX_OVERLAP_SCAN,
-};
+pub use diff::{diff, diff_with_scan, json_equal, overlap, overlap_with, DEFAULT_MAX_OVERLAP_SCAN};
 pub use op::{
     assert_valid_op, assert_valid_wire_op, is_base, is_base_wire, ops_from_json, ops_to_json,
     wire_ops_from_json, wire_ops_to_json, Op, PathRef, WireOp,
@@ -105,7 +103,10 @@ mod tests {
             assert_eq!(decoded, batch);
             replica = Some(apply(replica, &decoded).unwrap());
         }
-        assert_eq!(replica.unwrap(), json!({ "a": { "b": "xyz" }, "xs": [1, 2] }));
+        assert_eq!(
+            replica.unwrap(),
+            json!({ "a": { "b": "xyz" }, "xs": [1, 2] })
+        );
     }
 
     #[test]

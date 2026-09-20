@@ -243,8 +243,14 @@ mod tests {
     fn parses_and_serialises_segments() {
         assert_eq!(Seg::from_json(&json!("a")).unwrap(), Seg::Key("a".into()));
         assert_eq!(Seg::from_json(&json!(7)).unwrap(), Seg::Index(7));
-        assert!(matches!(Seg::from_json(&json!(1.5)), Err(DeltaError::UnsafePath(_))));
-        assert!(matches!(Seg::from_json(&json!(true)), Err(DeltaError::UnsafePath(_))));
+        assert!(matches!(
+            Seg::from_json(&json!(1.5)),
+            Err(DeltaError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            Seg::from_json(&json!(true)),
+            Err(DeltaError::UnsafePath(_))
+        ));
         assert_eq!(Seg::Index(3).to_json(), json!(3));
     }
 

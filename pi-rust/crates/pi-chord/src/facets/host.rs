@@ -22,13 +22,13 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::context::Context;
 use crate::facets::lifecycle::{Effect, FacetLifecycle};
 use crate::facets::registry::{
     FacetServiceDirectory, KeyedServiceSpawner, ServiceHandle, TypedObserver,
 };
 use crate::state::MutableReplicatedState;
 use crate::types::{Facet, FacetError, FacetFuture, FacetOptions, Service, ServiceMode};
-use crate::context::Context;
 
 /// A service requirement or provision recorded during setup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,23 +179,21 @@ impl FacetEnvironment {
     /// The view exists from setup on but only resolves while the facet is active.
     pub fn use_service<T>(&mut self, service: &Service<T>) -> Result<ServiceHandle<T>, FacetError> {
         self.lifecycle.assert_setting_up("acquire services")?;
-        self.state.record_requirement(service.id(), ServiceMode::Singleton);
+        self.state
+            .record_requirement(service.id(), ServiceMode::Singleton);
         Ok(self
             .directory
             .use_service(service, Arc::clone(&self.lifecycle)))
     }
 
     /// Provides a singleton implementation for the generation.
-    pub fn provide<T>(
-        &mut self,
-        service: &Service<T>,
-        implementation: T,
-    ) -> Result<(), FacetError>
+    pub fn provide<T>(&mut self, service: &Service<T>, implementation: T) -> Result<(), FacetError>
     where
         T: Send + Sync + 'static,
     {
         self.lifecycle.assert_setting_up("provide services")?;
-        self.state.record_provision(service.id(), ServiceMode::Singleton);
+        self.state
+            .record_provision(service.id(), ServiceMode::Singleton);
         let service_id = service.id().to_string();
         let install_id = service_id.clone();
         self.state.push_provision(Provision::Singleton {
@@ -215,8 +213,10 @@ impl FacetEnvironment {
         &mut self,
         service: &Service<T>,
     ) -> Result<Arc<KeyedServiceSpawner<T>>, FacetError> {
-        self.lifecycle.assert_setting_up("provide service instances")?;
-        self.state.record_provision(service.id(), ServiceMode::Keyed);
+        self.lifecycle
+            .assert_setting_up("provide service instances")?;
+        self.state
+            .record_provision(service.id(), ServiceMode::Keyed);
         let spawner = Arc::new(
             self.directory
                 .keyed_spawner(service, Arc::clone(&self.lifecycle)),
@@ -237,7 +237,8 @@ impl FacetEnvironment {
         H: Fn(Arc<T>, &Context) + Send + Sync + 'static,
     {
         self.lifecycle.assert_setting_up("observe services")?;
-        self.state.record_requirement(service.id(), ServiceMode::Keyed);
+        self.state
+            .record_requirement(service.id(), ServiceMode::Keyed);
         let directory = Arc::clone(&self.directory);
         let service_id = service.id().to_string();
         let facet_id = self.facet_id.clone();
@@ -272,7 +273,10 @@ impl FacetEnvironment {
     }
 
     /// Creates a replicated state owned by the facet.
-    pub fn replicated_state<T>(&mut self, initial: T) -> Result<MutableReplicatedState<T>, FacetError>
+    pub fn replicated_state<T>(
+        &mut self,
+        initial: T,
+    ) -> Result<MutableReplicatedState<T>, FacetError>
     where
         T: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
     {
@@ -528,7 +532,9 @@ pub async fn create_facet_host(options: FacetOptions) -> Result<FacetHost, Facet
     }
     let unique: HashSet<&str> = ids.iter().copied().collect();
     if unique.len() != ids.len() {
-        return Err(FacetError::new("Facet IDs must be unique within a generation"));
+        return Err(FacetError::new(
+            "Facet IDs must be unique within a generation",
+        ));
     }
 
     let mut host = FacetHost {
@@ -699,10 +705,7 @@ impl FacetHost {
             .iter()
             .map(|id| {
                 self.facets
-                    .insert(
-                        id.clone(),
-                        candidates.remove(id).expect("candidate exists"),
-                    )
+                    .insert(id.clone(), candidates.remove(id).expect("candidate exists"))
                     .expect("the outgoing generation had this facet")
             })
             .collect();
@@ -806,9 +809,7 @@ pub(crate) fn validate_facets(records: &[FacetRuntime]) -> Result<Vec<String>, F
                         provision.mode.as_str()
                     )));
                 }
-                let provider = facet_id
-                    .clone()
-                    .unwrap_or_else(|| "the host".to_string());
+                let provider = facet_id.clone().unwrap_or_else(|| "the host".to_string());
                 return Err(FacetError::new(format!(
                     "Service {} is provided by both {provider} and {}",
                     provision.service_id, record.id

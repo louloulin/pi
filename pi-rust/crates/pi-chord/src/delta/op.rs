@@ -16,8 +16,8 @@
 use serde_json::Value;
 
 use super::path::{assert_safe_path, path_from_json, path_to_json, Path, Seg};
-use super::NonEmptyPath;
 use super::DeltaError;
+use super::NonEmptyPath;
 
 /// A path inline, or an id assigned by the encoder, or omitted (reuse the
 /// previous path in the batch).
@@ -227,10 +227,9 @@ impl WireOp {
             },
             WireOp::Delete(PathRef::Omitted) => Value::Array(vec![Value::String("d".into())]),
             WireOp::Delete(path) => Value::Array(vec![Value::String("d".into()), ref_json(path)]),
-            WireOp::Append(PathRef::Omitted, text) => Value::Array(vec![
-                Value::String("a".into()),
-                Value::String(text.clone()),
-            ]),
+            WireOp::Append(PathRef::Omitted, text) => {
+                Value::Array(vec![Value::String("a".into()), Value::String(text.clone())])
+            }
             WireOp::Append(path, text) => Value::Array(vec![
                 Value::String("a".into()),
                 ref_json(path),

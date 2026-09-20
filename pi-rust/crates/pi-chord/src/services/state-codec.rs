@@ -256,7 +256,8 @@ impl<C> StateCodecRegistry<C> {
             )));
         }
         let codec = (self.create)();
-        self.entries.insert(key.clone(), CodecEntry { instance, codec });
+        self.entries
+            .insert(key.clone(), CodecEntry { instance, codec });
         Ok(&mut self.entries.get_mut(&key).expect("just inserted").codec)
     }
 
@@ -325,7 +326,9 @@ impl StateCodecRegistry<Decoder> {
             .members
             .iter()
             .map(|member| match member {
-                MemberSnapshot::Method { name } => Ok(MemberSnapshot::Method { name: name.clone() }),
+                MemberSnapshot::Method { name } => {
+                    Ok(MemberSnapshot::Method { name: name.clone() })
+                }
                 MemberSnapshot::State {
                     name,
                     sequence,

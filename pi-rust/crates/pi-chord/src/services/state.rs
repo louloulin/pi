@@ -72,9 +72,10 @@ where
     }
 
     fn subscribe_source(&self, listener: MemberSourceListener) -> Box<dyn FnOnce() + Send> {
-        let subscription = MutableReplicatedState::subscribe_source(self, move |ops, sequence, context| {
-            listener(ops, sequence, context);
-        });
+        let subscription =
+            MutableReplicatedState::subscribe_source(self, move |ops, sequence, context| {
+                listener(ops, sequence, context);
+            });
         Box::new(move || subscription.unsubscribe())
     }
 }

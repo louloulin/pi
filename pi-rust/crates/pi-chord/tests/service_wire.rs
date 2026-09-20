@@ -11,14 +11,14 @@ use pi_chord::context::{background_context, Context};
 use pi_chord::delta::{NonEmptyPath, Op};
 use pi_chord::{
     create_remote_service_endpoint, create_service_catalogue_call, create_service_subscribe_call,
-    create_service_unsubscribe_call, decode_service_control_call, define_service, parse_service_call,
-    parse_service_catalogue, parse_service_provider_update, parse_service_subscription_snapshot,
-    parse_wire_service_provider_update, parse_wire_service_subscription_snapshot, replicated_state,
-    wire_ops_to_json_value, InstanceSnapshot, MemberSnapshot, ProviderUpdate, RemoteServiceProvider,
-    ServiceControlCall, ServiceImplementation, ServiceInstanceAddress, ServiceMode,
-    ServiceProviderEntry, ServiceProviderUpdate, ServiceStateDecoder, ServiceStateEncoder,
-    ServiceSubscriptionSnapshot, ServiceUpdatePublisher, SubscriptionSnapshot,
-    WireServiceProviderUpdate,
+    create_service_unsubscribe_call, decode_service_control_call, define_service,
+    parse_service_call, parse_service_catalogue, parse_service_provider_update,
+    parse_service_subscription_snapshot, parse_wire_service_provider_update,
+    parse_wire_service_subscription_snapshot, replicated_state, wire_ops_to_json_value,
+    InstanceSnapshot, MemberSnapshot, ProviderUpdate, RemoteServiceProvider, ServiceControlCall,
+    ServiceImplementation, ServiceInstanceAddress, ServiceMode, ServiceProviderEntry,
+    ServiceProviderUpdate, ServiceStateDecoder, ServiceStateEncoder, ServiceSubscriptionSnapshot,
+    ServiceUpdatePublisher, SubscriptionSnapshot, WireServiceProviderUpdate,
 };
 use serde_json::{json, Value};
 
@@ -327,9 +327,7 @@ fn creates_and_removes_keyed_instance_codecs_with_their_lifecycle() {
         update
     );
 
-    let closed = ServiceProviderUpdate::Closed {
-        instance: address,
-    };
+    let closed = ServiceProviderUpdate::Closed { instance: address };
     assert_eq!(
         dec.decode_update(&enc.encode_update(closed.clone()).unwrap())
             .unwrap(),
@@ -343,15 +341,17 @@ fn creates_and_removes_keyed_instance_codecs_with_their_lifecycle() {
         ops: vec![Op::Set(NonEmptyPath::from_keys(&["value"]), json!(2))],
     };
     let error = enc.encode_update(stale).unwrap_err();
-    assert_eq!(error.to_string(), "Unknown service state dialog-1@1.request");
+    assert_eq!(
+        error.to_string(),
+        "Unknown service state dialog-1@1.request"
+    );
 }
 
 #[test]
 fn remote_service_endpoints_publish_and_clean_up_provider_subscriptions() {
     let counter: pi_chord::Service<Json> = define_service("test.counter").expect("valid id");
-    let provider = Arc::new(
-        RemoteServiceProvider::new([ServiceProviderEntry::singleton(&counter)]).unwrap(),
-    );
+    let provider =
+        Arc::new(RemoteServiceProvider::new([ServiceProviderEntry::singleton(&counter)]).unwrap());
     let state = Arc::new(replicated_state(json!({ "value": 0 })).unwrap());
     provider
         .provide(
@@ -364,13 +364,19 @@ fn remote_service_endpoints_publish_and_clean_up_provider_subscriptions() {
     let updates: Arc<Mutex<Vec<ServiceProviderUpdate>>> = Arc::new(Mutex::new(Vec::new()));
     let publish: ServiceUpdatePublisher = {
         let updates = Arc::clone(&updates);
-        Arc::new(move |_subscription_id: &str, update: &ServiceProviderUpdate, _context: &Context| {
-            updates.lock().expect("lock").push(update.clone());
-        })
+        Arc::new(
+            move |_subscription_id: &str, update: &ServiceProviderUpdate, _context: &Context| {
+                updates.lock().expect("lock").push(update.clone());
+            },
+        )
     };
 
     let catalogue = endpoint
-        .invoke(&create_service_catalogue_call(), &publish, background_context())
+        .invoke(
+            &create_service_catalogue_call(),
+            &publish,
+            background_context(),
+        )
         .unwrap();
     assert_eq!(
         catalogue,
@@ -405,7 +411,11 @@ fn remote_service_endpoints_publish_and_clean_up_provider_subscriptions() {
     assert_eq!(updates.lock().expect("lock").len(), 1);
 
     let error = endpoint
-        .invoke(&create_service_catalogue_call(), &publish, background_context())
+        .invoke(
+            &create_service_catalogue_call(),
+            &publish,
+            background_context(),
+        )
         .unwrap_err();
     assert_eq!(error.to_string(), "Remote service endpoint is disposed");
     provider.dispose().unwrap();
