@@ -42,7 +42,7 @@ use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
 };
 use crate::config::{self, ConfigSources};
-use crate::extensions::ui_bridge::TuiUi;
+use crate::extensions::ui_bridge::{RegionPump, TuiUi};
 use crate::extensions::wiring::ExtensionRuntime;
 use crate::prompt_templates::PromptTemplate;
 use crate::session_log::SessionLog;
@@ -247,10 +247,15 @@ async fn run_loop(
 
     // Extension dialogs: the App drains the bridge every tick, and the
     // gate only opens now that the loop is running (see `ui_bridge`).
+    // Region / overlay mutations (`ctx.ui.setHeader` & friends) need the
+    // App in hand, so their receiver becomes a `RegionPump` the loop
+    // drives below.
+    let mut region_pump = None;
     if let Some(ui) = options.extension_ui.as_mut() {
         if let Some(dialogs) = ui.take_dialogs() {
             app.attach_ui_dialogs(dialogs);
         }
+        region_pump = ui.take_regions().map(|(ops, tx)| RegionPump::new(ops, tx));
         ui.arm();
     }
 
@@ -268,6 +273,15 @@ async fn run_loop(
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
         app.drain_agent_events();
+        // Apply queued `ctx.ui` region mutations and re-render the JS
+        // components before the frame is drawn, so a `setHeader` that
+        // just arrived shows up in this tick. The width mirrors what the
+        // App is about to render into; a failed size query falls back to
+        // the 80-column default.
+        if let Some(pump) = region_pump.as_mut() {
+            let width = terminal.size().map(|area| area.width).unwrap_or(80);
+            pump.pump(&mut app, width).await;
+        }
         // Turn queued `ctx.ui.*` requests into modals (and notifications
         // into transcript lines) before rendering them.
         app.poll_ui_dialogs();

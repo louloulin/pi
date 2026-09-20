@@ -19,6 +19,13 @@
 //   - `host_ui_confirm(title, body)`     — return Promise<bool>
 //   - `host_ui_input(title, placeholder)`— return Promise<string|null>
 //   - `host_ui_select(title, optionsJson)`— return Promise<string|null>
+//   - `host_ui_region(op, payloadJson)`  — the single synchronous bridge
+//     behind `ctx.ui.setWidget` / `setHeader` / `setFooter` /
+//     `setEditorComponent` / `custom`. Returns a JSON envelope
+//     (`{ok:true}` / `{ok:true,session}` / `{ok:false,error}`).
+//     Components are registered here under numeric ids; the host calls
+//     back into `__pi_ui_render_component` / `__pi_ui_component_input` /
+//     `__pi_ui_dispose_component`.
 //   - `host_log(level, message)`         — surface a log line
 //   - `host_child_read(handle, stream)` — return Promise<{data,done}> for a
 //     `node:child_process` pipe (see `child_process.spawn`)
@@ -211,6 +218,105 @@ function buildCtx(extra) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Extension UI component registry (`ctx.ui.setWidget` / `setHeader` /
+// `setFooter` / `setEditorComponent` / `custom`).
+//
+// The Rust host owns every region; a JS component is registered here under a
+// numeric id and the host calls back into `__pi_ui_render_component` /
+// `__pi_ui_component_input` / `__pi_ui_dispose_component` when it needs the
+// component's lines, wants to deliver a key, or is done with it. Only the
+// `host_ui_region` import crosses into Rust; the component objects themselves
+// never leave QuickJS.
+// ---------------------------------------------------------------------------
+
+/** Registered components, keyed by the id handed to the host. */
+const __pi_ui_components = new Map();
+let __pi_ui_next_component_id = 1;
+
+/**
+ * Register a component object. Returns its id, or `0` when the object
+ * cannot render.
+ *
+ * @param {unknown} component
+ * @returns {number}
+ */
+function __pi_ui_register_component(component) {
+  if (component === null || typeof component !== "object") return 0;
+  if (typeof component.render !== "function") return 0;
+  const id = __pi_ui_next_component_id++;
+  __pi_ui_components.set(id, component);
+  return id;
+}
+
+/**
+ * Render component `id` for `width` columns. Returns a JSON envelope
+ * (`{"ok":true,"lines":[…],"hasInput":bool}` / `{"ok":false,"error":…}`)
+ * so a throwing component surfaces as an empty region instead of a host crash.
+ *
+ * @param {number} id
+ * @param {number} width
+ * @returns {string}
+ */
+function __pi_ui_render_component(id, width) {
+  const component = __pi_ui_components.get(id);
+  if (!component) {
+    return JSON.stringify({ ok: false, error: "component " + id + " is not registered" });
+  }
+  try {
+    const rendered = component.render(Number(width) || 0);
+    const lines = Array.isArray(rendered) ? rendered.map((line) => String(line)) : [];
+    return JSON.stringify({
+      ok: true,
+      lines: lines,
+      hasInput: typeof component.handleInput === "function",
+    });
+  } catch (error) {
+    return JSON.stringify({
+      ok: false,
+      error: String(error && error.message ? error.message : error),
+    });
+  }
+}
+
+/**
+ * Deliver raw terminal `data` to component `id`; returns whether the component
+ * handled it (upstream's `handleInput` returns `void`, so any implementation
+ * counts as handled).
+ *
+ * @param {number} id
+ * @param {string} data
+ * @returns {boolean}
+ */
+function __pi_ui_component_input(id, data) {
+  const component = __pi_ui_components.get(id);
+  if (!component || typeof component.handleInput !== "function") return false;
+  try {
+    component.handleInput(String(data));
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+/**
+ * Drop component `id`, calling its `dispose` exactly once.
+ *
+ * @param {number} id
+ * @returns {boolean}
+ */
+function __pi_ui_dispose_component(id) {
+  const component = __pi_ui_components.get(id);
+  if (!component) return false;
+  __pi_ui_components.delete(id);
+  try {
+    if (typeof component.dispose === "function") component.dispose();
+  } catch (_error) {
+    // Swallow: a throwing dispose must not take the host down.
+  }
+  return true;
+}
+
 /**
  * Build the `ui` sub-context. Each method either fires a host import
  * (notify) or returns a Promise that resolves when the host answers
@@ -252,15 +358,6 @@ function makeUiContext(hasUI) {
     } catch (_e) {
       // Swallow — notify is fire-and-forget.
     }
-  }
-  function unsupportedError(kind) {
-    const error = new Error(
-      "ctx.ui." +
-        kind +
-        " is not available in the pi extension host: it has no interactive render channel. See docs/SDK_MODULES.md.",
-    );
-    error.code = "ERR_PI_UI_UNSUPPORTED";
-    return error;
   }
   const ui = {
     // The host has no colour palette: every style helper is an identity
@@ -326,25 +423,260 @@ function makeUiContext(hasUI) {
       reportDenied("editor", title);
       return null;
     },
-    custom() {
-      throw unsupportedError("custom");
+
+    // --- Region / overlay surface ---------------------------------------
+    // The Rust TUI owns header / footer / widget / editor regions and the
+    // overlay stack; these methods register a JS component and forward the
+    // mutation through `host_ui_region`. Without a UI (or without a region
+    // host) they deny / warn exactly like `confirm` does.
+
+    /**
+     * Install (or, with `null` / `undefined`, clear) the widget registered
+     * under `key`. `content` is either the upstream `string[]` shorthand or a
+     * factory `(tui, theme) => Component`.
+     */
+    setWidget(key, content, options) {
+      const placement =
+        options && options.placement === "belowEditor" ? "belowEditor" : "aboveEditor";
+      const component = normalizeRegionComponent("setWidget", content, [tuiStub, ui.theme]);
+      installRegion("setWidget", "setWidget", component, {
+        key: String(key),
+        placement: placement,
+      });
+    },
+
+    /** Install (or clear) the header region from a `(tui, theme) => Component` factory. */
+    setHeader(factory) {
+      const component = normalizeRegionComponent("setHeader", factory, [tuiStub, ui.theme]);
+      installRegion("setHeader", "setHeader", component);
+    },
+
+    /** Install (or clear) the footer region from a `(tui, theme, data) => Component` factory. */
+    setFooter(factory) {
+      const component = normalizeRegionComponent("setFooter", factory, [
+        tuiStub,
+        ui.theme,
+        footerDataStub,
+      ]);
+      installRegion("setFooter", "setFooter", component);
+    },
+
+    /** Install (or clear) the editor-region component from a `(tui, theme, keys) => Component` factory. */
+    setEditorComponent(factory) {
+      const component = normalizeRegionComponent("setEditorComponent", factory, [
+        tuiStub,
+        ui.theme,
+        keybindingsStub,
+      ]);
+      installRegion("setEditorComponent", "setEditorComponent", component);
+    },
+
+    /**
+     * Run a full-screen / overlay component.
+     *
+     * Returns a thenable *handle*: `await` it for the upstream
+     * `Promise<T>` behaviour, or call `handle.resolve(value)` / `close()` /
+     * `isVisible()` directly, mirroring upstream's `CustomHandle`.
+     */
+    custom(factory, options) {
+      const opts = options || {};
+      const state = { closed: false, visible: true, session: 0, result: undefined };
+      let settle;
+      const promise = new Promise((resolve) => {
+        settle = resolve;
+      });
+      const handle = {
+        id: 0,
+        isVisible() {
+          return !state.closed && state.visible;
+        },
+        setVisible(next) {
+          state.visible = Boolean(next);
+          if (state.session) {
+            regionCall("customSetVisible", { session: state.session, visible: state.visible });
+          }
+          return state.visible;
+        },
+        resolve(result) {
+          if (state.closed) return;
+          state.closed = true;
+          state.result = result === undefined ? null : result;
+          if (state.session) {
+            regionCall("customClose", { session: state.session, result: state.result });
+          }
+          settle(result === undefined ? undefined : result);
+        },
+        close() {
+          handle.resolve(undefined);
+        },
+        done(result) {
+          handle.resolve(result);
+        },
+        then(onFulfilled, onRejected) {
+          return promise.then(onFulfilled, onRejected);
+        },
+        catch(onRejected) {
+          return promise.catch(onRejected);
+        },
+        finally(onFinally) {
+          return promise.finally(onFinally);
+        },
+      };
+      if (typeof factory !== "function" || !regionsAvailable("custom")) {
+        queueMicrotask(() => handle.resolve(undefined));
+        return handle;
+      }
+      Promise.resolve()
+        .then(() => factory(tuiStub, ui.theme, keybindingsStub, (result) => handle.resolve(result)))
+        .then((component) => {
+          // The factory is asynchronous, so `done(...)` can win the race: a
+          // session that closed before it opened never touches the host (the
+          // handle already carries the result), and there is nothing to
+          // dispose because the component was never registered.
+          if (state.closed) return;
+          if (!component || typeof component.render !== "function") {
+            reportRegionError(
+              "custom",
+              new Error("factory did not return a component with render(width)"),
+            );
+            handle.resolve(undefined);
+            return;
+          }
+          const componentId = __pi_ui_register_component(component);
+          if (!componentId) {
+            handle.resolve(undefined);
+            return;
+          }
+          const overlayOptions = opts.overlayOptions || {};
+          const opened = regionCall("customOpen", {
+            componentId: componentId,
+            overlay: opts.overlay === true,
+            width: typeof overlayOptions.width === "number" ? overlayOptions.width : null,
+            maxHeight: typeof overlayOptions.maxHeight === "number" ? overlayOptions.maxHeight : null,
+            anchor: typeof overlayOptions.anchor === "string" ? overlayOptions.anchor : null,
+            margin: typeof overlayOptions.margin === "number" ? overlayOptions.margin : 0,
+          });
+          if (!opened || !opened.ok || typeof opened.session !== "number") {
+            __pi_ui_dispose_component(componentId);
+            handle.resolve(undefined);
+            return;
+          }
+          state.session = opened.session;
+          handle.id = opened.session;
+        })
+        .catch((error) => {
+          reportRegionError("custom", error);
+          if (!state.closed) handle.resolve(undefined);
+        });
+      // The factory above runs on a microtask, and the host only re-polls its
+      // async driver when a Rust-side task is pushed. Ask it to poll now so an
+      // idle TUI opens the overlay instead of waiting for the next awaited
+      // host call to drain the job queue.
+      regionCall("wake", {});
+      return handle;
     },
   };
-  // Widget / status / theme / footer channels have no host bridge: accept the
-  // call so extensions that configure them at load time still load, warn once,
-  // and keep the value inert.
+
+  // No-op stand-ins for the upstream `tui` / `keybindings` / footer-data
+  // objects a region factory receives. Extensions mostly use them to request
+  // a re-render; the host re-renders every frame regardless.
+  const tuiStub = Object.freeze({
+    requestRender: () => {},
+    setFocus: () => {},
+    terminal: Object.freeze({ columns: 80, rows: 24 }),
+  });
+  const keybindingsStub = Object.freeze({
+    matches: () => false,
+    getKeys: () => [],
+  });
+  const footerDataStub = Object.freeze({
+    getGitBranch: () => undefined,
+    getExtensionStatuses: () => new Map(),
+  });
+
+  /** Call the `host_ui_region` import; never throws. */
+  function regionCall(op, payload) {
+    if (typeof globalThis.host_ui_region !== "function") return { ok: false };
+    try {
+      const raw = globalThis.host_ui_region(String(op), JSON.stringify(payload || {}));
+      return typeof raw === "string" ? JSON.parse(raw) : { ok: false };
+    } catch (_error) {
+      return { ok: false };
+    }
+  }
+
+  /** Whether the real region surface exists; otherwise deny like `confirm` does. */
+  function regionsAvailable(kind) {
+    if (hasUI && typeof globalThis.host_ui_region === "function") return true;
+    reportDenied(kind);
+    return false;
+  }
+
+  /** Surface a component failure without throwing into the extension. */
+  function reportRegionError(kind, error) {
+    const message = String(error && error.message ? error.message : error);
+    if (typeof globalThis.host_ui_notify === "function") {
+      try {
+        globalThis.host_ui_notify("ctx.ui." + kind + " failed: " + message, "warning");
+      } catch (_error2) {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Normalise the three shapes `content` can take — `string[]`, a factory or
+   * an already-built component — into a component object (or `null` to clear).
+   */
+  function normalizeRegionComponent(kind, content, args) {
+    if (content === undefined || content === null) return null;
+    if (Array.isArray(content)) {
+      return { render: () => content.map((line) => String(line)) };
+    }
+    if (typeof content === "function") {
+      let produced;
+      try {
+        produced = content.apply(null, args);
+      } catch (error) {
+        reportRegionError(kind, error);
+        return null;
+      }
+      if (!produced || typeof produced.render !== "function") {
+        reportRegionError(kind, new Error("factory did not return a component with render(width)"));
+        return null;
+      }
+      return produced;
+    }
+    if (typeof content.render === "function") return content;
+    return null;
+  }
+
+  /** Register `component` and forward the region mutation to the host. */
+  function installRegion(kind, op, component, extra) {
+    if (!regionsAvailable(kind)) return false;
+    let componentId = 0;
+    if (component !== null) {
+      componentId = __pi_ui_register_component(component);
+      if (!componentId) {
+        reportRegionError(kind, new Error("component must have render(width)"));
+        return false;
+      }
+    }
+    regionCall(op, Object.assign({ componentId: componentId }, extra || {}));
+    return true;
+  }
+
+  // Status / title / theme / autocomplete channels still have no host
+  // bridge: accept the call so extensions that configure them at load time
+  // still load, warn once, and keep the value inert.
   for (const kind of [
-    "setWidget",
     "setStatus",
     "setTitle",
-    "setFooter",
-    "setHeader",
     "setEditorText",
     "setHiddenThinkingLabel",
     "setWorkingIndicator",
     "setWorkingVisible",
     "setWorkingMessage",
-    "setEditorComponent",
     "addAutocompleteProvider",
     "setTheme",
   ]) {
@@ -5648,12 +5980,15 @@ if (typeof globalThis.TextDecoder === "undefined") globalThis.TextDecoder = __pi
 // The packages used to be published under the `@mariozechner/` scope, so every
 // specifier is registered under both scopes as well as the bare package name.
 //
-// The extension host has no terminal render loop: there is no live `TUI`
-// object and no widget/overlay channel, so the component classes below are
-// pure-JS renderables — they implement the constructor surface upstream code
-// uses and `render(width)` returns strings, but nothing drives them on screen.
-// `ctx.ui.custom()` therefore throws a named error instead of silently
-// returning `undefined` (see `docs/SDK_MODULES.md`).
+// The extension host drives the real region surface (header / footer /
+// widgets / editor component / overlay) through `ctx.ui`, so the component
+// classes below are the renderables that surface consumes: they implement the
+// constructor surface upstream code uses and `render(width)` returns strings.
+// A component an extension hands to `ctx.ui.setWidget` / `setHeader` /
+// `setFooter` / `setEditorComponent` / `custom` is registered here under a
+// numeric id and rendered by the Rust TUI through
+// `__pi_ui_render_component`; see the component registry near
+// `makeUiContext` and `docs/SDK_MODULES.md`.
 //
 // Hard rule: a name this file does not implement must never evaluate to
 // `undefined`. Implemented names are real values; names that upstream imports

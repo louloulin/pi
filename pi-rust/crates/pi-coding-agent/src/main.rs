@@ -141,8 +141,10 @@ fn main() -> ExitCode {
             // there instead of promising a UI that cannot render.
             let mut extension_ui = interactive_ui_available().then(TuiUi::new);
             let ui_bridge = extension_ui.as_ref().map(|ui| ui.bridge().clone());
+            let ui_region_host = extension_ui.as_ref().map(|ui| ui.region_host());
             let has_ui = ui_bridge.is_some();
-            let loaded_extensions = load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge);
+            let loaded_extensions =
+                load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge, ui_region_host);
             let extension_resources = loaded_extensions.runtime.resource_paths().clone();
             let system_prompt = build_system_prompt_for(
                 &cli,
@@ -233,7 +235,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(70);
                 }
             };
-            let loaded_extensions = load_extensions(&runtime, &cli, "print", false, None);
+            let loaded_extensions = load_extensions(&runtime, &cli, "print", false, None, None);
             let extension_resources = loaded_extensions.runtime.resource_paths().clone();
             let system_prompt = build_system_prompt_for(
                 &cli,
@@ -278,7 +280,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(70);
                 }
             };
-            let loaded_extensions = load_extensions(&runtime, &cli, "rpc", false, None);
+            let loaded_extensions = load_extensions(&runtime, &cli, "rpc", false, None, None);
             let extension_resources = loaded_extensions.runtime.resource_paths().clone();
             let system_prompt = build_system_prompt_for(
                 &cli,
@@ -455,6 +457,7 @@ fn load_extensions(
     mode: &str,
     has_ui: bool,
     ui: Option<pi_coding_agent::extensions::ui_bridge::TuiUiBridge>,
+    ui_region_host: Option<std::sync::Arc<pi_coding_agent::extensions::ui_bridge::TuiRegionHost>>,
 ) -> wiring::ExtensionLoadOutcome {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // Resolve trust *before* discovery so an untrusted project's
@@ -470,6 +473,7 @@ fn load_extensions(
         mode: mode.to_string(),
         has_ui,
         ui,
+        ui_region_host,
         disabled: cli.no_extensions,
         project_trusted,
     };
