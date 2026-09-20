@@ -130,7 +130,7 @@ async fn idle_follow_up_behaves_like_enter() {
     assert!(!app.is_busy());
     app.set_editor_text("hello");
     match app.follow_up_from_editor() {
-        FollowUpOutcome::Submitted(text) => assert_eq!(text, "hello"),
+        FollowUpOutcome::Submitted(submission) => assert_eq!(submission.text, "hello"),
         other => panic!("idle followUp must submit like Enter, got {other:?}"),
     }
     // The caller runs the normal Enter path, so the buffer is clear and

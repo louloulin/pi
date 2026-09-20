@@ -258,9 +258,24 @@ impl Agent {
     /// (either because the model stopped, the user hook requested an early
     /// exit, or the loop surface returned an error).
     pub async fn prompt(&mut self, text: &str) -> Result<(), crate::agent_loop::AgentError> {
+        self.prompt_content(vec![Content::text(text)]).await
+    }
+
+    /// Enqueue a user message built from pre-formed content blocks and run a
+    /// turn. [`Agent::prompt`] is the text-only shorthand; the composer uses
+    /// this to send a prompt that carries pasted image blocks alongside its
+    /// text (upstream `UserMessage.content`, `packages/ai/src/types.ts`).
+    ///
+    /// The block list is used verbatim, so callers own the block order —
+    /// text first, then one `Content::Image` per attachment, mirroring how a
+    /// provider request is assembled.
+    pub async fn prompt_content(
+        &mut self,
+        content: Vec<Content>,
+    ) -> Result<(), crate::agent_loop::AgentError> {
         let user_message = Message {
             role: pi_protocol::Role::User,
-            content: vec![Content::text(text)],
+            content,
             model: None,
         };
         self.queue.push(user_message.clone());

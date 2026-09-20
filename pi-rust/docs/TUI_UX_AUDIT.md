@@ -235,7 +235,7 @@ LUM-1227）。未实现：`/thinking`、`/scoped-models`、`/import`、`/share`�
 | 问题 | pi-rust 现状 | 上游 / Martty 对位 | 建议 stage |
 | --- | --- | --- | --- |
 | `!cmd` / `!!cmd` 本地 shell | 零实现（见 P1-4） | 上游 `interactive-mode.ts:2907-2912`、`:3106-3123`；Martty 把客户端命令留在本地、不进 agent 上下文（`src/app.rs` 测试 `client_plugin_command_invocation_stays_out_of_the_agent_prompt`） | 62 |
-| `app.clipboard.pasteImage`（alt+v） | 键位已定义（`keybindings.rs:165`、`:273`），**零消费者**（`grep -rn pasteImage pi-rust/crates --include=*.rs` 只剩 `tests/keybindings.rs`） | 上游 `onPasteImage`：按路径挂图片，无图片时退化为纯文本粘贴（`interactive-mode.ts:2913-2915`）；Martty 有 composer 图片 chip 全语义：`chip_at` / `delete_token_at`（退格吃掉整个 token 而不是一个字符）/ `draft_split_keeps_text_and_images_interleaved` | 63 |
+| `app.clipboard.pasteImage`（alt+v） | 键位已定义（`keybindings.rs:165`、`:273`），**已接线**（Stage 63，LUM-1224）：`App::step_key` 记录 chord → driver `ClipboardReader` 读取 → `App::paste_image` / `paste_text`，图片以 chip 形式进 composer | 上游 `onPasteImage`：按路径挂图片，无图片时退化为纯文本粘贴（`interactive-mode.ts:2913-2915`）；Martty 有 composer 图片 chip 全语义：`chip_at` / `delete_token_at`（退格吃掉整个 token 而不是一个字符）/ `draft_split_keeps_text_and_images_interleaved` | 63（已交付） |
 | token / cache 指标不进界面 | `TurnUsage` 只在 `maybe_auto_compact` 里被读一次（`crates/pi-coding-agent/src/interactive.rs:1438`），界面无脚注 | Martty 有 footer usage 快照（`acp_resume_usage_snapshot_reaches_the_footer_once`） | 64（LUM-1225 已落地，见第七节） |
 | 流式等待没有动效 | `pi-tui` 全树无 spinner（`grep -rn spinner` 零命中），忙时只有状态行文本 | Martty 有 subagent/turn spinner（`a_running_subagent_keeps_the_spinner_advancing`） | 低优先，随 62 一起评估 → **已落地，Stage 66 = LUM-1228**（见第十节） |
 
@@ -309,7 +309,7 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | 60（LUM-1218，已合入） | 会话命令补齐：`/new`、`/copy`、`/name` | 已交付 `86f46dea0`，LUM-1220 轮合入 `feature/pi.rs`（3 个命令 + `app.session.new` 键位 + 6 个新测试） | `/tree`、`/fork` 仍待接线 |
 | 61（LUM-1216，已合入） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 已交付 `8cab3a136`，LUM-1220 轮合入 `feature/pi.rs` | 无；mid-turn steer 需 core 暴露共享队列，留作后续切片 |
 | 62（LUM-1223，已交付） | `!cmd` / `!!cmd` 本地 bash 通道 + 忙时拒绝语义 | 已交付 `b2f673922`（LUM-1225 轮合入）：前缀识别 + 执行 + 结果折叠块 + `Esc` 取消；`!!` 因协议层缺 `bashExecution` role 暂以「不入 log」实现；忙时拒回编辑器而不入 Stage 61 队列 | 提交分支与 Stage 61 的队列相邻，需先判 bash 再判队列（已按此顺序实现） |
-| 63（LUM-1224，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧；62 已落地，可开工 |
+| 63（LUM-1224，已交付） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | 已交付：`Alt+V` 触发剪贴板读取（驱动侧注入式 `ClipboardReader`，平台后端 `wl-paste`/`xclip`/`pngpaste`/PowerShell），有图挂 chip、无图退化为纯文本粘贴；chip 用单字符哨兵 `U+FFFC` 实现「退格/删除整块、左右键整体跨越」，文本与 chip 交错保持顺序；提交时组装成「文本块 + 逐张图片块」的 `UserMessage`；≤8 上限，超出闪提示而不静默丢弃；`/new` 与 `app.session.new` 清空 composer | `image.rs` / `terminal_image.rs` 渲染已就绪；与 Stage 62 共用 `interactive.rs` 的提交分支（bash → slash → prompt）；clipboard 读取不在 App 内（App 只记录 chord），由 driver 的 render loop 做阻塞读 |
 | 65（LUM-1227，已交付） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼（`pi-session` 树 + `pi-tui` 预序展平/gutter/活动分支优先）；`/fork` 选 user message 建新会话（含该条，空转录提示）；`/clone` 逐条复制整个会话为新文件，源文件零改写（`verify_stats` 断言）；`app.session.resume` 与 `/resume` 同一 `open_resume_selector` | 读路径来自 Stage 56（`branch_*`）；写路径新增 `SessionWriter::copy_entries_from` + `set_leaf`（对齐上游 `SessionManager.forkFrom`/`createBranchedSession`）；未改 `pi-protocol` 枚举 |
 | 66（LUM-1226，停放 `backlog`） | 流式反馈与可发现性：spinner + 轮耗时 + 启动头 key hints + `app.header` | `spinner` 全仓命中从 0 到有；耗时与 Stage 64 同 footer 行；启动头可折叠且不占行 | 对照 Martty `src/app.rs` 的 `SPINNER`/`spinner_idx`/`spinner()` 与测试 `a_running_subagent_keeps_the_spinner_advancing`；文案对照 Martty `src/locale.rs`，用常量表不引 i18n 框架 |
 | **P0-修（建议排到 Stage 67 之前，编号待定）** | 修交互输入循环：内层改成 `while ct_event::poll(Duration::ZERO)?` 再 `read()`（详见第十节） | 普通按键之后仍持续出帧（PTY 断言帧字节数增长）；`Esc` / `Ctrl+C` / `Ctrl+D` 语义不变；启动即有输入时首帧仍会画 | 一行改动 + 一个 PTY 回归测试；与 Stage 65/66 同处 `interactive.rs`，必须排在它们落地之后合并 |
@@ -327,7 +327,8 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 > `pi-evals` 回绿（tip `3fefd7bd8`）。本轮（LUM-1225）在 `3fefd7bd8` 之上交付 Stage 64
 > （usage 脚注，`f84e262b5`），并合入 Stage 56（LUM-1212，`c9122e3d8`，pi-session 的
 > usage/stats/branch 读路径）与 Stage 62（LUM-1223，`b2f673922`，`!cmd`/`!!cmd`）。
-> Stage 63（LUM-1224）先前受「必须排在本切片之后」约束，现已解除，可开工。
+> Stage 63（LUM-1224）先前受「必须排在本切片之后」约束，现已解除；本轮（LUM-1224）已交付
+> `app.clipboard.pasteImage` + composer 图片 chip，验证见第六节 Stage 63 块。
 
 ## 六、验证
 
@@ -392,6 +393,51 @@ Stage 62（LUM-1223）新增测试：`interactive::tests::bang_echo_renders_a_to
 `pi_tui` 侧 `bash_mode_ignores_leading_whitespace`、`parses_bang_and_double_bang_commands`、
 `empty_bash_commands_fall_back_to_the_prompt`、`bash_mode_colours_the_prompt_label`。
 
+Stage 63 轮（LUM-1224，`app.clipboard.pasteImage` + composer 图片 chip）：
+
+```console
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-coding-agent -p pi-tui --offline
+  65 个 test target：1382 passed / 0 failed / 0 ignored
+
+$ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo clippy -p pi-coding-agent -p pi-tui --all-targets --offline -- -D warnings
+  exit 0
+
+$ cargo fmt -p pi-coding-agent -p pi-tui -- --check
+  干净
+```
+
+新增测试：`pi-tui` 新增 `tests/composer_images.rs`（`alt_v_records_a_clipboard_read_request`、
+`paste_image_attaches_a_chip_and_paste_text_inserts_text`、`paste_image_stops_at_the_capacity_with_a_hint`、
+`clear_composer_drops_the_draft_and_its_chips`、`busy_enter_with_chips_keeps_the_whole_draft`、
+`submission_orders_text_before_images`、`interleaved_draft_reaches_the_agent_in_order`）；`editor.rs` 内
+`chip_renders_as_a_label_and_submits_its_display_text`、`backspace_deletes_the_whole_chip`、
+`delete_removes_the_chip_at_the_cursor`、`cursor_steps_across_a_chip_as_one_character`、
+`draft_split_keeps_text_and_images_interleaved`、`insert_image_refuses_past_the_capacity`、
+`kill_ring_never_resurrects_a_chip_without_its_payload`、`killing_a_chip_drops_its_attachment`、
+`programmatic_set_text_drops_chips`、`clear_drops_chips`、`undo_restores_a_deleted_chip`；
+`pi-coding-agent` 内 `clipboard::tests::*` 与
+`interactive::tests::image_paste_attaches_a_chip_and_non_images_fall_back_to_text`、
+`alt_v_records_the_read_request_for_the_driver`、`clipboard_reader_is_injectable_through_the_options`、
+`new_session_clears_the_composer_chips`。
+
+实现说明：chip 在编辑缓冲区里是单字符哨兵 `U+FFFC`（OBJECT REPLACEMENT CHARACTER），
+`Editor::text()` 返回原始缓冲区、`Editor::display_text()` 展开为 `[Image #N]`，所以已有的
+「一个字符」退格/删除/左右移动规则天然对 chip 生效；附件与哨兵按出现顺序对齐
+（`Editor::insert_image` 只追加，`remove_images_in_range` 按范围同步删）。kill-ring / yank /
+`set_text` / 补全路径都会剥离哨兵，避免「文本复活但图片已丢」的错位（代价：跨 chip 的 kill
+会丢弃该图）。驱动侧读取剪贴板：`pi-coding-agent/src/clipboard.rs` 的 `ClipboardReader` trait
+（生产实现 `SystemClipboard`），`InteractiveOptions.clipboard` 可注入假实现；render loop 在
+`take_image_paste_request()` 后 `spawn_blocking(read)`，再把结果交给 `apply_clipboard_paste`。
+与上游的偏差：上游把图片落临时文件后粘贴**路径**（`interactive-mode.ts:2933`），本移植把图片
+字节作为 `Content::Image` 内容块随 `UserMessage` 发出（与 `read` 工具图片输出同形），不落临时
+文件、不依赖会话目录。
+
+本 stage 已知限制：忙时（turn 进行中）按 Enter 提交带图草稿会被拒绝并提示，且**整个草稿（文本 + chip）原样留在编辑器**里
+（Stage 61 的 pending 队列是纯文本，不能带图入队）；`Alt+V` 在忙时仍可挂图，到提交时才拒绝；
+kill 范围跨过 chip 会丢弃该图；slash 命令与 `!cmd` 不接受图片（分别闪提示 / 把文本放回编辑器，chip 留在原地）。
+
 已知限制：`/hotkeys` 只列已实现动作（未实现的 `app.*` 不显示，避免「文档骗人」）；
 Ctrl+P 循环的是完整模型目录，上游的 `/scoped-models` 作用域还没实现；本轮未重跑全量
 workspace（LUM-1209 / LUM-1211 正在各自的 worktree 里编译，避免三份全量构建抢 CPU/磁盘），
@@ -450,7 +496,7 @@ Stage 56（LUM-1212）与 Stage 62（LUM-1223）一并并入 `feature/pi.rs`（t
 | 键位 | 命中 | 归属 |
 | --- | --- | --- |
 | `app.session.tree` / `app.session.fork` / `app.session.resume` | 0 / 0 / 0 | Stage 65（`/tree`、`/fork`、`/clone` + `/resume` 键位） |
-| `app.clipboard.pasteImage` | 0 | Stage 63（LUM-1224，串行约束已解除） |
+| `app.clipboard.pasteImage` | 已接线 | Stage 63（LUM-1224）已交付：`App::step_key` 记录 `pending_image_paste`，driver 的 `ClipboardReader` 读取后 `App::paste_image` / `paste_text` |
 | `app.header` | 0 | Stage 66（启动头折叠开关） |
 | `app.thinking.cycle` | 0 | 未切片（Stage 59 尾部，需 `Model.reasoning` 语义） |
 | `app.editor.external` | 0 | 未切片（需 teardown/restore 终端交接，与 Stage 66 同族） |
@@ -489,7 +535,8 @@ Stage 66 用常量表即可，不引入 i18n 框架。
 「tip 更完整」的净增，因此不产生合并动作。
 
 **本轮派发**：Stage 63（`backlog` → `todo`）与 Stage 65（新建 `todo`），Stage 66 停放 `backlog`；
-LUM-1225 收工后同时在跑 2 个 stage，符合「最多 3 个并发」。
+LUM-1225 收工后同时在跑 2 个 stage，符合「最多 3 个并发」。Stage 63 已由 LUM-1224 交付
+（`Alt+V` 接线 + composer 图片 chip，验证见第六节），第六轮表里它的「0 命中」已消解。
 
 
 ## 九、第七轮（LUM-1229）：满槽并发轮 —— 对照 Martty 源码复核「输入通道 / 思考级别 / 命令面」
@@ -591,7 +638,7 @@ tip 的门已由 LUM-1225 实跑（147 / 2202 / 0 / 2）。磁盘剩 25G，无�
 全都「接好了线但不显示」——因为在按键那一刻，渲染循环已经卡死在 crossterm 的阻塞读取里。
 本轮因此没有产出「交互截图」（拿不到），产出的是这一条可复现证据链 + 一行修复补丁。
 
-> **后续（LUM-1235，见第十三节）**：10.3 的补丁已落地并由同一套 PTY harness 复验通过，
+> **后续（LUM-1235，见第十四节）**：10.3 的补丁已落地并由同一套 PTY harness 复验通过，
 > 实机截图已提交到 `screenshots/`；上面「没有产出交互截图」的结论只对**未修复**的 tip 成立。
 
 ### 10.1 方法（可复现）
@@ -756,7 +803,7 @@ LUM-1228）；本轮进行中 Stage 65（LUM-1227）转 `in_review`，收工时�
 争磁盘与 CPU（并且会让补丁与其他 worker 的 `interactive.rs` 改动混在一起）。tip 的门沿用
 LUM-1225 的实跑结果（147 / 2202 / 0 / 2）。校验：本文件 fence 计数为偶数、本节零相对链接
 （满足 `pi-evals/src/suites/docs.rs:123` 与 `:130`）。
-## 十一、第七轮（LUM-1227）：会话树导航与分叉（Stage 65）
+## 十一、Stage 65 交付（LUM-1227）：会话树导航与分叉
 
 Stage 65 是 Stage 59 停车场里最大的一块：会话树导航与从历史节点分叉。上游的 `/tree`、`/fork`、
 `/clone` 三个命令 + `app.session.tree`/`fork`/`resume` 三个键位此前在 Rust 侧零实现，`/resume`
@@ -806,7 +853,170 @@ $ … cargo test -p pi-coding-agent --offline # 431 lib + 24 套集成
 的 `/clone`（逐条相等 + 源不变 + stats）、`/fork`（选择器内容、含选中条、源保留 6 条 + stats）、
 空转录 `/fork`（提示且不建 `.sqlite`）、`/tree`（覆盖层只读、展平顺序、选中后 `session_leaf`、
 转录重载、后续 append 的 `parent_entry_id`）、三个键位各自打开对应选择器且 `/resume` 键位复用它。
-## 十二、第八轮（LUM-1228）：Stage 66 落地 —— 等待反馈与启动可发现性
+## 十二、第八轮协调（LUM-1234）：Stage 65 合并进 `feature/pi.rs` + P0「首键之后不再出帧」修复（真实 PTY A/B）
+
+本轮是协调轮：把已转 `in_review` 的 Stage 65 合进 `feature/pi.rs`，把 LUM-1233 只写了补丁、
+因磁盘不足没编译的 P0 真正改掉并用真实二进制做 A/B，然后把输入面复核推进到「命令 / 文件补全」这一层
+（顺带得到一个新 P1）。
+
+### 12.1 合并 Stage 65（LUM-1227）
+
+- `work/LUM-1227`（`9b544ed11`，Stage 65 会话树 `/tree` `/fork` `/clone` + `app.session.*`）合进
+  `feature/pi.rs`，merge commit `60b2224a1`；随后 LUM-1233 的文档提交 `0d1b8884c` 也并入（`bef18e530`）。
+- 唯一冲突在 `docs/TUI_UX_AUDIT.md`（并发两个 round 各自新增一节），按「两节并序」保留全文，并把
+  Stage 65 那一节编号为十一：九 = 第七轮（LUM-1229）、十 = 第八轮（LUM-1233）、十一 = Stage 65 交付（LUM-1227）。
+- **未跑全量门**：磁盘 1.1–1.2G / 98%，且 LUM-1224 / LUM-1228 两个 worker 正在 `cargo test`；合并树的门
+  沿用 LUM-1225 在 tip 上的实跑（147 / 2202 / 0 / 2）。合并本身以 `git diff` 复核（14 文件 / +2184 / -78）+
+  `cargo fmt --all -- --check` 干净。
+- 顺序遵循 LUM-1233 在 10.5 里自己写下的要求（「P0 补丁与未合并的 Stage 65 改的是同一个
+  `interactive.rs`，应当先合 65 再切 P0，否则必冲突」）：先合 65，再动 `interactive.rs`。
+
+### 12.2 P0：第一次按键之后 TUI 再也不出帧 —— 根因 / 修复 / 真实 A/B
+
+**根因（源码级）**：`crates/pi-coding-agent/src/interactive.rs`
+
+```rust
+if ct_event::poll(config.event_poll_interval)? {
+    while let Some(event) = read_event()? {   // ← 永远等不到 None
+```
+
+`read_event()`（`interactive.rs:2017-2026`）对 `crossterm::event::read()` 的 `match` 只有一个分支，
+覆盖 `Key` / `Mouse` / `Resize` / `FocusGained` / `FocusLost` / `Paste` 全部变体，因此恒为 `Ok(Some(_))`：
+`while let Some(..)` 的退出条件不可达，每次迭代都阻塞在**下一个**事件上。外层 `loop` 再也回不到顶部 ——
+`terminal.draw`、`drain_agent_events`、`bash.poll`、`deliver_pending`、`poll_ui_dialogs` 全部停摆。
+用户按下第一个键之后，界面就冻在按键前那一帧；之后的每个键仍被消费（所以 Ctrl+C 还能退出、非空草稿
+仍能挡住 Ctrl+D、选择器仍然能打开），但屏幕上什么都不会变 —— 「按键即死」的表象由此而来。
+
+**补丁**（`fix(pi-coding-agent)`，commit `9c68ce01c`）：只抽干此刻已就绪的事件，然后回到渲染。
+
+```rust
+if ct_event::poll(config.event_poll_interval)? {
+    while ct_event::poll(Duration::ZERO)? {
+        let Some(event) = read_event()? else { break };
+        ...
+    }
+}
+```
+
+**真实 A/B**（同一棵合并树、同一个 harness：PTY + VT 单元格回放；BEFORE = `feature/pi.rs bef18e530`
+未打补丁的 `target/debug/pi`，AFTER = 只加这个补丁后重新构建的同一个二进制；两边都是全新 `HOME`、
+120x36、`--approve`，注入键完全一致）：
+
+| 步骤 | BEFORE 字节 | AFTER 字节 |
+| --- | --- | --- |
+| 启动后空闲 3s | 1714 | 3460 |
+| 敲 `h` | 50 | 309 |
+| 敲 `e` / `l` / `l` / `o` | 0 / 0 / 0 / 0 | 186 / 186 / 186 / 186 |
+| Backspace x5 | 0 | 353 |
+| `/` | 0 | 509 |
+| `help` | 0 | 439 |
+| `Enter`（执行 `/help`） | 0 | 2458 |
+| `Esc`（关掉 /help） | 0 | 450 |
+| `Ctrl+T` / `Ctrl+O` / `Ctrl+L` | 0 / 0 / 0 | 529 / 550 / 1710 |
+| `Ctrl+C` | 54（退出） | 129（退出） |
+| **首个按键之后累计** | **0** | **1183** |
+| 全程累计 | 1818 | 11640 |
+
+BEFORE 侧 11 张截图**逐像素相同**（每张 PNG 都是 29864 字节）—— 屏幕在首键之后再没有变化；
+AFTER 侧每一步都变：`> hello▍`（含 CJK 输入）、退格清空、`> /▍`、`> /help▍`、`/help` 正文进入
+transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后 `Tool output: expanded`、
+`Ctrl+L` 清屏。截图（本轮 workdir 产物，随 LUM-1234 的评论以附件交付，不入库）：`compare-typing.png`
+（键入 hello 的 before/after）、`compare-help.png`（`/help` 之后，0.62 缩放）。
+
+**验证口径（重要）**：LUM-1233 已经证明「PTY 回显」不能当证据 —— 进程退出后 tty 仍会回显你敲的字。
+本节所有数字都是 master 端 `read()` 到的**真实字节**加上 VT 模拟出的**单元格内容**（`/proc/<pid>/wchan`
+与 `ep_poll` 亦只作旁证），因此 BEFORE 的 0 字节是「TUI 没画」，不是「没读到」。这也意味着
+**第十二节之前的、基于回显的交互结论一律作废**（`first key freezes the TUI` 会把它们全部推翻）。
+
+**门禁**：`cargo build -p pi-coding-agent --bin pi` 干净（1m53s），`cargo check -p pi-coding-agent
+--all-targets` 干净（测试 cfg 一起编译），`cargo fmt --all -- --check` 干净。**全量 `cargo test --workspace`
+未跑**（磁盘 98% + 两个 worker 在编译），本轮的验证强度实际高于单测：这个缺陷只在「真实终端 + 真实按键序列」
+下暴露，`pi-tui` / `pi-coding-agent` 的既有测试全都直接调用 `App::step*`，绕过事件循环，因此不可能捕获它。
+回归测试要真覆盖，需要一个可注入的 `EventSource`（把 `ct_event::poll/read` 提到 trait 后面），
+这是下一轮该补的债，不是本轮的取舍。
+
+### 12.3 P1（本轮新发现）：命令 / 文件补全「实现完整，零接线」
+
+补全引擎在 `crates/pi-tui/src/autocomplete.rs`（命令 `/` 与文件 `@` 两个 provider，7 个单测）+
+`Editor` 侧的完整下拉层（`autocomplete_items` / `is_showing_autocomplete` / `handle_autocomplete_key` /
+`set_autocomplete_provider`，`crates/pi-tui/tests/autocomplete.rs` 另有集成测试），键盘映射也在
+（`tui.input.tab` = `Tab / autocomplete`，`/hotkeys` 里印着 `Ctrl+K`、`Tab / autocomplete`）。
+但 `set_autocomplete_provider` 在**生产代码里没有任何调用点**（`grep -rn` 只命中它自己的定义与测试），
+`App` 与 `interactive.rs` 一次都没有设置 provider，而 provider 是 opt-in 的 ——
+`editor.rs:101-103` 自己写着「a caller that never [sets one keeps] the pre-autocomplete behaviour」。
+
+真实二进制上的后果（P0 修好后才测得出来）：键入 `/`、`/he`、`/help` 全程**没有任何候选框**，
+用户只能凭记忆手打命令名。这是 Stage 66（命令面）里最便宜也最值钱的一格：把
+`CommandAutocompleteProvider`（`crates/pi-coding-agent/src/commands/slash.rs` 已有命令表 +
+`argument_completions`）挂到 composer 的 Editor 上即可，不需要新协议、新渲染。
+
+### 12.4 本轮不动、留给后续轮次的输入面缺口
+
+- **`app.clear` 三处不一致**（与 P0 同源、但没有被 P0 修掉）：`/hotkeys` 印的是
+  `Ctrl+C to clear` + `Ctrl+C twice to exit`，`keybindings.rs:225` 的描述是 `Clear editor`，
+  而实现是「idle 时一次 Ctrl+C 直接 `exit_requested = true`」。真实二进制实测：空 composer 一次 Ctrl+C
+  → 退出；**草稿 `hello` + 一次 Ctrl+C → 直接退出且草稿丢失**；两次 Ctrl+C 与一次无区别。
+  上游 `interactive-mode.ts:3931-3939` 是 500ms 窗口（第一次清编辑器、第二次才退出），
+  Rust 侧没有双击状态。修法：`app.rs` 的 `app.clear` 分支加 500ms 窗口状态，并同步 `keybindings.rs`
+  的描述与 `/hotkeys` 文案。
+- **jump-to-latest 指示器缺失**：`MessageView::detached` / `set_following` / `repin_if_following`
+  已把视口漂移补掉了，但「脱离底部」这件事屏幕上没有任何提示（上游是
+  `scrollToEndIndicator`，`tui-renderer.ts:29-33` 的 `" ↓ Jump to latest message · <shortcut> "`）。
+  建议挂在既有的 `tui.altScreen.bottom = ["end"]` 槽位上。
+- **`/help` 正文与用户输入共用 `> ` 前缀**：截图里 `/help` 的输出块和 composer 一样以 `> ` 开头，
+  与用户消息难以区分（上游用 info 块）。低风险、纯渲染层的收尾项。
+
+### 12.5 追加：把已交付的 Stage 63（LUM-1224）与 Stage 66（LUM-1228）也合进 `feature/pi.rs`
+
+交接物只合并了一节 65，本节补上另外两个**已在 `origin` 上、且已跑过绿门**的交付分支：
+
+- `origin/work/LUM-1224` → 合并提交 `831de79ba`（图片粘贴接线）。
+- `origin/work/LUM-1228` → 合并提交 `a47df87cf`（Stage 66：spinner / 轮耗时 / 启动头 / `app.header`）。
+
+四个冲突全部是「两侧各加一处」的并集，无一处需要语义取舍：
+`interactive.rs` 的 `clipboard` 与 `quiet_startup` 字段及默认值、`main.rs` 的同两行、
+`pi-tui/src/app.rs` 的 `app.clipboard.pasteImage`（alt+v）与 `app.header`（alt+h）两个按键分支
+（原共享收尾行只覆盖后一个分支，已各自补 `return StepOutcome::Redraw`）、
+以及本文件的节序（1233 / Stage 65 / 1234 / 1228 → 十 / 十一 / 十二 / 十三）。
+合并后 `origin/work/LUM-1224`、`work/LUM-1227`、`work/LUM-1228`、`work/LUM-1233` 对
+`feature/pi.rs` 的领先量均为 0，即除停放中的 67/68/69 外无尾巴。
+
+**合并 tip（`a47df87cf`）的实机核对**（同一 PTY 脚本、同一按键序列、120x36、全新 `HOME`）：
+
+| 步骤 | BEFORE（未修） | AFTER-P0（只打一行补丁） | AFTER-MERGED（P0 + 63 + 65 + 66） |
+| --- | --- | --- | --- |
+| 空闲启动帧 | 1714B | 3460B | 3410B（多出启动头提示行） |
+| 首键 `h` 之后 | 0B | 309B | 284B |
+| 后续 `e`/`l`/`l`/`o` | 0 / 0 / 0 / 0 | 186 x4 | 186 x4 |
+| `/` → `help` → `Enter` | 0 / 0 / 0 | 509 / 439 / 2458 | 509 / 439 / 2433 |
+| Ctrl+T / Ctrl+O / Ctrl+L | 0 / 0 / 0 | 529 / 550 / 1710 | 554 / 550 / 1710 |
+| **首键之后累计** | **0B** | **1183B** | **1183B** |
+
+结论：P0 修复不因这两次合并而回退（首键之后帧字节与只打补丁时同量级），
+且 63/65/66 的新面在真实二进制里都出帧。本轮没有改动 `interactive.rs` 的修复逻辑。
+
+**合并 tip 上的新面实机证据**：启动头列出 `Alt+H to hide this header`、
+`Ctrl+V to paste image (with text fallback)`、`drop files to attach`（分别来自 Stage 66 与 63）；
+`alt+h` → 1379B 出帧、footer 变为 `Startup header: collapsed (Alt+H to show)`；再按一次 → 2301B 恢复；
+`alt+v` 在本机（无剪贴板图片）→ 563B 出帧、草稿未被写入任何内容（退化路径不污染输入）。
+
+**顺带加固 12.4 的第一条**：启动头自己写着 `Ctrl+C to clear` 与 `Ctrl+C twice to exit`，
+而实机（`probe_exit.py` 用例 B）是**草稿非空时单次 Ctrl+C 直接退出、草稿丢失**。
+界面承诺与行为不一致，`app.clear` 的双击窗口是应当优先补上的一处。
+
+**仍然欠的门**：合并 tip 的 `cargo test --workspace` 未跑（磁盘当时只剩 2.0G，且另有 run 在编译）。
+可参考的数字是各分支自带的门：LUM-1228 分支自身 `cargo test --workspace` 2238 passed / 0 failed、
+`clippy --all-targets -- -D warnings` 退出 0；LUM-1224 分支自带绿门。合并新增的代码只有两个结构体
+字段、两处默认值与两个互斥按键分支，风险面很小，但这仍是**未实跑的债**。
+本轮实跑的是：`cargo build --offline -p pi-coding-agent --bin pi`（干净，41.5s 热 target）、
+`cargo fmt --all -- --check`（干净）、以及上表的真实 PTY A/B。
+
+> **后续（LUM-1235，见第十四节）**：本节 12.2 那版抽干保留了 `read_event()`、没有单测、
+> 也没有首帧修复；第十四节把它重写为可注入的 `drain_ready_events`（+3 条单测）并补上
+> `last_render: Option<Instant>` 首帧。行为契约不变，本节记录的实机 A/B 结论仍然成立。
+> 12.3 的「补全零接线」仍然是未动的缺口。
+
+## 十三、Stage 66 交付（LUM-1228）：等待反馈与启动可发现性
 
 第六轮把两块空白合并成 Stage 66 停放 `backlog`；本轮把它实现、验证并合入。详细设计、与上游
 逐项对照以及刻意保留的差异见新文件 **`docs/TUI_BUSY_AND_STARTUP.md`**，这里只记结论与核对。
@@ -855,14 +1065,16 @@ Stage 65 范围内的 `app.session.fork` / `app.session.resume`。
 `pi-coding-agent` 664）；`cargo test -p pi-evals` 8 passed（含 `docs-code-fences-balanced`，本节与
 新文件都在审计范围内）。
 
-## 十三、第九轮（LUM-1235）：P0 补丁落地 —— 交互 TUI 第一次真的出帧
+## 十四、第九轮（LUM-1235）：P0 补丁落地 —— 交互 TUI 第一次真的出帧
 
-第八轮（第十节）只交了一行补丁和一条证据链，本轮把在飞的 Stage 65 / 66 分支合进
-`feature/pi.rs`（对应第十一、十二节），落地该补丁，并用**同一套 PTY harness** 复验；
-实机驱动又暴露出第二个只在真实终端下才看得见的缺陷（选择器覆盖层），一并修掉。
+第八轮（第十节）只交了一行补丁和一条证据链；第十二节的协调轮把它改成 `while
+ct_event::poll(Duration::ZERO)?` 先落了地（保留 `read_event()`，无单测，也没有首帧修复）。
+本轮与第十二轮在同一棵树上并行工作，合流后把这一处**重写**成可注入、可单测的
+`drain_ready_events`，补上首帧修复，以及真实终端里才会暴露的第二个缺陷（选择器覆盖层）。
+Stage 65 / 66 两个在飞分支也已合进 `feature/pi.rs`（第十一、十三节）。
 本节所有截图都是把真实二进制放进 PTY 驱动的产物，不是单元测试画出来的 buffer。
 
-### 13.1 P0：输入循环不再阻塞在 `read()`（第十节 10.3 的补丁）
+### 14.1 P0：输入循环不再阻塞在 `read()`（第十节 10.3 的补丁）
 
 两处语义修改，都在 `crates/pi-coding-agent/src/interactive.rs`：
 
@@ -897,7 +1109,7 @@ let render_due = last_render.map(|at| at.elapsed() >= render_interval).unwrap_or
 | 队列空时不调用 `read`（旧实现在此阻塞） | 同文件 `draining_events_returns_immediately_when_nothing_is_buffered` |
 | `poll` 报错向上传递、不吞掉 | 同文件 `draining_events_propagates_a_poll_error` |
 
-### 13.2 P1：选择器覆盖层锚在消息视口、且先清行再绘制
+### 14.2 P1：选择器覆盖层锚在消息视口、且先清行再绘制
 
 实机跑 `/model` 时看到的不是「缺功能」，而是**画错位置**：选择器从终端第 1 行开始画，
 盖住了 20 行启动头；同时因为 ratatui 只输出本帧变化的 cell，被盖住的行没有清空，
@@ -930,7 +1142,7 @@ for col in 0..area.width {
 | 被覆盖的行在绘制前被清空（无 `W` 透出） | 失败 |
 | 选择器不越过视口底边 | 通过（旧代码也裁剪） |
 
-### 13.3 实机对照（PTY）
+### 14.3 实机对照（PTY）
 
 harness 是 `pty.fork` + `TIOCSWINSZ` + 自写 VT/CSI/OSC 解析（**只在协调侧，不入库**）；
 被测二进制是同一棵树的两次构建：`work/LUM-1228`（Stage 66，未修）与 `work/LUM-1235`（已修）。
@@ -952,14 +1164,14 @@ harness 是 `pty.fork` + `TIOCSWINSZ` + 自写 VT/CSI/OSC 解析（**只在协�
 三张图由 `docs/screenshots/` 下同名文件提供；生成脚本是协调侧的临时工具，
 没有进仓库，理由是它依赖 `pyte` 风格的终端仿真与 PIL，不适合成为构建门槛。
 
-### 13.4 本轮实测
+### 14.4 本轮实测
 
 `cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui -p pi-coding-agent --all-targets
 -- -D warnings` 退出码 0；`cargo test -p pi-tui -p pi-coding-agent` **1412 passed / 0 failed**
 （含本节新增的 4 条覆盖层断言与 3 条输入循环断言）；`cargo test -p pi-evals` 仍含
 `docs-code-fences-balanced` 与相对链接两个 case，本节与两个新文件都在审计范围内。
 
-### 13.5 仍然缺的（顺延）
+### 14.5 仍然缺的（顺延）
 
 1. **resume / 回放保真度**：`/resume` 与 `--continue` 的转写重建仍只覆盖文本，工具卡片、
    思考块、耗时统计不回放（第六、七轮记录）。
