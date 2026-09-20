@@ -10937,6 +10937,9 @@ mistral adapter 上游 941 行、与本次任何在飞切片都不冲突但体�
 排在第 7 项之后，等 `pi-coding-agent` 渲染层成型再派更省（渲染层会定义工具结果的数据形状，
 provider 与之无关但同属「大块」）。第 5 项（provider catalog）仍维持「无上游数据源，不猜」不派。
 
+派发结果（`multica issue status` 后核对）：LUM-1214 `in_progress`、LUM-1216 / LUM-1218 `todo`，
+`multica daemon status` → `running = 4`（三个 worker + 本轮协调 run，与「3 个工人槽位」的既有口径一致）。
+
 ### 六、磁盘事故与处置（延续前几轮口径）
 
 - 继承现象：根分区 50G，本轮开工时**仅剩约 851M**（99%）。两个大 target：
@@ -14604,6 +14607,9 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
 4. **`/hotkeys` 的诚实性约束**：它只列已实现的动作。每接一个 `app.*`，必须同步更新 `slash.rs:152` 的分组表，否则会出现「文档里有的键按下去没反应」——这是本轮特意选择的取舍（宁缺毋假）。
 5. 引擎级残余维持 LUM-1185 / 1177 结论（`fs.watch` / key-based WebCrypto / `node:test` / 无 adapter 的 provider 家族）。
 
+派发结果（`multica issue status` 后核对）：LUM-1214 `in_progress`、LUM-1216 / LUM-1218 `todo`，
+`multica daemon status` → `running = 4`（三个 worker + 本轮协调 run，与「3 个工人槽位」的既有口径一致）。
+
 ### 六、磁盘（本轮）
 
 * 开工 `30G / 50G`（63%），余 18G。
@@ -14834,13 +14840,16 @@ LUM-1209 / LUM-1213 收工后 `running_task_count` 回落到 1（本轮协调 ru
    修复 = `App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染。
 2. **Stage 58 = LUM-1214（`backlog` → `todo`）**：工具输出折叠 + `app.tools.expand`（Ctrl+O）+ 点击工具块展开。
    修的是 P0-1「一个 `read`/`bash` 刷满整屏」；零件 `tools/render.rs`（2,269 行富渲染器）已在树上，只差接线。
-3. **Stage 60（新建，本轮不占用既有编号）**：会话命令补齐 `/new`、`/copy`、`/name` + `app.session.new` 键位。
+3. **Stage 60（本轮新建 = LUM-1218）**：会话命令补齐 `/new`、`/copy`、`/name` + `app.session.new` 键位。
    依赖已就绪 —— LUM-1209 刚落下 `pi-session` 的上游 v4 写路径，`/new` 才有正确的落盘语义；
    `/tree`、`/fork` 仍依赖 LUM-1212（Stage 56 的 branch_* 读路径），不在本切片内。
 
 冲突面提示（给下一轮协调）：Stage 61 与 Stage 58 都会动 `pi-tui/src/message.rs` 的 `MessageItem`
 （61 加 pending 字段、58 加折叠字段）与 `pi-coding-agent/src/interactive.rs` 的拦截块；Stage 60 也落在
 `interactive.rs` / `commands/slash.rs`。三条可并行，但合并顺序建议 61 → 58 → 60（先正确性，再密度，再入口）。
+
+派发结果（`multica issue status` 后核对）：LUM-1214 `in_progress`、LUM-1216 / LUM-1218 `todo`，
+`multica daemon status` → `running = 4`（三个 worker + 本轮协调 run，与「3 个工人槽位」的既有口径一致）。
 
 ### 六、磁盘
 
