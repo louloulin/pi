@@ -1,0 +1,6 @@
+data: {"id":"cmpl-cache","choices":[{"index":0,"delta":{"content":"cached reply"},"finish_reason":null}]}
+
+data: {"id":"cmpl-cache","choices":[{"index":0,"delta":{"content":" truncated"},"finish_reason":"model_length"}],"usage":{"prompt_tokens":1000,"completion_tokens":9,"total_tokens":1009,"prompt_tokens_details":{"cached_tokens":900}}}
+
+data: [DONE]
+

@@ -55,6 +55,7 @@ use async_trait::async_trait;
 use pi_ai::providers::anthropic::AnthropicProvider;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::providers::google::GoogleProvider;
+use pi_ai::providers::mistral::MistralProvider;
 use pi_ai::providers::openai::OpenAiProvider;
 use pi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use pi_ai::providers::registry::{self, ProviderSpec, BUILTIN_PROVIDERS};
@@ -96,6 +97,7 @@ fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Opti
         }
         Api::AnthropicMessages => Arc::new(AnthropicProvider::with_base_url(api_key, base_url)),
         Api::GoogleGenerativeAi => Arc::new(GoogleProvider::with_base_url(api_key, base_url)),
+        Api::MistralConversations => Arc::new(MistralProvider::with_base_url(api_key, base_url)),
         Api::BedrockConverse | Api::CohereV2 => return None,
     };
     Some(adapter)
@@ -518,6 +520,28 @@ mod tests {
             .is_ok());
         assert_eq!(api_key_env_vars("xai"), &["XAI_API_KEY"]);
         assert_eq!(base_url_env_vars("xai"), &["XAI_BASE_URL"]);
+    }
+
+    #[test]
+    fn mistral_key_registers_the_native_adapter() {
+        // Mistral has its own API family, so it must not be served by the
+        // OpenAI Chat Completions adapter the `openai` entry uses.
+        let router = ProviderRouter::from_env_with(|name| match name {
+            "MISTRAL_API_KEY" => Some("test-key".to_string()),
+            _ => None,
+        });
+        assert!(router.has_provider("mistral"));
+        assert!(!router.has_provider("openai"));
+        assert_eq!(router.provider_ids(), vec!["faux", "mistral"]);
+        assert!(router
+            .require(&model(
+                "mistral",
+                "mistral-large-latest",
+                Api::MistralConversations
+            ))
+            .is_ok());
+        assert_eq!(api_key_env_vars("mistral"), &["MISTRAL_API_KEY"]);
+        assert_eq!(base_url_env_vars("mistral"), &["MISTRAL_BASE_URL"]);
     }
 
     #[test]

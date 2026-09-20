@@ -91,6 +91,7 @@ pub fn api_name(api: Api) -> &'static str {
         Api::GoogleGenerativeAi => "google_generative_ai",
         Api::BedrockConverse => "bedrock_converse",
         Api::CohereV2 => "cohere_v2",
+        Api::MistralConversations => "mistral_conversations",
         Api::Faux => "faux",
     }
 }
