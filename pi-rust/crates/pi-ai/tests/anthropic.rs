@@ -112,9 +112,11 @@ async fn text_response_round_trip() {
     let done = events
         .iter()
         .find_map(|e| match e {
-            AssistantMessageEvent::Done { content, stop_reason, usage } => {
-                Some((content.clone(), *stop_reason, *usage))
-            }
+            AssistantMessageEvent::Done {
+                content,
+                stop_reason,
+                usage,
+            } => Some((content.clone(), *stop_reason, *usage)),
             _ => None,
         })
         .expect("done event");
@@ -165,9 +167,11 @@ async fn tool_use_response_round_trip() {
     let done = events
         .iter()
         .find_map(|e| match e {
-            AssistantMessageEvent::Done { content, stop_reason, .. } => {
-                Some((content.clone(), *stop_reason))
-            }
+            AssistantMessageEvent::Done {
+                content,
+                stop_reason,
+                ..
+            } => Some((content.clone(), *stop_reason)),
             _ => None,
         })
         .expect("done event");
@@ -234,7 +238,11 @@ async fn malformed_tool_arguments_are_repaired() {
     let provider = Arc::new(FixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
 
     let mut stream = provider
-        .stream_simple(&claude_model(), &user_context("weather?"), &Default::default())
+        .stream_simple(
+            &claude_model(),
+            &user_context("weather?"),
+            &Default::default(),
+        )
         .await
         .expect("stream opens");
     let mut events = Vec::new();
@@ -268,7 +276,11 @@ async fn cache_read_response_round_trip() {
     let provider = Arc::new(FixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
 
     let mut stream = provider
-        .stream_simple(&claude_model(), &user_context("cached prompt"), &Default::default())
+        .stream_simple(
+            &claude_model(),
+            &user_context("cached prompt"),
+            &Default::default(),
+        )
         .await
         .expect("stream opens");
     let mut events = Vec::new();
@@ -308,7 +320,10 @@ async fn upstream_error_surfaces_as_stream_error() {
             }
         }
     }
-    assert!(saw_error, "expected the parser to surface the upstream error");
+    assert!(
+        saw_error,
+        "expected the parser to surface the upstream error"
+    );
 }
 
 /// Exercise the `AnthropicProvider::build_request` builder directly,
@@ -355,8 +370,7 @@ fn request_body_carries_system_and_tools() {
     assert_eq!(tools[0]["name"], "get_weather");
     assert_eq!(tools[0]["input_schema"]["type"], "object");
     assert_eq!(
-        tools[0]["input_schema"]["required"][0],
-        "city",
+        tools[0]["input_schema"]["required"][0], "city",
         "schema carries through unchanged"
     );
 }

@@ -14,9 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
-use pi_ai::providers::google::{
-    builtin_google_models, GoogleProvider, DEFAULT_BASE_URL,
-};
+use pi_ai::providers::google::{builtin_google_models, GoogleProvider, DEFAULT_BASE_URL};
 use pi_ai::StreamFn;
 use pi_protocol::{
     AssistantMessageEvent, Content, Context, Message, Model, ProviderId, Role, StopReason,
@@ -337,7 +335,9 @@ fn provider_url_and_catalog_smoke() {
 
     let models = builtin_google_models();
     assert_eq!(models.len(), 3);
-    assert!(models.iter().all(|m| m.api == pi_protocol::Api::GoogleGenerativeAi));
+    assert!(models
+        .iter()
+        .all(|m| m.api == pi_protocol::Api::GoogleGenerativeAi));
 }
 
 /// `Arc<GoogleProvider>` satisfies the object-safe `StreamFn` bound used

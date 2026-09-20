@@ -111,9 +111,14 @@ pub async fn resolve_api_key_for_provider(
     let Some(provider_auth) = provider_auth_for(provider_id) else {
         return Ok(None);
     };
-    let Some(resolved) =
-        resolve_provider_auth(provider_id, &provider_auth, credentials, auth_context, overrides)
-            .await?
+    let Some(resolved) = resolve_provider_auth(
+        provider_id,
+        &provider_auth,
+        credentials,
+        auth_context,
+        overrides,
+    )
+    .await?
     else {
         return Ok(None);
     };

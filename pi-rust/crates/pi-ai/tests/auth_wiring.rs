@@ -188,15 +188,10 @@ async fn provider_scoped_env_from_the_credential_is_preserved() {
     )
     .await;
 
-    let resolved = resolve_api_key_for_provider(
-        "anthropic",
-        &store,
-        &FakeContext::empty(),
-        None,
-    )
-    .await
-    .expect("resolution must not fail")
-    .expect("the stored credential must resolve");
+    let resolved = resolve_api_key_for_provider("anthropic", &store, &FakeContext::empty(), None)
+        .await
+        .expect("resolution must not fail")
+        .expect("the stored credential must resolve");
 
     assert_eq!(resolved.key.as_deref(), Some("stored-key"));
     assert_eq!(

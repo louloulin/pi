@@ -154,7 +154,9 @@ impl AnthropicProvider {
             } else {
                 Some(ctx.system_prompt.clone())
             },
-            max_tokens: options.max_tokens.unwrap_or(model.max_output_tokens.max(DEFAULT_MAX_TOKENS)),
+            max_tokens: options
+                .max_tokens
+                .unwrap_or(model.max_output_tokens.max(DEFAULT_MAX_TOKENS)),
             temperature: options.temperature,
             stream: true,
             tools,
@@ -172,10 +174,7 @@ impl AnthropicProvider {
         &self,
         body: &MessagesRequest,
     ) -> Result<AssistantMessageEventStream, StreamError> {
-        let url = format!(
-            "{}/v1/messages",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let client = reqwest::Client::new();
         let response = client
             .post(&url)
@@ -399,7 +398,9 @@ fn anthropic_message_from(msg: &Message) -> Result<AnthropicMessage, StreamError
                 .content
                 .iter()
                 .filter_map(|c| match c {
-                    Content::Text(t) => Some(UserContentBlock::Text { text: t.text.clone() }),
+                    Content::Text(t) => Some(UserContentBlock::Text {
+                        text: t.text.clone(),
+                    }),
                     _ => None,
                 })
                 .collect();
@@ -692,7 +693,11 @@ impl SseStream {
         if !self.started {
             self.started = true;
             self.pending.push_back(Ok(AssistantMessageEvent::Start {
-                model: self.state.model.clone().unwrap_or_else(|| self.model_id.clone()),
+                model: self
+                    .state
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.model_id.clone()),
             }));
         }
 
@@ -777,8 +782,9 @@ impl SseStream {
                 input: Value,
             },
         }
-        let parsed: WireContentBlockStart = serde_json::from_str(data)
-            .map_err(|e| StreamError::Malformed(format!("Anthropic content_block_start: {e}: {data}")))?;
+        let parsed: WireContentBlockStart = serde_json::from_str(data).map_err(|e| {
+            StreamError::Malformed(format!("Anthropic content_block_start: {e}: {data}"))
+        })?;
         let index = parsed.index;
         let mut block = BlockState::default();
         match parsed.content_block {
@@ -797,9 +803,8 @@ impl SseStream {
             }
             WireContentBlock::Thinking { thinking } => {
                 if !thinking.is_empty() {
-                    self.pending.push_back(Ok(AssistantMessageEvent::ThinkingDelta {
-                        delta: thinking,
-                    }));
+                    self.pending
+                        .push_back(Ok(AssistantMessageEvent::ThinkingDelta { delta: thinking }));
                 }
                 block.kind = BlockKind::Thinking;
             }
@@ -811,20 +816,22 @@ impl SseStream {
                 if !name.is_empty() {
                     state.name = Some(name.clone());
                 }
-                let initial_json = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                let initial_json =
+                    serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
                 if !initial_json.is_empty() && initial_json != "{}" {
                     state.arguments.push_str(&initial_json);
                 }
-                self.pending.push_back(Ok(AssistantMessageEvent::ToolCallDelta {
-                    index,
-                    id: if id.is_empty() { None } else { Some(id) },
-                    name: if name.is_empty() { None } else { Some(name) },
-                    arguments_delta: if initial_json.is_empty() || initial_json == "{}" {
-                        None
-                    } else {
-                        Some(initial_json)
-                    },
-                }));
+                self.pending
+                    .push_back(Ok(AssistantMessageEvent::ToolCallDelta {
+                        index,
+                        id: if id.is_empty() { None } else { Some(id) },
+                        name: if name.is_empty() { None } else { Some(name) },
+                        arguments_delta: if initial_json.is_empty() || initial_json == "{}" {
+                            None
+                        } else {
+                            Some(initial_json)
+                        },
+                    }));
                 block.kind = BlockKind::ToolUse(state);
                 self.state.saw_tool_use = true;
             }
@@ -857,8 +864,9 @@ impl SseStream {
                 signature: String,
             },
         }
-        let parsed: WireContentBlockDelta = serde_json::from_str(data)
-            .map_err(|e| StreamError::Malformed(format!("Anthropic content_block_delta: {e}: {data}")))?;
+        let parsed: WireContentBlockDelta = serde_json::from_str(data).map_err(|e| {
+            StreamError::Malformed(format!("Anthropic content_block_delta: {e}: {data}"))
+        })?;
         let index = parsed.index;
         match parsed.delta {
             WireContentDelta::TextDelta { text } => {
@@ -880,9 +888,8 @@ impl SseStream {
                 if thinking.is_empty() {
                     return Ok(());
                 }
-                self.pending.push_back(Ok(AssistantMessageEvent::ThinkingDelta {
-                    delta: thinking,
-                }));
+                self.pending
+                    .push_back(Ok(AssistantMessageEvent::ThinkingDelta { delta: thinking }));
             }
             WireContentDelta::InputJsonDelta { partial_json } => {
                 let entry = self.state.blocks.entry(index).or_default();
@@ -897,12 +904,13 @@ impl SseStream {
                     }
                 };
                 tc.arguments.push_str(&partial_json);
-                self.pending.push_back(Ok(AssistantMessageEvent::ToolCallDelta {
-                    index,
-                    id: None,
-                    name: None,
-                    arguments_delta: Some(partial_json),
-                }));
+                self.pending
+                    .push_back(Ok(AssistantMessageEvent::ToolCallDelta {
+                        index,
+                        id: None,
+                        name: None,
+                        arguments_delta: Some(partial_json),
+                    }));
             }
             WireContentDelta::SignatureDelta { .. } => {
                 // The signature is required by the API to echo back
@@ -989,7 +997,11 @@ impl SseStream {
                     let id = tc.id.unwrap_or_default();
                     let name = tc.name.unwrap_or_default();
                     let arguments = parse_streaming_json(Some(tc.arguments.as_str()));
-                    content.push(Content::ToolCall(ToolCall { id, name, arguments }));
+                    content.push(Content::ToolCall(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    }));
                 }
                 BlockKind::Text(t) => {
                     if !t.text.is_empty() {
@@ -1007,7 +1019,11 @@ impl SseStream {
             }
         });
         let usage = self.state.usage;
-        let model = self.state.model.clone().unwrap_or_else(|| self.model_id.clone());
+        let model = self
+            .state
+            .model
+            .clone()
+            .unwrap_or_else(|| self.model_id.clone());
         let message = AssistantMessage {
             model,
             content,
@@ -1086,9 +1102,8 @@ impl futures::Stream for SseStream {
                         // callers always see the contract.
                         self.started = true;
                         let start_model = self.model_id.clone();
-                        self.pending.push_back(Ok(AssistantMessageEvent::Start {
-                            model: start_model,
-                        }));
+                        self.pending
+                            .push_back(Ok(AssistantMessageEvent::Start { model: start_model }));
                     }
                     self.finalize();
                     if let Some(ev) = self.pending.pop_front() {
@@ -1202,7 +1217,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"][0]["type"], "text");
-        assert_eq!(messages[0]["content"][0]["text"], "what's the weather in SF?");
+        assert_eq!(
+            messages[0]["content"][0]["text"],
+            "what's the weather in SF?"
+        );
 
         let tools = v["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 1);
@@ -1232,15 +1250,13 @@ mod tests {
         let mut ctx = Context::new("");
         ctx.messages.push(Message {
             role: Role::Tool,
-            content: vec![
-                Content::ToolResult(pi_protocol::ToolResult {
-                    tool_call_id: "toolu_x".into(),
-                    content: Box::new(Content::text("72F and sunny")),
-                    is_error: false,
-                    details: None,
-                    added_tool_names: None,
-                }),
-            ],
+            content: vec![Content::ToolResult(pi_protocol::ToolResult {
+                tool_call_id: "toolu_x".into(),
+                content: Box::new(Content::text("72F and sunny")),
+                is_error: false,
+                details: None,
+                added_tool_names: None,
+            })],
             model: None,
         });
         let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
@@ -1266,7 +1282,12 @@ mod tests {
             events.push(ev.expect("stream event"));
         }
         // Expect: Start, TextDelta("Hello"), TextDelta(" there"), Done.
-        assert!(events.len() >= 4, "got {} events: {:?}", events.len(), events);
+        assert!(
+            events.len() >= 4,
+            "got {} events: {:?}",
+            events.len(),
+            events
+        );
         assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
         match &events[1] {
             AssistantMessageEvent::TextDelta { delta } => assert_eq!(delta, "Hello"),
@@ -1383,7 +1404,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_error, "expected the parser to surface the upstream error");
+        assert!(
+            saw_error,
+            "expected the parser to surface the upstream error"
+        );
     }
 
     #[tokio::test]
