@@ -380,6 +380,153 @@ fn node_fs_promises_and_callbacks_reach_the_same_bridge() {
     });
 }
 
+/// `fs.createReadStream` — the read side of the blocking bridge, wrapped as a
+/// `Readable`-shaped stream. This is the named blocker on
+/// `git-merge-and-resolve.ts`, which reads a file into `readline`, so that
+/// pairing is asserted end to end alongside the raw stream events.
+#[test]
+fn node_fs_create_read_stream_replays_the_file() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("read-stream");
+        let host = host_with_cwd(&scratch.as_str()).await;
+        let file = scratch.path().join("input.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").expect("write fixture");
+
+        let source = r#"
+            import { createReadStream, ReadStream } from "node:fs";
+            import { createInterface } from "node:readline";
+            import { join } from "node:path";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "read_stream_probe",
+                    label: "read stream probe",
+                    description: "exercises fs.createReadStream",
+                    parameters: { type: "object", properties: { dir: { type: "string" } } },
+                    execute: async (args) => {
+                        const file = join(args.dir, "input.txt");
+
+                        // The blocked extension's exact shape:
+                        // createReadStream -> readline.createInterface.
+                        const lines = await new Promise((resolve, reject) => {
+                            const stream = createReadStream(file, "utf-8");
+                            const rl = createInterface({ input: stream });
+                            const seen = [];
+                            rl.on("line", (line) => seen.push(line));
+                            rl.on("close", () => resolve(seen));
+                            stream.on("error", reject);
+                        });
+
+                        // Raw byte mode: `open` / `data` / `end` / `close`.
+                        const byteMode = await new Promise((resolve, reject) => {
+                            const stream = createReadStream(file);
+                            const chunks = [];
+                            const events = [];
+                            stream.on("open", () => events.push("open"));
+                            stream.on("data", (chunk) => {
+                                events.push("data");
+                                chunks.push(chunk);
+                            });
+                            stream.on("end", () => events.push("end"));
+                            stream.on("close", () => {
+                                events.push("close");
+                                resolve({
+                                    events,
+                                    text: Buffer.concat(chunks).toString("utf8"),
+                                    bytesRead: stream.bytesRead,
+                                    isBuffer: Buffer.isBuffer(chunks[0]),
+                                    path: stream.path,
+                                    readableEnded: stream.readableEnded,
+                                });
+                            });
+                            stream.on("error", reject);
+                        });
+
+                        // `for await` drains the same buffer.
+                        let iterated = "";
+                        for await (const chunk of createReadStream(file)) {
+                            iterated += chunk.toString("utf8");
+                        }
+
+                        // `start` / `end` are byte offsets, `end` inclusive.
+                        const slice = await new Promise((resolve, reject) => {
+                            const stream = createReadStream(file, { start: 6, end: 9, encoding: "utf8" });
+                            let text = "";
+                            stream.on("data", (chunk) => { text += chunk; });
+                            stream.on("end", () => resolve(text));
+                            stream.on("error", reject);
+                        });
+
+                        // A missing file surfaces as an async `error`, not a throw.
+                        const missing = await new Promise((resolve) => {
+                            const stream = createReadStream(join(args.dir, "missing.txt"));
+                            stream.on("error", (err) => resolve({ code: err.code, syscall: err.syscall }));
+                            stream.on("close", () => resolve({ code: "closed", syscall: null }));
+                        });
+
+                        // The documented refusals throw at the call site.
+                        let badFlag = null;
+                        try { createReadStream(file, { flag: "w" }); }
+                        catch (err) { badFlag = err.message.includes("only supports read flags"); }
+                        let badEncoding = null;
+                        try { createReadStream(file).setEncoding("nope"); }
+                        catch (err) { badEncoding = err.name; }
+
+                        const instance = createReadStream(file);
+                        const isReadStream = instance instanceof ReadStream;
+                        instance.destroy();
+
+                        return {
+                            content: [{ type: "text", text: JSON.stringify({ lines, byteMode, iterated, slice, missing }) }],
+                            details: { lines, byteMode, iterated, slice, missing, badFlag, badEncoding, isReadStream },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("read_stream_probe", "/tmp/pi_node_builtins/read_stream_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load read stream probe extension");
+
+        let outcome = host
+            .execute_tool("read_stream_probe", &json!({ "dir": scratch.as_str() }).to_string())
+            .await
+            .expect("execute read stream probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        // The `git-merge-and-resolve.ts` pairing.
+        assert_eq!(details["lines"], json!(["alpha", "beta", "gamma"]), "{details}");
+        // Raw events, in order, and the byte accounting.
+        assert_eq!(
+            details["byteMode"]["events"],
+            json!(["open", "data", "end", "close"]),
+            "{details}"
+        );
+        assert_eq!(details["byteMode"]["text"], "alpha\nbeta\ngamma\n", "{details}");
+        assert_eq!(details["byteMode"]["bytesRead"], 17, "{details}");
+        assert_eq!(details["byteMode"]["isBuffer"], true, "{details}");
+        assert_eq!(
+            details["byteMode"]["path"],
+            file.to_string_lossy().as_ref(),
+            "{details}"
+        );
+        assert_eq!(details["byteMode"]["readableEnded"], true, "{details}");
+        assert_eq!(details["iterated"], "alpha\nbeta\ngamma\n", "{details}");
+        assert_eq!(details["slice"], "beta", "{details}");
+        assert_eq!(details["missing"]["code"], "ENOENT", "{details}");
+        assert_eq!(details["missing"]["syscall"], "open", "{details}");
+        assert_eq!(details["badFlag"], true, "{details}");
+        assert_eq!(details["badEncoding"], "TypeError", "{details}");
+        assert_eq!(details["isReadStream"], true, "{details}");
+    });
+}
+
 /// `Buffer` / `process` are globals on Node, so an extension that never
 /// imports them must still find them — and a builtin that is *not* bridged
 /// must fail loudly, naming what is available.

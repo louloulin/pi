@@ -1893,6 +1893,90 @@ function __pi_schedule(fn) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared `EventEmitter` — the `child.stdout` / `child.stderr` streams,
+// `node:readline`'s `Interface` and `fs.createReadStream`'s stream are all
+// EventEmitters, so the implementation lives at module scope instead of
+// inside one module factory. It sits ahead of `node:buffer` because
+// `node:fs`'s read stream extends it.
+// ---------------------------------------------------------------------------
+
+class Emitter {
+  constructor() {
+    this._listeners = Object.create(null);
+  }
+
+  on(type, listener) {
+    if (typeof listener !== "function") {
+      throw new TypeError('The "listener" argument must be of type function');
+    }
+    const key = String(type);
+    (this._listeners[key] || (this._listeners[key] = [])).push(listener);
+    return this;
+  }
+
+  once(type, listener) {
+    const self = this;
+    function wrapper(...args) {
+      self.off(type, wrapper);
+      listener.apply(self, args);
+    }
+    wrapper.listener = listener;
+    return this.on(type, wrapper);
+  }
+
+  off(type, listener) {
+    const key = String(type);
+    const list = this._listeners[key];
+    if (!list) return this;
+    if (listener === undefined) {
+      delete this._listeners[key];
+      return this;
+    }
+    this._listeners[key] = list.filter(
+      (item) => item !== listener && item.listener !== listener,
+    );
+    return this;
+  }
+
+  addListener(type, listener) {
+    return this.on(type, listener);
+  }
+
+  removeListener(type, listener) {
+    return this.off(type, listener);
+  }
+
+  removeAllListeners(type) {
+    if (type === undefined) this._listeners = Object.create(null);
+    else delete this._listeners[String(type)];
+    return this;
+  }
+
+  listeners(type) {
+    return (this._listeners[String(type)] || []).slice();
+  }
+
+  listenerCount(type) {
+    return (this._listeners[String(type)] || []).length;
+  }
+
+  emit(type, ...args) {
+    const key = String(type);
+    const list = this._listeners[key];
+    if (!list || list.length === 0) {
+      // Node's EventEmitter rethrows an unhandled `error` event.
+      if (key === "error") {
+        const error = args[0];
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      return false;
+    }
+    for (const listener of list.slice()) listener.apply(this, args);
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // `node:buffer` — the `Buffer` subset extensions touch: `from` / `alloc` /
 // `concat` / `byteLength` / `isBuffer` plus `toString(encoding)` and
 // `equals`. Bytes are a real `Uint8Array` subclass, so `instanceof`,
@@ -2443,6 +2527,219 @@ const __pi_fs_module = (() => {
     access: promisify(accessSync),
   });
 
+  /** Validate an encoding the way `Buffer#toString` does, so the `encoding`
+   *  option and `setEncoding` fail at the call site like Node's. */
+  function streamEncoding(encoding) {
+    if (encoding === undefined || encoding === null) return null;
+    BufferCtor.from("").toString(encoding);
+    return encoding;
+  }
+
+  /** The `Readable` subset `fs.createReadStream` needs.
+   *
+   *  The bridge has no live descriptor — `fs.readFile` is blocking — so the
+   *  whole file is read up front and replayed to the consumer, the same shape
+   *  as `child.stdout` / `child.stderr`: chunks that arrive before a `data`
+   *  listener are buffered, so attaching the listener a tick after the call
+   *  cannot lose output. `open` / `data` / `end` / `close` are scheduled on the
+   *  microtask queue. */
+  class ReadStream extends Emitter {
+    constructor(path, options) {
+      super();
+      const opts = typeof options === "string" ? { encoding: options } : options || {};
+      this.path = String(path);
+      this.flags = opts.flag === undefined ? "r" : String(opts.flag);
+      if (this.flags !== "r" && this.flags !== "rs" && this.flags !== "r+") {
+        throw new Error(
+          "pi extension host fs.createReadStream only supports read flags, got " + this.flags,
+        );
+      }
+      this.bytesRead = 0;
+      this.readable = true;
+      this.readableEnded = false;
+      this.destroyed = false;
+      this.closed = false;
+      // There is no descriptor to expose; a numeric `fd` would be a fabricated
+      // handle the `fs.*` ops cannot use. `options.fd` is therefore ignored.
+      this.fd = null;
+      this.autoClose = opts.autoClose !== false;
+      this.__encoding = streamEncoding(opts.encoding);
+      this.__highWaterMark =
+        opts.highWaterMark === undefined
+          ? 64 * 1024
+          : Math.max(1, Math.trunc(Number(opts.highWaterMark)) || 1);
+      this.__offset = 0;
+      this.__slice = BufferCtor.alloc(0);
+      this.__ended = false;
+      this.__flowing = false;
+      this.__started = false;
+      this.__failure = null;
+      let source = null;
+      try {
+        source = readFileSync(this.path, null);
+      } catch (err) {
+        this.__failure = err;
+      }
+      if (source) {
+        const start =
+          opts.start === undefined ? 0 : Math.max(0, Math.trunc(Number(opts.start)) || 0);
+        const end = opts.end === undefined ? source.length - 1 : Math.trunc(Number(opts.end));
+        const stop = end < start ? start : Math.min(end + 1, source.length);
+        this.__slice = source.slice(Math.min(start, source.length), Math.max(stop, start));
+      }
+      const self = this;
+      __pi_schedule(function () {
+        self.__open();
+      });
+    }
+
+    __open() {
+      if (this.destroyed) return;
+      this.__started = true;
+      if (this.__failure) {
+        this.readable = false;
+        this.emit("error", this.__failure);
+        this.__close();
+        return;
+      }
+      this.emit("open", this.fd);
+      if (this.__flowing) this.__drain();
+    }
+
+    __nextChunk() {
+      if (this.__offset >= this.__slice.length) return null;
+      const end = Math.min(this.__offset + this.__highWaterMark, this.__slice.length);
+      const chunk = this.__slice.slice(this.__offset, end);
+      this.__offset = end;
+      return chunk;
+    }
+
+    __drain() {
+      this.__flowing = true;
+      if (this.listenerCount("data") === 0) return;
+      if (this.__encoding !== null) {
+        // Decode the remainder in one pass: a multi-byte character split
+        // across a chunk boundary must not become a replacement character.
+        const rest = this.__slice.slice(this.__offset);
+        this.__offset = this.__slice.length;
+        this.bytesRead += rest.length;
+        if (rest.length > 0) this.emit("data", rest.toString(this.__encoding));
+        this.__finish();
+        return;
+      }
+      while (this.listenerCount("data") > 0) {
+        const chunk = this.__nextChunk();
+        if (chunk === null) break;
+        this.bytesRead += chunk.length;
+        this.emit("data", chunk);
+      }
+      if (this.__offset >= this.__slice.length) this.__finish();
+    }
+
+    __finish() {
+      if (this.__ended) return;
+      this.__ended = true;
+      this.readable = false;
+      this.readableEnded = true;
+      this.emit("end");
+      if (this.autoClose) this.__close();
+    }
+
+    __close() {
+      if (this.closed) return;
+      this.closed = true;
+      this.destroyed = true;
+      this.emit("close");
+    }
+
+    setEncoding(encoding) {
+      this.__encoding = streamEncoding(encoding);
+      return this;
+    }
+
+    pause() {
+      this.__flowing = false;
+      return this;
+    }
+
+    resume() {
+      if (this.__started) this.__drain();
+      else this.__flowing = true;
+      return this;
+    }
+
+    read() {
+      if (this.__encoding !== null && this.__offset < this.__slice.length) {
+        const rest = this.__slice.slice(this.__offset);
+        this.__offset = this.__slice.length;
+        this.bytesRead += rest.length;
+        const value = rest.toString(this.__encoding);
+        if (!this.__ended) this.__finish();
+        return value;
+      }
+      const chunk = this.__nextChunk();
+      if (chunk === null) {
+        if (!this.__ended) this.__finish();
+        return null;
+      }
+      this.bytesRead += chunk.length;
+      return chunk;
+    }
+
+    pipe(destination) {
+      this.on("data", function (chunk) {
+        destination.write(chunk);
+      });
+      this.on("end", function () {
+        if (destination && typeof destination.end === "function") destination.end();
+      });
+      return destination;
+    }
+
+    unpipe() {
+      return this;
+    }
+
+    destroy(error) {
+      if (error) this.emit("error", error);
+      this.readable = false;
+      this.__close();
+      return this;
+    }
+
+    [Symbol.asyncIterator]() {
+      const self = this;
+      return {
+        next() {
+          const value = self.read();
+          return Promise.resolve(
+            value === null ? { done: true, value: undefined } : { done: false, value: value },
+          );
+        },
+        return() {
+          self.destroy();
+          return Promise.resolve({ done: true, value: undefined });
+        },
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+      };
+    }
+
+    on(type, listener) {
+      const result = super.on(type, listener);
+      if (String(type) === "data") {
+        this.__flowing = true;
+        if (this.__started) this.__drain();
+      }
+      return result;
+    }
+  }
+
+  function createReadStream(path, options) {
+    return new ReadStream(path, options);
+  }
+
   const mod = {
     readFileSync: readFileSync,
     writeFileSync: writeFileSync,
@@ -2459,6 +2756,8 @@ const __pi_fs_module = (() => {
     copyFileSync: copyFileSync,
     realpathSync: realpathSync,
     accessSync: accessSync,
+    createReadStream: createReadStream,
+    ReadStream: ReadStream,
     readFile: callbackify(readFileSync),
     writeFile: callbackify(writeFileSync),
     appendFile: callbackify(appendFileSync),
@@ -3975,88 +4274,6 @@ const __pi_util_module = (() => {
   mod.default = mod;
   return Object.freeze(mod);
 })();
-
-// ---------------------------------------------------------------------------
-// Shared `EventEmitter` — the `child.stdout` / `child.stderr` streams and
-// `node:readline`'s `Interface` are EventEmitters, so the implementation lives
-// at module scope instead of inside `node:child_process`.
-// ---------------------------------------------------------------------------
-
-class Emitter {
-  constructor() {
-    this._listeners = Object.create(null);
-  }
-
-  on(type, listener) {
-    if (typeof listener !== "function") {
-      throw new TypeError('The "listener" argument must be of type function');
-    }
-    const key = String(type);
-    (this._listeners[key] || (this._listeners[key] = [])).push(listener);
-    return this;
-  }
-
-  once(type, listener) {
-    const self = this;
-    function wrapper(...args) {
-      self.off(type, wrapper);
-      listener.apply(self, args);
-    }
-    wrapper.listener = listener;
-    return this.on(type, wrapper);
-  }
-
-  off(type, listener) {
-    const key = String(type);
-    const list = this._listeners[key];
-    if (!list) return this;
-    if (listener === undefined) {
-      delete this._listeners[key];
-      return this;
-    }
-    this._listeners[key] = list.filter(
-      (item) => item !== listener && item.listener !== listener,
-    );
-    return this;
-  }
-
-  addListener(type, listener) {
-    return this.on(type, listener);
-  }
-
-  removeListener(type, listener) {
-    return this.off(type, listener);
-  }
-
-  removeAllListeners(type) {
-    if (type === undefined) this._listeners = Object.create(null);
-    else delete this._listeners[String(type)];
-    return this;
-  }
-
-  listeners(type) {
-    return (this._listeners[String(type)] || []).slice();
-  }
-
-  listenerCount(type) {
-    return (this._listeners[String(type)] || []).length;
-  }
-
-  emit(type, ...args) {
-    const key = String(type);
-    const list = this._listeners[key];
-    if (!list || list.length === 0) {
-      // Node's EventEmitter rethrows an unhandled `error` event.
-      if (key === "error") {
-        const error = args[0];
-        throw error instanceof Error ? error : new Error(String(error));
-      }
-      return false;
-    }
-    for (const listener of list.slice()) listener.apply(this, args);
-    return true;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // `node:child_process` — `exec` / `execFile` / `execSync` / `execFileSync` /
