@@ -12915,3 +12915,80 @@ LUM-1168 原 run（分支 `agent/devbox1/e4e41b73b232`，停在 `0745b31bc`）**
   大体积产物；`/tmp/pi-fresh-1167-utils`（1.9G）为闲置 target，未清理以免影响在飞任务。
 - Git 身份沿用 `multica-agent <agent@multica.local>`；本轮提交 `6e192c404`（createReadStream）
   与合并提交 `b3c346db0`（auth 接线），随后 docs(status) 提交并推送 `feature/pi.rs`。
+
+## LUM-1176 round — 合并 LUM-1168（pi-ai 图像 provider 运行时 `images-models.ts`）进 feature/pi.rs + 本轮跳过派发（并发已满 + rustfmt 冲突）
+
+### 一、合并 LUM-1168（图像 provider 运行时集合）
+
+LUM-1168 已 `in_review`，分支 `agent/pi-ai-images-models`（`a347a63f0`，基线 `fc0d2dee7`）
+已推送、工作区干净、`pi-ai` 全量测试自证通过。本轮回合在 `work/lum-1176` 上 `--no-ff`
+合并进 `feature/pi.rs`（合并提交 `a0b0f59d3`），**零冲突**，只新增：
+
+| 文件 | 变化 |
+| --- | --- |
+| `pi-rust/crates/pi-ai/src/images/runtime.rs` | 新增 610 行（`ImagesProvider` / `ImagesModels` / `MutableImagesModels` / `create_images_provider`） |
+| `pi-rust/crates/pi-ai/src/images/mod.rs` | +11 / -2（`pub mod runtime` + 重导出） |
+| `pi-rust/crates/pi-ai/tests/images_models.rs` | 新增 848 行 / 19 个离线测试 |
+
+上游 `packages/ai/src/images-models.ts`（275 行）的运行时集合因此首次在 Rust 侧可用：
+`get_auth` 委托 `pi_ai::auth::resolve_provider_auth`（auth 子系统的图像侧消费方），
+`generate_images` 永不 reject（错误包装成 `AssistantImages { stop_reason: Error, .. }`），
+`refresh(None)` 对全部 provider 并发 best-effort。**它目前仍无生产调用方**：除
+`pi-ai/src/images/**` 自身与测试外，`providers/**` / `models.rs` / `pi-coding-agent`
+都没有引用它（LUM-1168 的边界要求如此），接线留作后续任务。
+
+### 二、验证（`work/lum-1176` @ `a0b0f59d3`）
+
+```
+$ export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-fresh-1176 \
+    CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+$ cargo check --workspace --all-targets --offline
+    Finished `dev` profile [unoptimized] target(s) in 2m 29s     # 0 error，仅 rquickjs-core 既有 12 warning
+$ cargo test --workspace --offline --no-fail-fast
+    全部 test result: ok，0 failed（2m 27s）
+$ cargo test -p pi-ai --offline
+    lib 113 / images_models 19 / 其余目标全绿
+```
+
+唯一编译告警仍是既有 `rquickjs-core`（上游依赖的 lifetime / unused 提示），首方 crate 无告警。
+
+### 三、本轮跳过派发（决策与理由）
+
+按「最多 3 个任务同时运行」开工时并发槽位已满：
+
+| 在飞 | 内容 | 状态 |
+| --- | --- | --- |
+| LUM-1173 | 上一个协调轮（10:40 CST 触发）：派发 LUM-1174 / LUM-1175，自己做全 workspace rustfmt 对齐 | run 仍 `running` |
+| LUM-1174 | `/export` + `--export` + 自包含 HTML + JSONL 导出 | `running` |
+| LUM-1175 | `create*Tool` 七个内建工具工厂 + `host_builtin_tool` 桥 | `running` |
+| LUM-1176 | 本回合（合并 LUM-1168 + 验证 + 推送） | 本 run |
+
+「LUM-1173 + LUM-1174 + LUM-1175 + 本任务」= 4 路，已无空位；且 LUM-1173 的分支
+`work/lum-1173`（`7deea4372`）是 **128 个文件的 rustfmt 全量对齐**，此刻新派发的任何
+代码任务都会与它在格式上碰撞。因此本轮**不新建、不重跑任何子任务**，只做集成与验证。
+
+### 四、frontier（本轮后）
+
+1. **provider 家族**：不变——`Api` 枚举里仍无适配器的是 **bedrock-converse / cohere-v2 /
+   google-vertex**（云凭据/签名，本环境拿不到）；OAuth/subscription 首登族与多协议网关 parked。
+2. **图像侧**：`ImagesModels` 运行时已并入（本轮），但**尚无消费方**——`pi-coding-agent`
+   的 `provider.rs` / CLI 还没有 `ImagesModels::generate_images` 的入口（也没有
+   `pi list-images-models` 之类）。这是图像侧下一条自然的接线任务。
+3. **`pi-ai/utils/` 缺口**：已收口（LUM-1169 并入）。
+4. **auth 接线**：已收口（LUM-1171 并入）；`ProviderRouter` stored credential 优先、env 兜底。
+5. **`node:fs` 流**：读侧 `createReadStream` 已收口（LUM-1172）；写侧 `createWriteStream`
+   与 `fs.watch` 仍缺。
+6. **会话导出**（LUM-1174）与 **SDK 七工具工厂**（LUM-1175）在飞；`pi-extensions` SDK 缺口
+   清单见 `crates/pi-extensions/docs/SDK_MODULES.md`。
+7. **`assistant-message-frame` / 事件枚举扩宽**：仍延后（有损简化枚举，移植会横切所有
+   provider 适配器、与多路并行冲突）。
+
+### 五、并发与磁盘
+
+- 开工与收工 `active` run 均为 4（LUM-1173、LUM-1174、LUM-1175、LUM-1176），本轮未新增派发。
+- 复用 `CARGO_HOME=/tmp/cargo-home` + **新建** `CARGO_TARGET_DIR=/tmp/pi-fresh-1176`
+  （2.0G，冷启动 check 2m29s / 全量 test 2m27s），全程 `--offline`。根分区开工 21G 可用、
+  收工 16G 可用；`/tmp/pi-fresh-1173`（1.7G）与 `/tmp/pi-fresh-1174`（972M）属于在飞任务，
+  未清理。
+- Git 身份沿用 `multica-agent <agent@multica.local>`；本轮提交 `a0b0f59d3`（合并 LUM-1168）
+  与本文档提交，推送 `work/lum-1176` 与 `feature/pi.rs`。
