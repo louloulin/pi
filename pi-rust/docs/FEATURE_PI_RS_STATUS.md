@@ -14761,83 +14761,90 @@ origin/work/lum-1173                unique=11 behind=93
    两轮同题 autopilot 会双花 CPU/磁盘并制造「谁先 push」的竞争，建议 autopilot 触发前检查
    同项目同题的在飞 issue。
 
-## LUM-1217 round — 合并 LUM-1211 → `feature/pi.rs`，并在合并后 tip 上补跑欠账的全量门（138 / 2107 / 0 / 2）；槽位 3/3 满故零派发
+## LUM-1217 round — 合并三条已完成 worker 线（LUM-1211 五个 api family / LUM-1213 thinking+Ctrl+T / LUM-1209 pi-session 上游 v4 写路径）→ `feature/pi.rs`；合并后 tip 全量实跑 **143 套件 / 2131 passed / 0 failed / 2 ignored** + clippy / fmt 全绿；槽位释放 → 派发 Stage 61 / 58 + 新建 Stage 60
 
 ### 一、开工基线
 
 * tip = `origin/feature/pi.rs` = `73e07658b`（LUM-1215 的状态文档提交）。
-* **全量门欠账**：最后一次实跑是 LUM-1208 的 `d063396b8`（138 套件 / 2092 passed / 0 failed / 2 ignored）；
-  `e12b8efdb`（LUM-1210）与 `73e07658b`（LUM-1215）都只做了局部或静态核验，LUM-1215 还因并发构建
-  撞上 ENOSPC 未能实跑。本轮把这条欠账补掉（第三节）。
-* 开工磁盘 28G / 50G（60%，余 19G），无遗留 `cargo` / `rustc` 进程。
-* 并发：`multica daemon status` → `running_task_count = 3`，即 LUM-1209（Stage 55 `pi-session` 写路径）、
-  LUM-1213（`pi-tui` thinking 渲染 + Ctrl+T）、本轮 LUM-1217 —— **槽位 3/3 满**。
+* **全量门欠账**：最后一次实跑是 LUM-1208 的 `d063396b8`（138 / 2092 / 0 / 2）；`e12b8efdb`（LUM-1210）与
+  `73e07658b`（LUM-1215）都只做了局部或静态核验，LUM-1215 还因并发构建撞 ENOSPC 未能实跑。本轮清零（第三节）。
+* 开工磁盘 `28G / 50G`（60%，余 19G），无遗留 `cargo` / `rustc` 进程。
+* 开工并发：`multica daemon status` → `running_task_count = 3`（LUM-1209 Stage 55、LUM-1213 thinking、本轮 LUM-1217）
+  —— **槽位 3/3 满**，故本轮先做「不占槽位」的合并 + 全量门，等 worker 收工再派发（第五节）。
 
-### 二、可合并性扫描
+### 二、可合并性扫描（本轮实际合了三条）
 
-* 唯一**已完成且已 push** 的可合并产物：`origin/work/LUM-1211` = `b51ee7e27`
-  （基于 `d063396b8`，1 个唯一提交，7 文件 +479/−75），已合入（第三节）。
-* **在飞未完成**（本地已有提交但尚未 push，按约定不抢合并，留待其 worker 自己收尾后由后续轮合并）：
+开工时唯一「已完成且已 push」的是 LUM-1211；本轮进行中 LUM-1213 与 LUM-1209 相继收工并 push，
+三条都已合入 `feature/pi.rs`：
 
-  | issue | 本地 ref | 提交 | 内容 |
-  | --- | --- | --- | --- |
-  | LUM-1209（Stage 55） | `agent/devbox1/f324f1f100e5` | `543845f2b` | `pi-session` 写上游 v4 会话 + 布局迁移 |
-  | LUM-1213 | `work/LUM-1213` / `work/LUM-1213-merge` | `ff7905126` / `8ac4c8e77` | `pi-tui` thinking 块渲染 + `app.thinking.toggle`（Ctrl+T），自报 139 / 2102 |
+| issue | 来源 ref / commit | 内容 | 该 worker 自报门 |
+| --- | --- | --- | --- |
+| LUM-1211 | `origin/work/LUM-1211` = `b51ee7e27` | host bridge 真实派发全部五个 `pi-ai` api family；`pi-protocol` 新增 `Api::api_id` / `from_api_id` 双向映射单一来源 | 138 / 2097 |
+| LUM-1213 | `origin/feature/pi.rs` = `3e7566bf2`（含 `ff7905126` thinking 渲染 + `8ac4c8e77` 自合并） | `pi-tui` 渲染 assistant thinking 块 + `app.thinking.toggle`（Ctrl+T）+ `MessageItem.thinking` / `MessageView.hide_thinking` | 139 / 2112 |
+| LUM-1209 | `origin/agent/devbox1/f324f1f100e5` = `543845f2b` | `pi-session` 写上游 sqlite-node storage format 4 布局（DDL 与 `001_initial.sql` 字节一致、payload 为 JSON TEXT、`parent_id` 链）+ `pi session migrate` | 142 / 2106 |
 
-  两条的提交时间戳（`10:04:33` / `10:21:01`）与本轮开工同分钟，`in_progress` 仍成立 —— 属于「正在写」，
-  不是「写完了没人合」。
-* 陈旧分支 7 条（`142cee5d0ed9`、`9f0097e10886`、`e3a55b14fe9d`、`lum-1020`、`lum-1023`、`lum-1058`、
-  `work/lum-1173`）复核结论与 LUM-1215 一致：其内容已被 `feature/pi.rs` 上的后续提交覆盖或取代
-  （`work/lum-1173` 的 11 个 rustfmt 提交 = LUM-1138 波次，后被 `a71263a3d` 后的格式提交覆盖）。
-  **无新增可合并产物。**
+本地合并链（`work/LUM-1217` → 推 `origin/feature/pi.rs`）：
 
-### 三、本轮交付
+```
+35b5e9e6a Merge work on LUM-1209: pi-session 写上游 v4 会话 + 布局迁移
+8d6ed9f57 Merge origin/feature/pi.rs (LUM-1213 thinking 交付) into LUM-1217 协调轮
+c6d232932 Merge work/LUM-1211: pi-coding-agent bridge 派发全部五个 pi-ai api family
+3e7566bf2 Merge origin/feature/pi.rs (LUM-1215 文档轮) into work/LUM-1213-merge   ← 本轮开工后 LUM-1213 push 的远端 tip
+```
 
-1. **合并 `work/LUM-1211`** → 合并提交 `c6d232932`（`--no-ff`，保留来源提交 `b51ee7e27`）：
-   `pi-coding-agent` 的 host bridge 现在真实派发全部五个 `pi-ai` api family
-   （`openai-completions` / `google-generative-ai` / `azure-openai-responses` 三个此前会以
-   `model_from_js` error 收尾）；`pi-protocol` 新增 `Api::api_id` / `Api::from_api_id` 作为 api id 双向映射的单一来源。
-   合并无冲突（LUM-1211 基于 `d063396b8`，其后 tip 上只有两份纯文档提交）。
-2. **全量门（在合并后的 tip `c6d232932` 上实跑）**：
+三处合并**均无代码冲突**：LUM-1211 基于 `d063396b8`、LUM-1209 基于同一提交，其后 tip 上只有文档提交；
+LUM-1213 与 LUM-1209 的改动面不相交（前者 `pi-tui` + `pi-coding-agent` 的 thinking 通路，后者 `pi-session` +
+`commands/session.rs`），唯一需要 `ort` 自动合并的是 `docs/FEATURE_PI_RS_STATUS.md` 的追加段落。
 
-   ```console
-   $ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
-       cargo test --workspace --offline
-     138 套件 / 2107 passed / 0 failed / 2 ignored
-   $ … cargo clippy --workspace --all-targets --offline -- -D warnings
-     Finished `dev` profile … (0 warning)
-   $ cargo fmt --all -- --check
-     干净
-   ```
+陈旧分支 7 条（`142cee5d0ed9`、`9f0097e10886`、`e3a55b14fe9d`、`lum-1020`、`lum-1023`、`lum-1058`、
+`work/lum-1173`）复核结论与 LUM-1215 一致：内容已被 `feature/pi.rs` 后续提交覆盖或取代
+（`work/lum-1173` 的 11 个 rustfmt 提交 = LUM-1138 波次，已被后续格式提交覆盖）。**无额外可合并产物。**
 
-   相对 LUM-1208 基线（138 / 2092 / 0 / 2）：套件数与 ignored 数不变，passed +15（LUM-1211 的 5 个新测试
-   + 同批 `--all-targets` 覆盖到的增量）。**全量欠账清零，下一欠账点 = 下一个 tip。**
-   构建用私有 target 并全程关 debuginfo / incremental，收尾已删除（第五节）。
-3. **push**：`origin/feature/pi.rs` 更新到 `c6d232932`。
+### 三、全量门（三条线合并后的 tip `35b5e9e6a` 上实跑）
 
-### 四、派发决定（本轮为什么零派发）
+```console
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0     cargo test --workspace --offline
+  143 套件 / 2131 passed / 0 failed / 2 ignored
+$ … cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished `dev` profile … (0 warning)
+$ cargo fmt --all -- --check
+  干净
+```
 
-* 槽位 **3/3 满**（LUM-1209、LUM-1213 的 run 仍在运行 + 本轮的协调 run）。按 LUM-1210 / LUM-1215 的既定
-  取舍，不抢第四个并发 run —— 上一轮已经用 ENOSPC 验证过「第四个全量构建」的代价。
-* **前端 frontier 与优先级不变**（不重复审计，避免做 LUM-1213 / LUM-1215 已经做过的第三遍 TUI 分析）：
+* 相对最后一次全量基线 LUM-1208（138 / 2092 / 0 / 2）：套件 +5、passed +39、failed 0、ignored 不变。
+  单线自报数（LUM-1213 的 139 / 2112、LUM-1209 的 142 / 2106）各自基于不同 tip，**不能相加**——
+  合并后的 143 / 2131 才是权威值，也是下一轮的基线。
+* **全量欠账清零**；下一欠账点 = 下一个 tip。构建用 worktree 内私有 target 并全程关 debuginfo / incremental
+  （峰值 1.9G），收尾删除（第六节）。
+* 验证点：本轮是「`pi-ai` ext_bridge（LUM-1211）× `pi-tui` thinking（LUM-1213）× `pi-session` v4 写路径
+  （LUM-1209）」三条工作线的首次同树验证 —— 之前没有任何一个 worker 在含另外两条的树上跑过。
 
-  1. **Stage 61 = LUM-1216（`backlog`，最高优先）**：流式期间输入被静默丢弃 —— 正确性缺陷，
-     修复面（`App` 内 pending 队列 + steer / followUp / dequeue）独立于富渲染器接线。证据链在
-     `docs/TUI_UX_AUDIT.md` P1-3 节（`app.rs:1849-1852` → `:1236-1239`）。
-  2. **Stage 58 = LUM-1214（`backlog`）**：工具输出折叠 + `app.tools.expand`（Ctrl+O）+ 点击工具块展开。
-     零件（`tools/render.rs` 2,269 行富渲染器）已在仓库里，只差接线与坐标系更新。
-  3. Stage 59 / 60：`app.*` 第 1 批与 `/new`、`/copy`、`/tree`、`/fork`（`/tree`、`/fork` 依赖 LUM-1209 写路径）。
+### 四、`feature/pi.rs` 已 push
 
-* **下一轮的开场动作**（槽位释放后）：
-  1. 若 LUM-1213 已 push，**先合并 thinking 交付再派发** —— `MessageItem` / `MessageView` 会被
-     Stage 58 与 Stage 61 同时修改，先落它可把后续冲突面从三方降到两方。
-  2. 把 **LUM-1216 从 `backlog` 升 `todo`**（`multica issue status LUM-1216 todo`），占 1 个槽位；
-     LUM-1209 完成后其槽位再放 LUM-1214。
-  3. 派发前先 `multica daemon status --output json` 核对 `running_task_count`，并检查同题在飞 issue
-     （autopilot 每 20 分钟一轮，LUM-1213 / 1215 / 1217 已是同题重复轮，见第五节第 4 点）。
+`origin/feature/pi.rs` 由 `73e07658b` 前进到本轮合并 tip（含三条 worker 线 + 本文档）。
+远端先被 LUM-1213 推到 `3e7566bf2`，本轮把该提交并入后才推送，**无 force push**。
 
-### 五、磁盘
+### 五、派发决定（槽位释放后本轮派发 3 个）
 
-* 开工 `28G / 50G`（60%，余 19G），无遗留构建进程。
-* 本轮构建用 worktree 内私有 target，全程 `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` + `CARGO_INCREMENTAL=0`；
-  收尾删除 target。
+LUM-1209 / LUM-1213 收工后 `running_task_count` 回落到 1（本轮协调 run），三个工人槽位全部释放。
+按「TUI 优先 + 正确性优先」的既定排序派发（不再重复第三遍 TUI 审计 —— LUM-1213 / LUM-1215 已做过两轮）：
+
+1. **Stage 61 = LUM-1216（`backlog` → `todo`，最高优先）**：流式期间输入被静默丢弃（正确性缺陷）。
+   证据链 `app.rs:1849-1852` → `:1236-1239`（编辑器先清空，`App::submit` 因忙直接 `return`），
+   修复 = `App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染。
+2. **Stage 58 = LUM-1214（`backlog` → `todo`）**：工具输出折叠 + `app.tools.expand`（Ctrl+O）+ 点击工具块展开。
+   修的是 P0-1「一个 `read`/`bash` 刷满整屏」；零件 `tools/render.rs`（2,269 行富渲染器）已在树上，只差接线。
+3. **Stage 60（新建，本轮不占用既有编号）**：会话命令补齐 `/new`、`/copy`、`/name` + `app.session.new` 键位。
+   依赖已就绪 —— LUM-1209 刚落下 `pi-session` 的上游 v4 写路径，`/new` 才有正确的落盘语义；
+   `/tree`、`/fork` 仍依赖 LUM-1212（Stage 56 的 branch_* 读路径），不在本切片内。
+
+冲突面提示（给下一轮协调）：Stage 61 与 Stage 58 都会动 `pi-tui/src/message.rs` 的 `MessageItem`
+（61 加 pending 字段、58 加折叠字段）与 `pi-coding-agent/src/interactive.rs` 的拦截块；Stage 60 也落在
+`interactive.rs` / `commands/slash.rs`。三条可并行，但合并顺序建议 61 → 58 → 60（先正确性，再密度，再入口）。
+
+### 六、磁盘
+
+* 开工 `28G / 50G`（60%，余 19G）；构建后 `30G / 50G`（64%，余 17G），其中本轮私有 target 1.9G。
+* 本轮全程 `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` + `CARGO_INCREMENTAL=0`，收尾删除 target。
+* 提醒：三个新派发的 worker 若都开全量构建，请沿用同样的环境变量 —— LUM-1215 轮的 ENOSPC 就是
+  「三个不开 debuginfo 开关的 target」叠出来的。
