@@ -113,7 +113,9 @@ fn app_table_matches_the_declared_ids() {
     let ids: Vec<&str> = definitions.iter().map(|(id, _)| id.as_str()).collect();
 
     assert_eq!(ids, APP_KEYBINDING_IDS);
-    assert_eq!(definitions.len(), 43);
+    assert_eq!(definitions.len(), 44);
+    // 43 upstream ids + the Rust-only `app.header`.
+    assert_eq!(definitions.len(), APP_KEYBINDING_IDS.len());
     for (id, definition) in &definitions {
         assert!(
             definition.description.is_some(),

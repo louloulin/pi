@@ -270,6 +270,10 @@ use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
+use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
+use crate::locale::{
+    format_chord, Locale, HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
+};
 use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
@@ -280,7 +284,7 @@ use crate::search::{
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
-use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine};
+use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeColor, ThemeError};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
@@ -430,6 +434,27 @@ pub struct AppConfig {
     /// setting onto it, and tests pin it to make a fold assertion exact. It
     /// only seeds the view — [`App::messages_mut`] exposes the live value.
     pub tool_preview_lines: usize,
+    /// Show the built-in startup header (the key-hint screen) above the
+    /// message view.
+    ///
+    /// Upstream gates its header on `options.verbose ||
+    /// !settingsManager.getQuietStartup()` (`interactive-mode.ts:910`); this
+    /// is the same switch at the App level, so a host that wants a quiet
+    /// startup (or a test that wants a fixed transcript) starts here.
+    /// `false` in [`AppConfig::default`] keeps the headless/default surface
+    /// byte-identical to the pre-header port; the interactive driver turns it
+    /// on unless the user asked for `--no-header` / `quietStartup`.
+    pub startup_header: bool,
+    /// Whether the startup header starts expanded (the full hint list) or
+    /// folded away.
+    ///
+    /// Upstream seeds this from `getStartupExpansionState()` (`--verbose ||
+    /// toolOutputExpanded`); the Rust port defaults to expanded so a first
+    /// run teaches the chords it just shipped. Folded means *no rows* — the
+    /// message view takes the space back (see [`App::toggle_header`]).
+    pub startup_header_expanded: bool,
+    /// Copy table the built-in startup header reads (see [`crate::locale`]).
+    pub locale: Locale,
 }
 
 impl Default for AppConfig {
@@ -442,6 +467,9 @@ impl Default for AppConfig {
             copy_on_select: true,
             hyperlinks: None,
             tool_preview_lines: crate::message::TOOL_PREVIEW_LINES,
+            startup_header: false,
+            startup_header_expanded: true,
+            locale: Locale::default(),
         }
     }
 }
@@ -962,6 +990,21 @@ pub struct App {
     /// release: a click that starts and ends on the same tool block toggles
     /// that block's expansion instead of starting a text selection.
     tool_press: Option<(u16, u16, usize)>,
+    /// Cursor into [`crate::loader::SPINNER_FRAMES`] for the footer's busy
+    /// indicator. Advanced by [`App::tick_busy_feedback`] from the render
+    /// loop's existing beat — there is no timer of its own.
+    spinner: Spinner,
+    /// When the in-flight turn was submitted; the busy indicator's elapsed
+    /// time is measured from here. `None` while idle.
+    turn_started: Option<Instant>,
+    /// When the spinner last advanced. Gates [`Spinner::advance`] to one step
+    /// per [`SPINNER_INTERVAL_MS`], so a driver that polls faster than the
+    /// upstream 80 ms frame rate still animates at that rate.
+    spinner_advanced_at: Instant,
+    /// Whether the built-in startup header is currently expanded. Distinct
+    /// from [`AppConfig::startup_header`] (visible at all) and from an
+    /// extension's `ctx.ui.setHeader`, which replaces the built-in lines.
+    header_expanded: bool,
 }
 
 impl App {
@@ -982,6 +1025,7 @@ impl App {
         let event_rx = agent.subscribe();
         let markdown = config.markdown;
         let tool_preview_lines = config.tool_preview_lines;
+        let header_expanded = config.startup_header_expanded;
         let hyperlinks = config
             .hyperlinks
             .unwrap_or_else(crate::hyperlink::supports_hyperlinks);
@@ -1027,6 +1071,10 @@ impl App {
             status_flash: None,
             tool_block_renderer: None,
             tool_press: None,
+            spinner: Spinner::new(),
+            turn_started: None,
+            spinner_advanced_at: Instant::now(),
+            header_expanded,
         }
     }
 
@@ -1094,6 +1142,176 @@ impl App {
     /// upstream's `showStatus` does.
     pub fn toggle_tools_expanded(&mut self) -> bool {
         self.messages.toggle_tools_expanded()
+    }
+
+    /// Whether the built-in startup header is configured to render at all
+    /// (see [`AppConfig::startup_header`]).
+    pub fn header_visible(&self) -> bool {
+        self.config.startup_header
+    }
+
+    /// Show or hide the built-in startup header for this session.
+    ///
+    /// Hiding it takes no rows, so the message view takes the space back on
+    /// the next render.
+    pub fn set_header_visible(&mut self, visible: bool) {
+        self.config.startup_header = visible;
+    }
+
+    /// Whether the startup header is currently expanded.
+    pub fn header_expanded(&self) -> bool {
+        self.header_expanded
+    }
+
+    /// Expand or fold the startup header. Folding renders *no* rows (not a
+    /// collapsed one-liner), matching this port's requirement that a folded
+    /// header "not occupy a line" — the message view gets the rows back.
+    pub fn set_header_expanded(&mut self, expanded: bool) {
+        self.header_expanded = expanded;
+    }
+
+    /// Flip the startup header's expansion, returning the new state.
+    ///
+    /// Backs the `app.header` chord. Upstream has no such binding — it drives
+    /// the header's `setExpanded` from `setToolsExpanded` together with the
+    /// tool blocks — so this port separates the two: `Ctrl+O` keeps folding
+    /// tool output, and `app.header` folds the hint screen.
+    pub fn toggle_header(&mut self) -> bool {
+        let expanded = !self.header_expanded;
+        self.header_expanded = expanded;
+        expanded
+    }
+
+    /// The locale copy table the startup header reads.
+    pub fn locale(&self) -> Locale {
+        self.config.locale
+    }
+
+    /// Switch the startup header's copy table (`/lang`-style switches, or a
+    /// host that resolved `--lang` at startup). Takes effect on the next
+    /// render.
+    pub fn set_locale(&mut self, locale: Locale) {
+        self.config.locale = locale;
+    }
+
+    /// The frame cursor behind the busy indicator (read-only; tests assert
+    /// the animation, [`App::tick_busy_feedback`] drives it).
+    pub fn spinner(&self) -> &Spinner {
+        &self.spinner
+    }
+
+    /// How long the in-flight turn has been running, or `None` when idle.
+    pub fn busy_elapsed(&self) -> Option<Duration> {
+        self.turn_started.map(|started| started.elapsed())
+    }
+
+    /// Advance the busy feedback for this tick and return whether the footer
+    /// changed.
+    ///
+    /// Called from [`App::render_to_buffer`], i.e. from the render loop's
+    /// existing 50 ms beat — no second timer, matching the port's "one clock"
+    /// rule. `now` is a parameter so a test can drive the animation
+    /// deterministically (the driver passes `Instant::now()`).
+    ///
+    /// While a turn is in flight the spinner advances at most once per
+    /// [`SPINNER_INTERVAL_MS`] and the status bar carries
+    /// `"<frame> <elapsed>"`; once `turn_busy` clears, the segment is removed
+    /// and the cursor resets, so a finished turn never leaves a stray glyph
+    /// or a stale time on screen.
+    pub fn tick_busy_feedback(&mut self, now: Instant) -> bool {
+        if self.is_busy() {
+            let started = *self.turn_started.get_or_insert(now);
+            if now.saturating_duration_since(self.spinner_advanced_at)
+                >= Duration::from_millis(SPINNER_INTERVAL_MS)
+            {
+                self.spinner.advance();
+                self.spinner_advanced_at = now;
+            }
+            let elapsed = now.saturating_duration_since(started);
+            let frame = self.spinner.frame();
+            // At the resolution the footer actually prints: a new frame, or a
+            // new whole second on the clock. Sub-second jitter is not a change.
+            let changed = match self.status_data.busy {
+                Some(previous) => {
+                    previous.frame != frame
+                        || format_elapsed(previous.elapsed) != format_elapsed(elapsed)
+                }
+                None => true,
+            };
+            self.status_data.set_busy(frame, elapsed);
+            return changed;
+        }
+        if self.status_data.busy.is_some() {
+            self.status_data.clear_busy();
+            self.spinner.reset();
+            self.turn_started = None;
+            return true;
+        }
+        false
+    }
+
+    /// The extension frame with the built-in startup header merged in when no
+    /// extension header is set.
+    ///
+    /// Upstream renders `customHeader ?? builtInHeader`
+    /// (`interactive-mode.ts:958`), so a `ctx.ui.setHeader` from an extension
+    /// still wins. Composing here (rather than only at paint time) matters:
+    /// [`plan_chrome`] has to budget the header's rows before the message
+    /// viewport is sized, otherwise the built-in lines would be painted into a
+    /// zero-height region.
+    fn composed_frame(&self, width: u16) -> ExtensionFrame {
+        let mut frame = self.extension.frame(width);
+        if frame.header.is_empty() {
+            frame.header = self.builtin_header_lines();
+        }
+        frame
+    }
+
+    /// The built-in startup header: title, key hints, onboarding line.
+    ///
+    /// Empty when the header is disabled or folded, so "folded" costs zero
+    /// rows. The hint rows come from [`STARTUP_HINTS`] resolved against the
+    /// live keybinding table, so an override in `keybindings.json` shows up
+    /// here exactly as it does in `/hotkeys`.
+    fn builtin_header_lines(&self) -> Vec<StyledLine> {
+        if !self.config.startup_header || !self.header_expanded {
+            return Vec::new();
+        }
+        let kb = get_keybindings();
+        let locale = self.config.locale;
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 3);
+        // Logo, upstream `interactive-mode.ts:913`.
+        lines.push(vec![
+            StyledSpan::new(
+                format!("{HEADER_TITLE} "),
+                SpanStyle::fg(ThemeColor::Accent).bold(),
+            ),
+            StyledSpan::new(
+                format!("v{}", crate::VERSION),
+                SpanStyle::fg(ThemeColor::Dim),
+            ),
+        ]);
+        for hint in STARTUP_HINTS {
+            let Some(keys) = hint.key.label(|id| kb.get_keys(id)) else {
+                // Unbound in this table: an unbound action is not a hint.
+                continue;
+            };
+            lines.push(vec![
+                StyledSpan::new(format!("  {keys} "), SpanStyle::fg(ThemeColor::Accent)),
+                StyledSpan::new(
+                    hint.description(locale).to_string(),
+                    SpanStyle::fg(ThemeColor::Muted),
+                ),
+            ]);
+        }
+        lines.push(Vec::new());
+        lines.push(vec![StyledSpan::new(
+            locale
+                .tr(HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH)
+                .to_string(),
+            SpanStyle::fg(ThemeColor::Dim),
+        )]);
+        lines
     }
 
     /// Whether markdown links render as OSC 8 hyperlinks.
@@ -1440,6 +1658,15 @@ impl App {
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
         self.turn_busy.store(true, Ordering::SeqCst);
+        // Start the busy feedback in the same breath as the turn: the footer
+        // shows the spinner + `0s` on the very next frame, so a slow model is
+        // distinguishable from a frozen UI before the first token arrives.
+        self.spinner.reset();
+        let started = Instant::now();
+        self.turn_started = Some(started);
+        self.spinner_advanced_at = started;
+        self.status_data
+            .set_busy(self.spinner.frame(), Duration::ZERO);
 
         let busy = self.turn_busy.clone();
         let cancel_for_task = cancel.clone();
@@ -2067,6 +2294,29 @@ impl App {
             self.flash_status(format!(
                 "Tool output: {}",
                 if expanded { "expanded" } else { "collapsed" }
+            ));
+            return StepOutcome::Redraw;
+        }
+        // `app.header` (`Alt+H`): fold / unfold the built-in startup header.
+        // A Rust-port addition — upstream ties the header's expansion to
+        // `app.tools.expand` — so it is resolved with the same
+        // registry-first / builtin-fallback rule as every other `app.*` chord
+        // and reported through `showStatus` (`flash_status`).
+        if Self::matches_app_key(&kb, &event, "app.header", &["alt+h"]) {
+            let expanded = self.toggle_header();
+            let chord = kb
+                .get_keys("app.header")
+                .first()
+                .map(|chord| format_chord(chord))
+                .unwrap_or_else(|| format_chord("alt+h"));
+            self.flash_status(format!(
+                "Startup header: {}{}",
+                if expanded { "expanded" } else { "collapsed" },
+                if expanded {
+                    String::new()
+                } else {
+                    format!(" ({chord} to show)")
+                }
             ));
             return StepOutcome::Redraw;
         }
@@ -3636,10 +3886,13 @@ impl App {
     /// not tick.
     pub fn render_to_buffer(&mut self, area: Rect, buf: &mut Buffer) {
         let _ = self.advance_selection_autoscroll();
+        // Same beat, second animation: the busy spinner reuses this 50 ms
+        // tick instead of owning a timer (see [`App::tick_busy_feedback`]).
+        let _ = self.tick_busy_feedback(Instant::now());
         // Render the extension regions and budget the chrome before anything
         // else: the message viewport this frame paints is what the scroll,
         // selection and search paths must index.
-        let frame = self.extension.frame(area.width);
+        let frame = self.composed_frame(area.width);
         let layout = plan_chrome(area.height, &frame);
         // Record the geometry first so the refresh below indexes the exact
         // viewport this frame is about to paint.
@@ -3944,7 +4197,7 @@ impl App {
         // `/transcript` (and the snapshot tests) want plain text, never
         // OSC 8 escapes, so links fall back to the inline `(url)` form
         // regardless of the live capability.
-        let frame = self.extension.frame(width);
+        let frame = self.composed_frame(width);
         let layout = plan_chrome(height, &frame);
         self.render_to_buffer_impl(area, &mut buf, false, false, &frame, &layout);
         let lines = buf
