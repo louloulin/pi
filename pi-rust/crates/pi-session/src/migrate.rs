@@ -70,10 +70,7 @@ where
             continue;
         }
         let entry: SessionEntry = serde_json::from_str(trimmed).map_err(|e| {
-            SessionError::Migration(format!(
-                "failed to parse line {}: {e}",
-                line_no + 1
-            ))
+            SessionError::Migration(format!("failed to parse line {}: {e}", line_no + 1))
         })?;
         if let SessionEntry::Header { ref id, .. } = entry {
             writer.write_header(entry.clone())?;
@@ -136,9 +133,7 @@ mod tests {
         writeln!(jsonl_file, "{}", serde_json::to_string(&header).unwrap()).unwrap();
         let user = SessionEntry::UserMessage(Message {
             role: Role::User,
-            content: vec![Content::Text(TextContent {
-                text: "hi".into(),
-            })],
+            content: vec![Content::Text(TextContent { text: "hi".into() })],
             model: None,
         });
         writeln!(jsonl_file, "{}", serde_json::to_string(&user).unwrap()).unwrap();
@@ -173,7 +168,9 @@ mod tests {
             other => panic!("expected user message, got {other:?}"),
         }
         match &entries[1].entry {
-            SessionEntry::Extension { extension, kind, .. } => {
+            SessionEntry::Extension {
+                extension, kind, ..
+            } => {
                 assert_eq!(extension, "test");
                 assert_eq!(kind, "marker");
             }

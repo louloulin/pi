@@ -227,7 +227,9 @@ impl SessionWriter {
     pub fn checkpoint(&self) -> Result<usize> {
         let committed = self.commit()?;
         let inner = self.inner.lock();
-        inner.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        inner
+            .conn
+            .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
         Ok(committed)
     }
 
@@ -242,7 +244,9 @@ fn classify(entry: &SessionEntry, current_session: Option<&str>) -> Result<Class
     let (type_, ts_value): (String, i64) = match entry {
         SessionEntry::Header { .. } => ("header".to_string(), schema::now_millis()),
         SessionEntry::UserMessage(msg) => ("user_message".to_string(), msg_ts(msg)),
-        SessionEntry::AssistantMessage(msg) => ("assistant_message".to_string(), msg_ts_assistant(msg)),
+        SessionEntry::AssistantMessage(msg) => {
+            ("assistant_message".to_string(), msg_ts_assistant(msg))
+        }
         SessionEntry::ToolCall(_call) => (
             "tool_call".to_string(),
             chrono::Utc::now().timestamp_millis(),
@@ -251,10 +255,14 @@ fn classify(entry: &SessionEntry, current_session: Option<&str>) -> Result<Class
             "tool_result".to_string(),
             chrono::Utc::now().timestamp_millis(),
         ),
-        SessionEntry::Extension { .. } => ("extension".to_string(), chrono::Utc::now().timestamp_millis()),
-        SessionEntry::Compaction { .. } => {
-            ("compaction".to_string(), chrono::Utc::now().timestamp_millis())
-        }
+        SessionEntry::Extension { .. } => (
+            "extension".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        ),
+        SessionEntry::Compaction { .. } => (
+            "compaction".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        ),
     };
     let session_id = match entry {
         SessionEntry::Header { id, .. } => id.clone(),
@@ -275,7 +283,8 @@ fn msg_ts_assistant(_msg: &pi_protocol::AssistantMessage) -> i64 {
 
 fn encode_payload(entry: &SessionEntry) -> Result<Vec<u8>> {
     let json = serde_json::to_vec(entry)?;
-    let compressed = zstd::encode_all(json.as_slice(), ZSTD_LEVEL).map_err(|e| SessionError::Zstd(e.to_string()))?;
+    let compressed = zstd::encode_all(json.as_slice(), ZSTD_LEVEL)
+        .map_err(|e| SessionError::Zstd(e.to_string()))?;
     Ok(compressed)
 }
 

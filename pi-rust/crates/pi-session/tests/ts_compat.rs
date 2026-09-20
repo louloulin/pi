@@ -34,7 +34,10 @@ fn fixture_reads_with_matching_schema_version() {
     // still aligned with the Rust reader. Both sides bumped in lock-step.
     assert_eq!(SCHEMA_VERSION, 1);
     let reader = open_fixture();
-    assert_eq!(reader.path().file_name().and_then(|s| s.to_str()), Some("ts_recorded.sqlite"));
+    assert_eq!(
+        reader.path().file_name().and_then(|s| s.to_str()),
+        Some("ts_recorded.sqlite")
+    );
 }
 
 #[test]
@@ -46,7 +49,10 @@ fn fixture_session_header_round_trips() {
         cwd,
         created_at,
         ..
-    } = reader.session_header().expect("header").expect("has header");
+    } = reader
+        .session_header()
+        .expect("header")
+        .expect("has header");
     assert_eq!(id, "ts-recorded-fixture");
     assert_eq!(version.as_deref(), Some("0.85.1-fixture"));
     assert_eq!(cwd.as_deref(), Some("/home/example"));
@@ -157,9 +163,7 @@ fn fixture_extra_message_shape() {
     // in pi_protocol::Message between the writer and the reader.
     let expected = Message {
         role: Role::User,
-        content: vec![Content::Text(TextContent {
-            text: "x".into(),
-        })],
+        content: vec![Content::Text(TextContent { text: "x".into() })],
         model: None,
     };
     let json = serde_json::to_string(&SessionEntry::UserMessage(expected.clone())).unwrap();

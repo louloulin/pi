@@ -58,7 +58,9 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
         .append(SessionEntry::UserMessage(user_message("hello pi")))
         .expect("user message");
     writer
-        .append(SessionEntry::AssistantMessage(assistant_message("hi, human")))
+        .append(SessionEntry::AssistantMessage(assistant_message(
+            "hi, human",
+        )))
         .expect("assistant message");
     writer
         .append(SessionEntry::ToolCall(ToolCall {
@@ -86,7 +88,10 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
     writer.checkpoint().expect("checkpoint");
 
     let reader = SessionReader::open(&path).expect("open reader");
-    let header = reader.session_header().expect("header").expect("has header");
+    let header = reader
+        .session_header()
+        .expect("header")
+        .expect("has header");
     assert_eq!(header.id, "abc");
     assert_eq!(header.version.as_deref(), Some("0.1.0"));
 
@@ -132,7 +137,11 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
         other => panic!("expected tool result, got {other:?}"),
     }
     match &entries[4].entry {
-        SessionEntry::Extension { extension, kind, payload } => {
+        SessionEntry::Extension {
+            extension,
+            kind,
+            payload,
+        } => {
             assert_eq!(extension, "demo");
             assert_eq!(kind, "marker");
             assert_eq!(payload["k"], 1);
@@ -195,7 +204,10 @@ fn round_trip_compaction_entry() {
             assert_eq!(retained_tail.len(), 1);
             assert_eq!(retained_tail[0].role, Role::Assistant);
             assert_eq!(usage.expect("usage").input, 100);
-            assert_eq!(details.as_ref().expect("details")["readFiles"][0], "src/lib.rs");
+            assert_eq!(
+                details.as_ref().expect("details")["readFiles"][0],
+                "src/lib.rs"
+            );
         }
         other => panic!("expected compaction entry, got {other:?}"),
     }
@@ -261,7 +273,10 @@ fn corrupt_db_returns_session_error_corrupt() {
 
     let err = SessionReader::open(&path).unwrap_err();
     assert!(
-        matches!(err, pi_session::SessionError::Corrupt(_) | pi_session::SessionError::Sqlite(_)),
+        matches!(
+            err,
+            pi_session::SessionError::Corrupt(_) | pi_session::SessionError::Sqlite(_)
+        ),
         "expected Corrupt or Sqlite error, got {err:?}"
     );
 }
