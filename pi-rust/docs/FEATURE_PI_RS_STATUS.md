@@ -14598,7 +14598,7 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
 
 ### 五、frontier（本轮后）
 
-1. **Stage 58（建议，最高优先）**：工具输出折叠 + `app.tools.expand`（ctrl+o）+ 点击工具块展开 + 启动头可展开。零件已在仓库里（`crates/pi-coding-agent/src/tools/render.rs` 2,269 行富渲染器目前只被 print / 导出使用），缺口是接线与坐标系更新。
+1. **Stage 58（已新建停放 = LUM-1214，`backlog`）**：工具输出折叠 + `app.tools.expand`（ctrl+o）+ 点击工具块展开 + 启动头可展开。零件已在仓库里（`crates/pi-coding-agent/src/tools/render.rs` 2,269 行富渲染器目前只被 print / 导出使用），缺口是接线与坐标系更新。因槽位 3/3 已满，本轮只建 `backlog` 不启动，留待下一轮按槽位释放情况晋升。
 2. **Stage 59**：补齐 `app.*` 第 1 批（`app.thinking.toggle`、`app.editor.external`、`app.session.new/tree/fork/resume`）；`/tree`、`/fork` 依赖 LUM-1209 的 `pi-session` 写路径。
 3. **Stage 60**：会话命令补齐（`/new`、`/copy`、`/name`、`/tree`、`/fork`）；`/login`、`/logout` 涉及凭据，单独评估。
 4. **`/hotkeys` 的诚实性约束**：它只列已实现的动作。每接一个 `app.*`，必须同步更新 `slash.rs:152` 的分组表，否则会出现「文档里有的键按下去没反应」——这是本轮特意选择的取舍（宁缺毋假）。
