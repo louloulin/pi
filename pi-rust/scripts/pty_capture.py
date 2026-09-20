@@ -41,12 +41,21 @@ Scenario file schema (JSON):
 Every panel is fed into the *same* process, so panels are cumulative
 frames of one interactive session. `skip_capture` drives the UI without
 emitting a panel (useful for intermediate keystrokes).
+
+Every emitted panel is rendered from a **frozen copy of the terminal at
+that panel's moment**, not from the emulator's final state, and the
+harness prints a per-panel frame hash. Set `"distinct_panels": true` to
+turn "two adjacent panels are byte-identical" into a hard failure; the
+harness then exits non-zero instead of shipping a collage whose captions
+claim interaction the images do not show.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
+import hashlib
 import json
 import os
 import pty
@@ -203,6 +212,29 @@ class Renderer:
         self.caption_h = 26 * 1
         self.caption_font = load_font(13 * 1)
 
+    def sheet(
+        self, images: list[Image.Image], columns: int = 2, max_width: int = 2400
+    ) -> Image.Image:
+        """Tile equal-sized panels into a grid, downscaled to a readable width.
+
+        A 17-panel vertical collage is ~11k px tall and awkward to view; the
+        sheet keeps the same panels in a grid at a width a human can actually
+        scan. Downscale is integer, so glyphs stay crisp.
+        """
+        cols = max(1, columns)
+        width, height = images[0].size
+        factor = 1
+        while (cols * width) // factor > max_width and factor < 8:
+            factor += 1
+        if factor > 1:
+            width, height = width // factor, height // factor
+            images = [img.resize((width, height), Image.LANCZOS) for img in images]
+        rows = (len(images) + cols - 1) // cols
+        out = Image.new("RGB", (width * cols, height * rows), (10, 10, 12))
+        for index, img in enumerate(images):
+            out.paste(img, ((index % cols) * width, (index // cols) * height))
+        return out
+
     def render_panel(self, screen, caption: str) -> Image.Image:
         cols = screen.columns
         rows = screen.lines
@@ -352,6 +384,38 @@ def snapshot(screen) -> str:
     return body
 
 
+def child_alive(pid) -> bool:
+    """Has the app process already exited? Reaps it if so.
+
+    A panel that claims "the UI is still up" is only worth something if the
+    process is provably still up, so every frame records this.
+    """
+    if pid in _REAPED:
+        return False
+    try:
+        wpid, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        _REAPED[pid] = 0
+        return False
+    if wpid == 0:
+        return True
+    _REAPED[pid] = status
+    return False
+
+
+def reap(pid) -> None:
+    """Best-effort final reap that tolerates an already-reaped child."""
+    if pid in _REAPED or child_alive(pid) is False:
+        return
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+_REAPED = {}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bin", required=True, help="path to the built `pi` binary")
@@ -363,6 +427,18 @@ def main() -> int:
     ap.add_argument("--keep-temp", action="store_true")
     ap.add_argument("--font-size", type=int, default=15)
     ap.add_argument("--scale", type=int, default=2)
+    ap.add_argument(
+        "--sheet",
+        type=int,
+        default=0,
+        help="tile the panels into N columns instead of one tall column",
+    )
+    ap.add_argument(
+        "--sheet-width",
+        type=int,
+        default=2400,
+        help="target width in px for --sheet (panels are downscaled to fit)",
+    )
     args = ap.parse_args()
 
     with open(args.steps, encoding="utf-8") as fh:
@@ -423,7 +499,20 @@ def main() -> int:
             label = panel.get("label") or f"panel {index}"
             caption = scenario.get("caption", "") or ""
             head = f"[{index}] {label}" if not caption else f"{caption}  |  [{index}] {label}"
-            cards.append((head, snapshot(screen), screen.cursor.x, screen.cursor.y))
+            # Freeze this panel's terminal state. The emulator keeps mutating
+            # as later keys arrive, so rendering `screen` after the loop would
+            # paint every panel with the *last* frame (the bug this fixes).
+            frame = copy.deepcopy(screen)
+            cards.append(
+                (
+                    head,
+                    snapshot(frame),
+                    frame,
+                    frame.cursor.x,
+                    frame.cursor.y,
+                    child_alive(pid),
+                )
+            )
     finally:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -434,27 +523,76 @@ def main() -> int:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        os.waitpid(pid, 0)
+        reap(pid)
         os.close(master)
         if not args.keep_temp:
             shutil.rmtree(home, ignore_errors=True)
             shutil.rmtree(cwd, ignore_errors=True)
 
     renderer = Renderer(font_size=args.font_size, scale=args.scale)
-    images = [renderer.render_panel(screen, head) for head, _, _, _ in cards]
+    images = [renderer.render_panel(frame, head) for head, _, frame, _, _, _ in cards]
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    renderer.stack(images).save(args.out)
+    composite = (
+        renderer.sheet(images, args.sheet, args.sheet_width) if args.sheet else renderer.stack(images)
+    )
+    composite.save(args.out)
+
+    # Frame provenance: hash each panel's frozen grid and its rendered pixels,
+    # so a reader can tell a real multi-frame collage from one frame repeated.
+    hashes = [hashlib.sha256(body.encode("utf-8")).hexdigest()[:12] for _, body, _, _, _, _ in cards]
+    pix = [hashlib.sha256(img.tobytes()).hexdigest()[:12] for img in images]
+    duplicates = [
+        i
+        for i in range(1, len(hashes))
+        if hashes[i] == hashes[i - 1] or pix[i] == pix[i - 1]
+    ]
 
     text_out = args.text_out or (args.out + ".txt")
     with open(text_out, "w", encoding="utf-8") as fh:
         fh.write(f"# {os.path.basename(args.out)} — chars, {cols}x{rows} cells\n")
-        for head, body, cx, cy in cards:
-            fh.write(f"\n===== {head}  (cursor {cx},{cy}) =====\n{body}\n")
+        for i, (head, body, _, cx, cy, alive) in enumerate(cards):
+            fh.write(
+                f"\n===== {head}  (cursor {cx},{cy}, frame {hashes[i]}, px {pix[i]}, "
+                f"alive={alive}) =====\n{body}\n"
+            )
 
     print(f"wrote {args.out}")
     print(f"wrote {text_out}")
-    for head, body, cx, cy in cards:
-        print(f"--- {head} (cursor {cx},{cy}) ---")
+    for i, (head, body, _, cx, cy, alive) in enumerate(cards, start=1):
+        print(
+            f"frame {i:2d}  {hashes[i - 1]}  px {pix[i - 1]}  "
+            f"alive={str(alive):5s} {head}"
+        )
+    # A repeat that is not adjacent is usually legitimate (two panels can end
+    # in the same terminal state), but it is worth naming so a reader can see
+    # exactly which captions share a grid instead of assuming every caption
+    # implies a distinct frame.
+    seen: dict[str, int] = {}
+    for idx, digest in enumerate(hashes, start=1):
+        if digest in seen:
+            print(
+                f"WARN: panel {idx} renders the same grid as panel {seen[digest]} "
+                "(not adjacent; check whether the captions really claim two states)"
+            )
+        else:
+            seen[digest] = idx
+
+    if duplicates:
+        panels = ", ".join(str(i + 1) for i in duplicates)
+        message = (
+            f"{'FAIL' if scenario.get('distinct_panels') else 'WARN'}: panel(s) "
+            f"[{panels}] are byte-identical to the previous panel — the caption "
+            f"claims a state change the frame does not show"
+        )
+        print(message, file=sys.stderr)
+        if scenario.get("distinct_panels"):
+            print("wrote the PNG anyway; refusing to report success", file=sys.stderr)
+            for i, (head, body, _, cx, cy, alive) in enumerate(cards, start=1):
+                print(f"--- {head} (cursor {cx},{cy}, alive={alive}) ---")
+                print(body)
+            return 1
+    for head, body, _, cx, cy, alive in cards:
+        print(f"--- {head} (cursor {cx},{cy}, alive={alive}) ---")
         print(body)
     return 0
 
