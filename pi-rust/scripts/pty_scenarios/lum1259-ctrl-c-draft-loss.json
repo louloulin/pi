@@ -1,0 +1,24 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1259 tip 4b187b418 — §12.4 item 1: a single Ctrl+C with a non-empty composer still exits",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs"],
+  "panels": [
+    {
+      "label": "1. startup frame after a no-op repaint",
+      "send": "<C-u>",
+      "wait": 3.0
+    },
+    {
+      "label": "2. a real draft is in the composer",
+      "send": "this draft must not be lost",
+      "wait": 0.8
+    },
+    {
+      "label": "3. one Ctrl+C -> process already gone (no 500ms double-press window), screen restored, draft lost",
+      "send": "<C-c>",
+      "wait": 1.5
+    }
+  ]
+}
