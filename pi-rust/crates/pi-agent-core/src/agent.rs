@@ -65,10 +65,7 @@ impl std::fmt::Debug for AgentOptions {
                 "prepare_next_turn",
                 &self.prepare_next_turn.as_ref().map(|_| "…"),
             )
-            .field(
-                "tool_executor",
-                &self.tool_executor.as_ref().map(|_| "…"),
-            )
+            .field("tool_executor", &self.tool_executor.as_ref().map(|_| "…"))
             .field("tool_execution", &self.tool_execution)
             .field("telemetry", &self.telemetry.as_ref().map(|_| "…"))
             .field("retry", &self.retry)

@@ -347,7 +347,10 @@ async fn tool_error_is_marked_and_loop_continues() {
     assert_eq!(executor.call_names(), vec!["explode", "alpha"]);
     let results = tool_results(&agent);
     assert_eq!(results.len(), 2);
-    assert!(results[0].is_error, "the failing tool is marked as an error");
+    assert!(
+        results[0].is_error,
+        "the failing tool is marked as an error"
+    );
     assert_eq!(result_text(&results[0]), "mock failure");
     assert!(!results[1].is_error);
     assert_eq!(
@@ -387,7 +390,11 @@ async fn missing_executor_keeps_stub_behaviour() {
         tool_call_message(&[("alpha", "call-a")]),
         text_reply("done"),
     ]));
-    let mut agent = Agent::new(AgentOptions::new(faux_model(), stream.clone(), "you are pi"));
+    let mut agent = Agent::new(AgentOptions::new(
+        faux_model(),
+        stream.clone(),
+        "you are pi",
+    ));
 
     agent
         .loop_mut()
