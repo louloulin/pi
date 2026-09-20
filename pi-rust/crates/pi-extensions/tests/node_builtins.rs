@@ -1026,3 +1026,198 @@ fn upstream_node_imports_are_all_bridged_or_documented() {
         "expected several node builtins in the upstream examples, found {upstream:?}"
     );
 }
+
+/// The WHATWG `URL` global (LUM-1177): the whole reason it exists is the
+/// upstream `custom-provider-gitlab-duo` example, whose OAuth callback is
+/// read with `new URL(callbackUrl).searchParams.get("code")`. The probe
+/// covers that exact shape plus the parser, resolver, serializer and
+/// mutators an extension is likely to touch.
+#[test]
+fn node_url_global_parses_resolves_serializes_and_mutates() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+
+        host.load(
+            entry_at("url_probe", "/tmp/pi_node_builtins/url_probe.mjs"),
+            r##"
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "url_probe",
+                        label: "url probe",
+                        description: "exercises the URL global",
+                        parameters: { type: "object" },
+                        execute: () => {
+                            const parsed = new URL("https://user:pass@Example.COM:8443/a/b/../c?x=1&y=2#frag");
+                            const callback = new URL(
+                                "/oauth/callback?code=abc&state=xyz",
+                                "https://gitlab.example.com/oauth/authorize",
+                            );
+                            const resolved = new URL("sub/page", "https://h/a/b");
+                            const up = new URL("../up", "https://h/a/b/");
+                            const queryOnly = new URL("?only=1", "https://h/a/b?old=2#f");
+                            const fragmentOnly = new URL("#only", "https://h/a/b?q=1");
+                            const opaque = new URL("mailto:someone@example.com?subject=hi%20there");
+                            const encoded = new URL("https://h/a b?q=a b#c d");
+                            const defaultPort = new URL("https://h:443/p");
+
+                            const mutated = new URL("https://h/p?x=1");
+                            mutated.searchParams.set("x", "2");
+                            mutated.searchParams.append("y", "3");
+                            mutated.pathname = "/other";
+                            mutated.hash = "frag";
+
+                            const removed = new URL("https://h/p?x=1");
+                            removed.searchParams.delete("x");
+
+                            let invalid = null;
+                            try { new URL("not a url"); } catch (err) { invalid = err.name; }
+                            let badPort = null;
+                            try { new URL("https://h:abc/"); } catch (err) { badPort = err.name; }
+
+                            return {
+                                content: [{ type: "text", text: "url probe" }],
+                                details: {
+                                    parsed: {
+                                        href: parsed.href,
+                                        origin: parsed.origin,
+                                        protocol: parsed.protocol,
+                                        username: parsed.username,
+                                        password: parsed.password,
+                                        host: parsed.host,
+                                        hostname: parsed.hostname,
+                                        port: parsed.port,
+                                        pathname: parsed.pathname,
+                                        search: parsed.search,
+                                        hash: parsed.hash,
+                                        hasCode: callback.searchParams.has("code"),
+                                        code: callback.searchParams.get("code"),
+                                    },
+                                    callbackHref: callback.href,
+                                    resolvedHref: resolved.href,
+                                    upHref: up.href,
+                                    queryOnlyHref: queryOnly.href,
+                                    queryOnlyPathname: queryOnly.pathname,
+                                    queryOnlySearch: queryOnly.search,
+                                    fragmentOnlyHref: fragmentOnly.href,
+                                    fragmentOnlyHash: fragmentOnly.hash,
+                                    opaque: {
+                                        href: opaque.href,
+                                        protocol: opaque.protocol,
+                                        pathname: opaque.pathname,
+                                        search: opaque.search,
+                                        host: opaque.host,
+                                        origin: opaque.origin,
+                                    },
+                                    encoded: {
+                                        pathname: encoded.pathname,
+                                        search: encoded.search,
+                                        hash: encoded.hash,
+                                    },
+                                    defaultPort: {
+                                        port: defaultPort.port,
+                                        host: defaultPort.host,
+                                        href: defaultPort.href,
+                                    },
+                                    mutatedHref: mutated.href,
+                                    mutatedSearch: mutated.search,
+                                    removedHref: removed.href,
+                                    removedSearch: removed.search,
+                                    invalid,
+                                    badPort,
+                                    isURL: parsed instanceof URL,
+                                    canParse: [URL.canParse("https://h/x"), URL.canParse("x"), URL.canParse("/x", "https://h")],
+                                    staticParse: URL.parse("https://h/x").href,
+                                    staticParseNull: URL.parse("nope") === null,
+                                    json: JSON.parse(JSON.stringify(mutated)),
+                                    toStringTag: Object.prototype.toString.call(parsed),
+                                },
+                            };
+                        },
+                    });
+                }
+            "##,
+        )
+        .await
+        .expect("load url probe extension");
+
+        let outcome = host
+            .execute_tool("url_probe", &json!({}).to_string())
+            .await
+            .expect("execute url probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(
+            details["parsed"]["href"],
+            "https://user:pass@example.com:8443/a/c?x=1&y=2#frag",
+            "{details}"
+        );
+        assert_eq!(details["parsed"]["origin"], "https://example.com:8443", "{details}");
+        assert_eq!(details["parsed"]["protocol"], "https:", "{details}");
+        assert_eq!(details["parsed"]["username"], "user", "{details}");
+        assert_eq!(details["parsed"]["password"], "pass", "{details}");
+        assert_eq!(details["parsed"]["host"], "example.com:8443", "{details}");
+        assert_eq!(details["parsed"]["hostname"], "example.com", "{details}");
+        assert_eq!(details["parsed"]["port"], "8443", "{details}");
+        assert_eq!(details["parsed"]["pathname"], "/a/c", "{details}");
+        assert_eq!(details["parsed"]["search"], "?x=1&y=2", "{details}");
+        assert_eq!(details["parsed"]["hash"], "#frag", "{details}");
+
+        // The blocked example's exact shape.
+        assert_eq!(details["parsed"]["hasCode"], true, "{details}");
+        assert_eq!(details["parsed"]["code"], "abc", "{details}");
+        assert_eq!(
+            details["callbackHref"],
+            "https://gitlab.example.com/oauth/callback?code=abc&state=xyz",
+            "{details}"
+        );
+
+        // Relative resolution.
+        assert_eq!(details["resolvedHref"], "https://h/a/sub/page", "{details}");
+        assert_eq!(details["upHref"], "https://h/a/up", "{details}");
+        assert_eq!(details["queryOnlyHref"], "https://h/a/b?only=1", "{details}");
+        assert_eq!(details["queryOnlyPathname"], "/a/b", "{details}");
+        assert_eq!(details["queryOnlySearch"], "?only=1", "{details}");
+        assert_eq!(details["fragmentOnlyHref"], "https://h/a/b?q=1#only", "{details}");
+        assert_eq!(details["fragmentOnlyHash"], "#only", "{details}");
+
+        // Opaque (non-special) schemes keep their path verbatim and have no
+        // authority / origin.
+        assert_eq!(
+            details["opaque"]["href"],
+            "mailto:someone@example.com?subject=hi%20there",
+            "{details}"
+        );
+        assert_eq!(details["opaque"]["protocol"], "mailto:", "{details}");
+        assert_eq!(details["opaque"]["pathname"], "someone@example.com", "{details}");
+        assert_eq!(details["opaque"]["search"], "?subject=hi%20there", "{details}");
+        assert_eq!(details["opaque"]["host"], "", "{details}");
+        assert_eq!(details["opaque"]["origin"], "null", "{details}");
+
+        // Percent-encoding per component.
+        assert_eq!(details["encoded"]["pathname"], "/a%20b", "{details}");
+        assert_eq!(details["encoded"]["search"], "?q=a%20b", "{details}");
+        assert_eq!(details["encoded"]["hash"], "#c%20d", "{details}");
+
+        // A default port is dropped from the serialization.
+        assert_eq!(details["defaultPort"]["port"], "", "{details}");
+        assert_eq!(details["defaultPort"]["host"], "h", "{details}");
+        assert_eq!(details["defaultPort"]["href"], "https://h/p", "{details}");
+
+        // `searchParams` is live, and the other setters round-trip.
+        assert_eq!(details["mutatedHref"], "https://h/other?x=2&y=3#frag", "{details}");
+        assert_eq!(details["mutatedSearch"], "?x=2&y=3", "{details}");
+        assert_eq!(details["removedHref"], "https://h/p", "{details}");
+        assert_eq!(details["removedSearch"], "", "{details}");
+
+        assert_eq!(details["invalid"], "TypeError", "{details}");
+        assert_eq!(details["badPort"], "TypeError", "{details}");
+        assert_eq!(details["isURL"], true, "{details}");
+        assert_eq!(details["canParse"], json!([true, false, true]), "{details}");
+        assert_eq!(details["staticParse"], "https://h/x", "{details}");
+        assert_eq!(details["staticParseNull"], true, "{details}");
+        assert_eq!(details["json"], "https://h/other?x=2&y=3#frag", "{details}");
+        assert_eq!(details["toStringTag"], "[object URL]", "{details}");
+    });
+}

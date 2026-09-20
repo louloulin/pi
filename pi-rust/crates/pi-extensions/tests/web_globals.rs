@@ -1,5 +1,7 @@
 //! Web platform globals in the extension host — `atob` / `btoa` /
-//! `crypto` (WebCrypto subset) / `URLSearchParams`.
+//! `crypto` (WebCrypto subset) / `URLSearchParams`. (`URL` is the fourth
+//! sibling global, but its probe lives with the builtin-surface tests in
+//! `tests/node_builtins.rs` because the frontier table there names it.)
 //!
 //! QuickJS ships none of them, but upstream extensions treat them as
 //! ambient: `packages/coding-agent/examples/extensions/custom-provider-anthropic/index.ts`

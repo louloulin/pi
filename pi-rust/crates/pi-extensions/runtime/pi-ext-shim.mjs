@@ -7510,6 +7510,514 @@ if (typeof globalThis.process === "undefined") {
   if (typeof globalThis.URLSearchParams === "undefined") {
     globalThis.URLSearchParams = URLSearchParamsPolyfill;
   }
+
+  // -- URL ------------------------------------------------------------------
+  //
+  // QuickJS has no WHATWG URL parser and upstream extensions treat `URL` as
+  // ambient: `packages/coding-agent/examples/extensions/custom-provider-gitlab-duo/`
+  // reads its OAuth callback with `new URL(callbackUrl).searchParams.get("code")`.
+  // This is a concentrated port of the URL Standard's parser / serializer /
+  // resolver for the four special schemes (`http` / `https` / `ws` / `wss`),
+  // `ftp` / `file`, and opaque (non-special) schemes such as `mailto:`.
+  // Divergences are recorded in `docs/NODE_BUILTINS.md`.
+
+  const SPECIAL_PORTS = {
+    ftp: 21,
+    file: null,
+    http: 80,
+    https: 443,
+    ws: 80,
+    wss: 443,
+  };
+  const SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.\-]*):/;
+
+  // The URL Standard's percent-encode sets: each string lists the characters
+  // the set adds on top of the C0 controls and everything above 0x7E, which
+  // are always encoded. `%` is *not* in any of them, so an existing escape
+  // survives a re-encode untouched.
+  const FRAGMENT_EXTRA = ' "<>`';
+  const QUERY_EXTRA = ' "#<>';
+  const SPECIAL_QUERY_EXTRA = QUERY_EXTRA + "'";
+  const PATH_EXTRA = QUERY_EXTRA + "?`{}";
+  const USERINFO_EXTRA = PATH_EXTRA + "/:;=@[\\]^|";
+
+  function urlEncode(text, extra) {
+    let out = "";
+    for (const byte of encoder.encode(String(text))) {
+      if (byte < 0x20 || byte > 0x7e || extra.indexOf(String.fromCharCode(byte)) >= 0) {
+        out += "%" + byte.toString(16).toUpperCase().padStart(2, "0");
+      } else {
+        out += String.fromCharCode(byte);
+      }
+    }
+    return out;
+  }
+
+  function isSpecialScheme(scheme) {
+    return Object.prototype.hasOwnProperty.call(SPECIAL_PORTS, scheme);
+  }
+
+  function indexOfFirst(text, characters) {
+    for (let index = 0; index < text.length; index++) {
+      if (characters.indexOf(text[index]) >= 0) return index;
+    }
+    return -1;
+  }
+
+  function canonicalPort(scheme, port) {
+    if (port === null || port === "" || !/^[0-9]+$/.test(port)) return null;
+    const number = parseInt(port, 10);
+    const fallback = SPECIAL_PORTS[scheme];
+    if (typeof fallback === "number" && number === fallback) return null;
+    return String(number);
+  }
+
+  /** The standard's "remove leading/trailing C0 control or space" plus the
+   *  tab/newline strip that precedes it. */
+  function stripControlAndSpaces(input) {
+    return String(input)
+      .replace(/[\t\n\r]/g, "")
+      .replace(/^[\u0000-\u0020]+/, "")
+      .replace(/[\u0000-\u0020]+$/, "");
+  }
+
+  /** Dot-segment removal + percent-encoding, producing a hierarchical path
+   *  (`pathname`) that always starts with `/`. */
+  function normalizePath(text) {
+    const segments = String(text).split("/");
+    const out = [];
+    for (const segment of segments) {
+      if (segment === ".") continue;
+      if (segment === "..") {
+        if (out.length > 0) out.pop();
+        continue;
+      }
+      out.push(segment);
+    }
+    // A trailing `.` / `..` collapses to a trailing slash, as the standard's
+    // "shorten a URL's path" leaves one behind.
+    const last = segments[segments.length - 1];
+    if (last === "." || last === "..") out.push("");
+    let path = out.map((segment) => urlEncode(segment, PATH_EXTRA)).join("/");
+    if (path === "" || path[0] !== "/") path = "/" + path;
+    return path;
+  }
+
+  function cloneRecord(record) {
+    return {
+      scheme: record.scheme,
+      username: record.username,
+      password: record.password,
+      host: record.host,
+      port: record.port,
+      path: record.path,
+      query: record.query,
+      fragment: record.fragment,
+    };
+  }
+
+  function newRecord(scheme) {
+    return {
+      scheme: scheme,
+      username: "",
+      password: "",
+      host: null,
+      port: null,
+      path: "",
+      query: null,
+      fragment: null,
+    };
+  }
+
+  /** Parse `[userinfo@]host[:port]`. Returns `false` for a malformed
+   *  authority (the caller turns that into `new URL` throwing). */
+  function parseAuthority(record, authority, special) {
+    let userinfo = "";
+    let hostport = authority;
+    const at = authority.lastIndexOf("@");
+    if (at >= 0) {
+      userinfo = authority.slice(0, at);
+      hostport = authority.slice(at + 1);
+    }
+    if (userinfo !== "") {
+      const colon = userinfo.indexOf(":");
+      const user = colon < 0 ? userinfo : userinfo.slice(0, colon);
+      const password = colon < 0 ? "" : userinfo.slice(colon + 1);
+      record.username = urlEncode(user, USERINFO_EXTRA);
+      record.password = urlEncode(password, USERINFO_EXTRA);
+    }
+    if (hostport.startsWith("[")) {
+      const close = hostport.indexOf("]");
+      if (close < 0) return false;
+      record.host = hostport.slice(0, close + 1).toLowerCase();
+      const trailing = hostport.slice(close + 1);
+      if (trailing === "") {
+        record.port = null;
+      } else if (trailing.startsWith(":")) {
+        const portText = trailing.slice(1);
+        if (portText !== "" && !/^[0-9]+$/.test(portText)) return false;
+        record.port = canonicalPort(record.scheme, portText);
+      } else {
+        return false;
+      }
+      return true;
+    }
+    let host = hostport;
+    let port = null;
+    const colon = hostport.lastIndexOf(":");
+    if (colon >= 0) {
+      host = hostport.slice(0, colon);
+      const portText = hostport.slice(colon + 1);
+      // A default port canonicalizes to `null` while still being valid, so
+      // reject on the text, not on the canonical result.
+      if (portText !== "" && !/^[0-9]+$/.test(portText)) return false;
+      port = canonicalPort(record.scheme, portText);
+    }
+    void special;
+    record.host = host.toLowerCase();
+    record.port = port;
+    return true;
+  }
+
+  /** Split a `path[?query][#fragment]` tail and write it into `record`; an
+   *  empty path leaves the inherited path in place (the `?q` / `#f` cases of
+   *  relative resolution). */
+  function applyTail(record, text, special) {
+    let rest = String(text);
+    let fragment = null;
+    const hashIndex = rest.indexOf("#");
+    if (hashIndex >= 0) {
+      fragment = rest.slice(hashIndex + 1);
+      rest = rest.slice(0, hashIndex);
+    }
+    let query = null;
+    let hasQuery = false;
+    const queryIndex = rest.indexOf("?");
+    if (queryIndex >= 0) {
+      query = rest.slice(queryIndex + 1);
+      rest = rest.slice(0, queryIndex);
+      hasQuery = true;
+    }
+    if (rest !== "") {
+      const pathText = special ? rest.split("\\").join("/") : rest;
+      record.path = normalizePath(pathText);
+    }
+    if (hasQuery) {
+      record.query = urlEncode(query, special ? SPECIAL_QUERY_EXTRA : QUERY_EXTRA);
+    }
+    record.fragment = fragment === null ? null : urlEncode(fragment, FRAGMENT_EXTRA);
+    return record;
+  }
+
+  function resolveRelative(base, reference) {
+    const special = isSpecialScheme(base.scheme);
+    const text = String(reference);
+    if (text.startsWith("//")) {
+      const after = text.slice(2);
+      const cut = indexOfFirst(after, special ? "/?#\\" : "/?#");
+      const record = newRecord(base.scheme);
+      record.path = "/";
+      parseAuthority(record, cut < 0 ? after : after.slice(0, cut), special);
+      return applyTail(record, cut < 0 ? "" : after.slice(cut), special);
+    }
+    if (text.startsWith("?")) {
+      const record = cloneRecord(base);
+      record.query = null;
+      record.fragment = null;
+      return applyTail(record, text, special);
+    }
+    if (text.startsWith("#")) {
+      // A fragment-only reference keeps the base query intact.
+      const record = cloneRecord(base);
+      record.fragment = null;
+      return applyTail(record, text, special);
+    }
+    const record = cloneRecord(base);
+    record.query = null;
+    record.fragment = null;
+    let tail = text;
+    if (!(tail.startsWith("/") || (special && tail.startsWith("\\")))) {
+      const slash = base.path.lastIndexOf("/");
+      tail = (slash < 0 ? "/" : base.path.slice(0, slash + 1)) + tail;
+    }
+    return applyTail(record, tail, special);
+  }
+
+  function parseWithScheme(scheme, rest) {
+    const special = isSpecialScheme(scheme);
+    const record = newRecord(scheme);
+    let hasAuthority = false;
+    let remainder = rest;
+    if (rest.startsWith("//")) {
+      hasAuthority = true;
+      const after = rest.slice(2);
+      const cut = indexOfFirst(after, special ? "/?#\\" : "/?#");
+      if (!parseAuthority(record, cut < 0 ? after : after.slice(0, cut), special)) return null;
+      remainder = cut < 0 ? "" : after.slice(cut);
+    } else if (special) {
+      // The standard tolerates a missing `//` for special schemes
+      // (`http:example.com/p`): skip the separator run and still parse an
+      // authority.
+      hasAuthority = true;
+      const after = rest.replace(/^[\\/]+/, "");
+      const cut = indexOfFirst(after, "/?#\\");
+      if (!parseAuthority(record, cut < 0 ? after : after.slice(0, cut), special)) return null;
+      remainder = cut < 0 ? "" : after.slice(cut);
+    }
+    if (!hasAuthority) {
+      // Opaque path (`mailto:`, `urn:`, a custom scheme).
+      let text = remainder;
+      const hashIndex = text.indexOf("#");
+      if (hashIndex >= 0) {
+        record.fragment = urlEncode(text.slice(hashIndex + 1), FRAGMENT_EXTRA);
+        text = text.slice(0, hashIndex);
+      }
+      const queryIndex = text.indexOf("?");
+      if (queryIndex >= 0) {
+        record.query = urlEncode(text.slice(queryIndex + 1), QUERY_EXTRA);
+        text = text.slice(0, queryIndex);
+      }
+      record.path = urlEncode(text, PATH_EXTRA);
+      return record;
+    }
+    return applyTail(record, remainder, special);
+  }
+
+  function parseUrlRecord(input, base) {
+    const value = stripControlAndSpaces(input);
+    const match = SCHEME_PATTERN.exec(value);
+    if (match) {
+      return parseWithScheme(match[1].toLowerCase(), value.slice(match[0].length));
+    }
+    let baseRecord = null;
+    if (base !== undefined && base !== null) {
+      if (base instanceof URLPolyfill) baseRecord = cloneRecord(base.__record);
+      else if (typeof base === "string" || typeof base === "object") {
+        baseRecord = parseUrlRecord(String(base), null);
+      }
+    }
+    if (baseRecord === null) return null;
+    return resolveRelative(baseRecord, value);
+  }
+
+  function serializeRecord(record) {
+    let out = record.scheme + ":";
+    if (record.host !== null) {
+      out += "//";
+      if (record.username !== "" || record.password !== "") {
+        out += record.username;
+        if (record.password !== "") out += ":" + record.password;
+        out += "@";
+      }
+      out += record.host;
+      if (record.port !== null) out += ":" + record.port;
+    }
+    out += record.path;
+    if (record.query !== null) out += "?" + record.query;
+    if (record.fragment !== null) out += "#" + record.fragment;
+    return out;
+  }
+
+  class URLPolyfill {
+    constructor(input, base) {
+      const record = parseUrlRecord(input, base);
+      if (record === null) throw new TypeError("Invalid URL: " + String(input));
+      this.__record = record;
+      this.__searchParams = null;
+    }
+
+    get href() {
+      return serializeRecord(this.__record);
+    }
+
+    set href(value) {
+      const record = parseUrlRecord(String(value), null);
+      if (record === null) throw new TypeError("Invalid URL: " + String(value));
+      this.__record = record;
+      this.__searchParams = null;
+    }
+
+    get origin() {
+      const record = this.__record;
+      if (!isSpecialScheme(record.scheme) || record.scheme === "file") return "null";
+      let out = record.scheme + "://" + record.host;
+      if (record.port !== null) out += ":" + record.port;
+      return out;
+    }
+
+    get protocol() {
+      return this.__record.scheme + ":";
+    }
+
+    set protocol(value) {
+      const scheme = String(value).replace(/:$/, "").toLowerCase();
+      if (!/^[A-Za-z][A-Za-z0-9+.\-]*$/.test(scheme)) return;
+      // The standard refuses to switch between a special and a non-special
+      // scheme; a same-kind swap is applied and the port re-canonicalized.
+      if (isSpecialScheme(scheme) !== isSpecialScheme(this.__record.scheme)) return;
+      this.__record.scheme = scheme;
+      if (isSpecialScheme(scheme)) {
+        this.__record.port = canonicalPort(scheme, this.__record.port) === null ? null : this.__record.port;
+      }
+    }
+
+    get username() {
+      return this.__record.username;
+    }
+
+    set username(value) {
+      this.__record.username = urlEncode(String(value), USERINFO_EXTRA);
+    }
+
+    get password() {
+      return this.__record.password;
+    }
+
+    set password(value) {
+      this.__record.password = urlEncode(String(value), USERINFO_EXTRA);
+    }
+
+    get host() {
+      const record = this.__record;
+      if (record.host === null) return "";
+      return record.port === null ? record.host : record.host + ":" + record.port;
+    }
+
+    set host(value) {
+      this.__setAuthority(String(value), true);
+    }
+
+    get hostname() {
+      return this.__record.host === null ? "" : this.__record.host;
+    }
+
+    set hostname(value) {
+      this.__setAuthority(String(value), false);
+    }
+
+    __setAuthority(value, replacePort) {
+      const record = this.__record;
+      if (record.host === null) return;
+      if (value === "") {
+        record.host = "";
+        if (replacePort) record.port = null;
+        return;
+      }
+      const probe = newRecord(record.scheme);
+      if (!parseAuthority(probe, value, isSpecialScheme(record.scheme))) return;
+      record.host = probe.host;
+      if (replacePort) record.port = probe.port;
+    }
+
+    get port() {
+      return this.__record.port === null ? "" : this.__record.port;
+    }
+
+    set port(value) {
+      if (this.__record.host === null) return;
+      const text = String(value);
+      if (text === "") {
+        this.__record.port = null;
+        return;
+      }
+      const port = canonicalPort(this.__record.scheme, text);
+      // An invalid port is ignored, matching the standard's setter.
+      if (port === null && !/^[0-9]+$/.test(text)) return;
+      this.__record.port = port;
+    }
+
+    get pathname() {
+      return this.__record.path === "" && this.__record.host !== null ? "/" : this.__record.path;
+    }
+
+    set pathname(value) {
+      const text = String(value);
+      if (this.__record.host === null && !isSpecialScheme(this.__record.scheme)) {
+        this.__record.path = urlEncode(text, PATH_EXTRA);
+        return;
+      }
+      this.__record.path = normalizePath(isSpecialScheme(this.__record.scheme) ? text.split("\\").join("/") : text);
+    }
+
+    get search() {
+      const query = this.__record.query;
+      return query === null || query === "" ? "" : "?" + query;
+    }
+
+    set search(value) {
+      const text = String(value).replace(/^\?/, "");
+      this.__record.query = text === "" ? null : urlEncode(text, isSpecialScheme(this.__record.scheme) ? SPECIAL_QUERY_EXTRA : QUERY_EXTRA);
+      this.__searchParams = null;
+    }
+
+    get searchParams() {
+      if (this.__searchParams === null) this.__searchParams = makeLiveSearchParams(this);
+      return this.__searchParams;
+    }
+
+    get hash() {
+      const fragment = this.__record.fragment;
+      return fragment === null || fragment === "" ? "" : "#" + fragment;
+    }
+
+    set hash(value) {
+      const text = String(value).replace(/^#/, "");
+      this.__record.fragment = text === "" ? null : urlEncode(text, FRAGMENT_EXTRA);
+    }
+
+    toString() {
+      return this.href;
+    }
+
+    toJSON() {
+      return this.href;
+    }
+
+    static canParse(input, base) {
+      try {
+        return parseUrlRecord(input, base) !== null;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    static parse(input, base) {
+      const record = parseUrlRecord(input, base);
+      if (record === null) return null;
+      const url = Object.create(URLPolyfill.prototype);
+      url.__record = record;
+      url.__searchParams = null;
+      return url;
+    }
+  }
+  Object.defineProperty(URLPolyfill.prototype, Symbol.toStringTag, {
+    value: "URL",
+    configurable: true,
+  });
+
+  /** A `URL.searchParams` view that writes every mutation back into the
+   *  record, so `url.searchParams.set("a", "1")` shows up in `url.href`. */
+  function makeLiveSearchParams(url) {
+    const record = url.__record;
+    const params = new URLSearchParamsPolyfill(record.query === null ? "" : record.query);
+    const sync = () => {
+      const text = params.toString();
+      record.query = text === "" ? null : text;
+    };
+    for (const name of ["append", "delete", "set", "sort"]) {
+      const original = params[name];
+      params[name] = function () {
+        const result = original.apply(params, arguments);
+        sync();
+        return result;
+      };
+    }
+    return params;
+  }
+
+  if (typeof globalThis.URL === "undefined") {
+    globalThis.URL = URLPolyfill;
+  }
 })();
 
 // ===========================================================================
