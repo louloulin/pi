@@ -726,7 +726,10 @@ pub fn encode_iterm2(base64_data: &str, options: &Iterm2EncodeOptions) -> String
     }
     if let Some(name) = &options.name {
         if !name.is_empty() {
-            params.push(format!("name={}", crate::clipboard::base64_encode(name.as_bytes())));
+            params.push(format!(
+                "name={}",
+                crate::clipboard::base64_encode(name.as_bytes())
+            ));
         }
     }
     if options.preserve_aspect_ratio == Some(false) {
@@ -891,7 +894,11 @@ fn controls_have_more(controls: &str) -> bool {
 fn get_registered_kitty_image_metadata(line: &str) -> Option<RegisteredKittyImageMetadata> {
     let (_, controls) = find_kitty_control(line)?;
     let image_id = control_image_id(controls)?;
-    kitty_metadata_table().lock().entries.get(&image_id).copied()
+    kitty_metadata_table()
+        .lock()
+        .entries
+        .get(&image_id)
+        .copied()
 }
 
 /// The metadata of the image an image line references.
@@ -986,7 +993,8 @@ pub fn crop_kitty_image_line(line: &str, hidden_rows: u32, visible_rows: u32) ->
     let rows = u64::from(metadata.rows);
     let height_px = u64::from(metadata.height_px);
     let source_y = height_px * u64::from(hidden_rows) / rows;
-    let source_end = (height_px * (u64::from(hidden_rows) + u64::from(cropped_rows))).div_ceil(rows);
+    let source_end =
+        (height_px * (u64::from(hidden_rows) + u64::from(cropped_rows))).div_ceil(rows);
     let source_height = 1.max(height_px.min(source_end).saturating_sub(source_y));
 
     let mut controls: Vec<String> = match_controls
