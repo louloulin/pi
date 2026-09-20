@@ -1771,11 +1771,10 @@ fn host_provider_registration_rejects_stream_simple_without_api() {
         assert!(err.to_string().contains("no `api`"), "{err}");
         assert!(host.registered_providers().is_empty());
         // A rejected registration must not leave a callable handler behind.
-        assert!(
-            host.invoke_provider_stream_simple("no-api-handler", "{}", "{}", "{}")
-                .await
-                .is_err()
-        );
+        assert!(host
+            .invoke_provider_stream_simple("no-api-handler", "{}", "{}", "{}")
+            .await
+            .is_err());
     });
 }
 

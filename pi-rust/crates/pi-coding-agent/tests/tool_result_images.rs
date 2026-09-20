@@ -16,7 +16,7 @@ use pi_coding_agent::tools::{get_text_output, render_lines_plain, ToolOutput, To
 use pi_protocol::{Content, ImageContent, ToolCall, ToolResult};
 use pi_tui::{
     set_capabilities, set_cell_dimensions, CellDimensions, ImageProtocol, TerminalCapabilities,
-    KITTY_PREFIX, ITERM2_PREFIX,
+    ITERM2_PREFIX, KITTY_PREFIX,
 };
 
 /// PNG header carrying 320x240 (same fixture as the `pi-tui` tests).
@@ -39,7 +39,9 @@ fn caps(images: Option<ImageProtocol>) -> TerminalCapabilities {
 
 /// Serialize every case that installs a terminal capability.
 fn capabilities() -> MutexGuard<'static, ()> {
-    CAPABILITIES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    CAPABILITIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn image_content() -> ImageContent {
@@ -108,7 +110,10 @@ fn image_block_renders_kitty_escapes() {
         rendered.starts_with(KITTY_PREFIX),
         "kitty sequence must be the first row: {rendered:?}"
     );
-    assert!(rendered.contains("a=T,f=100"), "kitty payload: {rendered:?}");
+    assert!(
+        rendered.contains("a=T,f=100"),
+        "kitty payload: {rendered:?}"
+    );
     assert!(rendered.contains(PNG), "payload must carry the base64 data");
 
     // A non-image block contributes no rows.
@@ -130,7 +135,10 @@ fn image_block_renders_iterm2_escapes() {
         rendered.contains(ITERM2_PREFIX),
         "iTerm2 sequence expected: {rendered:?}"
     );
-    assert!(rendered.contains("inline=1"), "iTerm2 payload: {rendered:?}");
+    assert!(
+        rendered.contains("inline=1"),
+        "iTerm2 payload: {rendered:?}"
+    );
 }
 
 #[test]
@@ -219,7 +227,10 @@ async fn read_tool_image_result_renders_through_the_executor() {
         result.content
     );
     assert_eq!(
-        result.details.as_ref().and_then(|d| d["image_text"].as_str()),
+        result
+            .details
+            .as_ref()
+            .and_then(|d| d["image_text"].as_str()),
         Some("Read image file [image/png]")
     );
 
@@ -239,6 +250,9 @@ async fn read_tool_image_result_renders_through_the_executor() {
     let mut plain = session(&dir, false);
     plain.call(&tool_call, false);
     let rendered = render_lines_plain(&plain.result(&result));
-    assert!(rendered.contains("[Image: [image/png] 320x240]"), "{rendered:?}");
+    assert!(
+        rendered.contains("[Image: [image/png] 320x240]"),
+        "{rendered:?}"
+    );
     assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
 }
