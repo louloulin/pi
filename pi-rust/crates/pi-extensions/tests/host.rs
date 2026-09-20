@@ -375,7 +375,10 @@ fn bridge_implements_extension_bridge_trait() {
         };
         // Smoke: call into the bridge trait from a typed reference.
         let outcome = host
-            .emit_event(&ExtensionEvent::SessionEnd)
+            .emit_event(&ExtensionEvent::SessionShutdown {
+                reason: pi_protocol::SessionShutdownReason::Quit,
+                target_session_file: None,
+            })
             .await
             .expect("dispatch");
         assert!(!outcome.handled);
@@ -409,6 +412,113 @@ fn host_emits_unknown_event_cleanly() {
             .expect("dispatch");
         assert!(!outcome.handled);
         assert_eq!(outcome.subscribers, 0);
+    });
+}
+
+#[test]
+fn shim_aliases_session_end_to_session_shutdown() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        // `session_end` was this port's pre-rename name for upstream's
+        // `session_shutdown`; an extension written against the older docs
+        // must keep firing after the rename.
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_end", function (event, ctx) {
+                    pi.appendEntry("bye", { type: event.type, reason: event.reason });
+                    return { ok: true };
+                });
+            };
+        "#;
+        host.load(entry("alias"), source).await.expect("load");
+
+        // `known_event_names` reports the canonical key, so the host's
+        // subscription gating and the handler table cannot disagree.
+        let names = host.known_event_names().await;
+        assert_eq!(names, vec!["session_shutdown".to_string()]);
+
+        let outcome: DispatchOutcome = host
+            .emit_event(&ExtensionEvent::SessionShutdown {
+                reason: pi_protocol::SessionShutdownReason::Quit,
+                target_session_file: None,
+            })
+            .await
+            .expect("dispatch");
+        assert!(outcome.handled, "alias handler must run: {outcome:?}");
+        assert_eq!(outcome.subscribers, 1);
+
+        let log = host.log();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].custom_type, "bye");
+        assert_eq!(log.entries[0].data["type"], "session_shutdown");
+        assert_eq!(log.entries[0].data["reason"], "quit");
+    });
+}
+
+#[test]
+fn shim_dispatches_turn_and_tool_execution_events() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        // The upstream names the Rust port previously never emitted.
+        let source = r#"
+            module.exports = function (pi) {
+                const seen = [];
+                pi.on("turn_start", (event) => {
+                    pi.appendEntry("turn", { index: event.turnIndex });
+                });
+                pi.on("tool_execution_start", (event) => {
+                    pi.appendEntry("tool", {
+                        id: event.toolCallId,
+                        name: event.toolName,
+                    });
+                });
+                pi.on("message_update", (event) => {
+                    pi.appendEntry("delta", {
+                        kind: event.assistantMessageEvent
+                            ? event.assistantMessageEvent.type
+                            : null,
+                    });
+                });
+            };
+        "#;
+        host.load(entry("lifecycle"), source).await.expect("load");
+
+        host.emit_event(&ExtensionEvent::TurnStart {
+            turn_index: 2,
+            timestamp: 1_700_000_000_000,
+        })
+        .await
+        .expect("turn_start");
+        host.emit_event(&ExtensionEvent::ToolExecutionStart {
+            tool_call_id: "call-1".into(),
+            tool_name: "read".into(),
+            args: json!({"path": "a.txt"}),
+        })
+        .await
+        .expect("tool_execution_start");
+        host.emit_event(&ExtensionEvent::MessageUpdate {
+            assistant_message_event: serde_json::from_value(json!({
+                "type": "text_delta",
+                "delta": "hi",
+            }))
+            .expect("delta"),
+        })
+        .await
+        .expect("message_update");
+
+        let log = host.log();
+        let kinds: Vec<&str> = log
+            .entries
+            .iter()
+            .map(|entry| entry.custom_type.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["turn", "tool", "delta"]);
+        assert_eq!(log.entries[0].data["index"], 2);
+        assert_eq!(log.entries[1].data["id"], "call-1");
+        assert_eq!(log.entries[1].data["name"], "read");
+        assert_eq!(log.entries[2].data["kind"], "text_delta");
     });
 }
 

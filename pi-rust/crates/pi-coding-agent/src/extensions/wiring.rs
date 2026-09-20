@@ -11,6 +11,7 @@
 //! runtime it is created in, so [`load`] takes the runtime the mode is
 //! about to run on rather than creating one of its own.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +28,7 @@ use pi_extensions::{
 };
 use pi_protocol::{
     Api, AssistantMessageEvent, Content, Context, ExtensionEvent, Message, Model, ProviderId,
-    ResourcesDiscoverReason, Role, StopReason, UiLevel, Usage,
+    ResourcesDiscoverReason, Role, SessionShutdownReason, StopReason, UiLevel, Usage,
 };
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
@@ -180,6 +181,14 @@ pub struct ExtensionRuntime {
     mode: String,
     has_ui: bool,
     cwd: String,
+    /// Event names with at least one registered handler, snapshotted right
+    /// after the load pass (`host.known_event_names()`).
+    ///
+    /// The fan-out consults this before serialising an event into the JS
+    /// host: an extension that subscribes to nothing must not pay for
+    /// `message_update` traffic, which is the hottest event in the
+    /// system.
+    subscribed_events: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for ExtensionRuntime {
@@ -192,6 +201,7 @@ impl std::fmt::Debug for ExtensionRuntime {
             .field("resources", &self.resources)
             .field("mode", &self.mode)
             .field("has_ui", &self.has_ui)
+            .field("subscribed_events", &self.subscribed_events.len())
             .finish_non_exhaustive()
     }
 }
@@ -200,6 +210,22 @@ impl ExtensionRuntime {
     /// The no-extension runtime.
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Test-only constructor: a runtime around `host` that reports exactly
+    /// `subscribed` as the subscribed event names.
+    ///
+    /// [`load`] is the only production path because it is the pass that
+    /// discovers extensions; a test that already has a loaded host (for
+    /// example to drive the interactive event fan-out) does not need a
+    /// search path.
+    #[cfg(test)]
+    pub(crate) fn for_test(host: JsExtensionHost, subscribed: &[&str]) -> Self {
+        Self {
+            host: Some(host),
+            subscribed_events: subscribed.iter().map(|name| (*name).to_string()).collect(),
+            ..Self::default()
+        }
     }
 
     /// Commands registered by every loaded extension, in load order.
@@ -266,6 +292,59 @@ impl ExtensionRuntime {
             .as_ref()
             .map(JsExtensionHost::drain_side_effects)
             .unwrap_or_default()
+    }
+
+    /// Event names at least one loaded extension registered a handler for.
+    pub fn subscribed_events(&self) -> &BTreeSet<String> {
+        &self.subscribed_events
+    }
+
+    /// Whether any extension wants `name` (an [`ExtensionEvent`] wire tag,
+    /// see [`ExtensionEvent::name`]).
+    pub fn has_subscriber_for(&self, name: &str) -> bool {
+        self.subscribed_events.contains(name)
+    }
+
+    /// Whether at least one extension subscribed to any event at all.
+    ///
+    /// Modes use this to decide whether to install the agent fan-out at
+    /// all: with no subscribers there is no reason to subscribe to the
+    /// agent or to spawn the delivery task.
+    pub fn has_any_subscriber(&self) -> bool {
+        !self.subscribed_events.is_empty()
+    }
+
+    /// Deliver one lifecycle event to the JS host.
+    ///
+    /// Returns `true` when the host reported at least one handler. Events
+    /// nobody subscribed to are dropped before crossing into JS; the
+    /// caller can also pre-filter with [`Self::has_subscriber_for`] when
+    /// building an expensive payload.
+    pub async fn deliver_event(&self, event: &ExtensionEvent) -> bool {
+        let Some(host) = self.host.as_ref() else {
+            return false;
+        };
+        if !self.has_subscriber_for(event.name()) {
+            return false;
+        }
+        host.emit_event_with(event, Some(&self.mode), self.has_ui, &self.cwd)
+            .await
+            .map(|outcome| outcome.handled)
+            .unwrap_or(false)
+    }
+
+    /// Deliver `session_shutdown` before the runtime goes away.
+    ///
+    /// Upstream emits this on quit / reload / session replacement; plugins
+    /// use it to flush state. Failure is reported as `false` rather than
+    /// propagated: a broken shutdown handler must not change the process
+    /// exit path.
+    pub async fn deliver_shutdown(&self, reason: SessionShutdownReason) -> bool {
+        self.deliver_event(&ExtensionEvent::SessionShutdown {
+            reason,
+            target_session_file: None,
+        })
+        .await
     }
 }
 
@@ -384,11 +463,22 @@ pub fn load(
         // them back after the load (and the lifecycle dispatch) ran.
         let commands = host.registered_commands().await;
         let tool_prompts = host.registered_tool_prompts().await;
-        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands, tool_prompts, resources))
+        // Which lifecycle events the loaded extensions actually subscribed
+        // to; the runtime uses this to skip the fan-out for everything else.
+        let subscribed_events: BTreeSet<String> =
+            host.known_event_names().await.into_iter().collect();
+        Ok::<_, pi_extensions::ExtensionError>((
+            host,
+            outcome,
+            commands,
+            tool_prompts,
+            resources,
+            subscribed_events,
+        ))
     });
 
     match result {
-        Ok((host, outcome, commands, tool_prompts, resources)) => {
+        Ok((host, outcome, commands, tool_prompts, resources, subscribed_events)) => {
             let loaded: Vec<PathBuf> = outcome.entries.iter().map(|e| e.source.clone()).collect();
             let errors: Vec<(PathBuf, String)> = outcome
                 .errors
@@ -423,6 +513,7 @@ pub fn load(
                     mode,
                     has_ui,
                     cwd,
+                    subscribed_events,
                 },
                 loaded,
                 tools,

@@ -746,6 +746,36 @@ function makeUiContext(hasUI) {
   return Object.freeze(ui);
 }
 
+/**
+ * Event-name aliases, for extensions written against this port's earlier
+ * naming. Upstream pi matches event names exactly, so an alias is only
+ * added when *this port* once shipped a different name for an upstream
+ * event — never invented for a name upstream never had.
+ *
+ * `session_end` was this port's name for upstream's `session_shutdown`
+ * (see `crates/pi-extensions/docs/EXTENSIONS.md`); the shim keeps
+ * accepting it so extensions written against the older Rust docs keep
+ * firing after the rename.
+ */
+const EVENT_ALIASES = Object.freeze({
+  session_end: "session_shutdown",
+});
+
+/**
+ * Resolve an event name to the canonical one the host emits.
+ *
+ * Both `pi.on` and `_pi_dispatch` go through this, so a subscription and a
+ * delivery can never disagree about which key they use.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function canonicalEventName(name) {
+  return Object.prototype.hasOwnProperty.call(EVENT_ALIASES, name)
+    ? EVENT_ALIASES[name]
+    : name;
+}
+
 /** The `pi` object extensions see — mirrors `ExtensionAPI`. */
 const pi = Object.freeze({
   /**
@@ -759,7 +789,8 @@ const pi = Object.freeze({
     if (typeof handler !== "function") {
       throw new TypeError("pi.on: handler must be a function");
     }
-    const list = _pi.handlers[eventName] || (_pi.handlers[eventName] = []);
+    const name = canonicalEventName(eventName);
+    const list = _pi.handlers[name] || (_pi.handlers[name] = []);
     list.push(handler);
   },
 
@@ -1057,7 +1088,9 @@ globalThis._pi_dispatch = async function _pi_dispatch(eventJson) {
       errored: { message: "event missing `type`" },
     });
   }
-  const handlers = _pi.handlers[parsed.type] || [];
+  // Aliases resolve here as well as at `pi.on`, so a handler registered
+  // under either spelling is found by the canonical name the host emits.
+  const handlers = _pi.handlers[canonicalEventName(parsed.type)] || [];
   const ctx = buildCtx({
     mode: parsed._ctx_mode,
     hasUI: parsed._ctx_hasUI,
