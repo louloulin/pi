@@ -297,3 +297,4 @@ fn an_extension_header_still_overrides_the_extension_summary() {
 
     assert!(text.contains("-- custom header --"), "{text}");
     assert!(!text.contains("extension(s)"), "{text}");
+}

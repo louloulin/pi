@@ -368,13 +368,15 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
 /// complete through the same dropdown because they are real commands —
 /// `/extensions` lists them and `handle_command` dispatch does not care who
 /// registered them.
+/// Installation with no extension-registered commands — what the binary
+/// used before Stage 70 and what the LUM-1236 regression test still drives.
+/// The binary itself now goes through the three-argument form (it always has
+/// extension commands to offer, possibly none), so this is test-only.
+#[cfg(test)]
 fn install_composer_autocomplete(app: &mut App, base_path: PathBuf) {
     install_composer_autocomplete_with(app, base_path, Vec::new());
 }
 
-/// [`install_composer_autocomplete`] plus the commands the loaded extensions
-/// registered. Split from the two-argument form so the existing LUM-1236
-/// regression test keeps driving the built-in table alone.
 fn install_composer_autocomplete_with(
     app: &mut App,
     base_path: PathBuf,
@@ -6371,6 +6373,8 @@ mod tests {
         send(&mut app, &agent, &mut options, ctrl('d')).await;
         assert!(app.selector_open());
         assert!(options.pickers.session.pending_delete.is_none());
+    }
+
     // -----------------------------------------------------------------------
     // Extension lifecycle fan-out (LUM-1246)
     // -----------------------------------------------------------------------
