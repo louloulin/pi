@@ -13798,3 +13798,120 @@ IDENTICAL
 2. pi-tui 终端图片：切片 1/2 已合入；**切片 3 = LUM-1194 已晋升（todo）**；组件片 LUM-1192 仍等切片 3 的 `renderImage` 接口。
 3. `pi-ai` 请求级 telemetry span：仍是下一轮首个空槽的首选（文件面 `pi-ai/**`，与在飞各线零重叠）。
 4. **Autopilot 节奏本身进入 frontier（本轮新发现）**：`LUM-1189`(13:40) → `LUM-1191`(14:00) → `LUM-1193`(14:20) → `LUM-1195`(14:40) **每 20 分钟一个「整点协调轮」**，LUM-1193 与 LUM-1195 本轮实际重叠 20 分钟、各自独立合并同一分支。建议 owner 把该 autopilot 周期放宽到 ≥1h，或在轮内做「已有同刻轮在飞则只核验不合并」的串行化，避免重复构建（本次还叠加了磁盘 100%）。
+
+## LUM-1196 round — 合并 LUM-1190（`ctx.ui.custom` + 区域组件端到端接线）→ `feature/pi.rs` 全量实跑 **132 套件 / 2029 passed / 0 failed / 2 ignored**；重派 LUM-1194（零产物）+ 派发 Stage 50（LUM-1197 `pi.registerProvider` host 桥）；纠正「pi-ai telemetry span」这一伪缺口
+
+本轮是 **LUM-981** 的推进/协调轮。硬职责（合并 + 验证 + 推送 + 派发）全部完成，并把 frontier 里一个**前提站不住**的候选项换成了真正有消费方的插件生态缺口。
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `c85b4ec65`（LUM-1195 文档提交），`origin` 与工作区 `mirror` 同位同 SHA。
+* `multica daemon status`：`running_task_count = 1` / `active_task_count = 1`（只有本协调轮）→ 头上 **2 个空槽**。
+* `df -h /`：`22G / 50G`（47%），余 **25G**；`/tmp` 无 `*target*` 目录（LUM-1195 已清），本轮自建私有 `/tmp/pi-target-1196`。
+
+### 二、合并：`work/lum-1190`（本轮唯一有新产物的分支）
+
+开工时 **LUM-1190**（`ctx.ui.*` 端到端接线）与 **LUM-1194**（pi-tui 图片内核切片 3）两个 run 都已在 **06:53:59** 终止，issue 上各留一条 system 评论 `Upstream provider closed the connection before the response completed: unexpected EOF`（provider/harness 侧错误，不是模型自爆）。但两者产物状态不同：
+
+| run | work 分支 | 产物 |
+| --- | --- | --- |
+| LUM-1190 | `origin/work/lum-1190` = `d02fb0ace`（1 提交，基于 `626e0b28a`） | **有**：`pi-extensions` host 区域组件桥 + `pi-coding-agent` TUI 接线 |
+| LUM-1194 | `mirror/work/LUM-1194` = `c85b4ec65`（= tip，**零提交**） | **无**：workdir 无改动 → 重派 |
+
+合并（在自有分支 `work/LUM-1196` 上，`--no-ff`，**无冲突**）：
+
+```console
+$ git merge --no-ff origin/work/lum-1190
+Merge made by the 'ort' strategy.
+ 11 files changed, 2028 insertions(+), 55 deletions(-)
+```
+
+`d02fb0ace` 的 `base` 是 `626e0b28a`（不含切片 1 的 `terminal_image.rs`），但该分支没有触碰 `pi-tui`，三方合并结果里切片 1/2 的 `terminal_image*.rs` 全部保留 —— 这也是「看单分支 `diff --stat` 会误报 2000 行删除、必须看真实 merge 结果」的原因。
+
+| 文件 | 变化 |
+| --- | --- |
+| `pi-extensions/src/host.rs` | +565（`host_ui_region_*` / custom overlay / widget / header / footer / editor 区域桥） |
+| `pi-extensions/runtime/pi-ext-shim.mjs` | +383（`ctx.ui.custom` / `setWidget` / `setHeader` / `setFooter` 等 shim 侧形状） |
+| `pi-coding-agent/src/extensions/ui_bridge.rs` | +456（TUI `UiRegionHost` 适配器） |
+| `pi-coding-agent/src/extensions/wiring.rs` | +37 |
+| `pi-coding-agent/src/{interactive.rs,main.rs}` | +26 |
+| `pi-coding-agent/tests/extension_ui.rs` | +234（3 个 overlay/区域渲染用例） |
+| `pi-extensions/tests/host.rs` | +339（3 个 region 宿主用例） |
+| `pi-extensions/tests/sdk_modules.rs` | +19 |
+| `pi-extensions/docs/{EXTENSIONS,SDK_MODULES}.md` | +24 |
+
+合并提交 `f95be63f0`（第一父 `c85b4ec65`、第二父 `d02fb0ace`）。
+
+### 三、质量门：私有 target dir 实跑，**132 套件 / 2029 passed / 0 failed / 2 ignored**
+
+```console
+$ CARGO_TARGET_DIR=/tmp/pi-target-1196 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo fmt --all -- --check                                   # OK
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings   # 干净（1m21s）
+$ ... cargo test --workspace --offline --no-fail-fast                   # exit 0
+  suites = 132, passed = 2029, failed = 0, ignored = 2
+```
+
+* 基线（`343ab6978`，LUM-1193 实跑）= **132 / 2023 / 0 / 2** → 本轮 **+6 passed、套件数不变**（LUM-1190 把用例加进既有的 `extension_ui.rs` / `host.rs` 两个套件，没有新套件文件），零倒退。
+* 私有 target dir 沿用 LUM-1193 / LUM-1195 的结论：**不要复用别的 run 的 `CARGO_TARGET_DIR`**，否则会伪造 `E0463 can't find crate` 失败。
+
+### 四、可合并性扫描（双向 `origin` + `mirror`，两种大小写）
+
+新命中只有 `work/lum-1190`（本轮合并）。其余非祖先 ref 逐个核实**都是被 tip 取代的旧树 / 无独有产物**，维持 LUM-1173 / 1187 / 1191 / 1193 / 1195 结论：
+
+```
+2  origin/agent/devbox1/lum-1058      # 旧 pi-telemetry 设计（tip 已有 pi-telemetry 全套）
+1  origin/work/lum-1173 (+mirror)     # rustfmt 基线；唯一独有提交 b6656384 已被 tip 的 fmt 基线覆盖
+1  origin/agent/devbox1/lum-1023      # Stage 3 QuickJS（已在 tip）
+1  origin/agent/devbox1/lum-1020      # 文档
+1  origin/agent/devbox1/e3a55b14fe9d  # 旧 Gemini 夹具
+1  mirror/agent/devbox1/lum-1061      # 旧「wire telemetry into pi-ai」设计（见第五节）
+1  mirror/agent/devbox1/{b662db4686e7,a5e8bd115db9,7046ef4e9915,5b45b672209a,1baa9881aff2,18de691ee1bc}
+0  mirror/work/lum-1177 / origin|mirror 9f0097e10886 / 142cee5d0ed9
+```
+
+每个非祖先 ref 对 tip 的 `diff --stat` 都是 **37–513 文件、净删除 8000–190000 行**量级的旧树，无一可并入。
+
+### 五、纠正一个 frontier 伪缺口：**`pi-ai` 请求级 telemetry span 不是真缺口**
+
+LUM-1187 / 1189 / 1191 / 1195 连续四轮把「`pi-ai` 请求级 telemetry span」列为「下一轮首个空槽的首选」。本轮实际核对上游后确认**这个前提站不住**：
+
+* 上游 `packages/ai` **只在类型层搬运** `telemetryContext`：`types.ts:127` 声明、`api/simple-options.ts:36` 透传，**没有任何 provider adapter 用 `startSpan` 发过 span**（`grep -rn "telemetry" packages/ai/src` 只命中这两个文件）。
+* 真正发射 span 的是 agent harness：`packages/agent/src/harness/telemetry.ts:45` 定义 `pi.ai.request` 谱系，`harness/execution/assistant.ts:82` / `drive/*.ts` 注入 `telemetryContext`。
+* Rust 侧**这份已经落地**：`pi-agent-core/src/telemetry.rs` 定义 `pi.ai.request` + 全部属性名，`agent_loop.rs:607` 在 provider 调用外开 span。也就是说，若让 `pi-ai` 自己也发 `pi.ai.request`，只会与 `pi-agent-core` 的 span **嵌套重复**，并与上游语义分叉。
+
+因此本轮**不派发**该项，把它从 frontier 移除（改为「`SimpleStreamOptions` 字段对齐」这类纯 parity 项，价值低、优先级降级）。空出的槽改投第六节真正的插件生态缺口。
+
+### 六、派发（本轮 2 路，加本 run = **3/3** 满槽）
+
+| issue | 内容 | 处置 |
+| --- | --- | --- |
+| **LUM-1194**（重派） | pi-tui 图片内核切片 3（几何 + 四种像素尺寸解析 + `renderImage` + `imageFallback`） | run 零产物（`work` 分支 == tip）且终止原因是 provider EOF → `multica issue rerun LUM-1194`，已 `queued`（runtime `0d113b34` = Pi devbox1）✓ |
+| **LUM-1197**（新建 · 已派发） | **`pi.registerProvider` / `unregisterProvider` host 桥**（Stage 50） | 见下 |
+
+**为什么是 `pi.registerProvider`**：`pi-extensions/docs/EXTENSIONS.md:506` 自己把这一行登记为 **⚠️ Partial / out of scope** —— 上游扩展用 `pi.registerProvider(name, { baseUrl, apiKey, api, models })` 注册自定义 / 代理 provider（`loader.ts:435`、`types.ts:1486`），而 Rust shim 里**连方法都不存在**（`grep registerProvider runtime/pi-ext-shim.mjs` 零命中），扩展一调用就 `TypeError`。它直接落在 LUM-981 的「兼容 pi 插件生态」验收面上，且文件面（`pi-extensions` + `pi-coding-agent/{provider.rs,extensions/**}`）与在飞的 LUM-1194（纯 `pi-tui`）**零重叠**。
+
+* issue 里已钉死范围：**只做 `registerProvider(name, config)` 字符串重载 + `unregisterProvider`**，`baseUrl` / `apiKey`（字面量与 `$ENV`）/ `api` / `models`；**不做** native `Provider` 对象重载、`oauth` 块、`streamSimple` handler（登记为后续 slice）。
+* 同时附上**作业规程**：16384 token 输出预算 → thinking ≤ ~1000 字、每 turn 以工具调用结尾、先落盘再完善、每组本地 commit。
+* 派发后 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`（LUM-1194 + LUM-1197 + 本协调轮）✓。
+
+### 七、frontier（本轮后）
+
+1. **质量门基线** = **132 套件 / 2029 passed / 0 failed / 2 ignored（`f95be63f0`）**；下一欠账点 = LUM-1194 或 LUM-1197 任一合入时。
+2. **pi-tui 终端图片**：切片 1/2 已合入；切片 3 = LUM-1194 **已重派**；组件片 LUM-1192（`Image` + `truncate_to_width`）等切片 3 的 `renderImage` 接口。
+3. **插件生态 provider 面**：`pi.registerProvider` host 桥 = LUM-1197（在飞）；后续 slice = native `Provider` 对象 + `oauth` + `streamSimple` handler 注册。
+4. **~~`pi-ai` telemetry span~~**：**本轮证伪并移除**（第五节）。
+5. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert`）与 provider 家族（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1185 / 1177 结论（环境做不了 / 无凭据无消费方）。
+6. **run 可靠性**：本轮两个 run 的终止原因都是 **provider 侧 EOF**（不是 16384 自爆），其中 LUM-1190 的产物**已推分支、可挽救**，LUM-1194 零产物。→ 开工例程的「产物四查」应把「读 work 分支是否已推进」放在「看 session 末条 `stopReason`」**之前**：**分支有提交 = 直接合并**，不要因为 run 报错就重派（会白扔已落盘的工作）。
+
+### 八、下一轮动作（按优先级）
+
+1. **LUM-1194 / LUM-1197 任一推分支就合并它**：双向扫（`origin` + `mirror`，两种大小写）+ **先看 work 分支 SHA**；合并后补跑私有 target dir 的全量门并核对 passed 增量。
+2. **LUM-1194 合入后晋升 LUM-1192**（`multica issue status LUM-1192 todo`）。
+3. 修订开工例程：`git fetch --all --prune` → 双向 + 大小写扫 `work/*` → **对每个在飞 issue 先查其 work 分支是否已推进** → 非祖先分支 `git cherry` 核实 → run 产物四查（含 session 预算核对）→ `multica daemon status --output json` → `df -h /` → 再决定派发。
+4. **Autopilot 节奏**：`LUM-1189→1191→1193→1195→1196` 仍是每 20 分钟一轮。本轮开工时前两轮 run 已同刻终止但 issue 状态还是 `in_progress`，建议 owner 放宽周期或加串行化（维持 LUM-1195 的建议）。
+
+### 九、磁盘（本轮）
+
+* 开工 `22G / 50G`（47%），余 25G；本轮自建 `/tmp/pi-target-1196`（全量 fmt/clippy/test 后 2.0G）。
+* 既无「owner 已出轮且无进程持有」的大 target 目录（LUM-1195 已清），也未做额外清理。
