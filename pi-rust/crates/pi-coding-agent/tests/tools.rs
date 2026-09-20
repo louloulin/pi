@@ -66,7 +66,10 @@ async fn bash_reports_non_zero_exit() {
         .expect_err("non-zero exit is an error");
 
     let msg = err.to_string();
-    assert!(msg.contains("oops"), "stderr should surface in error: {msg}");
+    assert!(
+        msg.contains("oops"),
+        "stderr should surface in error: {msg}"
+    );
     assert!(
         msg.contains("[exit code 7]"),
         "exit code should surface in error: {msg}"
@@ -153,12 +156,74 @@ async fn write_creates_missing_parent_dirs() {
 }
 
 #[tokio::test]
-async fn edit_replaces_single_occurrence() {
+async fn edit_replaces_single_occurrence_with_edits() {
     let dir = fresh_tmp("edit-single");
     let path = dir.join("note.txt");
     std::fs::write(&path, "hello world\nfoo bar\n").unwrap();
 
     let out = EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [{ "oldText": "foo bar", "newText": "foo baz" }],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("single edit");
+
+    assert!(first_text(&out).contains("Successfully replaced 1 block(s)"));
+
+    let details: EditToolDetails =
+        serde_json::from_value(out.details.expect("details")).expect("decode");
+    assert!(details.diff.contains("-2 foo bar"), "{}", details.diff);
+    assert!(details.diff.contains("+2 foo baz"), "{}", details.diff);
+    assert_eq!(details.first_changed_line, Some(2));
+    assert!(details.patch.contains("--- "), "{}", details.patch);
+    assert!(details.patch.contains("+++ "), "{}", details.patch);
+    assert!(details.patch.contains("@@"), "{}", details.patch);
+    assert!(details.patch.contains("-foo bar"), "{}", details.patch);
+    assert!(details.patch.contains("+foo baz"), "{}", details.patch);
+    assert_eq!(apply_patch_body(&details.patch), "hello world\nfoo baz\n");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "hello world\nfoo baz\n"
+    );
+}
+
+/// Rebuild the new file from a unified patch body (context + added lines).
+/// Mirrors what jsdiff's `applyPatch` validates in the upstream tests.
+fn apply_patch_body(patch: &str) -> String {
+    let mut rebuilt = String::new();
+    for line in patch.lines() {
+        if line.starts_with("@@")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+            || line.starts_with("===")
+            || line == "\\ No newline at end of file"
+        {
+            continue;
+        }
+        let (prefix, text) = line.split_at(1);
+        match prefix {
+            " " | "+" => {
+                rebuilt.push_str(text);
+                rebuilt.push('\n');
+            }
+            _ => {}
+        }
+    }
+    rebuilt
+}
+
+#[tokio::test]
+async fn edit_accepts_legacy_single_edit_form() {
+    let dir = fresh_tmp("edit-legacy");
+    let path = dir.join("note.txt");
+    std::fs::write(&path, "hello world\nfoo bar\n").unwrap();
+
+    EditTool
         .execute(
             json!({
                 "path": path.display().to_string(),
@@ -168,12 +233,7 @@ async fn edit_replaces_single_occurrence() {
             AbortLike::none(),
         )
         .await
-        .expect("single edit");
-
-    let details: EditToolDetails =
-        serde_json::from_value(out.details.expect("details")).expect("decode");
-    assert_eq!(details.replaced, 1);
-    assert_eq!(details.diff_summary, "1 occurrence replaced");
+        .expect("legacy single edit");
 
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -182,7 +242,27 @@ async fn edit_replaces_single_occurrence() {
 }
 
 #[tokio::test]
-async fn edit_replace_all() {
+async fn edit_accepts_stringified_edits() {
+    let dir = fresh_tmp("edit-stringified");
+    let path = dir.join("note.txt");
+    std::fs::write(&path, "alpha\n").unwrap();
+
+    EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": "[{\"oldText\":\"alpha\",\"newText\":\"beta\"}]",
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("stringified edits");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "beta\n");
+}
+
+#[tokio::test]
+async fn edit_replace_all_legacy() {
     let dir = fresh_tmp("edit-replace-all");
     let path = dir.join("multi.txt");
     std::fs::write(&path, "aaa bbb aaa ccc aaa\n").unwrap();
@@ -202,8 +282,11 @@ async fn edit_replace_all() {
 
     let details: EditToolDetails =
         serde_json::from_value(out.details.expect("details")).expect("decode");
-    assert_eq!(details.replaced, 3);
-    assert_eq!(details.diff_summary, "3 occurrences replaced");
+    assert!(
+        details.diff.contains("+1 ZZZ bbb ZZZ ccc ZZZ"),
+        "{}",
+        details.diff
+    );
 
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -212,61 +295,273 @@ async fn edit_replace_all() {
 }
 
 #[tokio::test]
-async fn edit_errors_on_zero_or_multiple_occurrences_without_replace_all() {
+async fn edit_replaces_multiple_disjoint_regions_in_one_call() {
+    let dir = fresh_tmp("edit-multi");
+    let path = dir.join("multi.txt");
+    std::fs::write(&path, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+    let out = EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [
+                    { "oldText": "alpha\n", "newText": "ALPHA\n" },
+                    { "oldText": "gamma\n", "newText": "GAMMA\n" },
+                ],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("multi edit");
+
+    assert!(first_text(&out).contains("Successfully replaced 2 block(s)"));
+    let details: EditToolDetails =
+        serde_json::from_value(out.details.expect("details")).expect("decode");
+    assert!(details.diff.contains("ALPHA"), "{}", details.diff);
+    assert!(details.diff.contains("GAMMA"), "{}", details.diff);
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "ALPHA\nbeta\nGAMMA\ndelta\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_matches_edits_against_the_original_file() {
+    let dir = fresh_tmp("edit-multi-original");
+    let path = dir.join("multi.txt");
+    std::fs::write(&path, "foo\nbar\nbaz\n").unwrap();
+
+    EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [
+                    { "oldText": "foo\n", "newText": "foo bar\n" },
+                    { "oldText": "bar\n", "newText": "BAR\n" },
+                ],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("edits are matched against the original content");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "foo bar\nBAR\nbaz\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_collapses_large_unchanged_gaps() {
+    let dir = fresh_tmp("edit-large-gap");
+    let path = dir.join("long.txt");
+    let lines: Vec<String> = (1..=600).map(|i| format!("line {i:03}")).collect();
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let out = EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [
+                    { "oldText": "line 100\n", "newText": "LINE 100\n" },
+                    { "oldText": "line 300\n", "newText": "LINE 300\n" },
+                    { "oldText": "line 500\n", "newText": "LINE 500\n" },
+                ],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("large-gap edit");
+
+    let details: EditToolDetails =
+        serde_json::from_value(out.details.expect("details")).expect("decode");
+    assert!(details.diff.contains("LINE 100"));
+    assert!(details.diff.contains("LINE 300"));
+    assert!(details.diff.contains("LINE 500"));
+    assert!(details.diff.contains("..."));
+    assert!(!details.diff.contains("line 250"));
+    assert!(details.diff.split('\n').count() < 50, "{}", details.diff);
+}
+
+#[tokio::test]
+async fn edit_errors_on_missing_or_ambiguous_matches() {
     let dir = fresh_tmp("edit-strict");
     let path = dir.join("dup.txt");
     std::fs::write(&path, "x x x\n").unwrap();
 
-    // Zero occurrences → error.
     let err = EditTool
         .execute(
             json!({
                 "path": path.display().to_string(),
-                "old_text": "nope",
-                "new_text": "yes",
+                "edits": [{ "oldText": "nope", "newText": "yes" }],
             }),
             AbortLike::none(),
         )
         .await
         .expect_err("zero matches should error");
-    assert!(err.to_string().contains("not found"), "got: {err}");
+    assert!(
+        err.to_string().contains("Could not find the exact text"),
+        "got: {err}"
+    );
 
-    // Multiple occurrences → error unless replace_all.
     let err = EditTool
         .execute(
             json!({
                 "path": path.display().to_string(),
-                "old_text": "x",
-                "new_text": "y",
+                "edits": [{ "oldText": "x", "newText": "y" }],
             }),
             AbortLike::none(),
         )
         .await
         .expect_err("multiple matches should error");
-    let msg = err.to_string();
     assert!(
-        msg.contains("matches 3 places"),
-        "expected count of matches in error, got: {msg}"
+        err.to_string().contains("Found 3 occurrences"),
+        "got: {err}"
     );
 
-    // File should be untouched.
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "x x x\n");
+}
+
+#[tokio::test]
+async fn edit_rejects_empty_edits_and_overlapping_regions() {
+    let dir = fresh_tmp("edit-invalid");
+    let path = dir.join("file.txt");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+    let err = EditTool
+        .execute(
+            json!({ "path": path.display().to_string(), "edits": [] }),
+            AbortLike::none(),
+        )
+        .await
+        .expect_err("empty edits should error");
+    assert!(
+        err.to_string()
+            .contains("edits must contain at least one replacement"),
+        "got: {err}"
+    );
+
+    let err = EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [
+                    { "oldText": "one\ntwo\n", "newText": "ONE\nTWO\n" },
+                    { "oldText": "two\nthree\n", "newText": "TWO\nTHREE\n" },
+                ],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect_err("overlapping edits should error");
+    assert!(err.to_string().contains("overlap"), "got: {err}");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\nthree\n");
+}
+
+#[tokio::test]
+async fn edit_does_not_partially_apply_when_one_edit_fails() {
+    let dir = fresh_tmp("edit-no-partial");
+    let path = dir.join("file.txt");
+    std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+
+    let err = EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [
+                    { "oldText": "alpha\n", "newText": "ALPHA\n" },
+                    { "oldText": "missing\n", "newText": "MISSING\n" },
+                ],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect_err("a failing edit aborts the whole call");
+    assert!(err.to_string().contains("Could not find"), "got: {err}");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "alpha\nbeta\ngamma\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_reports_missing_files() {
+    let dir = fresh_tmp("edit-missing");
+    let path = dir.join("missing.txt");
+
+    let err = EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [{ "oldText": "hello", "newText": "world" }],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect_err("missing file should error");
+    assert!(
+        err.to_string().starts_with("Could not edit file:"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn edit_preserves_bom_and_crlf_line_endings() {
+    let dir = fresh_tmp("edit-endings");
+    let path = dir.join("win.txt");
+    std::fs::write(&path, "\u{feff}alpha\r\nbeta\r\n").unwrap();
+
+    EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [{ "oldText": "beta", "newText": "BETA" }],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("crlf edit");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "\u{feff}alpha\r\nBETA\r\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_fuzzy_matches_smart_quotes() {
+    let dir = fresh_tmp("edit-fuzzy");
+    let path = dir.join("fuzzy.txt");
+    std::fs::write(&path, "const x = \u{201c}hi\u{201d};\nkeep  \n").unwrap();
+
+    EditTool
+        .execute(
+            json!({
+                "path": path.display().to_string(),
+                "edits": [{ "oldText": "const x = \"hi\";", "newText": "const x = \"bye\";" }],
+            }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("fuzzy edit");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "const x = \"bye\";\nkeep  \n"
+    );
 }
 
 #[tokio::test]
 async fn abort_like_short_circuits_tools() {
     let tool = BashTool;
     let err = tool
-        .execute(
-            json!({ "command": "echo hello" }),
-            AbortLike::cancelled(),
-        )
+        .execute(json!({ "command": "echo hello" }), AbortLike::cancelled())
         .await
         .expect_err("pre-cancelled handle should reject the call");
-    assert!(matches!(
-        err,
-        pi_coding_agent::tools::ToolError::Aborted
-    ));
+    assert!(matches!(err, pi_coding_agent::tools::ToolError::Aborted));
 }
 
 #[tokio::test]

@@ -90,6 +90,11 @@ getrandom = { version = "0.2", features = ["js"] }
 # via `unicode-truncate`), so pinning it directly adds no new package to
 # the lockfile and keeps `--offline` builds working.
 unicode-segmentation = "=1.13.3"
+# NFKC normalization — the `edit` tool's fuzzy matcher (`normalizeForFuzzyMatch`)
+# applies `String.prototype.normalize("NFKC")` before its smart-quote / dash /
+# space folding. Already in the graph transitively via `idna_adapter`, so
+# pinning it directly adds no new package to the lockfile.
+unicode-normalization = "=0.1.25"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.3", features = ["serde"] }

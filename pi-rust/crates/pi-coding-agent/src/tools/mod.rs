@@ -21,17 +21,21 @@ mod defaults;
 #[cfg(not(target_arch = "wasm32"))]
 mod edit;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod edit_diff;
+#[cfg(not(target_arch = "wasm32"))]
 mod find;
 #[cfg(not(target_arch = "wasm32"))]
 mod grep;
 #[cfg(not(target_arch = "wasm32"))]
-mod mod_ignore;
-#[cfg(not(target_arch = "wasm32"))]
 mod ls;
+#[cfg(not(target_arch = "wasm32"))]
+mod mod_ignore;
 #[cfg(not(target_arch = "wasm32"))]
 mod read;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod text_diff;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod truncate;
 #[cfg(not(target_arch = "wasm32"))]
@@ -43,6 +47,11 @@ pub use bash::BashTool;
 pub use defaults::default_tool_bundle;
 #[cfg(not(target_arch = "wasm32"))]
 pub use edit::{EditTool, EditToolDetails};
+#[cfg(not(target_arch = "wasm32"))]
+pub use edit_diff::{
+    apply_edits_to_normalized_content, compute_edits_diff, generate_diff_string,
+    generate_unified_patch, DiffResult, Edit,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use find::{FindTool, FindType};
 #[cfg(not(target_arch = "wasm32"))]
