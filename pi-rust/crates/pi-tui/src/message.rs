@@ -21,7 +21,8 @@ use crate::theme::{Theme, ThemeColor};
 
 /// Logical role — drives the visual prefix and the message-view
 /// rendering. Mirrors the `user` / `assistant` / `tool` distinction the
-/// TS message components make.
+/// TS message components make, plus [`Role::Info`] for command-reference
+/// blocks that must not read as user input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
     /// User-typed prompt.
@@ -30,6 +31,12 @@ pub enum Role {
     Assistant,
     /// Tool call + result block.
     Tool,
+    /// System / command output block (slash-command help, `/hotkeys`).
+    ///
+    /// Rendered with an info prefix so the reader can tell it apart from a
+    /// user prompt: before this variant existed `/help`'s body shared the
+    /// composer's `> ` prefix (LUM-1238 §15.4).
+    Info,
 }
 
 /// Label a collapsed thinking block renders in place of its text
@@ -877,9 +884,32 @@ impl MessageView {
 
     /// Push a free-form info message — used by `/help`, slash
     /// command output, and TUI-side notices.
+    ///
+    /// Shares the user prefix (`> `) for backwards compatibility with the
+    /// inline notices the App has always printed this way; command-reference
+    /// blocks that must not read as user input go through
+    /// [`MessageView::push_info_block`].
     pub fn push_info(&mut self, text: impl Into<String>) {
         self.push(MessageItem {
             role: Role::User,
+            text: text.into(),
+            thinking: String::new(),
+            streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
+        });
+    }
+
+    /// Push a system info block — a command-reference body such as `/help`
+    /// or `/hotkeys`.
+    ///
+    /// Distinct from [`MessageView::push_info`]: the block renders with the
+    /// `· ` info prefix (role [`Role::Info`]) so it is never mistaken for a
+    /// user prompt, which is the LUM-1238 §15.4 fix.
+    pub fn push_info_block(&mut self, text: impl Into<String>) {
+        self.push(MessageItem {
+            role: Role::Info,
             text: text.into(),
             thinking: String::new(),
             streaming: false,
@@ -1086,6 +1116,11 @@ impl MessageView {
                 "* ",
                 SpanStyle::fg(ThemeColor::Muted),
                 SpanStyle::fg(ThemeColor::ToolOutput),
+            ),
+            Role::Info => (
+                "· ",
+                SpanStyle::fg(ThemeColor::Muted),
+                SpanStyle::fg(ThemeColor::CustomMessageText),
             ),
         };
 

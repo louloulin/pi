@@ -342,20 +342,58 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     outcome
 }
 
-/// Install the composer's command / file completion provider.
+/// Install the composer's command / file completion provider, plus the
+/// commands the loaded extensions registered (`pi.registerCommand`).
 ///
 /// Split out of [`run_loop`] so the wiring itself is testable without a
 /// terminal: the LUM-1236 defect was exactly that this call did not exist,
-/// and a provider-only test could not have caught it.
+/// and a provider-only test could not have caught it. Extension commands
+/// complete through the same dropdown because they are real commands —
+/// `/extensions` lists them and `handle_command` dispatch does not care who
+/// registered them.
 fn install_composer_autocomplete(app: &mut App, base_path: PathBuf) {
+    install_composer_autocomplete_with(app, base_path, Vec::new());
+}
+
+/// [`install_composer_autocomplete`] plus the commands the loaded extensions
+/// registered. Split from the two-argument form so the existing LUM-1236
+/// regression test keeps driving the built-in table alone.
+fn install_composer_autocomplete_with(
+    app: &mut App,
+    base_path: PathBuf,
+    extra: Vec<pi_tui::autocomplete::SlashCommand>,
+) {
+    let mut commands = crate::commands::slash::autocomplete_commands();
+    commands.extend(extra);
     app.prompt_mut()
         .editor_mut()
         .set_autocomplete_provider(Arc::new(
-            pi_tui::autocomplete::CombinedAutocompleteProvider::new(
-                crate::commands::slash::autocomplete_commands(),
-                base_path,
-            ),
+            pi_tui::autocomplete::CombinedAutocompleteProvider::new(commands, base_path),
         ));
+}
+
+/// The extension-registered commands as dropdown rows.
+fn extension_autocomplete_commands(
+    options: &InteractiveOptions,
+) -> Vec<pi_tui::autocomplete::SlashCommand> {
+    options
+        .extensions
+        .as_ref()
+        .map(|runtime| {
+            runtime
+                .commands()
+                .iter()
+                .map(|command| {
+                    let entry = pi_tui::autocomplete::SlashCommand::new(command.name.clone());
+                    if command.description.is_empty() {
+                        entry
+                    } else {
+                        entry.with_description(command.description.clone())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn run_loop(
@@ -376,6 +414,7 @@ async fn run_loop(
     // adapter and the App owns the folding (collapsed preview, Ctrl+O,
     // click-to-toggle). Print mode keeps its own session in `text_fallback`.
     let tool_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
     app.set_tool_block_renderer(Box::new(crate::tools::InteractiveToolRenderer::new(
         tool_cwd.clone(),
     )));
@@ -384,8 +423,13 @@ async fn run_loop(
     // since LUM-1122, but nothing ever installed a provider in the binary:
     // typing `/` showed no candidates (LUM-1236). Upstream installs the same
     // `CombinedAutocompleteProvider` on the editor at startup; `tool_cwd` is
-    // the base the `@` file completion walks.
-    install_composer_autocomplete(&mut app, tool_cwd);
+    // the base the `@` file completion walks, and the extension-registered
+    // commands ride in the same table (Stage 70 / LUM-1238).
+    install_composer_autocomplete_with(
+        &mut app,
+        tool_cwd,
+        extension_autocomplete_commands(&options),
+    );
 
     // Stage 67 — seed the session thinking level from the persisted
     // `defaultThinkingLevel`, clamp it to what the active model can honour,
@@ -2017,7 +2061,10 @@ async fn run_slash_command(
                 help_text_with_extensions(commands),
                 &options.prompt_templates,
             );
-            app.info(help);
+            // Command-reference output, not user input: the info prefix keeps
+            // `/help`'s body from reading as something the user typed
+            // (LUM-1238 §15.4).
+            app.info_block(help);
         }
         SlashCommand::Clear => {
             app.messages_mut().clear();
@@ -2042,7 +2089,7 @@ async fn run_slash_command(
             open_model_selector(app, options);
         }
         SlashCommand::Hotkeys => {
-            app.info(crate::commands::slash::hotkeys_text());
+            app.info_block(crate::commands::slash::hotkeys_text());
         }
         SlashCommand::Extensions => {
             let home = crate::paths::home_dir();
@@ -4672,6 +4719,29 @@ mod tests {
         assert!(rendered.contains("existing output"), "{rendered}");
         // `Esc` closed the dropdown without rewriting the input.
         assert!(rendered.contains("/m"), "{rendered}");
+    }
+
+    /// Stage 70 (LUM-1238) folded the extension-registered commands into the
+    /// same dropdown: `pi.registerCommand("ext-echo")` has to complete like a
+    /// built-in, or the user cannot discover it.
+    #[test]
+    fn extension_commands_complete_through_the_same_dropdown() {
+        let agent = Agent::new(AgentOptions::new(
+            small_window_model(1_000_000),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let mut app = App::new(&agent, AppConfig::default());
+        let extra = vec![pi_tui::autocomplete::SlashCommand::new("ext-echo")
+            .with_description("echo through an extension")];
+        install_composer_autocomplete_with(&mut app, std::env::temp_dir(), extra);
+
+        for ch in ['/', 'e', 'x', 't'] {
+            app.step(key(KeyCode::Char(ch)));
+        }
+
+        let rendered = app.render_snapshot(72, 14).lines.join("\n");
+        assert!(rendered.contains("ext-echo"), "{rendered}");
     }
 
     // -----------------------------------------------------------------------

@@ -183,7 +183,9 @@ pub fn help_text() -> String {
     out.push_str("  Up / Down   navigate prompt history\n");
     out.push_str("  PgUp/PgDn   scroll the chat log one page\n");
     out.push_str("  Home / End  jump to the start / end of the chat log\n");
-    out.push_str("  Ctrl+C      abort the current turn (or exit on idle)\n");
+    out.push_str(
+        "  Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)\n",
+    );
     out.push_str("  Ctrl+D      exit on an empty prompt\n");
     out.push_str("  Ctrl+L      open the model selector\n");
     out.push_str("  Ctrl+U      clear the prompt buffer\n");
@@ -320,7 +322,6 @@ pub fn display_path(
 }
 
 /// The `/hotkeys` overview for the process-wide (installed) keybindings.
-///
 /// The interactive TTY path installs the merged coding-agent table
 /// (`crate::keybindings::install_keybindings_from`), so this resolves the
 /// same chords the components do — including any `keybindings.json`
@@ -512,6 +513,53 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+
+    #[test]
+    fn autocomplete_commands_match_the_slash_command_table() {
+        // Every candidate the composer offers must actually parse, and every
+        // command `/help` documents must be offered — the two lists are
+        // written separately for layout reasons (see `autocomplete_commands`),
+        // so this is the invariant that keeps them from drifting.
+        let commands = autocomplete_commands();
+        assert!(!commands.is_empty());
+        for command in &commands {
+            assert!(
+                handle_command(&format!("/{}", command.name)).is_ok(),
+                "autocomplete offers /{} but the parser does not know it",
+                command.name
+            );
+        }
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        let help = help_text();
+        let documented: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('/'))
+            .map(|rest| rest.split_whitespace().next().unwrap_or_default())
+            .collect();
+        assert!(!documented.is_empty());
+        for name in documented {
+            assert!(
+                names.contains(&name),
+                "/help documents /{name} but the autocomplete table omits it"
+            );
+        }
+    }
+
+    #[test]
+    fn autocomplete_commands_carry_hints_and_descriptions() {
+        let commands = autocomplete_commands();
+        let compact = commands
+            .iter()
+            .find(|command| command.name == "compact")
+            .expect("compact is offered");
+        assert_eq!(compact.argument_hint.as_deref(), Some("[instructions]"));
+        assert!(compact.description.is_some());
+        let help = commands
+            .iter()
+            .find(|command| command.name == "help")
+            .expect("help is offered");
+        assert_eq!(help.argument_hint, None);
+    }
 
     #[test]
     fn parses_known_commands() {
