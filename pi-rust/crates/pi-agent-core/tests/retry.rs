@@ -621,6 +621,8 @@ async fn event_labels(receiver: &mut UnboundedReceiver<AgentEvent>) -> Vec<&'sta
     let mut labels = Vec::new();
     while let Ok(event) = receiver.try_recv() {
         labels.push(match event {
+            AgentEvent::AgentStart => "AgentStart",
+            AgentEvent::AgentEnd { .. } => "AgentEnd",
             AgentEvent::TurnStart => "TurnStart",
             AgentEvent::MessageStart { .. } => "MessageStart",
             AgentEvent::MessageUpdate(_) => "MessageUpdate",

@@ -27,6 +27,11 @@ use serde_json::{json, Value};
 /// turn that just finished.
 pub fn agent_event_to_json(event: &AgentEvent, turn: u32) -> Vec<Value> {
     match event {
+        AgentEvent::AgentStart => vec![json!({"type": "agent_start"})],
+        AgentEvent::AgentEnd { messages } => vec![json!({
+            "type": "agent_end",
+            "messages": messages.len(),
+        })],
         AgentEvent::TurnStart => vec![json!({"type": "turn_start"})],
         AgentEvent::MessageStart { model } => {
             vec![json!({"type": "message_start", "model": model})]

@@ -28,6 +28,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// An agent run started.
+    ///
+    /// Emitted once per [`Agent::prompt`](crate::Agent::prompt) (or
+    /// `prompt_content`) call, before the run's first `TurnStart`. The
+    /// extension runtime maps this onto upstream `agent_start`.
+    AgentStart,
+
+    /// An agent run finished.
+    ///
+    /// Emitted once per [`Agent::prompt`](crate::Agent::prompt) call after
+    /// the run's final `TurnEnd` — including on the error path, where it
+    /// precedes the `Error` event. `messages` is the message log the run
+    /// left behind. The extension runtime maps this onto upstream
+    /// `agent_end`.
+    AgentEnd {
+        /// Message log after the run.
+        messages: Vec<Message>,
+    },
+
     /// A new turn began.
     ///
     /// Fired after the loop has drained pending messages and is about to

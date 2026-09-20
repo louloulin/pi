@@ -1738,6 +1738,10 @@ impl App {
                 });
             }
             AgentEvent::UserMessage(_) => {}
+            // Run brackets. The TUI renders turn/message state, not the run
+            // boundary itself, so these need no UI work — but the extension
+            // fan-out hook (if installed) still sees them.
+            AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {}
             AgentEvent::Error(message) => {
                 self.pending_error = Some(message);
             }
