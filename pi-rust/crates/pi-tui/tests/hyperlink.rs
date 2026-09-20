@@ -58,6 +58,7 @@ fn assistant_with_link() -> MessageView {
     view.push(MessageItem {
         role: Role::Assistant,
         text: "see [docs](https://example.com/x) now".into(),
+        thinking: String::new(),
         streaming: false,
     });
     view
@@ -143,6 +144,7 @@ fn selection_never_includes_osc8_sequences() {
     app.messages_mut().push(MessageItem {
         role: Role::Assistant,
         text: "see [docs](https://example.com/x) now".into(),
+        thinking: String::new(),
         streaming: false,
     });
     let area = Rect::new(0, 0, WIDTH, HEIGHT);
@@ -176,6 +178,7 @@ fn snapshot_export_stays_plain_text_when_hyperlinks_are_on() {
     app.messages_mut().push(MessageItem {
         role: Role::Assistant,
         text: "see [docs](https://example.com/x) now".into(),
+        thinking: String::new(),
         streaming: false,
     });
     let snapshot = app.render_snapshot(WIDTH, HEIGHT);

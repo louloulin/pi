@@ -1993,11 +1993,13 @@ mod tests {
         app.messages_mut().push(pi_tui::message::MessageItem {
             role: pi_tui::message::Role::Assistant,
             text: "first reply".into(),
+            thinking: String::new(),
             streaming: false,
         });
         app.messages_mut().push(pi_tui::message::MessageItem {
             role: pi_tui::message::Role::Assistant,
             text: "second reply\nwith two lines".into(),
+            thinking: String::new(),
             streaming: false,
         });
 

@@ -111,10 +111,14 @@
 //! table have **no consumer** in this port yet and are deliberately not
 //! implemented here: `app.suspend`, `app.thinking.cycle`,
 //! `app.thinking.save`, `app.model.cycleForward` / `cycleBackward` /
-//! `select`, `app.tools.expand`, `app.thinking.toggle`, the `app.session.*`,
+//! `select`, `app.tools.expand`, the `app.session.*`,
 //! `app.tree.*`, `app.models.*`, `app.message.*`, `app.clipboard.*` and
 //! `app.editor.*` families, and `tui.altScreen.halfPageUp` / `halfPageDown`
 //! / `lineUp` / `lineDown` / `previousPrompt` / `nextPrompt`.
+//!
+//! `app.thinking.toggle` (`ctrl+t`) **is** wired: it collapses / expands
+//! assistant thinking blocks and reports the new state through the transient
+//! status hint (see [`App::toggle_thinking_visibility`]).
 //!
 //! One deliberate deviation: upstream's `app.model.select` also defaults to
 //! `ctrl+l`, but there it means "open the model selector"
@@ -246,6 +250,7 @@ use pi_protocol::{Content, Message, StopReason, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -913,6 +918,11 @@ pub struct App {
     /// (upstream saves `this.editor.getText()` on `showExtensionCustom`,
     /// `packages/coding-agent/src/modes/interactive/interactive-mode.ts:2755,2778`).
     custom_saved_editor: Option<String>,
+    /// Transient status-bar message (upstream's `showStatus`), rendered in the
+    /// hint slot of the *next* frame and cleared by the next key press. Used
+    /// to acknowledge a chord that changes no visible text on its own, e.g.
+    /// `app.thinking.toggle`.
+    status_flash: Option<String>,
 }
 
 impl App {
@@ -975,6 +985,7 @@ impl App {
             tool_call_ids: HashMap::new(),
             extension: ExtensionUi::new(),
             custom_saved_editor: None,
+            status_flash: None,
         }
     }
 
@@ -989,6 +1000,29 @@ impl App {
     /// untouched, so flipping the switch back re-renders the same bodies.
     pub fn set_markdown(&mut self, enabled: bool) {
         self.messages.set_markdown(enabled);
+    }
+
+    /// Whether assistant thinking / reasoning blocks are currently shown.
+    pub fn thinking_visible(&self) -> bool {
+        self.messages.thinking_visible()
+    }
+
+    /// Show or hide assistant thinking blocks in place, returning the new
+    /// visibility. Backs `app.thinking.toggle` (`Ctrl+T`), upstream's
+    /// `toggleThinkingBlockVisibility`
+    /// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:4239`).
+    ///
+    /// Only the collapsed flag changes — the reasoning text stays on the
+    /// transcript item, so toggling back restores it unchanged.
+    pub fn set_thinking_visible(&mut self, visible: bool) {
+        self.messages.set_thinking_visible(visible);
+    }
+
+    /// Flip assistant thinking visibility, returning the new value.
+    pub fn toggle_thinking_visibility(&mut self) -> bool {
+        let visible = !self.messages.thinking_visible();
+        self.messages.set_thinking_visible(visible);
+        visible
     }
 
     /// Whether markdown links render as OSC 8 hyperlinks.
@@ -1024,6 +1058,33 @@ impl App {
     /// Mutable borrow of the status data.
     pub fn status_data_mut(&mut self) -> &mut StatusData {
         &mut self.status_data
+    }
+
+    /// The last transient status message pushed by [`App::flash_status`], if
+    /// any. Consumed by the next render and cleared by the next key press.
+    pub fn status_flash(&self) -> Option<&str> {
+        self.status_flash.as_deref()
+    }
+
+    /// Show a transient status message in the status bar until the next key
+    /// press (upstream's `showStatus`, which is what `Ctrl+T` and the other
+    /// toggles use to acknowledge a chord).
+    pub fn flash_status(&mut self, text: impl Into<String>) {
+        self.status_flash = Some(text.into());
+    }
+
+    /// The status data as it should be painted: [`App::status_data`] with the
+    /// transient hint layered on top when a flash is pending. Borrowed in the
+    /// common case so the render path does not clone on every frame.
+    fn status_for_render(&self) -> Cow<'_, StatusData> {
+        match &self.status_flash {
+            None => Cow::Borrowed(&self.status_data),
+            Some(flash) => {
+                let mut data = self.status_data.clone();
+                data.hint = Some(flash.clone());
+                Cow::Owned(data)
+            }
+        }
     }
 
     /// The palette the buffer render path currently consumes.
@@ -1123,6 +1184,16 @@ impl App {
         changed
     }
 
+    /// Apply one [`AgentEvent`] to the message view and status bar.
+    ///
+    /// [`App::drain_agent_events`] funnels every queued event through this;
+    /// it is public so a driver (or a test) can inject a synthetic event —
+    /// the faux provider only streams text, so a thinking or tool event has
+    /// no other way in.
+    pub fn apply_agent_event(&mut self, event: AgentEvent) {
+        self.apply_event(event);
+    }
+
     /// Apply a single [`AgentEvent`] to the message view + status bar.
     fn apply_event(&mut self, event: AgentEvent) {
         match event {
@@ -1135,8 +1206,8 @@ impl App {
                 AssistantMessageUpdate::TextDelta { delta } => {
                     self.messages.append_assistant_delta(&delta);
                 }
-                AssistantMessageUpdate::ThinkingDelta { .. } => {
-                    // Collapsed thinking — not rendered by Stage 4.
+                AssistantMessageUpdate::ThinkingDelta { delta } => {
+                    self.messages.append_thinking_delta(&delta);
                 }
                 AssistantMessageUpdate::ToolCallDelta {
                     index,
@@ -1726,6 +1797,10 @@ impl App {
     /// Process a single [`Key`]. Public so tests can step the App
     /// with explicit keys.
     pub fn step_key(&mut self, key: Key) -> StepOutcome {
+        // A transient status message lives for exactly one key press
+        // (upstream's `showStatus` clears on a timer; this port has no timer
+        // in the App, and a key press is the next thing the reader does).
+        self.status_flash = None;
         // A visible custom overlay is the outermost layer; see [`App::step`].
         if self.extension.handle_overlay_input(key) {
             return StepOutcome::Redraw;
@@ -1791,6 +1866,18 @@ impl App {
             // The selected line indices point into the transcript that
             // just disappeared.
             self.clear_selection();
+            return StepOutcome::Redraw;
+        }
+        // `app.thinking.toggle` (`Ctrl+T`): collapse / expand every assistant
+        // reasoning block (upstream's `toggleThinkingBlockVisibility`,
+        // `interactive-mode.ts:4239`, which also reports the new state through
+        // `showStatus`).
+        if Self::matches_app_key(&kb, &event, "app.thinking.toggle", &["ctrl+t"]) {
+            let visible = self.toggle_thinking_visibility();
+            self.flash_status(format!(
+                "Thinking blocks: {}",
+                if visible { "visible" } else { "hidden" }
+            ));
             return StepOutcome::Redraw;
         }
         // Fullscreen chat-log scrolling. Upstream deliberately shadows
@@ -3444,8 +3531,12 @@ impl App {
         // Below-editor widgets.
         self.paint_extension_lines(below_area, &frame.below, buf);
 
-        self.status_bar
-            .render_to_buffer_themed(&self.status_data, status_area, buf, &self.theme);
+        self.status_bar.render_to_buffer_themed(
+            &self.status_for_render(),
+            status_area,
+            buf,
+            &self.theme,
+        );
 
         self.paint_extension_lines(footer_area, &frame.footer, buf);
 
@@ -3667,7 +3758,7 @@ impl App {
                     crate::search::search_bar_text(&render_search_bar(&state.bar, width).lines)
                 })
                 .unwrap_or_default(),
-            status: self.status_data.clone(),
+            status: self.status_for_render().into_owned(),
         }
     }
 

@@ -14609,3 +14609,85 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
 * 开工 `30G / 50G`（63%），余 18G。
 * 收尾 `43G / 50G`（92%），余 4.2G —— 涨的是三个并发 worktree 的 target：`lum-1211` **17G**、`lum-1209` 2.2G、`lum-1189` 2.2G、本轮 1.2G。**告警**：LUM-1211 的 target 已单占 17G，下一轮开工前需要有人清理死掉的 worktree target，否则新一轮全量构建会直接撞盘。
 * 本轮 target 用 worktree 内 `pi-rust/target`（与两个 worker 的目录互不干扰），收尾已删除；无 `/tmp` 遗留。
+## LUM-1213 round — pi-tui「thinking 块渲染 + `app.thinking.toggle`（Ctrl+T）」：把被丢弃的 `ThinkingDelta` 变成可见推理 → 合并 `feature/pi.rs`；合入树全量实跑 **139 套件 / 2112 passed / 0 failed / 2 ignored**（本轮单独 139 / 2102）；3/3 满槽零派发
+
+本轮为 autopilot 重复轮：可合并队列为空、并发槽已满（`running_task_count = 4`），按 LUM-1185 / 1186 / 1191 先例，把本轮产能用于**一个自成闭环、文件面不碰任何在飞 stage 的 TUI 增量**，而不是空转。
+
+### 一、本轮定位与选片依据
+
+选题来自对 pi-tui（27,885 行）+ `pi-coding-agent/src/interactive.rs`（1,750 行）的逐点对照，共发现三处「上游有、Rust 端没有」的 TUI 缺口：
+
+| # | 缺口 | 位置 | 本轮处置 |
+| - | ---- | ---- | -------- |
+| 1 | **thinking 内容被整体丢弃**（provider 已发 `ThinkingDelta`，TUI 无处可放） | `pi-tui/src/app.rs` 原 `AssistantMessageUpdate::ThinkingDelta { .. } => { /* Collapsed thinking — not rendered by Stage 4. */ }`；`Content` 无 thinking 变体 | **本轮实现（渲染层）** |
+| 2 | `app.thinking.toggle`（`Ctrl+T`）/ `app.tools.expand`（`Ctrl+O`）在 keybinding 表里**声明了但零消费者** | `pi-coding-agent/src/keybindings.rs:159,246` | `Ctrl+T` **本轮接线**；`Ctrl+O` 推迟（见第六节） |
+| 3 | `tui.altScreen.*` 滚动和弦未实现；prompt 跳转和弦（`ctrl+shift+up` / `ctrl+up` …）无处理 | 上游靠 OSC 133 prompt 标记（`packages/tui/src/tui-alt-screen.ts:482,753,757`），本移植不产出该标记 | 推迟（需先补 OSC 133 上报） |
+
+选 #1+#2 的理由：改动**全部落在 `pi-tui` 内部**，与在飞的 Stage 55（`pi-session/**`）和 Stage 57（`pi-ai/src/ext_bridge.rs`）**零文件重叠**；且它是「用户可见的功能缺失」而非重构，收益/风险比最高。
+
+### 二、交付内容（文件:行号）
+
+**`pi-rust/crates/pi-tui/src/message.rs`**
+
+1. `MessageItem` 新增公开字段 `thinking: String`（`:47`），4 个构造器与 `push_info` 全部置空 —— 推理文本挂在**同一条** assistant item 上，而不是新建 `Role::Thinking`：后者的渲染位置会落到 `[model]` 占位符之后，把「推理」画到「回答」下面。
+2. 新增 `pub const HIDDEN_THINKING_LABEL: &str = "Thinking..."`（`:36`），对齐上游 `hiddenThinkingLabel` 默认值（`packages/coding-agent/src/modes/interactive/components/assistant-message.ts:30`）。
+3. `MessageView` 新增私有开关 `hide_thinking: bool`（`:156`）+ 4 个访问器（`thinking_visible` `:227`、`set_thinking_visible` `:239`、`set_hide_thinking`、`with_hide_thinking`）。**默认 `false`（推理可见）**，对齐上游 `hideThinkingBlock = false`（`packages/coding-agent/src/core/settings-manager.ts:962`）。
+4. `append_thinking_delta(&mut self, delta: &str)`（`:320`）：写进尾部「流式中」assistant item 的 `thinking`；若尾部不是流式 assistant 则新开一条 —— 与 `append_assistant_delta` 同一条规则，因此 tool 块之间的 thinking 顺序得以保持；随后 `repin_if_following()` 维持粘底。
+5. 渲染：`render_styled_lines` 在 body 之前先输出 thinking 块（`:783` 起 `thinking_lines`），空白 thinking 直接跳过；可见态走 markdown（`self.markdown` 为真时）或纯文本换行，再把**除 role 前缀外**的所有 span 重着色为 `ThemeColor::ThinkingText` + italic —— 对应上游给 thinking `Markdown` 组件传 `color` / `italic`（`assistant-message.ts:147-158`）。内联图片行按逐字原样保留（`image_row_mask` 跳过），避免把转义序列重新着色。
+6. 抽出 `plain_lines()`（`:874`）承载「换行 + 加前缀」逻辑，供 body 与 thinking 两条路径共用，行为与改动前逐字一致（含空 body 时只输出前缀）。
+
+**`pi-rust/crates/pi-tui/src/app.rs`**
+
+7. `App` 新增 `status_flash: Option<String>`（`:921`）+ `flash_status()`（`1069`）/`status_flash()`（`1061`）/私有 `status_for_render() -> Cow<'_, StatusData>`（`1075`）；两处渲染点（buffer 路径 `:3521`、`render_snapshot` `:3747`）改用后者。这是**最小可用的上游 `showStatus` 等价物**：只覆盖 `hint` 槽，不引入完整 toast 系统。`Cow` 保证无 flash 时零克隆。
+8. `step_key()` 入口清 `status_flash`（`:1799`）→ 瞬态提示只活一次按键；`Ctrl+T` 处理器（`:1875`）调用 `toggle_thinking_visibility()`（`:1018`）并 `flash_status("Thinking blocks: visible|hidden")`，返回 `Redraw`。上游对应 `interactive-mode.ts:4239 toggleThinkingBlockVisibility`。
+9. `AssistantMessageUpdate::ThinkingDelta { delta }` 不再被丢弃，改为 `self.messages.append_thinking_delta(&delta)`（`:1205`）。`interactive.rs:391` 只是把事件转给 `app.step(event)`，所以 Ctrl+T 与渲染**自动**在真实交互路径生效，无需改 `pi-coding-agent`。
+10. 新增公开 `apply_agent_event(&mut self, event: AgentEvent)`（`:1189`）包住私有 `apply_event` —— faux provider 只发文本 delta，测试/驱动需要注入合成 thinking 事件的入口。
+11. 模块文档更新（`:110-122`）：`app.thinking.toggle` 从「无消费者」清单移出，并标注已接线。
+
+**测试**：新增 `pi-rust/crates/pi-tui/tests/thinking.rs`（10 个用例）—— 覆盖 delta 归并、thinking 先于 body、`ThinkingText`+italic 槽位校验、折叠标签与往返恢复、纯空白跳过、`Ctrl+T` 两次翻转 + `status.hint` 文案、下一次按键清除 flash、`Ctrl+L` 不清开关、`apply_agent_event` 路由。另同步修 4 处既有 `MessageItem` 字面量（`tests/hyperlink.rs:61,147,181`、`tests/markdown.rs:539`）补 `thinking` 字段。
+
+### 三、质量门（全量实跑，两次）
+
+**（a）本轮产物单独**（base = `d063396b8`）：`139 套件 / 2102 passed / 0 failed / 2 ignored`（= LUM-1208 基线 138 / 2092 之上 +1 套件 +10 用例）。
+
+**（b）合入后的 `feature/pi.rs` tip（= 本轮产物 + LUM-1210）**：`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --offline -- -D warnings` + `cargo test --workspace --offline --no-fail-fast` → **`139 套件 / 2112 passed / 0 failed / 2 ignored`**（+10 用例全部来自 LUM-1210 在 `interactive.rs` / `slash.rs` 的新增测试）。
+
+* fmt / clippy 全绿（clippy 仅 `vendor/rquickjs-core` 的 12 条上游告警，属 cap-lints 放行的第三方基线）。
+* **合并后的这一跑是必须的**：合并树曾在本轮第一次 `cargo check` 时报 **E0063** `missing field thinking in initializer of MessageItem` ×2（`pi-coding-agent/src/interactive.rs:1993,1998`）—— 这是 LUM-1210 新写的测试字面量与本轮新增字段的**跨轮合并破口**，本次已补 `thinking: String::new()` 修复。它同时证明：**worker 自报的门（LUM-1210 只跑了 `pi-tui` + `pi-coding-agent`）不等于全量门**。
+
+### 四、可合并性扫描
+
+开工时 `git fetch origin --prune` + 双向扫 `work/*` / `agent/devbox1/*`：**零可合并产物** —— 除 `mirror/work/LUM-1211`（ahead 0）外全部是 `feature/pi.rs` 的祖先或已被更新实现覆盖。故本轮只合并自己的 `work/LUM-1213`。
+
+**但 tip 在作业期间动了**：合并前复查发现 `origin/feature/pi.rs` 已从 `d063396b8` 前进到 **`e12b8efdb`（LUM-1210，TUI 优先轮）**。按「合并前必须重新 fetch」的规矩做了 `git merge --no-ff`，冲突只有文档一处（两个 round 段追加到同一位置），`app.rs` 自动合并（LUM-1210 只加了 `request_clipboard`）。详见第八节。
+
+### 五、frontier（本轮后）
+
+1. **质量门基线** = **139 套件 / 2112 passed / 0 failed / 2 ignored**（合入树实跑，含 LUM-1210）；仅本轮产物为 139 / 2102。下一欠账点 = LUM-1209 或 LUM-1211 任一合入时（两条在飞产物从未跑过全量门）。
+2. **thinking 的协议级残余（本轮明确留作后续片）**：本轮只做「TUI 把已到达的流事件画出来」。真正的完整支持需要 (a) `pi-protocol::Content` 增加 `Thinking` 变体，(b) provider 累积并回填 thinking（当前 `pi-ai/src/providers/anthropic.rs:917-918` 明确注释「signature 未在线类型中承载，故丢弃」），(c) 会话序列化携带 thinking。三处跨 crate，风险面大，**不塞进 TUI 片**。
+3. **已知语义偏差（本轮引入，需后续片收口）**：同一 assistant message 内「thinking → text → thinking」交错到达时，本实现把两段 thinking 归并到同一字段（渲染为「合并后的推理 + 正文」），而非严格按到达顺序交错。Anthropic 的 interleaved thinking 在每个 tool 往返里是**新 message**（新 `MessageStart`），tool 块之间的顺序由「尾部非流式 assistant 时新开 item」规则保住，因此实务上影响面小；但这是与上游 `message.content` 有序数组的**结构性差异**，后续补 `Content::Thinking` 时应一并消除。
+4. **推迟片（本轮不动，理由已核）**：`app.tools.expand`（`Ctrl+O`）—— 上游默认折叠 tool 输出，Rust 端默认全展开；改成折叠会改变**默认渲染与既有快照**，需要先定折叠格式，不能顺手改。`tui.altScreen.*` 滚动/prompt 跳转和弦 —— 依赖 OSC 133 prompt 标记，属独立前置工作。
+5. Stage 55（LUM-1209）/ 56（LUM-1212）/ 57（LUM-1211）状态与依赖不变，维持 LUM-1208 的裁决。
+
+### 六、流程教训（本轮三条）
+
+1. **协调轮的「满槽零派发」不等于零产出**：只要选片满足「自成闭环 + 与在飞文件面零重叠 + 有真实用户可见收益」，就能产出可合并增量。判据要看**文件面**，不是看「本轮是不是协调轮」。
+2. **测试计数是门的一部分，`--no-fail-fast` 下必须自己求和**：`cargo test --workspace` 只逐 suite 打印 `test result`，不汇总。用 `grep -E "^test result" | awk` 求和，且必须断言 `failed == 0` 与「无 suite 报 fail」，否则会把中途 ENOSPC 导致的少 suite 误读成通过。
+3. **在共享磁盘上，ENOSPC 不等于「这版代码编不过」**：本轮两次全量门报 `No space left on device (os error 28)`，`df` 却是 250M–544M 且数十秒后回到 5G+ —— 真正的原因是同机两个在飞 run（LUM-1211 / LUM-1209）正在并发全量编译。处置规律：先 `find <other target> -newermt '-2 minutes'` 确认是不是别人在写盘 + 等窗口，**不要**把别人的 target 当成「死了」删掉。详见第七节。
+
+### 七、磁盘
+
+* 开工 `91%`（余 4.3G）。首次全量门复用 `/home/devbox/multica_workspaces/lumos-659117e3ca3d/lum-1189-3bcc98c399ee/workdir/pi/pi-rust/target`（2.6G，无进程持有），验证 LUM-1185 的跨界复用结论仍然成立（第三方依赖可复用，本 crate 产物需重编）。
+* **复用他人的 target 有寿命风险**：合并阶段该目录被清空到 157M（另一 run 的 `cargo clean` 或全盘 ENOSPC 后的残缺状态），导致 `cargo clippy` 撞 ENOSPC；此后改用**本轮私有** `lum-1213-.../workdir/pi/pi-rust/target`。**结论：跨界复用只能在「只读地当一次缓存」的场景，且要接受它随时消失；不要把多阶段的门都押在它上面。**
+* **共享盘的 ENOSPC 不是本 run 的产物撑爆的**：本轮两次报 `No space left on device (os error 28)`（`target/debug/deps/rustcapsZXf` / `rmeta1AGnQW`），而每次报错前 `df` 只有 250M–544M、数十秒后同一文件系统回到 5G+；实测同机 **LUM-1211 + LUM-1209 两个在飞 run 正在并发全量编译**（`find <their target> -newermt '-2 minutes'` 持续 1500–2400 个文件在写）。它们在 10:08 前后收尾并各自清理，磁盘随即从 `100%` 回到 `45%`（余 26G）——本次全量门随后一次跑绿。**处置规律：先确认是谁在写盘，等窗口，别急着删别人的 target。**
+
+### 八、与 LUM-1210 的对接（合并时发现，请后续轮沿用）
+
+合入时发现：本轮开工的 base 是 `d063396b8`（LUM-1208），但 `origin/feature/pi.rs` 在本轮作业期间已被 **LUM-1210 推到 `e12b8efdb`**（TUI 优先轮：首批 `app.*` 快捷键 + `/hotkeys` + 模型目录排序 + `docs/TUI_UX_AUDIT.md`）。这是一次**同一区域（TUI）两轮并行**，因此逐条对账：
+
+1. **无重复实现**：LUM-1210 在 `pi-tui/src/app.rs` 只加了 `App::request_clipboard`（`:3176`），与本轮的 `status_flash` / `thinking_lines` 不重叠 —— 合并 `git merge --no-ff` 对 `app.rs` **自动合并成功**，唯一冲突在本文档（两个 round 段都追加在同一处，属机械冲突，两边内容都保留）。
+2. **键盘不打架**：LUM-1210 在 `pi-coding-agent/src/interactive.rs:392-430` 于 `app.step` **之前**截获 `app.model.cycleForward` / `cycleBackward` / `app.message.copy`（仅限无模态时），**不含** `app.thinking.toggle`；而本轮的 `Ctrl+T` 实现在 `App::step_key` 内部。两者叠加到真实交互路径后：Ctrl+T 不被截获 → 落到 `app.step` → 本轮处理器生效。已核对，无覆盖。
+3. **本轮的 `Ctrl+T` 正好是 LUM-1210 规划的 Stage 59 首项**（其 frontier 第 2 条：「补齐 `app.*` 第 1 批（`app.thinking.toggle`、`app.editor.external`、`app.session.*`）」）。即 **Stage 59 的第一项已由本轮交付**；后续晋升 Stage 59 时应删掉该项，只留 `app.editor.external` 与 `app.session.*`（后者仍等 LUM-1209 的 `pi-session` 写路径）。
+4. **`/hotkeys` 的诚实性规则已履行**：LUM-1210 立下「每接一个 `app.*` 必须同步 `slash.rs` 的分组表，否则会出现「文档里有的键按下去没反应」」。本轮按该规则把 `app.thinking.toggle` 加进 `slash.rs` 的 APP 分组（`"show or hide thinking blocks"`），并扩展 `hotkeys_text_lists_effective_chords` 断言 `Ctrl+T` 与描述文本。
+5. **门的交接**：LUM-1210 只跑了 `pi-tui` + `pi-coding-agent` 子图（59 target / 1291 passed），**未跑全量 workspace**。本轮合并后在**含 LUM-1210 全部改动**的树上重跑全量三件套（见第三节），因此 LUM-1210 的产物也随之过了全量门 —— 且这一次跑真的抓到了东西：**E0063**（LUM-1210 的测试字面量缺本轮新增的 `thinking` 字段，`interactive.rs:1993,1998`），已修。这就是「worker 自报的门 ≠ 全量门」在本轮的兑现方式 —— 注意：**报了 green 的子图门，仍然可以漏掉跨 run 的合并破口**。
+6. **教训**：同一片区域（TUI）由两个 run 并行时，**开工时扫到的 tip 会在作业期间过期**。本轮流程正确（合并前 `git fetch` 并发现 tip 已从 `d063396b8` 变成 `e12b8efdb`），但更稳的做法是：**选片前先看该区域最近是否已有在飞/刚落地的 round**（`git log --oneline origin/feature/pi.rs -- <path>`），并在 issue 正文里点名对齐；否则两个 run 容易同时挑中同一项（本轮靠运气没撞上）。

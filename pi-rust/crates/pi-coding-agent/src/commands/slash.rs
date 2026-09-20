@@ -211,6 +211,7 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ("app.model.cycleForward", "cycle to the next model"),
         ("app.model.cycleBackward", "cycle to the previous model"),
         ("app.message.copy", "copy the last assistant message"),
+        ("app.thinking.toggle", "show or hide thinking blocks"),
         ("app.model.select", "open the model selector"),
     ];
     const SELECTORS: &[(&str, &str)] = &[
@@ -387,9 +388,11 @@ mod tests {
         let text = hotkeys_text_with(&manager);
         assert!(text.contains("Ctrl+P"), "{text}");
         assert!(text.contains("Ctrl+X"), "{text}");
+        assert!(text.contains("Ctrl+T"), "{text}");
         assert!(text.contains("navigation:"), "{text}");
         assert!(text.contains("chat log:"), "{text}");
         assert!(text.contains("copy the last assistant message"), "{text}");
+        assert!(text.contains("show or hide thinking blocks"), "{text}");
     }
 
     #[test]
