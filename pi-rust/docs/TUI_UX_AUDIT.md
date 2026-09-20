@@ -204,8 +204,16 @@ worker 的 stage 划分。
   而不是静默排队；启动头用 `rawKeyHint("!", …)` 提示（`:932`、`:943`）。
 - Rust 侧零实现：`pi-rust/crates/pi-coding-agent/src/` 全树无 `isBashMode` / `startsWith("!")` 等价物。
 - 修复方向：编辑器前缀识别（已有 `autocomplete.rs` 的前缀逻辑可参考）+ `tool_executor` 的
+  修复方向：编辑器前缀识别（已有 `autocomplete.rs` 的前缀逻辑可参考）+ `tool_executor` 的
   bash 通路。与 Stage 61 已落地的 pending 队列有一处交集：bash 忙时应「拒绝并提示」而不是入队（上游语义）。
-- 建议：Stage 62。
+- **已落地（Stage 62 = LUM-1223，`b2f673922`）**：前缀解析放在 `editor.rs`（`parse_bash_command` /
+  `is_bash_mode`），提交分支在 `interactive.rs::handle_submitted`；命令结果复用 Stage 58 的
+  `InteractiveToolRenderer` + `MessageView::finish_tool_execution_with_lines`，折叠 / `Ctrl+O` /
+  点击展开全部生效；忙时按上游语义**拒绝并把文本放回编辑器**（不接 Stage 61 的 pending 队列）；
+  `Esc` 复用 `CancellationToken`/`AbortLike` 通道杀掉子进程。**已知差异**：`pi-protocol::Role`
+  没有 `bashExecution` 变体，所以 `!` 目前也不写入 `Agent::state().messages`（上游会写入并在
+  构造上下文时过滤 `!!`）—— 待协议层补 role 后即可对齐。编辑器边框色上游在 `bashMode` 时切换，
+  本移植的 prompt 没有边框，改为把 `> ` 标签染成 `ThemeColor::BashMode`。
 
 ### P2 其它
 
@@ -291,23 +299,23 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | Stage | 内容 | 验收 | 依赖 / 风险 |
 | --- | --- | --- | --- |
 | 58（LUM-1214，已合入） | 工具输出折叠 + `app.tools.expand` + 点击工具块展开 | 已交付 `6d4f64e62`，LUM-1221 轮合入（`76d1d634e`）；折叠提示 + N 可注入 + 键位可覆盖 + 单击单块，测试 `tests/tool_blocks.rs` 与 `tools_render.rs` 快照 | 无（选词/搜索快照未受影响，因折叠只在装了渲染器的交互路径生效） |
-| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）。剩余：`app.editor.external`、`app.session.tree`/`fork`/`resume` | `/tree`、`/fork` 依赖 LUM-1212 的 `branch_*` 读路径；外部编辑器需要 teardown/restore 终端 |
-| 60（LUM-1218，已合入） | 会话命令补齐：`/new`、`/copy`、`/name` | 已交付 `86f46dea0`，LUM-1220 轮合入 `feature/pi.rs`（3 个命令 + `app.session.new` 键位 + 6 个新测试） | `/tree`、`/fork` 仍等 Stage 56 |
+| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）。剩余：`app.editor.external`、`app.session.tree`/`fork`/`resume` | `/tree`、`/fork` 的读路径已由 Stage 56（LUM-1212）备齐；外部编辑器需要 teardown/restore 终端 |
+| 60（LUM-1218，已合入） | 会话命令补齐：`/new`、`/copy`、`/name` | 已交付 `86f46dea0`，LUM-1220 轮合入 `feature/pi.rs`（3 个命令 + `app.session.new` 键位 + 6 个新测试） | `/tree`、`/fork` 仍待接线 |
 | 61（LUM-1216，已合入） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 已交付 `8cab3a136`，LUM-1220 轮合入 `feature/pi.rs` | 无；mid-turn steer 需 core 暴露共享队列，留作后续切片 |
-| 62（LUM-1221 新建） | `!cmd` / `!!cmd` 本地 bash 通道 + 忙时拒绝语义 | 前缀识别 + 执行 + `!!` 不进上下文 + 忙时提示 | 提交分支与 Stage 61 的队列相邻，需先判 bash 再判队列 |
-| 63（LUM-1221 新建，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧 |
+| 62（LUM-1223，已交付） | `!cmd` / `!!cmd` 本地 bash 通道 + 忙时拒绝语义 | 已交付 `b2f673922`（LUM-1225 轮合入）：前缀识别 + 执行 + 结果折叠块 + `Esc` 取消；`!!` 因协议层缺 `bashExecution` role 暂以「不入 log」实现；忙时拒回编辑器而不入 Stage 61 队列 | 提交分支与 Stage 61 的队列相邻，需先判 bash 再判队列（已按此顺序实现） |
+| 63（LUM-1224，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧；62 已落地，可开工 |
 
 并发约束：LUM-1219 轮是 3 worker 在飞的重复轮（零派发）；LUM-1221 开工时在飞 2 个
 （LUM-1214 Stage 58、LUM-1220 协调轮），LUM-1214 与 LUM-1220 均在本轮内收工（且 LUM-1214 的
 产物未提交、由本轮抢救），故本轮把 58 合入后按「非冲突面优先」派发 Stage 56 = LUM-1212
 （`backlog` → `todo`，解 `/tree`/`/fork` 的读路径阻塞），62/63 待其占用槽位释放后晋升。
 
-> **落地状态（LUM-1222 更新）**：Stage 58（LUM-1214，`6d4f64e62`）已由 LUM-1221 合入
-> `feature/pi.rs`（`76d1d634e`），本轮独立复现了同一棵树并复核通过 4/5 条验收标准；
-> Stage 61（`c234068d1`）、Stage 60（`b91a3ae12`）已在 tip。
-> **当前 tip 的全量门 = 145 套件 / 2159 passed / 0 failed / 2 ignored**，但仅在
-> `76d1d634e` 上成立 —— 其后的文档提交 `b20800ed3` 引入了未闭合 fence 使 `pi-evals` 变红，
-> 本轮修好后重新全绿（详见「三点六」）。
+> **落地状态（LUM-1225 更新）**：Stage 58（`6d4f64e62`）、Stage 60（`b91a3ae12`）、Stage 61
+> （`c234068d1`）早已并入 `feature/pi.rs`；LUM-1222 修复了 `b20800ed3` 引入的未闭合 fence、使
+> `pi-evals` 回绿（tip `3fefd7bd8`）。本轮（LUM-1225）在 `3fefd7bd8` 之上交付 Stage 64
+> （usage 脚注，`f84e262b5`），并合入 Stage 56（LUM-1212，`c9122e3d8`，pi-session 的
+> usage/stats/branch 读路径）与 Stage 62（LUM-1223，`b2f673922`，`!cmd`/`!!cmd`）。
+> Stage 63（LUM-1224）先前受「必须排在本切片之后」约束，现已解除，可开工。
 
 ## 六、验证
 
@@ -341,6 +349,19 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
   干净
 ```
 
+Stage 62 轮（LUM-1223，已合入本轮 `feature/pi.rs`）：
+
+```console
+$ cargo test -p pi-coding-agent -p pi-tui --offline
+  63 个 test target：1343 passed / 0 failed / 0 ignored
+
+$ cargo clippy -p pi-coding-agent -p pi-tui --all-targets --offline -- -D warnings
+  exit 0
+
+$ cargo fmt -p pi-coding-agent -p pi-tui -- --check
+  干净
+```
+
 新增测试：`commands::slash::tests::hotkeys_text_lists_effective_chords`、
 `hotkeys_text_skips_unbound_rows`、`help_text_lists_hotkeys_command`、
 `interactive::tests::cycling_models_wraps_around_the_sorted_catalog`、
@@ -350,6 +371,14 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
 `copying_an_empty_transcript_reports_nothing_to_copy`、
 `default_model_is_the_first_entry_of_the_sorted_catalog`、
 `sorted_models_orders_by_provider_then_id`。
+
+Stage 62（LUM-1223）新增测试：`interactive::tests::bang_echo_renders_a_tool_block_without_a_user_message`、
+`double_bang_output_is_visible_but_never_enters_the_agent_log`、
+`a_busy_app_refuses_bash_and_restores_the_editor`、
+`empty_bang_commands_fall_back_to_the_normal_prompt`、
+`esc_cancels_a_running_bash_command`；`tools::bash::tests::abort_kills_a_running_command`；
+`pi_tui` 侧 `bash_mode_ignores_leading_whitespace`、`parses_bang_and_double_bang_commands`、
+`empty_bash_commands_fall_back_to_the_prompt`、`bash_mode_colours_the_prompt_label`。
 
 已知限制：`/hotkeys` 只列已实现动作（未实现的 `app.*` 不显示，避免「文档骗人」）；
 Ctrl+P 循环的是完整模型目录，上游的 `/scoped-models` 作用域还没实现；本轮未重跑全量
@@ -372,7 +401,9 @@ workspace（LUM-1209 / LUM-1211 正在各自的 worktree 里编译，避免三�
 安全边界：`context_window == 0`（无模型窗口信息）时整段隐藏，`StatusData::new` 的旧构造
 （测试与驱动）行为不变；`add_tokens` 保留。新增 8 个单测、1 个 App 级测试与 1 个主题色测试。
 
-状态：Stage 64 已并入 `feature/pi.rs`。至此审计里的「入口 → 密度」三段中，58/60/61/64 已落地，
-62（`!cmd`）在飞，63（图片 chip）排为下一槽位；剩下的 Stage 59 尾部（`app.editor.external`、
-`app.session.tree`/`fork`）仍等 Stage 56 的会话分支读路径。
+状态：Stage 64（`f84e262b5`）与 Stage 56（LUM-1212，`c9122e3d8`）、Stage 62（LUM-1223，
+`b2f673922`）已由本轮一并并入 `feature/pi.rs`。至此审计里的「入口 → 密度」三段中，
+56/58/60/61/62/64 已落地；63（图片 chip）的排序约束（「必须排在 62 之后」）已解除，成为下一个槽位；
+剩下的 Stage 59 尾部（`app.editor.external`、`app.session.tree`/`fork`）所需的 `branch_*` 读路径
+（Stage 56）本轮已备齐，可以接线。
 

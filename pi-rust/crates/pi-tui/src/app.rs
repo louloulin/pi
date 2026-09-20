@@ -3902,6 +3902,13 @@ impl App {
             return;
         }
         let line = self.prompt.render_line(rect.width);
+        // Upstream paints the editor chrome in `bashMode` while the buffer is
+        // a `!` submission (`updateEditorBorderColor`,
+        // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
+        // the label carries the colour instead.
+        let bash_style = crate::editor::is_bash_mode(self.prompt.text())
+            .then(|| SpanStyle::fg(ThemeColor::BashMode).to_style(&self.theme));
+        let label_width = self.prompt.label().chars().count() as u16;
         for (col, ch) in line.chars().enumerate() {
             let x = rect.x + col as u16;
             if x >= rect.x + rect.width {
@@ -3909,6 +3916,11 @@ impl App {
             }
             if let Some(cell) = buf.cell_mut((x, rect.y)) {
                 cell.set_char(ch);
+                if let Some(style) = bash_style {
+                    if (col as u16) < label_width {
+                        cell.set_style(style);
+                    }
+                }
             }
         }
     }

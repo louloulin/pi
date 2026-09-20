@@ -50,7 +50,9 @@ pub use component::{
     Component, CustomHandle, CustomOptions, OverlayAnchor, TextComponent, WidgetPlacement,
 };
 pub use dialog::{Dialog, DialogAction, DialogKind};
-pub use editor::{Editor, EditorAction, JumpDirection};
+pub use editor::{
+    is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, JumpDirection,
+};
 pub use extension_ui::ExtensionUi;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
 pub use highlight::{

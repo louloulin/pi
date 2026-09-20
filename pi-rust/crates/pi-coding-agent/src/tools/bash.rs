@@ -15,10 +15,14 @@
 //! model at the full log.
 //!
 //! Known gaps against upstream: stdout and stderr are labelled separately
-//! instead of being merged at the OS level (so interleaving is lost), and the
-//! `AbortLike` handle is only polled before spawning — an abort mid-command
-//! does not kill the child. Reading the drained pipes can also block on a
-//! grandchild that inherited them, which upstream shares.
+//! instead of being merged at the OS level (so interleaving is lost). Reading
+//! the drained pipes can also block on a grandchild that inherited them, which
+//! upstream shares.
+//!
+//! Cancellation is cooperative: the [`AbortLike`] handle is polled before the
+//! spawn and once per wait-loop iteration (50ms resolution), and a cancelled
+//! command gets `SIGKILL` — so the local `!cmd` path can abort a running
+//! command with `Esc`.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -145,7 +149,7 @@ impl AgentTool for BashTool {
         let stderr_rx = child.stderr.take().map(spawn_pipe_reader);
 
         let result = tokio::task::spawn_blocking(move || {
-            wait_with_timeout(child, timeout, stdout_rx, stderr_rx)
+            wait_with_timeout(child, timeout, stdout_rx, stderr_rx, abort)
         })
         .await
         .map_err(|e| ToolError::Execution(format!("shell join error: {}", e)))?;
@@ -201,6 +205,7 @@ impl AgentTool for BashTool {
                     format!("{}\n\n{}", formatted.text, status)
                 }))
             }
+            ChildOutcome::Cancelled => Err(ToolError::Aborted),
         }
     }
 }
@@ -333,6 +338,10 @@ enum ChildOutcome {
     /// The deadline fired and the child was killed; whatever it managed to
     /// write into the pipes before dying is drained and kept.
     TimedOut { stdout: String, stderr: String },
+    /// The [`AbortLike`] handle fired mid-command; the child was killed and
+    /// reaped. Any partial output is discarded — an aborted command reports
+    /// [`ToolError::Aborted`] rather than a partial result.
+    Cancelled,
 }
 
 /// Read a child pipe to EOF on a dedicated thread, forwarding each chunk to an
@@ -382,18 +391,25 @@ fn drain_pipe(rx: &mpsc::Receiver<Vec<u8>>, grace: Duration) -> Vec<u8> {
     out
 }
 
-/// Block on `child.wait()` until either the child exits or `deadline`
-/// elapses. We poll the child rather than rely on platform-specific
-/// `wait_timeout` to keep this portable across Unix and Windows; the
-/// resolution is 50ms which is fine for command-level timeouts.
+/// Block on `child.wait()` until either the child exits, the deadline
+/// elapses, or `abort` fires. We poll the child rather than rely on
+/// platform-specific `wait_timeout` to keep this portable across Unix and
+/// Windows; the resolution is 50ms which is fine for command-level timeouts
+/// (and for `Esc` cancellation).
 fn wait_with_timeout(
     mut child: std::process::Child,
     deadline: Duration,
     stdout_rx: Option<mpsc::Receiver<Vec<u8>>>,
     stderr_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    abort: AbortLike,
 ) -> ChildOutcome {
     let start = Instant::now();
     loop {
+        if abort.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ChildOutcome::Cancelled;
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 let stdout_bytes = stdout_rx
@@ -463,4 +479,36 @@ fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
         .args(["/C", "exit 1"])
         .status()
         .expect("fallback exit probe")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_kills_a_running_command() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let abort = AbortLike::from_flag(flag.clone());
+        let handle = tokio::spawn(async move {
+            BashTool
+                .execute(serde_json::json!({"command": "sleep 30"}), abort)
+                .await
+        });
+
+        // Let the child actually start before cancelling it, so the test
+        // exercises the mid-command poll rather than the pre-spawn check.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        flag.store(true, Ordering::SeqCst);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancellation must not hang")
+            .expect("task join");
+        assert!(
+            matches!(result, Err(ToolError::Aborted)),
+            "cancelled command must report Aborted: {result:?}"
+        );
+    }
 }

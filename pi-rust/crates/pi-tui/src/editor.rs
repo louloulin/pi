@@ -137,6 +137,54 @@ pub const MIN_AUTOCOMPLETE_MAX_VISIBLE: usize = 3;
 /// Upper clamp for the dropdown height, upstream's `Math.min(20, …)`.
 pub const MAX_AUTOCOMPLETE_MAX_VISIBLE: usize = 20;
 
+/// A local shell submission typed into the editor (`!cmd` / `!!cmd`).
+///
+/// Upstream runs these against the local shell without asking the model
+/// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:3106-3118`);
+/// `!!` additionally keeps the result out of the model context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCommand {
+    /// The command with the `!` / `!!` prefix and surrounding whitespace
+    /// removed. Never empty — an empty command falls back to the normal
+    /// prompt path.
+    pub command: String,
+    /// `true` for `!!` — the transcript shows the output but it must not be
+    /// added to the agent's message log.
+    pub excluded: bool,
+}
+
+/// True while the editor buffer reads as a bash submission — upstream's
+/// `onChange` bash-mode test (`text.trimStart().startsWith("!")`,
+/// `interactive-mode.ts:2907`), which drives the editor border colour.
+///
+/// This ignores leading whitespace, unlike [`parse_bash_command`], mirroring
+/// upstream where the border test trims but the submit branch does not.
+pub fn is_bash_mode(text: &str) -> bool {
+    text.trim_start().starts_with('!')
+}
+
+/// Parse a submitted buffer as `!cmd` / `!!cmd`.
+///
+/// Mirrors the upstream submit branch (`interactive-mode.ts:3106-3111`):
+/// only a leading `!` counts, `!!` excludes the result from context, and an
+/// empty command (`!`, `!!`, or `!   `) yields `None` so the caller falls
+/// back to the normal prompt path.
+pub fn parse_bash_command(text: &str) -> Option<BashCommand> {
+    let rest = text.strip_prefix('!')?;
+    let (excluded, command) = match rest.strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    Some(BashCommand {
+        command: command.to_string(),
+        excluded,
+    })
+}
+
 /// Action returned from [`Editor::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorAction {
@@ -2276,5 +2324,42 @@ mod tests {
         assert_eq!(ed.handle_key(ctrl_minus()), EditorAction::Changed);
         assert_eq!(ed.text(), "你好 世界");
         assert_eq!(ed.cursor(), "你好 世界".len());
+    }
+
+    // -------------------------------------------------------------------
+    // `!` / `!!` local bash prefix detection (LUM-1223)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bash_mode_ignores_leading_whitespace() {
+        assert!(is_bash_mode("!ls"));
+        assert!(is_bash_mode("  !!ls"));
+        assert!(is_bash_mode("!"));
+        assert!(!is_bash_mode("ls"));
+        assert!(!is_bash_mode(""));
+    }
+
+    #[test]
+    fn parses_bang_and_double_bang_commands() {
+        let one = parse_bash_command("!echo hi").expect("! parses");
+        assert_eq!(one.command, "echo hi");
+        assert!(!one.excluded);
+
+        let two = parse_bash_command("!!echo hi").expect("!! parses");
+        assert_eq!(two.command, "echo hi");
+        assert!(two.excluded);
+
+        // The submit branch only recognises a leading `!`; leading whitespace
+        // is not trimmed there (upstream `text.startsWith("!")`).
+        assert!(parse_bash_command("  !echo hi").is_none());
+        assert_eq!(parse_bash_command("!  spaced  ").unwrap().command, "spaced");
+    }
+
+    #[test]
+    fn empty_bash_commands_fall_back_to_the_prompt() {
+        assert!(parse_bash_command("!").is_none());
+        assert!(parse_bash_command("!!").is_none());
+        assert!(parse_bash_command("!   ").is_none());
+        assert!(parse_bash_command("!!   ").is_none());
     }
 }
