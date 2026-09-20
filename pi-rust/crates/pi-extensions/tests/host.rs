@@ -101,7 +101,9 @@ fn loading_a_second_extension_keeps_the_first_extensions_tools() {
                 });
             };
         "#;
-        host.load(entry("first_ext"), first).await.expect("load first");
+        host.load(entry("first_ext"), first)
+            .await
+            .expect("load first");
         host.load(entry("second_ext"), second)
             .await
             .expect("load second");
@@ -899,12 +901,9 @@ fn esm_arrow_default_export_and_aliased_imports() {
                 }));
             };
         "#;
-        host.load(
-            entry_at("arrow-ext", "/opt/ext/arrow/index.mjs"),
-            source,
-        )
-        .await
-        .expect("arrow ESM extension should load");
+        host.load(entry_at("arrow-ext", "/opt/ext/arrow/index.mjs"), source)
+            .await
+            .expect("arrow ESM extension should load");
 
         let bridge = JsExtensionBridge::new(host, "print", false, "/w");
         let discovered = bridge

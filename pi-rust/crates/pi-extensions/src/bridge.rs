@@ -36,7 +36,12 @@ impl std::fmt::Debug for JsExtensionBridge {
 
 impl JsExtensionBridge {
     /// Wrap a host, attaching the runtime fields every event needs.
-    pub fn new(host: JsExtensionHost, mode: impl Into<String>, has_ui: bool, cwd: impl Into<String>) -> Self {
+    pub fn new(
+        host: JsExtensionHost,
+        mode: impl Into<String>,
+        has_ui: bool,
+        cwd: impl Into<String>,
+    ) -> Self {
         Self {
             host,
             mode: mode.into(),
@@ -122,9 +127,10 @@ impl ExtensionBridge for JsExtensionBridge {
 
 /// Convert a [`DispatchOutcome`](crate::host::DispatchOutcome) error
 /// into an [`ExtensionError`].
-pub fn dispatch_error_to_extension_error(err: &crate::host::DispatchOutcome) -> Option<ExtensionError> {
-    err
-        .errored
+pub fn dispatch_error_to_extension_error(
+    err: &crate::host::DispatchOutcome,
+) -> Option<ExtensionError> {
+    err.errored
         .as_ref()
         .map(|e| ExtensionError::Runtime(e.message.clone()))
 }

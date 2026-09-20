@@ -135,7 +135,9 @@ fn e2e_hello_extension_loads_and_registers_tool() {
     let runtime = rt();
     runtime.block_on(async {
         let host = JsExtensionHost::new().await.expect("host");
-        host.load(entry("hello"), HELLO_JS).await.expect("load hello");
+        host.load(entry("hello"), HELLO_JS)
+            .await
+            .expect("load hello");
         let tools = host.registered_tool_names().await;
         assert_eq!(tools, vec!["hello".to_string()]);
     });
@@ -146,7 +148,9 @@ fn e2e_hello_extension_executes_via_host() {
     let runtime = rt();
     runtime.block_on(async {
         let host = JsExtensionHost::new().await.expect("host");
-        host.load(entry("hello"), HELLO_JS).await.expect("load hello");
+        host.load(entry("hello"), HELLO_JS)
+            .await
+            .expect("load hello");
         let outcome: ToolExecutionOutcome = host
             .execute_tool("hello", r#"{"name": "world"}"#)
             .await
@@ -155,7 +159,10 @@ fn e2e_hello_extension_executes_via_host() {
         let content = outcome.content.first().expect("content block");
         assert_eq!(content["type"], "text");
         assert_eq!(content["text"], "Hello, world!");
-        assert_eq!(outcome.details, Some(serde_json::json!({"greeted": "world"})));
+        assert_eq!(
+            outcome.details,
+            Some(serde_json::json!({"greeted": "world"}))
+        );
     });
 }
 
@@ -166,7 +173,9 @@ fn e2e_notify_extension_emits_via_ui_handler() {
         let answers = ScriptedUiAnswers::default();
         let handler = Arc::new(ScriptedUiHandler::new(answers));
         let host = JsExtensionHost::with_handler(handler).await.expect("host");
-        host.load(entry("notify"), NOTIFY_JS).await.expect("load notify");
+        host.load(entry("notify"), NOTIFY_JS)
+            .await
+            .expect("load notify");
         // Drive session_start with hasUI=true so the shim routes
         // through host_ui_notify.
         host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
@@ -276,16 +285,17 @@ fn e2e_command_side_effects_are_drainable_once() {
 
         let effects = host.drain_side_effects();
         assert!(
-            effects
-                .entries
-                .iter()
-                .any(|e| e.custom_type == "cmd_entry" && e.data == serde_json::json!({"args": "payload"})),
+            effects.entries.iter().any(|e| e.custom_type == "cmd_entry"
+                && e.data == serde_json::json!({"args": "payload"})),
             "entries: {:?}",
             effects.entries
         );
         assert_eq!(effects.session_name.as_deref(), Some("renamed-by-command"));
         assert!(
-            effects.messages.iter().any(|m| m["customType"] == "cmd_message"),
+            effects
+                .messages
+                .iter()
+                .any(|m| m["customType"] == "cmd_message"),
             "messages: {:?}",
             effects.messages
         );
