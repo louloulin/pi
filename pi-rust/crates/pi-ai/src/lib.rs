@@ -25,11 +25,12 @@ pub mod utils;
 pub mod wasm;
 
 pub use auth::{
-    default_provider_auth_context, env_api_key_auth, lazy_oauth, resolve_provider_auth, ApiKeyAuth,
-    ApiKeyCredential, AuthCheck, AuthContext, AuthError, AuthEvent, AuthOperationOptions,
-    AuthResolutionOverrides, AuthResult, AuthType, Credential, CredentialInfo, CredentialStore,
-    InMemoryCredentialStore, LazyOAuthConfig, ModelAuth, ModelsError, ModelsErrorCode, OAuthAuth,
-    OAuthCredential, ProviderAuth, ProviderEnv, ProviderHeaders,
+    default_provider_auth_context, env_api_key_auth, lazy_oauth, provider_auth_for,
+    resolve_api_key_for_provider, resolve_provider_auth, ApiKeyAuth, ApiKeyCredential, AuthCheck,
+    AuthContext, AuthError, AuthEvent, AuthOperationOptions, AuthResolutionOverrides, AuthResult,
+    AuthType, Credential, CredentialInfo, CredentialStore, InMemoryCredentialStore,
+    LazyOAuthConfig, ModelAuth, ModelsError, ModelsErrorCode, OAuthAuth, OAuthCredential,
+    ProviderAuth, ProviderEnv, ProviderHeaders,
 };
 pub use env_api_keys::{
     find_env_keys, get_env_api_key, ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV,

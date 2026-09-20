@@ -13,7 +13,10 @@
 //!   the environment.
 //!
 //! [`credential_store`] provides the default in-memory store and [`helpers`]
-//! the standard api-key / lazy-OAuth builders.
+//! the standard api-key / lazy-OAuth builders; [`provider_registry`] is the
+//! runtime bridge that wires the provider registry's `api_key_env` table into
+//! those strategies and exposes the api-key resolution entry point the
+//! `pi-coding-agent` router consumes.
 //!
 //! # Deliberate differences from the TypeScript implementation
 //!
@@ -31,6 +34,7 @@
 
 pub mod credential_store;
 pub mod helpers;
+pub mod provider_registry;
 pub mod resolve;
 pub mod types;
 
@@ -40,6 +44,7 @@ use crate::types::AbortSignal;
 
 pub use credential_store::InMemoryCredentialStore;
 pub use helpers::{env_api_key_auth, lazy_oauth, LazyOAuthConfig};
+pub use provider_registry::{provider_auth_for, resolve_api_key_for_provider};
 pub use resolve::{
     resolve_provider_auth, AuthResolutionOverrides, ModelsError, ModelsErrorCode,
     DEFAULT_OAUTH_MINIMUM_VALIDITY_MS, DEFAULT_OAUTH_REFRESH_TIMEOUT_MS,

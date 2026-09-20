@@ -27,6 +27,15 @@
 //! `GEMINI_API_KEY`, but the Google SDKs document both names and users
 //! routinely export the latter. `GEMINI_API_KEY` always wins.
 //!
+//! Credentials are not read straight from the environment: the router runs
+//! [`pi_ai::resolve_api_key_for_provider`], so a credential held by the
+//! router's [`CredentialStore`] **owns the provider** and the env vars above
+//! are only the fallback when nothing is stored. With an empty store — the
+//! default for every `from_env*` constructor — the outcome is the env-only one
+//! described by the table, byte for byte. OAuth is not wired yet: the
+//! providers that need it are absent from the registry, so their adapters are
+//! reported as unsupported rather than misconfigured.
+//!
 //! The concrete provider list, credential env vars, base URLs and model
 //! catalogs all live in the data-driven
 //! [`pi_ai::providers::registry`]. Besides the first-party providers
@@ -52,6 +61,7 @@ use std::env;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::executor::block_on;
 use pi_ai::providers::anthropic::AnthropicProvider;
 use pi_ai::providers::azure_openai_responses::AzureOpenAiResponsesProvider;
 use pi_ai::providers::faux::FauxProvider;
@@ -62,6 +72,8 @@ use pi_ai::providers::openai_responses::OpenAiResponsesProvider;
 use pi_ai::providers::registry::{self, ProviderSpec, BUILTIN_PROVIDERS};
 use pi_ai::stream::AssistantMessageEventStream;
 use pi_ai::{
+    default_provider_auth_context, resolve_api_key_for_provider, AuthContext,
+    AuthResolutionOverrides, CredentialStore, InMemoryCredentialStore, ProviderEnv,
     ProviderRetryPolicy, RetryStreamFn, SharedStreamFn, SimpleStreamOptions, StreamError, StreamFn,
 };
 use pi_protocol::{Api, Context, Model};
@@ -155,10 +167,13 @@ fn env_value(get_env: &dyn Fn(&str) -> Option<String>, names: &[&str]) -> Option
 /// Dispatch table from provider id to streaming adapter.
 ///
 /// Cloneable and cheap to clone: the adapters live behind [`Arc`], so
-/// the same router can back print, RPC and interactive mode.
+/// the same router can back print, RPC and interactive mode, and the
+/// credential store / auth context are shared the same way.
 #[derive(Clone)]
 pub struct ProviderRouter {
     adapters: HashMap<String, SharedStreamFn>,
+    credentials: Arc<dyn CredentialStore>,
+    auth_context: Arc<dyn AuthContext>,
 }
 
 impl std::fmt::Debug for ProviderRouter {
@@ -171,6 +186,81 @@ impl std::fmt::Debug for ProviderRouter {
     }
 }
 
+/// Auth context with no ambient environment at all.
+///
+/// [`ProviderRouter::from_env_with`] and
+/// [`ProviderRouter::from_env_with_policy`] take their environment as an
+/// injectable closure, which they hand to the resolver as scoped
+/// [`AuthResolutionOverrides::env`] and pair with this context. That keeps an
+/// injected router hermetic: the fallback the resolver walks next contributes
+/// nothing, so the host process environment can never turn an unconfigured
+/// provider into a configured one (and the env-only regression tests do not
+/// depend on the machine they run on). Only
+/// [`ProviderRouter::from_env`] uses the ambient
+/// [`default_provider_auth_context`].
+struct EmptyAuthContext;
+
+#[async_trait]
+impl AuthContext for EmptyAuthContext {
+    async fn env(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    async fn file_exists(&self, _path: &str) -> bool {
+        false
+    }
+}
+
+/// The provider's credential env vars as a scoped [`ProviderEnv`].
+///
+/// This reproduces the pre-wiring `env_value` lookup — first set var in
+/// registry priority order, trimmed, empty means unset — as the scoped
+/// environment handed to the resolver, which applies the stored-credential
+/// -first policy on top of it.
+fn scoped_provider_env(get_env: &dyn Fn(&str) -> Option<String>, env_vars: &[&str]) -> ProviderEnv {
+    env_vars
+        .iter()
+        .filter_map(|name| {
+            let value = get_env(name)?.trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(((*name).to_string(), value))
+            }
+        })
+        .collect()
+}
+
+/// Resolve `spec`'s api key through the auth subsystem.
+///
+/// The constructors are synchronous and the resolver is async, so this bridges
+/// with [`block_on`]. Every step of the api-key path is synchronous
+/// underneath — the in-memory store reads an `RwLock`, and both auth contexts
+/// answer from a map or `std::env` — so the bridge never waits on a reactor and
+/// is safe to call from inside an async context (`pi-evals` builds its router
+/// that way). A store failure is returned, not swallowed, so the caller can
+/// decide; the constructor treats it as unconfigured and logs.
+fn resolve_provider_key(
+    spec: &ProviderSpec,
+    get_env: &dyn Fn(&str) -> Option<String>,
+    credentials: &dyn CredentialStore,
+    auth_context: &dyn AuthContext,
+) -> Result<Option<String>, pi_ai::AuthError> {
+    let overrides = AuthResolutionOverrides {
+        env: Some(scoped_provider_env(get_env, spec.api_key_env)),
+        ..AuthResolutionOverrides::default()
+    };
+    let resolved = block_on(resolve_api_key_for_provider(
+        spec.id,
+        credentials,
+        auth_context,
+        Some(overrides),
+    ))?;
+    Ok(resolved
+        .and_then(|credential| credential.key)
+        .filter(|key| !key.is_empty()))
+}
+
 impl Default for ProviderRouter {
     fn default() -> Self {
         Self::from_env()
@@ -181,16 +271,25 @@ impl ProviderRouter {
     /// Build a router from the process environment.
     ///
     /// The faux provider is always registered (offline / test runs);
-    /// every other registry entry is registered only when one of its
-    /// credential env vars is present. Requesting a model whose provider
-    /// is absent then fails [`require`](Self::require) with the exact
-    /// env var to set instead of silently streaming from faux.
+    /// every other registry entry is registered only when a credential
+    /// resolves for it — a stored credential first, then one of its
+    /// credential env vars. Requesting a model whose provider is absent
+    /// then fails [`require`](Self::require) with the exact env var to
+    /// set instead of silently streaming from faux.
     pub fn from_env() -> Self {
-        Self::from_env_with(|name| env::var(name).ok())
+        Self::from_env_with_credentials(
+            |name| env::var(name).ok(),
+            ProviderRetryPolicy::default(),
+            Arc::new(InMemoryCredentialStore::new()),
+            default_provider_auth_context(),
+        )
     }
 
     /// [`from_env`](Self::from_env) with an injectable environment, so
     /// tests can exercise every branch without mutating process state.
+    ///
+    /// The closure is the only environment the router sees: it reaches the
+    /// resolver as scoped overrides and its fallback context is empty.
     pub fn from_env_with(get_env: impl Fn(&str) -> Option<String>) -> Self {
         Self::from_env_with_policy(get_env, ProviderRetryPolicy::default())
     }
@@ -207,21 +306,67 @@ impl ProviderRouter {
         get_env: impl Fn(&str) -> Option<String>,
         retry_policy: ProviderRetryPolicy,
     ) -> Self {
+        Self::from_env_with_credentials(
+            get_env,
+            retry_policy,
+            Arc::new(InMemoryCredentialStore::new()),
+            Arc::new(EmptyAuthContext),
+        )
+    }
+
+    /// [`from_env_with_policy`](Self::from_env_with_policy) with an explicit
+    /// credential store and auth context.
+    ///
+    /// Embedders wire a persistent [`CredentialStore`] (and the ambient
+    /// [`AuthContext`] that goes with it) here; the plain `from_env*`
+    /// constructors pass an empty [`InMemoryCredentialStore`], which is what
+    /// keeps their behaviour identical to the pre-wiring env-only router.
+    pub fn from_env_with_credentials(
+        get_env: impl Fn(&str) -> Option<String>,
+        retry_policy: ProviderRetryPolicy,
+        credentials: Arc<dyn CredentialStore>,
+        auth_context: Arc<dyn AuthContext>,
+    ) -> Self {
         let mut adapters: HashMap<String, SharedStreamFn> = HashMap::new();
 
         for spec in BUILTIN_PROVIDERS {
-            let api_key = env_value(&get_env, spec.api_key_env).unwrap_or_default();
-            if spec.requires_api_key() && api_key.is_empty() {
-                continue;
-            }
             let base_url = env_value(&get_env, spec.base_url_env)
                 .unwrap_or_else(|| spec.default_base_url.to_string());
+            let api_key = if spec.requires_api_key() {
+                match resolve_provider_key(
+                    spec,
+                    &get_env,
+                    credentials.as_ref(),
+                    auth_context.as_ref(),
+                ) {
+                    Ok(Some(api_key)) => api_key,
+                    // Store and environment both empty: leave the provider
+                    // unregistered so `require` names the env var to set,
+                    // exactly as the env-only router did.
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(
+                            provider = spec.id,
+                            %error,
+                            "provider credential resolution failed; treating the provider as unconfigured"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // Keyless providers (faux) are always registered.
+                String::new()
+            };
             if let Some(adapter) = build_adapter(spec, api_key, base_url) {
                 adapters.insert(spec.id.to_string(), adapt_retry(adapter, retry_policy));
             }
         }
 
-        Self { adapters }
+        Self {
+            adapters,
+            credentials,
+            auth_context,
+        }
     }
 
     /// Re-wrap every adapter with a new provider-request retry policy.
@@ -273,6 +418,19 @@ impl ProviderRouter {
         let mut ids: Vec<&str> = self.adapters.keys().map(String::as_str).collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// The credential store this router resolves provider credentials from.
+    ///
+    /// Shared with the caller, so a login / logout performed elsewhere is
+    /// visible to the next router built from the same store.
+    pub fn credential_store(&self) -> Arc<dyn CredentialStore> {
+        self.credentials.clone()
+    }
+
+    /// The auth context this router resolves ambient credentials from.
+    pub fn auth_context(&self) -> Arc<dyn AuthContext> {
+        self.auth_context.clone()
     }
 
     /// Whether `provider` has a registered adapter.
@@ -679,5 +837,186 @@ mod tests {
             Err(err) => assert!(matches!(err, StreamError::Provider { status: 503, .. })),
         }
         assert_eq!(flaky.calls(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Auth wiring: a stored credential owns the provider, env is the
+    // fallback. All of these stay offline — no API key is ever used on
+    // the wire, only at adapter-construction time.
+    // -----------------------------------------------------------------
+
+    /// Seed an [`InMemoryCredentialStore`] with one api-key credential.
+    fn store_with(provider_id: &str, key: &str) -> Arc<dyn CredentialStore> {
+        let stored = pi_ai::Credential::ApiKey(pi_ai::ApiKeyCredential {
+            key: Some(key.to_string()),
+            env: None,
+        });
+        let store = Arc::new(InMemoryCredentialStore::new());
+        block_on(store.modify(
+            provider_id,
+            Box::new(move |_current| {
+                let stored = stored.clone();
+                Box::pin(async move { Ok(Some(stored)) })
+            }),
+            None,
+        ))
+        .expect("seeding the in-memory store must not fail");
+        store
+    }
+
+    #[test]
+    fn a_stored_credential_wins_over_the_same_env_var() {
+        let store = store_with("anthropic", "stored-key");
+        let get_env = |name: &str| {
+            if name == "ANTHROPIC_API_KEY" {
+                Some("env-key".to_string())
+            } else {
+                None
+            }
+        };
+        let spec = registry::find_provider("anthropic").expect("anthropic is registered");
+
+        let resolved = resolve_provider_key(spec, &get_env, store.as_ref(), &EmptyAuthContext)
+            .expect("resolution must not fail");
+        assert_eq!(resolved.as_deref(), Some("stored-key"));
+
+        // The resolved key is what registers the adapter.
+        let router = ProviderRouter::from_env_with_credentials(
+            get_env,
+            ProviderRetryPolicy::default(),
+            store,
+            Arc::new(EmptyAuthContext),
+        );
+        assert!(router.has_provider("anthropic"));
+    }
+
+    #[test]
+    fn without_a_stored_credential_the_env_var_is_the_fallback() {
+        let store = InMemoryCredentialStore::new();
+        let get_env = |name: &str| {
+            if name == "ANTHROPIC_API_KEY" {
+                Some("env-key".to_string())
+            } else {
+                None
+            }
+        };
+        let spec = registry::find_provider("anthropic").expect("anthropic is registered");
+
+        let resolved = resolve_provider_key(spec, &get_env, &store, &EmptyAuthContext)
+            .expect("resolution must not fail");
+        assert_eq!(resolved.as_deref(), Some("env-key"));
+        assert_eq!(
+            get_env("ANTHROPIC_API_KEY").as_deref(),
+            Some("env-key"),
+            "the injected environment is the only source"
+        );
+    }
+
+    #[test]
+    fn no_stored_credential_and_no_env_var_reports_a_missing_key() {
+        let store = InMemoryCredentialStore::new();
+        let spec = registry::find_provider("anthropic").expect("anthropic is registered");
+        let resolved = resolve_provider_key(spec, &empty_env, &store, &EmptyAuthContext)
+            .expect("resolution must not fail");
+        assert_eq!(resolved, None);
+
+        let router = ProviderRouter::from_env_with(empty_env);
+        assert_eq!(
+            require_err(
+                &router,
+                &model("anthropic", "claude-sonnet-4-5", Api::AnthropicMessages)
+            ),
+            ProviderError::MissingApiKey {
+                provider: "anthropic".to_string(),
+                vars: "ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN".to_string(),
+            }
+        );
+    }
+
+    /// Regression lock for the pre-wiring contract: with nothing stored,
+    /// the router behaves exactly as the env-only one did — the first set
+    /// env var registers the provider (trimmed), an empty/absent var does
+    /// not, and the keyless faux provider is untouched.
+    #[test]
+    fn an_empty_store_keeps_the_env_only_behaviour() {
+        let get_env = |name: &str| match name {
+            "ANTHROPIC_API_KEY" => Some("  sk-anthropic  ".to_string()),
+            "GROQ_API_KEY" => Some("   ".to_string()),
+            _ => None,
+        };
+        let router = ProviderRouter::from_env_with(get_env);
+        assert_eq!(router.provider_ids(), vec!["anthropic", "faux"]);
+
+        let spec = registry::find_provider("anthropic").expect("anthropic is registered");
+        let resolved = resolve_provider_key(
+            spec,
+            &get_env,
+            &InMemoryCredentialStore::new(),
+            &EmptyAuthContext,
+        )
+        .expect("resolution must not fail");
+        assert_eq!(resolved.as_deref(), Some("sk-anthropic"));
+
+        assert_eq!(
+            require_err(
+                &router,
+                &model("groq", "llama-3.3-70b", Api::OpenAiChatCompletions)
+            ),
+            ProviderError::MissingApiKey {
+                provider: "groq".to_string(),
+                vars: "GROQ_API_KEY".to_string(),
+            }
+        );
+        assert!(router.has_provider("faux"));
+        // The default constructors wire an empty in-memory store, which is
+        // what makes the env-only behaviour above hold.
+        assert!(block_on(router.credential_store().read("anthropic", None))
+            .expect("reading an empty store must not fail")
+            .is_none());
+    }
+
+    #[test]
+    fn the_keyless_faux_provider_is_not_in_the_auth_registry() {
+        assert!(pi_ai::provider_auth_for("faux").is_none());
+        assert!(pi_ai::provider_auth_for("not-a-provider").is_none());
+        let router = ProviderRouter::from_env_with(empty_env);
+        assert!(router.has_provider("faux"));
+        assert!(router
+            .require(&model("faux", "faux-model", Api::Faux))
+            .is_ok());
+    }
+
+    /// The providers added to the registry by LUM-1170 are covered by the
+    /// wiring without any per-provider code: one registers from its env
+    /// var, the other from a stored credential only.
+    #[test]
+    fn newly_registered_providers_resolve_through_the_auth_subsystem() {
+        let minimax_env = |name: &str| {
+            if name == "MINIMAX_API_KEY" {
+                Some("sk-minimax".to_string())
+            } else {
+                None
+            }
+        };
+        let router = ProviderRouter::from_env_with(minimax_env);
+        assert!(router.has_provider("minimax"));
+        assert!(router
+            .require(&model("minimax", "MiniMax-M2", Api::AnthropicMessages))
+            .is_ok());
+
+        let router = ProviderRouter::from_env_with_credentials(
+            empty_env,
+            ProviderRetryPolicy::default(),
+            store_with("vercel-ai-gateway", "stored-gateway-key"),
+            Arc::new(EmptyAuthContext),
+        );
+        assert!(router.has_provider("vercel-ai-gateway"));
+        assert!(router
+            .require(&model(
+                "vercel-ai-gateway",
+                "anthropic/claude-sonnet-4-5",
+                Api::AnthropicMessages
+            ))
+            .is_ok());
     }
 }
