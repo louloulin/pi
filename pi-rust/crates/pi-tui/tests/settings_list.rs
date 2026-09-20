@@ -110,7 +110,10 @@ fn cycling_a_value_queues_exactly_one_change() {
     open(&mut app);
 
     // The first item is Auto-compact.
-    assert_eq!(app.step(InputEvent::Key(key(KeyCode::Enter))), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::Key(key(KeyCode::Enter))),
+        StepOutcome::Redraw
+    );
     assert_eq!(
         app.take_pending_setting_change(),
         Some(("autocompact".to_string(), "false".to_string()))
@@ -123,7 +126,10 @@ fn cycling_a_value_queues_exactly_one_change() {
     assert!(app.settings_open(), "cycling keeps the modal open");
 
     // A cursor move redraws but must not ask for a write.
-    assert_eq!(app.step(InputEvent::Key(key(KeyCode::Down))), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::Key(key(KeyCode::Down))),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.take_pending_setting_change(), None);
 }
 
@@ -163,7 +169,10 @@ fn an_item_without_values_reports_an_activation() {
     app.settings_mut()
         .expect("settings are open")
         .select_item("warnings");
-    assert_eq!(app.step(InputEvent::Key(key(KeyCode::Enter))), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::Key(key(KeyCode::Enter))),
+        StepOutcome::Redraw
+    );
     assert_eq!(
         app.take_pending_setting_activation(),
         Some("warnings".to_string())
@@ -176,7 +185,10 @@ fn esc_closes_the_modal_and_returns_the_keyboard() {
     let mut app = app();
     open(&mut app);
 
-    assert_eq!(app.step(InputEvent::Key(key(KeyCode::Esc))), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::Key(key(KeyCode::Esc))),
+        StepOutcome::Redraw
+    );
     assert!(!app.settings_open());
     assert!(app.close_settings().is_none());
 
@@ -208,14 +220,20 @@ fn the_overlay_covers_the_transcript_rows() {
     let snapshot = app.render_snapshot(70, 14);
     assert!(snapshot.settings_open);
     assert_eq!(snapshot.settings_lines[0], "> ");
-    assert_eq!(snapshot.lines[1], ">", "the search line is the first overlay row");
+    assert_eq!(
+        snapshot.lines[1], ">",
+        "the search line is the first overlay row"
+    );
     assert!(
         snapshot.lines[3].contains("→ Auto-compact"),
         "the overlay starts on the first content row: {:?}",
         snapshot.lines
     );
     assert!(
-        snapshot.lines.iter().any(|line| line.contains("Enter/Space to change")),
+        snapshot
+            .lines
+            .iter()
+            .any(|line| line.contains("Enter/Space to change")),
         "the hint is rendered: {:?}",
         snapshot.lines
     );
@@ -229,7 +247,10 @@ fn the_wheel_scrolls_the_list_not_the_log() {
     assert!(before[2].starts_with("→ Auto-compact"), "{before:?}");
 
     assert_eq!(
-        app.step(InputEvent::Mouse { up: false, alt: false }),
+        app.step(InputEvent::Mouse {
+            up: false,
+            alt: false
+        }),
         StepOutcome::Redraw
     );
     let after = app.render_snapshot(60, 12).settings_lines;
@@ -237,7 +258,10 @@ fn the_wheel_scrolls_the_list_not_the_log() {
         after[2].starts_with("  Auto-compact") && after[3].starts_with("→ Theme"),
         "the cursor moved down one row: {after:?}"
     );
-    assert!(app.settings().is_some(), "the wheel must not close the modal");
+    assert!(
+        app.settings().is_some(),
+        "the wheel must not close the modal"
+    );
 }
 
 #[test]

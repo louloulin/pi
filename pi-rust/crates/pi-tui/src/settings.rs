@@ -186,7 +186,9 @@ impl SettingsList {
 
     /// The highlighted item, if any.
     pub fn selected(&self) -> Option<&SettingItem> {
-        self.filtered.get(self.selected).map(|idx| &self.items[*idx])
+        self.filtered
+            .get(self.selected)
+            .map(|idx| &self.items[*idx])
     }
 
     /// Look an item up by id (filter-independent).
@@ -425,11 +427,7 @@ impl SettingsList {
             let item = &self.items[self.filtered[row]];
             let selected = row == self.selected;
             let cursor = if selected { "→ " } else { "  " };
-            let label = format!(
-                "{}{}  ",
-                cursor,
-                pad_right(&item.label, label_width)
-            );
+            let label = format!("{}{}  ", cursor, pad_right(&item.label, label_width));
             let used = display_width(&label);
             let value_max = width.saturating_sub(used + 2);
             let value = truncate_to_width(&item.current_value, value_max);
@@ -476,7 +474,10 @@ impl SettingsList {
         } else {
             "  Enter/Space to change · Esc to cancel"
         };
-        vec![Vec::new(), vec![StyledSpan::new(hint, SpanStyle::fg(ThemeColor::Dim))]]
+        vec![
+            Vec::new(),
+            vec![StyledSpan::new(hint, SpanStyle::fg(ThemeColor::Dim))],
+        ]
     }
 }
 
@@ -653,13 +654,22 @@ mod tests {
     #[test]
     fn searchable_list_routes_printable_keys_and_backspace() {
         let mut list = SettingsList::new(items(), 10).searchable(true);
-        assert_eq!(list.handle_key(key(KeyCode::Char('t'))), SettingsAction::Changed);
+        assert_eq!(
+            list.handle_key(key(KeyCode::Char('t'))),
+            SettingsAction::Changed
+        );
         assert_eq!(list.filter(), "t");
-        assert_eq!(list.handle_key(key(KeyCode::Backspace)), SettingsAction::Changed);
+        assert_eq!(
+            list.handle_key(key(KeyCode::Backspace)),
+            SettingsAction::Changed
+        );
         assert_eq!(list.filter(), "");
         // A space is a query character once the filter is non-empty.
         list.set_filter("the");
-        assert_eq!(list.handle_key(key(KeyCode::Char('m'))), SettingsAction::Changed);
+        assert_eq!(
+            list.handle_key(key(KeyCode::Char('m'))),
+            SettingsAction::Changed
+        );
         assert_eq!(list.filter(), "them");
     }
 
@@ -682,7 +692,10 @@ mod tests {
     #[test]
     fn a_plain_list_keeps_vim_keys_out_of_the_filter() {
         let mut list = SettingsList::new(items(), 10);
-        assert_eq!(list.handle_key(key(KeyCode::Char('j'))), SettingsAction::Changed);
+        assert_eq!(
+            list.handle_key(key(KeyCode::Char('j'))),
+            SettingsAction::Changed
+        );
         assert_eq!(list.selected().unwrap().id, "theme");
         assert_eq!(list.filter(), "");
     }
@@ -698,7 +711,10 @@ mod tests {
     #[test]
     fn esc_cancels() {
         let mut list = SettingsList::new(items(), 10);
-        assert_eq!(list.handle_key(key(KeyCode::Esc)), SettingsAction::Cancelled);
+        assert_eq!(
+            list.handle_key(key(KeyCode::Esc)),
+            SettingsAction::Cancelled
+        );
     }
 
     #[test]
@@ -740,7 +756,9 @@ mod tests {
         assert!(lines[0].starts_with("→ "));
         assert!(lines[1].starts_with("  "));
         // Description of the selected item, then the hint.
-        assert!(lines.iter().any(|line| line.contains("Automatically compact")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Automatically compact")));
         assert_eq!(
             lines.last().unwrap(),
             "  Enter/Space to change · Esc to cancel"
