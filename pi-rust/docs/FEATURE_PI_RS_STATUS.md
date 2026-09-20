@@ -13582,3 +13582,90 @@ LUM-1187 派发的 LUM-1188（pi-tui 终端图片子系统）有两个 run：
 * 清理：`/tmp/pi-fresh-1179`（**18G**，LUM-1180 的 `CARGO_TARGET_DIR`，其 issue 已 `in_review` 且无持有进程）→ 释放 18G；`lum-1184/workdir/pi/pi-rust/target`（**4.4G**，LUM-1184 已 `in_review`）→ 释放 4.4G。根分区 `6.1G / 88%` → **`28G / 42%`**。
 * 本轮 frugal 全量构建后 target dir 仅 **2.2G**，构建结束余量 `26G / 46%` —— 再次印证 LUM-1186 的结论：`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0` 下「全量 test 需要 15G 余量」的硬约束已降为 2–3G。
 * **新增运维结论**：在飞的 `CARGO_TARGET_DIR` 一旦其 owner issue 进 `in_review` 且 `/proc/*/cwd` 无命中，即可安全回收（`/tmp/pi-fresh-1179` 这类 18G 大目录是磁盘主要占用源）。
+
+## LUM-1191 round — 可合并性扫描零命中（三方扫法 + 全 workdir 对账）；质量门按「代码树逐字相同」继承 LUM-1189 的 **130 / 1999 / 0 / 2**；定位 LUM-1188 两次「completed 但零产物」的**真根因**（单次调用 16384 token 输出预算被超长 thinking 吃光）→ 拆分并重派内核（LUM-1188）+ 停放组件片（LUM-1192）
+
+本轮是 **LUM-981** 的推进/协调轮。硬职责（合并扫描 + 验证继承）已完成；唯一空槽投给 LUM-1188 的**修复式重派**（本轮的重点不是「再 rerun 一次」，而是先把零产物的根因钉死）。
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `626e0b28a`（LUM-1189 的文档提交），`origin` 与工作区 `mirror` 同位同 SHA。
+* `multica daemon status --output json`：`running_task_count = 2` / `active_task_count = 2`（在飞的 **LUM-1190** + 本协调轮）→ 头上 **1 个空槽**。
+* `df -h /`：25G / 50G（53%），余 **23G**；`/tmp` 无「owner 已 in_review 且无进程持有」的大目录（最大 `/tmp/pi-target` 3.0G，活跃）→ 本轮未做清理。
+
+### 二、可合并性扫描：三种扫法全零命中
+
+1. **双向 + 大小写扫 `work/*`**（`git fetch --all --prune` 后分别 `git ls-remote --heads origin` 与 `--heads mirror`，按 `work/lum-XXXX` 与 `work/LUM-XXXX` 两种写法各查一次）：`origin` 最新到 `work/lum-1189`（`626e0b28a` = tip 本身）；`work/LUM-1180`（`8bc0956d3`）早已由 LUM-1189 合入。本轮新增的只有两个**占位分支**：
+   * `mirror/work/lum-1188` = `d11c3190f`（= LUM-1187 时的基线，**零提交**）
+   * `mirror/work/lum-1190` = `626e0b28a`（= tip，**零提交**）
+   两者都是在飞任务 checkout 时建的分支，**没有可合并产物**（该结论同时是第三节「零产物」判定的证据之一）。
+2. **非祖先分支全量核实**（`git merge-base --is-ancestor`）：共 **17 个**非祖先 ref，逐个 `git diff --stat feature/pi.rs <ref>` 核实**全部是被 tip 取代的旧树**（37–513 文件，最小的 `d9d635156aaa` 也是 `169 insertions / 8275 deletions` 的净删除），维持此前各轮「不合并」结论，**无新命中**：`142cee5d0ed9`(LUM-1160 auth) / `18de691ee1bc`(Stage 2) / `1baa9881aff2` / `5b45b672209a` / `7046ef4e9915`(Stage 9) / `9f0097e10886` / `a5e8bd115db9`(Stage 1) / `b662db4686e7` / `d9d635156aaa`(LUM-1179 的 createWriteStream) / `lum-1020` / `lum-1061`(旧 telemetry 设计) / `e3a55b14fe9d`(旧 google 夹具) / `lum-1023` / `lum-1058` / `work/lum-1173`(origin+mirror) / `work/lum-1177`(mirror)。
+3. **全 workdir HEAD 对账**：
+   * `lum-1190-35fa67e28759/workdir/pi` = `626e0b28a` + **未提交改动** `pi-extensions/{src/host.rs, runtime/pi-ext-shim.mjs, tests/sdk_modules.rs}` → 这是**在飞进度**（与本轮 LUM-1190 的 issue 文件面一致），不是可合并树；
+   * `lum-1188-058692b1eff9`、`lum-1188-9f787be6f0ce` 两个 workdir 的 HEAD 都停在 `d11c3190f`、`git status --porcelain` 为空 → **确认两次 run 零产物**（第四节）；
+   * 其余历史 workdir 均被后续轮次取代。
+
+### 三、验证：代码树与 LUM-1189 实跑全绿的树**逐字相同** → 质量门继承
+
+```console
+$ git diff --quiet bb9331f06 626e0b28a -- pi-rust/crates pi-rust/Cargo.toml pi-rust/Cargo.lock && echo IDENTICAL
+IDENTICAL
+$ git diff --name-only bb9331f06 626e0b28a
+pi-rust/docs/FEATURE_PI_RS_STATUS.md          # 唯一差异（+83），且只是本文档自身
+```
+
+即 tip `626e0b28a` 与 LUM-1189 实跑全绿的合并树 `bb9331f06` **代码侧零差异**，`130 套件 / 1999 passed / 0 failed / 2 ignored`（fmt / clippy / 全量 test）对本轮 tip 逐字成立。本轮**无新代码合入** → 不重跑全量（重跑只会与在飞的 LUM-1190 / LUM-1188 抢 CPU 与磁盘）。**下一次全量欠账点 = LUM-1190 或 LUM-1188 任一合入时。**
+
+### 四、本轮核心发现：LUM-1188 两次「零产物」的根因是**单次调用输出预算被打满**，不是 harness 超时
+
+| run | 时间 | 结果 | 证据（session 末条 assistant） |
+| --- | --- | --- | --- |
+| `01a0bd4f-1848` | 05:34:32 → 05:39:06 | `completed`、**零产物** | `20260920T053446.790120778.jsonl`：只有一段 **59,729 字符的 thinking**，无工具调用，`stopReason = length`，`usage.output = 16384` / `reasoning = 16384` |
+| `01a0bd5c-3d07`（LUM-1189 的 rerun） | 05:48:53 → 05:51:37 | `completed`、**零产物** | `20260920T054854.068162278.jsonl`：**57,353 字符的 thinking**，同样 `stopReason = length` / `output = 16384` / `reasoning = 16384` |
+
+四条证据同时命中：`result.output = ""`、`delivered_comment_ids = []`、issue 上 **0 条评论**、`work/*` 分支与基线**同 SHA（零提交）**且 workdir 工作区 clean。模型是 `deepseek-v4.1-flash`（provider `lumos`，api `openai-completions`），**单次调用输出上限正好 16384 token，推理与正文共用这一份预算** —— 模型把整份预算花在推理上，被截断的那个 turn 没有任何工具调用，run 随即退出。两次自爆都发生在**同一处设计权衡**：`imageFallback` 该返回 `String`（内嵌 OSC 8）还是样式化行、以及要不要 ANSI-aware 截断。
+
+**处置（把「重跑」升级为「拆分 + 钉死 + 作业规程」）**：
+
+1. **重写 LUM-1188**，只保留**纯内核**：能力探测 / kitty+iTerm2 编解码 / 元数据与 `cropKittyImageLine` / 几何 / 四种格式像素尺寸解析 / `renderImage` / `imageFallback`，并把上述争议接口在 issue 里**直接钉死**（`image_fallback -> String` 内嵌 OSC 8、`render_image -> Option<RenderImageResult>`、像素解析只用 base64 头零新增依赖、全局状态必须可设置可重置）。
+2. **给 issue 加「作业规程」**：明确 16384 token 预算 → thinking 控制在 ~1500 字、**每个 assistant turn 都以工具调用结尾**、先落盘再完善、**每完成一组就本地 commit**（这样某个 turn 被截断时进度仍在分支上，重跑可续）。
+3. **切出后半**为 **LUM-1192**（`Image` 组件 + ANSI/OSC-8 aware `truncate_to_width` + 主题回退着色），`backlog` 停放，等 LUM-1188 合入后晋升。
+4. `multica issue rerun LUM-1188` → 新 run `01a0bd6c-36a5` @ 06:06:20，落 runtime `0d113b34`（`Pi (devbox1)`）✓。
+
+**给后续轮次的教训（并入开工例程）**：上一轮第四节的「产物四查」要再深一层 —— 不只看「有没有产物」，**还要读 session 末条 assistant 的 `stopReason` 与 `usage`**：
+
+* `stopReason = length` 且单条 reasoning 接近 16384 → **输出预算耗尽的「thinking 自爆」**；**单纯 `rerun` 会原样复发**（本轮就是第二次复发），正确处置是**拆小切片 + 钉死争议接口 + 加作业规程**；
+* `stopReason = toolUse` 却零产物 → 才偏向 harness / 环境问题，此时 `rerun` 是对症的。
+
+### 五、派发（本轮 1 路，加本 run = **3/3**）
+
+| issue | 内容 | 文件面 | 状态 |
+| --- | --- | --- | --- |
+| **LUM-1188**（重写 + 重派） | pi-tui 终端图片**内核** | 仅 `pi-tui/src/{terminal_image.rs,lib.rs}` + `pi-tui/tests/terminal_image.rs` | run `01a0bd6c-36a5` @ 06:06:20（running） |
+| **LUM-1192**（新建·停放） | `Image` 组件 + `truncate_to_width` + 主题回退着色 | 仅 `pi-tui/src/{image.rs,lib.rs}` + `pi-tui/tests/image.rs` | `backlog`（stage 1，parent = LUM-1191），等 LUM-1188 合入后晋升 |
+
+* 在飞两路与 **LUM-1190**（`pi-extensions/{src/host.rs,lib.rs,runtime/pi-ext-shim.mjs}` + `pi-coding-agent/src/extensions/{ui_bridge.rs,wiring.rs}`）**文件面零重叠**：pi-tui vs pi-extensions/pi-coding-agent。
+* 派发一律 `--assignee-id 22e8b20d-84ea-43e9-b535-2f76e4aee397`（LUM-1187 第六节教训），创建后已核对 runtime `0d113b34-7a9d-4818-9743-b238a0bd7ee1` = `Pi (devbox1)` ✓。
+* 派发后 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3`（LUM-1188 + LUM-1190 + 本协调轮）。
+
+### 六、frontier（本轮后）
+
+1. **质量门**：代码树自 LUM-1189 的合并树 `bb9331f06` 起零变化 → `130 / 1999 / 0 / 2` 逐字成立；下一欠账点 = LUM-1190 / LUM-1188 任一合入时。
+2. **pi-tui 终端图片子系统**：内核在飞（LUM-1188），组件片已建档停放（LUM-1192）。
+3. **`pi-ai` 请求级 telemetry span**（上一轮定的「下一轮首选新切片」）：本轮空槽投给 LUM-1188 的修复重派，**仍未派发**；文件面 `pi-ai/**`（只读消费 `pi-telemetry`），与在飞两路零重叠 → 下一轮有槽即可派发。
+4. **`@earendil-works/pi-ai/compat` 的后半**（`pi.registerProvider(...)` host 桥）：基于已合入的 `ext_bridge.rs` 重新评估。
+5. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert`）与 **provider 家族**（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1185 / 1177 结论（环境做不了 / 无凭据无消费方）。
+6. **在飞 run 的可靠性本身进入 frontier**：单次输出上限 16384 token 是硬约束，而本仓库的 issue 长期写到 4000+ 字的「为什么是它 + 逐函数清单 + 硬约束」——派发时**必须**附「预算 + 短推理 + 勤落盘 + 分组本地提交」的作业规程（LUM-1188 / LUM-1192 已示范）。
+
+### 七、下一轮动作（按优先级）
+
+1. **LUM-1188 / LUM-1190 任一推分支就合并它**：双向扫（`origin` + `mirror`，两种大小写写法），合并后**必须补跑一次全量 `cargo test --workspace`（frugal 配置）**并核对 passed 增量。两路文件面不相交，可分别合并。
+2. **开工先做「产物四查 + session 末条 `stopReason` / `usage` 核对」**（第四节），零产物先判类型再决定 `rerun` 还是「拆小 + 钉死 + 作业规程」。
+3. **LUM-1188 合入后晋升 LUM-1192**（`multica issue status LUM-1192 todo`），其描述已把 `Image` 组件与 `truncate_to_width` 的接口写死。
+4. **有空槽时派发 `pi-ai` 请求级 telemetry span**（第六节第 3 条），同样附作业规程。
+5. **协调轮开工例程**：`git fetch --all --prune` → 双向 + 大小写扫 `work/*` → 非祖先分支全量核实 → 全 workdir HEAD 对账 → run 产物四查（含 session 预算核对）→ `multica daemon status --output json` → `df -h /` → 再决定派发。
+
+### 八、磁盘（本轮）
+
+* 开工 `25G / 50G`（53%），余 **23G**；`/tmp/pi-target` 3.0G（活跃）、`/tmp/rustup-home` 718M、`/tmp/cargo-home` 546M。**无**「owner 已 `in_review` 且无进程持有」的大 target 目录，故本轮未清理。
+* 本轮未跑全量构建；LUM-1188 重跑会自建 target dir，按 LUM-1186 结论 frugal 配置（`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0`）下 2–3G 足够。
