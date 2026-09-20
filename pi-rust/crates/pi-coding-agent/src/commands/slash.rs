@@ -13,6 +13,16 @@ pub enum SlashCommand {
     Help,
     /// `/clear` — clear the message view.
     Clear,
+    /// `/new` — start a fresh session (clears the agent state and opens a
+    /// new session file).
+    New,
+    /// `/copy` — copy the last assistant message to the clipboard.
+    Copy,
+    /// `/name [name]` — show or set the session display name.
+    Name {
+        /// New display name. `None` (no argument) asks for the current one.
+        name: Option<String>,
+    },
     /// `/model` — open the model selector.
     Model,
     /// `/session` — print session info.
@@ -65,6 +75,11 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
     let cmd = match name {
         "help" | "?" => SlashCommand::Help,
         "clear" => SlashCommand::Clear,
+        "new" => SlashCommand::New,
+        "copy" => SlashCommand::Copy,
+        "name" => SlashCommand::Name {
+            name: (!args.is_empty()).then(|| args.to_string()),
+        },
         "model" => SlashCommand::Model,
         "session" => SlashCommand::Session,
         "export" => SlashCommand::Export {
@@ -115,6 +130,9 @@ pub fn help_text() -> String {
     out.push_str("slash commands:\n");
     out.push_str("  /help     show this help text\n");
     out.push_str("  /clear    clear the message view\n");
+    out.push_str("  /new      start a new session\n");
+    out.push_str("  /copy     copy the last assistant message to the clipboard\n");
+    out.push_str("  /name [name] show or set the session display name\n");
     out.push_str("  /model    pick a model (opens selector)\n");
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /export [path] export the session (HTML, or JSONL for a .jsonl path)\n");
@@ -218,6 +236,7 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ),
         ("app.thinking.toggle", "show or hide thinking blocks"),
         ("app.model.select", "open the model selector"),
+        ("app.session.new", "start a new session"),
     ];
     const SELECTORS: &[(&str, &str)] = &[
         ("tui.select.up", "move the selection up"),
@@ -329,6 +348,18 @@ mod tests {
         );
         assert_eq!(handle_command("/exit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Exit);
+        assert_eq!(handle_command("/new").unwrap(), SlashCommand::New);
+        assert_eq!(handle_command("/copy").unwrap(), SlashCommand::Copy);
+        assert_eq!(
+            handle_command("/name").unwrap(),
+            SlashCommand::Name { name: None }
+        );
+        assert_eq!(
+            handle_command("/name my session").unwrap(),
+            SlashCommand::Name {
+                name: Some("my session".into())
+            }
+        );
         assert_eq!(handle_command("/resume").unwrap(), SlashCommand::Resume);
         assert_eq!(handle_command("/settings").unwrap(), SlashCommand::Settings);
         assert_eq!(handle_command("/trust").unwrap(), SlashCommand::Trust(None));
@@ -362,6 +393,30 @@ mod tests {
                 instructions: Some("keep the API notes".into())
             }
         );
+    }
+
+    #[test]
+    fn help_text_documents_the_session_commands() {
+        let text = help_text();
+        for command in ["/new", "/copy", "/name"] {
+            assert!(text.contains(command), "{command} missing from:\n{text}");
+        }
+    }
+
+    #[test]
+    fn hotkeys_text_lists_the_new_session_chord() {
+        // `app.session.new` is a default chord as of Stage 60, so it is a
+        // real shortcut and belongs in the app group (`alt+n` on Linux).
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        let text = hotkeys_text_with(&manager);
+        assert!(text.contains("start a new session"), "{text}");
+        assert!(text.contains("Alt+N"), "{text}");
     }
 
     #[test]

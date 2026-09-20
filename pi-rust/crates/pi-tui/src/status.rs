@@ -18,6 +18,10 @@ pub struct StatusData {
     pub model: String,
     /// Session identifier shown in the middle of the bar.
     pub session_id: String,
+    /// Display name set with `/name`, shown in place of the identifier
+    /// when present — upstream's footer shows `pwd • name` instead of the
+    /// session id (`footer.ts:122-126`).
+    pub session_name: Option<String>,
     /// Cumulative input tokens.
     pub input_tokens: u32,
     /// Cumulative output tokens.
@@ -32,10 +36,17 @@ impl StatusData {
         Self {
             model: model.into(),
             session_id: session_id.into(),
+            session_name: None,
             input_tokens: 0,
             output_tokens: 0,
             hint: None,
         }
+    }
+
+    /// Set the session display name (`/name`).
+    pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
+        self.session_name = Some(name.into());
+        self
     }
 
     /// Set the trailing hint.
@@ -108,10 +119,10 @@ impl StatusBar {
             }
             right.push_str(hint);
         }
-        let session = if data.session_id.is_empty() {
-            String::new()
-        } else {
-            format!("  {}  ", data.session_id)
+        let session = match data.session_name.as_deref().filter(|name| !name.is_empty()) {
+            Some(name) => format!("  {name}  "),
+            None if data.session_id.is_empty() => String::new(),
+            None => format!("  {}  ", data.session_id),
         };
 
         // Layout: `<left><session><right>` padded to width.
@@ -212,6 +223,15 @@ mod tests {
         assert!(line.contains("abc-123"));
         assert!(line.contains("in 0 out 0"));
         assert!(line.contains("? for help"));
+    }
+
+    #[test]
+    fn renders_the_session_name_in_place_of_the_id() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "abc-123").with_session_name("my session");
+        let line = bar.render(&data, 60);
+        assert!(line.contains("my session"), "{line}");
+        assert!(!line.contains("abc-123"), "{line}");
     }
 
     #[test]

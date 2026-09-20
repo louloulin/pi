@@ -25,6 +25,19 @@ use crate::cli::SessionCommand;
 /// First 16 bytes of every SQLite database file.
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
+/// Generate a fresh session identifier.
+///
+/// The `session-<hex nanos>` shape is what the Stage 4 JSONL writer used
+/// and what both `main.rs` and the interactive `/new` command use, so a
+/// TUI-started session id is unique across modes.
+pub fn new_session_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("session-{nanos:x}")
+}
+
 /// Run a `pi session ...` subcommand. Returns 0 on success, non-zero on
 /// error.
 pub fn run(action: SessionCommand) -> anyhow::Result<()> {

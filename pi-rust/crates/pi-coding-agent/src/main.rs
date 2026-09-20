@@ -6,6 +6,7 @@ use std::sync::Arc;
 use pi_ai::models::Models;
 use pi_ai::stream::SharedStreamFn;
 use pi_coding_agent::cli::{Cli, Command};
+use pi_coding_agent::commands::session::new_session_id;
 use pi_coding_agent::config::{
     load_agent_retry_policy_default, load_compaction_settings_default,
     load_provider_retry_policy_default,
@@ -171,6 +172,17 @@ fn main() -> ExitCode {
             // so opening the JSONL log eagerly would leave empty
             // `<id>.jsonl` files behind in `--session-dir`.
             let session_log = SessionLog::open(&session_dir, &session_id).ok();
+            // `--resume <id>`: attach the stored session's name so the
+            // status bar and `/session` show the identity the TUI
+            // `/resume` would restore (and `/name` persists into the same
+            // database).
+            let (session_name, session_database) = match cli.resume.as_deref() {
+                Some(id) => match pi_coding_agent::resolve_resume(&session_dir, id) {
+                    Ok(reference) => (reference.name, Some(reference.database)),
+                    Err(_) => (None, None),
+                },
+                None => (None, None),
+            };
             let options = InteractiveOptions {
                 system_prompt,
                 // `--append-system-prompt`, `~/.pi/agent/SYSTEM.md` and
@@ -182,6 +194,8 @@ fn main() -> ExitCode {
                 models,
                 session_log,
                 session_id: session_id.clone(),
+                session_name,
+                session_database,
                 compaction: load_compaction_settings_default(),
                 // `settings.retry` drives the agent-level retry loop: a
                 // transient provider failure restarts the assistant call
@@ -538,15 +552,6 @@ fn load_extensions(
         );
     }
     outcome
-}
-
-fn new_session_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("session-{nanos:x}")
 }
 
 fn build_default_models() -> Models {

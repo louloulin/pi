@@ -238,6 +238,50 @@ impl SessionWriter {
         Ok(())
     }
 
+    /// Store the session's display name in the upstream
+    /// `sessions.metadata` JSON blob, preserving any other keys already
+    /// there (the `version` written by
+    /// [`write_header`](Self::write_header)).
+    ///
+    /// Upstream records the name in a `session_info` entry; the Rust port
+    /// has no such entry variant, so `/name` keeps it in the session row's
+    /// metadata instead — the same place [`crate::schema::session_name_from_metadata`]
+    /// reads it back from. Requires a current session
+    /// ([`write_header`](Self::write_header) or [`resume`](Self::resume)).
+    pub fn set_session_name(&self, name: &str) -> Result<()> {
+        let inner = self.inner.lock();
+        let session_id = inner.current_session.clone().ok_or_else(|| {
+            SessionError::Other(
+                "set_session_name called before write_header/resume: the upstream schema needs a sessions row"
+                    .to_string(),
+            )
+        })?;
+        let metadata: Option<String> = inner
+            .conn
+            .query_row(
+                "SELECT metadata FROM sessions WHERE id = ?1",
+                params![&session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                SessionError::Other(format!(
+                    "unknown session {session_id:?} in this database; call write_header first"
+                ))
+            })?;
+        let mut object = metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        object.insert("name".to_string(), Value::String(name.to_string()));
+        inner.conn.execute(
+            "UPDATE sessions SET metadata = ?1 WHERE id = ?2",
+            params![Value::Object(object).to_string(), &session_id],
+        )?;
+        Ok(())
+    }
+
     /// Append a [`SessionEntry`]. The entry is staged in memory until
     /// [`commit`](Self::commit) is called (or the buffer limit is
     /// reached, in which case a commit runs implicitly).
@@ -745,6 +789,48 @@ mod tests {
             })
             .expect("re-header");
         assert_eq!(writer.next_seq(), 4);
+    }
+
+    #[test]
+    fn session_name_round_trips_through_metadata() {
+        let dir = tempdir();
+        let path = dir.join("named.sqlite");
+        let writer = SessionWriter::open(&path).expect("open");
+        writer
+            .write_header(SessionEntry::Header {
+                id: "named".into(),
+                created_at: chrono::Utc::now(),
+                version: "0.1.0".into(),
+            })
+            .expect("header");
+        writer.set_session_name("my session").expect("set name");
+        writer.checkpoint().expect("checkpoint");
+        drop(writer);
+
+        // The name lives in `metadata.name` and does not clobber the
+        // `version` `write_header` stored there.
+        let reader = crate::SessionReader::open(&path).expect("reader");
+        assert_eq!(
+            reader.session_name("named").expect("read name").as_deref(),
+            Some("my session")
+        );
+        let header = reader.session_row("named").expect("row").expect("session");
+        assert_eq!(header.version.as_deref(), Some("0.1.0"));
+        assert_eq!(
+            crate::schema::session_name_from_metadata(header.metadata.as_deref()).as_deref(),
+            Some("my session")
+        );
+
+        // Renaming overwrites the previous name.
+        let writer = SessionWriter::open(&path).expect("reopen");
+        writer.resume("named").expect("resume");
+        writer.set_session_name("renamed").expect("rename");
+        writer.checkpoint().expect("checkpoint");
+        let reader = crate::SessionReader::open(&path).expect("reader");
+        assert_eq!(
+            reader.session_name("named").expect("read name").as_deref(),
+            Some("renamed")
+        );
     }
 
     #[test]

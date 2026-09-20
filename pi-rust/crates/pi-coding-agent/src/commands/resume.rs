@@ -26,6 +26,9 @@ pub struct SessionRef {
     pub cwd: Option<String>,
     /// Total number of entries in the session.
     pub entry_count: i64,
+    /// Display name set with `/name`, when the session has one (stored in
+    /// `sessions.metadata.name`).
+    pub name: Option<String>,
 }
 
 impl SessionRef {
@@ -33,10 +36,16 @@ impl SessionRef {
     pub fn display(&self) -> String {
         let ts = format_timestamp(self.created_at);
         let ver = self.version.as_deref().unwrap_or("?");
-        format!(
-            "{ts} · {ver} · {} entries · {}",
-            self.entry_count, self.session_id
-        )
+        match self.name.as_deref() {
+            Some(name) => format!(
+                "{ts} · {ver} · {} entries · {name} · {}",
+                self.entry_count, self.session_id
+            ),
+            None => format!(
+                "{ts} · {ver} · {} entries · {}",
+                self.entry_count, self.session_id
+            ),
+        }
     }
 }
 
@@ -88,6 +97,7 @@ pub fn list_resumable(directory: &Path) -> anyhow::Result<Vec<SessionRef>> {
                 version: session.version,
                 cwd: session.cwd,
                 entry_count: count,
+                name: pi_session::session_name_from_metadata(session.metadata.as_deref()),
             });
         }
     }
@@ -132,6 +142,7 @@ pub fn resolve(directory: &Path, arg: &str) -> anyhow::Result<SessionRef> {
             version: session.version,
             cwd: session.cwd,
             entry_count,
+            name: pi_session::session_name_from_metadata(session.metadata.as_deref()),
         });
     }
     let candidates = list_resumable(directory)?;

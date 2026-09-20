@@ -67,7 +67,7 @@ use pi_protocol::{
     AssistantMessage, Content, ImageContent, Message, Role, SessionEntry, StopReason, TextContent,
     ToolCall, ToolResult, Usage,
 };
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 use serde_json::Value;
 
 use crate::error::{Result, SessionError};
@@ -179,6 +179,24 @@ impl SessionReader {
             return Ok(Some(self.row_to_session(row)?));
         }
         Ok(None)
+    }
+
+    /// Display name of a session as stored in `sessions.metadata.name`,
+    /// when it has one.
+    ///
+    /// Returns `Ok(None)` for an unknown session id as well as for a
+    /// session that was never named, so callers can treat "no name" and
+    /// "no such row" the same way.
+    pub fn session_name(&self, session_id: &str) -> Result<Option<String>> {
+        let metadata: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT metadata FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(schema::session_name_from_metadata(metadata.as_deref()))
     }
 
     /// All sessions stored in this database, ordered by `created_at`

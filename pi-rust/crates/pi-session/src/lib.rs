@@ -79,6 +79,7 @@ pub use migrate::{
     FileMigrationReport, MigrationReport,
 };
 pub use reader::{decode_upstream_entry, DecodedEntry, SessionReader};
+pub use schema::session_name_from_metadata;
 pub use schema::{EntryRow, SchemaLayout, SessionRow, SCHEMA_VERSION, UPSTREAM_INITIAL_SQL};
 pub use writer::{SessionWriter, ZSTD_LEVEL};
 

@@ -471,6 +471,23 @@ impl SessionRow {
     }
 }
 
+/// The session display name stored under `metadata.name`, when present.
+///
+/// Upstream keeps the name in a `session_info` entry; the Rust port has no
+/// dedicated entry variant, so `/name` stores it in the session row's
+/// metadata JSON blob (`{"version": …, "name": …}`) instead. Trailing
+/// whitespace is trimmed and an empty name reads as `None`, matching
+/// upstream `getSessionName()`.
+pub fn session_name_from_metadata(metadata: Option<&str>) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(metadata?).ok()?;
+    parsed
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 /// Bind the current time on a row insert.
 pub fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
