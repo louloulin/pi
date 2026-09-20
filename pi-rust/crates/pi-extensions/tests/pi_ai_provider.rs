@@ -641,6 +641,14 @@ fn aborting_a_stream_releases_the_host_side_channel() {
 /// A live stream raises the host per-call deadline: with the *default* 5s
 /// timeout an extension that streams for longer would be cut off, so the
 /// bridge arms the pi-ai deadline and keeps the call alive.
+///
+/// The stub host budget is 1 s rather than the 50 ms this test used to use:
+/// `host.load()` shares it (the module goes through the shim's tokenizer and
+/// analyser in rquickjs), and on a loaded builder box that analysis alone can
+/// overrun 50 ms and abort the load with `Error: interrupted` before the
+/// deadline logic is even reached. 1 s leaves the load ~20× its typical cost
+/// while staying far below the stub stream's runtime, so the assertion still
+/// only passes if a live stream really extends the deadline.
 #[test]
 fn a_live_stream_extends_the_host_call_deadline() {
     let runtime = rt();
@@ -648,14 +656,14 @@ fn a_live_stream_extends_the_host_call_deadline() {
         let scratch = Scratch::new("deadline");
         let runner = FakeRunner::new(Script::Stream {
             ticks: 2,
-            delay: Duration::from_millis(120),
+            delay: Duration::from_millis(700),
         });
         // Far below the stream's total runtime: only the pi-ai deadline can
         // keep this call alive.
         let host = host_with_runner(
             &scratch.as_str(),
             runner.clone(),
-            Some(Duration::from_millis(50)),
+            Some(Duration::from_millis(1000)),
         )
         .await;
 

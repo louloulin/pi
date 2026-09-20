@@ -22,7 +22,9 @@
 上一快照之后有三条**已经写完但长期未合并**的交付一直漂在各自的 `work/*` 分支上：
 Stage 68 扩展生命周期事件（LUM-1246）、Stage 71 扩展可见性（LUM-1239）、Stage 70 输入面收尾（LUM-1238）。
 本 round 把三条并入 `feature/pi.rs` 并重测（合并细节、合并期发现的真实缺陷见
-`docs/TUI_UX_AUDIT.md` 二十）。
+`docs/TUI_UX_AUDIT.md` 二十一）。同时 `origin/feature/pi.rs` 上还并行落了一个 LUM-1257
+（jump-to-latest 指示器），合并时它与我这边救回来的 LUM-1238 版本撞了同一个功能，保留的是
+已推送到远端的 LUM-1257 版（详见 `docs/TUI_UX_AUDIT.md` 二十一.2 第 5 条）。
 
 | 口径 | 旧快照 | 本 tip | 变化 |
 |---|---|---|---|

@@ -61,6 +61,16 @@ impl Drop for Scratch {
 
 async fn host_with_cwd(cwd: &str) -> JsExtensionHost {
     JsExtensionHost::with_options(HostOptions {
+        // Every assertion in this file drives real `sh` / `yes` / `sleep`
+        // pipelines and moves ~200 KB per call through the JS heap. The
+        // host's 5 s default is a production default for *one* call on an
+        // idle machine; the probe below chains six of them, so a passing run
+        // already sits at ~4.1 s of that budget and a loaded builder box
+        // (4 concurrent agent tasks, load average > 15) pushes it over.
+        // Raising the budget here keeps every content assertion intact —
+        // none of them is about latency — while removing a load-sensitive
+        // false failure from `cargo test --workspace`.
+        timeout: Some(Duration::from_secs(60)),
         tool_context: ToolContext {
             mode: "print".to_string(),
             has_ui: false,

@@ -33,9 +33,7 @@ use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId};
 use pi_tui::app::{App, AppConfig, StepOutcome, CLEAR_EXIT_WINDOW};
 use pi_tui::autocomplete::{CombinedAutocompleteProvider, SlashCommand};
-use pi_tui::input::{
-    InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
-};
+use pi_tui::input::{InputEvent, Key, KeyCode, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -218,89 +216,33 @@ async fn ctrl_c_while_busy_still_cancels_the_turn() {
 // ---------------------------------------------------------------------------
 // Jump-to-latest indicator
 // ---------------------------------------------------------------------------
+//
+// The pill itself (painting, palette, width budget, hit test) is covered by
+// `tests/scroll_to_end.rs` — LUM-1257 landed that implementation on
+// `feature/pi.rs` while LUM-1238 had written a second, right-aligned one, and
+// the merge kept LUM-1257's. What stays here is LUM-1238's contract fix on the
+// chord path, which neither of the two painters owns.
 
 #[test]
-fn indicator_appears_when_detached_and_clears_when_following() {
+fn the_bottom_chord_reattaches_a_detached_viewport_sitting_at_offset_zero() {
+    // `set_following(false)` leaves the offset alone, so a caller can detach
+    // a viewport that is already pinned to the tail. The chord must still
+    // re-attach it, otherwise the pill could never be dismissed.
     let mut app = app_with_lines(WIDTH as usize);
-    assert!(app.messages().is_following());
-    assert_eq!(app.jump_to_latest_label(), None, "no indicator at the tail");
-
-    app.scroll_viewport_up(3);
+    app.messages_mut().set_following(false);
     assert!(!app.messages().is_following());
-    let label = app.jump_to_latest_label().expect("detached viewport hints");
-    assert!(label.contains("Jump to latest message"), "{label}");
-    assert!(label.contains("End"), "the chord is advertised: {label}");
+    assert_eq!(app.messages().scroll_offset(), 0);
 
-    // The live frame paints it on the viewport's bottom row and records the
-    // rectangle for the mouse hit test.
-    let buf = render(&mut app);
-    assert!(
-        row_text(&buf, VIEWPORT_BOTTOM).contains("Jump to latest message"),
-        "{}",
-        row_text(&buf, VIEWPORT_BOTTOM)
-    );
-    let (x, y, width) = app.jump_to_latest_indicator();
-    assert_eq!(y, VIEWPORT_BOTTOM);
-    assert!(width > 0, "the indicator rectangle was recorded");
-    assert_eq!(
-        x + width,
-        WIDTH - 1,
-        "right-aligned, clear of the scrollbar"
-    );
-
-    // `tui.altScreen.bottom` (`End`) re-pins and the indicator goes away.
     assert_eq!(
         app.step(key(KeyCode::End, KeyModifiers::NONE)),
         StepOutcome::Redraw
     );
     assert!(app.messages().is_following());
-    assert_eq!(app.jump_to_latest_label(), None);
     let buf = render(&mut app);
-    assert_eq!(app.jump_to_latest_indicator().2, 0);
-    assert!(!row_text(&buf, VIEWPORT_BOTTOM).contains("Jump to latest"));
-}
-
-#[test]
-fn indicator_clears_when_a_detached_viewport_sits_at_offset_zero() {
-    // `set_following(false)` leaves the offset alone, so a caller can detach
-    // a viewport that is already pinned to the tail. The chord must still
-    // re-attach it, otherwise the indicator could never be dismissed.
-    let mut app = app_with_lines(WIDTH as usize);
-    app.messages_mut().set_following(false);
-    assert!(!app.messages().is_following());
-    assert_eq!(app.messages().scroll_offset(), 0);
-    assert!(app.jump_to_latest_label().is_some());
-
-    app.scroll_viewport_to_bottom();
-    assert!(app.messages().is_following());
-    assert_eq!(app.jump_to_latest_label(), None);
-}
-
-#[test]
-fn clicking_the_indicator_jumps_back_to_the_tail() {
-    let mut app = app_with_lines(WIDTH as usize);
-    app.scroll_viewport_up(3);
-    // Paint once so the rectangle is known (it only exists after a frame).
-    let _ = render(&mut app);
-    let (x, y, width) = app.jump_to_latest_indicator();
-    assert!(width > 0);
-
-    let gesture = MouseGesture::new(MouseGestureKind::Press(MouseButton::Left), x + 1, y, false);
-    assert_eq!(app.step(InputEvent::gesture(gesture)), StepOutcome::Redraw);
     assert!(
-        app.messages().is_following(),
-        "the click re-attached the tail"
-    );
-
-    // A press that misses falls through to the selection path instead.
-    let mut other = app_with_lines(WIDTH as usize);
-    other.scroll_viewport_up(3);
-    let _ = render(&mut other);
-    let missing = MouseGesture::new(MouseGestureKind::Press(MouseButton::Left), 1, y, false);
-    other.step(InputEvent::gesture(missing));
-    assert!(
-        !other.messages().is_following(),
-        "a stray press must not jump"
+        !row_text(&buf, VIEWPORT_BOTTOM).contains("Jump to latest message"),
+        "no pill once the tail is re-attached: {}",
+        row_text(&buf, VIEWPORT_BOTTOM)
     );
 }
 
