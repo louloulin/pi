@@ -33,6 +33,7 @@ mod digest;
 mod error;
 mod host;
 mod loader;
+mod pi_ai;
 mod registry;
 mod shim;
 
@@ -41,5 +42,6 @@ pub use bridge::*;
 pub use error::*;
 pub use host::*;
 pub use loader::*;
+pub use pi_ai::*;
 pub use registry::*;
 pub use shim::*;

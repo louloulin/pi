@@ -34,6 +34,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::api::{ExtensionCapabilities, ExtensionEntry};
 use crate::deflate::{self, crc32};
 use crate::error::ExtensionError;
+use crate::pi_ai::{PiAiStreamBridge, PiAiStreamRunner};
 use crate::registry::ExtensionRegistry;
 use crate::shim::SHIM_SOURCE;
 
@@ -265,6 +266,15 @@ pub struct HostOptions {
     /// still import and return objects, but their `execute` rejects with
     /// a clear error.
     pub builtin_tool_runner: Option<Arc<dyn BuiltinToolRunner>>,
+    /// Optional runner behind the JS `@earendil-works/pi-ai/compat`
+    /// provider factories (`anthropicMessagesApi` / `openAIResponsesApi`).
+    ///
+    /// `pi-extensions` cannot depend on `pi-ai`, so the crate that owns
+    /// the concrete providers injects the runner here and the shim reaches
+    /// it through the `host_pi_ai_stream_*` imports. Without it the
+    /// factories still import and return a stream, but that stream
+    /// terminates with a named error event.
+    pub pi_ai_stream_runner: Option<Arc<dyn PiAiStreamRunner>>,
 }
 
 /// The session context an extension tool sees as its second argument.
@@ -310,6 +320,13 @@ impl std::fmt::Debug for HostOptions {
                     .as_ref()
                     .map(|_| "<dyn BuiltinToolRunner>"),
             )
+            .field(
+                "pi_ai_stream_runner",
+                &self
+                    .pi_ai_stream_runner
+                    .as_ref()
+                    .map(|_| "<dyn PiAiStreamRunner>"),
+            )
             .finish()
     }
 }
@@ -333,6 +350,11 @@ impl HostOptions {
     /// Install the runner behind the built-in `create*Tool` factories.
     pub fn with_builtin_tool_runner(mut self, runner: Arc<dyn BuiltinToolRunner>) -> Self {
         self.builtin_tool_runner = Some(runner);
+        self
+    }
+    /// Install the runner behind the built-in pi-ai provider factories.
+    pub fn with_pi_ai_stream_runner(mut self, runner: Arc<dyn PiAiStreamRunner>) -> Self {
+        self.pi_ai_stream_runner = Some(runner);
         self
     }
 }
@@ -442,6 +464,12 @@ struct Inner {
     /// Runner behind the JS `create*Tool` factories (see
     /// [`BuiltinToolRunner`]).
     builtin_tool_runner: Option<Arc<dyn BuiltinToolRunner>>,
+    /// Runner behind the JS `pi-ai/compat` provider factories (see
+    /// [`PiAiStreamRunner`]).
+    pi_ai_stream_runner: Option<Arc<dyn PiAiStreamRunner>>,
+    /// Live built-in provider streams started through
+    /// `host_pi_ai_stream_start` (see [`crate::pi_ai`]).
+    pi_ai: PiAiStreamBridge,
     /// Wall-clock nanos deadline the JS interrupt handler checks on
     /// every iteration. `u64::MAX` means "no deadline active".
     deadline_nanos: Arc<AtomicU64>,
@@ -476,6 +504,9 @@ impl Drop for Inner {
         // than by a dedicated wait task, so ask every surviving call to
         // kill its child too.
         self.execs.cancel_all();
+        // Trip the cancel token of every live built-in provider stream so
+        // a runner that spawns work behind it stops with the host.
+        self.pi_ai.cancel_all();
     }
 }
 
@@ -489,11 +520,12 @@ impl Inner {
         deadline
     }
 
-    /// Clear the per-call deadline — both the base and any `pi.exec`
-    /// extension armed during the call — once the host call returns.
+    /// Clear the per-call deadline — both the base and any `pi.exec` /
+    /// pi-ai extension armed during the call — once the host call returns.
     fn disarm_deadline(&self) {
         self.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
         self.execs.reset_deadline();
+        self.pi_ai.reset_deadline();
     }
 }
 
@@ -507,21 +539,31 @@ impl Inner {
 /// deadline the extension asked for.
 ///
 /// `Err(())` means the deadline fired; the future is dropped (as
-/// `tokio::time::timeout` did) and every exec still in flight is killed
-/// first, because a `host_exec` future lives on in the QuickJS async pool
-/// after the JS call that awaited it is dropped.
+/// `tokio::time::timeout` did) and every exec / provider stream still in
+/// flight is killed first, because a `host_exec` (or
+/// `host_pi_ai_stream_next`) future lives on in the QuickJS async pool after
+/// the JS call that awaited it is dropped.
 async fn drive_call<F>(inner: &Inner, base_deadline: Instant, future: F) -> Result<F::Output, ()>
 where
     F: std::future::Future,
 {
     tokio::pin!(future);
     loop {
-        let deadline = match inner.execs.deadline() {
+        // A live built-in provider stream raises the deadline to its own
+        // bound (`PI_AI_STREAM_TIMEOUT`): a single extension tool call can
+        // drive a whole model turn.
+        let mut deadline = match inner.execs.deadline() {
             Some(exec) if exec > base_deadline => exec,
             _ => base_deadline,
         };
+        if let Some(pi_ai) = inner.pi_ai.deadline() {
+            if pi_ai > deadline {
+                deadline = pi_ai;
+            }
+        }
         if Instant::now() >= deadline {
             inner.execs.cancel_all();
+            inner.pi_ai.cancel_all();
             return Err(());
         }
         tokio::select! {
@@ -557,6 +599,7 @@ impl JsExtensionHost {
         let state = Arc::new(Mutex::new(HostState::default()));
         let deadline_nanos = Arc::new(AtomicU64::new(u64::MAX));
         let execs = ExecBridge::new();
+        let pi_ai = PiAiStreamBridge::new();
         let inner = Arc::new(Inner {
             runtime: runtime.clone(),
             children: Arc::new(Mutex::new(HashMap::new())),
@@ -567,6 +610,8 @@ impl JsExtensionHost {
             timeout,
             tool_context: opts.tool_context.clone(),
             builtin_tool_runner: opts.builtin_tool_runner.clone(),
+            pi_ai_stream_runner: opts.pi_ai_stream_runner.clone(),
+            pi_ai,
             deadline_nanos: deadline_nanos.clone(),
             execs,
         });
@@ -595,6 +640,7 @@ impl JsExtensionHost {
         // forever.
         let interrupt_deadline = deadline_nanos.clone();
         let interrupt_exec_deadline = inner.execs.deadline_nanos.clone();
+        let interrupt_pi_ai_deadline = inner.pi_ai.deadline_nanos();
         runtime
             .set_interrupt_handler(Some(Box::new(move || {
                 let now = SystemTime::now()
@@ -603,14 +649,22 @@ impl JsExtensionHost {
                     .unwrap_or(0);
                 let base = interrupt_deadline.load(Ordering::Relaxed);
                 let exec = interrupt_exec_deadline.load(Ordering::Relaxed);
+                let pi_ai = interrupt_pi_ai_deadline.load(Ordering::Relaxed);
                 // `u64::MAX` means "unarmed": take whichever deadline *is*
-                // armed, and the later one when both are.
-                let deadline = match (base, exec) {
-                    (u64::MAX, u64::MAX) => return false,
-                    (u64::MAX, exec) => exec,
-                    (base, u64::MAX) => base,
-                    (base, exec) => base.max(exec),
-                };
+                // armed, and the later one when several are.
+                let mut deadline = u64::MAX;
+                for candidate in [base, exec, pi_ai] {
+                    if candidate != u64::MAX {
+                        deadline = if deadline == u64::MAX {
+                            candidate
+                        } else {
+                            deadline.max(candidate)
+                        };
+                    }
+                }
+                if deadline == u64::MAX {
+                    return false;
+                }
                 now >= deadline
             })))
             .await;
@@ -2808,6 +2862,48 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     };
     let builtin_tool_function = Function::new(ctx.clone(), Async(builtin_tool_fn))?;
     globals.set("host_builtin_tool", builtin_tool_function)?;
+
+    // host_pi_ai_stream_start(requestJson) -> Promise<string> — opens one
+    // built-in provider stream (`@earendil-works/pi-ai/compat`). Resolves
+    // with `{"ok":true,"id":N}` / `{"ok":false,"error":"…"}`; never
+    // rejects, so the shim owns the JS error shape and can surface it as an
+    // `error` event on the `AssistantMessageEventStream`.
+    let pi_ai_start_bridge = inner.pi_ai.clone();
+    let pi_ai_runner = inner.pi_ai_stream_runner.clone();
+    let pi_ai_stream_start_fn = move |request_json: String| {
+        let bridge = pi_ai_start_bridge.clone();
+        let runner = pi_ai_runner.clone();
+        async move { bridge.start(runner, &request_json).await }
+    };
+    globals.set(
+        "host_pi_ai_stream_start",
+        Function::new(ctx.clone(), Async(pi_ai_stream_start_fn))?,
+    )?;
+
+    // host_pi_ai_stream_next(id) -> Promise<string> — pulls the next
+    // upstream-shaped `AssistantMessageEvent`
+    // (`{"ok":true,"done":false,"event":…}` /
+    // `{"ok":true,"done":true}`), honouring the stream's cancel token.
+    let pi_ai_next_bridge = inner.pi_ai.clone();
+    let pi_ai_stream_next_fn = move |id: u64| {
+        let bridge = pi_ai_next_bridge.clone();
+        async move { bridge.next(id).await }
+    };
+    globals.set(
+        "host_pi_ai_stream_next",
+        Function::new(ctx.clone(), Async(pi_ai_stream_next_fn))?,
+    )?;
+
+    // host_pi_ai_stream_cancel(id) — synchronous, like `host_exec_cancel`:
+    // the shim calls it from an `AbortSignal` listener and from a `finally`,
+    // so it must not allocate a promise. Drops the provider stream and trips
+    // the runner's cancel token.
+    let pi_ai_cancel_bridge = inner.pi_ai.clone();
+    let pi_ai_stream_cancel_fn = Func::from(move |id: u64| -> rquickjs_core::Result<()> {
+        pi_ai_cancel_bridge.cancel(id);
+        Ok(())
+    });
+    globals.set("host_pi_ai_stream_cancel", pi_ai_stream_cancel_fn)?;
 
     Ok(())
 }
