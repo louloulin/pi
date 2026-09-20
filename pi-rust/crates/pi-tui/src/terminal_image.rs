@@ -1,0 +1,573 @@
+//! Terminal image kernel — slice 1 of the port of
+//! `packages/tui/src/terminal-image.ts`.
+//!
+//! This module currently covers the *capability layer* of the upstream file
+//! (`terminal-image.ts:6-211`): the [`TerminalCapabilities`] record and its
+//! environment detection, the resettable capability cache, the cell-pixel
+//! dimensions, the kitty/iTerm2 line prefixes, [`is_image_line`] and
+//! [`allocate_image_id`]. The encoders, kitty metadata/cropping, geometry, the
+//! four pixel-parsers, `renderImage` and `imageFallback` land in the following
+//! slices (see `FEATURE_PI_RS_STATUS.md`).
+//!
+//! Two divergences from upstream, both shared with [`crate::hyperlink`]:
+//!
+//! * `detectCapabilities()` probes tmux by spawning
+//!   `tmux display-message -p '#{client_termfeatures}'`. `pi-tui` must not
+//!   spawn processes from the render path, so the tmux branch asks
+//!   [`hyperlink::detect_hyperlinks_from_env`] instead — which is `false`
+//!   unless `PI_HYPERLINKS` says otherwise.
+//! * Upstream reads `process.env` inline. Here the environment is read once
+//!   into [`CapabilityInputs`] and the rule itself
+//!   ([`detect_capabilities_with`]) is pure, so every branch is testable
+//!   without mutating process-global state.
+
+use parking_lot::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::hyperlink;
+
+/// Inline image protocol the terminal understands.
+///
+/// Upstream spells this `"kitty" | "iterm2" | null`; the `null` arm is
+/// [`Option::None`] here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageProtocol {
+    /// Kitty graphics protocol (`\x1b_G…`).
+    Kitty,
+    /// iTerm2 inline images (`\x1b]1337;File=…`).
+    Iterm2,
+}
+
+impl ImageProtocol {
+    /// The upstream string spelling (`"kitty"` / `"iterm2"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kitty => "kitty",
+            Self::Iterm2 => "iterm2",
+        }
+    }
+}
+
+/// What the attached terminal can render.
+///
+/// Mirrors upstream's `TerminalCapabilities` (`terminal-image.ts:10-14`). The
+/// conservative default — no images, no true colour, no hyperlinks — is the
+/// "unknown terminal" arm of `detectCapabilitiesFromEnvironment`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalCapabilities {
+    /// Inline image protocol, or `None` when images are unreliable.
+    pub images: Option<ImageProtocol>,
+    /// The terminal renders 24-bit colour.
+    pub true_color: bool,
+    /// The terminal renders OSC 8 hyperlinks (see [`crate::hyperlink`]).
+    pub hyperlinks: bool,
+}
+
+/// Terminal cell size in pixels.
+///
+/// Mirrors `CellDimensions` (`terminal-image.ts:17-20`). The default
+/// `9 × 18` matches upstream's initial value, which the TUI replaces once the
+/// terminal answers its cell-size query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellDimensions {
+    /// Cell width in pixels.
+    pub width_px: u32,
+    /// Cell height in pixels.
+    pub height_px: u32,
+}
+
+impl Default for CellDimensions {
+    fn default() -> Self {
+        Self {
+            width_px: 9,
+            height_px: 18,
+        }
+    }
+}
+
+/// Pixel size of an image, as parsed from its base64 header.
+///
+/// Mirrors `ImageDimensions` (`terminal-image.ts:22-25`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDimensions {
+    /// Image width in pixels.
+    pub width_px: u32,
+    /// Image height in pixels.
+    pub height_px: u32,
+}
+
+/// Options for the (later-slice) `render_image`.
+///
+/// Mirrors `ImageRenderOptions` (`terminal-image.ts:27-40`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImageRenderOptions {
+    /// Maximum render width in terminal cells.
+    pub max_width_cells: Option<u32>,
+    /// Maximum render height in terminal cells.
+    pub max_height_cells: Option<u32>,
+    /// iTerm2 only: keep the aspect ratio. Upstream defaults this to `true`.
+    pub preserve_aspect_ratio: Option<bool>,
+    /// Kitty only: reuse/replace an existing image id.
+    pub image_id: Option<u32>,
+    /// Kitty only: let the terminal apply its default cursor movement.
+    /// Upstream defaults this to `true`, so only `Some(false)` is meaningful.
+    pub move_cursor: Option<bool>,
+}
+
+/// Kitty graphics protocol introducer.
+pub const KITTY_PREFIX: &str = "\u{1b}_G";
+
+/// iTerm2 inline-image introducer.
+pub const ITERM2_PREFIX: &str = "\u{1b}]1337;File=";
+
+/// Whether a rendered line carries an inline-image escape sequence.
+///
+/// Mirrors `isImageLine` (`terminal-image.ts:196-206`): single-row images start
+/// with a prefix, multi-row ones carry the sequence behind a cursor-up
+/// sequence, so a substring match is required as well.
+pub fn is_image_line(line: &str) -> bool {
+    line.starts_with(KITTY_PREFIX)
+        || line.starts_with(ITERM2_PREFIX)
+        || line.contains(KITTY_PREFIX)
+        || line.contains(ITERM2_PREFIX)
+}
+
+/// The environment `detectCapabilitiesFromEnvironment` inspects.
+///
+/// Values are stored already-lowercased where upstream lowercases them; the
+/// `has_*` flags mirror upstream's `process.env.X` presence checks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapabilityInputs {
+    /// Lowercased `TERM_PROGRAM`.
+    pub term_program: Option<String>,
+    /// Lowercased `TERMINAL_EMULATOR`.
+    pub terminal_emulator: Option<String>,
+    /// Lowercased `TERM`.
+    pub term: Option<String>,
+    /// Lowercased `COLORTERM`.
+    pub color_term: Option<String>,
+    /// `TMUX` is set.
+    pub tmux: bool,
+    /// `KITTY_WINDOW_ID` is set.
+    pub kitty_window_id: bool,
+    /// `GHOSTTY_RESOURCES_DIR` is set.
+    pub ghostty_resources_dir: bool,
+    /// `WEZTERM_PANE` is set.
+    pub wezterm_pane: bool,
+    /// `WARP_SESSION_ID` is set.
+    pub warp_session_id: bool,
+    /// `WARP_TERMINAL_SESSION_UUID` is set.
+    pub warp_terminal_session_uuid: bool,
+    /// `ITERM_SESSION_ID` is set.
+    pub iterm_session_id: bool,
+    /// `WT_SESSION` is set.
+    pub wt_session: bool,
+    /// Upstream's `process.platform === "win32"`.
+    pub is_windows_console: bool,
+}
+
+/// Read the capability environment.
+///
+/// Non-Unicode values are treated as unset, matching upstream's
+/// `process.env.X || ""`.
+pub fn capability_inputs_from_env() -> CapabilityInputs {
+    fn env_string(key: &str) -> Option<String> {
+        std::env::var_os(key)
+            .and_then(|v| v.into_string().ok())
+            .map(|v| v.to_lowercase())
+    }
+    CapabilityInputs {
+        term_program: env_string("TERM_PROGRAM"),
+        terminal_emulator: env_string("TERMINAL_EMULATOR"),
+        term: env_string("TERM"),
+        color_term: env_string("COLORTERM"),
+        tmux: std::env::var_os("TMUX").is_some(),
+        kitty_window_id: std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        ghostty_resources_dir: std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some(),
+        wezterm_pane: std::env::var_os("WEZTERM_PANE").is_some(),
+        warp_session_id: std::env::var_os("WARP_SESSION_ID").is_some(),
+        warp_terminal_session_uuid: std::env::var_os("WARP_TERMINAL_SESSION_UUID").is_some(),
+        iterm_session_id: std::env::var_os("ITERM_SESSION_ID").is_some(),
+        wt_session: std::env::var_os("WT_SESSION").is_some(),
+        is_windows_console: cfg!(windows),
+    }
+}
+
+/// The capability rule, with the environment already read.
+///
+/// `tmux_forwards_hyperlinks` stands in for upstream's
+/// `tmuxForwardsHyperlink()` probe callback (`terminal-image.ts:139-141`); it is
+/// only consulted in the tmux/screen arms, exactly like upstream.
+///
+/// The `PI_*` environment overrides are applied on top by
+/// [`apply_env_overrides`], which is what upstream's `detectCapabilities()`
+/// does after this function returns.
+pub fn detect_capabilities_with(
+    inputs: &CapabilityInputs,
+    tmux_forwards_hyperlinks: bool,
+) -> TerminalCapabilities {
+    let term_program = inputs.term_program.as_deref().unwrap_or("");
+    let term = inputs.term.as_deref().unwrap_or("");
+    let terminal_emulator = inputs.terminal_emulator.as_deref().unwrap_or("");
+    let color_term = inputs.color_term.as_deref().unwrap_or("");
+    let has_true_color_hint = color_term == "truecolor" || color_term == "24bit";
+
+    // tmux only forwards OSC 8 when its client advertises `hyperlinks`, and
+    // its image protocols are unreliable, so `images` stays `None`.
+    if inputs.tmux || term.starts_with("tmux") {
+        return TerminalCapabilities {
+            images: None,
+            true_color: has_true_color_hint,
+            hyperlinks: tmux_forwards_hyperlinks,
+        };
+    }
+
+    // screen swallows OSC 8.
+    if term.starts_with("screen") {
+        return TerminalCapabilities {
+            images: None,
+            true_color: has_true_color_hint,
+            hyperlinks: false,
+        };
+    }
+
+    if inputs.kitty_window_id || term_program == "kitty" {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if term_program == "ghostty" || term.contains("ghostty") || inputs.ghostty_resources_dir {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if inputs.wezterm_pane || term_program == "wezterm" {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if term_program == "warpterminal" || inputs.warp_session_id || inputs.warp_terminal_session_uuid
+    {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Kitty),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if inputs.iterm_session_id || term_program == "iterm.app" {
+        return TerminalCapabilities {
+            images: Some(ImageProtocol::Iterm2),
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if inputs.wt_session {
+        return TerminalCapabilities {
+            images: None,
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if term_program == "alacritty" || term_program == "vscode" || term_program == "zed" {
+        return TerminalCapabilities {
+            images: None,
+            true_color: true,
+            hyperlinks: true,
+        };
+    }
+
+    if terminal_emulator == "jetbrains-jediterm" {
+        return TerminalCapabilities {
+            images: None,
+            true_color: true,
+            hyperlinks: false,
+        };
+    }
+
+    // Windows Terminal does not always set `WT_SESSION` (e.g. a cmd.exe started
+    // from Win+R). Modern consoles do true colour, but hyperlinks stay off
+    // unless positively detected above.
+    if inputs.is_windows_console {
+        return TerminalCapabilities {
+            images: None,
+            true_color: true,
+            hyperlinks: false,
+        };
+    }
+
+    // Unknown terminal: be conservative. A terminal that swallows OSC 8 renders
+    // the link target invisibly, which loses the URL entirely, so hyperlinks
+    // default to off.
+    TerminalCapabilities {
+        images: None,
+        true_color: has_true_color_hint,
+        hyperlinks: false,
+    }
+}
+
+fn parse_bool_override(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+
+/// Apply the `PI_IMAGE_PROTOCOL` / `PI_TRUE_COLOR` / `PI_HYPERLINKS`
+/// environment overrides to an already-detected capability record.
+///
+/// Mirrors the merge at the end of upstream's `detectCapabilities()`
+/// (`terminal-image.ts:150-163`). `PI_IMAGE_PROTOCOL` accepts `"kitty"` /
+/// `"iterm2"` (any case), and `"none"` / `"0"` to force images off; anything
+/// else leaves the detection in place. The boolean overrides only accept
+/// `"1"` / `"0"`.
+pub fn apply_env_overrides(
+    caps: &mut TerminalCapabilities,
+    pi_image_protocol: Option<&str>,
+    pi_true_color: Option<&str>,
+    pi_hyperlinks: Option<&str>,
+) {
+    match pi_image_protocol.map(str::to_lowercase).as_deref() {
+        Some("kitty") => caps.images = Some(ImageProtocol::Kitty),
+        Some("iterm2") => caps.images = Some(ImageProtocol::Iterm2),
+        Some("none") | Some("0") => caps.images = None,
+        _ => {}
+    }
+    if let Some(value) = parse_bool_override(pi_true_color) {
+        caps.true_color = value;
+    }
+    if let Some(value) = parse_bool_override(pi_hyperlinks) {
+        caps.hyperlinks = value;
+    }
+}
+
+/// Detect capabilities from the current environment, without caching.
+///
+/// Mirrors upstream's `detectCapabilities()` (`terminal-image.ts:148-163`),
+/// including the `PI_*` overrides. tmux forwarding is answered by
+/// [`hyperlink::detect_hyperlinks_from_env`] instead of a `tmux` subprocess.
+pub fn detect_capabilities_from_env() -> TerminalCapabilities {
+    let tmux_forwards = hyperlink::detect_hyperlinks_from_env();
+    let mut caps = detect_capabilities_with(&capability_inputs_from_env(), tmux_forwards);
+    let image_protocol = std::env::var("PI_IMAGE_PROTOCOL").ok();
+    let true_color = std::env::var("PI_TRUE_COLOR").ok();
+    let hyperlinks = std::env::var("PI_HYPERLINKS").ok();
+    apply_env_overrides(
+        &mut caps,
+        image_protocol.as_deref(),
+        true_color.as_deref(),
+        hyperlinks.as_deref(),
+    );
+    caps
+}
+
+/// One overridable capability: left alone, explicitly cleared, or set.
+///
+/// Upstream's overrides are a `Partial<TerminalCapabilities>`, where a present
+/// key with the value `null` clears `images`. The three states are spelled out
+/// here so that "unset" and "clear" cannot be confused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Override<T> {
+    /// Leave the detected value alone.
+    #[default]
+    Unset,
+    /// Force the capability off (only meaningful for `images`).
+    Clear,
+    /// Force a specific value.
+    Set(T),
+}
+
+impl<T: Copy> Override<T> {
+    /// Apply this override to `slot`.
+    pub fn apply_to(self, slot: &mut T) {
+        if let Self::Set(value) = self {
+            *slot = value;
+        }
+    }
+}
+
+/// Capability overrides a caller (the TUI driver, or a test) can pin.
+///
+/// Mirrors upstream's `capabilityOverrides` (`terminal-image.ts:35`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilityOverrides {
+    /// Force the image protocol, or force images off with [`Override::Clear`].
+    pub images: Override<ImageProtocol>,
+    /// Force true-colour support.
+    pub true_color: Override<bool>,
+    /// Force hyperlink support.
+    pub hyperlinks: Override<bool>,
+}
+
+impl CapabilityOverrides {
+    /// No overrides at all (`const` so it can seed the process-global state).
+    pub const NONE: Self = Self {
+        images: Override::Unset,
+        true_color: Override::Unset,
+        hyperlinks: Override::Unset,
+    };
+
+    /// Apply every override to `caps`.
+    pub fn apply_to(self, caps: &mut TerminalCapabilities) {
+        if let Some(value) = self.images.value() {
+            caps.images = value;
+        }
+        self.true_color.apply_to(&mut caps.true_color);
+        self.hyperlinks.apply_to(&mut caps.hyperlinks);
+    }
+}
+
+impl<T: Copy> Override<T> {
+    /// The override as an `Option`, where [`Override::Clear`] is `Some(None)`.
+    ///
+    /// Only useful for `Option`-valued capabilities; the boolean overrides use
+    /// [`Override::apply_to`].
+    pub fn value(self) -> Option<Option<T>> {
+        match self {
+            Self::Unset => None,
+            Self::Clear => Some(None),
+            Self::Set(value) => Some(Some(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CapabilityState {
+    cached: Option<TerminalCapabilities>,
+    overrides: CapabilityOverrides,
+}
+
+static CAPABILITIES: Mutex<CapabilityState> = Mutex::new(CapabilityState {
+    cached: None,
+    overrides: CapabilityOverrides::NONE,
+});
+
+/// The process-wide cell dimensions, initially `9 × 18`.
+static CELL_DIMENSIONS: Mutex<CellDimensions> = Mutex::new(CellDimensions {
+    width_px: 9,
+    height_px: 18,
+});
+
+/// The current cell dimensions.
+///
+/// Mirrors `getCellDimensions()` (`terminal-image.ts:40-42`).
+pub fn get_cell_dimensions() -> CellDimensions {
+    *CELL_DIMENSIONS.lock()
+}
+
+/// Replace the cell dimensions (the TUI does this once the terminal answers
+/// its cell-size query).
+///
+/// Mirrors `setCellDimensions()` (`terminal-image.ts:44-46`).
+pub fn set_cell_dimensions(dimensions: CellDimensions) {
+    *CELL_DIMENSIONS.lock() = dimensions;
+}
+
+/// The cached capabilities, detecting them on first use.
+///
+/// Mirrors `getCapabilities()` (`terminal-image.ts:160-169`): overrides are
+/// merged over the detected record, and the result is cached until
+/// [`reset_capabilities_cache`] or [`set_capabilities`].
+pub fn get_capabilities() -> TerminalCapabilities {
+    let mut state = CAPABILITIES.lock();
+    if let Some(caps) = state.cached {
+        return caps;
+    }
+    // A pinned hyperlink override also feeds the tmux branch, like upstream's
+    // `() => hyperlinks` callback.
+    let tmux_forwards = match state.overrides.hyperlinks {
+        Override::Set(value) => value,
+        _ => hyperlink::detect_hyperlinks_from_env(),
+    };
+    let mut caps = detect_capabilities_with(&capability_inputs_from_env(), tmux_forwards);
+    let image_protocol = std::env::var("PI_IMAGE_PROTOCOL").ok();
+    let true_color = std::env::var("PI_TRUE_COLOR").ok();
+    let hyperlinks = std::env::var("PI_HYPERLINKS").ok();
+    apply_env_overrides(
+        &mut caps,
+        image_protocol.as_deref(),
+        true_color.as_deref(),
+        hyperlinks.as_deref(),
+    );
+    state.overrides.apply_to(&mut caps);
+    state.cached = Some(caps);
+    caps
+}
+
+/// Drop the cached capabilities so the next [`get_capabilities`] re-detects.
+///
+/// Mirrors `resetCapabilitiesCache()` (`terminal-image.ts:171-173`).
+pub fn reset_capabilities_cache() {
+    CAPABILITIES.lock().cached = None;
+}
+
+/// Pin selected capabilities, dropping the cache when the pin changes.
+///
+/// Mirrors `setCapabilityOverrides()` (`terminal-image.ts:176-187`): a call
+/// that does not change the overrides is a no-op, so the cache survives.
+pub fn set_capability_overrides(overrides: CapabilityOverrides) {
+    let mut state = CAPABILITIES.lock();
+    if state.overrides == overrides {
+        return;
+    }
+    state.overrides = overrides;
+    state.cached = None;
+}
+
+/// Replace the cached capabilities outright, bypassing detection.
+///
+/// Mirrors `setCapabilities()` (`terminal-image.ts:189-191`) — the entry tests
+/// (and the TUI driver after its own probe) use to exercise both code paths.
+pub fn set_capabilities(capabilities: TerminalCapabilities) {
+    CAPABILITIES.lock().cached = Some(capabilities);
+}
+
+/// Pseudo-random state for [`allocate_image_id`]; `0` means "not seeded yet".
+static IMAGE_ID_STATE: Mutex<u64> = Mutex::new(0);
+
+/// Allocate a kitty image id in `1..=0xfffffffe`.
+///
+/// Mirrors `allocateImageId()` (`terminal-image.ts:210-213`). Upstream uses
+/// `Math.random()`; this is an xorshift64\* generator seeded from the clock and
+/// the process id, which keeps the port dependency-free (`rand` is not a
+/// dependency of `pi-tui`) while preserving the property that matters: ids do
+/// not collide across module instances.
+pub fn allocate_image_id() -> u32 {
+    fn seed() -> u64 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15);
+        let seeded = nanos ^ ((u64::from(std::process::id())) << 17);
+        if seeded == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seeded
+        }
+    }
+
+    let mut state = IMAGE_ID_STATE.lock();
+    if *state == 0 {
+        *state = seed();
+    }
+    let mut x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    let value = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
+    // Upstream: Math.floor(Math.random() * 0xfffffffe) + 1
+    (value >> 32) as u32 % 0xffff_fffe + 1
+}

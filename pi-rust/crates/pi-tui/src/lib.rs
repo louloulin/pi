@@ -34,6 +34,7 @@ pub mod settings;
 pub mod status;
 pub mod styled;
 pub mod styles;
+pub mod terminal_image;
 pub mod theme;
 pub mod undo_stack;
 pub mod word_navigation;
@@ -79,6 +80,13 @@ pub use settings::{SettingItem, SettingsAction, SettingsList};
 pub use status::{StatusBar, StatusData};
 pub use styled::{SpanStyle, StyledLine, StyledSpan};
 pub use styles::SelectListStyles;
+pub use terminal_image::{
+    allocate_image_id, apply_env_overrides, capability_inputs_from_env,
+    detect_capabilities_from_env, detect_capabilities_with, get_capabilities, get_cell_dimensions,
+    is_image_line, reset_capabilities_cache, set_capabilities, set_capability_overrides,
+    set_cell_dimensions, CapabilityInputs, CapabilityOverrides, CellDimensions, ImageDimensions,
+    ImageProtocol, ImageRenderOptions, Override, TerminalCapabilities, ITERM2_PREFIX, KITTY_PREFIX,
+};
 pub use theme::{
     available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,
     default_theme_name, is_light_theme, load_theme, load_theme_from_path, parse_auto_theme_setting,
