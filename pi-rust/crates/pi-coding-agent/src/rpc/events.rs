@@ -76,7 +76,10 @@ pub fn agent_event_to_json(event: &AgentEvent, turn: u32) -> Vec<Value> {
             "tool_call_id": tool_call_id,
             "delta": delta,
         })],
-        AgentEvent::ToolExecutionEnd { result, duration_ms } => {
+        AgentEvent::ToolExecutionEnd {
+            result,
+            duration_ms,
+        } => {
             let mut payloads = vec![json!({
                 "type": "tool_execution_end",
                 "tool_call_id": result.tool_call_id,
@@ -132,9 +135,8 @@ mod tests {
 
     #[test]
     fn text_delta_wraps_in_message_update() {
-        let event = AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta {
-            delta: "hi".into(),
-        });
+        let event =
+            AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta { delta: "hi".into() });
         let payloads = agent_event_to_json(&event, 1);
         assert_eq!(payloads.len(), 1);
         assert_eq!(

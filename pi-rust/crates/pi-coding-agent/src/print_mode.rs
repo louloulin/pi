@@ -230,9 +230,7 @@ impl PrintModeOptions {
 /// `options.output_format`. It does not call `std::process::exit` —
 /// the caller maps the returned [`Result`] to an exit code so the
 /// function remains unit-testable.
-pub async fn run_print_mode(
-    options: PrintModeOptions,
-) -> Result<PrintModeResult, PrintModeError> {
+pub async fn run_print_mode(options: PrintModeOptions) -> Result<PrintModeResult, PrintModeError> {
     if options.prompt.trim().is_empty() {
         return Err(PrintModeError::AgentSetup(
             "prompt is empty after file/stdin expansion".into(),
@@ -252,7 +250,8 @@ pub async fn run_print_mode(
     // made and the turn counter stays at 0.
     if let Some((name, args)) = extension_command_invocation(&options.prompt) {
         if options.extensions.has_command(&name) {
-            return run_extension_command(&options, &name, args, session_writer, session_path).await;
+            return run_extension_command(&options, &name, args, session_writer, session_path)
+                .await;
         }
     }
 
@@ -378,7 +377,9 @@ pub async fn run_print_mode(
             prompt_result = Err(map_agent_error(err));
         }
         (_, Some(Err(join_err))) => {
-            prompt_result = Err(AgentError::Stream(format!("prompt task panicked: {join_err}")));
+            prompt_result = Err(AgentError::Stream(format!(
+                "prompt task panicked: {join_err}"
+            )));
         }
         _ => {}
     }
@@ -662,9 +663,7 @@ fn install_signal_handlers(state: Arc<SignalState>) -> Result<(), PrintModeError
         // first press cancels the current turn, the second kills the
         // process.
         let _ = tokio::signal::ctrl_c().await;
-        state_for_sigint
-            .terminate_now
-            .store(true, Ordering::SeqCst);
+        state_for_sigint.terminate_now.store(true, Ordering::SeqCst);
     });
 
     #[cfg(unix)]
@@ -833,8 +832,8 @@ fn find_session_by_id(
     directory: &Path,
     session_id: &str,
 ) -> Result<Option<(PathBuf, String)>, PrintModeError> {
-    let refs = crate::list_resumable(directory)
-        .map_err(|err| PrintModeError::Session(err.to_string()))?;
+    let refs =
+        crate::list_resumable(directory).map_err(|err| PrintModeError::Session(err.to_string()))?;
     Ok(refs
         .into_iter()
         .find(|r| r.session_id == session_id)
@@ -845,12 +844,9 @@ fn find_session_by_id(
 /// JSONL files. Returns `None` when the directory holds no sessions.
 fn most_recent_session(directory: &Path) -> Result<Option<(PathBuf, String)>, PrintModeError> {
     migrate_legacy_sessions(directory);
-    let refs = crate::list_resumable(directory)
-        .map_err(|err| PrintModeError::Session(err.to_string()))?;
-    Ok(refs
-        .into_iter()
-        .next()
-        .map(|r| (r.database, r.session_id)))
+    let refs =
+        crate::list_resumable(directory).map_err(|err| PrintModeError::Session(err.to_string()))?;
+    Ok(refs.into_iter().next().map(|r| (r.database, r.session_id)))
 }
 
 /// Best-effort one-shot migration of every `<id>.jsonl` in `directory`
@@ -931,10 +927,8 @@ fn load_history(reader: &SessionReader, session_id: &str) -> Vec<Message> {
                         retained_tail,
                         ..
                     } => {
-                        history = crate::compaction::replace_with_compaction(
-                            &retained_tail,
-                            &summary,
-                        );
+                        history =
+                            crate::compaction::replace_with_compaction(&retained_tail, &summary);
                     }
                     _ => {}
                 }
@@ -1191,10 +1185,7 @@ mod tests {
         assert_eq!(PrintModeError::Agent("x".into()).exit_code(), 70);
         assert_eq!(PrintModeError::Interrupted.exit_code(), 130);
         assert_eq!(PrintModeError::Terminated.exit_code(), 143);
-        assert_eq!(
-            PrintModeError::MaxTurnsExceeded { max: 2 }.exit_code(),
-            1
-        );
+        assert_eq!(PrintModeError::MaxTurnsExceeded { max: 2 }.exit_code(), 1);
         assert_eq!(
             PrintModeError::Stdout(io::Error::from(io::ErrorKind::BrokenPipe)).exit_code(),
             74

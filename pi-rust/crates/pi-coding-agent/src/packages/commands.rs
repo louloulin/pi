@@ -82,11 +82,11 @@ impl CommandError {
     /// `sysexits.h`-style exit code for the CLI.
     pub fn exit_code(&self) -> u8 {
         match self {
-            CommandError::Spec(_) => 64,                        // EX_USAGE
-            CommandError::NotFound(_) => 66,                    // EX_NOINPUT
-            CommandError::Install(err) => err.exit_code(),      // maps 64/66/69/74
+            CommandError::Spec(_) => 64,                           // EX_USAGE
+            CommandError::NotFound(_) => 66,                       // EX_NOINPUT
+            CommandError::Install(err) => err.exit_code(),         // maps 64/66/69/74
             CommandError::Registry(_) | CommandError::Io(_) => 74, // EX_IOERR
-            CommandError::Json(_) => 70,                        // EX_SOFTWARE
+            CommandError::Json(_) => 70,                           // EX_SOFTWARE
         }
     }
 }
@@ -173,7 +173,12 @@ fn run_list_models(models: &Models, output: OutputFormat) -> Result<(), CommandE
                     .unwrap_or_default();
                 println!(
                     "{}/{}  context={}  max_output_tokens={}{}{}",
-                    provider, model.id, model.context_window, model.max_output_tokens, label, pricing
+                    provider,
+                    model.id,
+                    model.context_window,
+                    model.max_output_tokens,
+                    label,
+                    pricing
                 );
             }
         }

@@ -115,20 +115,19 @@ impl AgentTool for BashTool {
             return Err(ToolError::Aborted);
         }
 
-        let parsed: BashArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: BashArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&parsed.command);
         if let Some(cwd) = &parsed.cwd {
             cmd.current_dir(cwd);
         }
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
 
-        let timeout = parsed
-            .timeout
-            .unwrap_or(120)
-            .min(MAX_TIMEOUT_SECS);
+        let timeout = parsed.timeout.unwrap_or(120).min(MAX_TIMEOUT_SECS);
 
         // Block on the child process on a blocking thread so we don't
         // stall the Tokio runtime, and so we can race a deadline against

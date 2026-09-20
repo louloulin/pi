@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use pi_session::{
-    default_destination, export_jsonl, migrate_jsonl, render_jsonl, ExportReport,
-    MigrationReport, SessionError, SessionReader,
+    default_destination, export_jsonl, migrate_jsonl, render_jsonl, ExportReport, MigrationReport,
+    SessionError, SessionReader,
 };
 
 use crate::cli::SessionCommand;
@@ -22,7 +22,10 @@ use crate::cli::SessionCommand;
 pub fn run(action: SessionCommand) -> anyhow::Result<()> {
     match action {
         SessionCommand::List { database } => list(database.as_deref()),
-        SessionCommand::Show { session_id, database } => show(&database, &session_id),
+        SessionCommand::Show {
+            session_id,
+            database,
+        } => show(&database, &session_id),
         SessionCommand::Export {
             session_id,
             database,
@@ -69,7 +72,10 @@ fn show(database: &Path, session_id: &str) -> anyhow::Result<()> {
     let reader = SessionReader::open(database)
         .with_context(|| format!("opening session database {}", database.display()))?;
     let entries = reader.iter_entries(session_id).with_context(|| {
-        format!("reading entries for session {session_id:?} in {}", database.display())
+        format!(
+            "reading entries for session {session_id:?} in {}",
+            database.display()
+        )
     })?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -183,5 +189,8 @@ fn default_session_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("pi").join("sessions")
+    home.join(".local")
+        .join("share")
+        .join("pi")
+        .join("sessions")
 }

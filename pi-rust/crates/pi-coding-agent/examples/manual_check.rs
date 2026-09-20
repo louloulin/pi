@@ -69,7 +69,10 @@ async fn main() {
     println!("[shell]:\n");
     let shell = std::process::Command::new("bash")
         .arg("-c")
-        .arg(format!("grep -n '^name' {}", dir.join("Cargo.toml").display()))
+        .arg(format!(
+            "grep -n '^name' {}",
+            dir.join("Cargo.toml").display()
+        ))
         .output()
         .expect("spawn shell");
     print!("{}", String::from_utf8_lossy(&shell.stdout));
@@ -78,17 +81,17 @@ async fn main() {
     // ---- ls -l ----
     println!("--- ls (detail: true) ---");
     let out = LsTool
-        .execute(
-            json!({ "path": ".", "detail": true }),
-            AbortLike::none(),
-        )
+        .execute(json!({ "path": ".", "detail": true }), AbortLike::none())
         .await
         .expect("ls should succeed");
     println!("[tool]:\n{}\n", first_text(&out));
     println!("[shell]:\n");
     let shell = std::process::Command::new("bash")
         .arg("-c")
-        .arg(format!("ls -l --time-style=+'%%Y-%%m-%%d %%H:%%M:%%S' {}", dir.display()))
+        .arg(format!(
+            "ls -l --time-style=+'%%Y-%%m-%%d %%H:%%M:%%S' {}",
+            dir.display()
+        ))
         .output()
         .expect("spawn shell");
     print!("{}", String::from_utf8_lossy(&shell.stdout));
@@ -97,10 +100,7 @@ async fn main() {
     // ---- ls (all: true) ----
     println!("--- ls (all: true) ---");
     let out = LsTool
-        .execute(
-            json!({ "path": ".", "all": true }),
-            AbortLike::none(),
-        )
+        .execute(json!({ "path": ".", "all": true }), AbortLike::none())
         .await
         .expect("ls should succeed");
     println!("[tool]:\n{}\n", first_text(&out));

@@ -96,15 +96,14 @@ impl AgentTool for LsTool {
             return Err(ToolError::Aborted);
         }
 
-        let parsed: LsArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: LsArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let cwd = std::env::current_dir().map_err(|e| {
             ToolError::Execution(format!("failed to resolve current directory: {}", e))
         })?;
 
-        let (dir, _) =
-            relativize_for_search(parsed.path.as_deref().unwrap_or("."), &cwd)?;
+        let (dir, _) = relativize_for_search(parsed.path.as_deref().unwrap_or("."), &cwd)?;
 
         let meta = fs::metadata(&dir).map_err(|e| {
             ToolError::Execution(format!("path not found: {} ({})", dir.display(), e))
@@ -120,11 +119,7 @@ impl AgentTool for LsTool {
         let detail = parsed.detail.unwrap_or(false);
 
         let entries = fs::read_dir(&dir).map_err(|e| {
-            ToolError::Execution(format!(
-                "cannot read directory {}: {}",
-                dir.display(),
-                e
-            ))
+            ToolError::Execution(format!("cannot read directory {}: {}", dir.display(), e))
         })?;
 
         let mut rows: Vec<Entry> = Vec::new();
@@ -156,7 +151,10 @@ impl AgentTool for LsTool {
         let text = if detail {
             render_detail(&rows)
         } else {
-            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join("\n")
+            rows.iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         };
 
         // Byte-limit the listing. There is no separate line limit because the
@@ -253,10 +251,7 @@ fn render_detail(rows: &[Entry]) -> String {
         let mtime = format_mtime(r.mtime);
         out.push_str(&format!(
             "{} {:>10} {} {}\n",
-            type_char,
-            r.size,
-            mtime,
-            r.name
+            type_char, r.size, mtime, r.name
         ));
     }
     while out.ends_with('\n') {

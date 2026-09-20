@@ -174,7 +174,9 @@ impl SkillReadTool {
     /// Instruction line telling the model how to open a skill file.
     fn instruction(self) -> &'static str {
         match self {
-            Self::Read => "Use the read tool to load a skill's file when the task matches its description.",
+            Self::Read => {
+                "Use the read tool to load a skill's file when the task matches its description."
+            }
             Self::Bash => "Use bash to load a skill's file when the task matches its description.",
         }
     }
@@ -197,7 +199,10 @@ pub fn validate_skill_name(name: &str) -> Vec<String> {
         .chars()
         .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
     {
-        errors.push("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)".to_string());
+        errors.push(
+            "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
+                .to_string(),
+        );
     }
 
     if name.starts_with('-') || name.ends_with('-') {
@@ -484,7 +489,10 @@ fn load_skill_from_file(file_path: &Path, source: SkillSource) -> LoadedSkill {
     match &description {
         Some(value) => {
             for error in validate_skill_description(value) {
-                diagnostics.push(SkillDiagnostic::warning(error, Some(file_path.to_path_buf())));
+                diagnostics.push(SkillDiagnostic::warning(
+                    error,
+                    Some(file_path.to_path_buf()),
+                ));
             }
         }
         None => diagnostics.push(SkillDiagnostic::warning(
@@ -513,7 +521,10 @@ fn load_skill_from_file(file_path: &Path, source: SkillSource) -> LoadedSkill {
         });
 
     for error in validate_skill_name(&name) {
-        diagnostics.push(SkillDiagnostic::warning(error, Some(file_path.to_path_buf())));
+        diagnostics.push(SkillDiagnostic::warning(
+            error,
+            Some(file_path.to_path_buf()),
+        ));
     }
 
     LoadedSkill {
@@ -523,7 +534,9 @@ fn load_skill_from_file(file_path: &Path, source: SkillSource) -> LoadedSkill {
             file_path: file_path.to_path_buf(),
             base_dir,
             source,
-            disable_model_invocation: frontmatter.get_bool("disable-model-invocation").unwrap_or(false),
+            disable_model_invocation: frontmatter
+                .get_bool("disable-model-invocation")
+                .unwrap_or(false),
         }),
         diagnostics,
     }
@@ -544,12 +557,15 @@ pub fn load_skills(options: &LoadSkillsOptions) -> SkillsLoadResult {
     let mut diagnostics: Vec<SkillDiagnostic> = Vec::new();
     let mut collisions: Vec<SkillDiagnostic> = Vec::new();
 
-    let mut add = |result: SkillsLoadResult, diagnostics: &mut Vec<SkillDiagnostic>, collisions: &mut Vec<SkillDiagnostic>| {
+    let mut add = |result: SkillsLoadResult,
+                   diagnostics: &mut Vec<SkillDiagnostic>,
+                   collisions: &mut Vec<SkillDiagnostic>| {
         diagnostics.extend(result.diagnostics);
         for skill in result.skills {
             // `canonicalize` resolves symlinks so the same file reached
             // through two locations loads once.
-            let identity = fs::canonicalize(&skill.file_path).unwrap_or_else(|_| skill.file_path.clone());
+            let identity =
+                fs::canonicalize(&skill.file_path).unwrap_or_else(|_| skill.file_path.clone());
             if !seen_files.insert(identity) {
                 continue;
             }
@@ -634,7 +650,10 @@ pub fn load_skills(options: &LoadSkillsOptions) -> SkillsLoadResult {
         .collect();
 
     diagnostics.extend(collisions);
-    SkillsLoadResult { skills, diagnostics }
+    SkillsLoadResult {
+        skills,
+        diagnostics,
+    }
 }
 
 /// Format skills for the system prompt (Agent Skills XML block).
@@ -796,7 +815,10 @@ mod tests {
     #[test]
     fn skips_skills_without_a_description() {
         let temp = TempDir::new("no-description");
-        temp.write("missing-description/SKILL.md", "---\nname: missing-description\n---\n");
+        temp.write(
+            "missing-description/SKILL.md",
+            "---\nname: missing-description\n---\n",
+        );
         temp.write("no-frontmatter/SKILL.md", "# No frontmatter\n");
 
         let result = load(&temp.path.join("missing-description"));
@@ -835,15 +857,24 @@ mod tests {
 
         let result = load(&temp.path.join("bad--name"));
         assert_eq!(result.skills.len(), 1);
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("consecutive hyphens")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("consecutive hyphens")));
 
         let result = load(&temp.path.join("invalid"));
         assert_eq!(result.skills.len(), 1);
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("invalid characters")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("invalid characters")));
 
         let result = load(&temp.path.join("long"));
         assert_eq!(result.skills.len(), 1);
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("exceeds 64 characters")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("exceeds 64 characters")));
     }
 
     #[test]
@@ -856,13 +887,19 @@ mod tests {
 
         let result = load(&temp.path.join("invalid-yaml"));
         assert!(result.skills.is_empty());
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("frontmatter")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("frontmatter")));
     }
 
     #[test]
     fn prefers_a_root_skill_over_nested_ones() {
         let temp = TempDir::new("root-preferred");
-        temp.write("SKILL.md", "---\ndescription: Root skill should win.\n---\n");
+        temp.write(
+            "SKILL.md",
+            "---\ndescription: Root skill should win.\n---\n",
+        );
         temp.write(
             "nested-child/SKILL.md",
             "---\ndescription: Nested skill should be ignored.\n---\n",
@@ -891,10 +928,17 @@ mod tests {
             "nested/child-skill/SKILL.md",
             "---\nname: child-skill\ndescription: A nested skill.\n---\n",
         );
-        temp.write("nested/loose.md", "---\ndescription: Not loaded when nested.\n---\n");
+        temp.write(
+            "nested/loose.md",
+            "---\ndescription: Not loaded when nested.\n---\n",
+        );
 
         let result = load(&temp.path);
-        let names: Vec<&str> = result.skills.iter().map(|skill| skill.name.as_str()).collect();
+        let names: Vec<&str> = result
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.contains(&"child-skill"));
         assert!(names.contains(&"notes"));
@@ -904,10 +948,7 @@ mod tests {
     #[test]
     fn skips_dot_dirs_and_node_modules() {
         let temp = TempDir::new("skip-dirs");
-        temp.write(
-            ".hidden/SKILL.md",
-            "---\ndescription: Hidden skill.\n---\n",
-        );
+        temp.write(".hidden/SKILL.md", "---\ndescription: Hidden skill.\n---\n");
         temp.write(
             "node_modules/pkg/SKILL.md",
             "---\ndescription: Dependency skill.\n---\n",
@@ -1011,7 +1052,10 @@ mod tests {
             project_trusted: true,
         });
         assert!(result.skills.is_empty());
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("does not exist")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("does not exist")));
     }
 
     #[test]
@@ -1056,7 +1100,8 @@ mod tests {
             disable_model_invocation: true,
         };
 
-        let formatted = format_skills_for_prompt(&[visible.clone(), hidden.clone()], SkillReadTool::Bash);
+        let formatted =
+            format_skills_for_prompt(&[visible.clone(), hidden.clone()], SkillReadTool::Bash);
         assert!(formatted.contains("<name>visible</name>"));
         assert!(!formatted.contains("<name>hidden</name>"));
         assert!(formatted.contains("Use bash to load a skill's file"));
@@ -1088,7 +1133,10 @@ mod tests {
 
         let temp = TempDir::new("gitignore");
         temp.write("project/.gitignore", "ignored/\nloose.md\n");
-        temp.write("project/kept/SKILL.md", "---\nname: kept\ndescription: Kept.\n---\n");
+        temp.write(
+            "project/kept/SKILL.md",
+            "---\nname: kept\ndescription: Kept.\n---\n",
+        );
         temp.write(
             "project/ignored/SKILL.md",
             "---\nname: ignored\ndescription: Ignored.\n---\n",
@@ -1100,7 +1148,11 @@ mod tests {
         run_git(&temp.path.join("project"), &["init", "-q", "."]);
 
         let result = load(&temp.path.join("project"));
-        let names: Vec<&str> = result.skills.iter().map(|skill| skill.name.as_str()).collect();
+        let names: Vec<&str> = result
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
         assert_eq!(names, vec!["kept"], "{:?}", result.diagnostics);
     }
 
@@ -1113,7 +1165,10 @@ mod tests {
 
         let temp = TempDir::new("no-git");
         temp.write("project/.gitignore", "ignored/\n");
-        temp.write("project/kept/SKILL.md", "---\nname: kept\ndescription: Kept.\n---\n");
+        temp.write(
+            "project/kept/SKILL.md",
+            "---\nname: kept\ndescription: Kept.\n---\n",
+        );
         temp.write(
             "project/ignored/SKILL.md",
             "---\nname: ignored\ndescription: Ignored.\n---\n",
@@ -1121,7 +1176,11 @@ mod tests {
 
         // No `git init`: the ignore rules are inert rather than an error.
         let result = load(&temp.path.join("project"));
-        let mut names: Vec<&str> = result.skills.iter().map(|skill| skill.name.as_str()).collect();
+        let mut names: Vec<&str> = result
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
         names.sort();
         assert_eq!(names, vec!["ignored", "kept"]);
     }
@@ -1131,7 +1190,10 @@ mod tests {
         // A directory that is not a work tree must never yield ignores, so
         // discovery keeps working on machines without git.
         let temp = TempDir::new("ignore-empty");
-        temp.write("project/SKILL.md", "---\nname: only\ndescription: Only.\n---\n");
+        temp.write(
+            "project/SKILL.md",
+            "---\nname: only\ndescription: Only.\n---\n",
+        );
         let candidates = vec![
             temp.path.join("project/SKILL.md"),
             temp.path.join("project/nested/SKILL.md"),

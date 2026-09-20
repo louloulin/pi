@@ -748,7 +748,10 @@ fn apply_setting_change(
     };
 
     match config::save_user_setting(sources, key, json_value) {
-        Ok(path) => app.info(format!("/settings: {applied}{note} (saved to {})", path.display())),
+        Ok(path) => app.info(format!(
+            "/settings: {applied}{note} (saved to {})",
+            path.display()
+        )),
         Err(err) => app.info(format!(
             "/settings: {applied}{note}, but saving to settings.json failed: {err}"
         )),
@@ -1024,7 +1027,10 @@ fn append_prompt_templates(base: String, templates: &[PromptTemplate]) -> String
         if template.description.is_empty() {
             section.push_str(&format!("  /{}\n", template.name));
         } else {
-            section.push_str(&format!("  /{:<16} {}\n", template.name, template.description));
+            section.push_str(&format!(
+                "  /{:<16} {}\n",
+                template.name, template.description
+            ));
         }
     }
     match base.split_once("\nkeys:") {
@@ -1401,7 +1407,9 @@ mod tests {
             .expect("close");
         let contents = std::fs::read_to_string(dir.path().join("auto.jsonl")).expect("read log");
         assert!(
-            contents.lines().any(|line| line.contains("\"type\":\"compaction\"")),
+            contents
+                .lines()
+                .any(|line| line.contains("\"type\":\"compaction\"")),
             "expected a compaction entry: {contents}"
         );
     }
@@ -1603,9 +1611,10 @@ mod tests {
 
         // Everything landed in the user settings file, and only the keys
         // the modal owns.
-        let parsed: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).expect("read"))
-                .expect("json");
+        let parsed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(user_settings_path(dir.path())).expect("read"),
+        )
+        .expect("json");
         assert_eq!(parsed["theme"], serde_json::json!("light"));
         assert_eq!(parsed["fullscreenCopyOnSelect"], serde_json::json!(false));
         assert_eq!(parsed["compaction"]["enabled"], serde_json::json!(false));
@@ -1623,7 +1632,12 @@ mod tests {
         let mut options = InteractiveOptions::default();
         open_settings(&mut app, &options, &sources);
 
-        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Char('t'), KeyCode::Backspace] {
+        for code in [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Char('t'),
+            KeyCode::Backspace,
+        ] {
             press(&mut app, &mut options, &sources, code);
         }
 
@@ -1686,6 +1700,9 @@ mod tests {
         press(&mut app, &mut options, &sources, KeyCode::Enter);
 
         let rendered = transcript(&app);
-        assert!(rendered.contains("'warnings' opens a submenu"), "{rendered}");
+        assert!(
+            rendered.contains("'warnings' opens a submenu"),
+            "{rendered}"
+        );
     }
 }

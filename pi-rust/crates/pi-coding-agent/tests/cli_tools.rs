@@ -93,7 +93,10 @@ fn sse_usage() -> String {
 fn sse_tool_call(name: &str, arguments: &Value) -> String {
     let encoded = arguments.to_string();
     let mut body = String::new();
-    body.push_str(&sse_chunk(json!({"role": "assistant", "content": null}), None));
+    body.push_str(&sse_chunk(
+        json!({"role": "assistant", "content": null}),
+        None,
+    ));
     body.push_str(&sse_chunk(
         json!({"tool_calls": [{
             "index": 0,
@@ -115,7 +118,10 @@ fn sse_tool_call(name: &str, arguments: &Value) -> String {
 
 fn sse_text(text: &str) -> String {
     let mut body = String::new();
-    body.push_str(&sse_chunk(json!({"role": "assistant", "content": ""}), None));
+    body.push_str(&sse_chunk(
+        json!({"role": "assistant", "content": ""}),
+        None,
+    ));
     body.push_str(&sse_chunk(json!({"content": text}), None));
     body.push_str(&sse_chunk(json!({}), Some("stop")));
     body.push_str(&sse_usage());
@@ -135,7 +141,9 @@ struct ModelServer {
 impl ModelServer {
     fn spawn(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let addr = listener.local_addr().expect("local addr");
 
         let bodies = Arc::new(Mutex::new(Vec::new()));
@@ -270,11 +278,7 @@ fn pi_command(server: &ModelServer, sessions: &std::path::Path) -> Command {
     cmd
 }
 
-fn run_print(
-    server: &ModelServer,
-    sessions: &std::path::Path,
-    output_format: &str,
-) -> Output {
+fn run_print(server: &ModelServer, sessions: &std::path::Path, output_format: &str) -> Output {
     pi_command(server, sessions)
         .args([
             "--model",
@@ -291,11 +295,8 @@ fn run_print(
 }
 
 fn tempdir(label: &str) -> tempfile::TempDir {
-    tempfile::TempDir::with_prefix(format!(
-        "pi-cli-tools-{label}-{}-",
-        std::process::id()
-    ))
-    .expect("tempdir")
+    tempfile::TempDir::with_prefix(format!("pi-cli-tools-{label}-{}-", std::process::id()))
+        .expect("tempdir")
 }
 
 fn stdout(output: &Output) -> String {
@@ -360,7 +361,8 @@ fn print_mode_executes_the_bash_tool_and_feeds_the_result_back() {
     // The event stream reports a successful bash execution.
     let events = stdout(&output);
     assert!(
-        events.contains("\"type\":\"tool_execution_start\"") && events.contains("\"name\":\"bash\""),
+        events.contains("\"type\":\"tool_execution_start\"")
+            && events.contains("\"name\":\"bash\""),
         "expected a bash tool_execution_start event:\n{events}"
     );
     assert!(

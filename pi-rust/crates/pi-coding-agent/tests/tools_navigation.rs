@@ -133,8 +133,14 @@ async fn find_filters_by_extension_and_ignores_dot_git() {
     let text = first_text(&out);
     let entries: Vec<String> = lines(&text);
 
-    assert!(entries.iter().any(|e| e == "src/lib.rs"), "missing src/lib.rs in: {text}");
-    assert!(entries.iter().any(|e| e == "src/main.rs"), "missing src/main.rs in: {text}");
+    assert!(
+        entries.iter().any(|e| e == "src/lib.rs"),
+        "missing src/lib.rs in: {text}"
+    );
+    assert!(
+        entries.iter().any(|e| e == "src/main.rs"),
+        "missing src/main.rs in: {text}"
+    );
     assert!(
         !entries.iter().any(|e| e.contains(".git")),
         ".git/objects/abc.rs must be ignored: {text}"
@@ -148,7 +154,9 @@ async fn find_filters_by_extension_and_ignores_dot_git() {
         "target must be ignored: {text}"
     );
     assert!(
-        !entries.iter().any(|e| e.ends_with(".toml") || e.ends_with(".md")),
+        !entries
+            .iter()
+            .any(|e| e.ends_with(".toml") || e.ends_with(".md")),
         "non-.rs files must not match **/*.rs: {text}"
     );
 
@@ -304,18 +312,12 @@ async fn find_unknown_path_is_an_error() {
 async fn find_type_enum_value_round_trip() {
     // Sanity check that the `type` parameter accepts the same wire
     // strings as the upstream TS tool.
-    assert_eq!(
-        serde_json::to_value(FindType::File).unwrap(),
-        json!("file")
-    );
+    assert_eq!(serde_json::to_value(FindType::File).unwrap(), json!("file"));
     assert_eq!(
         serde_json::to_value(FindType::Directory).unwrap(),
         json!("directory")
     );
-    assert_eq!(
-        serde_json::to_value(FindType::Any).unwrap(),
-        json!("any")
-    );
+    assert_eq!(serde_json::to_value(FindType::Any).unwrap(), json!("any"));
 }
 
 // ---------------------------------------------------------------------
@@ -412,10 +414,7 @@ async fn grep_skips_binary_files() {
         .expect("grep should succeed");
 
     let text = first_text(&out);
-    assert!(
-        text.contains("ok.txt:"),
-        "expected ok.txt match: {text}"
-    );
+    assert!(text.contains("ok.txt:"), "expected ok.txt match: {text}");
     assert!(
         !text.contains("binary.bin"),
         "binary.bin must be skipped: {text}"
@@ -453,7 +452,11 @@ async fn grep_ignore_case_toggle() {
         .expect("grep should succeed");
     let insensitive = first_text(&out_insensitive);
     // Case-insensitive matches both "Foo" and "FOO".
-    assert_eq!(lines(&insensitive).len(), 2, "expected 2 matches: {insensitive}");
+    assert_eq!(
+        lines(&insensitive).len(),
+        2,
+        "expected 2 matches: {insensitive}"
+    );
 }
 
 #[tokio::test]
@@ -485,12 +488,11 @@ async fn grep_include_glob() {
 async fn grep_limit_and_offset() {
     let _keep = Tmp::new("grep-limit");
     let dir = _keep.path().to_path_buf();
-    let body: String = (1..=50)
-        .fold(String::new(), |mut acc, i| {
-            use std::fmt::Write;
-            let _ = writeln!(acc, "match line {}", i);
-            acc
-        });
+    let body: String = (1..=50).fold(String::new(), |mut acc, i| {
+        use std::fmt::Write;
+        let _ = writeln!(acc, "match line {}", i);
+        acc
+    });
     std::fs::write(dir.join("multi.txt"), body).unwrap();
 
     let tool = GrepTool;
@@ -513,7 +515,11 @@ async fn grep_limit_and_offset() {
         .iter()
         .filter(|e| !e.starts_with('[') && !e.is_empty())
         .collect();
-    assert_eq!(matches.len(), 5, "limit=5 should give 5 matches: {entries:?}");
+    assert_eq!(
+        matches.len(),
+        5,
+        "limit=5 should give 5 matches: {entries:?}"
+    );
     // Skip the first 10, so lines 11..15 should remain. The grep tool
     // renders matches as `path:line:content` (no space), matching
     // ripgrep's presentation.
@@ -527,10 +533,7 @@ async fn grep_limit_and_offset() {
 async fn grep_invalid_regex_is_invalid_argument() {
     let tool = GrepTool;
     let err = tool
-        .execute(
-            json!({ "pattern": "(unclosed" }),
-            AbortLike::none(),
-        )
+        .execute(json!({ "pattern": "(unclosed" }), AbortLike::none())
         .await
         .expect_err("invalid regex should fail");
     assert!(matches!(
@@ -554,15 +557,16 @@ async fn ls_hides_dotfiles_by_default() {
 
     let tool = LsTool;
     let out = tool
-        .execute(
-            json!({ "path": "." }),
-            AbortLike::none(),
-        )
+        .execute(json!({ "path": "." }), AbortLike::none())
         .await
         .expect("ls should succeed");
 
     let entries = lines(&first_text(&out));
-    assert_eq!(entries.len(), 3, "hidden file should be excluded: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        3,
+        "hidden file should be excluded: {entries:?}"
+    );
     assert!(entries.iter().any(|e| e == "alpha.txt"));
     assert!(entries.iter().any(|e| e == "beta.txt"));
     assert!(entries.iter().any(|e| e == "gamma.txt"));
@@ -589,7 +593,11 @@ async fn ls_all_includes_dotfiles() {
         .expect("ls should succeed");
 
     let entries = lines(&first_text(&out));
-    assert_eq!(entries.len(), 2, "all=true should expose dotfiles: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        2,
+        "all=true should expose dotfiles: {entries:?}"
+    );
     assert!(entries.iter().any(|e| e == ".hidden"));
     assert!(entries.iter().any(|e| e == "alpha.txt"));
 }
@@ -653,10 +661,7 @@ async fn ls_directories_sort_before_files() {
 
     let tool = LsTool;
     let out = tool
-        .execute(
-            json!({ "path": "." }),
-            AbortLike::none(),
-        )
+        .execute(json!({ "path": "." }), AbortLike::none())
         .await
         .expect("ls should succeed");
 

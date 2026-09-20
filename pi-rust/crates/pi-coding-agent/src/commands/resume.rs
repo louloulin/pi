@@ -35,8 +35,7 @@ impl SessionRef {
         let ver = self.version.as_deref().unwrap_or("?");
         format!(
             "{ts} · {ver} · {} entries · {}",
-            self.entry_count,
-            self.session_id
+            self.entry_count, self.session_id
         )
     }
 }
@@ -49,9 +48,8 @@ pub fn list_resumable(directory: &Path) -> anyhow::Result<Vec<SessionRef>> {
         return Ok(Vec::new());
     }
     let mut refs = Vec::new();
-    let entries = std::fs::read_dir(directory).with_context(|| {
-        format!("reading session directory {}", directory.display())
-    })?;
+    let entries = std::fs::read_dir(directory)
+        .with_context(|| format!("reading session directory {}", directory.display()))?;
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -76,9 +74,10 @@ pub fn list_resumable(directory: &Path) -> anyhow::Result<Vec<SessionRef>> {
                 continue;
             }
         };
-        for session in reader.list_sessions().with_context(|| {
-            format!("listing sessions in {}", path.display())
-        })? {
+        for session in reader
+            .list_sessions()
+            .with_context(|| format!("listing sessions in {}", path.display()))?
+        {
             let count = reader
                 .count_entries(&session.id)
                 .with_context(|| format!("counting entries for {}", session.id))?;
@@ -118,7 +117,12 @@ pub fn resolve(directory: &Path, arg: &str) -> anyhow::Result<SessionRef> {
         let reader = SessionReader::open(direct)?;
         let session = reader
             .latest_session()?
-            .or_else(|| reader.list_sessions().ok().and_then(|s| s.into_iter().next()))
+            .or_else(|| {
+                reader
+                    .list_sessions()
+                    .ok()
+                    .and_then(|s| s.into_iter().next())
+            })
             .ok_or_else(|| anyhow::anyhow!("session database {arg:?} is empty"))?;
         let entry_count = reader.count_entries(&session.id)?;
         return Ok(SessionRef {

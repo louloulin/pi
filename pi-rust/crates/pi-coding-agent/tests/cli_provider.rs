@@ -125,9 +125,7 @@ impl Capture {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
             let mut head = Vec::new();
             let mut chunk = [0u8; 1024];
             while let Ok(n) = stream.read(&mut chunk) {
@@ -354,7 +352,12 @@ fn provider_retry_settings_retry_a_failed_request() {
 #[test]
 fn missing_anthropic_key_exits_78_and_names_the_env_var() {
     let output = pi(&["--model", "anthropic/claude-sonnet-4-5", "--print", "hello"]);
-    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&output)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("ANTHROPIC_API_KEY"),
@@ -370,14 +373,24 @@ fn missing_anthropic_key_exits_78_and_names_the_env_var() {
 #[test]
 fn missing_openai_key_exits_78_and_names_the_env_var() {
     let output = pi(&["--model", "openai/gpt-4o-mini", "--print", "hello"]);
-    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&output)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("OPENAI_API_KEY"));
 }
 
 #[test]
 fn missing_gemini_key_exits_78_and_names_the_env_var() {
     let output = pi(&["--model", "google/gemini-2.5-flash", "--print", "hello"]);
-    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&output)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("GEMINI_API_KEY"));
 }
 
@@ -398,8 +411,15 @@ fn list_models_includes_the_google_catalog() {
     let output = pi(&["list-models"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for id in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
-        assert!(stdout.contains(id), "list-models is missing {id}:\n{stdout}");
+    for id in [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ] {
+        assert!(
+            stdout.contains(id),
+            "list-models is missing {id}:\n{stdout}"
+        );
     }
 }
 
@@ -511,7 +531,12 @@ fn google_model_dials_the_stream_generate_content_endpoint() {
 #[test]
 fn missing_deepseek_key_exits_78_and_names_the_env_var() {
     let output = pi(&["--model", "deepseek/deepseek-v4-pro", "--print", "hello"]);
-    assert_eq!(output.status.code(), Some(78), "stderr: {}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "stderr: {}",
+        stderr(&output)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("DEEPSEEK_API_KEY"));
 }
 

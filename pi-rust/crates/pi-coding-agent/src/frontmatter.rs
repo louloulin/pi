@@ -246,7 +246,10 @@ fn parse_yaml_subset(yaml: &str) -> Result<Frontmatter, FrontmatterError> {
                 }
                 break;
             }
-            frontmatter.insert(key, FrontmatterValue::String(render_block_scalar(&block, header)));
+            frontmatter.insert(
+                key,
+                FrontmatterValue::String(render_block_scalar(&block, header)),
+            );
             index = cursor;
             continue;
         }
@@ -314,7 +317,13 @@ fn render_block_scalar(lines: &[String], header: BlockScalarHeader) -> String {
 
     let stripped: Vec<&str> = content
         .iter()
-        .map(|line| if line.len() >= indent { &line[indent..] } else { line.trim_start() })
+        .map(|line| {
+            if line.len() >= indent {
+                &line[indent..]
+            } else {
+                line.trim_start()
+            }
+        })
         .collect();
 
     let mut text = if header.style == BlockStyle::Folded {
@@ -414,7 +423,11 @@ fn check_flow_balance(raw: &str) -> Result<(), FrontmatterError> {
         }
     }
     if let Some(open) = stack.pop() {
-        let label = if open == '[' { "flow sequence" } else { "flow mapping" };
+        let label = if open == '[' {
+            "flow sequence"
+        } else {
+            "flow mapping"
+        };
         return Err(FrontmatterError::InvalidYaml(format!(
             "unterminated {label}"
         )));
@@ -466,7 +479,10 @@ mod tests {
         .expect("parses");
 
         assert_eq!(parsed.frontmatter.get_str("name"), Some("valid-skill"));
-        assert_eq!(parsed.frontmatter.get_str("description"), Some("A valid skill."));
+        assert_eq!(
+            parsed.frontmatter.get_str("description"),
+            Some("A valid skill.")
+        );
         assert_eq!(
             parsed.frontmatter.get_bool("disable-model-invocation"),
             Some(true)
@@ -477,13 +493,17 @@ mod tests {
     #[test]
     fn defaults_disable_model_invocation_to_absent() {
         let parsed = parse_frontmatter("---\nname: demo\n---\n").expect("parses");
-        assert_eq!(parsed.frontmatter.get_bool("disable-model-invocation"), None);
+        assert_eq!(
+            parsed.frontmatter.get_bool("disable-model-invocation"),
+            None
+        );
     }
 
     #[test]
     fn ignores_unknown_fields_and_numbers() {
-        let parsed = parse_frontmatter("---\nname: unknown-field\nauthor: someone\nversion: 1.0\n---\n")
-            .expect("parses");
+        let parsed =
+            parse_frontmatter("---\nname: unknown-field\nauthor: someone\nversion: 1.0\n---\n")
+                .expect("parses");
         assert_eq!(parsed.frontmatter.get_str("author"), Some("someone"));
         assert_eq!(parsed.frontmatter.get_str("version"), Some("1.0"));
         assert_eq!(parsed.frontmatter.len(), 3);
@@ -496,24 +516,34 @@ mod tests {
         )
         .expect("parses");
 
-        let description = parsed.frontmatter.get_str("description").expect("description");
-        assert!(description.contains('\n'), "expected a newline in {description:?}");
+        let description = parsed
+            .frontmatter
+            .get_str("description")
+            .expect("description");
+        assert!(
+            description.contains('\n'),
+            "expected a newline in {description:?}"
+        );
         assert!(description.contains("This is a multiline description."));
         assert!(description.ends_with('\n'));
     }
 
     #[test]
     fn folds_folded_block_scalars() {
-        let parsed =
-            parse_frontmatter("---\ndescription: >-\n  one\n  two\n\n  three\n---\n").expect("parses");
-        assert_eq!(parsed.frontmatter.get_str("description"), Some("one two\nthree"));
+        let parsed = parse_frontmatter("---\ndescription: >-\n  one\n  two\n\n  three\n---\n")
+            .expect("parses");
+        assert_eq!(
+            parsed.frontmatter.get_str("description"),
+            Some("one two\nthree")
+        );
     }
 
     #[test]
     fn handles_quoted_scalars() {
-        let parsed =
-            parse_frontmatter("---\na: \"say \\\"hi\\\"\"\nb: 'it''s fine'\nc: \" # not a comment\"\n---\n")
-                .expect("parses");
+        let parsed = parse_frontmatter(
+            "---\na: \"say \\\"hi\\\"\"\nb: 'it''s fine'\nc: \" # not a comment\"\n---\n",
+        )
+        .expect("parses");
         assert_eq!(parsed.frontmatter.get_str("a"), Some("say \"hi\""));
         assert_eq!(parsed.frontmatter.get_str("b"), Some("it's fine"));
         assert_eq!(parsed.frontmatter.get_str("c"), Some(" # not a comment"));
@@ -527,7 +557,8 @@ mod tests {
 
     #[test]
     fn rejects_unterminated_flow_collections() {
-        let error = parse_frontmatter("---\ndescription: [unclosed bracket\n---\n").expect_err("invalid");
+        let error =
+            parse_frontmatter("---\ndescription: [unclosed bracket\n---\n").expect_err("invalid");
         assert!(matches!(error, FrontmatterError::InvalidYaml(_)));
         assert!(error.to_string().contains("unterminated"));
     }
@@ -556,7 +587,8 @@ mod tests {
 
     #[test]
     fn normalises_crlf_and_bom() {
-        let parsed = parse_frontmatter("\u{feff}---\r\nname: demo\r\n---\r\nbody\r\n").expect("parses");
+        let parsed =
+            parse_frontmatter("\u{feff}---\r\nname: demo\r\n---\r\nbody\r\n").expect("parses");
         assert_eq!(parsed.frontmatter.get_str("name"), Some("demo"));
         assert_eq!(parsed.body, "body");
     }

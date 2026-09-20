@@ -146,15 +146,11 @@ impl PackageSpec {
     pub fn display(&self) -> String {
         match self {
             PackageSpec::Npm { spec, .. } => format!("npm:{spec}"),
-            PackageSpec::Git {
-                url, reference, ..
-            } => match reference {
+            PackageSpec::Git { url, reference, .. } => match reference {
                 Some(reference) => format!("git:{url}#{reference}"),
                 None => format!("git:{url}"),
             },
-            PackageSpec::Https {
-                url, reference, ..
-            } => match reference {
+            PackageSpec::Https { url, reference, .. } => match reference {
                 Some(reference) => format!("{url}#{reference}"),
                 None => url.clone(),
             },
@@ -240,7 +236,10 @@ fn parse_https(raw: &str) -> Result<PackageSpec, SpecError> {
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(base.as_str());
-    let host_path = after_scheme.rsplit_once('@').map(|(_, h)| h).unwrap_or(after_scheme);
+    let host_path = after_scheme
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(after_scheme);
     let (host, path) = host_path
         .split_once('/')
         .ok_or_else(|| SpecError::Https(raw.to_string()))?;
@@ -294,7 +293,10 @@ fn git_clone_url(base: &str) -> String {
 
 fn git_host_path(base: &str) -> Option<(String, String)> {
     if let Some((_, after_scheme)) = base.split_once("://") {
-        let host_path = after_scheme.rsplit_once('@').map(|(_, h)| h).unwrap_or(after_scheme);
+        let host_path = after_scheme
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(after_scheme);
         let (host, path) = host_path.split_once('/')?;
         if host.is_empty() || path.is_empty() {
             return None;
@@ -382,9 +384,7 @@ mod tests {
     fn parses_git_ssh_shorthand_without_ref() {
         let spec = PackageSpec::parse("git:git@github.com:user/repo").unwrap();
         match &spec {
-            PackageSpec::Git {
-                url, reference, ..
-            } => {
+            PackageSpec::Git { url, reference, .. } => {
                 assert_eq!(url, "git@github.com:user/repo");
                 assert_eq!(*reference, None);
             }
@@ -405,9 +405,7 @@ mod tests {
     fn parses_https_with_ref() {
         let spec = PackageSpec::parse("https://github.com/user/repo@v2").unwrap();
         match &spec {
-            PackageSpec::Https {
-                url, reference, ..
-            } => {
+            PackageSpec::Https { url, reference, .. } => {
                 assert_eq!(url, "https://github.com/user/repo");
                 assert_eq!(reference.as_deref(), Some("v2"));
             }
@@ -439,9 +437,6 @@ mod tests {
             Err(SpecError::Unsupported(_))
         ));
         assert!(matches!(PackageSpec::parse("npm:"), Err(SpecError::Npm(_))));
-        assert!(matches!(
-            PackageSpec::parse("git:"),
-            Err(SpecError::Git(_))
-        ));
+        assert!(matches!(PackageSpec::parse("git:"), Err(SpecError::Git(_))));
     }
 }

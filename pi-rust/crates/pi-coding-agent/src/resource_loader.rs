@@ -35,9 +35,7 @@ use crate::prompt_templates::{
     load_prompt_templates, LoadPromptTemplatesOptions, PromptTemplate, PromptTemplateDiagnostic,
     PromptTemplatesLoadResult,
 };
-use crate::skills::{
-    load_skills, LoadSkillsOptions, Skill, SkillDiagnostic,
-};
+use crate::skills::{load_skills, LoadSkillsOptions, Skill, SkillDiagnostic};
 use crate::system_prompt::{
     build_system_prompt, builtin_prompt_contributions, pi_docs_paths, SystemPromptOptions,
 };
@@ -144,7 +142,12 @@ impl LoadedResources {
             builtin_prompt_contributions(&selected_tools);
 
         for tool in extension_tools {
-            if let Some(snippet) = tool.snippet.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(snippet) = tool
+                .snippet
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 tool_snippets.insert(tool.name.clone(), snippet.to_string());
             }
             prompt_guidelines.extend(
@@ -290,8 +293,7 @@ pub fn load_resources(options: &ResourceLoadOptions) -> LoadedResources {
 
     LoadedResources {
         custom_prompt,
-        append_system_prompt: (!append_segments.is_empty())
-            .then(|| append_segments.join("\n\n")),
+        append_system_prompt: (!append_segments.is_empty()).then(|| append_segments.join("\n\n")),
         context_files,
         skills,
         prompt_templates: prompt_templates.templates,
@@ -318,12 +320,8 @@ pub fn resolve_cli_project_trust(cli: &Cli) -> (bool, bool) {
 pub fn resolve_cli_project_trust_for(cli: &Cli, cwd: &Path, agent_dir: &Path) -> (bool, bool) {
     let has_trust_requiring = has_trust_requiring_project_resources(cwd);
     let store = ProjectTrustStore::new(agent_dir);
-    let trusted = resolve_project_trusted(
-        cwd,
-        &store,
-        cli.trust_override(),
-        DefaultProjectTrust::Ask,
-    );
+    let trusted =
+        resolve_project_trusted(cwd, &store, cli.trust_override(), DefaultProjectTrust::Ask);
     (trusted, has_trust_requiring)
 }
 
@@ -533,7 +531,10 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(loaded.custom_prompt.as_deref(), Some("You are a custom agent."));
+        assert_eq!(
+            loaded.custom_prompt.as_deref(),
+            Some("You are a custom agent.")
+        );
         assert_eq!(
             loaded.append_system_prompt.as_deref(),
             Some("Loader rule.\n\nCLI rule.")
@@ -587,7 +588,10 @@ mod tests {
         ];
 
         let prompt = loaded.build_system_prompt_with_extension_tools(&cwd, &tools);
-        assert!(prompt.contains("- custom_search: Search the web"), "{prompt}");
+        assert!(
+            prompt.contains("- custom_search: Search the web"),
+            "{prompt}"
+        );
         assert!(prompt.contains("- Cite sources"), "{prompt}");
         // A tool with no snippet stays callable but out of the prompt.
         assert!(!prompt.contains("silent_tool"), "{prompt}");
@@ -606,7 +610,12 @@ mod tests {
             agent_dir: temp.path.join("agent"),
             ..Default::default()
         });
-        assert_eq!(loaded.prompt_templates.len(), 1, "{:?}", loaded.prompt_diagnostics);
+        assert_eq!(
+            loaded.prompt_templates.len(),
+            1,
+            "{:?}",
+            loaded.prompt_diagnostics
+        );
         assert_eq!(loaded.prompt_templates[0].name, "greet");
         assert_eq!(loaded.prompt_templates[0].description, "Greet someone.");
 
@@ -648,14 +657,12 @@ mod tests {
         );
 
         // `--approve` overrides for one run, `--no-approve` forces off.
-        let approved = Cli::try_parse_from(["pi", "--approve", "--print", "hi"])
-            .expect("parses");
+        let approved = Cli::try_parse_from(["pi", "--approve", "--print", "hi"]).expect("parses");
         assert_eq!(
             resolve_cli_project_trust_for(&approved, &cwd, &agent_dir),
             (true, true)
         );
-        let denied = Cli::try_parse_from(["pi", "--no-approve", "--print", "hi"])
-            .expect("parses");
+        let denied = Cli::try_parse_from(["pi", "--no-approve", "--print", "hi"]).expect("parses");
         assert_eq!(
             resolve_cli_project_trust_for(&denied, &cwd, &agent_dir),
             (false, true)
@@ -724,7 +731,12 @@ mod tests {
             prompt_paths: vec![temp.path.join("dynamic/prompts/dyn.md")],
             theme_paths: vec![temp.path.join("dynamic/theme.json")],
         };
-        loaded.extend_extension_resources(&project, &temp.path.join("agent"), true, &extension_resources);
+        loaded.extend_extension_resources(
+            &project,
+            &temp.path.join("agent"),
+            true,
+            &extension_resources,
+        );
 
         let prompt = loaded.build_system_prompt(&absolute(&project));
         assert!(prompt.contains("<name>local</name>"), "{prompt}");

@@ -347,10 +347,8 @@ mod tests {
         temp.write("repo/pkg/AGENTS.md", "pkg");
         fs::create_dir_all(temp.path.join("repo/pkg/src")).expect("create cwd");
 
-        let loaded = load_project_context_files(
-            &temp.path.join("repo/pkg/src"),
-            &temp.path.join("agent"),
-        );
+        let loaded =
+            load_project_context_files(&temp.path.join("repo/pkg/src"), &temp.path.join("agent"));
 
         let contents: Vec<&str> = loaded.iter().map(|file| file.content.as_str()).collect();
         assert_eq!(contents, vec!["global", "repo", "pkg"]);
@@ -418,17 +416,23 @@ mod tests {
             "ref: refs/heads/feat\n",
         )
         .expect("worktree HEAD");
-        fs::write(temp.path.join("main/.git/worktrees/feat/commondir"), "../..\n").expect("commondir");
+        fs::write(
+            temp.path.join("main/.git/worktrees/feat/commondir"),
+            "../..\n",
+        )
+        .expect("commondir");
         fs::write(temp.path.join("main/AGENTS.md"), "main repo rules").expect("main context");
         // Nested linked worktree with the same logical context file.
         fs::create_dir_all(temp.path.join("main/wt/src")).expect("create worktree");
-        fs::write(temp.path.join("main/wt/.git"), "gitdir: ../.git/worktrees/feat\n").expect("git file");
+        fs::write(
+            temp.path.join("main/wt/.git"),
+            "gitdir: ../.git/worktrees/feat\n",
+        )
+        .expect("git file");
         fs::write(temp.path.join("main/wt/AGENTS.md"), "worktree rules").expect("worktree context");
 
-        let loaded = load_project_context_files(
-            &temp.path.join("main/wt/src"),
-            &temp.path.join("agent"),
-        );
+        let loaded =
+            load_project_context_files(&temp.path.join("main/wt/src"), &temp.path.join("agent"));
 
         let contents: Vec<&str> = loaded.iter().map(|file| file.content.as_str()).collect();
         assert_eq!(contents, vec!["worktree rules"], "{loaded:?}");
@@ -444,14 +448,23 @@ mod tests {
             "ref: refs/heads/feat\n",
         )
         .expect("worktree HEAD");
-        fs::write(temp.path.join("main/.git/worktrees/feat/commondir"), "../..\n").expect("commondir");
+        fs::write(
+            temp.path.join("main/.git/worktrees/feat/commondir"),
+            "../..\n",
+        )
+        .expect("commondir");
         fs::write(temp.path.join("main/AGENTS.md"), "main repo rules").expect("main context");
         // Sibling worktree: `main` is not an ancestor of the cwd, so its
         // context file is neither inherited nor considered shadowed.
         fs::create_dir_all(temp.path.join("feat/src")).expect("create worktree");
-        fs::write(temp.path.join("feat/.git"), "gitdir: ../main/.git/worktrees/feat\n").expect("git file");
+        fs::write(
+            temp.path.join("feat/.git"),
+            "gitdir: ../main/.git/worktrees/feat\n",
+        )
+        .expect("git file");
 
-        let loaded = load_project_context_files(&temp.path.join("feat/src"), &temp.path.join("agent"));
+        let loaded =
+            load_project_context_files(&temp.path.join("feat/src"), &temp.path.join("agent"));
         assert!(loaded.is_empty(), "{loaded:?}");
     }
 

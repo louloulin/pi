@@ -179,7 +179,10 @@ mod tests {
             normalize_arg(OsString::from("-na")),
             OsString::from("--no-approve")
         );
-        assert_eq!(normalize_arg(OsString::from("--print")), OsString::from("--print"));
+        assert_eq!(
+            normalize_arg(OsString::from("--print")),
+            OsString::from("--print")
+        );
     }
 
     #[test]
@@ -192,13 +195,11 @@ mod tests {
         let short = Cli::try_parse_from(["pi", "-a", "--print", "hi"]).expect("parses");
         assert_eq!(short.trust_override(), Some(true));
 
-        let deny =
-            Cli::try_parse_from(["pi", "--no-approve", "--print", "hi"]).expect("parses");
+        let deny = Cli::try_parse_from(["pi", "--no-approve", "--print", "hi"]).expect("parses");
         assert_eq!(deny.trust_override(), Some(false));
 
         // The two flags contradict each other.
-        assert!(Cli::try_parse_from(["pi", "--approve", "--no-approve", "--print", "hi"])
-            .is_err());
+        assert!(Cli::try_parse_from(["pi", "--approve", "--no-approve", "--print", "hi"]).is_err());
     }
 }
 

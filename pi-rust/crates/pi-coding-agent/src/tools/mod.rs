@@ -100,9 +100,9 @@ impl AbortLike {
     /// for tools that want to fail fast when invoked after the deadline.
     pub fn cancelled() -> Self {
         Self {
-            inner: Some(std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(true),
-            )),
+            inner: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            ))),
         }
     }
 

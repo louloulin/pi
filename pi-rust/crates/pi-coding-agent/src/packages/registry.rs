@@ -180,13 +180,14 @@ impl Registry {
             path: self.path.clone(),
             source,
         })?;
-        let json = serde_json::to_string_pretty(&self.data).map_err(|source| {
-            RegistryError::Write {
+        let json =
+            serde_json::to_string_pretty(&self.data).map_err(|source| RegistryError::Write {
                 path: self.path.clone(),
                 source: io::Error::new(io::ErrorKind::InvalidData, source),
-            }
-        })?;
-        let tmp = self.path.with_extension(format!("json.tmp.{}", std::process::id()));
+            })?;
+        let tmp = self
+            .path
+            .with_extension(format!("json.tmp.{}", std::process::id()));
         fs::write(&tmp, format!("{json}\n")).map_err(|source| RegistryError::Write {
             path: tmp.clone(),
             source,

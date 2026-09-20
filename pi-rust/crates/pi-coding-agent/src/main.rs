@@ -234,10 +234,8 @@ fn main() -> ExitCode {
             // Template expansion runs here, not before the extension load:
             // `/name` must be able to resolve to a template a plugin
             // contributed through `resources_discover`.
-            let prompt_text = pi_coding_agent::expand_prompt_template(
-                &expanded.text,
-                &prompt_templates,
-            );
+            let prompt_text =
+                pi_coding_agent::expand_prompt_template(&expanded.text, &prompt_templates);
             let tool_executor = loaded_extensions.executor.clone();
             let options = PrintModeOptions {
                 prompt: prompt_text,

@@ -61,7 +61,10 @@ impl JsonRpcError {
 
     /// `-32601` — unknown method.
     pub fn method_not_found(method: &str) -> Self {
-        Self::new(codes::METHOD_NOT_FOUND, format!("method not found: {method}"))
+        Self::new(
+            codes::METHOD_NOT_FOUND,
+            format!("method not found: {method}"),
+        )
     }
 
     /// `-32602` — params did not match the method's schema.
@@ -112,7 +115,8 @@ mod tests {
 
     #[test]
     fn with_data_round_trips() {
-        let err = JsonRpcError::invalid_params("bad model").with_data(serde_json::json!({"model": "nope"}));
+        let err = JsonRpcError::invalid_params("bad model")
+            .with_data(serde_json::json!({"model": "nope"}));
         let value = serde_json::to_value(&err).unwrap();
         assert_eq!(value["data"]["model"], "nope");
     }

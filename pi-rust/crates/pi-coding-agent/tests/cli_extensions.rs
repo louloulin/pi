@@ -599,11 +599,7 @@ fn no_extensions_flag_skips_discovery() {
         &server,
         sessions.path(),
         project.path(),
-        &[
-            "--no-extensions",
-            "--output-format",
-            "json-events",
-        ],
+        &["--no-extensions", "--output-format", "json-events"],
     );
     let bodies = server.bodies();
     server.finish();

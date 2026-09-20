@@ -138,8 +138,8 @@ impl AgentTool for FindTool {
             return Err(ToolError::Aborted);
         }
 
-        let parsed: FindArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: FindArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let cwd = std::env::current_dir().map_err(|e| {
             ToolError::Execution(format!("failed to resolve current directory: {}", e))
@@ -216,7 +216,11 @@ impl AgentTool for FindTool {
 
         let total = collected.len();
         let skipped = offset.min(total);
-        let page: Vec<String> = collected.into_iter().skip(skipped).take(effective_limit).collect();
+        let page: Vec<String> = collected
+            .into_iter()
+            .skip(skipped)
+            .take(effective_limit)
+            .collect();
 
         if page.is_empty() {
             let text = if total == 0 {
