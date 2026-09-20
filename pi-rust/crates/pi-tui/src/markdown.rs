@@ -1047,8 +1047,6 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
     out
 }
 
-/// Push a separator blank line unless the next block is already a blank line
-/// (or the document ended).
 // ---------------------------------------------------------------------------
 // Images
 // ---------------------------------------------------------------------------
@@ -1134,6 +1132,8 @@ fn parse_data_image_url(url: &str) -> Option<(String, String)> {
     Some((mime_type, data.to_string()))
 }
 
+/// Push a separator blank line unless the next block is already a blank line
+/// (or the document ended).
 fn maybe_blank(out: &mut Vec<StyledLine>, next: Option<&Block>) {
     if next.is_some_and(|b| !matches!(b, Block::Space)) {
         out.push(Vec::new());
