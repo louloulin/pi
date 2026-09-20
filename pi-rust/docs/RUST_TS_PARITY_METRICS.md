@@ -54,7 +54,42 @@ session_compact_failed, session_tree, ui_prompt_start, ui_prompt_end`。
 
 - 扩展事件轴补到 100%：**82.9%**（+3.0pt）——仍是最大的单一摆动项，但已经从「20% 的巨大空洞」变成「还差 14 个事件」。
 - `app.*` 接线率从 47.7% 补到 100%：交互轴 64% → 90.3%，总分 **83.6%**（+3.7pt）——**现在这是性价比最高的一轴**。
+  > **已作废（§0.2）**：47.7% 是扫描器低报，实测 **79.5%**（35/44），补满只有 **+2.9pt**，
+  > 且剩下 9 条里 6 条是**缺组件**（无 `/scoped-models`、无 tree 改名 UI），不是补键位。
 
+
+### 0.2 口径更正：`app.*` 接线率不是 47.7%，实测 **79.5%**；加权随之改为 **81.4%**
+
+同一个量被三个独立任务测过，结论差 36 个百分点，根因已经定位清楚：
+
+| 口径 | 值 | 为什么错 |
+| --- | --- | --- |
+| 本报告 §0.1（我，LUM-1256） | 21/44 = 47.7% | 扫描器「截到第一个 `#[cfg(test)]` 就停」；`interactive.rs` 的树选择器 handler 在该标记**之后**，被整段丢弃 → **少算约 17 条**（低报） |
+| LUM-1259（`docs/TUI_INPUT_AND_LAYOUT_VERIFICATION.md` §4.1） | 19/44 = 43.2% | 未剥离注释/字符串中的字面量，口径不同，同样低报 |
+| LUM-1260（`scripts/app_action_coverage.py`） | **35/44 = 79.5%** | 唯一做过假阳性剔除与交叉校验的口径，**采纳** |
+
+采纳 79.5% 的三条理由（本人复跑确认，不是转述）：
+
+1. `strip_test_items()` 是括号/字符串/注释感知的，不会过早截断；
+2. 它排掉了两类假阳性：`keybindings.rs` 里的**定义**、`locale.rs` / `slash.rs` 里的**广告行**（`("app.x", "描述")`）——只认 handler 形状的精确字面量 `"app.<id>"`；
+3. `python3 pi-rust/scripts/app_action_coverage.py --check-consumed` 在合并 tip 上退出 0：
+   `CONSUMED_APP_ACTIONS: 35 entries; measured wired: 35`，即**代码里的分发点与手写清单两个独立来源一致**。
+
+```text
+wired:      35/44 (79.5%)
+advertised:  2/44 (4.5%)   app.editor.external / app.suspend
+silent:      7/44 (15.9%)  app.models.{clearAll,enableAll,reorderDown,reorderUp,save,toggleProvider} / app.tree.editLabel
+```
+
+**连带更正两条结论：**
+
+1. **功能面加权改用 81.4%**（`docs/PARITY_AND_TUI_AUDIT_LUM1260.md` §5 的逐轴复算；我复核其算式：13 个轴权重和为 100，把 `14×0.477` 换成 `14×0.795` 后加权和 = 81.383）。比我 §0.1 的 79.9% 高，差额全部来自**口径修正**，不是功能变多（他们说得很直白，我也赞成：这是把旧报告里两条算错的轴改对）。
+2. **「`app.*` 接线是性价比最高的一轴」作废**：79.5% 的起点下补满只剩 14×0.205 = **+2.9pt**，而且剩下 9 条里 **6 条是缺组件**（上游 `ScopedModelsSelectorComponent` 与 tree 改名 UI 在 Rust 侧根本不存在，不是「键位没接」）。当前真正的性价比序列：
+   1. ≤23 行终端里**输入框整个不在屏上**（用户盲打；`docs/PARITY_AND_TUI_AUDIT_LUM1260.md` §3.1，120×22/23/24 三帧对照）；
+   2. 扩展事件缺的那 15 个恰好是插件最常用的（`tool_call` / `tool_result` / `before_agent_start` / `context`），按使用频率加权**远差于** 58.3% 这个名义覆盖；
+   3. `/help` 的预排版被 `wrap_text` 重排成一整段（第二十一.6 第 0 条）。
+
+> 教训（写进流程）：**百分比必须附「怎么量的」与「量它的脚本」**。我 §0.1 那张表里只有这一格是自己撮合出来的扫描器，也恰好是错得最厉害的一格；LUM-1260 的工具之所以可信，是因为它能被 `--check-consumed` 反测试（伪造清单会报 `FALSE AD` 并 exit 1）。后续这类数字一律走可复核脚本。
 
 ## 1. 方法与口径
 
@@ -154,8 +189,11 @@ editor.external 3  session.fork 3  thinking.save 1
 ```
 
 未在全局表消费的 23 个：`models.{clearAll,enableAll,reorderDown,reorderUp,save,toggleProvider}`、`session.{delete,deleteNoninvasive,rename,toggleNamedFilter,togglePath,toggleSort}`、`tree.{editLabel,foldOrUp,unfoldOrDown,filter.all,filter.cycleBackward,filter.cycleForward,filter.default,filter.labeledOnly,filter.noTools,filter.userOnly,toggleLabelTimestamp}`。
-**更正既有文档**：`docs/TUI_UX_AUDIT.md` 写的是"仅接线 3/43"，实测为 **21/44 ≈ 48%**（那份口径只统计了少数几个文件）；`tree.filter*` 一族很可能由 selector 组件内部按键处理而非走全局 `app.*`，已在 §1.3 标注待复核，**未计入差距**。
-→ 接线率 **47.7%**（下界；若 tree/models 族确实由组件内部消化，实际会更高）。
+`docs/TUI_UX_AUDIT.md` 写的是"仅接线 3/43"。
+**（该段真实值已被新脚本取代：21/44 ≈ 48% 是**低报**——扫描器在 `interactive.rs` 的第一个
+`#[cfg(test)]` 处截断，漏掉了树选择器的 handler。实测 **35/44 = 79.5%**，见 §0.2；
+LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
+→ 接线率见 §0.2（本段下方的 47.7% 已作废）。
 
 ### 3.6 扩展生态（两条子轴，本审计最大发现）
 
@@ -217,7 +255,7 @@ editor.external 3  session.fork 3  thinking.save 1
 ### 4.2 敏感性（诚实说明）
 
 - 把扩展事件轴从 20% 提到 100%（即补完 36 个事件）：总分为 **81.7%**——**这是全表最大的单一摆动项**，说明"扩展生态兼容"是当前性价比最高的攻坚方向。
-- 把 TUI 快捷键接线从 47.7% 提到 100%：总分 +4.1pt → **80.2%**。
+- 把 TUI 快捷键接线从 47.7% 提到 100%：总分 +4.1pt → **80.2%**。（同样按 §0.2 作废：79.5% 起点下只余 +2.9pt，且其中大半是缺组件）
 - 权重整体由我给定；若把"规模"口径直接当完成度则是 82.5%，若只看测试则是 42.0%。**三个数字都对，取决于你问的是"代码搬了多少""测了多少""功能能用多少"。**
 
 ## 5. 门禁结果（本 tip 实测）

@@ -2037,5 +2037,11 @@ header → Above → editor → Below → footer 顺序发，发不出的截断�
    这三处修正会永久丢失。建议后续轮次把"合并前 diff 一遍源 worktree 的未提交改动"写成固定步骤。
 2. 扩展事件轴仍有 14 个上游事件未实现，且 `model_select` 有变体无构造点（详见
    `docs/RUST_TS_PARITY_METRICS.md` §0.1）。
-3. `app.*` 接线率仍为 21/44（47.7%），是本轮之后**性价比最高**的一轴（补满 +3.7pt）。
+3. `app.*` 接线率：**以 `scripts/app_action_coverage.py` 的 35/44（79.5%）为准**，我 §0.1 写的 21/44（47.7%）
+   是扫描器在 `interactive.rs` 第一个 `#[cfg(test)]` 处过早截断的低报（LUM-1260 定位，我复跑
+   `--check-consumed` 得 `35 entries / measured wired: 35`、exit 0）。加权因此改为 **81.4%**（§0.2），
+   而「接线是性价比最高一轴」的说法也一并作废——79.5% 的起点下补满只剩 +2.9pt，且 9 条里 6 条是
+   **缺组件**（`/scoped-models`、tree 改名 UI 在 Rust 侧不存在）。现在性价比最高的是：
+   ① ≤23 行终端里输入框不在屏上（可盲打）② 扩展事件缺的 15 个恰好是插件最高频的四个族
+   （`tool_call` / `tool_result` / `before_agent_start` / `context`）③ 本节第 0 条的 `/help` 重排。
 4. 十九.7 的三条（Tab 接受路径的真机断言、CJK 候选标签、`Ctrl+G`）维持原状。
