@@ -715,6 +715,55 @@ enum SearchKeyOutcome {
     PassThrough,
 }
 
+/// A submitted composer draft: the user-visible text plus the image chips
+/// attached to it, in buffer order.
+///
+/// The App produces one from the prompt on Enter (or a follow-up chord) and
+/// the driver feeds it to the agent. [`Submission::content_blocks`] is the
+/// bridge between the composer's chip model and the protocol's
+/// `UserMessage` shape: the text block comes first, then one
+/// [`pi_protocol::Content::Image`] per attachment
+/// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts`, where
+/// the pasted path becomes an image part).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Submission {
+    /// The draft's visible text (chip labels expanded).
+    pub text: String,
+    /// Pasted images attached to the draft, in buffer order.
+    pub images: Vec<pi_protocol::ImageContent>,
+}
+
+impl Submission {
+    /// A text-only submission.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// The `UserMessage` content blocks for this draft: the text first,
+    /// then one image block per attachment. A draft with no chips yields
+    /// the single text block that `Agent::prompt` would have built.
+    pub fn content_blocks(&self) -> Vec<pi_protocol::Content> {
+        let mut blocks = vec![pi_protocol::Content::text(self.text.clone())];
+        blocks.extend(self.images.iter().cloned().map(pi_protocol::Content::Image));
+        blocks
+    }
+}
+
+impl From<String> for Submission {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for Submission {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
 /// Outcome returned by [`App::step`] after each key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -723,8 +772,8 @@ pub enum StepOutcome {
     /// Step mutated the rendered state.
     Redraw,
     /// User submitted a prompt. The caller is responsible for handing
-    /// the text to the agent.
-    Submitted(String),
+    /// it to the agent (see [`Submission`]).
+    Submitted(Submission),
     /// User pressed Ctrl+C / Ctrl+D — the caller should shut the App
     /// down and (optionally) fall back to print mode.
     Exit,
@@ -736,12 +785,16 @@ pub enum FollowUpOutcome {
     /// The editor was empty — nothing to submit or queue.
     Empty,
     /// The App was idle, so the chord behaves exactly like Enter. The
-    /// caller runs its normal submit path on the returned text (slash
+    /// caller runs its normal submit path on the returned draft (slash
     /// commands included); the App has already cleared the buffer.
-    Submitted(String),
+    Submitted(Submission),
     /// A turn was in flight, so the text was queued behind it
     /// (upstream's `streamingBehavior: "followUp"`). The buffer is clear.
     Queued,
+    /// A turn was in flight and the draft carried images. The pending queue
+    /// is text-only, so instead of dropping the attachments the App left
+    /// the draft in the editor and the driver should say why.
+    RefusedImages,
 }
 
 /// Geometry of the chat-log scrollbar, in absolute terminal cells.
@@ -922,6 +975,12 @@ pub struct App {
     /// Text waiting to be copied by the driver. Filled by copy-on-select;
     /// consumed with [`App::take_clipboard_request`].
     pending_clipboard: Option<String>,
+    /// True when `app.clipboard.pasteImage` (`Alt+V`) fired and the driver
+    /// still has to answer it. The App owns no terminal / clipboard handle,
+    /// so it records the request and the driver reads the system clipboard
+    /// and calls [`App::paste_image`] or [`App::paste_text`] — the same
+    /// seam as [`App::pending_clipboard`].
+    pending_image_paste: bool,
     /// True while the pointer is over the chat-log scrollbar's column and
     /// rows (upstream's `scrollbarHover`,
     /// `packages/tui/src/tui-alt-screen.ts:221`); drives the bar's active
@@ -1019,6 +1078,7 @@ impl App {
             selection_autoscroll_direction: 0,
             selection_autoscroll_pointer: None,
             pending_clipboard: None,
+            pending_image_paste: false,
             scrollbar_hover: false,
             scrollbar_drag: None,
             tool_call_ids: HashMap::new(),
@@ -1414,16 +1474,32 @@ impl App {
     }
 
     /// Begin an agent turn asynchronously. The App spawns a tokio
-    /// task that calls `Agent::prompt`; events flow through the
+    /// task that calls `Agent::prompt_content`; events flow through the
     /// subscriber channel established in [`App::new`] and are drained
     /// by [`App::drain_agent_events`].
-    pub fn submit(&mut self, agent: Arc<AsyncMutex<Agent>>, text: String) {
+    ///
+    /// Accepts anything convertible to a [`Submission`], so the text-only
+    /// call sites keep passing a `String` while the composer hands over a
+    /// draft that carries pasted images.
+    pub fn submit<M: Into<Submission>>(&mut self, agent: Arc<AsyncMutex<Agent>>, message: M) {
+        let submission = message.into();
+        let text = submission.text.clone();
         if self.turn_busy.load(Ordering::SeqCst) {
             // A turn is in flight: never drop the input. Upstream submits
             // this with `streamingBehavior: "steer"` so it joins the turn;
             // the port has no window into the locked `Agent`, so it queues
             // the text and the driver delivers it at the next turn
             // boundary. See `App::pending_len` / `App::take_next_pending`.
+            //
+            // The queue is text-only, so a draft that carries images cannot
+            // ride it without losing the attachments. This is a defensive
+            // backstop: drafts the App owns are refused *before* they are
+            // cleared (see `step_key`'s `PromptAction::Submit` arm and
+            // `follow_up_from_editor`), so nothing typed is lost here.
+            if !submission.images.is_empty() {
+                self.flash_status("Cannot attach images while a turn is running");
+                return;
+            }
             self.messages
                 .push_pending(PendingMessageKind::Steer, text.clone());
             self.prompt.push_history(&text);
@@ -1444,10 +1520,10 @@ impl App {
         let busy = self.turn_busy.clone();
         let cancel_for_task = cancel.clone();
         let agent_clone = agent.clone();
-        let text_clone = text.clone();
+        let content = submission.content_blocks();
         tokio::spawn(async move {
             let mut guard = agent_clone.lock().await;
-            let result = guard.prompt(&text_clone).await;
+            let result = guard.prompt_content(content).await;
             drop(guard);
             if let Err(err) = result {
                 let _ = cancel_for_task; // keep the cancellation alive until drop
@@ -1464,21 +1540,31 @@ impl App {
     ///
     /// While a turn is in flight the text is queued and delivered after it
     /// ends; when the App is idle the chord behaves exactly like Enter, so
-    /// the caller runs its normal submit path on the returned text. Either
-    /// way the editor buffer ends up empty — the text is never dropped.
+    /// the caller runs its normal submit path on the returned draft. Either
+    /// way the editor buffer ends up empty — the text is never dropped. A
+    /// draft with image chips cannot be queued (the queue is text-only), so
+    /// the App reports [`FollowUpOutcome::RefusedImages`] and *keeps* the
+    /// draft in the editor.
     pub fn follow_up_from_editor(&mut self) -> FollowUpOutcome {
         if self.prompt.text().trim().is_empty() {
             return FollowUpOutcome::Empty;
         }
-        let text = self.prompt.text().to_string();
+        let busy = self.turn_busy.load(Ordering::SeqCst);
+        if busy && !self.prompt.images().is_empty() {
+            return FollowUpOutcome::RefusedImages;
+        }
+        let submission = Submission {
+            text: self.prompt.text(),
+            images: self.prompt.images().to_vec(),
+        };
         self.prompt.clear();
-        if self.turn_busy.load(Ordering::SeqCst) {
+        if busy {
             self.messages
-                .push_pending(PendingMessageKind::FollowUp, text.clone());
-            self.prompt.push_history(&text);
+                .push_pending(PendingMessageKind::FollowUp, submission.text.clone());
+            self.prompt.push_history(&submission.text);
             FollowUpOutcome::Queued
         } else {
-            FollowUpOutcome::Submitted(text)
+            FollowUpOutcome::Submitted(submission)
         }
     }
 
@@ -1821,9 +1907,10 @@ impl App {
         self.prompt.editor_mut().set_text(text);
     }
 
-    /// The current text of the core input editor (upstream
-    /// `ctx.ui.getEditorText`).
-    pub fn editor_text(&self) -> &str {
+    /// The current visible text of the core input editor (upstream
+    /// `ctx.ui.getEditorText`). Pasted chips render as their `[Image #N]`
+    /// labels.
+    pub fn editor_text(&self) -> String {
         self.prompt.text()
     }
 
@@ -2070,6 +2157,16 @@ impl App {
             ));
             return StepOutcome::Redraw;
         }
+        // `app.clipboard.pasteImage` (`Alt+V`): attach a clipboard image to
+        // the draft. The App cannot read the system clipboard, so it records
+        // the request and the driver answers it with [`App::paste_image`]
+        // (or the text fallback, [`App::paste_text`]) — the same seam as
+        // copy-on-select. A key press always redraws so the "reading…" frame
+        // and the restored status hint stay honest.
+        if Self::matches_app_key(&kb, &event, "app.clipboard.pasteImage", &["alt+v"]) {
+            self.pending_image_paste = true;
+            return StepOutcome::Redraw;
+        }
         // Fullscreen chat-log scrolling. Upstream deliberately shadows
         // the bare editor bindings for these chords in fullscreen mode
         // (`packages/tui/src/keybindings.ts:159-165,208-209`: "These
@@ -2121,9 +2218,20 @@ impl App {
             PromptAction::Changed => StepOutcome::Redraw,
             PromptAction::Submit(text) => {
                 // Caller is responsible for invoking `submit` with an
-                // `Arc<AsyncMutex<Agent>>` — we just announce the
-                // submitted text and clear the buffer.
-                let submitted = text.clone();
+                // `Arc<AsyncMutex<Agent>>` — we just announce the submitted
+                // draft (text plus any pasted image chips) and clear the
+                // buffer. The images are captured before `clear()` wipes
+                // them.
+                let images = self.prompt.images().to_vec();
+                if self.turn_busy.load(Ordering::SeqCst) && !images.is_empty() {
+                    // Refuse *before* clearing: the Stage 61 pending queue is
+                    // text-only, so accepting would silently drop the chips.
+                    // Nothing is consumed — the draft (text and chips) stays
+                    // in the editor for the next attempt.
+                    self.flash_status("Cannot attach images while a turn is running");
+                    return StepOutcome::Redraw;
+                }
+                let submitted = Submission { text, images };
                 self.prompt.clear();
                 StepOutcome::Submitted(submitted)
             }
@@ -3496,6 +3604,55 @@ impl App {
         self.pending_clipboard = Some(text.into());
     }
 
+    /// Take the pending `app.clipboard.pasteImage` request, if any.
+    ///
+    /// `true` means the user pressed the chord and the driver should read the
+    /// system clipboard and call [`App::paste_image`] (image found) or
+    /// [`App::paste_text`] (text fallback). The App never reads the
+    /// clipboard itself, so headless tests drive the two paths directly.
+    pub fn take_image_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_image_paste)
+    }
+
+    /// Attach a clipboard image to the draft as a chip at the cursor
+    /// (upstream `handleClipboardPaste`'s image branch,
+    /// `interactive-mode.ts:2933`, which inserts the saved file path).
+    ///
+    /// Returns `false` when [`MAX_IMAGE_ATTACHMENTS`](crate::editor::MAX_IMAGE_ATTACHMENTS)
+    /// chips are already attached; the caller surfaces the refusal. The
+    /// draft text is left untouched either way.
+    pub fn paste_image(&mut self, image: pi_protocol::ImageContent) -> bool {
+        match self.prompt.editor_mut().insert_image(image) {
+            crate::editor::ImageInsertOutcome::Inserted => true,
+            crate::editor::ImageInsertOutcome::AtCapacity => {
+                self.flash_status(format!(
+                    "At most {} images can be attached to a prompt",
+                    crate::editor::MAX_IMAGE_ATTACHMENTS
+                ));
+                false
+            }
+        }
+    }
+
+    /// Insert clipboard *text* at the cursor — the fallback
+    /// `app.clipboard.pasteImage` takes when the clipboard holds no image
+    /// (upstream `handleClipboardPaste`'s else branch).
+    pub fn paste_text(&mut self, text: &str) {
+        self.prompt.editor_mut().insert_str(text);
+    }
+
+    /// Clear the composer: buffer text, pasted chips and the history
+    /// browsing / undo state, but keep the prompt history. `/new` and
+    /// `app.session.new` call this so a new session never inherits a draft.
+    pub fn clear_composer(&mut self) {
+        self.prompt.clear();
+    }
+
+    /// Number of image chips currently attached to the draft.
+    pub fn image_count(&self) -> usize {
+        self.prompt.image_count()
+    }
+
     /// Paint the active selection into the already-rendered message area by
     /// adding the reversed-video modifier to the selected cells.
     fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {
@@ -3906,7 +4063,7 @@ impl App {
         // a `!` submission (`updateEditorBorderColor`,
         // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
         // the label carries the colour instead.
-        let bash_style = crate::editor::is_bash_mode(self.prompt.text())
+        let bash_style = crate::editor::is_bash_mode(&self.prompt.text())
             .then(|| SpanStyle::fg(ThemeColor::BashMode).to_style(&self.theme));
         let label_width = self.prompt.label().chars().count() as u16;
         for (col, ch) in line.chars().enumerate() {

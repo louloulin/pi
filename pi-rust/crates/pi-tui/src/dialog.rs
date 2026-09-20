@@ -148,8 +148,9 @@ impl Dialog {
         }
     }
 
-    /// Current input buffer (empty for non-input dialogs).
-    pub fn input_text(&self) -> &str {
+    /// Current input buffer (empty for non-input dialogs). Chip sentinels
+    /// are expanded, matching what the dialog renders.
+    pub fn input_text(&self) -> String {
         self.input.text()
     }
 

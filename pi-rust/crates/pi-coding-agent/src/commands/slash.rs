@@ -241,6 +241,10 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ),
         ("app.model.select", "open the model selector"),
         ("app.session.new", "start a new session"),
+        (
+            "app.clipboard.pasteImage",
+            "attach a clipboard image (falls back to pasting text)",
+        ),
     ];
     const SELECTORS: &[(&str, &str)] = &[
         ("tui.select.up", "move the selection up"),

@@ -15109,7 +15109,7 @@ Stage 58/60/61 把「呈现」与「会话入口」补齐后，本轮复核 Mart
 | 问题 | 证据 | 新建 stage |
 | --- | --- | --- |
 | `!` / `!!` 本地 bash 通道零实现 | 上游 `interactive-mode.ts:2907-2912`（`isBashMode`）+ `:3106-3123`（`!!` 拆分、忙时拒绝并回填编辑器）；Rust 全树无等价物 | 62 = LUM-1223 |
-| `app.clipboard.pasteImage`（alt+v）零消费者 | `grep -rn pasteImage pi-rust/crates --include=*.rs` 只剩键位定义与测试；上游 `onPasteImage` 在 `:2913-2915`；Martty 有 chip 全语义（`chip_at` / `backspace_on_a_chip_cuts_the_whole_token`） | 63 = LUM-1224（停放） |
+| `app.clipboard.pasteImage`（alt+v）零消费者 | `grep -rn pasteImage pi-rust/crates --include=*.rs` 只剩键位定义与测试；上游 `onPasteImage` 在 `:2913-2915`；Martty 有 chip 全语义（`chip_at` / `backspace_on_a_chip_cuts_the_whole_token`） | 63 = LUM-1224（已交付） |
 
 另记录两条低优先项（token/cache 脚注、流式 spinner），不单独开 stage。
 

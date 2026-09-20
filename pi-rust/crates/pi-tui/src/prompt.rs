@@ -62,9 +62,25 @@ impl Prompt {
         &mut self.editor
     }
 
-    /// Borrow the buffer text.
-    pub fn text(&self) -> &str {
-        self.editor.text()
+    /// The draft the prompt shows: chip sentinels expanded to their
+    /// `[Image #N]` labels. Use [`Prompt::editor`] for the raw buffer.
+    pub fn text(&self) -> String {
+        self.editor.display_text()
+    }
+
+    /// Cursor column within [`Prompt::text`].
+    pub fn cursor(&self) -> usize {
+        self.editor.display_cursor()
+    }
+
+    /// The pasted image chips attached to the draft, in buffer order.
+    pub fn images(&self) -> &[pi_protocol::ImageContent] {
+        self.editor.image_attachments()
+    }
+
+    /// Number of image chips attached to the draft.
+    pub fn image_count(&self) -> usize {
+        self.editor.image_count()
     }
 
     /// Borrow the label.
@@ -99,9 +115,9 @@ impl Prompt {
         let label = self.label.as_str();
         let label_width = label.chars().count();
         let available = (width as usize).saturating_sub(label_width);
-        let text = self.editor.text();
-        let cursor = self.editor.cursor();
-        let (before, after) = split_at_char(text, cursor);
+        let text = self.editor.display_text();
+        let cursor = self.editor.display_cursor();
+        let (before, after) = split_at_char(&text, cursor);
         let mut line = String::new();
         line.push_str(label);
         if text.is_empty() && !self.placeholder.is_empty() {
@@ -158,7 +174,7 @@ impl Prompt {
     /// trimmed text if the key was Enter, otherwise `None`.
     pub fn try_submit(&mut self, key: Key) -> Option<String> {
         if key.code == KeyCode::Enter && !self.editor.is_empty() {
-            Some(self.editor.text().to_string())
+            Some(self.editor.display_text())
         } else {
             None
         }
