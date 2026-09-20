@@ -198,6 +198,12 @@ fn render_session_draws_images_only_when_enabled() {
 }
 
 /// The `read` tool's image output, end to end: tool → executor fold → render.
+///
+/// `CAPABILITIES` only serializes cases that touch the process-global
+/// capability cache; it guards no data read across the `await`, so holding it
+/// for the whole case (capabilities must stay installed while `execute` runs)
+/// is deliberate rather than an accidental await-holding-lock.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_tool_image_result_renders_through_the_executor() {
     let _guard = capabilities();

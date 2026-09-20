@@ -25,6 +25,11 @@ fn provider_config(name: &str, api: &str, api_key: &str) -> RegisteredProviderCo
                 "maxTokens": 4096,
             },
         ]),
+        // String overload: no native `Provider` object, no `streamSimple`
+        // handler, no `oauth` block.
+        native: false,
+        has_stream_simple: false,
+        oauth: None,
     }
 }
 
