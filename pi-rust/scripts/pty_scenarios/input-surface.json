@@ -1,0 +1,21 @@
+{
+  "cols": 110,
+  "rows": 44,
+  "caption": "LUM-1256 merged tip — input surface + extension visibility on one real PTY session",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs", "src/lib.rs", "README.md"],
+  "extensions": ["scripts/pty_scenarios/extension-events.js"],
+  "final_send": "<C-d>",
+  "panels": [
+    {"label": "1. `/` → the composer dropdown offers built-in commands (LUM-1236 table + LUM-1238 wiring)", "send": "/", "wait": 1.2},
+    {"label": "2. `/he` → fuzzy filter puts `help` first", "send": "<BS>/he", "wait": 1.0},
+    {"label": "3. `@src/` → file completion resolves against the cwd", "send": "<BS><BS><BS><BS>@src/", "wait": 1.0},
+    {"label": "4. `/extensions` → Stage 71 startup header + slash command report the loaded extension", "send": "<BS><BS><BS><BS><BS><BS>/extensions<Enter>", "wait": 1.5},
+    {"label": "5. four faux turns fill the viewport", "send": "hello one<Enter>", "wait": 4.5},
+    {"label": "6. (driving)", "send": "hello two<Enter>", "wait": 4.5, "skip_capture": true},
+    {"label": "7. (driving)", "send": "hello three<Enter>", "wait": 4.5, "skip_capture": true},
+    {"label": "8. (driving)", "send": "hello four<Enter>", "wait": 4.5, "skip_capture": true},
+    {"label": "9. PgUp detaches the viewport → `↓ Jump to latest message · End`", "send": "<PgUp>", "wait": 1.0},
+    {"label": "10. `/help` renders through the `· ` info block, composer still `> `", "send": "<End>/help<Enter>", "wait": 1.5}
+  ]
+}

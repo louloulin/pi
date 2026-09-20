@@ -1,0 +1,323 @@
+# lum1256-input-surface.png — chars, 110x44 cells
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [1] 1. `/` → the composer dropdown offers built-in commands (LUM-1236 table + LUM-1238 wiring)  (cursor 36,42) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=0
+  turn_start=0
+  message_start=0
+  message_update=0
+  message_end=0
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=0
+  agent_end=0
+  user_bash=0
+  input=0
+  handlers-run=1
+  clear  Clear the message view
+  new  Start a new session
+  copy  Copy last agent message to clipboard
+  name  <name> — Set session display name
+  (1/19)
+> /▍
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [2] 2. `/he` → fuzzy filter puts `help` first  (cursor 6,42) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=0
+  turn_start=0
+  message_start=0
+  message_update=0
+  message_end=0
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=0
+  agent_end=0
+  user_bash=0
+  input=0
+  handlers-run=1
+  hotkeys  Show all keyboard shortcuts
+  exit  Quit the interactive session
+  clear  Clear the message view
+  clone  Duplicate the current session at the current position
+  (1/12)
+> /he▍
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [3] 3. `@src/` → file completion resolves against the cwd  (cursor 8,42) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=0
+  turn_start=0
+  message_start=0
+  message_update=0
+  message_end=0
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=0
+  agent_end=0
+  user_bash=0
+  input=0
+  handlers-run=1
+
+
+
+❯ lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @src/▍
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [4] 4. `/extensions` → Stage 71 startup header + slash command report the loaded extension  (cursor 36,42) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=0
+  turn_start=0
+  message_start=0
+  message_update=0
+  message_end=0
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=0
+  agent_end=0
+  user_bash=0
+  input=0
+  handlers-run=1
+> extensions: 1 loaded sources: ~/.pi/agent/extensions/extension-events.js tools: (none) commands: (none)
+> providers: (none)
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [5] 5. four faux turns fill the viewport  (cursor 25,40) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=1
+  turn_start=1
+  message_start=1
+  message_update=1
+  message_end=1
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=1
+  agent_end=1
+  user_bash=0
+  input=1
+  handlers-run=9
+> extensions: 1 loaded sources: ~/.pi/agent/extensions/extension-events.js tools: (none) commands: (none)
+> providers: (none)
+> hello one
+  faux-model (faux) hello
+
+> type a prompt — /help for commands
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [9] 9. PgUp detaches the viewport → `↓ Jump to latest message · End`  (cursor 110,41) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=4
+  turn_start=4
+  message_start=4
+  message_update=4
+  message_end=4
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=4
+  agent_end=4
+  user_bash=0
+  input=4
+  handlers-run=33
+> extensions: 1 loaded sources: ~/.pi/agent/extensions/extension-events.js tools: (none) commands: (none)    ┃
+> providers: (none)                                                                                          ┃
+> hello one                                                                                                  ┃
+  faux-model (faux) hello                                                                                    │
+> hello two                                                                   ↓ Jump to latest message · End │
+> type a prompt — /help for commands
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [10] 10. `/help` renders through the `· ` info block, composer still `> `  (cursor 110,41) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-8008/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=4
+  turn_start=4
+  message_start=4
+  message_update=4
+  message_end=4
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=4
+  agent_end=4
+  user_bash=0
+  input=4
+  handlers-run=33
+· the conversation prefix to free context /hotkeys list the keyboard shortcuts /extensions list loaded       │
+· extensions and what they register /exit quit the interactive session keys: Enter submit prompt Up / Down   │
+· navigate prompt history PgUp/PgDn scroll the chat log one page Home / End jump to the start / end of the   │
+· chat log Ctrl+C abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit on an empty  ┃
+· prompt Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close selector / cancel turn      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d71e5d4735f68e                                        in 0 out 0 ?/8.2k  ? for help
