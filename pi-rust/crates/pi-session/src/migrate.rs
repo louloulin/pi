@@ -1,12 +1,20 @@
-//! Migration from the JSONL session format to the SQLite backend.
+//! Migration helpers.
 //!
-//! Stage 4 of the Rust port writes sessions as JSONL (one
-//! [`SessionEntry`](pi_protocol::SessionEntry) per line). This module
-//! reads those files, opens a fresh SQLite database, and replays each
-//! entry. The original JSONL is preserved on disk: any error during the
-//! migration leaves the input untouched (the `pi-coding-agent` CLI's
-//! `pi session migrate` command only deletes the JSONL after the SQLite
-//! commit succeeds).
+//! Two migration directions live here:
+//!
+//! * [`migrate_jsonl`] — Stage 4 of the Rust port wrote sessions as JSONL
+//!   (one [`SessionEntry`](pi_protocol::SessionEntry) per line). This
+//!   replays such a file into a fresh SQLite database (upstream v4 since
+//!   Stage 55). The original JSONL is preserved on disk.
+//! * [`migrate_file`] — converts a **Rust legacy** SQLite database (the
+//!   pre-Stage-55 narrow layout, refused by [`SessionWriter`]) into the
+//!   upstream v4 layout. The source is never modified: by default the
+//!   conversion is written to a sibling `<stem>.upstream.sqlite`.
+//!
+//! Both writers build the destination in a temporary sibling file and
+//! only rename it into place once every entry has been committed, so a
+//! failed migration leaves the source untouched and no half-written file
+//! behind.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -15,6 +23,8 @@ use std::path::{Path, PathBuf};
 use pi_protocol::SessionEntry;
 
 use crate::error::{Result, SessionError};
+use crate::reader::SessionReader;
+use crate::schema::{self, SchemaLayout};
 use crate::writer::SessionWriter;
 
 /// Result of a successful migration.
@@ -63,6 +73,7 @@ where
 
     let mut count = 0usize;
     let mut header_id = None;
+    let mut header_written = false;
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let trimmed = line.trim();
@@ -75,8 +86,25 @@ where
         if let SessionEntry::Header { ref id, .. } = entry {
             writer.write_header(entry.clone())?;
             header_id = Some(id.clone());
+            header_written = true;
             // Header itself is a row in `sessions`, not `entries`.
             continue;
+        }
+        if !header_written {
+            // Stage 4 always wrote a header first, but be forgiving: the
+            // upstream schema requires a `sessions` row before any entry.
+            let id = source
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or_else(|| "session".to_string());
+            writer.write_header(SessionEntry::Header {
+                id: id.clone(),
+                created_at: chrono::Utc::now(),
+                version: String::new(),
+            })?;
+            header_id = Some(id);
+            header_written = true;
         }
         writer.append(entry)?;
         count += 1;
@@ -99,6 +127,156 @@ pub fn default_destination<P: AsRef<Path>>(source: P) -> PathBuf {
         Some(ext) => source.with_extension(format!("{ext}.sqlite")),
         None => source.with_extension("sqlite"),
     }
+}
+
+/// Result of a Rust-legacy → upstream-v4 file migration.
+#[derive(Debug, Clone)]
+pub struct FileMigrationReport {
+    /// Path of the database that was inspected (never modified).
+    pub source: PathBuf,
+    /// Path the upstream v4 database was written to. Equal to `source`
+    /// when `already_upstream` is true (nothing to do).
+    pub destination: PathBuf,
+    /// Number of sessions replayed.
+    pub sessions_migrated: usize,
+    /// Number of entries replayed across all sessions.
+    pub entries_migrated: usize,
+    /// Layout detected in `source`.
+    pub layout_before: SchemaLayout,
+    /// Layout of `destination` after the migration.
+    pub layout_after: SchemaLayout,
+    /// True when `source` was already upstream v4 and nothing was written.
+    pub already_upstream: bool,
+    /// Always true: the source file is never overwritten or deleted.
+    pub source_preserved: bool,
+}
+
+/// Default destination for [`migrate_file`]: sibling `<stem>.upstream.sqlite`.
+pub fn default_layout_destination<P: AsRef<Path>>(source: P) -> PathBuf {
+    let source = source.as_ref();
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "session".to_string());
+    source.with_file_name(format!("{stem}.upstream.sqlite"))
+}
+
+/// Convert a **Rust legacy** session database into the upstream v4 layout.
+///
+/// The source is opened read-only and never modified. The converted copy
+/// is written to a temporary sibling file and renamed into place only
+/// after every session has been committed, so a failure cannot leave a
+/// half-written database behind (and never touches the source).
+///
+/// * `destination` defaults to [`default_layout_destination`].
+/// * A destination that already exists is refused with
+///   [`SessionError::AlreadyExists`] — the helper never silently
+///   overwrites a file.
+/// * A source that is already upstream v4 is a no-op: the report carries
+///   `already_upstream = true` and `destination == source`.
+pub fn migrate_file(
+    source: impl AsRef<Path>,
+    destination: Option<&Path>,
+) -> Result<FileMigrationReport> {
+    let source = source.as_ref().to_path_buf();
+    if !source.exists() {
+        return Err(SessionError::NotFound(source));
+    }
+    let (_conn, layout_before) = schema::open_read_only_with_layout(&source)?;
+    drop(_conn);
+
+    if layout_before == SchemaLayout::UpstreamV4 {
+        return Ok(FileMigrationReport {
+            source: source.clone(),
+            destination: source,
+            sessions_migrated: 0,
+            entries_migrated: 0,
+            layout_before,
+            layout_after: SchemaLayout::UpstreamV4,
+            already_upstream: true,
+            source_preserved: true,
+        });
+    }
+
+    let destination = destination
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_layout_destination(&source));
+    if destination == source {
+        return Err(SessionError::Other(
+            "migration destination equals the source; the source is never overwritten".to_string(),
+        ));
+    }
+    if destination.exists() {
+        return Err(SessionError::AlreadyExists(destination));
+    }
+    if let Some(parent) = destination.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let temp = temporary_sibling(&destination);
+    cleanup_database_files(&temp);
+
+    let reader = SessionReader::open(&source)?;
+    let result = (|| -> Result<(usize, usize)> {
+        let mut sessions = 0usize;
+        let mut entries = 0usize;
+        {
+            let writer = SessionWriter::open(&temp)?;
+            for row in reader.list_sessions()? {
+                writer.write_header(row.to_header())?;
+                for decoded in reader.iter_entries(&row.id)? {
+                    writer.append(decoded.entry)?;
+                    entries += 1;
+                }
+                sessions += 1;
+            }
+            writer.checkpoint()?;
+        }
+        Ok((sessions, entries))
+    })();
+
+    match result {
+        Ok((sessions, entries)) => {
+            std::fs::rename(&temp, &destination)?;
+            cleanup_database_files(&temp);
+            Ok(FileMigrationReport {
+                source,
+                destination,
+                sessions_migrated: sessions,
+                entries_migrated: entries,
+                layout_before,
+                layout_after: SchemaLayout::UpstreamV4,
+                already_upstream: false,
+                source_preserved: true,
+            })
+        }
+        Err(err) => {
+            cleanup_database_files(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn temporary_sibling(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session.sqlite".to_string());
+    let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    destination.with_file_name(format!(
+        ".{file_name}.migrate-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+/// Remove a database plus its `-wal` / `-shm` sidecars.
+fn cleanup_database_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(PathBuf::from(format!("{}-wal", path.display())));
+    let _ = std::fs::remove_file(PathBuf::from(format!("{}-shm", path.display())));
 }
 
 #[cfg(test)]
@@ -168,10 +346,10 @@ mod tests {
             other => panic!("expected user message, got {other:?}"),
         }
         match &entries[1].entry {
-            SessionEntry::Extension {
-                extension, kind, ..
-            } => {
-                assert_eq!(extension, "test");
+            SessionEntry::Extension { kind, .. } => {
+                // The upstream `custom` entry stores only a single custom
+                // type; the Rust `extension` namespace normalises to
+                // `custom` and the marker survives in `kind`.
                 assert_eq!(kind, "marker");
             }
             other => panic!("expected extension entry, got {other:?}"),

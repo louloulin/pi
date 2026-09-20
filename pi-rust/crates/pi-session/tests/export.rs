@@ -13,6 +13,8 @@ use pi_session::{
     export_jsonl, export_session, migrate_jsonl, render_jsonl, SessionReader, SessionWriter,
 };
 
+mod common;
+
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pi-session-export-{tag}-{}-{}",
@@ -178,17 +180,30 @@ fn header_entry_rows_are_folded_into_the_leading_header_line() {
     let dir = tempdir("folded-header");
     let db = dir.join("session.sqlite");
 
-    // The TS writer stores the header twice: once in `sessions` and once
-    // as a `header` row in `entries`.
-    let writer = SessionWriter::open(&db).expect("open writer");
-    writer.write_header(header("folded-id")).expect("header");
-    writer
-        .append(header("folded-id"))
-        .expect("header entry row");
-    writer.append(user_message("body")).expect("append");
-    writer.checkpoint().expect("checkpoint");
+    // The Stage 5 writer could store a `header` row in `entries` in
+    // addition to the `sessions` row. Export still folds that into the
+    // single leading header line, so the legacy file exports cleanly.
+    common::write_rust_legacy_fixture(&db, "folded-id", "0.1.0", &[user_message("body")]);
+    {
+        let conn = rusqlite::Connection::open(&db).expect("open legacy");
+        let payload = zstd::encode_all(
+            serde_json::to_vec(&header("folded-id"))
+                .expect("json")
+                .as_slice(),
+            3,
+        )
+        .expect("zstd");
+        conn.execute(
+            "INSERT INTO entries \
+             (session_id, seq, parent_seq, entry_id, parent_entry_id, type, timestamp, payload) \
+             VALUES (?1, 0, NULL, 'legacy-0', NULL, 'header', 0, ?2)",
+            rusqlite::params!["folded-id", payload],
+        )
+        .expect("header row");
+    }
 
     let reader = SessionReader::open(&db).expect("open reader");
+    assert_eq!(reader.layout(), pi_session::SchemaLayout::RustLegacy);
     // `iter_entries` sees both rows…
     assert_eq!(reader.iter_entries("folded-id").expect("entries").len(), 2);
 

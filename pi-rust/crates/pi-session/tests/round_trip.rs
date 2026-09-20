@@ -11,7 +11,6 @@ use pi_protocol::{
     ToolResult, Usage,
 };
 use pi_session::{SessionReader, SessionWriter};
-
 fn fresh_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pi-session-int-{label}-{}-{}",
@@ -21,16 +20,6 @@ fn fresh_dir(label: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-fn assistant_message(text: &str) -> AssistantMessage {
-    AssistantMessage {
-        model: "faux/faux-model".into(),
-        content: vec![Content::text(text)],
-        stop_reason: StopReason::Stop,
-        usage: Usage::default(),
-        error_message: None,
-    }
 }
 
 fn user_message(text: &str) -> Message {
@@ -58,10 +47,24 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
         .append(SessionEntry::UserMessage(user_message("hello pi")))
         .expect("user message");
     writer
-        .append(SessionEntry::AssistantMessage(assistant_message(
-            "hi, human",
-        )))
+        .append(SessionEntry::AssistantMessage(AssistantMessage {
+            model: "faux/faux-model".into(),
+            content: vec![
+                Content::text("hi, human"),
+                Content::ToolCall(ToolCall {
+                    id: "tool-1".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"cmd": "echo hi"}),
+                }),
+            ],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+            error_message: None,
+        }))
         .expect("assistant message");
+    // A standalone `ToolCall` entry has no upstream spelling: it is stored
+    // as a `custom` entry and reads back as an extension (documented
+    // degradation — see `pi-session::writer`).
     writer
         .append(SessionEntry::ToolCall(ToolCall {
             id: "tool-1".into(),
@@ -112,17 +115,32 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
     match &entries[1].entry {
         SessionEntry::AssistantMessage(msg) => {
             assert_eq!(msg.model, "faux/faux-model");
-            assert_eq!(msg.stop_reason, StopReason::Stop);
+            assert_eq!(msg.stop_reason, StopReason::ToolUse);
+            assert_eq!(msg.content.len(), 2);
+            match &msg.content[1] {
+                Content::ToolCall(call) => {
+                    assert_eq!(call.id, "tool-1");
+                    assert_eq!(call.name, "bash");
+                    assert_eq!(call.arguments["cmd"], "echo hi");
+                }
+                other => panic!("expected embedded tool call, got {other:?}"),
+            }
         }
         other => panic!("expected assistant message, got {other:?}"),
     }
     match &entries[2].entry {
-        SessionEntry::ToolCall(call) => {
-            assert_eq!(call.id, "tool-1");
-            assert_eq!(call.name, "bash");
-            assert_eq!(call.arguments["cmd"], "echo hi");
+        SessionEntry::Extension {
+            extension,
+            kind,
+            payload,
+        } => {
+            assert_eq!(extension, "custom");
+            assert_eq!(kind, "tool_call");
+            assert_eq!(payload["id"], "tool-1");
+            assert_eq!(payload["name"], "bash");
+            assert_eq!(payload["arguments"]["cmd"], "echo hi");
         }
-        other => panic!("expected tool call, got {other:?}"),
+        other => panic!("expected a custom tool_call extension, got {other:?}"),
     }
     match &entries[3].entry {
         SessionEntry::ToolResult(result) => {
@@ -142,7 +160,7 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
             kind,
             payload,
         } => {
-            assert_eq!(extension, "demo");
+            assert_eq!(extension, "custom");
             assert_eq!(kind, "marker");
             assert_eq!(payload["k"], 1);
             assert_eq!(payload["v"][2], 3);

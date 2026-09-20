@@ -17,8 +17,12 @@
 use std::path::{Path, PathBuf};
 
 use pi_protocol::{Content, Message, Role, SessionEntry, StopReason, TextContent, Usage};
-use pi_session::{SchemaLayout, SessionReader, SessionWriter};
+use pi_session::{SchemaLayout, SessionReader};
 use rusqlite::Connection;
+
+mod common;
+
+use common::{fresh_dir, write_rust_legacy_fixture};
 
 const FIXTURE_PATH: &str = "fixtures/ts_recorded.sqlite";
 const SESSION_ID: &str = "ts-recorded-fixture";
@@ -357,35 +361,36 @@ fn fixture_lookups_use_upstream_keys() {
     assert!(reader.get_message(SESSION_ID, "nope").unwrap().is_none());
 }
 
-/// Regression: files written by this crate (`~/.pi/sessions/*.sqlite`)
-/// must keep opening and decoding.
+/// Regression: files written by the Stage 5 crate before Stage 55
+/// (`~/.pi/sessions/*.sqlite`) must keep opening and decoding. The writer
+/// no longer emits this layout, so the fixture is built directly.
 #[test]
 fn rust_legacy_files_still_read() {
-    let dir = temp_dir("rust-legacy");
+    let dir = fresh_dir("rust-legacy");
     let path = dir.join("legacy.sqlite");
 
-    let writer = SessionWriter::open(&path).expect("open writer");
-    writer
-        .write_header(SessionEntry::Header {
-            id: "legacy".into(),
-            created_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(T0).unwrap(),
-            version: "0.1.0".into(),
-        })
-        .expect("header");
-    writer
-        .append(SessionEntry::UserMessage(Message {
-            role: Role::User,
-            content: vec![Content::text("hello")],
-            model: None,
-        }))
-        .expect("append");
-    writer.checkpoint().expect("checkpoint");
-    drop(writer);
+    write_rust_legacy_fixture(
+        &path,
+        "legacy",
+        "0.1.0",
+        &[
+            SessionEntry::UserMessage(Message {
+                role: Role::User,
+                content: vec![Content::text("hello")],
+                model: None,
+            }),
+            SessionEntry::Extension {
+                extension: "demo".into(),
+                kind: "marker".into(),
+                payload: serde_json::json!({"legacy": true}),
+            },
+        ],
+    );
 
     let reader = SessionReader::open(&path).expect("open reader");
     assert_eq!(reader.layout(), SchemaLayout::RustLegacy);
     let entries = reader.iter_entries("legacy").expect("entries");
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
     assert!(matches!(entries[0].entry, SessionEntry::UserMessage(_)));
     assert_eq!(
         reader.session_header().unwrap().unwrap().version.as_deref(),
@@ -397,18 +402,9 @@ fn rust_legacy_files_still_read() {
 /// misdetected: detection is structural, per column.
 #[test]
 fn renamed_rust_file_is_not_misdetected_as_upstream() {
-    let dir = temp_dir("renamed");
+    let dir = fresh_dir("renamed");
     let path = dir.join("ts_recorded.sqlite");
-    let writer = SessionWriter::open(&path).expect("open writer");
-    writer
-        .write_header(SessionEntry::Header {
-            id: "renamed".into(),
-            created_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(T0).unwrap(),
-            version: "0.1.0".into(),
-        })
-        .expect("header");
-    writer.checkpoint().expect("checkpoint");
-    drop(writer);
+    write_rust_legacy_fixture(&path, "renamed", "0.1.0", &[]);
 
     let reader = SessionReader::open(&path).expect("open reader");
     assert_eq!(reader.layout(), SchemaLayout::RustLegacy);
@@ -432,17 +428,6 @@ fn fixture_rows_are_self_consistent() {
             "upstream rows always carry an id: {entry:?}"
         );
     }
-}
-
-fn temp_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pi-session-ts-compat-{label}-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// Keeps the fixture path helper honest even if the fixture moves.

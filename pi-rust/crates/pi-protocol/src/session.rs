@@ -1,7 +1,13 @@
 //! Session entry types — mirrors `packages/coding-agent/docs/session-format.md`.
 //!
-//! The Rust session backend in Stage 5 round-trips these types with the
-//! SQLite session backend in the TS monorepo.
+//! Since Stage 55 the Rust session backend (`pi-session`) persists these
+//! types in the upstream TS `packages/session-backends/sqlite-node` v4
+//! layout, so a file written here opens directly in the TS
+//! `SqliteStorage` (and vice versa). A few variants have no 1:1 upstream
+//! spelling — standalone [`SessionEntry::ToolCall`] is stored as a
+//! `custom` entry and an extension's namespace is folded into the custom
+//! type — see `pi-session` for the exact mapping and its documented
+//! degradations.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,8 +16,8 @@ use crate::{AssistantMessage, Message, ToolCall, ToolResult, Usage};
 
 /// A single row in a session log.
 ///
-/// Variants cover the same shape the TS format uses; new variants land when
-/// we port the session writer/reader in Stage 5.
+/// Variants cover the same shape the TS format uses; the SQLite backend in
+/// `pi-session` maps them onto the upstream v4 `entries` layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEntry {
