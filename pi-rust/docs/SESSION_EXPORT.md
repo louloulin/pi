@@ -35,6 +35,8 @@ into a linear chain, terminated by a newline.
 | `src/export/html.rs` | `include_str!` templates, base64, `generate_html` |
 | `src/export/theme.rs` | theme → CSS bridge (`generateThemeVars` / `deriveExportColors`) on top of `pi_tui::theme` |
 | `src/export/session_file.rs` | message → entry conversion, JSONL session-file reader |
+| `src/export/rendered_tools.rs` | `preRenderCustomTools` — pre-renders non-template tools into `renderedTools` |
+| `src/export/ansi_to_html.rs` | `ansi-to-html.ts` — ANSI SGR → inline-styled HTML spans |
 | `src/export/jsonl.rs` | JSONL generator + `session-<ISO>` file naming |
 | `src/commands/export.rs` | `/export` format selection and the `--export` entry point |
 
@@ -61,33 +63,44 @@ upstream.
 
 ## Known divergences
 
-1. **`preRenderCustomTools` is not ported.**
-   Upstream renders extension tools through their TUI (ANSI → HTML)
-   renderers before injecting `renderedTools` into the payload. The Rust
-   port always leaves `renderedTools` unset, so *every* tool call and
-   result is rendered by `template.js` (the same fallback upstream uses for
-   its built-in `bash` / `read` / `write` / `edit` / `ls` set). Extension
-   tools therefore lose their bespoke TUI rendering in an export; they are
-   still shown, just in the generic call/result form. This is an explicit
-   gap, not a silent one: the payload simply omits the key.
-2. **`/export` default HTML file name.**
+1. **JS extension tools have no pre-rendered HTML.**
+   `preRenderCustomTools` is ported: every `toolCall`/`toolResult` outside
+   `TEMPLATE_RENDERED_TOOLS` (`bash` / `read` / `write` / `edit` / `ls`) is
+   run through its Rust `ToolRenderer`, painted with `render_lines_ansi`,
+   converted by `ansi_to_html`, and injected as `renderedTools[<callId>]`
+   (`callHtml` / `resultHtmlCollapsed` / `resultHtmlExpanded`) so the
+   template's `default` branch shows the TUI rendering instead of a JSON
+   dump. Tools with no Rust renderer — i.e. JS extension tools, which
+   upstream renders through `getToolDefinition(name)` — produce no entry and
+   fall back to the generic call/result view, and a payload that rendered
+   nothing omits the `renderedTools` key entirely (upstream's
+   "only if we actually rendered something" rule). This is an explicit gap,
+   not a silent one.
+2. **File-based export also pre-renders.**
+   Upstream's `exportFromFile` builds no `ToolRenderer`, so a `pi --export`
+   document shows only template-rendered tools; here the same pre-rendering
+   runs for `pi --export` / `export_from_file` (using the default dark
+   palette), so a session exported from the CLI matches one exported from
+   the TUI. This is deliberate: the divergence costs nothing and keeps the
+   two surfaces consistent.
+3. **`/export` default HTML file name.**
    Upstream names the TUI export
    `pi-session-<session-file-basename>.html`; this port writes
    `session-<ISO>.html`, matching the LUM-1174 acceptance criteria. The
    `--export` default still follows upstream exactly
    (`pi-session-<input-basename>.html`).
-3. **JSON object key order.**
+4. **JSON object key order.**
    `serde_json`'s default map is ordered, so the exported JSON/JSONL (and
    the base64 payload) emits object keys alphabetically, where
    `JSON.stringify` in upstream emits insertion order. JSON object key order
    is not significant, and `template.js` / the session reader are
    order-insensitive; the CSS variable block is reordered the same way.
-4. **Session-file reader is permissive.** Upstream only accepts
+5. **Session-file reader is permissive.** Upstream only accepts
    `type: "session"` headers and skips unparseable lines; this port also
    accepts the Rust `type: "header"` spelling produced by
    `pi session export`, so a session can be round-tripped from either
    backend.
-5. **The reader never mutates the input file.** Upstream's
+6. **The reader never mutates the input file.** Upstream's
    `SessionManager.open` treats a zero-byte file as a brand-new session and
    rewrites it with a fresh header (and a missing trailing newline is
    appended) before the export runs. Here a zero-byte file is rejected with

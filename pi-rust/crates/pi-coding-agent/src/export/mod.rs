@@ -6,19 +6,24 @@
 //! | --- | --- |
 //! | `core/export-html/index.ts` | [`html`] + [`theme`] + [`session_file`] |
 //! | `core/export-html/{template.html,template.css,template.js,vendor/*}` | `assets/export-html/**` (verbatim) |
+//! | `core/export-html/tool-renderer.ts` + `preRenderCustomTools` | [`rendered_tools`] |
+//! | `core/export-html/ansi-to-html.ts` | [`ansi_to_html`] |
 //! | `core/session-export.ts` | [`jsonl`] |
 //! | `cli/args.ts` + `main.ts` `--export` | [`export_from_file`] |
 //! | `agent-session.ts` `exportToHtml` / `exportToJsonl` | [`export_active_session_html`] / [`export_active_session_jsonl`] |
 //!
-//! See `docs/SESSION_EXPORT.md` for the known divergences
-//! (`preRenderCustomTools` is not ported, and the `/export` default file name
-//! follows the issue spec rather than upstream's `pi-session-<basename>`).
+//! See `docs/SESSION_EXPORT.md` for the known divergences (JS extension
+//! tools still have no pre-rendered call HTML, and the `/export` default file
+//! name follows the issue spec rather than upstream's `pi-session-<basename>`).
 
+pub mod ansi_to_html;
 pub mod html;
 pub mod jsonl;
+pub mod rendered_tools;
 pub mod session_file;
 pub mod theme;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -26,8 +31,9 @@ use serde_json::Value;
 
 pub use html::{base64_encode, generate_html};
 pub use jsonl::{generate_jsonl, timestamped_session_file_name};
+pub use rendered_tools::{pre_render_custom_tools, RenderedToolHtml};
 pub use session_file::{read_session_file, session_data_from_messages};
-pub use theme::{export_colors, generate_theme_vars, resolved_theme_colors};
+pub use theme::{export_colors, generate_theme_vars, resolved_theme, resolved_theme_colors};
 
 /// Product name used in generated file names (`APP_NAME` upstream).
 pub const APP_NAME: &str = "pi";
@@ -65,14 +71,15 @@ pub struct SessionData {
     pub tools: Option<Vec<ToolInfo>>,
     /// Pre-rendered custom-tool HTML keyed by tool-call id.
     ///
-    /// Always `None` in this port: see the `preRenderCustomTools`
-    /// divergence note in the module docs.
+    /// Built by [`pre_render_custom_tools`] for every tool `template.js` does
+    /// not render itself and whose Rust renderer produced HTML; omitted (not
+    /// `null`, not `{}`) when there is nothing to carry.
     #[serde(
         rename = "renderedTools",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub rendered_tools: Option<Value>,
+    pub rendered_tools: Option<BTreeMap<String, RenderedToolHtml>>,
 }
 
 /// The subset of a tool definition the export payload carries

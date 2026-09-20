@@ -59,6 +59,7 @@ pub fn run_slash_export(
         session.messages,
         Some(session.system_prompt),
         session.tools,
+        theme_name,
     );
     if data.entries.is_empty() {
         return Err(ExportError::NothingToExport);

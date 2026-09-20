@@ -85,8 +85,8 @@ pub use compaction::{
 pub use context_files::{load_project_context_files, ContextFile};
 pub use export::{
     export_active_session_html, export_active_session_jsonl, export_from_file, generate_html,
-    generate_jsonl, read_session_file, session_data_from_messages, ExportError, SessionData,
-    ToolInfo,
+    generate_jsonl, pre_render_custom_tools, read_session_file, session_data_from_messages,
+    ExportError, RenderedToolHtml, SessionData, ToolInfo,
 };
 pub use file_processor::{
     expand_prompt, read_stdin_if_piped, ExpandedPrompt, FileError, MAX_FILE_BYTES,
