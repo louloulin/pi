@@ -101,16 +101,19 @@ fn app_buffer_cells_carry_the_theme_colours() {
     assert_eq!(style_at(&buf, 2, 0).fg, Some(TEXT));
     assert!(is_unstyled(style_at(&buf, 2, 1)));
 
-    // Status row (y = height - 2): model accent, session muted, stats dim.
-    assert_eq!(symbol_at(&buf, 0, 2), "F");
-    assert_eq!(style_at(&buf, 0, 2).fg, Some(ACCENT));
-    assert_eq!(symbol_at(&buf, 6, 2), "t"); // "  test  " starts at column 4
-    assert_eq!(style_at(&buf, 6, 2).fg, Some(MUTED));
-    assert_eq!(symbol_at(&buf, 18, 2), "i"); // "in 0 out 0 …" starts at column 18
-    assert_eq!(style_at(&buf, 18, 2).fg, Some(DIM));
+    // Status row (y = height - 1, the last row: the status bar sits below
+    // the editor region, upstream's footer position): model accent, session
+    // muted, stats dim.
+    assert_eq!(symbol_at(&buf, 0, 3), "F");
+    assert_eq!(style_at(&buf, 0, 3).fg, Some(ACCENT));
+    assert_eq!(symbol_at(&buf, 6, 3), "t"); // "  test  " starts at column 4
+    assert_eq!(style_at(&buf, 6, 3).fg, Some(MUTED));
+    assert_eq!(symbol_at(&buf, 18, 3), "i"); // "in 0 out 0 …" starts at column 18
+    assert_eq!(style_at(&buf, 18, 3).fg, Some(DIM));
 
-    // The prompt row keeps its plain style (out of scope for this slice).
-    assert!(is_unstyled(style_at(&buf, 0, 3)));
+    // The editor region (y = height - 2) keeps the prompt's plain style (out
+    // of scope for this slice).
+    assert!(is_unstyled(style_at(&buf, 0, 2)));
 }
 
 #[test]
