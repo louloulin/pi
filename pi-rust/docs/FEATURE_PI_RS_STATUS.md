@@ -13080,3 +13080,80 @@ $ cargo test --workspace --offline                            # exit 0
 * 教训沿用：**只用 `rustfmt --edition 2021 <leaf-file>`**，绝不跑 `cargo fmt -p <crate>`（会格式化整个 crate，
   LUM-1133 有过 49 文件连带事故）；全量 fmt 只在协调轮的集成分支上、作为最后一层做。
 * Git 身份沿用 `multica-agent <agent@multica.local>`；推送 `work/lum-1173`、`work/lum-1173-integrate` 与 `feature/pi.rs`。
+
+## LUM-1177 round — pi-extensions `URL` 全局（WHATWG 解析/序列化/相对解析）+ 派发 LUM-1178（导出 preRenderCustomTools）/ LUM-1179（`fs.createWriteStream`）+ 停放 LUM-1180（pi-ai/compat 工厂需要 host 流式桥）
+
+### 一、本轮自身切片：pi-extensions 的 `URL` 全局
+
+`docs/NODE_BUILTINS.md` frontier 表里 `URL` 一行写着「needs a WHATWG parser (QuickJS has none); add when an
+extension actually constructs one」。本轮确认消费方**已经在仓库里**：`packages/coding-agent/examples/extensions/custom-provider-gitlab-duo/index.ts:247` 的 OAuth 回调读取就是
+`new URL(callbackUrl).searchParams.get("code")`；`URLSearchParams` 早就有（LUM-1159），但没有解析器就吃不进一个 URL 字符串。
+
+实现（`pi-rust/crates/pi-extensions/runtime/pi-ext-shim.mjs`，挂在既有 web-platform IIFE 内、`URLSearchParams` 之后）：
+
+| 能力 | 覆盖 |
+| --- | --- |
+| scheme | 特殊 scheme `http`/`https`/`ws`/`wss`/`ftp`/`file`（缺失 `//` 也容忍，照规范的 special-authority-ignore-slashes），以及 `mailto:`/`urn:`/自定义的**不透明**路径 |
+| 读写属性 | `href` / `origin` / `protocol` / `username` / `password` / `host` / `hostname` / `port` / `pathname` / `search` / `hash` |
+| 归一化 | 默认端口按 scheme 丢弃（`https://h:443/p` → `port ""`），点段折叠（`.`/`..`），host 小写，各组件按规范的 percent-encode 集合编码 |
+| 相对解析 | `//host/p`、绝对路径、相对路径合并、`?q`、`#f` 四种形态；`#f` 保留基准 query |
+| `searchParams` | 与 URL 记录**双向联动**——`append`/`delete`/`set`/`sort` 会写回 `href`，改 `search`/`href` 会重建视图 |
+| 其它 | `toString` / `toJSON`、`URL.canParse` / `URL.parse` 静态方法、`[object URL]`（`Symbol.toStringTag`），非法输入抛 `TypeError` |
+
+**divergence**（逐条写在 `docs/NODE_BUILTINS.md`）：不做 IDNA/punycode（非 ASCII host 按字节 percent-encode，不用 `xn--`），不展开 `blob:`（`origin` 为 `"null"`），不透明基准 URL（`mailto:`）的相对解析不支持，清空的 live `searchParams` 把 query 清成「无 query」而不是留一个裸 `?`。
+
+测试 `tests/node_builtins.rs::node_url_global_parses_resolves_serializes_and_mutates` 直接复刻 gitlab-duo 的回调形状（`callbackHref` + `searchParams.get("code")`），另覆盖解析/相对解析/编码/setter/live `searchParams`/非法输入。**grep 确认 `URL` 不在任何 `node:*` import 名单里**，所以兼容性门 `upstream_node_imports_are_all_bridged_or_documented` 不受影响（它管模块 specifier，不管全局）。
+
+一句提醒：把它落到 `packages/ai/src/` 之外会误伤 —— `custom-provider-gitlab-duo` 还有一个**非 builtin/non-global** 阻塞点，见下面 frontier 第 4 条。
+
+### 二、在飞分支盘点：本轮无「别人做完但没合」的分支
+
+开工时 `feature/pi.rs` tip = `9e50b700c`（= LUM-1176 轮末），`work/*` 上只有 1173/1174/1175/1176 四条，全部已合并或已被协调轮合并，**没有遗留待合并分支**。开工时 `active_task_count = 1`（只有本 run），所以本轮可以满 3 路。
+
+**但基线在切片期间动了**：`9e50b700c` → `e38eeb778`（LUM-1173 轮的 rustfmt 全量对齐 + 它自己合并的 LUM-1174/1175 + status 文档）。我最初是在 `9e50b700c` 上把 1174/1175 合进本分支的，于是这两笔 merge 提交与 1173 轮的 `c535dac7d` / `73312c760` 成了**重复合并**。处理方式：丢弃本分支的重复合并，把仅有的两个 URL 提交 **cherry-pick 到最新 tip** 上得到 `work/lum-1177-2`：
+
+| 提交 | 内容 |
+| --- | --- |
+| `95b00e2c2` | `feat(pi-extensions): LUM-1177 补齐 URL 全局（WHATWG 解析/序列化/相对解析）` |
+| `8717afe5d` | `docs(pi-extensions): 记录 URL 全局表面与 divergence（LUM-1177）` |
+| 本文档提交 | `docs(status): LUM-1177 round — …` |
+
+**教训（写进流程）**：协调轮的基线要取两次——**动手前一次、推送前一次**；`git fetch` 之后比 `feature/pi.rs` 的最新 tip，若已前进就重接（cherry-pick）而不是叠加重复合并。
+
+### 三、验证（`work/lum-1177-2` @ 本轮末提交，全绿）
+
+```
+$ export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-fresh-1176
+$ cargo check --workspace --all-targets --offline                        # exit 0（1m10s）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings        # exit 0（25s，仅 rquickjs-core 依赖的既有提示）
+$ cargo test --workspace --offline                                       # exit 0
+```
+
+| 范围 | 套件 | passed | failed | ignored |
+| --- | --- | --- | --- | --- |
+| **本轮末**（`--workspace`） | 127 | **1915** | **0** | **2** |
+
+对照 LUM-1173 轮末的 127 / 1914 / 0 / 2：**套件数不变、通过数 +1**，正是本轮新增的 `node_url_global_…`。`cargo check --workspace --all-targets` 与 `clippy -D warnings` 用来确认「1174/1175 的等价合并 + rustfmt 基线」在新分支上确实干净（本分支只动 `pi-extensions`，但基线含全线改动）。
+
+`pi-extensions` 单 crate 全绿（117 用例）；`pi-coding-agent` 单 crate 全绿（含 LUM-1174 的会话导出测试）。
+
+### 四、frontier（本轮后）
+
+1. **质量门**（LUM-1138 的 fmt + `-D warnings`）：保持绿。本轮改动只有 `.mjs` / `.rs` 测试 / Markdown，且 Rust 侧逐文件跑过 `rustfmt --edition 2021`。
+2. **pi-extensions 引擎级缺口**：`URL` **本轮闭合**。剩余：
+   * `fs.createWriteStream` —— **本轮已派发 LUM-1179**（写桥早已存在：`fs.writeFile`/`fs.appendFile` arm + `writeFileSync` 已在用，缺的只是 `Writable` 外形）。注意实情：`createWriteStream` 在仓库里**只出现在宿主侧** `packages/coding-agent/src/core/{bash-executor,output-accumulator,tools-manager}.ts`，那些不在沙箱里跑，所以这一条是「闭合已记录的表面」而不是解阻塞某个扩展。
+   * `fs.watch`（需要 `notify` + host→JS 异步回推，最重，未派发）。
+   * `crypto.createHmac` / key-based WebCrypto —— **已核实无扩展消费方**（`grep createHmac` 在 `examples/` 与 `.pi/` 下为空），建议等出现消费方再做，别为凑全表面而派发。
+   * `node:test` / `node:assert` 全局 —— 同样无消费方（已核实），同上。
+3. **会话导出 divergence**：只剩 `preRenderCustomTools`，**本轮已派发 LUM-1178**（含一个诚实边界：JS 扩展自定义工具的 TUI renderer 需要 host→JS 渲染回调，不在该任务范围内，要求写进文档）。
+4. **`@earendil-works/pi-ai/compat` 内建 provider 工厂**（`anthropicMessagesApi` / `openAIResponsesApi` / `registerBuiltInApiProviders`）——**本轮停放到 LUM-1180（backlog）**，理由：host 侧**没有**流式回推 op（现有 import 只有请求/响应式 + 两个拉取式的 `host_child_read`/`host_child_wait`），要新增跨 crate 的事件通道与同型回调注入（照 LUM-1175 的 `HostOptions.builtin_tool_runner` 模式），横切 `pi-extensions`/`pi-coding-agent`/`pi-ai`，适合独占一轮。**这是 `custom-provider-*` 一族 OAuth 示例现在仍跑不到底的位置**——LUM-1177 只解掉了其中的全局半边。
+5. **图像侧**：修正 LUM-1173 轮 frontier 第 3 条的口径 —— 「没有生产消费方」在**上游 TS 里也一样**（全仓 `grep generateImages` 只命中 `packages/ai` 自身），所以给 `pi-coding-agent` 造 `generateImage` 入口 / `pi list-images-models` 是**发明上游没有的产品面**，不属于兼容性移植缺口；本轮**不派发**，也不建议后续为它单独开轮。
+6. **`ctx.ui.custom()` overlay/render channel**：不变，仍是最大的插件生态缺口（固定 `ERR_PI_UI_UNSUPPORTED`），跨 `pi-tui` 渲染循环且无法离线端到端验证，需要独占一轮。
+7. **provider 家族**（bedrock-converse / cohere-v2 / google-vertex，云凭据）与 **`assistant-message-frame` 事件枚举扩宽**：不变，仍延后。
+
+### 五、并发、磁盘与派发
+
+* 开工 `active = running = 1`（只有本 run）。派发后 `active = running = 3`：本 run + **LUM-1178**（`todo`）+ **LUM-1179**（`todo`）；**LUM-1180** 停在 `backlog`，不占槽。
+* 三个新 issue 都挂在 **LUM-1177** 下（沿用「协调轮派发的子任务挂协调轮」的既有约定，与 LUM-1168↔LUM-1167、LUM-1174/1175↔LUM-1173 一致），unstage，`priority = high`。
+* 复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1176`（2.0G，LUM-1176 轮遗留），全程 `--offline`：冷 check 1m10s、clippy 25s、`--workspace` 全量 test 在既有产物上主要花在链接与跑测试。未清理 `/tmp/pi-fresh-1173` / `/tmp/pi-fresh-1174`（属在飞任务）。
+* Git 身份沿用 `multica-agent <agent@multica.local>`；本轮推送 `work/lum-1177-2` 与 `feature/pi.rs`。

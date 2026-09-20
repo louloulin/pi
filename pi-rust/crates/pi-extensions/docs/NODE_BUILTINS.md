@@ -291,15 +291,25 @@ implementation keeps it, and re-evaluating the shim is idempotent.
 | `atob(string)` / `btoa(string)` | Strict Latin-1 binary-string codec: one code unit per byte, `InvalidCharacterError` above `0xFF`, and `atob` rejects a length that is not a multiple of four or a character outside the base64 alphabet (whitespace is stripped first, as the spec requires). |
 | `crypto` | `webcrypto` from `node:crypto`: `getRandomValues` (in place, 64 KiB quota, integer views only), `randomUUID`, `subtle.digest`. |
 | `URLSearchParams` | `application/x-www-form-urlencoded` codec: `append` / `delete` / `get` / `getAll` / `has` / `set` / `sort` / `toString` / `forEach` / `keys` / `values` / `entries` / `size` / iterator, constructible from a query string, a record, a sequence of pairs or another `URLSearchParams`. |
+| `URL` | WHATWG parser / serializer / resolver over the special schemes (`http` / `https` / `ws` / `wss` / `ftp` / `file`) plus opaque ones (`mailto:`, `urn:`, custom): `href` / `origin` / `protocol` / `username` / `password` / `host` / `hostname` / `port` / `pathname` / `search` / `hash` read **and** written, a live `searchParams`, `toString` / `toJSON`, and the `URL.canParse` / `URL.parse` statics. Divergences below. |
 
-`URL` itself is still missing (see the frontier table): it needs a WHATWG URL
-parser, and nothing in the repo constructs one yet. The clearest consumer of the
-globals above is the legacy OAuth extension
-`packages/coding-agent/examples/extensions/custom-provider-anthropic/index.ts`,
-whose PKCE step is `crypto.getRandomValues` → `btoa` →
+The `URL` polyfill (LUM-1177) closes the gap `URLSearchParams` could not:
+the repo's `packages/coding-agent/examples/extensions/custom-provider-gitlab-duo/index.ts`
+reads its OAuth redirect as `new URL(callbackUrl).searchParams.get("code")` —
+the only global that example was missing. Deliberate divergences
+from Node: no IDNA / punycode, so a non-ASCII host is byte-percent-encoded
+instead of `xn--`-transcoded (ASCII hosts lower-case exactly as Node does);
+no `blob:` unwrapping (`new URL("blob:https://h/x").origin` is `"null"`);
+resolving a relative reference against a non-special *opaque* base
+(`mailto:`) is not supported; and an emptied live `searchParams` clears the
+query instead of leaving a bare `?`. The legacy OAuth extension
+`packages/coding-agent/examples/extensions/custom-provider-anthropic/index.ts`
+is the clearest consumer of the rest, its PKCE step being
+`crypto.getRandomValues` → `btoa` →
 `crypto.subtle.digest("SHA-256", …)` → `new URLSearchParams({ … })`; the
 `base64_globals_…` / `crypto_globals_…` / `url_search_params_…` tests in
-`tests/web_globals.rs` replay it, including the RFC 7636 appendix B vector.
+`tests/web_globals.rs` replay it, including the RFC 7636 appendix B vector, and
+`node_url_global_…` in `tests/node_builtins.rs` replays the `URL` half.
 
 ## Coverage against the repo's own extensions
 
@@ -307,6 +317,7 @@ whose PKCE step is `crypto.getRandomValues` → `btoa` →
 |---|---|---|
 | `claude-rules.ts`, `file-trigger.ts`, `preset.ts`, `provider-payload.ts`, `titlebar-spinner.ts`, `truncated-tool.ts`, `subagent/agents.ts`, `dynamic-resources/index.ts`, `gondolin/index.ts` | `node:fs`, `node:fs/promises`, `node:path`, `node:url` | Builtins **fully covered**. |
 | `.pi/extensions/import-repro.ts` | `node:buffer`, `node:fs`, `node:path` | **Unblocked**: builtins plus the `fetch` / `Headers` / `Request` / `Response` globals (LUM-1135) are covered, and `response.text()` / `response.json()` / `response.ok` are all it uses. |
+| `custom-provider-gitlab-duo/index.ts` | globals `URL` / `URLSearchParams` / `crypto.subtle.digest`, plus `@earendil-works/pi-ai/compat` | **Builtins/globals unblocked** (LUM-1177): the OAuth redirect check is `new URL(callbackUrl).searchParams.get("code")`, which needed the `URL` global's parser and was the only global this example was missing. Its remaining blocker is not a builtin: `anthropicMessagesApi` / `openAIResponsesApi` are documented `pi-ai/compat` gaps (see [`SDK_MODULES.md`](SDK_MODULES.md#earendil-workspi-aicompat--provider-registry--builtin-gaps)). |
 | `.pi/extensions/prompt-url-widget.ts` | `node:fs/promises`, `node:os`, `node:path` | Covered; the `@earendil-works/pi-tui` module it needs is bridged as well (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
 | `.pi/extensions/redraws.ts`, `.pi/extensions/tps.ts` | — | No builtins; the `@earendil-works/*` modules they need are bridged (see [`SDK_MODULES.md`](SDK_MODULES.md)). |
 | `git-merge-and-resolve.ts`, `doom-overlay/doom-engine.ts`, `doom-overlay/wad-finder.ts` | covered set + `node:readline` / `node:module` / `node:zlib` | `node:readline` / `node:module` (LUM-1129), the whole `node:zlib` surface (LUM-1125, LUM-1131) and `fs.createReadStream` (LUM-1172) are bridged, so **`git-merge-and-resolve.ts` reads its input through `createReadStream` + `readline.createInterface` and `wad-finder.ts`'s `gunzipSync` works**. The remaining blocker is non-builtin: `doom-engine.ts` needs to `require` the local `doom.js` off disk (the sandbox refuses). |
@@ -365,7 +376,7 @@ plain "undefined is not a function":
 | `fs.watch`, `fs.createWriteStream` | `createReadStream` **is** bridged (LUM-1172) as a buffered replay of `fs.readFile`, so the read half of this row is closed; a write stream needs the same `Writable` plumbing over `fs.writeFile`/`fs.appendFile`, and `fs.watch` needs a filesystem watcher. | Wrap the write ops in a `Writable` the way LUM-1172 wrapped the read op; `notify` crate for `watch`. |
 | `os.cpus()`, `os.totalmem()`, `os.networkInterfaces()` | Machine topology has no consumer yet; inventing numbers would be worse than failing. | Straightforward `sysinfo`-style additions when needed. |
 | `process.argv`, `process.execPath`, `process.stdin`, `process.kill` | The host owns the process; extensions must not steer it. | Probably never. |
-| `node:test`, `node:assert` global, `URL` | Engine-level globals QuickJS does not ship (`TextEncoder` / `TextDecoder` are now polyfilled from `node:util` and installed globally, `AbortController` / `AbortSignal` by the extension shim for `pi.exec` cancellation — see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)), and `atob` / `btoa` / `crypto` / `URLSearchParams` are polyfilled by the shim now (LUM-1159) — see [Globals](#globals). | `URL` needs a WHATWG parser (QuickJS has none); add when an extension actually constructs one. `fetch` **is** bridged (LUM-1135): `fetch` / `Headers` / `Request` / `Response` are backed by the `host_fetch` import over the host's `reqwest` stack, so the repo's own `.pi/extensions/import-repro.ts` runs (see [`EXTENSIONS.md`](EXTENSIONS.md#fetch-global)). |
+| `node:test`, `node:assert` global | Engine-level globals QuickJS does not ship (`TextEncoder` / `TextDecoder` are now polyfilled from `node:util` and installed globally, `AbortController` / `AbortSignal` by the extension shim for `pi.exec` cancellation — see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)), and `atob` / `btoa` / `crypto` / `URLSearchParams` / `URL` are polyfilled by the shim now (LUM-1159, LUM-1177) — see [Globals](#globals). | `node:test` is a whole runner and `assert` is a deep-equality library; neither is on an extension's critical path. `fetch` **is** bridged (LUM-1135): `fetch` / `Headers` / `Request` / `Response` are backed by the `host_fetch` import over the host's `reqwest` stack, so the repo's own `.pi/extensions/import-repro.ts` runs (see [`EXTENSIONS.md`](EXTENSIONS.md#fetch-global)). |
 
 The upstream examples are the compatibility yardstick: the test
 `upstream_node_imports_are_all_bridged_or_documented`
