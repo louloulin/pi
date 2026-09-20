@@ -297,6 +297,47 @@ Divergences:
   `calculateCost(model, usage)` from `@earendil-works/pi-ai` if the
   extension needs it.
 
+#### `pi.registerProvider` — ExtensionAPI bridge (slice 1)
+
+The extension-facing `pi.registerProvider(name, config)` /
+`pi.unregisterProvider(name)` methods are **implemented** for the
+string overload. They are a distinct path from the `compat` registry
+above: the registration lands in the host (`host_register_provider`,
+validated), and `pi-coding-agent` turns it into a `ProviderRouter`
+adapter plus model-catalog entries, so the agent itself can stream from
+the extension's provider.
+
+Supported fields: `name`, `baseUrl`, `apiKey` (literal or `$VAR` /
+`${VAR}`), `api`, `models`. `api` must be one of `anthropic-messages`,
+`openai-responses`, `openai-completions`, `google-generative-ai`; a
+`models` array without `api` and an unknown `api` both throw with the
+supported set in the message. A `baseUrl`-only call is accepted as an
+override of a built-in provider.
+
+Documented divergences from upstream `ProviderConfig`:
+
+* **Native `Provider` object overload is not bridged.**
+  `pi.registerProvider(providerObject)` throws
+  `ERR_PI_SDK_UNIMPLEMENTED` and points at the string overload.
+* **No `oauth` block.** `/login` support for extension providers is not
+  wired; an `oauth` field is ignored (the provider registers without
+  one).
+* **No `streamSimple`.** A custom api family still needs
+  `compat.registerApiProvider` (LUM-1180), not `registerProvider`.
+* **No `headers` / `authHeader` / `refreshModels`.** Same reason as the
+  compat divergence above: the Rust adapters take only a credential and
+  a base URL.
+* **`!command` apiKey is never executed.** The host stores the string but
+  the application layer rejects it, logs a warning and skips the
+  provider; use a literal or `$VAR`.
+* **A key that does not resolve skips the provider.** Matching the
+  built-in router's "unconfigured provider is absent, not broken" rule,
+  a `$VAR` that is unset warns and leaves the provider unregistered.
+* **`unregisterProvider` is a host-registry no-op after load.** It
+  removes the registration from the host; a live router adapter / catalog
+  entry is removed through `ProviderRouter::unregister_provider`, which
+  the CLI does not yet call from an event handler.
+
 ### `@earendil-works/pi-agent-core` — resolves, no runtime exports
 
 Every value import from this package in the upstream examples is

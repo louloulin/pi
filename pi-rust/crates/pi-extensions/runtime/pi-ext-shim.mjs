@@ -438,6 +438,69 @@ const pi = Object.freeze({
     }
   },
 
+  /**
+   * Register a custom / proxy provider the agent can stream from.
+   *
+   * Slice 1 backs the string overload only:
+   * `pi.registerProvider(name, { baseUrl, apiKey, api, models, name })`.
+   * The native `Provider` object overload (and its `streamSimple` /
+   * `oauth` fields) is not implemented — calling it throws
+   * `ERR_PI_SDK_UNIMPLEMENTED` instead of registering a broken provider.
+   *
+   * Validation happens host-side, so an unknown `api` or a `models`
+   * array without `api` rejects with a readable `Error` that names the
+   * supported set. `apiKey` is stored verbatim: `$VAR` / `${VAR}` is
+   * resolved by the application layer, and a leading `!command` is
+   * documented as unsupported (never executed).
+   */
+  registerProvider(nameOrProvider, config) {
+    if (typeof nameOrProvider !== "string") {
+      const error = new Error(
+        "pi.registerProvider: the native Provider object overload is not implemented by this host; call pi.registerProvider(name, { baseUrl, apiKey, api, models })",
+      );
+      error.code = "ERR_PI_SDK_UNIMPLEMENTED";
+      throw error;
+    }
+    const name = nameOrProvider;
+    if (!name) {
+      throw new TypeError("pi.registerProvider: name must be a non-empty string");
+    }
+    if (config != null && typeof config !== "object") {
+      throw new TypeError("pi.registerProvider: config must be an object");
+    }
+    const source = config || {};
+    const payload = { name };
+    for (const key of ["baseUrl", "apiKey", "api"]) {
+      if (typeof source[key] === "string") payload[key] = source[key];
+    }
+    if (typeof source.name === "string") payload.displayName = source.name;
+    else if (typeof source.displayName === "string") payload.displayName = source.displayName;
+    if (Array.isArray(source.models)) payload.models = source.models;
+    if (typeof globalThis.host_register_provider !== "function") {
+      throw new Error(
+        "pi.registerProvider is not available in this host build",
+      );
+    }
+    // The host validates and throws on a bad registration; let it propagate.
+    globalThis.host_register_provider(JSON.stringify(payload));
+  },
+
+  /**
+   * Remove a provider previously registered with `registerProvider`.
+   * A no-op when the name is unknown.
+   */
+  unregisterProvider(name) {
+    if (typeof name !== "string" || !name) {
+      throw new TypeError("pi.unregisterProvider: name must be a non-empty string");
+    }
+    if (typeof globalThis.host_unregister_provider !== "function") {
+      throw new Error(
+        "pi.unregisterProvider is not available in this host build",
+      );
+    }
+    globalThis.host_unregister_provider(name);
+  },
+
   /** Append a custom entry to the session for state persistence. */
   appendEntry(customType, data) {
     if (typeof customType !== "string" || !customType) {

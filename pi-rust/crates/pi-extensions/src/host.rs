@@ -199,6 +199,106 @@ pub struct RegisteredToolPrompt {
     pub guidelines: Vec<String>,
 }
 
+/// API families `pi.registerProvider` may name in `config.api`.
+///
+/// The string ids mirror the upstream TS `Api` union (and the wire names
+/// `pi-ai::models::register_provider_json` accepts), not the Rust enum's
+/// `snake_case` serialization. `openai-chat-completions` is accepted as an
+/// alias so an extension written against the Rust-port spelling keeps
+/// working.
+pub const SUPPORTED_PROVIDER_APIS: &[&str] = &[
+    "anthropic-messages",
+    "openai-responses",
+    "openai-completions",
+    "google-generative-ai",
+];
+
+/// Map an extension-supplied `api` string to a supported family name.
+///
+/// Returns `None` for an unknown / out-of-scope family (native `streamSimple`
+/// APIs, `azure-openai-responses`, `bedrock-converse`, …), which
+/// [`validate_registered_provider`] reports to the extension.
+pub fn canonical_provider_api(api: &str) -> Option<&'static str> {
+    match api {
+        "anthropic-messages" => Some("anthropic-messages"),
+        "openai-responses" => Some("openai-responses"),
+        "openai-completions" | "openai-chat-completions" => Some("openai-completions"),
+        "google-generative-ai" => Some("google-generative-ai"),
+        _ => None,
+    }
+}
+
+/// A provider registered by an extension via `pi.registerProvider(name, config)`.
+///
+/// Slice 1 covers the string overload only: `name` plus the declarative
+/// `baseUrl` / `apiKey` / `api` / `models` fields. The native `Provider`
+/// object overload, the `oauth` block and `streamSimple` handlers are out of
+/// scope and stay unregistered.
+///
+/// `apiKey` is kept as the raw string the extension supplied; resolving a
+/// `$VAR` reference is the application layer's job (it owns the environment
+/// and the credential store), not the sandbox host's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredProviderConfig {
+    /// Provider id the extension registered under.
+    pub name: String,
+    /// Display name shown in the UI, when the extension supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Base URL override; `None` means "use the API family's default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Raw API key string (literal / `$VAR` / `${VAR}` / `!command`). The
+    /// host never executes the `!command` form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// API family id (see [`SUPPORTED_PROVIDER_APIS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    /// Raw `models` array from the extension. `Null` when the extension
+    /// supplied none (a pure base-URL override).
+    #[serde(default)]
+    pub models: serde_json::Value,
+}
+
+/// Validate one [`RegisteredProviderConfig`] before it enters the registry.
+///
+/// Mirrors the checks upstream performs implicitly: a provider needs a name;
+/// a provider that declares models needs an API family this build can stream;
+/// and an unknown family is rejected with the supported set in the message so
+/// an extension author can fix the call without reading the source.
+fn validate_registered_provider(config: &RegisteredProviderConfig) -> Result<(), String> {
+    if config.name.trim().is_empty() {
+        return Err("pi.registerProvider: name must be a non-empty string".into());
+    }
+    let has_models = match &config.models {
+        serde_json::Value::Null => false,
+        serde_json::Value::Array(items) => !items.is_empty(),
+        _ => return Err("pi.registerProvider: `models` must be an array".into()),
+    };
+    match config.api.as_deref() {
+        Some(api) => {
+            if canonical_provider_api(api).is_none() {
+                return Err(format!(
+                    "pi.registerProvider: unsupported api `{api}` for provider `{}`; supported: {}",
+                    config.name,
+                    SUPPORTED_PROVIDER_APIS.join(", ")
+                ));
+            }
+        }
+        None if has_models => {
+            return Err(format!(
+                "pi.registerProvider: provider `{}` declares `models` but no `api`; set `api` to one of: {}",
+                config.name,
+                SUPPORTED_PROVIDER_APIS.join(", ")
+            ))
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 /// One entry written to the host's log, either via `pi.appendEntry`
 /// or as a side-effect trace from a UI call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,10 +582,33 @@ struct Inner {
 struct HostState {
     registry: ExtensionRegistry,
     log: RegistrationLog,
+    /// Providers registered via `pi.registerProvider`, in registration
+    /// order. A repeated `name` overwrites in place, so the last write
+    /// wins without losing the provider's original position — the
+    /// application layer reads this once per load pass.
+    providers: Vec<RegisteredProviderConfig>,
     /// Index of [`HostState::log::tools`] into [`HostState::registry`]
     /// so `host_register_tool` can attribute tools to the extension
     /// that registered them without widening the host-import ABI.
     pending_extension: Option<String>,
+}
+
+impl HostState {
+    /// Insert / overwrite one provider registration (validated first).
+    fn register_provider(&mut self, config: RegisteredProviderConfig) -> Result<(), String> {
+        validate_registered_provider(&config)?;
+        match self.providers.iter_mut().find(|p| p.name == config.name) {
+            // Overwrite in place so registration order is stable.
+            Some(existing) => *existing = config,
+            None => self.providers.push(config),
+        }
+        Ok(())
+    }
+
+    /// Drop a provider registration; a no-op when `name` is unknown.
+    fn unregister_provider(&mut self, name: &str) {
+        self.providers.retain(|provider| provider.name != name);
+    }
 }
 
 impl Drop for Inner {
@@ -690,6 +813,24 @@ impl JsExtensionHost {
     /// Borrow the registered tools across every loaded extension.
     pub fn registered_tools(&self) -> Vec<ToolDefinition> {
         self.inner.state.lock().registry.tools().cloned().collect()
+    }
+
+    /// Providers registered via `pi.registerProvider(name, config)`, in
+    /// registration order (a repeated name overwrites in place). Empty
+    /// when no extension registered one, so `--no-extensions` and a
+    /// plain host both yield `[]`.
+    ///
+    /// The snapshot is a clone: the application layer resolves `apiKey`
+    /// and builds adapters from it, and mutating the returned vector must
+    /// not change the host registry.
+    pub fn registered_providers(&self) -> Vec<RegisteredProviderConfig> {
+        self.inner.state.lock().providers.clone()
+    }
+
+    /// Remove one provider registration (the host side of
+    /// `pi.unregisterProvider`). A no-op when `name` is unknown.
+    pub fn unregister_provider(&self, name: &str) {
+        self.inner.state.lock().unregister_provider(name);
     }
 
     /// List every slash command registered via `pi.registerCommand`,
@@ -2617,6 +2758,39 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
         Ok(())
     });
     globals.set("host_register_command", cmd_fn)?;
+
+    // host_register_provider(json) — register one provider declared via
+    // `pi.registerProvider(name, config)`. Validation failures throw a JS
+    // `Error` (the shim lets it propagate) instead of silently dropping the
+    // registration, so an extension author sees the bad `api` immediately.
+    let state_for_provider = inner.state.clone();
+    let provider_fn = Func::from(move |json: String| -> rquickjs_core::Result<()> {
+        let config: RegisteredProviderConfig = serde_json::from_str(&json).map_err(|e| {
+            rquickjs_core::Error::new_from_js_message(
+                "register_provider",
+                "protocol",
+                e.to_string(),
+            )
+        })?;
+        state_for_provider
+            .lock()
+            .register_provider(config)
+            .map_err(|message| {
+                rquickjs_core::Error::new_from_js_message("register_provider", "config", message)
+            })?;
+        Ok(())
+    });
+    globals.set("host_register_provider", provider_fn)?;
+
+    // host_unregister_provider(name) — drop a provider registration. A
+    // no-op when the name is unknown, matching upstream's
+    // `unregisterProvider` contract.
+    let state_for_unregister = inner.state.clone();
+    let unregister_provider_fn = Func::from(move |name: String| -> rquickjs_core::Result<()> {
+        state_for_unregister.lock().unregister_provider(&name);
+        Ok(())
+    });
+    globals.set("host_unregister_provider", unregister_provider_fn)?;
 
     // host_append_entry(customType, dataJson)
     let state_for_entry = inner.state.clone();

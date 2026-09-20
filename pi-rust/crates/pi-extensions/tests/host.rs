@@ -1250,3 +1250,144 @@ fn esm_unsupported_imports_are_reported() {
         assert!(err.to_string().contains("relative import"), "{err}");
     });
 }
+
+#[test]
+fn host_collects_provider_registration_via_shim() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.registerProvider("my-proxy", {
+                    name: "My Proxy",
+                    baseUrl: "https://proxy.example.com/v1",
+                    apiKey: "$MY_PROXY_KEY",
+                    api: "openai-completions",
+                    models: [{ id: "proxy-model", name: "Proxy Model" }],
+                });
+            };
+        "#;
+        host.load(entry("provider_ext"), source)
+            .await
+            .expect("load should succeed");
+
+        let providers = host.registered_providers();
+        assert_eq!(providers.len(), 1, "{providers:?}");
+        let config = &providers[0];
+        assert_eq!(config.name, "my-proxy");
+        assert_eq!(config.display_name.as_deref(), Some("My Proxy"));
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://proxy.example.com/v1")
+        );
+        // `apiKey` stays the raw string: resolution is the app layer's job.
+        assert_eq!(config.api_key.as_deref(), Some("$MY_PROXY_KEY"));
+        assert_eq!(config.api.as_deref(), Some("openai-completions"));
+        assert_eq!(config.models.as_array().map(Vec::len), Some(1));
+        assert_eq!(config.models[0]["id"], "proxy-model");
+    });
+}
+
+#[test]
+fn host_provider_registration_overwrites_in_place_and_unregisters() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.registerProvider("alpha", { baseUrl: "https://a.example.com" });
+                pi.registerProvider("beta", { baseUrl: "https://b.example.com" });
+                // Same name again: overwrite, keep position.
+                pi.registerProvider("alpha", { baseUrl: "https://a2.example.com" });
+                pi.unregisterProvider("missing");
+                pi.unregisterProvider("beta");
+            };
+        "#;
+        host.load(entry("provider_overwrite"), source)
+            .await
+            .expect("load should succeed");
+
+        let providers = host.registered_providers();
+        assert_eq!(
+            providers
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "overwrite keeps position, unregister drops"
+        );
+        assert_eq!(
+            providers[0].base_url.as_deref(),
+            Some("https://a2.example.com")
+        );
+    });
+}
+
+#[test]
+fn host_provider_registration_rejects_unknown_api() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let err = host
+            .load(
+                entry("provider_bad_api"),
+                r#"
+                    module.exports = function (pi) {
+                        pi.registerProvider("bad", {
+                            api: "bedrock-converse",
+                            models: [{ id: "m" }],
+                        });
+                    };
+                "#,
+            )
+            .await
+            .expect_err("an unknown api must reject");
+        let message = err.to_string();
+        assert!(message.contains("bedrock-converse"), "{message}");
+        assert!(message.contains("anthropic-messages"), "{message}");
+        assert!(host.registered_providers().is_empty());
+    });
+}
+
+#[test]
+fn host_provider_registration_requires_api_when_models_given() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let err = host
+            .load(
+                entry("provider_no_api"),
+                r#"
+                    module.exports = function (pi) {
+                        pi.registerProvider("no-api", { models: [{ id: "m" }] });
+                    };
+                "#,
+            )
+            .await
+            .expect_err("models without api must reject");
+        assert!(err.to_string().contains("no `api`"), "{err}");
+        assert!(host.registered_providers().is_empty());
+    });
+}
+
+#[test]
+fn host_provider_registration_rejects_native_provider_object() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let err = host
+            .load(
+                entry("provider_native"),
+                r#"
+                    module.exports = function (pi) {
+                        pi.registerProvider({ id: "native", api: "custom", streamSimple() {} });
+                    };
+                "#,
+            )
+            .await
+            .expect_err("native Provider overload is out of scope");
+        let message = err.to_string();
+        assert!(message.contains("not implemented"), "{message}");
+        assert!(host.registered_providers().is_empty());
+    });
+}
