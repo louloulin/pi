@@ -1,0 +1,76 @@
+# lum1266-longline.png — chars, 120x23 cells
+
+===== LUM-1266: 120x23 — 滚动条绘制期间，一条 130 列消息折成 117+13 列，最后一个字符仍在第 119 列，滚动条独占第 120 列  |  [1] 1. idle at 120x23 (long startup wait: this box runs at load >100 and the first paint can take >10s)  (cursor 120,22, frame 3a1916d0e95d, px 6e1c45027873, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d728a5cd5fa8c6                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — 滚动条绘制期间，一条 130 列消息折成 117+13 列，最后一个字符仍在第 119 列，滚动条独占第 120 列  |  [2] 2. /help fills the transcript past the viewport, so the chat-log scrollbar is drawn  (cursor 120,20, frame a2ab6b43ffb1, px 77d63eaf7493, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+·   /settings show or change interface settings                                                                        │
+·   /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)                                │
+·   /trust    show or set project trust (/trust yes|no)                                                                │
+·   /compact  summarize the conversation prefix to free context                                                        │
+·   /hotkeys  list the keyboard shortcuts                                                                              │
+·   /extensions list loaded extensions and what they register                                                          │
+·   /exit     quit the interactive session                                                                             │
+·                                                                                                                      │
+· keys:                                                                                                                ┃
+·   Enter       submit prompt                                                                                          ┃
+·   Up / Down   navigate prompt history                                                                                ┃
+·   PgUp/PgDn   scroll the chat log one page                                                                           ┃
+·   Home / End  jump to the start / end of the chat log                                                                ┃
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      ┃
+·   Ctrl+D      exit on an empty prompt                                                                                ┃
+·   Ctrl+L      open the model selector                                                                                ┃
+·   Ctrl+U      clear the prompt buffer                                                                                ┃
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d728a5cd5fa8c6                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — 滚动条绘制期间，一条 130 列消息折成 117+13 列，最后一个字符仍在第 119 列，滚动条独占第 120 列  |  [3] 3. a 130-column message submitted with Enter while the bar is drawn: text wraps at 119 columns, the last character stays in column 119 and the bar keeps column 120  (cursor 49,22, frame f84b7887ec21, px dc709792eb72, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+·   /compact  summarize the conversation prefix to free context                                                        │
+·   /hotkeys  list the keyboard shortcuts                                                                              │
+·   /extensions list loaded extensions and what they register                                                          │
+·   /exit     quit the interactive session                                                                             │
+·                                                                                                                      │
+· keys:                                                                                                                │
+·   Enter       submit prompt                                                                                          │
+·   Up / Down   navigate prompt history                                                                                │
+·   PgUp/PgDn   scroll the chat log one page                                                                           │
+·   Home / End  jump to the start / end of the chat log                                                                ┃
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      ┃
+·   Ctrl+D      exit on an empty prompt                                                                                ┃
+·   Ctrl+L      open the model selector                                                                                ┃
+·   Ctrl+U      clear the prompt buffer                                                                                ┃
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+> 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456┃
+> 7890123456789                                                                                                        ┃
+  faux-model (faux) hello                                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d728a5cd5fa8c6                                                  in 0 out 0 ?/8.2k  ? for help

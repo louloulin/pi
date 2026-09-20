@@ -6,7 +6,7 @@
   "fixtures": ["src/main.rs"],
   "distinct_panels": true,
   "panels": [
-    {"label": "1. idle at 120x23: folded header (title + folded-hints row), composer, status bar — the LUM-1260 build had 0 composer rows here", "send": "", "wait": 2.5},
+    {"label": "1. 8s idle at 120x23: folded header (title + folded-hints row), composer, status bar — the LUM-1260 build had 0 composer rows here", "send": "", "wait": 8.0},
     {"label": "2. a real turn lands in the transcript", "send": "hi<Enter>", "wait": 4.0},
     {"label": "3. /help<Enter> -> command surface fills the transcript; every row keeps its last character", "send": "/help<Enter>", "wait": 1.5},
     {"label": "4. /hotkeys<Enter> -> the transcript now overflows, so the scrollbar is drawn on the frame's last column", "send": "/hotkeys<Enter>", "wait": 1.5},

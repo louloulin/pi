@@ -1,0 +1,126 @@
+# lum1266-before-short-23.png — chars, 120x23 cells
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [1] 1. idle at 120x23: folded header (title + folded-hints row), composer, status bar — the LUM-1260 build had 0 composer rows here  (cursor 120,22, frame 8a6f6d6e19dd, px 06e061dc189f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7271b86461ae7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [2] 2. a real turn lands in the transcript  (cursor 120,20, frame a8203fae3d65, px 2568cc09512b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+  faux-model (faux) hello                                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7271b86461ae7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [3] 3. /help<Enter> -> command surface fills the transcript; every row keeps its last character  (cursor 25,20, frame 9b19865217b3, px b817fa93ee17, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7271b86461ae7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [4] 4. /hotkeys<Enter> -> the transcript now overflows, so the scrollbar is drawn on the frame's last column  (cursor 25,20, frame 9b19865217b3, px 7f33a8dac781, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7271b86461ae7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x23 — folded header + visible composer, and the chat-log scrollbar in its own column beside full-width /help rows  |  [5] 5. PgUp -> scrolled back: the thumb moves off the bottom, no text row lost a character to the bar  (cursor 75,20, frame 611fa47ba814, px d6ffbc41e0b5, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+·   Esc             close the selector / ov ↓ Jump to latest message · End                                             ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7271b86461ae7                                                  in 0 out 0 ?/8.2k  ? for help

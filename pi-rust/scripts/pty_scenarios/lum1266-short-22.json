@@ -6,7 +6,7 @@
   "fixtures": ["src/main.rs"],
   "distinct_panels": true,
   "panels": [
-    {"label": "1. idle at 120x22: the header folds its hint list into one line and the composer + status bar stay on screen (LUM-1260 shipped 0 composer rows here)", "send": "", "wait": 2.5},
+    {"label": "1. 8s idle at 120x22: the header folds its hint list into one line and the composer + status bar stay on screen (LUM-1260 shipped 0 composer rows here)", "send": "", "wait": 8.0},
     {"label": "2. a draft typed at 120x22 is visible in the composer instead of being typed blind", "send": "typed at 22 rows", "wait": 1.0},
     {"label": "3. Enter runs the turn: the reply lands in the transcript and the composer is still there", "send": "<Enter>", "wait": 4.0}
   ]

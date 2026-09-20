@@ -1,0 +1,13 @@
+{
+  "cols": 120,
+  "rows": 23,
+  "caption": "LUM-1266: 120x23 — 滚动条绘制期间，一条 130 列消息折成 117+13 列，最后一个字符仍在第 119 列，滚动条独占第 120 列",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs"],
+  "distinct_panels": true,
+  "panels": [
+    {"label": "1. idle at 120x23 (long startup wait: this box runs at load >100 and the first paint can take >10s)", "send": "", "wait": 30.0},
+    {"label": "2. /help fills the transcript past the viewport, so the chat-log scrollbar is drawn", "send": "/help<Enter>", "wait": 4.0},
+    {"label": "3. a 130-column message submitted with Enter while the bar is drawn: text wraps at 119 columns, the last character stays in column 119 and the bar keeps column 120", "send": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789<Enter>", "wait": 4.0}
+  ]
+}

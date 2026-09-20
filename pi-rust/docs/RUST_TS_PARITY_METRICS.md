@@ -116,6 +116,24 @@ silent:      7/44 (15.9%)  app.models.{clearAll,enableAll,reorderDown,reorderUp,
 该用例自 `d02fb0ace`（LUM-1190）就在，是 `pump()` 投递与渲染之间的竞态；40×12 下新旧 `plan_chrome`
 分配完全相同，**与本轮布局改动无关**。
 
+### 0.4 LUM-1266 复测：矮终端里聊天区从 1 行回到 17 行（合并提交 `e4db5cb82`）
+
+同样**不改计数口径**，加权仍是 **81.4%**。本轮是 TUI 布局修正，关掉的是 §0.2 序列背后的同一个根因
+（`plan_chrome` 不感知内置启动头高度）剩下的另外两个受害者：
+
+| 问题 | 本轮 | 证据 |
+| --- | --- | --- |
+| 120×22/23 里聊天区只剩 1 行，`/help` 与 `/hotkeys` 渲染成**完全相同的帧** | **关闭** | 内置启动头在装不下时自动折叠；`app.rs::builtin_header_lines`；A/B：`docs/screenshots/lum1266-before-short-23.png.txt`（面板 3/4 同哈希 `9b19865217b3`，harness 判 FAIL）→ `lum1266-short-23.png.txt`（5 帧全不同，`/help` 19 行可见）；细节见 `docs/TUI_SHORT_VIEWPORT_AND_SCROLLBAR_LUM1266.md` |
+| 滚动条画在文字最后一列，会吃掉整宽行的最后一个字符 | **关闭** | 画滚动条时转写区宽度 `W → W-1`（`app.rs::viewport_for_render` / `viewport_reserved` / `scrollbar_geometry`）；不变量测试 `pi-tui/tests/short_viewport.rs`（3 条）。诚实说明：120 列下无行填满末列，所以缺同 tip 的 before 帧（详见该文 §2.4） |
+
+门禁（本轮独立运行）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --offline -p pi-tui` | **805 passed / 0 failed**（LUM-1261 tip 为 798，本轮 +7） |
+| `cargo clippy --offline -p pi-tui --all-targets` | 无告警 |
+| 真机 PTY `lum1266-{short-22,short-23,tall-34}` | 3/5/3 帧各不相同、退出码 0（120×22 / 120×23 / 120×34） |
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

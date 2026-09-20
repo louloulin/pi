@@ -349,6 +349,12 @@ PTY 实拍（120×50，同一 `lum1259-tip-interaction` / `lum1261-help-layout` 
 1. **低于 24 行时自动收起启动头**（§3 的建议）仍未实现。现在不是靠"收起"，而是靠"截尾 + 保住提示行"
    让输入框可见；`total >= 24` 时启动头依旧占满 21 行，80×24 的"界面只剩一行内容"观感没变。
    这条要动 `app.rs`（渲染前按尺寸决定 `header_expanded`），本轮 3 条在飞 run 正在改 `app.rs`，故意不碰。
+   > **LUM-1266 已关闭本条**（tip `e4db5cb82`）：内置启动头在 `expanded + HEADER_RESERVED_ROWS > total` 时
+   > 自动折叠成"标题行 + 一行 `hints hidden on a short terminal — Alt+H shows them`"（`app.rs::builtin_header_lines`，
+   > 常量 `MIN_TRANSCRIPT_ROWS` / `RESERVED_CHROME_ROWS`，文案 `locale.rs::header_folded_line`）。
+   > 120×22 的聊天区从 0–1 行回到 17 行，120×23 下 `/help` 与 `/hotkeys` 不再渲染成同一帧；
+   > 高终端逐行不变。`ctx.ui.setHeader` 的扩展 header **仍然截尾**，不替扩展做取舍。
+   > 细节与 A/B 帧见 `docs/TUI_SHORT_VIEWPORT_AND_SCROLLBAR_LUM1266.md`。
 2. **80 列时超宽行的内部列对齐仍会丢**：列宽预算不够时 `Ctrl+C abort the current turn (…)` 这类行会折成两行、
    第二行从正文列 0 起排。上游同款行为（先按空白折叠再包），保留为已知的外观偏差，不做 Rust 特有的增强。
 3. **`plan_chrome` 的新顺序改了扩展区域的观测行为**：当扩展 header/Above/Below/footer 的总需求超过终端高度时，
