@@ -301,11 +301,12 @@ fn pi_ai_event_stream_and_compat_registry_match_upstream() {
                 AssistantMessageEventStream, EventStream, createAssistantMessageEventStream,
             } from "@earendil-works/pi-ai";
             import {
-                // The built-in provider factories (LUM-1180) plus the registry
-                // surface: all imported by value so a regression that drops one
-                // fails at load, not at a `typeof` check.
-                anthropicMessagesApi, completeSimple, getApiProvider, getApiProviders,
-                openAIResponsesApi, registerApiProvider, registerBuiltInApiProviders,
+                // The built-in provider factories (LUM-1180 / LUM-1204) plus
+                // the registry surface: all imported by value so a regression
+                // that drops one fails at load, not at a `typeof` check.
+                anthropicMessagesApi, azureOpenAIResponsesApi, completeSimple, getApiProvider,
+                getApiProviders, googleGenerativeAIApi, openAICompletionsApi, openAIResponsesApi,
+                registerApiProvider, registerBuiltInApiProviders,
                 resetApiProviders, streamSimple, unregisterApiProviders,
             } from "@earendil-works/pi-ai/compat";
 
@@ -370,11 +371,14 @@ fn pi_ai_event_stream_and_compat_registry_match_upstream() {
                             return s;
                         }
                         // `registerBuiltInApiProviders()` ran at module init,
-                        // so the two bridged apis are already registered.
+                        // so every bridged api is already registered.
                         captured.builtinApis = getApiProviders().map((p) => p.api).sort();
                         captured.builtinFactoryTypes = [
                             typeof anthropicMessagesApi,
                             typeof openAIResponsesApi,
+                            typeof openAICompletionsApi,
+                            typeof googleGenerativeAIApi,
+                            typeof azureOpenAIResponsesApi,
                             typeof registerBuiltInApiProviders,
                             typeof resetApiProviders,
                         ];
@@ -410,7 +414,7 @@ fn pi_ai_event_stream_and_compat_registry_match_upstream() {
                         captured.registryAfterUnregister = getApiProviders().length;
 
                         // `resetApiProviders()` is the documented hard reset:
-                        // everything goes, then the two builtins come back.
+                        // everything goes, then the builtins come back.
                         registerApiProvider({ api: "shim-probe-api", stream: makeStream, streamSimple: makeStream }, "probe");
                         captured.probeBeforeReset = getApiProviders().length;
                         resetApiProviders();
@@ -443,16 +447,22 @@ fn pi_ai_event_stream_and_compat_registry_match_upstream() {
         assert_eq!(d["streamText"], "registered");
         assert_eq!(d["completeText"], "registered");
         assert_eq!(d["registryApi"], "shim-probe-api");
-        assert_eq!(d["registryCount"], 3, "two builtins + the probe");
+        assert_eq!(d["registryCount"], 6, "five builtins + the probe");
         assert_eq!(
             d["builtinApis"],
-            json!(["anthropic-messages", "openai-responses"]),
+            json!([
+                "anthropic-messages",
+                "azure-openai-responses",
+                "google-generative-ai",
+                "openai-completions",
+                "openai-responses",
+            ]),
             "registerBuiltInApiProviders runs at module init"
         );
         assert_eq!(
             d["builtinFactoryTypes"],
-            json!(["function", "function", "function", "function"]),
-            "the built-in provider factories are implemented"
+            json!(["function", "function", "function", "function", "function", "function", "function"]),
+            "every bridged builtin provider factory is implemented"
         );
         assert_eq!(
             d["builtinStreamReturn"],
@@ -464,11 +474,20 @@ fn pi_ai_event_stream_and_compat_registry_match_upstream() {
             "a registered provider rejects a model from another api"
         );
         assert_eq!(d["missing"], "No API provider registered for api: nope-api");
-        assert_eq!(d["registryAfterUnregister"], 2, "the builtins survive");
-        assert_eq!(d["probeBeforeReset"], 3);
+        assert_eq!(
+            d["registryAfterUnregister"], 5,
+            "the builtins survive"
+        );
+        assert_eq!(d["probeBeforeReset"], 6);
         assert_eq!(
             d["afterResetApis"],
-            json!(["anthropic-messages", "openai-responses"]),
+            json!([
+                "anthropic-messages",
+                "azure-openai-responses",
+                "google-generative-ai",
+                "openai-completions",
+                "openai-responses",
+            ]),
             "resetApiProviders() clears overrides and re-registers the builtins"
         );
     });
@@ -511,11 +530,12 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                             typeof compat.resetApiProviders,
                         ];
                         try {
-                            compat.googleGenerativeAIApi;
+                            compat.googleVertexApi;
                         } catch (err) {
                             captured.streamCode = err.code;
                             captured.streamExportName = err.exportName;
                             captured.streamNamesDoc = err.message.indexOf("SDK_MODULES.md") !== -1;
+                            captured.streamReasonNamesAdapter = err.message.indexOf("google-vertex") !== -1;
                         }
                         try {
                             gondolin.VM;
@@ -587,8 +607,12 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
 
         assert_eq!(d["unknownCode"], "ERR_PI_SDK_UNKNOWN_EXPORT");
         assert_eq!(d["streamCode"], "ERR_PI_SDK_UNIMPLEMENTED");
-        assert_eq!(d["streamExportName"], "googleGenerativeAIApi");
+        assert_eq!(d["streamExportName"], "googleVertexApi");
         assert_eq!(d["streamNamesDoc"], true);
+        assert_eq!(
+            d["streamReasonNamesAdapter"], true,
+            "a remaining gap names the missing adapter instead of a flat 'not implemented'"
+        );
         assert_eq!(
             d["streamFactoryType"], "function",
             "createAssistantMessageEventStream is implemented now"
@@ -637,7 +661,7 @@ fn top_level_gap_import_fails_the_load() {
         let host = host_with_cwd(&scratch.as_str()).await;
 
         let source = r##"
-            import { googleGenerativeAIApi } from "@earendil-works/pi-ai/compat";
+            import { googleVertexApi } from "@earendil-works/pi-ai/compat";
             export default function () {}
         "##;
 
@@ -650,7 +674,7 @@ fn top_level_gap_import_fails_the_load() {
             .expect_err("load must fail");
         let message = format!("{error}");
         assert!(
-            message.contains("googleGenerativeAIApi"),
+            message.contains("googleVertexApi"),
             "error names the export: {message}"
         );
         assert!(

@@ -37,7 +37,7 @@ cross into Rust: `getAgentDir()` (reads `os.homedir()` through
 which run a built-in tool through the `host_builtin_tool_definition` /
 `host_builtin_tool` bridge described under
 [`@earendil-works/pi-coding-agent`](#earendil-workspi-coding-agent--helpers-bridged-tool-factories-bridged),
-and the two built-in model adapters behind `@earendil-works/pi-ai/compat`,
+and the built-in model adapters behind `@earendil-works/pi-ai/compat`,
 which stream provider events through `host_pi_ai_stream_start` /
 `host_pi_ai_stream_next` / `host_pi_ai_stream_cancel` (see
 [`@earendil-works/pi-ai/compat`](#earendil-workspi-ai-compat--provider-registry--builtin-apis)).
@@ -218,8 +218,8 @@ Divergences:
 Upstream `compat.ts` keeps a module-level `Map<Api, RegisteredApiProvider>`
 so an extension can plug its own streaming implementation in; that is
 exactly what the `custom-provider-*` examples do. The registry, the
-`AssistantMessageEventStream` factory and the two built-in provider
-factories the Rust port has adapters for are **implemented**:
+`AssistantMessageEventStream` factory and the five built-in provider
+factories whose Rust adapter the host has are **implemented**:
 
 | Export | Notes |
 |---|---|
@@ -227,13 +227,13 @@ factories the Rust port has adapters for are **implemented**:
 | `unregisterApiProviders(sourceId)` / `getApiProvider(api)` / `getApiProviders()` | Registry maintenance, same shapes as upstream. |
 | `stream` / `streamSimple` / `complete` / `completeSimple` | Resolve the registered provider for `model.api`, stream, and (for `complete*`) await `result()`. |
 | `createAssistantMessageEventStream()` | Same factory as `@earendil-works/pi-ai`. |
-| `anthropicMessagesApi()` / `openAIResponsesApi()` | Return a `ProviderStreams` whose `stream` / `streamSimple` run the host's `AnthropicProvider` / `OpenAiResponsesProvider` (LUM-1180). |
-| `registerBuiltInApiProviders()` | Called at module init: registers the two bridged apis **without clobbering** an entry an extension already registered for the same api id. |
+| `anthropicMessagesApi()` / `openAIResponsesApi()` / `openAICompletionsApi()` / `googleGenerativeAIApi()` / `azureOpenAIResponsesApi()` | Return a `ProviderStreams` whose `stream` / `streamSimple` run the host's `AnthropicProvider` / `OpenAiResponsesProvider` / `OpenAiProvider` / `GoogleProvider` / `AzureOpenAiResponsesProvider` (LUM-1180, extended by LUM-1204). |
+| `registerBuiltInApiProviders()` | Called at module init: registers the five bridged apis **without clobbering** an entry an extension already registered for the same api id. |
 | `resetApiProviders()` | Clears the whole registry (extension overrides included) and re-registers the builtins. |
 
 #### The built-in provider streaming bridge
 
-The two factories normally `import()` a TypeScript provider module that
+The built-in factories normally `import()` a TypeScript provider module that
 talks to the network. The shim cannot, and `pi-extensions` cannot depend
 on `pi-ai`, so the embedding crate injects a **stream runner** into the
 host and the traffic crosses three host imports:
@@ -262,11 +262,19 @@ Without a runner (a host that is not `pi-coding-agent`) the factories
 still import and return a stream that terminates with an error event
 naming the missing runner.
 
-Documented gaps still need a host adapter for that api family:
-`azureOpenAIResponsesApi`, `bedrockConverseStreamApi`,
-`googleGenerativeAIApi`, `googleVertexApi`, `mistralConversationsApi`,
-`openAICodexResponsesApi`, `openAICompletionsApi`, `piMessagesApi`. The
-module resolves, so an extension that imports a gap only fails when it
+Documented gaps still need a provider implementation the host does not
+have, and accessing the factory throws `ERR_PI_SDK_UNIMPLEMENTED` with a
+`reason` that names the missing adapter (never a flat "not implemented"):
+
+| Gap export | `reason` — what is missing |
+|---|---|
+| `bedrockConverseStreamApi` | No `bedrock-converse-stream` adapter: Bedrock authenticates with AWS SigV4 credentials and a region, which the Rust credential path does not carry. |
+| `googleVertexApi` | No `google-vertex` adapter: Vertex needs a GCP project plus location and ADC/access-token credentials; use `googleGenerativeAIApi` (Gemini API key) instead. |
+| `mistralConversationsApi` | The adapter **does** exist (`pi_ai::providers::MistralProvider`, api `mistral-conversations`), but the extension bridge does not route to it yet — wiring it is a follow-up slice. |
+| `openAICodexResponsesApi` | No `openai-codex-responses` adapter: the Codex Responses dialect is authenticated with a ChatGPT account token rather than an API key, and the Rust port has neither that auth path nor the dialect. |
+| `piMessagesApi` | No `pi-messages` adapter: first-party pi gateway protocol, and this build has no endpoint or credential for it. |
+
+The module resolves, so an extension that imports a gap only fails when it
 actually reaches for that factory.
 
 Divergences:
@@ -275,10 +283,22 @@ Divergences:
   look the model up in the builtin catalogue and route cloudflare models
   through `Models`; the shim has neither, so they go straight to the
   registry and throw `No API provider registered for api: …` when the
-  extension has not registered one. The two bridged apis are the
+  extension has not registered one. The five bridged apis are the
   exception: `registerBuiltInApiProviders()` runs at module init, so
   `stream` / `complete` reach them even when the extension imports nothing
   but those.
+* **The bundled runner dispatches two of the five bridged apis.** The shim
+  side of LUM-1204 is complete — all five factories drive
+  `host_pi_ai_stream_*` — but `pi-ai`'s `ext_bridge::model_from_js` still
+  parses only `anthropic-messages` / `openai-responses`, and
+  `BuiltinPiAiStreamRunner` matches the same two, so in a
+  `pi-coding-agent` host an `openai-completions` /
+  `google-generative-ai` / `azure-openai-responses` turn terminates with an
+  `error` event naming the unbridged api. The Rust adapters for all three
+  exist (`OpenAiProvider` / `GoogleProvider` /
+  `AzureOpenAiResponsesProvider`, all reachable from the `ProviderRouter`);
+  the runner needs the api whitelist widened plus three match arms. Tracked
+  for the coordination round, not silently claimed as working.
 * **No env API-key injection.** Upstream's `withEnvApiKey` fills in
   `options.apiKey` from the provider environment; the shim has no
   `getEnvApiKey` bridge, so the caller must pass `apiKey` explicitly. The

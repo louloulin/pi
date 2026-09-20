@@ -1555,20 +1555,22 @@ fn esm_unsupported_imports_are_reported() {
         // A value import of a documented SDK gap fails the load too, naming
         // the export and its package instead of binding `undefined`.
         // (`create*Tool` used to be the example gap; it is bridged as of
-        // LUM-1175, and `anthropicMessagesApi` as of LUM-1180, so this pins
-        // the contract to a gap that still exists.)
+        // LUM-1175, `anthropicMessagesApi` as of LUM-1180 and
+        // `googleGenerativeAIApi` / `openAICompletionsApi` /
+        // `azureOpenAIResponsesApi` as of LUM-1204, so this pins the contract
+        // to a gap that still exists.)
         let err = host
             .load(
                 entry_at("sdk-gap-ext", "/tmp/sdk-gap-ext/index.mjs"),
                 r#"
-                    import { googleGenerativeAIApi } from "@earendil-works/pi-ai/compat";
+                    import { googleVertexApi } from "@earendil-works/pi-ai/compat";
                     export default function (pi) {}
                 "#,
             )
             .await
             .expect_err("a documented SDK gap must not load silently");
         let message = err.to_string();
-        assert!(message.contains("googleGenerativeAIApi"), "{message}");
+        assert!(message.contains("googleVertexApi"), "{message}");
         assert!(
             message.contains("@earendil-works/pi-ai/compat"),
             "{message}"
