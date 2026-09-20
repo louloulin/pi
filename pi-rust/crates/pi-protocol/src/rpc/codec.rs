@@ -114,9 +114,13 @@ fn rpc_target(value: &Value) -> Result<RpcTarget> {
         assert_keys(map, &["serverId"], &[], "server target")?;
         let server_id = id_string(map, "serverId", "server target")?;
         if !is_server_id(&server_id) {
-            return Err(invalid("Invalid server target: serverId must be a canonical UUIDv4"));
+            return Err(invalid(
+                "Invalid server target: serverId must be a canonical UUIDv4",
+            ));
         }
-        Ok(RpcTarget::Server(super::protocol::ServerTarget { server_id }))
+        Ok(RpcTarget::Server(super::protocol::ServerTarget {
+            server_id,
+        }))
     }
 }
 
@@ -141,12 +145,19 @@ pub fn validate_client_message(value: &Value) -> Result<()> {
         Some("hello") => {
             assert_keys(map, &["type", "version"], &[], "client hello")?;
             if !map.get("version").is_some_and(Value::is_u64) {
-                return Err(invalid("Invalid client hello: version must be a non-negative integer"));
+                return Err(invalid(
+                    "Invalid client hello: version must be a non-negative integer",
+                ));
             }
             Ok(())
         }
         Some("request") => {
-            assert_keys(map, &["type", "id", "target", "call"], &[], "request envelope")?;
+            assert_keys(
+                map,
+                &["type", "id", "target", "call"],
+                &[],
+                "request envelope",
+            )?;
             id_string(map, "id", "request envelope")?;
             rpc_target(map.get("target").unwrap_or(&Value::Null))?;
             Ok(())
@@ -169,7 +180,9 @@ pub fn validate_server_message(value: &Value) -> Result<()> {
             assert_keys(map, &["type", "version", "serverId"], &[], "server hello")?;
             let version = map.get("version").and_then(Value::as_u64);
             if version != Some(PROTOCOL_VERSION as u64) {
-                return Err(invalid("Invalid server hello: unsupported protocol version"));
+                return Err(invalid(
+                    "Invalid server hello: unsupported protocol version",
+                ));
             }
             let server_id = id_string(map, "serverId", "server hello")?;
             if !is_server_id(&server_id) {
@@ -181,16 +194,26 @@ pub fn validate_server_message(value: &Value) -> Result<()> {
         }
         Some("hello_error") => {
             assert_keys(map, &["type", "error"], &[], "server hello error")?;
-            protocol_error(map.get("error").unwrap_or(&Value::Null), "server hello error")?;
+            protocol_error(
+                map.get("error").unwrap_or(&Value::Null),
+                "server hello error",
+            )?;
             Ok(())
         }
         Some("response") => {
-            assert_keys(map, &["type", "id", "ok"], &["result", "error"], "response envelope")?;
+            assert_keys(
+                map,
+                &["type", "id", "ok"],
+                &["result", "error"],
+                "response envelope",
+            )?;
             id_string(map, "id", "response envelope")?;
             match map.get("ok").and_then(Value::as_bool) {
                 Some(true) => {
                     if map.contains_key("error") {
-                        return Err(invalid("Invalid response envelope: ok response carries an error"));
+                        return Err(invalid(
+                            "Invalid response envelope: ok response carries an error",
+                        ));
                     }
                     Ok(())
                 }
@@ -241,7 +264,12 @@ pub fn parse_server_message(value: &Value) -> Result<ServerMessage> {
         .map_err(|error| invalid(format!("Invalid server protocol message: {error}")))
 }
 
-fn encode_protocol_message<T, F>(message: &T, options: CborOptions, parse: F, kind: &str) -> Result<Vec<u8>>
+fn encode_protocol_message<T, F>(
+    message: &T,
+    options: CborOptions,
+    parse: F,
+    kind: &str,
+) -> Result<Vec<u8>>
 where
     T: serde::Serialize,
     F: FnOnce(&Value) -> Result<()>,
@@ -256,15 +284,31 @@ where
 }
 
 /// Validates and encodes one complete length-prefixed client message.
-pub fn encode_client_message(message: &ClientMessage, max_frame_length: Option<usize>) -> Result<Vec<u8>> {
+pub fn encode_client_message(
+    message: &ClientMessage,
+    max_frame_length: Option<usize>,
+) -> Result<Vec<u8>> {
     let limit = max_frame_length.unwrap_or(DEFAULT_MAX_FRAME_LENGTH);
-    encode_protocol_message(message, CborOptions::new(limit, DEFAULT_MAX_CBOR_CONTAINER, DEFAULT_MAX_CBOR_DEPTH), validate_client_message, "client")
+    encode_protocol_message(
+        message,
+        CborOptions::new(limit, DEFAULT_MAX_CBOR_CONTAINER, DEFAULT_MAX_CBOR_DEPTH),
+        validate_client_message,
+        "client",
+    )
 }
 
 /// Validates and encodes one complete length-prefixed server message.
-pub fn encode_server_message(message: &ServerMessage, max_frame_length: Option<usize>) -> Result<Vec<u8>> {
+pub fn encode_server_message(
+    message: &ServerMessage,
+    max_frame_length: Option<usize>,
+) -> Result<Vec<u8>> {
     let limit = max_frame_length.unwrap_or(DEFAULT_MAX_FRAME_LENGTH);
-    encode_protocol_message(message, CborOptions::new(limit, DEFAULT_MAX_CBOR_CONTAINER, DEFAULT_MAX_CBOR_DEPTH), validate_server_message, "server")
+    encode_protocol_message(
+        message,
+        CborOptions::new(limit, DEFAULT_MAX_CBOR_CONTAINER, DEFAULT_MAX_CBOR_DEPTH),
+        validate_server_message,
+        "server",
+    )
 }
 
 const DEFAULT_MAX_CBOR_CONTAINER: usize = super::cbor::DEFAULT_MAX_CBOR_CONTAINER_LENGTH;
@@ -279,7 +323,11 @@ struct ValidatedMessageDecoder<T> {
 }
 
 impl<T> ValidatedMessageDecoder<T> {
-    fn new(kind: &'static str, parse: fn(&Value) -> Result<T>, max_frame_length: Option<usize>) -> Self {
+    fn new(
+        kind: &'static str,
+        parse: fn(&Value) -> Result<T>,
+        max_frame_length: Option<usize>,
+    ) -> Self {
         let limit = max_frame_length.unwrap_or(DEFAULT_MAX_FRAME_LENGTH);
         Self {
             frames: FrameDecoder::with_max_frame_length(limit),
@@ -295,14 +343,14 @@ impl<T> ValidatedMessageDecoder<T> {
             return Err(invalid(format!("{} message decoder has failed", self.kind)));
         }
         let result = (|| {
-            let frames = self
-                .frames
-                .push(chunk)
-                .map_err(|error| invalid(format!("Invalid {} protocol framing: {error}", self.kind)))?;
+            let frames = self.frames.push(chunk).map_err(|error| {
+                invalid(format!("Invalid {} protocol framing: {error}", self.kind))
+            })?;
             let mut messages = Vec::with_capacity(frames.len());
             for frame in frames {
-                let value = decode_cbor(&frame, self.options)
-                    .map_err(|error| invalid(format!("Invalid {} protocol frame: {error}", self.kind)))?;
+                let value = decode_cbor(&frame, self.options).map_err(|error| {
+                    invalid(format!("Invalid {} protocol frame: {error}", self.kind))
+                })?;
                 messages.push((self.parse)(&value)?);
             }
             Ok(messages)
@@ -448,8 +496,7 @@ mod tests {
 
     #[test]
     fn target_variants_parse() {
-        let target: RpcTarget =
-            serde_json::from_value(json!({"serverId": SERVER_ID})).unwrap();
+        let target: RpcTarget = serde_json::from_value(json!({"serverId": SERVER_ID})).unwrap();
         assert_eq!(
             target,
             RpcTarget::Server(ServerTarget {
