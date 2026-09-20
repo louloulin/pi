@@ -11614,3 +11614,214 @@ stdio；`pi-client` / Chord 那条线的客户端仍缺（与本 issue 不同协
 `feature/pi.rs` 从 `5a23004d1`（LUM-1156 轮）**快进至 `cfb028ead`**，`git ls-remote` 复查一致：
 `cfb028ead19dd072128dd8de9ef2a230e3259de9`（本条哈希补记是紧随其后的纯文档提交）；
 留档分支 `work/lum-1090`（基于 `5a23004d1`）一并推送。
+
+## LUM-1157 round — `pi-ai` `utils/` 三小件移植（`estimate` / `error-body` / `deferred-tools`，Stage 46 收口）+ `compaction` 委托 + 4 份 `truncate_body` 收敛 + 合并推送 feature/pi.rs
+
+本轮起点 `72d7c272d`（LUM-1155 轮文档）。代码提交 `ebce093b1`，随后合并 `origin/feature/pi.rs`
+（已含 LUM-1156 `3d7a732cf` 与 LUM-1090 `cfb028ead`/`026b6827c`，合并提交 `efef7fbba`）。
+本轮**不派发**新子任务（开工时并发 3/3 满，见第七节）；推送哈希见本节末补记。
+
+### 一、改动清单（14 文件，+1264 / −97，对 `72d7c272d`）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-ai/src/utils/mod.rs`（新，22 行） | 三个子模块 + 全部公开项的再导出（`utils::estimate::*` 与 `utils::*` 两条路径都可用） |
+| `crates/pi-ai/src/utils/estimate.rs`（新，193 行） | `CHARS_PER_TOKEN` / `ESTIMATED_IMAGE_CHARS` / `ContextUsageEstimate` / `UsageAnchor` + 7 个函数 |
+| `crates/pi-ai/src/utils/error_body.rs`（新，143 行） | `MAX_PROVIDER_ERROR_BODY_CHARS` / `NormalizedProviderError` + 4 个函数 |
+| `crates/pi-ai/src/utils/deferred_tools.rs`（新，132 行） | `identity_tool_name` / `SplitDeferredTools` / `split_deferred_tools` |
+| `crates/pi-ai/src/lib.rs`（+1） | `pub mod utils;` |
+| `crates/pi-ai/src/types.rs`（+3/−1） | `StreamError::Provider.body` 的文档：4 KiB 字节 → 4000 **字符** |
+| `crates/pi-ai/src/providers/anthropic.rs`（+3/−15） | 删本地 `truncate_body`，调用改 `crate::utils::error_body::truncate_provider_error_body` |
+| `crates/pi-ai/src/providers/openai.rs`（+4/−16） | 同上（2 个调用点） |
+| `crates/pi-ai/src/providers/openai_responses.rs`（+4/−16） | 同上（2 个调用点） |
+| `crates/pi-ai/src/providers/google.rs`（+3/−15） | 同上（**issue 只点名 3 处，实际是 4 处**：`google.rs:317` 也抄了一份，同为 `MAX = 4096`） |
+| `crates/pi-coding-agent/src/compaction.rs`（+14/−34） | 5 个同名函数改为委托；删本地 `block_chars` / `content_chars` / `ESTIMATED_IMAGE_CHARS` |
+| `crates/pi-ai/tests/estimate.rs`（新，289 行） | 10 条 |
+| `crates/pi-ai/tests/error_body.rs`（新，214 行） | 13 条 |
+| `crates/pi-ai/tests/deferred_tools.rs`（新，239 行） | 9 条 |
+
+未碰：`pi-tui`、`pi-extensions`、`pi-coding-agent/src/tools/*`、`pi-protocol`（issue 的「明确不做」）。
+未新增依赖（`serde_json` 已有）。
+
+### 二、三件的落点与公开 API
+
+**1. `estimate`（`utils/estimate.ts` 143 行）** — 此前只有 `pi-coding-agent/src/compaction.rs` 的
+半套，`ContextUsageEstimate` 与图片口径完全没有。
+
+```rust
+pub const CHARS_PER_TOKEN: usize = 4;            // 上游 CHARS_PER_TOKEN
+pub const ESTIMATED_IMAGE_CHARS: usize = 4800;   // 上游 ESTIMATED_IMAGE_CHARS
+pub struct ContextUsageEstimate { tokens, usage_tokens, trailing_tokens, last_usage_index }
+pub struct UsageAnchor<'a> { usage: &'a Usage, index: usize }
+pub fn calculate_context_tokens(usage: &Usage) -> u32
+pub fn estimate_text_tokens(text: &str) -> u32
+pub fn estimate_text_and_image_content_tokens(content: &[Content]) -> u32
+pub fn estimate_message_tokens(message: &Message) -> u32
+pub fn estimate_messages_tokens(messages: &[Message]) -> u32
+pub fn estimate_tools_tokens(tools: &[ToolDefinition]) -> u32
+pub fn estimate_context_usage(context: &Context, anchor: Option<UsageAnchor<'_>>) -> ContextUsageEstimate
+```
+
+`compaction.rs` 的 `calculate_context_tokens` / `estimate_tokens` / `estimate_message_tokens` /
+`estimate_context_tokens` / `context_tokens_with_trailing` **签名不动**，内部改为调用
+`pi_ai::utils::estimate::*`（`context_tokens_with_trailing` 用 `saturating_add`，与上游 JS 的
+number 加法在正常量级下等价，只是不会在极端值上回绕）。`compaction.rs` 的 `estimate_tokens` 原来按
+role 分两支，两支展开后都是「逐块 `block_chars` 求和」，所以删除 role 分支是等价重写而不是改口径。
+
+**2. `error_body`（`utils/error-body.ts` 149 行）** — 4 份重复收敛为一份。
+
+```rust
+pub const MAX_PROVIDER_ERROR_BODY_CHARS: usize = 4_000;
+pub struct NormalizedProviderError { status: Option<u16>, body: Option<String>, message: String, message_carries_body: bool }
+pub fn normalize_provider_error(status: Option<u16>, message: &str, raw_body: &str) -> NormalizedProviderError
+pub fn format_provider_error(norm: &NormalizedProviderError, prefix: Option<&str>) -> String
+pub fn truncate_provider_error_body(body: &str) -> String
+pub fn truncate_error_text(text: &str, max_chars: usize) -> String
+```
+
+Rust 的 provider 走 `reqwest`，没有 SDK 形状的错误对象，所以上游四条探测分支（Mistral
+`statusCode`/`body`、`openai` `status`/`error`、`@google/genai`、Bedrock
+`$metadata.httpStatusCode`/`$response.body`）在 Rust 的对应物就是「`reqwest::StatusCode` +
+已读到的 body 字符串」，模块头注释里给了一张对照表。**`messageCarriesBody` 保留**：上游用它避免
+Anthropic / `@google/genai` happy path 打印成 `403: <body>: <body>`；Rust 侧对应「调用方传进来的
+message 已经包含 body」与「body 为空」两种情形，注释里写明了这个映射。
+
+provider 侧只用了 `truncate_provider_error_body`（`StreamError::Provider` 只有 status/body/hint，
+没有 message 字段可组合），`normalize_provider_error` / `format_provider_error` 暂无仓库内消费方 ——
+它们是 util 的完整移植（供后续把 provider 错误文案统一到一处时使用），这一点在模块文档里写明。
+
+**3. `deferred_tools`（`utils/deferred-tools.ts` 39 行）** — 此前完全没有。
+
+```rust
+pub struct SplitDeferredTools<'a> { immediate: Vec<&'a ToolDefinition>, deferred: Vec<(String, &'a ToolDefinition)> }
+pub fn identity_tool_name(name: &str) -> String
+pub fn split_deferred_tools<'a>(context: &'a Context, enabled: bool,
+    added_tool_names: &[String], normalize_name: impl Fn(&str) -> String) -> SplitDeferredTools<'a>
+```
+
+语义逐条对齐：按规范名去重（首次出现定序、**后出现的定义获胜**）、`enabled == false` 全量 immediate、
+已出现在 assistant `toolCall` 里的名字不算 deferred、`added_tool_names` 里没有对应工具的忽略。
+`deferred` 用有序 `Vec<(normalized_name, &Tool)>` 表示上游的 `Map<string, Tool>`：保留 `Map` 的
+插入顺序（首次出现），需要查表时一行就能 `collect` 进 `HashMap`，且不引入新依赖。
+
+### 三、与上游的刻意偏离（每条都写在模块头注释）
+
+1. **`error-body` 统一到 4000 字符：`MAX_PROVIDER_ERROR_BODY_CHARS = 4000`，截断标记同时改成上游的
+   `"... [truncated N chars]"`。** 旧实现是 4096 **字节** + `"…(truncated)"`。这是本轮唯一一处
+   「可见行为」变化，按 issue 授权选择「统一到上游」而非「保留 4096 并记偏离」；仓库内**没有**任何
+   测试或调用方断言过旧的截断文本/长度（已 `grep` 确认）。注意 provider 调用点只做截断、不做
+   `trim`（上游在 `extractBody` 里 trim），所以 `StreamError::Provider.body` 仍可能是带首尾空白的
+   原始 body —— 与旧实现一致，未顺手改。
+2. **字符口径是 Unicode 标量值（`str::chars()`），不是 JS 的 UTF-16 code unit。** `estimate.ts` 用
+   `.length` / `slice`，BMP 外字符（emoji）按 2 计；Rust 按 `chars().count()` 按 1 计，会让这类文本
+   略微**低估**。选它的理由：`compaction.rs` 原本就是 `chars().count()`，沿用才能保证 288 条
+   compaction 用例（含 `div_ceil(4)` 取整方向）逐位不变；这是「相同输入的数值不变」优先于
+   「与 JS 逐字符相同」的取舍。`truncate_error_text` 走 `char_indices`，不会切坏 UTF-8，
+   与上游 `slice` 的不切坏序列语义一致（用例覆盖 2 字节与 4 字节边界）。
+3. **usage 由调用方传入（`UsageAnchor`），不做 transcript 扫描。** 上游扫消息列表找「最新的、
+   `stopReason` 不是 `aborted`/`error`、且 `calculateContextTokens(usage) > 0`、且时间戳不早于最新
+   前缀消息」的 assistant message。Rust `Message` 没有 `usage` / `timestamp` / `stopReason`，这三个
+   判据都没有数据来源，所以收敛成：调用方给出「哪条消息的 usage 适用于当前前缀」（`pi-tui` 的
+   `TurnUsage` 正是这个形状，`StopReason`/`aborted`/`error` 的过滤由驱动层在拿到 `TurnUsage` 时
+   决定）。因此上游 `context-estimate.test.ts` 的两条向量（插入 summary 后 usage 失效 / 新响应后
+   usage 重新生效）在消息层**不可达**，本轮用「锚点命中 / 锚点越界降级 / 无锚点」三条用例替代，
+   `tests/estimate.rs` 文件头写明了这一点。
+4. **`ToolResult.addedToolNames` 不加字段，改为形参。** `pi_protocol::ToolResult` 有 20 余处结构体
+   字面量构造点（`pi-agent-core` / `pi-coding-agent` / `pi-tui` / `pi-evals` / `pi-protocol` 的 wire
+   测试），加一个字段要同时改这些点，属协议层改动；而本件**不要求接线**，所以
+   `split_deferred_tools` 直接接收已提取的名字切片（issue 给的二选一里选后者）。将来协议字段落地时
+   这个签名不用动，只是调用方换成从 transcript 提取。对应地，上游 deferred-tools 测试里
+   「counts definitions marked after the latest usage checkpoint」那条（依赖 `addedToolNames` 参与
+   估算）在 Rust 侧不可达，未移植。
+5. **assistant 的 `thinking` 块不计入估算。** 上游 `estimateMessageTokens` 的 assistant 分支会加
+   `block.thinking.length`；Rust 的 `Content` 没有 thinking 变体（provider 的思考文本还没进协议），
+   这是与 `errorMessage` 同源的一处协议缺口，写在模块文档里。
+6. **assistant 里的 image 块**：上游 assistant 分支对非 text/thinking 块取 `block.name.length`，
+   遇到 image 会取到 `undefined`（实际不可达）；Rust 统一按 `ESTIMATED_IMAGE_CHARS` 计，比上游「更
+   不糊」但结果不同，属防御性差异。
+7. **`estimateContextTokens` 的裸消息数组重载没有对应函数**：Rust 侧用
+   `estimate_messages_tokens(&[Message])`（上游那个重载就是不含 system prompt / tools 的纯扫描）。
+8. **`deferred-tools` 的顺序细节**：上游在 walk transcript 时把「已出现的 assistant toolCall 名」与
+   「`addedToolNames`」按顺序交叉判断，所以「先标记 added、后又被 assistant 调用」的名字**仍然
+   deferred**；本实现是「先求两边的并集再相减」，这个病态顺序下结果不同（模块注释写明）。
+9. **`lib.rs` 只加 `pub mod utils;`，不在根部再导出。** `json_parse` / `overflow` 的公开项在根部
+   `pub use` 过，但三个新件的命名（`estimate_*` / `normalize_provider_error` / `split_deferred_tools`）
+   放进根部会与 `overflow` / `retry` 的语义边界混在一起，故按 `utils::` 命名空间暴露（`utils/mod.rs`
+   里再导出，两种写法都能用）。如果统一要求根部再导出，下一轮改 `lib.rs` 一行即可。
+10. **`truncate_provider_error_body` / `truncate_error_text` 是公开的**，上游这两个函数未 export
+    （只在 `error-body.ts` 内部用）。Rust 侧 provider 需要截断入口，且 `truncate_error_text` 被单测
+    直接钉边界，故设为 `pub` 并在文档里说明用途。
+
+### 四、测试与验证
+
+- **新增 32 条**（`cargo test -p pi-ai --offline`，7 个目标全绿）：
+  - `tests/estimate.rs` **10** 条：`chars/4` 取整（0/4/5/9 字符）、图片 4800（纯图 1200、文+图 1201）、
+    user / toolResult / assistant(text+toolCall) 三分支、`estimate_messages_tokens` 只做逐条求和、
+    `usage.total > 0` 优先于分项求和、`estimate_tools_tokens` 与序列化长度一致且空表为 0、
+    锚点命中（9500 + 1000 = 10500 / trailing 1000 / index 1）、无锚点加 system+tools 且
+    `trailing == tokens`、锚点在末条（trailing 0）、锚点越界降级为 trailing 0。
+  - `tests/error_body.rs` **13** 条：四种错误形状（Mistral / openai / Google 折叠 message / Bedrock）、
+    `messageCarriesBody` 两条分支、空 body 与纯空白 body、body trim、4000 字符截断 + 标记、
+    恰好 4000 不截断、**2 字节与 4 字节字符边界**（`é` / `😀`，断言保留字符数与标记计数）、
+    带/不带 prefix 的 `formatProviderError`、无 status / 无 body 时退回 message。
+  - `tests/deferred_tools.rs` **9** 条：标记即 deferred、`enabled == false` 全量、assistant 已用过则不
+    deferred、`addedToolNames` 无对应工具则忽略、规范化去重（后定义获胜、位置取首次）、
+    「规范化后再判 used」、「规范化标记匹配活动工具」、重复 added 名去重、工具顺序保持。
+- **上游用例覆盖情况**：`context-estimate.test.ts` 2 条中的扫描类向量不可达（第三节第 3 条），
+  用锚点语义替代；`deferred-tools.test.ts` 的 24 条是 payload 级（provider `defer_loading` /
+  `additional_tools` / Kimi `system.tools`），本件不接线故不移植，只在 util 层钉 9 条；
+  `error-body.test.ts` / `provider-error-body-{regression,passthrough}.test.ts` 的探测层向量由
+  Rust 的 `(status, message, body)` 形参替代，四种形状与两条 `messageCarriesBody` 分支均已覆盖。
+- **回归**：`cargo test -p pi-coding-agent --offline` lib **307 passed / 0 failed**（288 compaction 时代
+  的用例全在其中），全部集成目标绿；`cargo test -p pi-ai -p pi-coding-agent --offline` 合并态同样全绿
+  （pi-ai：lib 94 / anthropic 12 / **deferred_tools 9** / **error_body 13** / **estimate 10** /
+  google 10 / overflow 22）。
+- `cargo clippy -p pi-ai -p pi-coding-agent --all-targets --offline -- -D warnings` → **EXIT 0**
+  （唯一告警来自 `vendor/rquickjs-core`，非本轮文件）。
+- 格式：只对**叶子文件**跑 `/tmp/rustup-home/toolchains/*/bin/rustfmt --edition 2021`（`utils/*.rs`、
+  3 个新测试文件）；新增行 `rustfmt --check` 零命中。**未跑 `cargo fmt`**（全量漂移属 LUM-1138）。
+- **未验证**：wasm32 构建（环境无该 target、无 `wasm-pack`）；4 个 provider 的
+  `#[cfg(not(target_arch = "wasm32"))]` 门控保持原样，未新增 wasm 面。
+
+### 五、已知限制 / 接线前置
+
+- **`deferred-tools` 未接线**（issue 明确不做）。接线前置两条：`Compat` 增加
+  `supports_additional_tools`（`grep -rn "supports_additional" crates/pi-ai` 仍为空），以及
+  `ToolResult.added_tool_names` 上提协议层（第三节第 4 条）。
+- `error_body` 的 `normalize_provider_error` / `format_provider_error` 暂无仓库内消费方；4 个 provider
+  仍只截断、不改写错误文案。把 provider 的错误展示统一到 `format_provider_error` 是后续可做的一刀
+  （上游在 `compat.ts` 的错误路径里做），本轮不做以免扩大行为面。
+- `estimate` 的 usage 锚点由调用方负责「哪条 usage 适用」；`pi-tui::app::TurnUsage` 是现成的锚点
+  来源，但 `compaction.rs` 的 5 个函数签名保持不变（仍收 `&Usage` / `&[Message]`），所以本轮**未**把
+  交互层改走 `estimate_context_usage`。
+
+### 六、frontier（本轮更新）
+
+1. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；本轮新增行零漂移。
+2. ~~**`pi-ai` 未移植的 `utils/` 小件**~~：`estimate` / `error-body` / `deferred-tools` **本轮收口**。
+   上游 `packages/ai/src/utils/` 目录在本轮之后全部有 Rust 对应物（`json-parse` LUM-1145、
+   `overflow` LUM-1150、`provider-retry` LUM-1142、`validation` LUM-1156 的 coerce 半边、
+   本轮三件）。
+3. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」；RPC 客户端已由 LUM-1090 收口。
+4. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex / oauth / images。
+5. **`edit` 渲染器**：仍是 `renderers/` 唯一缺口（前置 `edit-diff.ts`）。
+6. **（本轮新增）协议层的两处缺口**：`AssistantMessage.error_message`（LUM-1150 记过）与
+   `ToolResult.added_tool_names`（本轮新增）。后者是 deferred-tools 接线的硬前置，改它要同时改
+   `pi-protocol` wire 测试与 20 余处结构体字面量，建议单独立项（Stage 46/47 之外）。
+7. **（本轮新增）`estimate` 的图片/thinking 口径随协议走**：`Content` 增加 thinking 变体时，
+   `estimate_message_tokens` 的块分支要同步补一行。
+
+### 七、环境与并发记录
+
+- 复用 **LUM-1152 检出内的 `pi-rust/target`**（issue 指定）：`CARGO_TARGET_DIR=…/lum-1152-…/pi-rust/target`，
+  未新建任何 target，未删除任何 target；开工 16G → 结束 8.9G（本轮链接 3 个新测试目标 + 合并后的
+  LUM-1090 目标重链）。`CARGO_HOME=/tmp/cargo-home`，所有 cargo 命令 `--offline`；未跑 `--workspace`。
+- Git 身份用 worktree 级覆盖：`git config --worktree user.name multica-agent` /
+  `user.email agent@multica.local`（与 feature/pi.rs 既有历史一致）。
+- 并发：开工与结束时 `multica daemon status` 都是 `active_task_count: 3`（上限 3），故**不派发**
+  新子任务；LUM-1157 本身是 Stage 46 的叶子件，无子任务需求。
+- 本轮本人只写 `crates/pi-ai/src/utils/*`、`crates/pi-ai/src/lib.rs`、`crates/pi-ai/src/types.rs`、
+  `crates/pi-ai/src/providers/{anthropic,openai,openai_responses,google}.rs`、
+  `crates/pi-ai/tests/{estimate,error_body,deferred_tools}.rs`、
+  `crates/pi-coding-agent/src/compaction.rs` 与本文档；未碰 `pi-tui` / `pi-extensions` /
+  `pi-coding-agent/src/tools/*` / `pi-protocol`。
