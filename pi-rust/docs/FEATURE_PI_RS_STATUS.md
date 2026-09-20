@@ -14609,3 +14609,72 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
 * 开工 `30G / 50G`（63%），余 18G。
 * 收尾 `43G / 50G`（92%），余 4.2G —— 涨的是三个并发 worktree 的 target：`lum-1211` **17G**、`lum-1209` 2.2G、`lum-1189` 2.2G、本轮 1.2G。**告警**：LUM-1211 的 target 已单占 17G，下一轮开工前需要有人清理死掉的 worktree target，否则新一轮全量构建会直接撞盘。
 * 本轮 target 用 worktree 内 `pi-rust/target`（与两个 worker 的目录互不干扰），收尾已删除；无 `/tmp` 遗留。
+
+## LUM-1215 round — 第二轮 TUI 审计（与 LUM-1213 重复轮去重）：全量门**未跑**（三份并发构建抢盘，本轮不抢第四个）+ 可合并性扫描零命中 → 把 P1-3 从「缺功能」升级为**确定性缺陷：流式期间输入被静默丢弃**，停放 Stage 61
+
+本轮触发是 autopilot（`01a0be42`，与 17:40 触发的 LUM-1213 同题：LUM-1213 做 `app.thinking.toggle`
+的渲染侧，本轮刻意避开同一文件区域，只做审计与文档，不重复落代码）。
+
+### 一、基线
+
+* tip = `origin/feature/pi.rs` = `e12b8efdb`（LUM-1210 的状态文档提交），本轮检查点在本地分支
+  `work/LUM-1215`。
+* 最后一次**全量实跑**仍是 LUM-1208 的 **138 套件 / 2092 passed / 0 failed / 2 ignored**
+  （`d063396b8`）；`e12b8efdb` 上只有 LUM-1210 的 `pi-tui` + `pi-coding-agent` 局部门
+  （59 target / 1291 passed）。**全量门在 tip 上仍未验证**，见第三节的取舍。
+
+### 二、可合并性扫描（零命中）
+
+`git fetch --all` 后逐分支算唯一提交：
+
+```
+origin/agent/devbox1/142cee5d0ed9 unique=1 behind=114
+origin/agent/devbox1/9f0097e10886 unique=2 behind=405
+origin/agent/devbox1/e3a55b14fe9d unique=1 behind=405
+origin/agent/devbox1/lum-1020       unique=1 behind=450
+origin/agent/devbox1/lum-1023       unique=1 behind=450
+origin/agent/devbox1/lum-1058       unique=2 behind=410
+origin/work/lum-1173                unique=11 behind=93
+```
+
+活跃 worker（LUM-1209 Stage 55、LUM-1211 Stage 57、LUM-1213）都还没 push，唯一有独特提交的都是
+早已被替代的陈旧分支（`work/lum-1173` 的 11 个提交是 rustfmt 波次，早被后续提交覆盖），
+**本轮无可合并产物**。
+
+### 三、为什么不跑全量门（本轮最重要的操作结论）
+
+* 开工时 `/` **44G/50G（94%）**，余 2.9G；本轮先行的一次 `cargo test --workspace` 直接
+  `No space left on device` 死在链接阶段（`rustc7WCuR2`，磁盘打满 47G/50G）。
+* 三个并发 worktree 的 target 是元凶：`lum-1211` 曾单占 **17G**、`lum-1209` 曾 **10G**，
+  且它们的构建**没有**关 debuginfo / incremental（rustc 命令行里是 `-C debuginfo=2`
+  与 `-C incremental=.../target/debug/incremental`）—— 关掉这两个开关的 target（本仓协调轮的做法）
+  只有 1–2G。这是「三个 worktree 各建一份全量 target」+「debuginfo 未关」的乘法效应。
+* 本轮删掉自己的 target 后释放到 2.9G→随后三方完成回收，收尾时 **21G/50G（45%），余 26G**。
+  但收尾时 `ps` 显示又有 3 个 `cargo` + 6 个 `rustc` 在跑（三个 worktree 同时在重建 target），
+  按 LUM-1210/1185/1207 的既有取舍，**再起第四个全量构建会重演本轮的 ENOSPC**，故本轮不跑，
+  只做静态核验。
+* 静态核验结论（替代不了编译，但能覆盖本轮唯一的跨 crate 风险）：LUM-1210 的 diff
+  `d75de445b` 是**纯增量**（`app.rs` +10 行、新 `App::request_clipboard`、`slash.rs` 新
+  `SlashCommand::Hotkeys` 变体 + 两个渲染函数）。依赖 `pi-coding-agent` 的只有 `pi-coding-agent`
+  自身与 `pi-evals`，后者不引用 `SlashCommand`；`pi-tui` 里同名的是
+  `pi_tui::autocomplete::SlashCommand`（另一个类型）。新增枚举变体的中断面 = 0。
+
+**待办**：`e12b8efdb` 的全量门（或任一 worker 合入后的新 tip）是下一轮开工第一件事；
+建议四个 worktree 统一带 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`。
+
+### 四、本轮交付
+
+* `docs/TUI_UX_AUDIT.md`：P1-3 升级为确定性缺陷（证据链 `app.rs:1849-1852` → `:1236-1239`、
+  上游 steer/followUp/dequeue 语义表 + 位置）、更正首轮「ctrl+x steer」的错误说法、
+  第五节新增 Stage 61 行并调整优先级。**本轮无 Rust 代码改动**（见第三节：无法验证就不落码）。
+* 新建 **Stage 61 = LUM-1216**（`backlog`）：流式期间输入不丢（`App` pending 队列 + steer/followUp/dequeue），
+  含精确改动点与测试清单。因槽位 3/3 已满不启动。
+
+### 五、frontier（本轮后）
+
+1. **Stage 61（新，建议最高优先级）**：静默丢输入 —— 正确性缺陷，修复面独立于富渲染器。
+2. Stage 58（LUM-1214，`backlog`）：工具输出折叠接线。
+3. Stage 59 / 60：`app.*` 第 1 批与 `/new`、`/copy`、`/tree`、`/fork` 等会话命令。
+4. 重复轮问题：LUM-1203 是 LUM-1202 的重复轮，本轮 LUM-1215 又是 LUM-1213 的重复轮。
+   两轮同题 autopilot 会双花 CPU/磁盘并制造「谁先 push」的竞争，建议 autopilot 触发前检查
+   同项目同题的在飞 issue。
