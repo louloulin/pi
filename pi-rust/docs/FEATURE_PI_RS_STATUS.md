@@ -14533,3 +14533,79 @@ LUM-1204 的验收第 1 条要求「经 host runner 真实发出流」，但宿�
 
 * 开工 `27G / 50G`（58%），余 20G。
 * 复用 `/tmp/pi-target-1204`（LUM-1204 已死、无进程持有）作为合并前门，本轮自建 `/tmp/pi-target-1208`；收尾清理两者。`/tmp/pi-target-1205`（2.5G，LUM-1205 已 `in_review`）一并清理。
+
+## LUM-1210 round — TUI 优先轮：全量可合并性扫描零命中（LUM-1209 / LUM-1211 均未 push）→ 槽位 3/3 已满故零派发 → 本轮亲自落地**首批 `app.*` 快捷键 + `/hotkeys`**（`pi-tui` + `pi-coding-agent` 实跑 **59 target / 1291 passed / 0 failed**）并产出 TUI 审计与 Stage 58/59/60 路线
+
+本轮是 **LUM-981** 的推进/协调轮，按 issue 正文「优先完善 TUI」把决策从「派发新棋子」改为「协调轮亲自做一片」。
+
+### 一、开工盘点
+
+```console
+$ git rev-parse origin/feature/pi.rs
+d063396b87bf8ed155883987bf3504e59f5b1a1f      # = LUM-1208 状态文档，与本 worktree 的 base 逐字相同
+$ git log --oneline -1
+d063396b8 docs(status): LUM-1208 协调轮 …
+$ multica daemon status --output json | jq .running_task_count
+4                                             # 本 run + LUM-1209 + LUM-1211 + daemon 自身计数口径
+```
+
+- **无待合并产物**：`git rev-list --count origin/feature/pi.rs..mirror/work/LUM-1211` = **0**（该 mirror ref 就指向 tip 本身），`origin` 上没有 `work/lum-1209` / 新增的 `work/LUM-1211` —— 两个 Stage 正在各自 worktree 里干活，尚未 push。本轮**没有**可合并的东西，`git cherry` 扫描零命中。
+- **槽位已满**：LUM-1209（Stage 55）+ LUM-1211（Stage 57）+ 本协调轮 = 3，正好卡在 issue 要求的「最多 3 个任务同时运行」。**本轮不派发任何新 stage**（LUM-1212 继续 `backlog`），避免第四个进程与两个正在跑全量编译的 worker 抢 CPU/磁盘。
+- **重复轮检查**：开工时只有本 run 是协调轮，未出现同刻重复。
+
+### 二、本轮裁决：为什么是「亲自实现」而不是「空转等合并」
+
+issue 正文给了「跳过 / 计划 / 实现」三选一。本轮的实际约束是：**没有可合并产物 + 槽位已满**，若只做扫描就退化成空转轮（LUM-1195 / LUM-1203 已经记过这种浪费）。因此本轮把额度用于「协调轮自己交付一片 TUI 改动」——这也是 issue 正文明确的优先级（TUI）。
+
+选择切片的标准：**用户每天都会碰、且不触碰已有渲染坐标系的加法**。据此排除了「工具输出折叠」（价值最高但会改所有选词/搜索/快照测试的坐标，见审计 P0-1，留作 Stage 58 单独一轮），选择：
+
+1. `app.model.cycleForward` / `app.model.cycleBackward`（ctrl+p / shift+ctrl+p）—— **Rust 端第一个真正的 `app.*` 动作消费者**；
+2. `app.message.copy`（ctrl+x）—— 复用 App 已有 clipboard 通道；
+3. `/hotkeys` —— 补齐上游内置命令（23 个里 Rust 原来只有 11 个），且只列**已实现**的动作；
+4. 模型目录排序（`/model` 列表 + 循环顺序 + 默认模型）—— 修掉一个 `HashMap` 引起的静默不确定性。
+
+### 三、改动（4 文件，+486/−6）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-tui/src/app.rs:3176` | 新增 `App::request_clipboard` —— 复用 copy-on-select 的 pending 通道，App 仍不碰终端 |
+| `crates/pi-coding-agent/src/interactive.rs:395-430` | `handle_input_event` 在 `app.step` 之前拦截 `app.*`：选择器/对话框/设置/自定义覆盖层/搜索任一打开时不抢键；`matches_with_fallback` 保证没装合并键位表时回落到内置拼写 |
+| `crates/pi-coding-agent/src/interactive.rs:486` | `sorted_models()` —— `(provider, id)` 排序，选择器/循环/默认模型共用 |
+| `crates/pi-coding-agent/src/interactive.rs:498` | `cycle_model()` —— 环绕切换；当前模型不在目录时从头开始；单模型给提示 |
+| `crates/pi-coding-agent/src/interactive.rs:537` | `copy_last_assistant_message()` —— 取最后一条非空 assistant 块交给 clipboard |
+| `crates/pi-coding-agent/src/interactive.rs:1308` | `default_model` 改用 `sorted_models`（原来 `models.iter().next()` 是 `HashMap` 顺序） |
+| `crates/pi-coding-agent/src/commands/slash.rs:47,80,146,258` | `/hotkeys` 变体 + 从**生效**键位表渲染的分组视图（navigation / editing / chat log / app / selectors），未绑定的 id 不显示 |
+| `docs/TUI_UX_AUDIT.md`（新） | TUI 差距审计 + Stage 58/59/60 路线 |
+
+与上游的对应关系：上游把这些动作注册在 editor 上（`interactive-mode.ts:2883-2903`），Rust 端 editor 没有 action 钩子，所以由 driver 在 `app.step` 之前截获；覆盖层守卫保证不抢模态的键盘。
+
+### 四、验证（`pi-tui` + `pi-coding-agent`）
+
+私有 target dir：`pi-rust/target`（`CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`，与两个 worker 的 target 目录天然隔离）：
+
+```console
+$ CARGO_HOME=/tmp/cargo-home … cargo test -p pi-coding-agent -p pi-tui --offline
+  test result: 59 个 test target 全 ok → 1291 passed / 0 failed / 0 ignored
+$ … cargo clippy -p pi-coding-agent -p pi-tui --all-targets --offline -- -D warnings
+  Finished（0 warning）
+$ cargo fmt -p pi-coding-agent -p pi-tui -- --check
+  干净
+```
+
+新增 10 个测试（`slash.rs` 3 个 + `interactive.rs` 7 个），覆盖：生效键位渲染并 title-case、未绑定 id 不出现在 `/hotkeys`、环绕前进/后退、越界当前模型从头开始、单模型提示、复制最后一条助手消息、空会话提示、默认模型取排序后首个、排序稳定。
+
+**本轮不跑全量 workspace**：LUM-1209 与 LUM-1211 正在各自 worktree 里做全量编译，再起第三个全量构建会同时压 CPU 与磁盘（与 LUM-1110 / LUM-1207 轮的取舍一致）。跨 crate 影响面已由上面的 `--all-targets` 门槛覆盖（`pi-tui` 是 `pi-coding-agent` 的依赖，两者一起测等价于该子图的全量）。**全量基线仍是 LUM-1208 的 138 / 2092 / 0 / 2**，下一欠账点 = 本轮产物或任一 worker 合入时。
+
+### 五、frontier（本轮后）
+
+1. **Stage 58（建议，最高优先）**：工具输出折叠 + `app.tools.expand`（ctrl+o）+ 点击工具块展开 + 启动头可展开。零件已在仓库里（`crates/pi-coding-agent/src/tools/render.rs` 2,269 行富渲染器目前只被 print / 导出使用），缺口是接线与坐标系更新。
+2. **Stage 59**：补齐 `app.*` 第 1 批（`app.thinking.toggle`、`app.editor.external`、`app.session.new/tree/fork/resume`）；`/tree`、`/fork` 依赖 LUM-1209 的 `pi-session` 写路径。
+3. **Stage 60**：会话命令补齐（`/new`、`/copy`、`/name`、`/tree`、`/fork`）；`/login`、`/logout` 涉及凭据，单独评估。
+4. **`/hotkeys` 的诚实性约束**：它只列已实现的动作。每接一个 `app.*`，必须同步更新 `slash.rs:152` 的分组表，否则会出现「文档里有的键按下去没反应」——这是本轮特意选择的取舍（宁缺毋假）。
+5. 引擎级残余维持 LUM-1185 / 1177 结论（`fs.watch` / key-based WebCrypto / `node:test` / 无 adapter 的 provider 家族）。
+
+### 六、磁盘（本轮）
+
+* 开工 `30G / 50G`（63%），余 18G。
+* 收尾 `43G / 50G`（92%），余 4.2G —— 涨的是三个并发 worktree 的 target：`lum-1211` **17G**、`lum-1209` 2.2G、`lum-1189` 2.2G、本轮 1.2G。**告警**：LUM-1211 的 target 已单占 17G，下一轮开工前需要有人清理死掉的 worktree target，否则新一轮全量构建会直接撞盘。
+* 本轮 target 用 worktree 内 `pi-rust/target`（与两个 worker 的目录互不干扰），收尾已删除；无 `/tmp` 遗留。
