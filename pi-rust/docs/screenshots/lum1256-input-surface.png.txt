@@ -1,7 +1,7 @@
 # lum1256-input-surface.png — chars, 110x44 cells
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [1] 1. `/` → the composer dropdown offers built-in commands (LUM-1236 table + LUM-1238 wiring)  (cursor 36,42) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -44,10 +44,10 @@ LUM-1246 lifecycle events delivered by the host:
   name  <name> — Set session display name
   (1/19)
 > /▍
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [2] 2. `/he` → fuzzy filter puts `help` first  (cursor 6,42) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -90,10 +90,10 @@ LUM-1246 lifecycle events delivered by the host:
   clone  Duplicate the current session at the current position
   (1/12)
 > /he▍
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [3] 3. `@src/` → file completion resolves against the cwd  (cursor 8,42) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -136,10 +136,10 @@ LUM-1246 lifecycle events delivered by the host:
 ❯ lib.rs  src/lib.rs
   main.rs  src/main.rs
 > @src/▍
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [4] 4. `/extensions` → Stage 71 startup header + slash command report the loaded extension  (cursor 36,42) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -182,10 +182,10 @@ LUM-1246 lifecycle events delivered by the host:
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [5] 5. four faux turns fill the viewport  (cursor 25,40) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -228,10 +228,10 @@ LUM-1246 lifecycle events delivered by the host:
   faux-model (faux) hello
 
 > type a prompt — /help for commands
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [9] 9. PgUp detaches the viewport → `↓ Jump to latest message · End`  (cursor 110,41) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -274,10 +274,10 @@ LUM-1246 lifecycle events delivered by the host:
   faux-model (faux) hello                                                                                    │
 > hello two                            ↓ Jump to latest message · End                                        │
 > type a prompt — /help for commands
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1256 merged tip — input surface + extension visibility on one real PTY session  |  [10] 10. `/help` renders through the `· ` info block, composer still `> `  (cursor 110,41) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57257/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-24554/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -320,4 +320,4 @@ LUM-1246 lifecycle events delivered by the host:
 · chat log Ctrl+C abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit on an empty  ┃
 · prompt Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close selector / cancel turn      ┃
 > type a prompt — /help for commands
-Faux test model  session-18d720c8d5f1130f                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721d5b665611c                                        in 0 out 0 ?/8.2k  ? for help

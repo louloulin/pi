@@ -2034,6 +2034,14 @@ impl App {
         self.selector = Some(selector);
     }
 
+    /// Mutably borrow the open selector.
+    ///
+    /// The driver uses it to move the cursor after it rebuilt the picker
+    /// items itself (e.g. the `/tree` fold chords' branch jump).
+    pub fn selector_mut(&mut self) -> Option<&mut Selector> {
+        self.selector.as_mut()
+    }
+
     /// Whether the selector modal is currently visible.
     pub fn selector_open(&self) -> bool {
         self.selector.is_some()
@@ -4495,10 +4503,12 @@ impl App {
         // (upstream paints it from the scroll view, before the overlays).
         if scrollbar {
             self.apply_scrollbar(message_area, buf);
-            // The "jump to latest" pill is composited over the bottom of the
-            // transcript, after the scrollbar so its own width budget can stop
-            // left of the bar. `render_snapshot` passes `scrollbar == false`,
-            // which is also what keeps `/transcript` free of screen furniture.
+        }
+        // The "jump to latest" pill is composited over the bottom of the
+        // transcript, after the scrollbar so its own width budget can stop
+        // left of the bar. `render_snapshot` passes `scrollbar == false`,
+        // which is also what keeps `/transcript` free of screen furniture.
+        if scrollbar {
             self.paint_scroll_to_end(message_area, buf);
         } else {
             self.scroll_to_end.2.store(0, Ordering::Relaxed);

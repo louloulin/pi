@@ -1525,102 +1525,7 @@ wired 判定路径，那比原来的缺陷更难维护。
 5. 工具卡片 / 思考块 / 耗时统计的 `/resume` 回放仍缺（第六、七轮记录），
    `faux` 提供商不产生工具调用，本轮截图依旧无法覆盖该面。
 
-## 十八、第十二轮（LUM-1257）：jump-to-latest 指示器落地 —— §12.4 第二项闭合
-
-### 18.1 为什么挑这一项
-
-本轮槽位已满（三个 run 同时在写 `app.rs` / `interactive.rs` / `slash.rs`），磁盘一度被
-并发构建吃到 97%，因此只挑**单 crate（`pi-tui`）**、**与在飞分支零文件重叠**、且
-**用户一眼可感知**的缺口：§12.4 第二项「脱离底部没有任何提示」。滚上去读历史之后，
-屏幕上不告诉读者怎么回到最新消息 —— 这是 codex / 上游 pi 里最容易看出的交互差，
-而上游的参考实现是一段不到 20 行的合成逻辑。
-
-### 18.2 行为对齐点（逐项对照上游）
-
-| 维度 | 上游 | 本 port |
-| --- | --- | --- |
-| 触发条件 | `!scrollView.isFollowingEnd`（`tui-alt-screen.ts:1620`） | `!MessageView::is_following()`（`app.rs` `paint_scroll_to_end`） |
-| 合成行 | `clip.y + clip.height - 1`（`:1626`） | `message_area.y + message_area.height - 1` |
-| 水平位置 | `clip.x + (available - w) / 2`（`:1630`） | 同式 |
-| 宽度上限 | 到滚动条列为止（`:1628`） | `scrollbar_geometry().column` |
-| 文案 | `" ↓ Jump to latest message · <shortcut> "`（`tui-renderer.ts:29-33`） | `SCROLL_TO_END_LABEL` + `format_chord("tui.altScreen.bottom")` |
-| 配色 | `bg("selectedBg", fg("text", label))` | `SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg)` |
-| 点击 | `handleScrollToEndIndicatorMouseEvent`（`:1017-1024`） | `App::step_mouse_gesture` 里最先命中 → `set_following(true)` |
-| 记录矩形 | `scrollToEndIndicatorRect`（`:222,1618,1634`） | `App::scroll_to_end_rect()`（三个 `AtomicU16`，`width == 0` 即「没画」） |
-| 与导出面的关系 | 指示器属 alt-screen 合成层 | 只画在 `render_to_buffer`（活帧）；`render_snapshot`（`/transcript`）不画，与滚动条同规则 |
-
-已知偏差（两条，都写在代码注释里）：
-
-1. 未绑定时上游只丢 shortcut，本 port 连 ` · <shortcut>` 半句一起丢（与 `/hotkeys` 同一规则）。
-2. 上游在「图片行」上不合成指示器；本 port 的消息视口不承载图片行（图片走独立 span 层），
-   因此没有这条判断。
-
-改动落点：`crates/pi-tui/src/app.rs`（`SCROLL_TO_END_LABEL` 常量、
-`paint_scroll_to_end` / `scroll_to_end_label` / `scroll_to_end_rect`、
-`render_to_buffer_impl` 的合成调用、`step_mouse_gesture` 的命中分支）。
-
-### 18.3 测试（新增 8 条：`crates/pi-tui/tests/scroll_to_end.rs`）
-
-1. 脱离底部才出现、`End` 回到底部即消失；
-2. 文案带绑定 chord（`· End`，默认表 `tui.altScreen.bottom = ["end"]`）；
-3. 配色取 `selectedBg` + `text`，且邻格不被污染；
-4. 内容不足一屏（`max_scroll == 0`）不出现；
-5. 宽度不越过滚动条列，且滚动条字形仍在；
-6. 点击指示器回到底部，并清掉记录（不能对着已消失的矩形重复命中）；
-7. 指示器之外的点击**不**触发跳转（仍是普通选择路径）；
-8. `render_snapshot`（`/transcript`）不含指示器，且记录为空。
-
-结果：`8 passed; 0 failed`。
-
-### 18.4 真实 PTY 证据
-
-场景 `scripts/pty_scenarios/lum1257-jump-to-latest.json`（120×34，`--model faux/faux-model`），
-8 帧同一进程的累积画面；截图与字符网格 dump：
-`docs/screenshots/lum1257-jump-to-latest.png` / `.png.txt`。
-
-| 帧 | 内容 | grid dump 行 |
-| --- | --- | --- |
-| 1 | 启动帧：视口贴着尾部 → 无指示器 | 检查 |
-| 2–3 | `/help` + `/hotkeys` 把日志灌到超过一屏 | — |
-| 5–6 | `PgUp` 脱离底部 → 视口最后一行出现 `↓ Jump to latest message · End` | 143 / 179 |
-| 7 | 原始 SGR 左键点击（col 60, row 32）→ 回到底部，指示器消失，画面是 `/hotkeys` 尾部 | 无 `Jump to latest` |
-| 8 | 再 `PgUp` → 指示器回来（证明不是一次性状态） | 251 |
-
-### 18.5 本轮门禁（实跑结果）
-
-| 命令 | 结果 |
-| --- | --- |
-| `cargo test -p pi-tui` | ✅ **769 passed / 0 failed**，43 个 target（含新增 8 条） |
-| `cargo clippy -p pi-tui --all-targets` | ✅ 本 crate 零告警（输出只剩 vendored `rquickjs-core` 的既有告警） |
-| `cargo fmt --all -- --check` | ✅ exit 0 |
-| `cargo build --bin pi` | ✅ exit 0（3m 28s，二进制 215,750,424 B，PTY 用的就是它） |
-| PTY 实机 | ✅ 8 帧真终端录制（§18.4） |
-
-**未跑**：`cargo test -p pi-coding-agent`。原因是磁盘：本轮开始时 90%、结束时 97%（并发轮同时在构建），
-链接该 crate 的测试二进制有把并发轮的构建写爆的真实风险。接触面很小且已被覆盖：
-`pi-coding-agent` 对本改动的唯一接触点是 `interactive.rs:458` 的活帧渲染（PTY 真机路径已跑），
-其断言类测试走 `render_snapshot`，而该路径本轮明确不画指示器（§18.3 第 8 条）。
-
-### 18.6 完成度变化（真实值）
-
-- 键位**声明/消费**面数字**不变**：本项复用已消费的 `tui.altScreen.bottom` 槽位，未新增绑定，
-  所以 `app.* 19/44 = 43%`、`tui.* 38/47 = 81%`、整体 **~75%** 的机械量法结果与 §17.6 相同。
-- 本轮把 §12.4 第二项（也是 §17.7 同类列表里唯一的纯渲染缺口）**移出缺口清单**，
-  并补上了它此前缺失的回归测试与真机证据。
-
-### 18.7 仍然缺口（按用户可感知程度，更新后）
-
-1. `app.clear` 的 500ms 双击窗口（§12.4 第一项，LUM-1238 在飞）——空 composer 一次 `Ctrl+C`
-   直接退出、草稿丢失的问题仍在。
-2. `/help` 正文与用户输入共用 `> ` 前缀（§12.4 第三项）。
-3. `app.suspend` / `app.editor.external` 仍未实现（§17.7.1）。
-4. `app.*` 里 23 条无消费者的 id（§17.7.2）。
-5. `powershell` 与 7 条 `/` 命令（§17.7.3）。
-6. 环境风险：`/` 分区长期在 90–97%，本轮清理了 `lum-1243` 目录下 5.6G 的陈旧 `target/`
-   （该 run 停在 `todo`、无进程占用）才腾出构建空间；并发轮再多会重新撞上这个上限。
-
-
-## 十九、Stage 71 交付（LUM-1239）：扩展对用户可见 —— 启动头摘要行 + `/extensions`
+## 十八、Stage 71 交付（LUM-1239）：扩展对用户可见 —— 启动头摘要行 + `/extensions`
 
 > 编号说明：issue 正文把这节写作「第十六节」，本文件按顺序是第十五节（第十四节 = LUM-1235）。
 
@@ -1740,7 +1645,7 @@ harness：`pty.fork` + `TIOCSWINSZ`，`pyte` 还原屏幕、Pillow 渲成 PNG（
 3. **`/help` 与 `/extensions` 的排版**：都受 `app.info` 的流式段落渲染限制，
    等 TUI 有「保留换行的普通文本块」再统一改善。
 
-## 二十、Stage 70 交付（LUM-1238）：TUI 输入面收尾
+## 十九、Stage 70 交付（LUM-1238）：TUI 输入面收尾
 
 第十二节 12.3 / 12.4 记下的四条输入面缺口本轮全部关掉。四处改动都在同一条链路上
 （`Editor` → `App::step` → 消息视口 / footer），没有新增模块，也没有新依赖。
@@ -1897,6 +1802,100 @@ harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流
 2. **扩展命令的中文/多字节标签**：下拉宽度按列截断，未验证 CJK 命令名。
 3. 14.5 的四条（resume 保真度、扩展可见性、`Ctrl+G` 外部编辑器、`/tree` 无会话）维持原状。
 
+## 二十、第十二轮（LUM-1257）：jump-to-latest 指示器落地 —— §12.4 第二项闭合
+
+### 20.1 为什么挑这一项
+
+本轮槽位已满（三个 run 同时在写 `app.rs` / `interactive.rs` / `slash.rs`），磁盘一度被
+并发构建吃到 97%，因此只挑**单 crate（`pi-tui`）**、**与在飞分支零文件重叠**、且
+**用户一眼可感知**的缺口：§12.4 第二项「脱离底部没有任何提示」。滚上去读历史之后，
+屏幕上不告诉读者怎么回到最新消息 —— 这是 codex / 上游 pi 里最容易看出的交互差，
+而上游的参考实现是一段不到 20 行的合成逻辑。
+
+### 20.2 行为对齐点（逐项对照上游）
+
+| 维度 | 上游 | 本 port |
+| --- | --- | --- |
+| 触发条件 | `!scrollView.isFollowingEnd`（`tui-alt-screen.ts:1620`） | `!MessageView::is_following()`（`app.rs` `paint_scroll_to_end`） |
+| 合成行 | `clip.y + clip.height - 1`（`:1626`） | `message_area.y + message_area.height - 1` |
+| 水平位置 | `clip.x + (available - w) / 2`（`:1630`） | 同式 |
+| 宽度上限 | 到滚动条列为止（`:1628`） | `scrollbar_geometry().column` |
+| 文案 | `" ↓ Jump to latest message · <shortcut> "`（`tui-renderer.ts:29-33`） | `SCROLL_TO_END_LABEL` + `format_chord("tui.altScreen.bottom")` |
+| 配色 | `bg("selectedBg", fg("text", label))` | `SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg)` |
+| 点击 | `handleScrollToEndIndicatorMouseEvent`（`:1017-1024`） | `App::step_mouse_gesture` 里最先命中 → `set_following(true)` |
+| 记录矩形 | `scrollToEndIndicatorRect`（`:222,1618,1634`） | `App::scroll_to_end_rect()`（三个 `AtomicU16`，`width == 0` 即「没画」） |
+| 与导出面的关系 | 指示器属 alt-screen 合成层 | 只画在 `render_to_buffer`（活帧）；`render_snapshot`（`/transcript`）不画，与滚动条同规则 |
+
+已知偏差（两条，都写在代码注释里）：
+
+1. 未绑定时上游只丢 shortcut，本 port 连 ` · <shortcut>` 半句一起丢（与 `/hotkeys` 同一规则）。
+2. 上游在「图片行」上不合成指示器；本 port 的消息视口不承载图片行（图片走独立 span 层），
+   因此没有这条判断。
+
+改动落点：`crates/pi-tui/src/app.rs`（`SCROLL_TO_END_LABEL` 常量、
+`paint_scroll_to_end` / `scroll_to_end_label` / `scroll_to_end_rect`、
+`render_to_buffer_impl` 的合成调用、`step_mouse_gesture` 的命中分支）。
+
+### 20.3 测试（新增 8 条：`crates/pi-tui/tests/scroll_to_end.rs`）
+
+1. 脱离底部才出现、`End` 回到底部即消失；
+2. 文案带绑定 chord（`· End`，默认表 `tui.altScreen.bottom = ["end"]`）；
+3. 配色取 `selectedBg` + `text`，且邻格不被污染；
+4. 内容不足一屏（`max_scroll == 0`）不出现；
+5. 宽度不越过滚动条列，且滚动条字形仍在；
+6. 点击指示器回到底部，并清掉记录（不能对着已消失的矩形重复命中）；
+7. 指示器之外的点击**不**触发跳转（仍是普通选择路径）；
+8. `render_snapshot`（`/transcript`）不含指示器，且记录为空。
+
+结果：`8 passed; 0 failed`。
+
+### 20.4 真实 PTY 证据
+
+场景 `scripts/pty_scenarios/lum1257-jump-to-latest.json`（120×34，`--model faux/faux-model`），
+8 帧同一进程的累积画面；截图与字符网格 dump：
+`docs/screenshots/lum1257-jump-to-latest.png` / `.png.txt`。
+
+| 帧 | 内容 | grid dump 行 |
+| --- | --- | --- |
+| 1 | 启动帧：视口贴着尾部 → 无指示器 | 检查 |
+| 2–3 | `/help` + `/hotkeys` 把日志灌到超过一屏 | — |
+| 5–6 | `PgUp` 脱离底部 → 视口最后一行出现 `↓ Jump to latest message · End` | 143 / 179 |
+| 7 | 原始 SGR 左键点击（col 60, row 32）→ 回到底部，指示器消失，画面是 `/hotkeys` 尾部 | 无 `Jump to latest` |
+| 8 | 再 `PgUp` → 指示器回来（证明不是一次性状态） | 251 |
+
+### 20.5 本轮门禁（实跑结果）
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test -p pi-tui` | ✅ **769 passed / 0 failed**，43 个 target（含新增 8 条） |
+| `cargo clippy -p pi-tui --all-targets` | ✅ 本 crate 零告警（输出只剩 vendored `rquickjs-core` 的既有告警） |
+| `cargo fmt --all -- --check` | ✅ exit 0 |
+| `cargo build --bin pi` | ✅ exit 0（3m 28s，二进制 215,750,424 B，PTY 用的就是它） |
+| PTY 实机 | ✅ 8 帧真终端录制（§20.4） |
+
+**未跑**：`cargo test -p pi-coding-agent`。原因是磁盘：本轮开始时 90%、结束时 97%（并发轮同时在构建），
+链接该 crate 的测试二进制有把并发轮的构建写爆的真实风险。接触面很小且已被覆盖：
+`pi-coding-agent` 对本改动的唯一接触点是 `interactive.rs:458` 的活帧渲染（PTY 真机路径已跑），
+其断言类测试走 `render_snapshot`，而该路径本轮明确不画指示器（§20.3 第 8 条）。
+
+### 20.6 完成度变化（真实值）
+
+- 键位**声明/消费**面数字**不变**：本项复用已消费的 `tui.altScreen.bottom` 槽位，未新增绑定，
+  所以 `app.* 19/44 = 43%`、`tui.* 38/47 = 81%`、整体 **~75%** 的机械量法结果与 §17.6 相同。
+- 本轮把 §12.4 第二项（也是 §17.7 同类列表里唯一的纯渲染缺口）**移出缺口清单**，
+  并补上了它此前缺失的回归测试与真机证据。
+
+### 20.7 仍然缺口（按用户可感知程度，更新后）
+
+1. `app.clear` 的 500ms 双击窗口（§12.4 第一项，LUM-1238 在飞）——空 composer 一次 `Ctrl+C`
+   直接退出、草稿丢失的问题仍在。
+2. `/help` 正文与用户输入共用 `> ` 前缀（§12.4 第三项）。
+3. `app.suspend` / `app.editor.external` 仍未实现（§17.7.1）。
+4. `app.*` 里 23 条无消费者的 id（§17.7.2）。
+5. `powershell` 与 7 条 `/` 命令（§17.7.3）。
+6. 环境风险：`/` 分区长期在 90–97%，本轮清理了 `lum-1243` 目录下 5.6G 的陈旧 `target/`
+   （该 run 停在 `todo`、无进程占用）才腾出构建空间；并发轮再多会重新撞上这个上限。
+
 ## 二十一、LUM-1256：三条未合并交付的抢救合并 + 合并期真实缺陷 + 复测
 
 本节记录的不是新功能，而是**仓库状态本身的一次修复**：`feature/pi.rs` 上有三条早已写完、
@@ -1944,8 +1943,9 @@ harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流
    截断、尊重滚动条列，且有独立的 `tests/scroll_to_end.rs` 8 条用例与点击回底的 PTY 证据），
    删除 LUM-1238 的右对齐版，并把它的三条冗余用例收敛为一条仍然独有价值的断言
    （「视口已脱钩但 offset 恰为 0 时，`End` 也必须重新挂回」——这条是 LUM-1238 修的，
-   LUM-1257 没有覆盖）。   本轮因此把 `docs/TUI_UX_AUDIT.md` 的节号重新排了一次：LUM-1257 在远端已经用了「十八」，
-   所以本轮的三件交付顺延为十九 / 二十 / 二十一。
+   LUM-1257 没有覆盖）。节号这一次两边各排了一套（远端把 LUM-1239 / LUM-1238 留在十八 / 十九、
+   把 LUM-1257 顺延到二十；我这边反过来），最终**以远端已发布的那套为准**：
+   十八 = LUM-1239、十九 = LUM-1238、二十 = LUM-1257，本节是二十一。
 
 ### 21.3 门禁（合并后本 tip 实测）
 
@@ -1953,17 +1953,28 @@ harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流
 cargo fmt --all                                             # 干净
 cargo check --offline --workspace --all-targets             # 退出 0
 cargo clippy --offline --workspace --all-targets -- -D warnings   # 退出 0（仅 vendored rquickjs-core 既有 warning）
-cargo test  --offline --workspace                           # 64 个 target / 1,307 条用例通过
+cargo test  --offline --workspace --no-fail-fast            # 155 个 target / 2,376 条用例通过 / 0 失败
 ```
 
-一条已知**环境性 flake**（不是回归）：`pi-extensions/tests/child_process.rs` 的
-`child_process_honours_cwd_env_and_drains_large_output` 对扩展调用设了 5 s 上限，
-在工作区并行跑 65 个测试二进制、且卷只剩约 11 G 的机器上偶发超时；单独重跑
-`cargo test -p pi-extensions --test child_process` 连续 3 次全绿。
+两条**负载敏感**的用例在 4 个 agent 任务并发（load average 15~22）时开始随机红，都不是本轮引入，
+但会让 `cargo test --workspace` 没法当门禁用，所以按根因修掉，而不是记为"环境问题"：
+
+1. `pi-extensions/tests/child_process.rs` 的 `child_process_honours_cwd_env_and_drains_large_output`：
+   `host_with_cwd` 用宿主默认的 **5 s** 单次调用预算驱动六条真 `sh` / `yes` 管道（每次搬 200 KB 过 JS 堆），
+   实测**通过**的一次也要 4.1 s——正常态就吃掉 82% 的预算，负载一上来必超。改为该测试宿主显式
+   **60 s**；断言全部与延迟无关，没有放宽任何检查。
+2. `pi-extensions/tests/pi_ai_provider.rs` 的 `a_live_stream_extends_the_host_call_deadline`：
+   它故意把宿主预算设成 **50 ms** 来证明"只有 pi-ai 的死线能续命"，但 `host.load()` 也吃这 50 ms
+   （模块要过 shim 的 tokenizer / analyser），负载下分析本身就超预算，于是以
+   `Error: interrupted at __pi_tokenize` 在**测到死线逻辑之前**就失败。宿主预算改 **1 s**、
+   桩流时长相应拉到 ~1.4 s：加载余量约 20 倍，同时流仍远超宿主预算，断言含义不变。
+
+改后两条各自连跑 3 次全绿，整仓 `cargo test --workspace --no-fail-fast` 退出 0。
 
 编译环境仍受卷容量限制，沿用既有约定：`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`
 （仓库 `Cargo.toml` 没有 `[profile.dev] debug = 0`），并在构建前回收已死任务的陈旧 `target/`
-（本轮回收 lum-1238 的 4.1 G 与 lum-1246 的 9.9 G）。
+（本轮先后回收 lum-1238 的 4.1 G、lum-1246 的 9.9 G、lum-1252 的 2.9 G；卷一度 100% 写满，
+`cargo test` 在创建 fingerprint 目录时直接失败过。**不要碰在飞任务的 workdir**）。
 
 ### 21.4 实机证据（合并 tip 上的真 PTY 一镜到底）
 
@@ -2003,10 +2014,10 @@ header → Above → editor → Below → footer 顺序发，发不出的截断�
 
 ### 21.6 仍然缺的（顺延给后续 round）
 
-1. 二十一.2 的第 3 条说明：**worktree 里未提交的收尾改动是真实存在的风险面**。本轮侥幸在回收
+1. 21.2 的第 3 条说明：**worktree 里未提交的收尾改动是真实存在的风险面**。本轮侥幸在回收
    `target/` 之前先读了三个 worktree 的 `git status`；如果先删目录或直接 `checkout --fresh`，
    这三处修正会永久丢失。建议后续轮次把"合并前 diff 一遍源 worktree 的未提交改动"写成固定步骤。
 2. 扩展事件轴仍有 14 个上游事件未实现，且 `model_select` 有变体无构造点（详见
    `docs/RUST_TS_PARITY_METRICS.md` §0.1）。
 3. `app.*` 接线率仍为 21/44（47.7%），是本轮之后**性价比最高**的一轴（补满 +3.7pt）。
-4. 二十.7 的三条（Tab 接受路径的真机断言、CJK 候选标签、`Ctrl+G`）维持原状。
+4. 十九.7 的三条（Tab 接受路径的真机断言、CJK 候选标签、`Ctrl+G`）维持原状。

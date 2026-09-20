@@ -1,7 +1,7 @@
 # lum1246-extension-events.png — chars, 110x44 cells
 
 ===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [1] 1. boot: widget is installed by the session_start handler  (cursor 110,43) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-25175/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -44,10 +44,10 @@ LUM-1246 lifecycle events delivered by the host:
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721dedd1da072                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [2] 2. `!echo hello` → user_bash delivered (driver-level emit)  (cursor 11,39) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-25175/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -90,10 +90,10 @@ LUM-1246 lifecycle events delivered by the host:
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721dedd1da072                                        in 0 out 0 ?/8.2k  ? for help
 
 ===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [3] 3. a full faux turn → agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end  (cursor 25,41) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-25175/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -136,10 +136,10 @@ LUM-1246 lifecycle events delivered by the host:
 > hi there
   faux-model (faux) hello
 > type a prompt — /help for commands
-Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721dedd1da072                                        in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [4] 4. second turn: counters keep climbing (per-turn events are not one-shot)  (cursor 49,43) =====
-pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [4] 4. second turn: counters keep climbing (per-turn events are not one-shot)  (cursor 110,41) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-25175/.pi/agent/extensions/extension-events.js]
 1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
@@ -182,4 +182,4 @@ LUM-1246 lifecycle events delivered by the host:
 > again                                                                                                      ┃
   faux-model (faux) hello                                                                                    ┃
 > type a prompt — /help for commands
-Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d721dedd1da072                                        in 0 out 0 ?/8.2k  ? for help

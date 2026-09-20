@@ -89,7 +89,7 @@ pub use schema::{EntryRow, SchemaLayout, SessionRow, SCHEMA_VERSION, UPSTREAM_IN
 pub use stats::{SessionStats, StatsCheck};
 pub use tree::SessionTreeNode;
 pub use usage::{add_usage, sum_usage, UsageLedgerRow, UsageOrder, UsageScan};
-pub use writer::{SessionWriter, ZSTD_LEVEL};
+pub use writer::{delete_session, SessionWriter, ZSTD_LEVEL};
 
 // Re-export the protocol `SessionEntry` so downstream users don't have
 // to add a second `pi-protocol` dependency.

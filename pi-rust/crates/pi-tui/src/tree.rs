@@ -9,11 +9,12 @@
 //! so `pi-tui` needs no dependency on `pi-session`; the coding agent
 //! assembles [`TreeItem`]s from its own entry tree.
 //!
-//! Not ported (upstream-only, out of scope): folding (`⊞`/`⊟`), the tree
-//! label editor, the three filter modes and horizontal viewport scrolling.
-//! Because filtering is not re-flattened, a fuzzy hit keeps its original
-//! indent/gutter instead of being re-indented as upstream's
-//! `recomputeVisualStructure` would.
+//! Not ported (upstream-only, out of scope): the tree label editor and
+//! horizontal viewport scrolling. Folding and the filter modes are ported
+//! (Stage 68, LUM-1255) — see [`flatten_tree_folded`] and
+//! [`TreeRow::foldable`]. Because filtering is not re-flattened, a fuzzy
+//! hit keeps its original indent/gutter instead of being re-indented as
+//! upstream's `recomputeVisualStructure` would.
 //!
 //! [`TreeRow`] is the flattened row: `prefix` is the indent + gutter +
 //! connector string, `label` is the node's own text, and
@@ -23,7 +24,7 @@
 //!
 //! [`Selector`]: crate::selector::Selector
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::selector::SelectorItem;
 
@@ -79,6 +80,14 @@ pub struct TreeRow {
     pub description: Option<String>,
     /// True when this node lies on the root-to-active-leaf path.
     pub on_active_path: bool,
+    /// True when this node's children are hidden by a fold.
+    pub folded: bool,
+    /// True when upstream's `isFoldable` says this node can be folded:
+    /// it has visible children and is either a root or the start of a
+    /// branch segment (its visible parent has more than one visible
+    /// child). A node in the middle of a single-child chain is not
+    /// foldable — folding it would hide the rest of the chain.
+    pub foldable: bool,
 }
 
 /// Flatten a forest into pre-order rows.
@@ -87,6 +96,23 @@ pub struct TreeRow {
 /// leaf) is emitted first at every level, so the branch the cursor sits on
 /// is not buried under older forks. Child order is otherwise preserved.
 pub fn flatten_tree(roots: &[TreeItem], active_value: Option<&str>) -> Vec<TreeRow> {
+    flatten_tree_folded(roots, active_value, &HashSet::new())
+}
+
+/// [`flatten_tree`] with folding: the children of every node whose value
+/// is in `folded` are skipped.
+///
+/// Mirrors upstream `tree-selector.ts` `applyFilter`'s fold step — the
+/// folded set is consulted while walking, so a folded node keeps its own
+/// row (drawn with the `⊞` fold glyph) and loses its subtree. A value in
+/// `folded` that is not currently foldable is ignored (upstream clears
+/// the fold set whenever the filter changes, and `isFoldable` gates the
+/// chord that adds to it).
+pub fn flatten_tree_folded(
+    roots: &[TreeItem],
+    active_value: Option<&str>,
+    folded: &HashSet<String>,
+) -> Vec<TreeRow> {
     let active = compute_active_subtrees(roots, active_value);
     let is_active = |node: &TreeItem| active.get(&node.value).copied().unwrap_or(false);
 
@@ -106,19 +132,28 @@ pub fn flatten_tree(roots: &[TreeItem], active_value: Option<&str>) -> Vec<TreeR
             is_last,
             gutters: Vec::new(),
             is_virtual_root_child: multiple_roots,
+            // A root has no visible parent, so it is foldable whenever it
+            // has children (`isFoldable`'s `parentId === null` branch).
+            foldable: !root.children.is_empty(),
         });
     }
 
     let mut rows = Vec::new();
     while let Some(frame) = stack.pop() {
+        let is_folded = frame.foldable && folded.contains(&frame.node.value);
         rows.push(TreeRow {
             value: frame.node.value.clone(),
             indent: frame.indent,
-            prefix: render_prefix(&frame, multiple_roots),
+            prefix: render_prefix(&frame, multiple_roots, is_folded),
             label: frame.node.label.clone(),
             description: frame.node.description.clone(),
             on_active_path: is_active(frame.node),
+            folded: is_folded,
+            foldable: frame.foldable,
         });
+        if is_folded {
+            continue;
+        }
 
         let multiple_children = frame.node.children.len() > 1;
         let child_indent = if multiple_children {
@@ -174,6 +209,9 @@ pub fn flatten_tree(roots: &[TreeItem], active_value: Option<&str>) -> Vec<TreeR
                     })
                     .collect(),
                 is_virtual_root_child: false,
+                // `isFoldable`: a child of a branch point starts a segment
+                // and may be folded; the only child of a chain may not.
+                foldable: multiple_children && !child.children.is_empty(),
             });
         }
     }
@@ -213,6 +251,8 @@ struct Frame<'a> {
     is_last: bool,
     gutters: Vec<Gutter>,
     is_virtual_root_child: bool,
+    /// Upstream `isFoldable(entryId)` for this node.
+    foldable: bool,
 }
 
 /// Indent the row is actually drawn at: multiple roots are drawn as
@@ -226,7 +266,7 @@ fn display_indent(indent: usize, multiple_roots: bool) -> usize {
 }
 
 /// Build the indent + gutter + connector prefix for one row.
-fn render_prefix(frame: &Frame<'_>, multiple_roots: bool) -> String {
+fn render_prefix(frame: &Frame<'_>, multiple_roots: bool, folded: bool) -> String {
     let display_indent = display_indent(frame.indent, multiple_roots);
     let connector_displayed = frame.show_connector && !frame.is_virtual_root_child;
     let connector_position = connector_displayed.then(|| display_indent.saturating_sub(1));
@@ -244,10 +284,16 @@ fn render_prefix(frame: &Frame<'_>, multiple_roots: bool) -> String {
         } else if connector_position == Some(level) {
             match position {
                 0 => prefix.push(if frame.is_last { '└' } else { '├' }),
-                // Upstream puts the fold indicator (`⊟`/`⊞`) here; folding
-                // is not ported, so a connector always shows an unbroken
-                // `─`.
-                1 => prefix.push('─'),
+                // Upstream's fold indicator: `⊞` collapsed, `⊟` expanded
+                // (`tree-selector.ts` gutter rendering). A row with no
+                // children keeps the unbroken `─`.
+                1 => prefix.push(if !frame.foldable {
+                    '─'
+                } else if folded {
+                    '⊞'
+                } else {
+                    '⊟'
+                }),
                 _ => prefix.push(' '),
             }
         } else {
@@ -335,8 +381,14 @@ mod tests {
         // The active branch is emitted first, so it carries the "more
         // siblings follow" connector and the inactive branch closes the
         // list (upstream `flattenTree`, unchanged by the reorder).
+        // `y` is a leaf, so its connector keeps the unbroken rule; `x` has
+        // a child, so the connector's second column carries the fold
+        // indicator (Stage 68) — expanded, since nothing is folded.
         assert_eq!(by_value("y").prefix, "├─ ");
-        assert_eq!(by_value("x").prefix, "└─ ");
+        assert!(by_value("y").prefix.contains('─'), "no fold box on a leaf");
+        assert_eq!(by_value("x").prefix, "└⊟ ");
+        assert!(by_value("x").foldable);
+        assert!(!by_value("y").foldable);
         // `x` is the last child, so its connector does not continue: its
         // child is indented but draws no vertical gutter line.
         assert_eq!(by_value("x1").prefix, "      ");
@@ -378,6 +430,107 @@ mod tests {
         // column 0.
         assert!(rows.iter().all(|row| row.indent == 1));
         assert!(rows.iter().all(|row| row.prefix.is_empty()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Folding (Stage 68 / LUM-1255)
+    // -----------------------------------------------------------------------
+
+    /// The shape every fold test uses — a branch point with two children,
+    /// each of them a single-child chain:
+    ///
+    /// ```text
+    /// r ─ x ─ x1
+    ///   └ y ─ y1
+    /// ```
+    fn branchy() -> Vec<TreeItem> {
+        vec![item(
+            "r",
+            vec![
+                item("x", vec![item("x1", vec![])]),
+                item("y", vec![item("y1", vec![])]),
+            ],
+        )]
+    }
+
+    #[test]
+    fn foldable_marks_the_segment_starts_only() {
+        let rows = flatten_tree(&branchy(), None);
+        let foldable = |value: &str| {
+            rows.iter()
+                .find(|row| row.value == value)
+                .expect("row")
+                .foldable
+        };
+        // The root has visible children and no visible parent
+        // (`isFoldable`'s `parentId === null` branch).
+        assert!(foldable("r"));
+        // `x` and `y` are the children of a branch point, so each starts a
+        // segment.
+        assert!(foldable("x"), "{rows:#?}");
+        assert!(foldable("y"));
+        // `x1` / `y1` are the only child of their chain: folding them
+        // would hide the rest of the chain.
+        assert!(!foldable("x1"));
+        assert!(!foldable("y1"));
+    }
+
+    #[test]
+    fn folding_a_row_hides_its_subtree_but_keeps_the_row() {
+        let folded = HashSet::from(["x".to_string()]);
+        let rows = flatten_tree_folded(&branchy(), None, &folded);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r", "x", "y", "y1"],
+            "`x1` is gone, `x` stays"
+        );
+        let x = rows.iter().find(|row| row.value == "x").expect("x");
+        assert!(x.folded, "the row reports its own fold");
+        assert!(x.prefix.contains('⊞'), "collapsed glyph: {:?}", x.prefix);
+        let y = rows.iter().find(|row| row.value == "y").expect("y");
+        assert!(!y.folded);
+        assert!(y.prefix.contains('⊟'), "expanded glyph: {:?}", y.prefix);
+        // A row in the middle of a single-child chain keeps the plain
+        // indent — it has no connector of its own, so no fold box either.
+        let y1 = rows.iter().find(|row| row.value == "y1").expect("y1");
+        assert_eq!(y1.prefix, "      ", "{:?}", y1.prefix);
+    }
+
+    #[test]
+    fn folding_the_root_hides_everything_below_it() {
+        let folded = HashSet::from(["r".to_string()]);
+        let rows = flatten_tree_folded(&branchy(), None, &folded);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].value, "r");
+        assert!(rows[0].folded);
+    }
+
+    #[test]
+    fn a_fold_on_a_non_foldable_row_is_ignored() {
+        // Upstream clears the fold set whenever the filter changes and
+        // gates the chord on `isFoldable`; a stale value must not hide a
+        // chain.
+        let folded = HashSet::from(["x1".to_string()]);
+        let rows = flatten_tree_folded(&branchy(), None, &folded);
+        assert_eq!(rows.len(), 5, "{rows:#?}");
+        assert_eq!(rows.iter().filter(|row| row.folded).count(), 0);
+    }
+
+    #[test]
+    fn flatten_tree_is_folding_with_an_empty_set() {
+        let roots = branchy();
+        assert_eq!(
+            flatten_tree(&roots, Some("y1"))
+                .iter()
+                .map(|row| (row.value.clone(), row.folded, row.foldable))
+                .collect::<Vec<_>>(),
+            flatten_tree_folded(&roots, Some("y1"), &HashSet::new())
+                .iter()
+                .map(|row| (row.value.clone(), row.folded, row.foldable))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -21,12 +21,13 @@
 //! [`SessionReader::entry_ancestry`]: pi_session::SessionReader::entry_ancestry
 //! [`SessionWriter::copy_entries_from`]: pi_session::SessionWriter::copy_entries_from
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use pi_protocol::{Content, Role, SessionEntry, StopReason};
 use pi_session::{SessionReader, SessionTreeNode, SessionWriter};
-use pi_tui::tree::{flatten_tree, tree_selector_items, TreeItem};
+use pi_tui::tree::{flatten_tree_folded, tree_selector_items, TreeItem};
 use pi_tui::Selector;
 
 use crate::commands::session::new_session_id;
@@ -44,6 +45,128 @@ pub struct CreatedSession {
     pub entries: usize,
 }
 
+/// Which entries the `/tree` overlay shows — upstream `tree-selector.ts`
+/// `FilterMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TreeFilter {
+    /// Hide settings / bookkeeping entries (upstream's default view).
+    #[default]
+    Default,
+    /// Default minus tool results.
+    NoTools,
+    /// Only user messages.
+    UserOnly,
+    /// Only entries that carry a label — see [`TreeFilter::LabeledOnly`]
+    /// note in [`TreeFilter::passes`].
+    LabeledOnly,
+    /// Everything, including settings / bookkeeping entries.
+    All,
+}
+
+impl TreeFilter {
+    /// Every mode, in upstream's cycle order
+    /// (`tree-selector.ts:1064` `cycleForward`).
+    pub const CYCLE: [TreeFilter; 5] = [
+        TreeFilter::Default,
+        TreeFilter::NoTools,
+        TreeFilter::UserOnly,
+        TreeFilter::LabeledOnly,
+        TreeFilter::All,
+    ];
+
+    /// The next mode in the cycle (`app.tree.filter.cycleForward`).
+    pub fn next(self) -> Self {
+        let index = Self::CYCLE
+            .iter()
+            .position(|mode| *mode == self)
+            .unwrap_or(0);
+        Self::CYCLE[(index + 1) % Self::CYCLE.len()]
+    }
+
+    /// The previous mode in the cycle (`app.tree.filter.cycleBackward`).
+    pub fn prev(self) -> Self {
+        let index = Self::CYCLE
+            .iter()
+            .position(|mode| *mode == self)
+            .unwrap_or(0);
+        Self::CYCLE[(index + Self::CYCLE.len() - 1) % Self::CYCLE.len()]
+    }
+
+    /// Upstream's mode name, as shown in the picker footer.
+    pub fn name(self) -> &'static str {
+        match self {
+            TreeFilter::Default => "default",
+            TreeFilter::NoTools => "no-tools",
+            TreeFilter::UserOnly => "user-only",
+            TreeFilter::LabeledOnly => "labeled-only",
+            TreeFilter::All => "all",
+        }
+    }
+
+    /// Whether `entry` survives this mode, given the session's current
+    /// leaf.
+    ///
+    /// `is_current_leaf` keeps the active position visible: upstream
+    /// never hides the leaf even when its assistant message carries no
+    /// text (`tree-selector.ts:341-353`).
+    ///
+    /// Deviation: upstream's `labeled-only` keeps entries with a `label`;
+    /// the Rust session model has no label entry (upstream's `label` type
+    /// is stored as a `custom` entry, which this port maps to
+    /// [`SessionEntry::Extension`], and nothing writes one yet — see
+    /// `app.tree.editLabel`, still unwired). The filter therefore keeps
+    /// the entries that are custom/extension rows.
+    pub fn passes(self, entry: &SessionEntry, is_current_leaf: bool) -> bool {
+        // Upstream hides assistant turns that produced only tool calls
+        // unless they errored/aborted or are the active leaf.
+        if let SessionEntry::AssistantMessage(message) = entry {
+            if !is_current_leaf {
+                let has_text = !content_text(&message.content).trim().is_empty();
+                let is_error_or_aborted = message.error_message.is_some()
+                    || !matches!(message.stop_reason, StopReason::Stop | StopReason::ToolUse);
+                if !has_text && !is_error_or_aborted {
+                    return false;
+                }
+            }
+        }
+        let is_settings_entry = matches!(
+            entry,
+            SessionEntry::Extension { .. }
+                | SessionEntry::Compaction { .. }
+                | SessionEntry::Header { .. }
+        );
+        match self {
+            TreeFilter::UserOnly => {
+                matches!(entry, SessionEntry::UserMessage(message) if message.role == Role::User)
+            }
+            TreeFilter::NoTools => {
+                !is_settings_entry && !matches!(entry, SessionEntry::ToolResult(_))
+            }
+            TreeFilter::LabeledOnly => matches!(entry, SessionEntry::Extension { .. }),
+            TreeFilter::All => true,
+            TreeFilter::Default => !is_settings_entry,
+        }
+    }
+}
+
+/// How the `/tree` overlay is currently viewed: the filter, the folded
+/// branch ids and whether labels are drawn as timestamps.
+#[derive(Debug, Clone, Default)]
+pub struct TreeView {
+    /// Active filter mode.
+    pub filter: TreeFilter,
+    /// Entry ids whose subtree is collapsed.
+    pub folded: HashSet<String>,
+    /// Draw each row's timestamp in the description column
+    /// (`app.tree.toggleLabelTimestamp`).
+    ///
+    /// Upstream toggles between a label and that label's timestamp; this
+    /// port has no label entries, so the toggle covers the entry
+    /// timestamp instead — the same column, the only timestamp a ported
+    /// entry has.
+    pub show_label_timestamps: bool,
+}
+
 /// The `/tree` overlay for a stored session.
 ///
 /// `active_leaf` marks the branch the cursor currently sits on so it is
@@ -54,11 +177,25 @@ pub fn tree_selector(
     session_id: &str,
     active_leaf: Option<&str>,
 ) -> anyhow::Result<Selector> {
-    let roots = reader
-        .session_tree(session_id)
-        .with_context(|| format!("building the entry tree for session {session_id:?}"))?;
-    let items = roots.iter().map(to_tree_item).collect::<Vec<_>>();
-    let rows = flatten_tree(&items, active_leaf);
+    tree_selector_with(reader, session_id, active_leaf, &TreeView::default())
+}
+
+/// [`tree_selector`] honouring a [`TreeView`]: filter, folds and the
+/// label/timestamp column.
+///
+/// The fold set is applied while flattening (a folded node keeps its own
+/// row and loses its subtree), matching upstream's `applyFilter`, where
+/// `foldedNodes` is consulted after the filter mode has pruned the tree.
+/// Filtering therefore happens *before* folding, so a node's foldability
+/// is computed from its visible children (`isFoldable` in
+/// `tree-selector.ts:1106`).
+pub fn tree_selector_with(
+    reader: &SessionReader,
+    session_id: &str,
+    active_leaf: Option<&str>,
+    view: &TreeView,
+) -> anyhow::Result<Selector> {
+    let rows = tree_rows(reader, session_id, active_leaf, view)?;
     let selector_items = tree_selector_items(&rows)
         .into_iter()
         .map(|mut item| {
@@ -68,7 +205,51 @@ pub fn tree_selector(
         .collect::<Vec<_>>();
     Ok(Selector::new("Session tree", selector_items)
         .searchable(true)
-        .with_max_visible(15))
+        .with_max_visible(15)
+        .with_footer(tree_footer(view)))
+}
+
+/// The visible rows of the current `/tree` view, in display order.
+///
+/// [`tree_selector_with`] renders exactly these rows; the driver reads
+/// them back to answer the fold chords, which need the rows' `indent` /
+/// `foldable` metadata rather than the flattened selector items.
+/// Upstream keeps the equivalent maps (`visibleParentMap` /
+/// `visibleChildrenMap`) inside `tree-selector.ts`.
+pub fn tree_rows(
+    reader: &SessionReader,
+    session_id: &str,
+    active_leaf: Option<&str>,
+    view: &TreeView,
+) -> anyhow::Result<Vec<pi_tui::tree::TreeRow>> {
+    let roots = reader
+        .session_tree(session_id)
+        .with_context(|| format!("building the entry tree for session {session_id:?}"))?;
+    let items = roots
+        .iter()
+        .filter_map(|node| to_tree_item(node, active_leaf, view))
+        .collect::<Vec<_>>();
+    Ok(flatten_tree_folded(&items, active_leaf, &view.folded))
+}
+
+/// The `/tree` help footer — upstream `TREE_HELP_ITEMS`
+/// (`tree-selector.ts:1219-1236`), with the current filter folded in so
+/// the active view is visible without opening `/hotkeys`.
+fn tree_footer(view: &TreeView) -> Vec<String> {
+    vec![
+        "  ↑/↓ move · ←/→ page · ctrl+← branch · shift+t label time".to_string(),
+        "  ctrl+d default · ctrl+t no-tools · ctrl+u user-only · ctrl+l labeled-only · ctrl+a all"
+            .to_string(),
+        format!(
+            "  ctrl+o cycle forward · shift+ctrl+o back · filter: {}{}",
+            view.filter.name(),
+            if view.folded.is_empty() {
+                String::new()
+            } else {
+                format!(" · {} folded", view.folded.len())
+            }
+        ),
+    ]
 }
 
 /// The `/fork` user-message picker. Values are `fork:<entry_id>`.
@@ -231,15 +412,42 @@ fn create_copy(
 }
 
 /// Turn one tree node into the generic [`TreeItem`] the `pi-tui`
-/// flattener consumes.
-fn to_tree_item(node: &SessionTreeNode) -> TreeItem {
-    let value = node
-        .entry
-        .entry_id
-        .clone()
-        .unwrap_or_else(|| format!("seq:{}", node.entry.seq));
-    TreeItem::new(value, entry_display_text(&node.entry.entry))
-        .with_children(node.children.iter().map(to_tree_item).collect())
+/// flattener consumes, dropping the subtree rooted at a node the filter
+/// rejects.
+///
+/// `None` means the node is filtered out at this level; its children are
+/// dropped with it, exactly like upstream's `flatNodes` — a filtered-out
+/// parent takes its subtree out of the visible list.
+fn to_tree_item(
+    node: &SessionTreeNode,
+    active_leaf: Option<&str>,
+    view: &TreeView,
+) -> Option<TreeItem> {
+    let entry_id = node.entry.entry_id.clone();
+    let is_current_leaf = entry_id.as_deref() == active_leaf;
+    if !view.filter.passes(&node.entry.entry, is_current_leaf) {
+        return None;
+    }
+    let children = node
+        .children
+        .iter()
+        .filter_map(|child| to_tree_item(child, active_leaf, view))
+        .collect::<Vec<_>>();
+    let value = entry_id.unwrap_or_else(|| format!("seq:{}", node.entry.seq));
+    let item = TreeItem::new(value, entry_display_text(&node.entry.entry));
+    let item = if view.show_label_timestamps {
+        item.with_description(format_timestamp(node.entry.timestamp))
+    } else {
+        item
+    };
+    Some(item.with_children(children))
+}
+
+/// `HH:MM:SS` for an entry timestamp (milliseconds since the epoch).
+fn format_timestamp(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ms, 0)
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| format!("@{ms}"))
 }
 
 /// Concatenate the text blocks of a message, mirroring upstream's

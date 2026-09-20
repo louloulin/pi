@@ -405,6 +405,12 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
 ///
 /// [# LUM-1245] `app.model.select` was added when the driver started routing
 /// `Ctrl+L` to the model selector instead of clearing the transcript.
+///
+/// [# LUM-1255] the selector-scoped `app.session.*` / `app.tree.*` chords are
+/// claimed by the driver while the `/resume` and `/tree` pickers are open
+/// (`interactive.rs::handle_picker_key`). Upstream consumes them inside its
+/// selector components, so the component-level exemption does not apply here:
+/// the port's shared `Selector` ignores them and the driver intercepts them.
 pub const CONSUMED_APP_ACTIONS: &[&str] = &[
     "app.interrupt",
     "app.clear",
@@ -425,6 +431,22 @@ pub const CONSUMED_APP_ACTIONS: &[&str] = &[
     "app.session.tree",
     "app.session.fork",
     "app.session.resume",
+    "app.session.toggleSort",
+    "app.session.togglePath",
+    "app.session.toggleNamedFilter",
+    "app.session.rename",
+    "app.session.delete",
+    "app.session.deleteNoninvasive",
+    "app.tree.foldOrUp",
+    "app.tree.unfoldOrDown",
+    "app.tree.toggleLabelTimestamp",
+    "app.tree.filter.default",
+    "app.tree.filter.noTools",
+    "app.tree.filter.userOnly",
+    "app.tree.filter.labeledOnly",
+    "app.tree.filter.all",
+    "app.tree.filter.cycleForward",
+    "app.tree.filter.cycleBackward",
 ];
 
 /// True when `id` names an action with a consumer in this port.
