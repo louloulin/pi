@@ -524,7 +524,10 @@ fn every_bridged_api_family_streams_through_the_host_bridge() {
 
         // `streamSimple` + `completeSimple` per family: two streams each.
         let requests = runner.requests.lock().expect("requests lock").clone();
-        let apis: Vec<&str> = requests.iter().map(|request| request.api.as_str()).collect();
+        let apis: Vec<&str> = requests
+            .iter()
+            .map(|request| request.api.as_str())
+            .collect();
         assert_eq!(
             apis,
             vec![
