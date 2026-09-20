@@ -1,0 +1,73 @@
+# lum1260-small-terminal.png — chars, 120x22 cells
+
+===== LUM-1260 tip b5769b585 at 120x22 — composer visibility boundary  |  [1] 1. idle at 120x22: the startup header + onboarding + footer consume every row, so no composer and no cursor are on screen  (cursor 120,21, frame 8491458f30d7, px 0171840d82ca, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+
+Faux test model  session-18d7219c927a5c57                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 at 120x22 — composer visibility boundary  |  [2] 2. a draft is typed into the invisible composer  (cursor 120,21, frame 8491458f30d7, px 455a8b5abae5, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+
+Faux test model  session-18d7219c927a5c57                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 at 120x22 — composer visibility boundary  |  [3] 3. after a real turn the transcript has content, the composer is still absent  (cursor 120,20, frame cbf64505c0a7, px 71ea4c72aaf1, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+  faux-model (faux) hello                                                                                              ┃
+Faux test model  session-18d7219c927a5c57                                                  in 0 out 0 ?/8.2k  ? for help

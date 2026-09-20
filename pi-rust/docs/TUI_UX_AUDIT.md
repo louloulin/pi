@@ -1755,6 +1755,13 @@ if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
 
 因此截图里 `/help` 的正文块以 `· ` 开头，composer 仍是 `> `，两者一眼可辨（15.5 的 c3）。
 
+> **后记（LUM-1259，合并到 `d041641b7` 之后）**：前缀那一半成立，但正文块的**行结构没有被保住**。
+> `help_text()` 是预排好的多行块，而 `MessageView` 走的仍是纯文本路径，`wrap_text` / `split_words`
+> 会把整块重排成一整段——缩进与换行都丢失。真机证据见本节 15.5 的 c3 与
+> `docs/screenshots/lum1256-input-surface.png` 面板 10：`/help` 正文是 5 行连续的 `· …` 段落。
+> LUM-1259 把它钉成了一条 `#[ignore]` 的验收测试（`crates/pi-tui/tests/lum1259_info_block_lines.rs`），
+> 在合并后的 tip 上依然失败（已实跑复核：6 行的命令块被压成 2 行）。属**下一轮**缺口，见第二十一.6。
+
 ### 15.5 实机证据（真实 PTY）
 
 harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流（本轮补了一层
@@ -1953,7 +1960,7 @@ harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流
 cargo fmt --all                                             # 干净
 cargo check --offline --workspace --all-targets             # 退出 0
 cargo clippy --offline --workspace --all-targets -- -D warnings   # 退出 0（仅 vendored rquickjs-core 既有 warning）
-cargo test  --offline --workspace --no-fail-fast            # 155 个 target / 2,376 条用例通过 / 0 失败
+cargo test  --offline --workspace --no-fail-fast            # 157 个 target / 2,403 条用例通过 / 0 失败（另有 1 条 LUM-1259 的 #[ignore] 验收测试）
 ```
 
 两条**负载敏感**的用例在 4 个 agent 任务并发（load average 15~22）时开始随机红，都不是本轮引入，
@@ -1999,7 +2006,10 @@ python3 scripts/pty_capture.py --bin ./target/debug/pi \
 - PgUp 脱钩后消息视口底行出现 `↓ Jump to latest message · End`，**居中**（列 40~71，居中于 110 列宽）
   ——这是合并后保留的 LUM-1257 版几何（LUM-1238 的右对齐版已被删除），这张截图是在
   最终 tip 上重拍并逐字核对的，所以可用来区分两份实现；
-- `/help` 正文以 `· ` 开头、composer 仍是 `> `（`Role::Info`）。
+- `/help` 正文以 `· ` 开头、composer 仍是 `> `（`Role::Info`）——**但只保住了前缀**：
+  `help_text()` 预排的多行块被 `wrap_text` 重排成了一整段（本截图里是 5 行连续的 `· …`），
+  缩进与换行全丢。这条是并行的 LUM-1259 独立复核发现的，我在合并后的 tip 上按它的
+  `#[ignore]` 验收测试复跑确认（6 行命令块 → 2 行），记在 21.6；
 
 ![LUM-1256 合并 tip：一镜覆盖补全 / 扩展可见性 / 生命周期事件 / jump-to-latest / 信息块前缀](screenshots/lum1256-input-surface.png)
 
@@ -2013,6 +2023,14 @@ header → Above → editor → Below → footer 顺序发，发不出的截断�
 在 44 行终端里给 prompt 留得下，26 行就留不下。截图因此取 44 行（与既有 `lum1246-*` 一致）。
 
 ### 21.6 仍然缺的（顺延给后续 round）
+
+0. **`/help` 只修了一半**（并行的 LUM-1259 发现，我在合并 tip 上复核）：`· ` 前缀换掉了，
+   但 `help_text()` 的预排版被 `wrap_text` 重排成一整段，命令表与键位表的行列对齐全丢。
+   复现：`cargo test -p pi-tui --test lum1259_info_block_lines -- --ignored` → FAILED
+   （“a 6-row command reference collapsed into 2 row(s)”）。修点在 `pi-tui/src/message.rs`
+   的纯文本折行路径：要么让 `Role::Info` 块保留换行，要么给预排版文本一条不过 `wrap_text` 的通道。
+   这一条也说明我这一节的“抢救”结论只对**代码与服务路径**成立：报告里的能力声明要按真机可
+   见粒度打折（第二十一.5 是同一种诚实的另一例）。
 
 1. 21.2 的第 3 条说明：**worktree 里未提交的收尾改动是真实存在的风险面**。本轮侥幸在回收
    `target/` 之前先读了三个 worktree 的 `git status`；如果先删目录或直接 `checkout --fresh`，

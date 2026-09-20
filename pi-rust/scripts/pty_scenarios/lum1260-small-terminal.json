@@ -1,0 +1,12 @@
+{
+  "cols": 120,
+  "rows": 22,
+  "caption": "LUM-1260 tip b5769b585 at 120x22 — composer visibility boundary",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs"],
+  "panels": [
+    {"label": "1. idle at 120x22: the startup header + onboarding + footer consume every row, so no composer and no cursor are on screen", "send": "", "wait": 2.5},
+    {"label": "2. a draft is typed into the invisible composer", "send": "typed blind", "wait": 1.0},
+    {"label": "3. after a real turn the transcript has content, the composer is still absent", "send": "<Enter>", "wait": 4.0}
+  ]
+}
