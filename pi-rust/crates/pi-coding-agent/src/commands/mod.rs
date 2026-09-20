@@ -9,11 +9,18 @@
 //!   CLI entry point over [`crate::export`].
 //! - [`session`] implements the `pi session list / show / export /
 //!   migrate` subcommands.
+//! - [`tree`] implements the `/tree`, `/fork` and `/clone` session
+//!   branching commands over the `pi-session` entry tree.
 
 pub mod export;
 pub mod resume;
 pub mod session;
 pub mod slash;
+pub mod tree;
 
 pub use export::{run_cli_export, run_slash_export, ActiveSession};
 pub use slash::{handle_command, help_text, SlashCommand};
+pub use tree::{
+    clone_session, entry_display_text, fork_selector, fork_session, session_tip, tree_selector,
+    CreatedSession,
+};

@@ -206,9 +206,6 @@ pub fn app_default_keybindings(
     let win32 = platform.is_windows();
     let darwin = matches!(platform, Platform::Darwin);
 
-    /// Explicitly unbound: an empty array literal cannot infer its item type.
-    const NO_KEYS: [&str; 0] = [];
-
     fn entry(
         id: &str,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -278,14 +275,17 @@ pub fn app_default_keybindings(
             },
             "Paste image from clipboard (text fallback)",
         ),
-        // Upstream leaves `app.session.new` unbound (`defaultKeys: []`).
-        // Stage 60 requires a real chord so the action is reachable and
-        // honestly listed by `/hotkeys`; `alt+n` is free across all
-        // platform tables and unambiguous in the terminals pi targets.
+        // Upstream leaves `app.session.new` / `app.session.tree` /
+        // `app.session.fork` / `app.session.resume` unbound
+        // (`defaultKeys: []`). Stage 60 required a real chord for `new`
+        // so the action is reachable and honestly listed by `/hotkeys`;
+        // Stage 65 does the same for the session branch trio. The chords
+        // are free across all platform tables and unambiguous in the
+        // terminals pi targets.
         entry("app.session.new", ["alt+n"], "Start a new session"),
-        entry("app.session.tree", NO_KEYS, "Open session tree"),
-        entry("app.session.fork", NO_KEYS, "Fork current session"),
-        entry("app.session.resume", NO_KEYS, "Resume a session"),
+        entry("app.session.tree", ["alt+t"], "Open session tree"),
+        entry("app.session.fork", ["alt+f"], "Fork current session"),
+        entry("app.session.resume", ["alt+r"], "Resume a session"),
         entry(
             "app.tree.foldOrUp",
             if darwin {

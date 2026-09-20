@@ -41,6 +41,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use pi_session::{SessionReader, SessionWriter};
 
 use crate::commands::session::new_session_id;
+use crate::commands::tree::{
+    clone_session, fork_selector, fork_session, session_tip, tree_selector, CreatedSession,
+};
 use crate::commands::{handle_command, SlashCommand};
 use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
@@ -102,6 +105,10 @@ pub struct InteractiveOptions {
     /// there is one. `/new` creates it; `/resume` attaches it. `/name`
     /// writes the display name into its `sessions.metadata`.
     pub session_database: Option<PathBuf>,
+    /// Entry id the session's cursor sits on, when it was moved by
+    /// `/tree`. `None` means the tip of the stored transcript. The next
+    /// append attaches to this entry (`parent_entry_id`).
+    pub session_leaf: Option<String>,
     /// Compaction thresholds and the auto-compaction toggle, resolved
     /// from `settings.json` by the caller (`config::load_compaction_settings`).
     /// Manual `/compact` uses the token settings; the toggle only gates
@@ -146,6 +153,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("session_id", &self.session_id)
             .field("session_name", &self.session_name)
             .field("session_database", &self.session_database)
+            .field("session_leaf", &self.session_leaf)
             .field("compaction", &self.compaction)
             .field("initial_prompt", &self.initial_prompt)
             .field("prompt_templates", &self.prompt_templates.len())
@@ -169,6 +177,7 @@ impl Default for InteractiveOptions {
             session_id: String::new(),
             session_name: None,
             session_database: None,
+            session_leaf: None,
             compaction: DEFAULT_COMPACTION_SETTINGS,
             initial_prompt: None,
             prompt_templates: Vec::new(),
@@ -688,6 +697,37 @@ async fn handle_input_event(
             start_new_session(app, agent, options).await;
             return Ok(None);
         }
+        // `app.session.tree` — the same overlay `/tree` opens.
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.session.tree",
+            &["alt+t"],
+        ) {
+            open_tree_selector(app, options);
+            return Ok(None);
+        }
+        // `app.session.fork` — the same picker `/fork` opens.
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.session.fork",
+            &["alt+f"],
+        ) {
+            open_fork_selector(app, options);
+            return Ok(None);
+        }
+        // `app.session.resume` — deliberately the *same* code path as
+        // `/resume` (`open_resume_selector`), never a second copy.
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.session.resume",
+            &["alt+r"],
+        ) {
+            open_resume_selector(app, options);
+            return Ok(None);
+        }
     }
 
     // `Esc` cancels a running local `!` command (upstream
@@ -934,6 +974,10 @@ async fn apply_selector_choice(
         }
     } else if let Some(session_id) = value.strip_prefix("resume:") {
         resume_session(app, agent, options, session_id).await;
+    } else if let Some(entry_id) = value.strip_prefix("tree:") {
+        handle_tree_selection(app, agent, options, entry_id).await;
+    } else if let Some(entry_id) = value.strip_prefix("fork:") {
+        handle_fork_selection(app, agent, options, entry_id).await;
     }
 }
 
@@ -948,11 +992,7 @@ async fn resume_session(
     options: &mut InteractiveOptions,
     session_id: &str,
 ) {
-    let Some(directory) = options
-        .session_log
-        .as_ref()
-        .map(|log| log.directory().to_path_buf())
-    else {
+    let Some(directory) = session_directory(options) else {
         app.info("/resume: session directory not configured".to_string());
         return;
     };
@@ -974,16 +1014,40 @@ async fn resume_session(
             return;
         }
     };
-    let entries = match reader.iter_entries(session_id) {
-        Ok(entries) => entries
-            .into_iter()
-            .map(|decoded| decoded.entry)
-            .collect::<Vec<SessionEntry>>(),
-        Err(err) => {
-            app.info(format!("/resume: {err}"));
-            return;
-        }
-    };
+    match attach_session(app, agent, options, reference.database, session_id, &reader).await {
+        Ok(Some(name)) => app.info(format!("Resumed session {session_id} ({name})")),
+        Ok(None) => app.info(format!("Resumed session {session_id}")),
+        Err(err) => app.info(format!("/resume: {err}")),
+    }
+}
+
+/// The directory session files live in, when one is configured.
+fn session_directory(options: &InteractiveOptions) -> Option<PathBuf> {
+    options
+        .session_log
+        .as_ref()
+        .map(|log| log.directory().to_path_buf())
+}
+
+/// Point the TUI and the agent at a stored session: transcript, model
+/// context, identity, `/name` and the JSONL trail. `/resume`, `/fork`
+/// and `/clone` all funnel through here so a resumed and a freshly
+/// branched session behave identically.
+///
+/// Returns the session's display name when it has one.
+async fn attach_session(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+    database: PathBuf,
+    session_id: &str,
+    reader: &SessionReader,
+) -> anyhow::Result<Option<String>> {
+    let entries = reader
+        .iter_entries(session_id)?
+        .into_iter()
+        .map(|decoded| decoded.entry)
+        .collect::<Vec<SessionEntry>>();
     let name = reader.session_name(session_id).ok().flatten();
     let messages = entries_to_messages(&entries);
 
@@ -997,16 +1061,216 @@ async fn resume_session(
 
     options.session_id = session_id.to_string();
     options.session_name = name.clone();
-    options.session_database = Some(reference.database);
+    options.session_database = Some(database);
+    options.session_leaf = None;
     // Keep the JSONL trail aimed at the session we just attached to.
-    if let Ok(log) = SessionLog::open(&directory, session_id) {
-        options.session_log = Some(log);
+    if let Some(directory) = session_directory(options) {
+        if let Ok(log) = SessionLog::open(&directory, session_id) {
+            options.session_log = Some(log);
+        }
     }
     app.set_session_id(session_id);
     app.set_session_name(name.clone());
-    match name {
-        Some(name) => app.info(format!("Resumed session {session_id} ({name})")),
-        None => app.info(format!("Resumed session {session_id}")),
+    Ok(name)
+}
+
+/// Open the session database the driver is currently attached to.
+fn open_current_session(
+    app: &mut App,
+    options: &InteractiveOptions,
+    verb: &str,
+) -> Option<(PathBuf, SessionReader)> {
+    let Some(database) = options.session_database.clone() else {
+        app.info(format!("{verb}: no session database"));
+        return None;
+    };
+    match SessionReader::open(&database) {
+        Ok(reader) => Some((database, reader)),
+        Err(err) => {
+            app.info(format!("{verb}: {err}"));
+            None
+        }
+    }
+}
+
+/// `/resume` and `app.session.resume` share this one code path: it lists
+/// the stored sessions through `list_resumable` and opens the picker.
+/// Values are `resume:<session_id>`.
+fn open_resume_selector(app: &mut App, options: &InteractiveOptions) {
+    let Some(dir) = session_directory(options) else {
+        app.info("/resume: session directory not configured".to_string());
+        return;
+    };
+    let refs = match crate::list_resumable(&dir) {
+        Ok(refs) => refs,
+        Err(err) => {
+            app.info(format!("/resume: {err}"));
+            return;
+        }
+    };
+    if refs.is_empty() {
+        app.info("/resume: no saved sessions".to_string());
+        return;
+    }
+    let items = refs
+        .into_iter()
+        .map(|r| {
+            let value = format!("resume:{}", r.session_id);
+            let label = r.session_id.clone();
+            SelectorItem::new(value, label).with_description(r.display())
+        })
+        .collect::<Vec<_>>();
+    let selector = Selector::new("Pick a session to resume", items)
+        .searchable(true)
+        // Upstream `session-selector.ts`: `maxVisible = 10`.
+        .with_max_visible(10);
+    app.open_selector(selector);
+}
+
+/// Open the `/tree` overlay for the current session.
+///
+/// The tree is built from the stored `entry_id`/`parent_entry_id` links
+/// (`pi_session::SessionReader::session_tree`) and flattened with
+/// upstream `tree-selector.ts`'s pre-order / active-branch-first / gutter
+/// semantics. Values are `tree:<entry_id>`.
+fn open_tree_selector(app: &mut App, options: &InteractiveOptions) {
+    let Some((_, reader)) = open_current_session(app, options, "/tree") else {
+        return;
+    };
+    let active_leaf = options
+        .session_leaf
+        .clone()
+        .or_else(|| session_tip(&reader, &options.session_id).ok().flatten());
+    match tree_selector(&reader, &options.session_id, active_leaf.as_deref()) {
+        Ok(selector) => app.open_selector(selector),
+        Err(err) => app.info(format!("/tree: {err}")),
+    }
+}
+
+/// Open the `/fork` user-message picker for the current session. Values
+/// are `fork:<entry_id>`; an empty transcript reports the upstream
+/// `No messages to fork from`.
+fn open_fork_selector(app: &mut App, options: &InteractiveOptions) {
+    let Some((_, reader)) = open_current_session(app, options, "/fork") else {
+        return;
+    };
+    match fork_selector(&reader, &options.session_id) {
+        Ok(selector) if selector.is_empty() => {
+            app.info("No messages to fork from".to_string());
+        }
+        Ok(selector) => app.open_selector(selector),
+        Err(err) => app.info(format!("/fork: {err}")),
+    }
+}
+
+/// `/tree` commit: move the stored leaf onto the selected node so later
+/// appends attach under it, then re-render the conversation up to that
+/// node (upstream `navigateTree` + `renderInitialMessages`).
+async fn handle_tree_selection(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+    entry_id: &str,
+) {
+    let Some(database) = options.session_database.clone() else {
+        app.info("/tree: no session database".to_string());
+        return;
+    };
+    let session_id = options.session_id.clone();
+    let writer = match SessionWriter::open(&database) {
+        Ok(writer) => writer,
+        Err(err) => {
+            app.info(format!("/tree: {err}"));
+            return;
+        }
+    };
+    if let Err(err) = writer.set_leaf(&session_id, entry_id) {
+        app.info(format!("/tree: {err}"));
+        return;
+    }
+    let reader = match SessionReader::open(&database) {
+        Ok(reader) => reader,
+        Err(err) => {
+            app.info(format!("/tree: {err}"));
+            return;
+        }
+    };
+    let path = match reader.entry_ancestry(&session_id, entry_id) {
+        Ok(path) => path,
+        Err(err) => {
+            app.info(format!("/tree: {err}"));
+            return;
+        }
+    };
+    let entries = path
+        .into_iter()
+        .map(|decoded| decoded.entry)
+        .collect::<Vec<_>>();
+    let messages = entries_to_messages(&entries);
+    app.messages_mut().clear();
+    for entry in &entries {
+        if let Some(item) = entry_to_item(entry) {
+            app.messages_mut().push(item);
+        }
+    }
+    agent.lock().await.state_mut().messages = messages;
+    options.session_leaf = Some(entry_id.to_string());
+    app.info("Navigated to selected point".to_string());
+}
+
+/// `/fork` commit: create a new session file holding the root-to-`entry_id`
+/// path and continue there.
+async fn handle_fork_selection(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+    entry_id: &str,
+) {
+    let Some(directory) = session_directory(options) else {
+        app.info("/fork: session directory not configured".to_string());
+        return;
+    };
+    let Some((_, reader)) = open_current_session(app, options, "/fork") else {
+        return;
+    };
+    match fork_session(&directory, &reader, &options.session_id, entry_id) {
+        Ok(created) => {
+            clone_into_new_session(app, agent, options, created).await;
+        }
+        Err(err) => app.info(format!("/fork: {err}")),
+    }
+}
+
+/// Attach the TUI to a freshly created `/fork` or `/clone` session so the
+/// user keeps going in the new branch (upstream replaces the runtime).
+async fn clone_into_new_session(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+    created: CreatedSession,
+) {
+    let reader = match SessionReader::open(&created.path) {
+        Ok(reader) => reader,
+        Err(err) => {
+            app.info(format!("session {}: {err}", created.session_id));
+            return;
+        }
+    };
+    match attach_session(
+        app,
+        agent,
+        options,
+        created.path,
+        &created.session_id,
+        &reader,
+    )
+    .await
+    {
+        Ok(_) => app.info(format!(
+            "Session branched into {} ({} entries)",
+            created.session_id, created.entries
+        )),
+        Err(err) => app.info(format!("session {}: {err}", created.session_id)),
     }
 }
 
@@ -1339,40 +1603,31 @@ async fn run_slash_command(
             // Stage 5: drive the selector from the SQLite reader via
             // `pi_coding_agent::list_resumable` so the user sees
             // versioned, time-stamped session metadata instead of raw
-            // filenames. Falls back to a friendly message when the
-            // session directory is empty or unconfigured.
-            let dir = options
-                .session_log
-                .as_ref()
-                .map(|log| log.directory().to_path_buf());
-            let Some(dir) = dir else {
-                app.info("/resume: session directory not configured".to_string());
+            // filenames. Stage 65 moved the body into
+            // `open_resume_selector` so `app.session.resume` runs the
+            // exact same code instead of a second copy.
+            open_resume_selector(app, options);
+        }
+        SlashCommand::Tree => {
+            open_tree_selector(app, options);
+        }
+        SlashCommand::Fork => {
+            open_fork_selector(app, options);
+        }
+        SlashCommand::Clone => {
+            let Some(directory) = session_directory(options) else {
+                app.info("/clone: session directory not configured".to_string());
                 return Ok(());
             };
-            let refs = match crate::list_resumable(&dir) {
-                Ok(refs) => refs,
-                Err(err) => {
-                    app.info(format!("/resume: {err}"));
-                    return Ok(());
+            let Some((_, reader)) = open_current_session(app, options, "/clone") else {
+                return Ok(());
+            };
+            match clone_session(&directory, &reader, &options.session_id) {
+                Ok(created) => {
+                    clone_into_new_session(app, agent, options, created).await;
                 }
-            };
-            if refs.is_empty() {
-                app.info("/resume: no saved sessions".to_string());
-                return Ok(());
+                Err(err) => app.info(format!("/clone: {err}")),
             }
-            let items = refs
-                .into_iter()
-                .map(|r| {
-                    let value = format!("resume:{}", r.session_id);
-                    let label = r.session_id.clone();
-                    SelectorItem::new(value, label).with_description(r.display())
-                })
-                .collect::<Vec<_>>();
-            let selector = Selector::new("Pick a session to resume", items)
-                .searchable(true)
-                // Upstream `session-selector.ts`: `maxVisible = 10`.
-                .with_max_visible(10);
-            app.open_selector(selector);
         }
         SlashCommand::Trust(action) => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3003,6 +3258,330 @@ mod tests {
             .path()
             .join(format!("{}.sqlite", options.session_id))
             .is_file());
+    }
+
+    // -----------------------------------------------------------------------
+    // `/tree`, `/fork`, `/clone` + the session keybindings (Stage 65)
+    // -----------------------------------------------------------------------
+
+    fn session_user(text: &str) -> SessionEntry {
+        SessionEntry::UserMessage(Message {
+            role: Role::User,
+            content: vec![Content::text(text)],
+            model: None,
+        })
+    }
+
+    fn session_assistant(text: &str) -> SessionEntry {
+        SessionEntry::AssistantMessage(pi_protocol::AssistantMessage {
+            model: "test-model".into(),
+            content: vec![Content::text(text)],
+            stop_reason: StopReason::Stop,
+            usage: Usage::default(),
+            error_message: None,
+        })
+    }
+
+    /// A two-branch upstream-v4 session (`e1..e6`), built with the same
+    /// `SessionWriter` the commands use:
+    ///
+    /// ```text
+    /// e1(u1) ─ e2(a1) ─ e3(u2) ─ e4(a2)
+    ///                  └─ e5(u2b) ─ e6(a2b)
+    /// ```
+    fn build_branch_session(dir: &Path, session_id: &str) -> PathBuf {
+        let path = dir.join(format!("{session_id}.sqlite"));
+        let writer = SessionWriter::open(&path).expect("open writer");
+        writer
+            .write_header(SessionEntry::Header {
+                id: session_id.to_string(),
+                created_at: chrono::Utc::now(),
+                version: "0.1.0".into(),
+            })
+            .expect("header");
+        for entry in [
+            session_user("u1"),
+            session_assistant("a1"),
+            session_user("u2"),
+            session_assistant("a2"),
+        ] {
+            writer.append(entry).expect("append");
+        }
+        // Branch B re-roots at the first assistant reply.
+        writer.set_leaf(session_id, "e2").expect("set leaf");
+        writer.append(session_user("u2b")).expect("append");
+        writer.append(session_assistant("a2b")).expect("append");
+        writer.checkpoint().expect("checkpoint");
+        drop(writer);
+        path
+    }
+
+    /// Driver options attached to a session file already on disk.
+    fn stored_options(dir: &Path, session_id: &str) -> InteractiveOptions {
+        let mut options = session_options(dir, session_id);
+        options.session_database = Some(dir.join(format!("{session_id}.sqlite")));
+        options
+    }
+
+    /// `(entry_id, parent_entry_id, seq)` per entry — enough to prove a
+    /// copy is entry-for-entry identical without a raw SQL dependency.
+    fn entry_signature(
+        reader: &SessionReader,
+        session_id: &str,
+    ) -> Vec<(Option<String>, Option<String>, i64)> {
+        reader
+            .iter_entries(session_id)
+            .expect("entries")
+            .into_iter()
+            .map(|entry| (entry.entry_id, entry.parent_entry_id, entry.seq))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn slash_clone_copies_every_entry_into_a_new_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let source_path = build_branch_session(dir.path(), "clone-source");
+        let mut options = stored_options(dir.path(), "clone-source");
+        let before = std::fs::read(&source_path).expect("source bytes");
+
+        run_slash_command(&mut app, &agent, &mut options, "/clone")
+            .await
+            .expect("clone");
+
+        assert_ne!(options.session_id, "clone-source");
+        let new_path = options.session_database.clone().expect("new database");
+        assert_eq!(
+            new_path,
+            dir.path().join(format!("{}.sqlite", options.session_id))
+        );
+        assert!(new_path.is_file());
+        let source = SessionReader::open(&source_path).expect("source reader");
+        let cloned = SessionReader::open(&new_path).expect("clone reader");
+        assert_eq!(
+            entry_signature(&cloned, &options.session_id),
+            entry_signature(&source, "clone-source"),
+            "the clone is entry-for-entry identical"
+        );
+        assert!(
+            cloned
+                .verify_stats(&options.session_id)
+                .expect("verify stats")
+                .expect("stats row")
+                .is_consistent(),
+            "the clone's cached stats agree with a recompute"
+        );
+        assert_eq!(
+            std::fs::read(&source_path).expect("source bytes"),
+            before,
+            "the source file must not change"
+        );
+        assert!(transcript(&app).contains("Session branched into"));
+        assert!(transcript(&app).contains("6 entries"));
+    }
+
+    #[tokio::test]
+    async fn slash_fork_stops_at_the_selected_user_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let source_path = build_branch_session(dir.path(), "fork-source");
+        let mut options = stored_options(dir.path(), "fork-source");
+
+        run_slash_command(&mut app, &agent, &mut options, "/fork")
+            .await
+            .expect("fork");
+        let selector = app.selector().cloned().expect("fork selector open");
+        let values = selector
+            .items()
+            .iter()
+            .map(|item| item.value.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec!["fork:e1", "fork:e3", "fork:e5"],
+            "only non-empty user messages are offered, in entry order"
+        );
+        let labels = selector
+            .items()
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["u1", "u2", "u2b"]);
+        app.close_selector();
+
+        apply_selector_choice(&mut app, &agent, "fork:e3", &mut options).await;
+
+        assert_ne!(options.session_id, "fork-source");
+        let new_path = options.session_database.clone().expect("new database");
+        let reader = SessionReader::open(&new_path).expect("reader");
+        assert!(
+            reader
+                .session_row(&options.session_id)
+                .expect("row")
+                .is_some(),
+            "the new session has its header row first"
+        );
+        let ids = reader
+            .iter_entries(&options.session_id)
+            .expect("entries")
+            .into_iter()
+            .map(|entry| entry.entry_id.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["e1", "e2", "e3"],
+            "the fork stops at the selected user message"
+        );
+        assert!(
+            reader
+                .verify_stats(&options.session_id)
+                .expect("verify stats")
+                .expect("stats row")
+                .is_consistent(),
+            "the fork's cached stats agree with a recompute"
+        );
+        // The source keeps all six entries.
+        let source = SessionReader::open(&source_path).expect("source reader");
+        assert_eq!(entry_signature(&source, "fork-source").len(), 6);
+    }
+
+    #[tokio::test]
+    async fn slash_fork_on_an_empty_transcript_creates_no_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let path = dir.path().join("empty.sqlite");
+        write_new_session_file(&path, "empty").expect("session file");
+        let mut options = stored_options(dir.path(), "empty");
+        let sqlite_files = |dir: &Path| {
+            std::fs::read_dir(dir)
+                .expect("dir")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sqlite"))
+                .count()
+        };
+        let before = sqlite_files(dir.path());
+
+        run_slash_command(&mut app, &agent, &mut options, "/fork")
+            .await
+            .expect("fork");
+
+        assert!(
+            app.selector().is_none(),
+            "no picker for an empty transcript"
+        );
+        assert!(transcript(&app).contains("No messages to fork from"));
+        assert_eq!(
+            sqlite_files(dir.path()),
+            before,
+            "no session file is created"
+        );
+        assert_eq!(options.session_id, "empty");
+    }
+
+    #[tokio::test]
+    async fn slash_tree_switches_the_leaf_and_the_next_append_hangs_below_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let path = build_branch_session(dir.path(), "tree-source");
+        let mut options = stored_options(dir.path(), "tree-source");
+        let before = std::fs::read(&path).expect("source bytes");
+
+        run_slash_command(&mut app, &agent, &mut options, "/tree")
+            .await
+            .expect("tree");
+        // Opening the overlay is read-only; Esc would leave it that way.
+        assert_eq!(std::fs::read(&path).expect("source bytes"), before);
+        let selector = app.selector().cloned().expect("tree selector open");
+        let values = selector
+            .items()
+            .iter()
+            .map(|item| item.value.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec!["tree:e1", "tree:e2", "tree:e5", "tree:e6", "tree:e3", "tree:e4"],
+            "pre-order, with the active branch emitted first"
+        );
+        app.close_selector();
+
+        apply_selector_choice(&mut app, &agent, "tree:e2", &mut options).await;
+
+        assert_eq!(options.session_leaf.as_deref(), Some("e2"));
+        assert!(transcript(&app).contains("Navigated to selected point"));
+        // The view is reloaded to the selected path (e1 `u1`, e2 `a1`).
+        let rendered = transcript(&app);
+        assert!(rendered.contains("u1"), "{rendered}");
+        assert!(rendered.contains("a1"), "{rendered}");
+        assert!(!rendered.contains("u2"), "{rendered}");
+
+        // A later append (a fresh writer, as after a restart) attaches to
+        // the selected node.
+        let writer = SessionWriter::open(&path).expect("writer");
+        writer.resume("tree-source").expect("resume");
+        writer.append(session_user("after-tree")).expect("append");
+        writer.checkpoint().expect("checkpoint");
+        drop(writer);
+        let reader = SessionReader::open(&path).expect("reader");
+        let appended = reader
+            .iter_entries("tree-source")
+            .expect("entries")
+            .into_iter()
+            .find(|entry| entry.seq == 7)
+            .expect("appended entry");
+        assert_eq!(
+            appended.parent_entry_id.as_deref(),
+            Some("e2"),
+            "the append hangs off the tree-selected leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_tree_fork_and_resume_keybindings_open_their_selectors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_branch_session(dir.path(), "kb-session");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = stored_options(dir.path(), "kb-session");
+        let mut bash = BashRunner::default();
+
+        let alt = |ch: char| {
+            InputEvent::Key(pi_tui::input::Key::new(
+                KeyCode::Char(ch),
+                pi_tui::input::KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            ))
+        };
+
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt('t'))
+            .await
+            .expect("tree key");
+        assert_eq!(app.selector().map(Selector::title), Some("Session tree"));
+        app.close_selector();
+
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt('f'))
+            .await
+            .expect("fork key");
+        assert_eq!(
+            app.selector().map(Selector::title),
+            Some("Fork from a user message")
+        );
+        app.close_selector();
+
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt('r'))
+            .await
+            .expect("resume key");
+        let values = app
+            .selector()
+            .expect("resume selector")
+            .items()
+            .iter()
+            .map(|item| item.value.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            values.contains(&"resume:kb-session".to_string()),
+            "the resume key shares the `/resume` picker: {values:?}"
+        );
     }
 
     #[tokio::test]

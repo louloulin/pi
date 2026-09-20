@@ -196,6 +196,7 @@ fn main() -> ExitCode {
                 session_id: session_id.clone(),
                 session_name,
                 session_database,
+                session_leaf: None,
                 compaction: load_compaction_settings_default(),
                 // `settings.retry` drives the agent-level retry loop: a
                 // transient provider failure restarts the assistant call

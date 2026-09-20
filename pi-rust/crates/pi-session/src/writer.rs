@@ -62,6 +62,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::error::{Result, SessionError};
+use crate::reader::SessionReader;
 use crate::schema::{self, SchemaLayout};
 
 /// zstd compression level used by the **Rust legacy** layout's `payload`
@@ -233,8 +234,52 @@ impl SessionWriter {
         self.flush_before_switching_session(session_id)?;
         let mut inner = self.inner.lock();
         inner.next_seq = next_seq_of(&inner.conn, session_id)?;
-        inner.last_entry_id = last_entry_id_of(&inner.conn, session_id)?;
+        // A `/tree` cursor move recorded in `metadata.leaf` wins over the
+        // tip, so a resumed session keeps appending under the branch the
+        // user navigated to (Rust-only; upstream keeps the leaf in memory).
+        let stored_leaf =
+            schema::session_leaf_from_metadata(metadata_of(&inner.conn, session_id)?.as_deref())
+                .filter(|leaf| entry_exists(&inner.conn, session_id, leaf));
+        inner.last_entry_id = match stored_leaf {
+            Some(leaf) => Some(leaf),
+            None => last_entry_id_of(&inner.conn, session_id)?,
+        };
         inner.current_session = Some(session_id.to_string());
+        Ok(())
+    }
+
+    /// Move the active leaf onto `entry_id` so later
+    /// [`append`](Self::append) calls attach to it as their
+    /// `parent_entry_id`. `/tree` navigation uses this to continue a
+    /// conversation from an earlier node; the stored entries are not
+    /// rewritten.
+    ///
+    /// The move is recorded in `sessions.metadata` (key `leaf`) so it also
+    /// survives a later [`resume`](Self::resume). Requires the entry to
+    /// exist in `session_id`'s tree.
+    pub fn set_leaf(&self, session_id: &str, entry_id: &str) -> Result<()> {
+        // Flush first: the entry may have just been appended by this
+        // writer and still be staged in memory.
+        self.commit()?;
+        self.resume(session_id)?;
+        let mut inner = self.inner.lock();
+        if !entry_exists(&inner.conn, session_id, entry_id) {
+            return Err(SessionError::Other(format!(
+                "entry {entry_id:?} not found in session {session_id:?}"
+            )));
+        }
+        let metadata = metadata_of(&inner.conn, session_id)?;
+        let mut object = metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        object.insert("leaf".to_string(), Value::String(entry_id.to_string()));
+        inner.conn.execute(
+            "UPDATE sessions SET metadata = ?1 WHERE id = ?2",
+            params![Value::Object(object).to_string(), session_id],
+        )?;
+        inner.last_entry_id = Some(entry_id.to_string());
         Ok(())
     }
 
@@ -366,6 +411,104 @@ impl SessionWriter {
         Ok(committed)
     }
 
+    /// Copy stored rows verbatim out of another upstream-v4 session into
+    /// this writer's current session.
+    ///
+    /// The rows keep their `id`, `parent_id`, `seq`, `type`,
+    /// `custom_type`, `timestamp` and `payload`, so
+    /// [`SessionReader::iter_entries`] returns an entry-for-entry equal
+    /// transcript (the source is opened read-only and never modified).
+    /// This is the primitive both session-copying commands need:
+    ///
+    /// * `/clone` copies **every** row (`entry_ids: None`) — upstream
+    ///   `SessionManager.cloneSession`.
+    /// * `/fork` copies one root-to-leaf path (`entry_ids: Some(path)`),
+    ///   producing a self-contained branch with the same parent links —
+    ///   upstream `SessionManager.createBranchedSession`.
+    ///
+    /// Requirements, all enforced with a clear error rather than a
+    /// half-written file:
+    ///
+    /// * the source must use the upstream v4 layout (the legacy layout's
+    ///   zstd payload is not a raw copy target);
+    /// * the destination session must be empty (freshly created with
+    ///   [`write_header`](Self::write_header)); a copy into a session
+    ///   that already has rows would collide on the `(session_id, id)`
+    ///   primary key.
+    ///
+    /// `sessions.message_count` and `sessions.next_seq` are updated in
+    /// the same transaction as the rows, and the in-memory parent chain
+    /// is moved to the copy's last entry so a follow-up
+    /// [`append`](Self::append) attaches to it.
+    pub fn copy_entries_from(
+        &self,
+        source: &SessionReader,
+        source_session_id: &str,
+        entry_ids: Option<&[String]>,
+    ) -> Result<usize> {
+        if source.layout() != SchemaLayout::UpstreamV4 {
+            return Err(SessionError::Other(format!(
+                "cannot copy entries from {}: the source uses the Rust legacy layout, convert it with `pi session migrate` first",
+                source.path().display()
+            )));
+        }
+        // Never mix staged rows with the verbatim batch below.
+        self.commit()?;
+
+        let rows = read_raw_entries(source, source_session_id, entry_ids)?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let mut inner = self.inner.lock();
+        let session_id = inner.current_session.clone().ok_or_else(|| {
+            SessionError::Other(
+                "copy_entries_from called before write_header/resume: the upstream schema needs a sessions row"
+                    .to_string(),
+            )
+        })?;
+        let existing: i64 = inner.conn.query_row(
+            "SELECT count(*) FROM entries WHERE session_id = ?1",
+            params![&session_id],
+            |row| row.get(0),
+        )?;
+        if existing > 0 {
+            return Err(SessionError::Other(format!(
+                "cannot copy entries into session {session_id:?}: it already contains {existing} entries"
+            )));
+        }
+
+        let messages = rows.iter().filter(|row| row.type_ == "message").count() as i64;
+        let next_seq = rows.iter().map(|row| row.seq).max().unwrap_or(0) + 1;
+        let tx = inner.conn.transaction()?;
+        for row in &rows {
+            tx.execute(
+                "INSERT INTO entries \
+                 (session_id, id, parent_id, seq, type, custom_type, timestamp, payload) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    &session_id,
+                    &row.id,
+                    &row.parent_id,
+                    row.seq,
+                    &row.type_,
+                    &row.custom_type,
+                    row.timestamp,
+                    &row.payload,
+                ],
+            )?;
+        }
+        tx.execute(
+            "UPDATE sessions SET message_count = message_count + ?1, next_seq = ?2 WHERE id = ?3",
+            params![messages, next_seq, &session_id],
+        )?;
+        tx.commit()?;
+
+        inner.next_seq = next_seq;
+        inner.last_entry_id = rows.last().map(|row| row.id.clone());
+        Ok(rows.len())
+    }
+
     /// Drop the staged rows and resynchronise the in-memory sequence and
     /// parent chain from the committed state. The database is untouched.
     pub fn rollback(&self) {
@@ -450,6 +593,27 @@ fn next_seq_of(conn: &Connection, session_id: &str) -> Result<i64> {
     })
 }
 
+fn metadata_of(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT metadata FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn entry_exists(conn: &Connection, session_id: &str, entry_id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM entries WHERE session_id = ?1 AND id = ?2",
+        params![session_id, entry_id],
+        |_| Ok(true),
+    )
+    .optional()
+    .unwrap_or(Some(false))
+    .unwrap_or(false)
+}
+
 fn last_entry_id_of(conn: &Connection, session_id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
@@ -458,6 +622,61 @@ fn last_entry_id_of(conn: &Connection, session_id: &str) -> Result<Option<String
             |row| row.get(0),
         )
         .optional()?)
+}
+
+/// One `entries` row read straight out of the upstream schema for a
+/// verbatim copy.
+#[derive(Debug, Clone)]
+struct RawEntryRow {
+    id: String,
+    parent_id: Option<String>,
+    seq: i64,
+    type_: String,
+    custom_type: Option<String>,
+    timestamp: i64,
+    payload: String,
+}
+
+/// Read the rows [`SessionWriter::copy_entries_from`] will insert.
+///
+/// `entry_ids` filters to a subset (a fork path); `None` keeps every row.
+/// The result follows the table order (`seq` ascending, `id` ascending),
+/// which is also parent-before-child, so the destination's
+/// `trg_entries_validate` trigger never sees a missing parent.
+fn read_raw_entries(
+    source: &SessionReader,
+    session_id: &str,
+    entry_ids: Option<&[String]>,
+) -> Result<Vec<RawEntryRow>> {
+    let keep: Option<std::collections::HashSet<&str>> = entry_ids.map(|ids| {
+        ids.iter()
+            .map(std::string::String::as_str)
+            .collect::<std::collections::HashSet<_>>()
+    });
+    let mut stmt = source.connection().prepare(
+        "SELECT id, parent_id, seq, type, custom_type, timestamp, payload \
+         FROM entries WHERE session_id = ?1 ORDER BY seq ASC, id ASC",
+    )?;
+    let mut rows = stmt.query(params![session_id])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        if let Some(keep) = &keep {
+            if !keep.contains(id.as_str()) {
+                continue;
+            }
+        }
+        out.push(RawEntryRow {
+            id,
+            parent_id: row.get(1)?,
+            seq: row.get(2)?,
+            type_: row.get(3)?,
+            custom_type: row.get(4)?,
+            timestamp: row.get(5)?,
+            payload: row.get(6)?,
+        });
+    }
+    Ok(out)
 }
 
 /// Deterministic entry id: `e<seq>`. The upstream primary key is
