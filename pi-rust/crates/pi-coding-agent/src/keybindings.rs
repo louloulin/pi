@@ -278,7 +278,11 @@ pub fn app_default_keybindings(
             },
             "Paste image from clipboard (text fallback)",
         ),
-        entry("app.session.new", NO_KEYS, "Start a new session"),
+        // Upstream leaves `app.session.new` unbound (`defaultKeys: []`).
+        // Stage 60 requires a real chord so the action is reachable and
+        // honestly listed by `/hotkeys`; `alt+n` is free across all
+        // platform tables and unambiguous in the terminals pi targets.
+        entry("app.session.new", ["alt+n"], "Start a new session"),
         entry("app.session.tree", NO_KEYS, "Open session tree"),
         entry("app.session.fork", NO_KEYS, "Fork current session"),
         entry("app.session.resume", NO_KEYS, "Resume a session"),

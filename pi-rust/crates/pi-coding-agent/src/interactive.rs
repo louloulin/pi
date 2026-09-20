@@ -15,7 +15,7 @@
 //! so the terminal never hangs (Stage 4 acceptance criterion).
 
 use std::io::{self, Stdout, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,11 +32,14 @@ use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy};
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Model, ProviderId};
+use pi_protocol::{Content, Message, Model, ProviderId, SessionEntry};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
 
+use pi_session::{SessionReader, SessionWriter};
+
+use crate::commands::session::new_session_id;
 use crate::commands::{handle_command, SlashCommand};
 use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
@@ -88,6 +91,14 @@ pub struct InteractiveOptions {
     pub session_log: Option<SessionLog>,
     /// Session identifier surfaced in the status bar.
     pub session_id: String,
+    /// Session display name (`/name`), shown in the status bar and
+    /// `/session`, and persisted to the session file. `None` until the
+    /// user names the session.
+    pub session_name: Option<String>,
+    /// Path of the upstream-v4 SQLite file backing this session, when
+    /// there is one. `/new` creates it; `/resume` attaches it. `/name`
+    /// writes the display name into its `sessions.metadata`.
+    pub session_database: Option<PathBuf>,
     /// Compaction thresholds and the auto-compaction toggle, resolved
     /// from `settings.json` by the caller (`config::load_compaction_settings`).
     /// Manual `/compact` uses the token settings; the toggle only gates
@@ -130,6 +141,8 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("models", &self.models)
             .field("session_log", &self.session_log)
             .field("session_id", &self.session_id)
+            .field("session_name", &self.session_name)
+            .field("session_database", &self.session_database)
             .field("compaction", &self.compaction)
             .field("initial_prompt", &self.initial_prompt)
             .field("prompt_templates", &self.prompt_templates.len())
@@ -151,6 +164,8 @@ impl Default for InteractiveOptions {
             models: Models::new(),
             session_log: None,
             session_id: String::new(),
+            session_name: None,
+            session_database: None,
             compaction: DEFAULT_COMPACTION_SETTINGS,
             initial_prompt: None,
             prompt_templates: Vec::new(),
@@ -245,6 +260,9 @@ async fn run_loop(
     // Build the App on the stack first so we can drop it before
     // tearing down the terminal.
     let mut app = App::new(&*agent.lock().await, config.clone());
+    // `--resume <id>` seeds the stored session's `/name` so the status bar
+    // and `/session` show it before the first command runs.
+    app.set_session_name(options.session_name.clone());
 
     // Extension dialogs: the App drains the bridge every tick, and the
     // gate only opens now that the loop is running (see `ui_bridge`).
@@ -427,6 +445,17 @@ async fn handle_input_event(
             copy_last_assistant_message(app);
             return Ok(None);
         }
+        // `app.session.new` — the same action `/new` runs. Bound to
+        // `alt+n` by the merged table (upstream leaves it unbound).
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.session.new",
+            &["alt+n"],
+        ) {
+            start_new_session(app, agent, options).await;
+            return Ok(None);
+        }
     }
 
     let step_outcome = app.step(event);
@@ -556,10 +585,9 @@ async fn apply_selector_choice(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
     value: &str,
-    options: &InteractiveOptions,
+    options: &mut InteractiveOptions,
 ) {
-    if value.starts_with("model:") {
-        let id = value.trim_start_matches("model:");
+    if let Some(id) = value.strip_prefix("model:") {
         let mut found = None;
         for (provider, model) in options.models.iter() {
             if model.id == id {
@@ -571,7 +599,292 @@ async fn apply_selector_choice(
             app.queue_model_switch(&mut *agent.lock().await, model);
             app.info(format!("model → {}", id));
         }
+    } else if let Some(session_id) = value.strip_prefix("resume:") {
+        resume_session(app, agent, options, session_id).await;
     }
+}
+
+/// Attach the TUI to a stored session picked from `/resume`.
+///
+/// Restores the transcript (the rendered view *and* the agent's model
+/// context), the session identity and its `/name`, so a named session
+/// keeps its name across a resume.
+async fn resume_session(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+    session_id: &str,
+) {
+    let Some(directory) = options
+        .session_log
+        .as_ref()
+        .map(|log| log.directory().to_path_buf())
+    else {
+        app.info("/resume: session directory not configured".to_string());
+        return;
+    };
+    let reference = match crate::list_resumable(&directory) {
+        Ok(refs) => refs.into_iter().find(|r| r.session_id == session_id),
+        Err(err) => {
+            app.info(format!("/resume: {err}"));
+            return;
+        }
+    };
+    let Some(reference) = reference else {
+        app.info(format!("/resume: session {session_id} not found"));
+        return;
+    };
+    let reader = match SessionReader::open(&reference.database) {
+        Ok(reader) => reader,
+        Err(err) => {
+            app.info(format!("/resume: {err}"));
+            return;
+        }
+    };
+    let entries = match reader.iter_entries(session_id) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|decoded| decoded.entry)
+            .collect::<Vec<SessionEntry>>(),
+        Err(err) => {
+            app.info(format!("/resume: {err}"));
+            return;
+        }
+    };
+    let name = reader.session_name(session_id).ok().flatten();
+    let messages = entries_to_messages(&entries);
+
+    app.messages_mut().clear();
+    for entry in &entries {
+        if let Some(item) = entry_to_item(entry) {
+            app.messages_mut().push(item);
+        }
+    }
+    agent.lock().await.state_mut().messages = messages;
+
+    options.session_id = session_id.to_string();
+    options.session_name = name.clone();
+    options.session_database = Some(reference.database);
+    // Keep the JSONL trail aimed at the session we just attached to.
+    if let Ok(log) = SessionLog::open(&directory, session_id) {
+        options.session_log = Some(log);
+    }
+    app.set_session_id(session_id);
+    app.set_session_name(name.clone());
+    match name {
+        Some(name) => app.info(format!("Resumed session {session_id} ({name})")),
+        None => app.info(format!("Resumed session {session_id}")),
+    }
+}
+
+/// Start a fresh session: open a new upstream-v4 session file, reset the
+/// agent + view state and point the driver at the new identity.
+///
+/// This is what both `/new` and `app.session.new` run. It differs from
+/// `/clear`, which only clears the message view and keeps the session.
+async fn start_new_session(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+) {
+    let Some(directory) = options
+        .session_log
+        .as_ref()
+        .map(|log| log.directory().to_path_buf())
+    else {
+        app.info("/new: session directory not configured".to_string());
+        return;
+    };
+    let id = new_session_id();
+    // Open the JSONL log first so a failure leaves no half-created
+    // session behind; the previous session's files are never touched.
+    let log = match SessionLog::open(&directory, &id) {
+        Ok(log) => log,
+        Err(err) => {
+            app.info(format!("/new: could not open session log: {err}"));
+            return;
+        }
+    };
+    let path = directory.join(format!("{id}.sqlite"));
+    if let Err(err) = write_new_session_file(&path, &id) {
+        app.info(format!("/new: could not create session file: {err}"));
+        return;
+    }
+
+    app.messages_mut().clear();
+    agent.lock().await.state_mut().messages.clear();
+
+    options.session_log = Some(log);
+    options.session_id = id.clone();
+    options.session_name = None;
+    options.session_database = Some(path);
+    app.set_session_id(id.clone());
+    app.set_session_name(None);
+    app.info(format!("Started new session {id}"));
+}
+
+/// Create an upstream-v4 session database and stamp the header, using
+/// [`SessionWriter`] (never hand-rolled SQL).
+fn write_new_session_file(path: &Path, session_id: &str) -> anyhow::Result<()> {
+    let writer = SessionWriter::open(path)?;
+    writer.write_header(SessionEntry::Header {
+        id: session_id.to_string(),
+        created_at: chrono::Utc::now(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })?;
+    writer.checkpoint()?;
+    Ok(())
+}
+
+/// Persist the display name to the session's files.
+///
+/// `/resume` reads the name back from the SQLite `sessions.metadata`, so
+/// naming a session that has no database yet also materialises one
+/// (header + name) — otherwise the name could not survive a resume.
+fn persist_session_name(options: &mut InteractiveOptions, name: &str) -> anyhow::Result<()> {
+    if options.session_database.is_none() {
+        if let Some(directory) = options
+            .session_log
+            .as_ref()
+            .map(|log| log.directory().to_path_buf())
+        {
+            let path = directory.join(format!("{}.sqlite", options.session_id));
+            write_new_session_file(&path, &options.session_id)?;
+            options.session_database = Some(path);
+        }
+    }
+    if let Some(path) = options.session_database.clone() {
+        let writer = SessionWriter::open(&path)?;
+        writer.resume(&options.session_id)?;
+        writer.set_session_name(name)?;
+        writer.checkpoint()?;
+    }
+    // The interactive session also has a JSONL trail; record the name
+    // there (same `session_name` kind the extension path uses) so the
+    // legacy file is self-describing.
+    if let Some(log) = options.session_log.as_ref() {
+        let _ = log.append_extension("extension", "session_name", serde_json::json!(name));
+    }
+    Ok(())
+}
+
+/// Set `/name <text>`: normalize, persist, then reflect the name in the
+/// status bar. Mirrors upstream `handleNameCommand`
+/// (`interactive-mode.ts:6193`).
+fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) {
+    let name = normalize_session_name(raw);
+    if name.is_empty() {
+        app.info("usage: /name <name>".to_string());
+        return;
+    }
+    if options.session_database.is_none() && options.session_log.is_none() {
+        app.info("/name: session persistence is disabled — the name was not saved".to_string());
+        return;
+    }
+    match persist_session_name(options, &name) {
+        Ok(()) => {
+            if name != raw.trim() {
+                app.info(format!(
+                    "Session name was normalized from {raw:?} to {name:?}"
+                ));
+            }
+            options.session_name = Some(name.clone());
+            app.set_session_name(Some(name.clone()));
+            app.info(format!("Session name set: {name}"));
+        }
+        Err(err) => app.info(format!("/name: could not save the session name: {err}")),
+    }
+}
+
+/// Collapse runs of CR/LF into a single space and trim, matching
+/// upstream `appendSessionInfo` (`session-manager.ts:1151`).
+fn normalize_session_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_newline_run = false;
+    for ch in raw.chars() {
+        if ch == '\r' || ch == '\n' {
+            if !in_newline_run {
+                out.push(' ');
+                in_newline_run = true;
+            }
+        } else {
+            out.push(ch);
+            in_newline_run = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Flatten the text blocks of a content list into one string.
+fn content_text(content: &[Content]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            Content::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render a stored entry as a message-view item, skipping entries that
+/// have no place in the transcript (headers, extension bookkeeping,
+/// compaction checkpoints).
+fn entry_to_item(entry: &SessionEntry) -> Option<pi_tui::message::MessageItem> {
+    match entry {
+        SessionEntry::UserMessage(message) => Some(pi_tui::message::MessageItem::user(
+            content_text(&message.content),
+        )),
+        SessionEntry::AssistantMessage(message) => Some(pi_tui::message::MessageItem::assistant(
+            content_text(&message.content),
+        )),
+        SessionEntry::ToolResult(result) => Some(pi_tui::message::MessageItem::tool(content_text(
+            std::slice::from_ref(&*result.content),
+        ))),
+        _ => None,
+    }
+}
+
+/// Rebuild the agent's model context from stored entries. A compaction
+/// checkpoint resets the log to its summary plus the retained tail,
+/// exactly as replaying the session would.
+fn entries_to_messages(entries: &[SessionEntry]) -> Vec<Message> {
+    let mut messages = Vec::new();
+    for entry in entries {
+        match entry {
+            SessionEntry::UserMessage(message) => messages.push(message.clone()),
+            SessionEntry::AssistantMessage(message) => messages.push(Message {
+                role: pi_protocol::Role::Assistant,
+                content: message.content.clone(),
+                model: Some(message.model.clone()).filter(|model| !model.is_empty()),
+            }),
+            SessionEntry::ToolCall(call) => messages.push(Message {
+                role: pi_protocol::Role::Assistant,
+                content: vec![Content::ToolCall(call.clone())],
+                model: None,
+            }),
+            SessionEntry::ToolResult(result) => messages.push(Message {
+                role: pi_protocol::Role::Tool,
+                content: vec![Content::ToolResult(result.clone())],
+                model: None,
+            }),
+            SessionEntry::Compaction {
+                summary,
+                retained_tail,
+                ..
+            } => {
+                messages.clear();
+                messages.push(Message {
+                    role: pi_protocol::Role::System,
+                    content: vec![Content::text(summary.clone())],
+                    model: None,
+                });
+                messages.extend(retained_tail.iter().cloned());
+            }
+            SessionEntry::Header { .. } | SessionEntry::Extension { .. } => {}
+        }
+    }
+    messages
 }
 
 async fn run_slash_command(
@@ -604,6 +917,19 @@ async fn run_slash_command(
         SlashCommand::Clear => {
             app.messages_mut().clear();
         }
+        SlashCommand::New => {
+            start_new_session(app, agent, options).await;
+        }
+        SlashCommand::Copy => {
+            copy_last_assistant_message(app);
+        }
+        SlashCommand::Name { name } => match name {
+            Some(name) => set_session_name(app, options, &name),
+            None => match options.session_name.as_deref() {
+                Some(name) => app.info(format!("Session name: {name}")),
+                None => app.info("usage: /name <name>".to_string()),
+            },
+        },
         SlashCommand::Exit => {
             app.request_exit();
         }
@@ -633,12 +959,20 @@ async fn run_slash_command(
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;
             let state = agent_guard.state();
-            app.info(format!(
-                "session {} — messages={}, model={}",
-                options.session_id,
-                state.messages.len(),
-                agent_guard.model().id
-            ));
+            match options.session_name.as_deref() {
+                Some(name) => app.info(format!(
+                    "session {} — name: {name}, messages={}, model={}",
+                    options.session_id,
+                    state.messages.len(),
+                    agent_guard.model().id
+                )),
+                None => app.info(format!(
+                    "session {} — messages={}, model={}",
+                    options.session_id,
+                    state.messages.len(),
+                    agent_guard.model().id
+                )),
+            }
         }
         SlashCommand::Export { path } => {
             // Upstream `handleExportCommand`: `.jsonl` writes the session
@@ -2027,5 +2361,178 @@ mod tests {
         assert!(app.take_clipboard_request().is_none());
         let rendered = transcript(&app);
         assert!(rendered.contains("nothing to copy yet"), "{rendered}");
+    }
+
+    // -----------------------------------------------------------------------
+    // `/new`, `/copy`, `/name` + `app.session.new` (Stage 60)
+    // -----------------------------------------------------------------------
+
+    fn session_options(dir: &std::path::Path, session_id: &str) -> InteractiveOptions {
+        InteractiveOptions {
+            session_log: Some(SessionLog::open(dir, session_id).expect("session log")),
+            session_id: session_id.to_string(),
+            ..InteractiveOptions::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_copy_uses_the_clipboard_channel() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+
+        // Empty transcript: a friendly message, never a silent drop.
+        run_slash_command(&mut app, &agent, &mut options, "/copy")
+            .await
+            .expect("copy");
+        assert!(app.take_clipboard_request().is_none());
+        assert!(transcript(&app).contains("nothing to copy yet"));
+
+        app.messages_mut()
+            .push(pi_tui::message::MessageItem::assistant("hello there"));
+        run_slash_command(&mut app, &agent, &mut options, "/copy")
+            .await
+            .expect("copy");
+        assert_eq!(app.take_clipboard_request().as_deref(), Some("hello there"));
+    }
+
+    #[tokio::test]
+    async fn slash_name_sets_reports_and_persists_the_session_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = session_options(dir.path(), "named-session");
+
+        run_slash_command(&mut app, &agent, &mut options, "/name foo")
+            .await
+            .expect("name");
+        assert_eq!(options.session_name.as_deref(), Some("foo"));
+        assert_eq!(app.status_data().session_name.as_deref(), Some("foo"));
+        assert!(transcript(&app).contains("Session name set: foo"));
+
+        // No argument reports the current name.
+        run_slash_command(&mut app, &agent, &mut options, "/name")
+            .await
+            .expect("name");
+        assert!(transcript(&app).contains("Session name: foo"));
+
+        // `/session` surfaces it too.
+        run_slash_command(&mut app, &agent, &mut options, "/session")
+            .await
+            .expect("session");
+        assert!(transcript(&app).contains("name: foo"));
+
+        // Persisted to the session file and readable through `pi-session`.
+        let database = options.session_database.clone().expect("session database");
+        let reader = SessionReader::open(&database).expect("reader");
+        assert_eq!(
+            reader
+                .session_name("named-session")
+                .expect("read name")
+                .as_deref(),
+            Some("foo")
+        );
+    }
+
+    #[test]
+    fn session_names_collapse_newline_runs_like_upstream() {
+        assert_eq!(normalize_session_name("  hello  "), "hello");
+        assert_eq!(normalize_session_name("a\r\nb"), "a b");
+        assert_eq!(normalize_session_name("a\r\r\n\nb"), "a b");
+        assert_eq!(normalize_session_name("\n\n"), "");
+    }
+
+    #[tokio::test]
+    async fn new_session_clears_state_and_keeps_the_old_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = session_options(dir.path(), "old-session");
+        let old_path = dir.path().join("old-session.sqlite");
+        write_new_session_file(&old_path, "old-session").expect("old session file");
+
+        app.messages_mut()
+            .push(pi_tui::message::MessageItem::user("hello"));
+        agent
+            .lock()
+            .await
+            .state_mut()
+            .messages
+            .push(text_message(Role::User, "hello".into()));
+
+        run_slash_command(&mut app, &agent, &mut options, "/new")
+            .await
+            .expect("new");
+
+        assert_ne!(options.session_id, "old-session");
+        assert!(agent.lock().await.state().messages.is_empty());
+        assert_eq!(app.status_data().session_id, options.session_id);
+        let rendered = transcript(&app);
+        assert!(!rendered.contains("hello"), "{rendered}");
+        assert!(rendered.contains("Started new session"), "{rendered}");
+
+        // The new file is a valid session and the old one is untouched.
+        let new_database = options.session_database.clone().expect("session database");
+        let new_reader = SessionReader::open(&new_database).expect("new reader");
+        assert!(new_reader
+            .session_row(&options.session_id)
+            .expect("row")
+            .is_some());
+        let old_reader = SessionReader::open(&old_path).expect("old reader");
+        assert!(old_reader
+            .session_row("old-session")
+            .expect("row")
+            .is_some());
+
+        // `pi session list` / `/resume` see both.
+        let ids = crate::list_resumable(dir.path())
+            .expect("list")
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"old-session".to_string()), "{ids:?}");
+        assert!(ids.contains(&options.session_id), "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn app_session_new_keybinding_runs_the_new_session_action() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = session_options(dir.path(), "kb-old");
+
+        let event = InputEvent::Key(pi_tui::input::Key::new(
+            KeyCode::Char('n'),
+            pi_tui::input::KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        ));
+        handle_input_event(&mut app, &agent, &mut options, event)
+            .await
+            .expect("handle event");
+
+        assert_ne!(options.session_id, "kb-old");
+        assert!(dir
+            .path()
+            .join(format!("{}.sqlite", options.session_id))
+            .is_file());
+    }
+
+    #[tokio::test]
+    async fn session_name_survives_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+
+        let mut first = session_options(dir.path(), "session-a");
+        run_slash_command(&mut app, &agent, &mut first, "/name foo")
+            .await
+            .expect("name");
+        assert_eq!(first.session_name.as_deref(), Some("foo"));
+
+        // A different session, then resume `session-a` from the selector.
+        let mut second = session_options(dir.path(), "session-b");
+        apply_selector_choice(&mut app, &agent, "resume:session-a", &mut second).await;
+
+        assert_eq!(second.session_id, "session-a");
+        assert_eq!(second.session_name.as_deref(), Some("foo"));
+        assert_eq!(app.status_data().session_name.as_deref(), Some("foo"));
+        assert!(transcript(&app).contains("Resumed session session-a (foo)"));
     }
 }

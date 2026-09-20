@@ -1060,6 +1060,17 @@ impl App {
         &mut self.status_data
     }
 
+    /// Point the status bar at a different session (`/new`, `/resume`).
+    pub fn set_session_id(&mut self, session_id: impl Into<String>) {
+        self.status_data.session_id = session_id.into();
+    }
+
+    /// Set the session display name (`/name`). `None` clears it, so the
+    /// status bar falls back to the session identifier.
+    pub fn set_session_name(&mut self, name: Option<String>) {
+        self.status_data.session_name = name;
+    }
+
     /// The last transient status message pushed by [`App::flash_status`], if
     /// any. Consumed by the next render and cleared by the next key press.
     pub fn status_flash(&self) -> Option<&str> {
