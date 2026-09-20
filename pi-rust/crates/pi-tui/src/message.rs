@@ -749,6 +749,13 @@ fn streaming_tool_text(name: &str, args: &str, running: bool) -> String {
 /// role prefix to every line and appending the streaming caret to the last
 /// line. A whitespace-only body falls back to a single prefixed blank line
 /// (matching the plain-text path).
+///
+/// A line the markdown renderer produced as an inline-image row — a kitty or
+/// iTerm2 escape sequence, plus the blank rows that image occupies — is passed
+/// through **verbatim**: prefixing an escape sequence would corrupt it, and
+/// writing text into the rows an image was told to occupy would draw the role
+/// prefix over the picture. A streaming body whose last line belongs to such
+/// an image gets no caret for the same reason.
 fn markdown_lines(
     body: &str,
     width: usize,
@@ -761,11 +768,15 @@ fn markdown_lines(
     if lines.is_empty() {
         return vec![vec![StyledSpan::new(prefix, prefix_style)]];
     }
+    let verbatim = image_row_mask(&lines);
     let last = lines.len() - 1;
     lines
         .into_iter()
         .enumerate()
         .map(|(idx, line)| {
+            if verbatim[idx] {
+                return line;
+            }
             let mut spans: StyledLine = vec![StyledSpan::new(prefix, prefix_style)];
             spans.extend(line);
             if streaming && idx == last {
@@ -774,6 +785,34 @@ fn markdown_lines(
             spans
         })
         .collect()
+}
+
+/// Which rendered lines are part of an inline-image block.
+///
+/// A run of consecutive lines that are blank or image escape remains verbatim
+/// as soon as one of its lines is an escape, so the iTerm2 shape (blank rows,
+/// then the sequence on the last) is kept intact just like the kitty shape
+/// (the sequence first, the reserved rows after).
+fn image_row_mask(lines: &[StyledLine]) -> Vec<bool> {
+    let is_image: Vec<bool> = lines
+        .iter()
+        .map(|line| crate::terminal_image::is_image_line(&plain_text(line)))
+        .collect();
+    let mut verbatim = vec![false; lines.len()];
+    let mut i = 0usize;
+    while i < lines.len() {
+        let mut j = i;
+        let mut has_image = false;
+        while j < lines.len() && (is_image[j] || lines[j].is_empty()) {
+            has_image |= is_image[j];
+            j += 1;
+        }
+        if has_image {
+            verbatim[i..j].fill(true);
+        }
+        i = if j == i { i + 1 } else { j };
+    }
+    verbatim
 }
 
 /// Word-aware wrap that prefers to break at word boundaries and

@@ -30,11 +30,18 @@
 //! * LaTeX math blocks (`$$…$$` and `\[…\]`) rendered through
 //!   [`crate::latex::render_latex_with`] in display mode, falling back to the
 //!   trimmed source when the expression is unsupported.
+//! * Standalone images whose target is an inline `data:image/…;base64,…` URI:
+//!   the line is rendered through [`crate::image::Image`], so a terminal that
+//!   advertises image support gets the kitty / iTerm2 rows and every other
+//!   terminal gets the `[Image: …]` label. A payload this crate cannot size
+//!   falls back to the alt text.
 //!
 //! Inline level:
 //!
 //! * `**bold**` / `__bold__`, `*italic*` / `_italic_`, `` `code` ``,
-//!   `~~strikethrough~~`, `[label](url)` links, backslash escapes.
+//!   `~~strikethrough~~`, `[label](url)` links, backslash escapes. An image that
+//!   is *not* a standalone data-URI line (`![alt](url)`) renders as its alt
+//!   text, which is what marked shows when an image cannot be drawn inline.
 //! * Inline LaTeX (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) rendered through
 //!   [`crate::latex::render_latex`], with the upstream pending/malformed guards
 //!   (a `$` opener followed by whitespace, a trailing digit, a backtick or an
@@ -42,7 +49,9 @@
 //!
 //! # Deliberately not covered (degrade to plain text, never panic)
 //!
-//! Terminal images, syntax highlighting for the outer language, block HTML and
+//! Terminal images are covered only in the standalone `data:` form above: a
+//! remote image URL or a `file://` target is not fetched, so it renders as the
+//! alt-text link. Syntax highlighting for the outer language, block HTML and
 //! the `transform` hooks are separate subsystems.
 //! A link whose target is not a plain `[label](url)` is emitted as its literal
 //! text. A parsed link always carries its target on the label spans
@@ -189,8 +198,25 @@ enum Block {
     List(ListBlock),
     /// A horizontal rule.
     Hr,
+    /// A standalone `![alt](data:image/…;base64,…)` line.
+    Image(ImageBlock),
     /// A LaTeX math block (`$$…$$` or `\[…\]`).
     Latex(LatexBlock),
+}
+
+/// A parsed markdown image.
+///
+/// Only the inline `data:` form is kept: the payload has to be in the source
+/// already, because the renderer never does I/O. `alt` is what a terminal
+/// without image support — or an unparsable payload — shows instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImageBlock {
+    /// Alt text from `![alt](…)`.
+    alt: String,
+    /// MIME type from the data URI, e.g. `image/png`.
+    mime_type: String,
+    /// Base64 payload from the data URI.
+    data: String,
 }
 
 /// A parsed list.
@@ -306,6 +332,14 @@ fn parse_blocks(lines: &[String]) -> Vec<Block> {
 
         if parse_hr(line) {
             blocks.push(Block::Hr);
+            i += 1;
+            continue;
+        }
+
+        // A standalone image is rendered as terminal rows rather than as a
+        // paragraph; an image inside a paragraph stays inline (alt text).
+        if let Some(image) = parse_image_block(line) {
+            blocks.push(Block::Image(image));
             i += 1;
             continue;
         }
@@ -902,6 +936,10 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                 )]);
                 maybe_blank(&mut out, next);
             }
+            Block::Image(image) => {
+                out.extend(render_image_block(image, width));
+                maybe_blank(&mut out, next);
+            }
             Block::Heading { level, text } => {
                 let mut style = with_fg(base, ThemeColor::MdHeading).bold();
                 if *level == 1 {
@@ -1011,6 +1049,91 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
 
 /// Push a separator blank line unless the next block is already a blank line
 /// (or the document ended).
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+/// Render a standalone image through [`crate::image::Image`].
+///
+/// `Image` owns both branches: with an image protocol in the terminal
+/// capabilities it returns the kitty / iTerm2 rows, without one the
+/// `[Image: …]` label. In both cases the label style is `mdLink`, so the
+/// fallback reads as the image's alt-ish reference. A payload whose header
+/// cannot be sized is a broken image: marked shows the alt text, and so does
+/// this — which is also why the payload is checked before `Image` is built
+/// (`Image::new` would silently assume `800x600`).
+fn render_image_block(image: &ImageBlock, width: usize) -> Vec<StyledLine> {
+    let style = with_fg(SpanStyle::PLAIN, ThemeColor::MdLink);
+    if crate::terminal_image::get_image_dimensions(&image.data, &image.mime_type).is_none() {
+        if image.alt.is_empty() {
+            return Vec::new();
+        }
+        return vec![vec![StyledSpan::new(image.alt.clone(), style)]];
+    }
+    let component = crate::image::Image::new(
+        image.data.clone(),
+        image.mime_type.clone(),
+        crate::image::ImageTheme::fallback(style),
+    );
+    let width = u16::try_from(width).unwrap_or(u16::MAX).max(1);
+    crate::component::Component::render(&component, width)
+}
+
+/// Parse a line that is exactly `![alt](data:image/…;base64,…)`.
+///
+/// The whole line must be consumed, so an image sharing its line with prose
+/// stays inline. Returns `None` for every other image: a remote URL, a
+/// `file://` path, a vendored format without a `base64` marker or a MIME type
+/// outside `image/*`.
+fn parse_image_block(line: &str) -> Option<ImageBlock> {
+    let trimmed = line.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.first() != Some(&'!') || chars.get(1) != Some(&'[') {
+        return None;
+    }
+    let label_end = find_matching_bracket(&chars, 1)?;
+    let open = label_end + 1;
+    if chars.get(open) != Some(&'(') {
+        return None;
+    }
+    let close = find_matching_paren(&chars, open)?;
+    if close + 1 != chars.len() {
+        return None;
+    }
+
+    let alt: String = chars[2..label_end].iter().collect();
+    let raw: String = chars[open + 1..close].iter().collect();
+    let (mime_type, data) = parse_data_image_url(&normalize_url(raw.trim()))?;
+    Some(ImageBlock {
+        alt,
+        mime_type,
+        data,
+    })
+}
+
+/// Split a `data:image/<type>[;…];base64,<payload>` URI.
+///
+/// The `;base64` marker is required: an inline image that is percent-encoded
+/// or not declared base64 is left to the inline path, which shows the alt text
+/// rather than trying to decode an unknown encoding.
+fn parse_data_image_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let mut params = meta.split(';');
+    let mime_type = params.next()?.trim().to_ascii_lowercase();
+    if !mime_type.starts_with("image/") {
+        return None;
+    }
+    if !params.any(|param| param.eq_ignore_ascii_case("base64")) {
+        return None;
+    }
+    let data = data.trim();
+    if data.is_empty() {
+        return None;
+    }
+    Some((mime_type, data.to_string()))
+}
+
 fn maybe_blank(out: &mut Vec<StyledLine>, next: Option<&Block>) {
     if next.is_some_and(|b| !matches!(b, Block::Space)) {
         out.push(Vec::new());
@@ -1349,13 +1472,34 @@ fn parse_inline(chars: &[char], base: SpanStyle, out: &mut StyledLine) {
                 push_span(out, "[".to_string(), base);
                 i += 1;
             }
+            '!' => {
+                // `![alt](url)` is an image; when it is not a standalone
+                // data-URI line the block parser kept it inline, and marked
+                // shows the alt text — that is exactly what the link renderer
+                // does, so the `!` is dropped and the rest is parsed as a link.
+                if chars.get(i + 1) == Some(&'[') {
+                    if let Some(consumed) = parse_link(chars, i + 1, base, out) {
+                        i += consumed + 1;
+                        continue;
+                    }
+                }
+                push_span(out, "!".to_string(), base);
+                i += 1;
+            }
             _ => {
                 let start = i;
-                while i < chars.len() && !is_special(chars[i]) {
+                // An image marker inside a run ends it, so `!` is dispatched to
+                // its own arm above instead of being swallowed into the text.
+                while i < chars.len() && !is_special(chars[i]) && !starts_image(chars, i) {
                     i += 1;
                 }
-                let run: String = chars[start..i].iter().collect();
-                push_span(out, run, base);
+                if i == start {
+                    push_span(out, chars[i].to_string(), base);
+                    i += 1;
+                } else {
+                    let run: String = chars[start..i].iter().collect();
+                    push_span(out, run, base);
+                }
             }
         }
     }
@@ -1644,6 +1788,11 @@ fn is_escaped(chars: &[char], idx: usize) -> bool {
 /// every one of them.
 fn is_special(c: char) -> bool {
     matches!(c, '\\' | '`' | '*' | '_' | '~' | '[' | '$')
+}
+
+/// True when `chars[i]` opens a markdown image (`![`).
+fn starts_image(chars: &[char], i: usize) -> bool {
+    chars[i] == '!' && chars.get(i + 1) == Some(&'[')
 }
 
 /// Characters a backslash escapes.
