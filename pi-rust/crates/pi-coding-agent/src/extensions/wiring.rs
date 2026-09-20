@@ -11,6 +11,7 @@
 //! runtime it is created in, so [`load`] takes the runtime the mode is
 //! about to run on rather than creating one of its own.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +28,7 @@ use pi_extensions::{
 };
 use pi_protocol::{
     Api, AssistantMessageEvent, Content, Context, ExtensionEvent, Message, Model, ProviderId,
-    ResourcesDiscoverReason, Role, StopReason, UiLevel, Usage,
+    ResourcesDiscoverReason, Role, SessionShutdownReason, StopReason, UiLevel, Usage,
 };
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
@@ -151,6 +152,78 @@ impl std::fmt::Debug for ExtensionLoadOutcome {
     }
 }
 
+/// Read-only projection of one extension load pass, for a UI surface
+/// (the interactive startup header and `/extensions`).
+///
+/// [`ExtensionLoadOutcome`] owns live handles — the executor and the JS
+/// host — that a UI must not touch. This struct keeps only what a surface
+/// renders: which sources loaded, what they registered, what failed, and
+/// whether the user disabled loading altogether.
+///
+/// The load pass does not track *which* source registered a command or a
+/// provider, so [`tools`](Self::tools), [`commands`](Self::commands) and
+/// [`providers`](Self::providers) are the union across every loaded
+/// source; [`loaded`](Self::loaded) is per source.
+///
+/// `RegisteredCommand` has no `PartialEq`, so this type cannot derive the
+/// comparison traits either.
+#[derive(Debug, Clone, Default)]
+pub struct ExtensionReport {
+    /// Sources that were evaluated successfully, in load order.
+    pub loaded: Vec<PathBuf>,
+    /// Extension tool names advertised to the model (the built-in
+    /// collision filter already dropped the shadowed ones).
+    pub tools: Vec<String>,
+    /// Extension tool names that a built-in tool already claimed; the
+    /// built-in wins and the registration is dropped.
+    pub shadowed: Vec<String>,
+    /// Commands registered via `pi.registerCommand`, in registration
+    /// order.
+    pub commands: Vec<RegisteredCommand>,
+    /// Provider ids registered via `pi.registerProvider`, in
+    /// registration order.
+    pub providers: Vec<String>,
+    /// Per-source failures (`path`, human-readable reason). Non-fatal:
+    /// the agent starts with whatever did load.
+    pub errors: Vec<(PathBuf, String)>,
+    /// `--no-extensions` was passed. Nothing was discovered, and the UI
+    /// says so instead of showing an empty list.
+    pub disabled: bool,
+}
+
+impl ExtensionReport {
+    /// True when there is nothing to advertise: no source, no failure and
+    /// no explicit opt-out.
+    pub fn is_empty(&self) -> bool {
+        self.loaded.is_empty() && self.errors.is_empty() && !self.disabled
+    }
+}
+
+impl ExtensionLoadOutcome {
+    /// Project this outcome into the UI-facing [`ExtensionReport`].
+    ///
+    /// `disabled` mirrors the CLI's `--no-extensions`: the early return in
+    /// [`load`] leaves an otherwise empty outcome, so the flag is not
+    /// recoverable from the outcome itself.
+    pub fn report(&self, disabled: bool) -> ExtensionReport {
+        ExtensionReport {
+            loaded: self.loaded.clone(),
+            tools: self.tools.clone(),
+            shadowed: self.shadowed.clone(),
+            commands: self.runtime.commands().to_vec(),
+            providers: self
+                .runtime
+                .providers()
+                .configs()
+                .iter()
+                .map(|config| config.name.clone())
+                .collect(),
+            errors: self.errors.clone(),
+            disabled,
+        }
+    }
+}
+
 /// Live handle to the JS extension host for one process.
 ///
 /// A mode uses it for two things:
@@ -180,6 +253,14 @@ pub struct ExtensionRuntime {
     mode: String,
     has_ui: bool,
     cwd: String,
+    /// Event names with at least one registered handler, snapshotted right
+    /// after the load pass (`host.known_event_names()`).
+    ///
+    /// The fan-out consults this before serialising an event into the JS
+    /// host: an extension that subscribes to nothing must not pay for
+    /// `message_update` traffic, which is the hottest event in the
+    /// system.
+    subscribed_events: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for ExtensionRuntime {
@@ -192,6 +273,7 @@ impl std::fmt::Debug for ExtensionRuntime {
             .field("resources", &self.resources)
             .field("mode", &self.mode)
             .field("has_ui", &self.has_ui)
+            .field("subscribed_events", &self.subscribed_events.len())
             .finish_non_exhaustive()
     }
 }
@@ -200,6 +282,22 @@ impl ExtensionRuntime {
     /// The no-extension runtime.
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Test-only constructor: a runtime around `host` that reports exactly
+    /// `subscribed` as the subscribed event names.
+    ///
+    /// [`load`] is the only production path because it is the pass that
+    /// discovers extensions; a test that already has a loaded host (for
+    /// example to drive the interactive event fan-out) does not need a
+    /// search path.
+    #[cfg(test)]
+    pub(crate) fn for_test(host: JsExtensionHost, subscribed: &[&str]) -> Self {
+        Self {
+            host: Some(host),
+            subscribed_events: subscribed.iter().map(|name| (*name).to_string()).collect(),
+            ..Self::default()
+        }
     }
 
     /// Commands registered by every loaded extension, in load order.
@@ -266,6 +364,59 @@ impl ExtensionRuntime {
             .as_ref()
             .map(JsExtensionHost::drain_side_effects)
             .unwrap_or_default()
+    }
+
+    /// Event names at least one loaded extension registered a handler for.
+    pub fn subscribed_events(&self) -> &BTreeSet<String> {
+        &self.subscribed_events
+    }
+
+    /// Whether any extension wants `name` (an [`ExtensionEvent`] wire tag,
+    /// see [`ExtensionEvent::name`]).
+    pub fn has_subscriber_for(&self, name: &str) -> bool {
+        self.subscribed_events.contains(name)
+    }
+
+    /// Whether at least one extension subscribed to any event at all.
+    ///
+    /// Modes use this to decide whether to install the agent fan-out at
+    /// all: with no subscribers there is no reason to subscribe to the
+    /// agent or to spawn the delivery task.
+    pub fn has_any_subscriber(&self) -> bool {
+        !self.subscribed_events.is_empty()
+    }
+
+    /// Deliver one lifecycle event to the JS host.
+    ///
+    /// Returns `true` when the host reported at least one handler. Events
+    /// nobody subscribed to are dropped before crossing into JS; the
+    /// caller can also pre-filter with [`Self::has_subscriber_for`] when
+    /// building an expensive payload.
+    pub async fn deliver_event(&self, event: &ExtensionEvent) -> bool {
+        let Some(host) = self.host.as_ref() else {
+            return false;
+        };
+        if !self.has_subscriber_for(event.name()) {
+            return false;
+        }
+        host.emit_event_with(event, Some(&self.mode), self.has_ui, &self.cwd)
+            .await
+            .map(|outcome| outcome.handled)
+            .unwrap_or(false)
+    }
+
+    /// Deliver `session_shutdown` before the runtime goes away.
+    ///
+    /// Upstream emits this on quit / reload / session replacement; plugins
+    /// use it to flush state. Failure is reported as `false` rather than
+    /// propagated: a broken shutdown handler must not change the process
+    /// exit path.
+    pub async fn deliver_shutdown(&self, reason: SessionShutdownReason) -> bool {
+        self.deliver_event(&ExtensionEvent::SessionShutdown {
+            reason,
+            target_session_file: None,
+        })
+        .await
     }
 }
 
@@ -384,11 +535,22 @@ pub fn load(
         // them back after the load (and the lifecycle dispatch) ran.
         let commands = host.registered_commands().await;
         let tool_prompts = host.registered_tool_prompts().await;
-        Ok::<_, pi_extensions::ExtensionError>((host, outcome, commands, tool_prompts, resources))
+        // Which lifecycle events the loaded extensions actually subscribed
+        // to; the runtime uses this to skip the fan-out for everything else.
+        let subscribed_events: BTreeSet<String> =
+            host.known_event_names().await.into_iter().collect();
+        Ok::<_, pi_extensions::ExtensionError>((
+            host,
+            outcome,
+            commands,
+            tool_prompts,
+            resources,
+            subscribed_events,
+        ))
     });
 
     match result {
-        Ok((host, outcome, commands, tool_prompts, resources)) => {
+        Ok((host, outcome, commands, tool_prompts, resources, subscribed_events)) => {
             let loaded: Vec<PathBuf> = outcome.entries.iter().map(|e| e.source.clone()).collect();
             let errors: Vec<(PathBuf, String)> = outcome
                 .errors
@@ -423,6 +585,7 @@ pub fn load(
                     mode,
                     has_ui,
                     cwd,
+                    subscribed_events,
                 },
                 loaded,
                 tools,
@@ -1262,6 +1425,61 @@ mod tests {
         assert!(!outcome.executor.definitions().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn report_projects_the_load_outcome_for_the_ui() {
+        // The interactive header and `/extensions` read this projection;
+        // it must carry exactly what the outcome advertised.
+        let source = r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "ext_greet",
+                    label: "Greet",
+                    description: "greets",
+                    parameters: { type: "object" },
+                    execute: function () {
+                        return { content: [{ type: "text", text: "hi" }] };
+                    },
+                });
+                pi.registerCommand("ext-hello", {
+                    description: "hello",
+                    handler: function () { return "hi"; },
+                });
+            };
+        "#;
+        let (_runtime, outcome) = load_extension("report", source);
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+
+        let report = outcome.report(false);
+        assert_eq!(report.loaded, outcome.loaded);
+        assert_eq!(report.tools, vec!["ext_greet".to_string()]);
+        assert!(report.shadowed.is_empty());
+        assert_eq!(report.commands.len(), 1);
+        assert_eq!(report.commands[0].name, "ext-hello");
+        assert!(report.providers.is_empty());
+        assert!(report.errors.is_empty());
+        assert!(!report.disabled);
+        assert!(!report.is_empty());
+
+        // `--no-extensions` is the caller's flag, not the outcome's: the
+        // early return in `load` leaves it unrecoverable from the outcome.
+        assert!(outcome.report(true).disabled);
+    }
+
+    #[test]
+    fn an_empty_report_stays_empty_until_something_is_advertised() {
+        assert!(ExtensionReport::default().is_empty());
+        assert!(!ExtensionReport {
+            disabled: true,
+            ..ExtensionReport::default()
+        }
+        .is_empty());
+        assert!(!ExtensionReport {
+            loaded: vec![PathBuf::from("/tmp/ext.js")],
+            ..ExtensionReport::default()
+        }
+        .is_empty());
     }
 
     /// Minimal extension source registering one named tool.

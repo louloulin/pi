@@ -971,6 +971,10 @@ transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后
 - **`/help` 正文与用户输入共用 `> ` 前缀**：截图里 `/help` 的输出块和 composer 一样以 `> ` 开头，
   与用户消息难以区分（上游用 info 块）。低风险、纯渲染层的收尾项。
 
+> **落地（LUM-1238，第十五节）**：以上四条已在 Stage 70 全部关掉 —— `app.clear` 改为 500 ms 双击窗口
+> （`App::CLEAR_EXIT_WINDOW`）、补全 provider 真正挂到 composer、jump-to-latest 指示器上屏
+> （含鼠标命中与 `End` 重挂尾）、`/help` 改用 `· ` 信息块前缀。真实 PTY 证据见 15.5。
+
 ### 12.5 追加：把已交付的 Stage 63（LUM-1224）与 Stage 66（LUM-1228）也合进 `feature/pi.rs`
 
 交接物只合并了一节 65，本节补上另外两个**已在 `origin` 上、且已跑过绿门**的交付分支：
@@ -1521,9 +1525,284 @@ wired 判定路径，那比原来的缺陷更难维护。
 5. 工具卡片 / 思考块 / 耗时统计的 `/resume` 回放仍缺（第六、七轮记录），
    `faux` 提供商不产生工具调用，本轮截图依旧无法覆盖该面。
 
-## 十八、第十二轮（LUM-1257）：jump-to-latest 指示器落地 —— §12.4 第二项闭合
+## 十八、Stage 71 交付（LUM-1239）：扩展对用户可见 —— 启动头摘要行 + `/extensions`
 
-### 18.1 为什么挑这一项
+> 编号说明：issue 正文把这节写作「第十六节」，本文件按顺序是第十五节（第十四节 = LUM-1235）。
+
+本节补的正是 14.5 的第 2 条：`-e` / 默认搜索路径装载的扩展在启动头与 `/extensions` 里都看不见。
+
+### 15.1 问题
+
+`load_extensions`（`crates/pi-coding-agent/src/main.rs:504`）把装载结果全部写 stderr
+（`:524` / `:528` / `:534` / `:543`）。alternate screen 一进去这些行就被整屏覆盖，于是：
+装了什么、装了哪个、哪个工具被内建顶掉、哪个文件加载失败，用户在屏幕上一个字都看不到；
+也没有任何查询入口（`/extensions` 此前不存在）。装载本身是好的 —— `registerProvider`、工具、
+命令都到达了 runtime。
+
+### 15.2 三个先定的设计决定
+
+1. **一个扩展都没装载时**（含 `--no-extensions`），二选一。本轮取
+   「**默认整行不出现；`--no-extensions` 时显示 `extensions: none (--no-extensions)`**」。
+   理由：无扩展运行是绝大多数，启动头与 Stage 70 保持逐像素一致，回归面最小；而
+   `--no-extensions` 是用户的显式选择，「确实是关掉的」这句话让「参数生效了吗」在屏幕上有答案。
+   反过来的方案（默认显示 `extensions: none`）会让每个用户的启动头多一行噪音。
+2. **`/extensions` 的归属粒度**：装载器不记录「这条命令 / 这个工具是谁注册的」——
+   `RegistrationLog` 的命令是扁平列表，`RegisteredProviderConfig` 只有 `name`，
+   工具注册表也没有按来源分组的 getter。要逐条归属得改 `pi-extensions`，不在本轮范围。
+   所以 `/extensions` 里 **sources 逐条列出**，`tools` / `commands` / `providers` 是
+   **全部已装载来源的并集**；多于一个来源时显式补一行
+   `note: tools / commands / providers are the union across the loaded sources.`，
+   不让「并集」被误读成「每个工具都来自第一个扩展」。
+3. **结构化数据进 TUI，TUI 只排版**：新增 `ExtensionLoadOutcome::report(disabled)`
+   （`crates/pi-coding-agent/src/extensions/wiring.rs:207`）投影出 `ExtensionReport`，
+   启动头与 `/extensions` 都读它，不各自解析字符串。`disabled` 由调用方传：`load` 在
+   `--no-extensions` 上是提前返回，outcome 里读不到这个标志。
+
+### 15.3 改动清单
+
+| 文件 | 位置 | 改动 |
+| --- | --- | --- |
+| `crates/pi-coding-agent/src/extensions/wiring.rs` | `:170` `:207` | `ExtensionReport`（`loaded` / `tools` / `shadowed` / `commands` / `providers` / `errors` / `disabled`）+ `report(disabled)`（不能派 `PartialEq`：`RegisteredCommand` 没有实现） |
+| `crates/pi-coding-agent/src/commands/slash.rs` | `:72` `:113` `:165` `:189` `:284` | `SlashCommand::Extensions`、解析、`/help` 行、`extensions_text`、`display_path`（`~` / `./` 收缩，跳过单段基路径） |
+| `crates/pi-coding-agent/src/interactive.rs` | `:138` `:252` `:1702` | `InteractiveOptions::extension_report`（连手工 `Debug` 一起）、`extension_header_for`、`/extensions` → `app.info` |
+| `crates/pi-coding-agent/src/main.rs` | `:150` | `loaded_extensions.report(cli.no_extensions)` 传进 `InteractiveOptions` |
+| `crates/pi-tui/src/app.rs` | `:466` `:475` `:504` `:1368` `:1423` | `AppConfig::extension_header`、`ExtensionHeader { Hidden, Loaded { count, names }, Disabled }`、内建头部容量 +4、摘要行紧跟标题行（Muted）、`extension_header_line` |
+| `crates/pi-tui/src/locale.rs` | `:223` `:231` | `EXTENSIONS_DISABLED_EN/ZH`、`extensions_summary_line`（en / zh 两版） |
+
+**`ctx.ui.setHeader` 的覆盖契约不变**：`composed_frame` 只在 `frame.header.is_empty()` 时回落到内建头部，
+而摘要行是内建头部的第二行 —— 扩展一旦自己 setHeader，整块内建头部（含摘要行）都不画。
+行预算也不受影响：`plan_chrome` 按行数分配，`write_styled_line` 对超宽行是裁剪而不是换行，
+所以一条再长的 `N extension(s): ...` 也只会被截断，不会顶掉键位提示或 onboarding 行。
+
+stderr 上的装载日志本轮**保留**：它是给 `pi --print` / `pi rpc` 和脚本用的，删除会打断既有消费者；
+本轮做的是在屏幕上补一份可见副本，两者共存。
+
+### 15.4 测试
+
+| 位置 | 断言 |
+| --- | --- |
+| `crates/pi-tui/tests/startup_header.rs:204` | 摘要行落在标题行**正下一行**，内容为 `2 extension(s): ./fixture-ext.mjs, ~/.pi/agent/extensions/foo.mjs` |
+| `crates/pi-tui/tests/startup_header.rs:223` | `Disabled` → `extensions: none (--no-extensions)` |
+| `crates/pi-tui/tests/startup_header.rs:232` | 默认（`Hidden`）整行不出现（`Loaded { count: 0, names: [] }` 也不出现，防御性） |
+| `crates/pi-tui/tests/startup_header.rs:250` | `ctx.ui.setHeader` 之后摘要行不再出现 |
+| `crates/pi-tui/src/locale.rs:331` | en / zh 两份文案的拼接与 `extensions: none` 形状 |
+| `crates/pi-coding-agent/src/commands/slash.rs:705` `:718` | `/extensions` 解析（含多余参数）、`/help` 收录该命令 |
+| `crates/pi-coding-agent/src/commands/slash.rs:742` `:798` `:809` `:822` | `extensions_text` 的 loaded / none / `--no-extensions` 三分支（含并集 note 与 `(none)` 行）与 `display_path` 收缩 |
+| `crates/pi-coding-agent/src/extensions/wiring.rs:1340` `:1380` | 真装载一个注册了工具 + 命令的扩展后 `report()` 的投影；`is_empty()` 的三种输入 |
+| `crates/pi-coding-agent/tests/startup_header.rs:109` `:133` `:148` `:156` | 驱动侧映射（`Loaded` / `Disabled` / `Hidden`）与「真实 `interactive_app_config` 渲染出的第 2 行」 |
+
+`crates/pi-coding-agent/tests/startup_header.rs` 里会渲染的测试全部走新增的 `lock_registry()`：
+`install_keybindings_from` / `reset_keybindings` 是进程级状态，cargo 同二进制内并发跑测试，
+不串行化会与既有的「启动头解析真键位」用例互踩（本轮首次跑就复现了这个 flake）。
+
+### 15.5 实机 PTY 证据
+
+harness：`pty.fork` + `TIOCSWINSZ`，`pyte` 还原屏幕、Pillow 渲成 PNG（**临时工具，未入库**，
+理由同第十四节：它依赖终端仿真与 PIL，不适合成为构建门槛）。
+一个必要的仿真修正：`pyte` 的 `Screen` 不实现 `CSI ? 1049 h` 的清屏语义，会把进 alternate screen
+**之前**写下的 stderr 文字留在缓冲里 —— 真终端那一下是空白屏。harness 覆盖 `set_mode` 在 1049 上清屏后，
+截图与真机一致（首版截图逐行左侧是启动头、右侧叠加着 stderr 残影，就是这条仿真缺陷）。
+被测二进制是本仓 `target/debug/pi`，离线 faux：`--model faux/faux-model`。
+夹具是三个扩展：`good.mjs`（工具 `ext_echo` + 命令 `ext-echo` + provider `acme-proxy`）、
+`shadow.mjs`（把工具注册成 `bash`，另有 `ext_greet`）、`broken.mjs`（语法错误）。
+
+| 画面 | 观察 |
+| --- | --- |
+| 已装载（2 成功 / 1 失败 / 1 个工具被顶掉） | 标题正下方一行 `2 extension(s): ./good.mjs, ./shadow.mjs`，键位提示整体下移一行；stderr 的装载日志在屏幕上依旧不可见 |
+| `/extensions` | `extensions: 2 loaded, 1 failed, 1 tool(s) shadowed` + `sources:` / `tools:` / `commands:` / `providers:` / `shadowed by a built-in tool (the built-in wins): bash` / `failed to load: ./broken.mjs — …` + 并集 note |
+| `--no-extensions` | `extensions: none (--no-extensions)` |
+| 无参数、环境里没有扩展 | 没有该行（与 Stage 70 的启动头一致） |
+
+![Stage 71：装载 2 个扩展时的启动头摘要行](screenshots/stage71-extension-header.png)
+
+![Stage 71：`/extensions` 列出来源、工具、命令、provider、被顶掉的工具与失败原因](screenshots/stage71-extensions-command.png)
+
+![Stage 71：`--no-extensions` 显示 extensions: none (--no-extensions)](screenshots/stage71-no-extensions-flag.png)
+
+![Stage 71：无扩展运行时没有摘要行](screenshots/stage71-no-extensions-default.png)
+
+一条实机才暴露的排版约束：`app.info` 走的是**流式段落**渲染（`plain_lines` → `wrap_text`，
+按词重组、句内换行不保留，`/help` 一直如此）。所以 `extensions_text` 是**一节一行、条目逗号分隔**，
+靠 `sources:` / `tools:` / `commands:` / `providers:` 这些标签而不是缩进保持可读性 ——
+首版按「每条一行 + 缩进」写，屏幕上摊平成一整段（截图里能看到），本轮改成现在这种形状。
+
+### 15.6 本轮实测
+
+`cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui -p pi-coding-agent --all-targets
+-- -D warnings` 退出码 0；`cargo test -p pi-tui -p pi-coding-agent` **1456 passed / 0 failed**
+（`pi-tui` 761）；`cargo test -p pi-evals` **8 passed / 0 failed / 1 ignored**（含
+`docs-code-fences-balanced` 与相对链接两个 case，本节与四张新截图都在审计范围内）。
+
+本机 overlay 是多任务共享的，本轮构建期间两次撞到「剩余 0」；门禁用
+`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_DEV_DEBUG=0` 跑完（不影响语义，只去掉调试信息），
+跑完按约定清掉本轮 `target`。这一条写出来是因为它解释了为什么门禁命令带着这两个环境变量。
+
+### 15.7 仍然缺的（顺延）
+
+1. **逐扩展归属**：`/extensions` 里 tools / commands / providers 仍是并集（见 15.2 第 2 条），
+   要精确到「哪个扩展提供了哪个工具」得让 `pi-extensions` 的注册日志带上来源。
+2. **`/reload` 热重载**：issue 明确划在本轮范围外。
+3. **`/help` 与 `/extensions` 的排版**：都受 `app.info` 的流式段落渲染限制，
+   等 TUI 有「保留换行的普通文本块」再统一改善。
+
+## 十九、Stage 70 交付（LUM-1238）：TUI 输入面收尾
+
+第十二节 12.3 / 12.4 记下的四条输入面缺口本轮全部关掉。四处改动都在同一条链路上
+（`Editor` → `App::step` → 消息视口 / footer），没有新增模块，也没有新依赖。
+
+### 15.1 P1：补全从「零接线」到「实机出候选」（12.3 的落地）
+
+12.3 的诊断（引擎与下拉层完整、生产调用点为零）按原计划落地，只加了一张表和一处装配：
+
+- **命令表** `crates/pi-coding-agent/src/commands/slash.rs:191 autocomplete_commands()`：17 条内置命令，
+  带参数提示（`export [path]`、`trust yes|no`、`compact [instructions]`）与短描述。它与 `help_text()`
+  **故意不共享字符串**：`help_text` 是固定列宽的对齐块，下拉要的是「短标签 + 描述」。两者不许漂移
+  这件事交给单测：`autocomplete_commands_match_the_slash_command_table`（`slash.rs:399`，每条表项都要能过
+  `handle_command`，`/help` 里每个 `/xxx` 行都必须出现在表里）与
+  `autocomplete_commands_carry_hints_and_descriptions`（`slash.rs:430`）。
+- **装配** `crates/pi-coding-agent/src/interactive.rs:336-355`：内置表 + 已加载扩展注册的命令
+  （`runtime.commands()` 映射成 `SlashCommand`），一起交给
+  `CombinedAutocompleteProvider::new(commands, tool_cwd)`，通过
+  `app.prompt_mut().editor_mut().set_autocomplete_provider(...)` 装上。provider 是 opt-in 的
+  （`editor.rs:101-103` 自己写着「没有调用点就保持补全前的行为」），这就是 12.3 里「引擎在、屏幕上没有」的根因。
+- **上屏** `crates/pi-tui/src/app.rs:4176 apply_autocomplete`：下拉挂在消息视口底边（紧贴 prompt），
+  候选行取自 `Editor::autocomplete_render_lines(width)`，选中行由
+  `crates/pi-tui/src/editor.rs:1154 autocomplete_selected_row()`（复用滚动窗口的居中规则）整行铺选中底。
+  标签是**裸命令名**（`help`，不带 `/`），与上游 `packages/tui/src/autocomplete.ts:318-328` 的
+  `label: name` 一致；描述只在宽度 44 列以上才追加。
+- 与滚动条 / jump-to-latest 不同，下拉属于 composer，所以 live frame 与 `render_snapshot`
+  **都画**（`app.rs:4388`，在 `if scrollbar` 之外）。
+
+真实二进制行为见 15.5 的 a1–a3：`/` 出 5 条候选、`/he` 把 `help` 排到第一（命令匹配走的是
+`fuzzy_rank`，与上游 `fuzzyFilter` 同源，`copy`/`exit` 也会因为描述里含 `h…e` 而入选，这是上游行为不是退化）、
+`@src/` 出 `src/app.rs` 等文件候选。
+
+### 15.2 P1：`app.clear` 的 500 ms 双击窗口
+
+12.4 第一条：idle 时一次 Ctrl+C 直接 `exit_requested = true`，草稿随退出一起丢；上游
+`interactive-mode.ts:3931-3939 handleCtrlC` 是「第一次清编辑器、500 ms 内第二次才退出」。
+
+```rust
+// crates/pi-tui/src/app.rs:311
+pub const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
+
+// crates/pi-tui/src/app.rs:2384-2399（判定分支内没有任何时钟调用）
+if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
+    if self.is_busy() {
+        self.cancel();                      // 忙时语义不变
+        return StepOutcome::Redraw;
+    }
+    let double_press = self
+        .last_clear_at
+        .is_some_and(|last| now.saturating_duration_since(last) < CLEAR_EXIT_WINDOW);
+    if double_press {
+        self.exit_requested = true;
+        return StepOutcome::Exit;
+    }
+    self.last_clear_at = Some(now);
+    self.prompt.clear();
+    return StepOutcome::Redraw;
+}
+```
+
+- 时钟从 `App::step_key_at(key, now)`（`app.rs:2326`）注入，`App::step_key`（`app.rs:2316`）才是调用
+  `Instant::now()` 的那一层。验收要求的「判定分支里不出现 `Instant::now()`」因此由类型直接保证，
+  也让 500 ms 边界、第三次按键重新计时这些用例可以在单测里精确构造。
+- **空 composer 也照样清、照样记时间**（与上游 `handleCtrlC` 一致）：慢速双击（第一次 → 停顿 →
+  第二次）仍然能退出，而不是变成「第一次被空草稿吃掉」。
+- 键位描述同步：`crates/pi-coding-agent/src/keybindings.rs:228` 从 `Clear editor` 改成
+  `Clear the prompt (twice to exit)`；`/help` 的 Ctrl+C 行也改成
+  `abort the current turn (or clear the prompt on idle; twice exits)`（`slash.rs:166-168`）。
+- 回归测试（`crates/pi-tui/tests/input_surface.rs`）：窗口内双击退出、恰好 500 ms 视为窗口
+  **外**（边界为左闭右开）、超窗后第三次按键重新计时、空 composer 双击、忙时仍是 `cancel()`。
+
+### 15.3 P1：jump-to-latest 指示器
+
+`MessageView` 的 `is_following()` / `set_following()` 已经把「视口脱钩」这件事补掉了，但屏幕上
+没有任何提示（12.4 第二条）。本轮把上游 `scrollToEndIndicator` 落到既有的
+`tui.altScreen.bottom` 槽位上：
+
+- **文案** `app.rs:4133 jump_to_latest_label()` 生成 `" ↓ Jump to latest message · <shortcut> "`
+  （文案取自 `tui-renderer.ts:29-33`），`<shortcut>` 由 `tui.altScreen.bottom` 的按键经
+  `format_chord` 本地化（en 下是 `End`）；该键位未绑定时省略后半段；跟随底部时返回 `None`。
+- **绘制** `app.rs:4215 apply_jump_to_latest()`：右对齐在消息视口最后一行，存在滚动条时让出最右一列
+  （与 14.2 的滚动条共用几何），宽度不足时先截断。配色 `ThemeColor::Text` on `ThemeBg::SelectedBg`。
+- **几何** 绘制路径拿的是 `&self`，矩形经 `jump_indicator` 原子量对外暴露
+  （`app.rs:4150 jump_to_latest_indicator()` / `:4161 record_jump_indicator()`；`width == 0` 表示本帧没画）。
+- **鼠标** `app.rs:3348 step_jump_indicator_mouse_gesture()`：主键**按下**即命中（上游
+  `handleScrollToEndIndicatorMouseEvent` 只在 press 分支返回 true，release 不处理），命中后
+  `scroll_viewport_to_bottom()` 并清掉滚动条 hover/drag。判定顺序是「模态 → 搜索栏 → 指示器 →
+  滚动条 → 选词」（`app.rs:3315`），对应 `tui-alt-screen.ts:914,1016-1022`。
+- **顺带修掉的一个死结**：`scroll_viewport_to_bottom()`（`app.rs:4117`）此前只判断
+  `is_following() && scroll_offset() == 0`，一个 offset 恰好为 0 的「脱钩」视口会被误判成「已到底、
+  无需重绘」，指示器点不掉也消不掉；现在只有真正处于跟随态且 offset 为 0 才是 no-op。
+- 指示器只在 live frame 画（与 `apply_scrollbar` 同一处的 `scrollbar` 标志，`app.rs:4377-4381`），
+  `render_snapshot` 仍是「只有内容」，既有快照测试不受影响。
+
+### 15.4 P1：`/help` 输出改用信息块前缀
+
+`MessageView::push_info` 的 `> ` 前缀被大量测试当成转录填充物（`tests/app_scroll.rs`、
+`mouse_scroll.rs`、`alt_screen_search.rs`、`extension_ui.rs`、`snapshot.rs::info_message_uses_user_prefix`），
+不能动。所以新增的是一条平行路径而不是改旧语义：
+
+- `crates/pi-tui/src/message.rs:39` 新增 `Role::Info`，`:1120` 的前缀是 `"· "`（`Muted` 色），
+  正文色用 `CustomMessageText`；`Role` 的穷尽匹配只有 `item_lines` 一处，改动面可控。
+- `MessageView::push_info_block`（`message.rs:910`）是唯一入口，`App::info_block`（`app.rs:3048`）
+  是唯一的应用层 API。
+- 调用点只有两处：`/help`（`interactive.rs:1661`）与 `/hotkeys`（`interactive.rs:1703`）。
+
+因此截图里 `/help` 的正文块以 `· ` 开头，composer 仍是 `> `，两者一眼可辨（15.5 的 c3）。
+
+### 15.5 实机证据（真实 PTY）
+
+harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流（本轮补了一层
+`\x1b[?1049h` / `\x1b[?1049l` 的主/备屏切换，退出那一刻的画面才是真实的「终端已还原」），
+再用 PIL 把字符网格渲染成 PNG。被测对象是 `work/LUM-1238` 上编译出的真二进制，
+`--model faux/faux-model`，每张图都是**断言通过后**才落盘：
+
+| 场景 | 送键 | 断言 |
+| --- | --- | --- |
+| a 补全 | `/` → Ctrl+U → `/he` → Ctrl+U → `@src/`（cwd `crates/pi-tui`） | `/` 出现 `help`/`clear`/`new`；`/he` 首行是 `❯ help`；`@src/` 出现 `.rs` 候选 |
+| b Ctrl+C | 输入 `hello draft` → Ctrl+C → 132 ms 后第二次 Ctrl+C（由 bash 包一层，退出后打印状态码） | 第一次后进程仍活着且草稿消失；第二次后进程退出、还原后的主屏出现 `pi exited with status 0` |
+| c 视口 / 信息块 | 7 轮 `hello` → `PgUp` → `End` → `/help`（再把窗口拉到 100x44） | 脱钩时出现 `↓ Jump to latest message · End`；`End` 后该行消失；`/help` 输出以 `· ` 开头（`· slash commands:` / `· keys:`） |
+
+![输入面：`/`、`/he`、`@src/` 三档候选](screenshots/input-surface-autocomplete.png)
+
+![输入面：草稿存活 → 第一次 Ctrl+C 只清草稿 → 500 ms 内第二次退出并还原终端](screenshots/input-surface-ctrl-c-window.png)
+
+![输入面：jump-to-latest 指示器、`End` 重挂尾、`/help` 信息块前缀](screenshots/input-surface-jump-to-latest.png)
+
+同名的 `.txt`（`docs/screenshots/input-surface-*.txt`）是上面三张图的逐字符网格文本，便于在
+代码评审 / 检索里直接看到内容，也给测试与截图之间留一份可 diff 的中间产物。
+
+### 15.6 本轮实测
+
+- `cargo fmt --all -- --check`：干净。
+- `cargo clippy -p pi-tui -p pi-coding-agent --all-targets --offline -- -D warnings`：退出码 0
+  （输出里只剩 vendored `rquickjs-core` 的既有 warning，不在本仓库代码范围内）。
+- `cargo test -p pi-tui --lib --test input_surface --test e2e --test alt_screen_search
+  --test scrollbar --test startup_header --offline`：全绿（344 + 12 + 9 + 10 + 10 + 3）。
+- `cargo test -p pi-coding-agent --lib --test keybindings --test cli_extensions --offline`：
+  全绿（447 + 13 + 20）。新增的两条表一致性单测在 `--lib` 里。
+- 全量 `cargo test -p pi-tui` 与 `-p pi-coding-agent` 在本轮**全部源码改动落地之后**各跑过一次全绿；
+  之后只把两个测试文件里的 `ctrl_c.clone()` 换成直接复用（clippy `clone_on_copy`，`Key: Copy`），
+  并重跑了受影响的 target。50G 卷被并行工作区占满（本轮为腾空间清掉过两次 `target/debug/deps`
+  下的测试可执行文件），无法再链接第三遍整棵测试树，因此这里给的是「全量一次 + 定向重跑」。
+- `pi-evals` 的两个文档 case（`docs-code-fences-balanced` / `docs-relative-links-resolve`）本轮
+  **没能用 cargo 跑**：链接 `pi-evals` 测试目标要重新编译一大批依赖，卷在 `ld` 阶段报
+  `Bus error`。改用等价脚本核对：9 页文档、7 条相对链接全部可解析、每页 fence 计数均为偶数；
+  新增的三张截图与三份 `.txt` 都在 `docs/screenshots/` 内，链接目标存在。
+
+### 15.7 仍然缺的（顺延）
+
+1. **补全的 `Tab` 接受路径未做真机验证**：`tui.input.tab` 已有映射、下拉也已出候选，但本轮
+   只截了候选框，没有把「Tab 补全成 `/help `」也放进 PTY 断言（单测层由 `tests/autocomplete.rs` 覆盖）。
+2. **扩展命令的中文/多字节标签**：下拉宽度按列截断，未验证 CJK 命令名。
+3. 14.5 的四条（resume 保真度、扩展可见性、`Ctrl+G` 外部编辑器、`/tree` 无会话）维持原状。
+
+## 二十、第十二轮（LUM-1257）：jump-to-latest 指示器落地 —— §12.4 第二项闭合
+
+### 20.1 为什么挑这一项
 
 本轮槽位已满（三个 run 同时在写 `app.rs` / `interactive.rs` / `slash.rs`），磁盘一度被
 并发构建吃到 97%，因此只挑**单 crate（`pi-tui`）**、**与在飞分支零文件重叠**、且
@@ -1531,7 +1810,7 @@ wired 判定路径，那比原来的缺陷更难维护。
 屏幕上不告诉读者怎么回到最新消息 —— 这是 codex / 上游 pi 里最容易看出的交互差，
 而上游的参考实现是一段不到 20 行的合成逻辑。
 
-### 18.2 行为对齐点（逐项对照上游）
+### 20.2 行为对齐点（逐项对照上游）
 
 | 维度 | 上游 | 本 port |
 | --- | --- | --- |
@@ -1555,7 +1834,7 @@ wired 判定路径，那比原来的缺陷更难维护。
 `paint_scroll_to_end` / `scroll_to_end_label` / `scroll_to_end_rect`、
 `render_to_buffer_impl` 的合成调用、`step_mouse_gesture` 的命中分支）。
 
-### 18.3 测试（新增 8 条：`crates/pi-tui/tests/scroll_to_end.rs`）
+### 20.3 测试（新增 8 条：`crates/pi-tui/tests/scroll_to_end.rs`）
 
 1. 脱离底部才出现、`End` 回到底部即消失；
 2. 文案带绑定 chord（`· End`，默认表 `tui.altScreen.bottom = ["end"]`）；
@@ -1568,7 +1847,7 @@ wired 判定路径，那比原来的缺陷更难维护。
 
 结果：`8 passed; 0 failed`。
 
-### 18.4 真实 PTY 证据
+### 20.4 真实 PTY 证据
 
 场景 `scripts/pty_scenarios/lum1257-jump-to-latest.json`（120×34，`--model faux/faux-model`），
 8 帧同一进程的累积画面；截图与字符网格 dump：
@@ -1582,7 +1861,7 @@ wired 判定路径，那比原来的缺陷更难维护。
 | 7 | 原始 SGR 左键点击（col 60, row 32）→ 回到底部，指示器消失，画面是 `/hotkeys` 尾部 | 无 `Jump to latest` |
 | 8 | 再 `PgUp` → 指示器回来（证明不是一次性状态） | 251 |
 
-### 18.5 本轮门禁（实跑结果）
+### 20.5 本轮门禁（实跑结果）
 
 | 命令 | 结果 |
 | --- | --- |
@@ -1590,21 +1869,21 @@ wired 判定路径，那比原来的缺陷更难维护。
 | `cargo clippy -p pi-tui --all-targets` | ✅ 本 crate 零告警（输出只剩 vendored `rquickjs-core` 的既有告警） |
 | `cargo fmt --all -- --check` | ✅ exit 0 |
 | `cargo build --bin pi` | ✅ exit 0（3m 28s，二进制 215,750,424 B，PTY 用的就是它） |
-| PTY 实机 | ✅ 8 帧真终端录制（§18.4） |
+| PTY 实机 | ✅ 8 帧真终端录制（§20.4） |
 
 **未跑**：`cargo test -p pi-coding-agent`。原因是磁盘：本轮开始时 90%、结束时 97%（并发轮同时在构建），
 链接该 crate 的测试二进制有把并发轮的构建写爆的真实风险。接触面很小且已被覆盖：
 `pi-coding-agent` 对本改动的唯一接触点是 `interactive.rs:458` 的活帧渲染（PTY 真机路径已跑），
-其断言类测试走 `render_snapshot`，而该路径本轮明确不画指示器（§18.3 第 8 条）。
+其断言类测试走 `render_snapshot`，而该路径本轮明确不画指示器（§20.3 第 8 条）。
 
-### 18.6 完成度变化（真实值）
+### 20.6 完成度变化（真实值）
 
 - 键位**声明/消费**面数字**不变**：本项复用已消费的 `tui.altScreen.bottom` 槽位，未新增绑定，
   所以 `app.* 19/44 = 43%`、`tui.* 38/47 = 81%`、整体 **~75%** 的机械量法结果与 §17.6 相同。
 - 本轮把 §12.4 第二项（也是 §17.7 同类列表里唯一的纯渲染缺口）**移出缺口清单**，
   并补上了它此前缺失的回归测试与真机证据。
 
-### 18.7 仍然缺口（按用户可感知程度，更新后）
+### 20.7 仍然缺口（按用户可感知程度，更新后）
 
 1. `app.clear` 的 500ms 双击窗口（§12.4 第一项，LUM-1238 在飞）——空 composer 一次 `Ctrl+C`
    直接退出、草稿丢失的问题仍在。

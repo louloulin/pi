@@ -915,6 +915,64 @@ fn map_entry(entry: &SessionEntry) -> Result<MappedEntry> {
     Ok(mapped)
 }
 
+/// Delete every durable row of `session_id` from the database at `path`.
+///
+/// Returns the number of rows removed (0 when the database holds no such
+/// session). The database file itself is left in place: the upstream v4
+/// schema is a session *container* — every durable row is scoped by
+/// `session_id` (`schema.rs` module docs) — so one file can hold several
+/// sessions and the caller decides whether an emptied file should go.
+///
+/// The table list is discovered from `sqlite_master` and only tables that
+/// carry a `session_id` column are touched, so both on-disk layouts are
+/// handled without branching on [`SchemaLayout`]: the `sessions` row is
+/// keyed by `id` and is deleted separately.
+///
+/// Used by the `/resume` picker's `app.session.delete`
+/// (`Ctrl+D`) — upstream's `deleteSession` removes the session file, this
+/// port removes the session.
+pub fn delete_session(path: impl AsRef<Path>, session_id: &str) -> Result<usize> {
+    let path = path.as_ref();
+    // Opened read-write without the schema probe: the deletion below is
+    // layout-agnostic, so a Rust legacy file can be pruned too.
+    let conn = Connection::open(path)?;
+    let mut tables: Vec<String> = Vec::new();
+    {
+        let mut statement = conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for name in rows {
+            tables.push(name?);
+        }
+    }
+    let mut removed = 0usize;
+    for table in tables {
+        if !table_has_session_id(&conn, &table)? {
+            continue;
+        }
+        removed += conn.execute(
+            &format!("DELETE FROM {table} WHERE session_id = ?1"),
+            params![session_id],
+        )?;
+    }
+    removed += conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+    Ok(removed)
+}
+
+/// Whether `table` has a `session_id` column, per `PRAGMA table_info`.
+fn table_has_session_id(conn: &Connection, table: &str) -> Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == "session_id" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

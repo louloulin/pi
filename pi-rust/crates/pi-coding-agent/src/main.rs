@@ -145,6 +145,9 @@ fn main() -> ExitCode {
             let has_ui = ui_bridge.is_some();
             let loaded_extensions =
                 load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge, ui_region_host);
+            // The UI-facing projection of the load pass: the startup header's
+            // extension row and `/extensions` read this, never stderr.
+            let extension_report = loaded_extensions.report(cli.no_extensions);
             // Fold `pi.registerProvider` registrations into the router +
             // catalog before any turn streams. Extension providers are
             // additive: a bad key or unknown family warns and is skipped.
@@ -207,10 +210,14 @@ fn main() -> ExitCode {
                 stream_fn: stream_fn.clone(),
                 tool_executor,
                 extensions: Some(extension_runtime),
+                extension_report,
                 extension_ui: extension_ui.take(),
                 // `app.clipboard.pasteImage` reads the real system clipboard
                 // (`wl-paste` / `xclip` / `pngpaste` / PowerShell).
                 clipboard: None,
+                // Picker view state (`/resume`, `/tree`) starts at its
+                // defaults; the driver keeps it across selector opens.
+                pickers: Default::default(),
                 // `--no-header`: the startup key-hint screen. Upstream's
                 // equivalent is the `quietStartup` setting.
                 quiet_startup: cli.no_header,

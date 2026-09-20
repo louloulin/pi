@@ -74,6 +74,10 @@ pub enum SlashCommand {
     /// `/hotkeys` — list the effective keyboard shortcuts. Mirrors upstream
     /// `handleHotkeysCommand` (`interactive-mode.ts:6315`).
     Hotkeys,
+    /// `/extensions` — list the loaded extensions and what they register
+    /// (tools / commands / providers), plus any load failure and any tool
+    /// a built-in shadowed.
+    Extensions,
     /// Anything else, captured as the command name (without the slash).
     Unknown(String),
 }
@@ -117,6 +121,7 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "exit" | "quit" => SlashCommand::Exit,
         "trust" => SlashCommand::Trust(parse_trust_decision(args)),
         "hotkeys" => SlashCommand::Hotkeys,
+        "extensions" => SlashCommand::Extensions,
         other => SlashCommand::Unknown(other.to_string()),
     };
     Ok(cmd)
@@ -171,13 +176,16 @@ pub fn help_text() -> String {
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
     out.push_str("  /hotkeys  list the keyboard shortcuts\n");
+    out.push_str("  /extensions list loaded extensions and what they register\n");
     out.push_str("  /exit     quit the interactive session\n");
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
     out.push_str("  Up / Down   navigate prompt history\n");
     out.push_str("  PgUp/PgDn   scroll the chat log one page\n");
     out.push_str("  Home / End  jump to the start / end of the chat log\n");
-    out.push_str("  Ctrl+C      abort the current turn (or exit on idle)\n");
+    out.push_str(
+        "  Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)\n",
+    );
     out.push_str("  Ctrl+D      exit on an empty prompt\n");
     out.push_str("  Ctrl+L      open the model selector\n");
     out.push_str("  Ctrl+U      clear the prompt buffer\n");
@@ -222,6 +230,11 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     ("settings", "Open settings menu", None),
+    (
+        "thinking",
+        "Set the reasoning level",
+        Some("off|minimal|low|medium|high|xhigh|max"),
+    ),
     ("trust", "Show or set project trust", Some("yes|no")),
     (
         "compact",
@@ -229,6 +242,11 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         Some("[instructions]"),
     ),
     ("hotkeys", "Show all keyboard shortcuts", None),
+    (
+        "extensions",
+        "List loaded extensions and what they register",
+        None,
+    ),
     ("exit", "Quit the interactive session", None),
 ];
 
@@ -252,8 +270,133 @@ pub fn autocomplete_commands() -> Vec<pi_tui::autocomplete::SlashCommand> {
         .collect()
 }
 
-/// The `/hotkeys` overview for the process-wide (installed) keybindings.
+/// The `/extensions` overview: every loaded source, what the extensions
+/// registered, what a built-in shadowed, and what failed to load.
 ///
+/// `home` / `cwd` are the prefixes shortened to `~` / `./` (see
+/// [`display_path`]); the report itself is home-agnostic so it can be
+/// built and asserted on any machine.
+///
+/// The load pass does not attribute a command or a provider to one source,
+/// so those sections list the union across sources and the header says so.
+pub fn extensions_text(
+    report: &crate::extensions::wiring::ExtensionReport,
+    home: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+) -> String {
+    let mut out = String::new();
+    if report.disabled {
+        out.push_str("extensions: none (--no-extensions)\n");
+        out.push_str(
+            "note: --no-extensions ignores the default search paths, --extensions-dir and -e.\n",
+        );
+        return out;
+    }
+    if report.is_empty() {
+        out.push_str("extensions: none\n");
+        out.push_str(
+            "note: nothing was found in ~/.pi/agent/extensions, .pi/extensions, --extensions-dir or -e <path>.\n",
+        );
+        return out;
+    }
+
+    // One line per section: the transcript flows text (no line is kept
+    // verbatim), so the labels — not indentation — are what keeps the
+    // listing readable there.
+    out.push_str(&format!("extensions: {} loaded", report.loaded.len()));
+    if !report.errors.is_empty() {
+        out.push_str(&format!(", {} failed", report.errors.len()));
+    }
+    if !report.shadowed.is_empty() {
+        out.push_str(&format!(", {} tool(s) shadowed", report.shadowed.len()));
+    }
+    out.push('\n');
+
+    if !report.loaded.is_empty() {
+        let sources: Vec<String> = report
+            .loaded
+            .iter()
+            .map(|path| display_path(path, home, cwd))
+            .collect();
+        out.push_str(&format!("sources: {}\n", sources.join(", ")));
+    }
+    out.push_str(&format!("tools: {}\n", join_names(&report.tools)));
+    let commands: Vec<String> = report
+        .commands
+        .iter()
+        .map(|command| match command.description.as_str() {
+            "" => format!("/{}", command.name),
+            description => format!("/{} ({description})", command.name),
+        })
+        .collect();
+    out.push_str(&format!(
+        "commands: {}\n",
+        if commands.is_empty() {
+            "(none)".to_string()
+        } else {
+            commands.join(", ")
+        }
+    ));
+    out.push_str(&format!("providers: {}\n", join_names(&report.providers)));
+
+    if !report.shadowed.is_empty() {
+        out.push_str(&format!(
+            "shadowed by a built-in tool (the built-in wins): {}\n",
+            report.shadowed.join(", ")
+        ));
+    }
+    for (path, reason) in &report.errors {
+        out.push_str(&format!(
+            "failed to load: {} — {reason}\n",
+            display_path(path, home, cwd)
+        ));
+    }
+    if report.loaded.len() > 1 {
+        out.push_str(
+            "note: tools / commands / providers are the union across the loaded sources.\n",
+        );
+    }
+    out
+}
+
+/// One comma-joined row for a name list, `(none)` when it is empty.
+fn join_names(names: &[String]) -> String {
+    if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Render an extension source path the way the UI shows it: `~` for the
+/// home prefix, `./` for the working directory, absolute otherwise.
+///
+/// Both prefixes are passed in rather than read from the environment, so the
+/// shortening is testable. A one-component base (`/`, `.`) is skipped: it
+/// would otherwise rewrite every absolute path.
+pub fn display_path(
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+) -> String {
+    let shorten = |base: &std::path::Path, prefix: &str| -> Option<String> {
+        if base.components().count() <= 1 {
+            return None;
+        }
+        path.strip_prefix(base)
+            .ok()
+            .map(|rest| format!("{prefix}{}", rest.display()))
+    };
+    if let Some(text) = home.and_then(|home| shorten(home, "~/")) {
+        return text;
+    }
+    if let Some(text) = shorten(cwd, "./") {
+        return text;
+    }
+    path.display().to_string()
+}
+
+/// The `/hotkeys` overview for the process-wide (installed) keybindings.
 /// The interactive TTY path installs the merged coding-agent table
 /// (`crate::keybindings::install_keybindings_from`), so this resolves the
 /// same chords the components do — including any `keybindings.json`
@@ -442,7 +585,56 @@ fn format_chord(chord: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
+
+    #[test]
+    fn autocomplete_commands_match_the_slash_command_table() {
+        // Every candidate the composer offers must actually parse, and every
+        // command `/help` documents must be offered — the two lists are
+        // written separately for layout reasons (see `autocomplete_commands`),
+        // so this is the invariant that keeps them from drifting.
+        let commands = autocomplete_commands();
+        assert!(!commands.is_empty());
+        for command in &commands {
+            assert!(
+                handle_command(&format!("/{}", command.name)).is_ok(),
+                "autocomplete offers /{} but the parser does not know it",
+                command.name
+            );
+        }
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        let help = help_text();
+        let documented: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('/'))
+            .map(|rest| rest.split_whitespace().next().unwrap_or_default())
+            .collect();
+        assert!(!documented.is_empty());
+        for name in documented {
+            assert!(
+                names.contains(&name),
+                "/help documents /{name} but the autocomplete table omits it"
+            );
+        }
+    }
+
+    #[test]
+    fn autocomplete_commands_carry_hints_and_descriptions() {
+        let commands = autocomplete_commands();
+        let compact = commands
+            .iter()
+            .find(|command| command.name == "compact")
+            .expect("compact is offered");
+        assert_eq!(compact.argument_hint.as_deref(), Some("[instructions]"));
+        assert!(compact.description.is_some());
+        let help = commands
+            .iter()
+            .find(|command| command.name == "help")
+            .expect("help is offered");
+        assert_eq!(help.argument_hint, None);
+    }
 
     #[test]
     fn parses_known_commands() {
@@ -758,6 +950,150 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_extensions_command() {
+        assert_eq!(
+            handle_command("/extensions").unwrap(),
+            SlashCommand::Extensions
+        );
+        // Arguments are tolerated like every other no-argument command.
+        assert_eq!(
+            handle_command("/extensions now").unwrap(),
+            SlashCommand::Extensions
+        );
+    }
+
+    #[test]
+    fn help_text_lists_the_extensions_command() {
+        assert!(help_text().contains("/extensions"), "{}", help_text());
+    }
+
+    /// A report with one extension of each interesting shape.
+    fn full_report() -> crate::extensions::wiring::ExtensionReport {
+        crate::extensions::wiring::ExtensionReport {
+            loaded: vec![
+                PathBuf::from("/home/dev/.pi/agent/extensions/foo.mjs"),
+                PathBuf::from("/work/fixture-ext.mjs"),
+            ],
+            tools: vec!["echo".into(), "greet".into()],
+            shadowed: vec!["read".into()],
+            commands: vec![pi_extensions::RegisteredCommand {
+                name: "ext-echo".into(),
+                description: "Echo something".into(),
+            }],
+            providers: vec!["acme".into()],
+            errors: vec![(PathBuf::from("/work/broken.mjs"), "boom".into())],
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn extensions_text_lists_sources_registrations_and_failures() {
+        let text = extensions_text(
+            &full_report(),
+            Some(Path::new("/home/dev")),
+            Path::new("/work"),
+        );
+
+        // Counts in the header, then one labelled line per section.
+        assert!(
+            text.contains("extensions: 2 loaded, 1 failed, 1 tool(s) shadowed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sources: ~/.pi/agent/extensions/foo.mjs, ./fixture-ext.mjs"),
+            "{text}"
+        );
+        assert!(text.contains("tools: echo, greet"), "{text}");
+        assert!(
+            text.contains("commands: /ext-echo (Echo something)"),
+            "{text}"
+        );
+        assert!(text.contains("providers: acme"), "{text}");
+        assert!(
+            text.contains("shadowed by a built-in tool (the built-in wins): read"),
+            "{text}"
+        );
+        assert!(
+            text.contains("failed to load: ./broken.mjs — boom"),
+            "{text}"
+        );
+        assert!(
+            text.contains("note: tools / commands / providers are the union"),
+            "{text}"
+        );
+        // A single source needs no union disclaimer.
+        let one = crate::extensions::wiring::ExtensionReport {
+            loaded: vec![PathBuf::from("/work/only.mjs")],
+            ..crate::extensions::wiring::ExtensionReport::default()
+        };
+        assert!(
+            !extensions_text(&one, None, Path::new("/work")).contains("note:"),
+            "{text}"
+        );
+        // Empty sections still say `(none)` instead of dropping the row.
+        let quiet = crate::extensions::wiring::ExtensionReport {
+            errors: vec![(PathBuf::from("/work/bad.mjs"), "boom".into())],
+            ..crate::extensions::wiring::ExtensionReport::default()
+        };
+        let quiet = extensions_text(&quiet, None, Path::new("/work"));
+        assert!(quiet.contains("tools: (none)"), "{quiet}");
+        assert!(quiet.contains("commands: (none)"), "{quiet}");
+        assert!(quiet.contains("providers: (none)"), "{quiet}");
+        assert!(quiet.contains("extensions: 0 loaded, 1 failed"), "{quiet}");
+    }
+
+    #[test]
+    fn extensions_text_without_extensions_says_none() {
+        let text = extensions_text(
+            &crate::extensions::wiring::ExtensionReport::default(),
+            None,
+            Path::new("/work"),
+        );
+        assert!(text.starts_with("extensions: none\n"), "{text}");
+        assert!(!text.contains("sources:"), "{text}");
+    }
+
+    #[test]
+    fn extensions_text_reports_the_no_extensions_flag() {
+        let report = crate::extensions::wiring::ExtensionReport {
+            disabled: true,
+            ..crate::extensions::wiring::ExtensionReport::default()
+        };
+        let text = extensions_text(&report, None, Path::new("/work"));
+        assert!(
+            text.starts_with("extensions: none (--no-extensions)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn display_path_shortens_home_then_cwd_and_keeps_the_rest_absolute() {
+        let home = Path::new("/home/dev");
+        let cwd = Path::new("/work");
+        assert_eq!(
+            display_path(Path::new("/home/dev/.pi/x.mjs"), Some(home), cwd),
+            "~/.pi/x.mjs"
+        );
+        assert_eq!(
+            display_path(Path::new("/work/ext.mjs"), Some(home), cwd),
+            "./ext.mjs"
+        );
+        assert_eq!(
+            display_path(Path::new("/opt/ext.mjs"), Some(home), cwd),
+            "/opt/ext.mjs"
+        );
+        // A one-component base must not rewrite every absolute path.
+        assert_eq!(
+            display_path(
+                Path::new("/opt/ext.mjs"),
+                Some(Path::new("/")),
+                Path::new(".")
+            ),
+            "/opt/ext.mjs"
+        );
+    }
+
+    #[test]
     fn ignores_arguments() {
         // The parser tolerates trailing arguments without erroring.
         assert_eq!(
@@ -781,8 +1117,25 @@ mod tests {
     #[test]
     fn autocomplete_commands_match_the_parser_exactly() {
         const IMPLEMENTED: &[&str] = &[
-            "help", "clear", "new", "copy", "name", "model", "session", "export", "resume", "tree",
-            "fork", "clone", "settings", "trust", "compact", "hotkeys", "exit",
+            "help",
+            "clear",
+            "new",
+            "copy",
+            "name",
+            "model",
+            "session",
+            "export",
+            "resume",
+            "tree",
+            "fork",
+            "clone",
+            "settings",
+            "thinking",
+            "trust",
+            "compact",
+            "hotkeys",
+            "extensions",
+            "exit",
         ];
         let names: Vec<String> = autocomplete_commands()
             .into_iter()
@@ -814,7 +1167,10 @@ mod tests {
             .filter(|command| command.argument_hint.is_some())
             .map(|command| command.name)
             .collect();
-        assert_eq!(with_hints, ["name", "model", "export", "trust", "compact"]);
+        assert_eq!(
+            with_hints,
+            ["name", "model", "export", "thinking", "trust", "compact"]
+        );
     }
 
     /// The installed list has to produce candidates through the same trait

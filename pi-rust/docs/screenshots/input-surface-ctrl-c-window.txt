@@ -1,0 +1,98 @@
+app.clear = 500 ms double press (upstream handleCtrlC)
+
+=== b1  draft `hello draft` in the composer ===
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+> hello draft▍
+Faux test model  session-18d7152790c4c04c                              in 0 out 0 ?/8.2k  ? for help
+
+=== b2  first Ctrl+C → draft cleared, still in the TUI ===
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7152790c4c04c                              in 0 out 0 ?/8.2k  ? for help
+
+=== b3  second Ctrl+C inside 500 ms → exited, terminal restored ===
+
+pi exited with status 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -97,8 +97,11 @@
 //! Consumed here:
 //!
 //! * `app.interrupt` (`escape`) — cancel the in-flight turn while busy.
-//! * `app.clear` (`ctrl+c`) — cancel while busy, otherwise exit, this
-//!   port's existing reading of upstream's `app.clear` + `app.exit`.
+//! * `app.clear` (`ctrl+c`) — cancel while busy; when idle, the first
+//!   press clears the composer and a second press inside
+//!   [`CLEAR_EXIT_WINDOW`] exits. Matches upstream `handleCtrlC`
+//!   (`interactive-mode.ts:3931-3939`), whose 500 ms window is what the
+//!   startup header's `Ctrl+C to clear` / `Ctrl+C twice to exit` promises.
 //! * `tui.altScreen.pageUp` / `pageDown` (`pageUp` / `pageDown`) and
 //!   `tui.altScreen.top` / `bottom` (`home` / `end`) — viewport scrolling.
 //! * `tui.altScreen.search` / `searchClose` / `searchNext` /
@@ -280,7 +283,8 @@ use crate::input::{
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
 use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
 use crate::locale::{
-    format_chord, Locale, HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
+    format_chord, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH, HEADER_ONBOARDING_EN,
+    HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
 };
 use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
@@ -306,6 +310,17 @@ const WHEEL_SCROLL_LINES: usize = 1;
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
 const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+
+/// How long a second `app.clear` (`Ctrl+C`) press after the first still
+/// counts as a double press.
+///
+/// Upstream keeps the window in `lastSigintTime` and exits when
+/// `now - lastSigintTime < 500` (`interactive-mode.ts:3931-3939`); the
+/// startup header advertises the same contract as `Ctrl+C twice to exit`.
+/// The window is compared against the timestamp [`App::step_key_at`]
+/// receives, so tests drive it deterministically instead of racing a real
+/// clock.
+pub const CLEAR_EXIT_WINDOW: Duration = Duration::from_millis(500);
 
 /// `round(value / divisor)` for unsigned integers, matching the `Math.round`
 /// calls in upstream's scrollbar maths
@@ -472,6 +487,36 @@ pub struct AppConfig {
     pub startup_header_expanded: bool,
     /// Copy table the built-in startup header reads (see [`crate::locale`]).
     pub locale: Locale,
+    /// The extension summary the built-in startup header shows under the
+    /// title (see [`ExtensionHeader`]).
+    ///
+    /// The driver owns extension discovery (`pi-tui` cannot depend on
+    /// `pi-coding-agent`), so it hands the App this projection. The default
+    /// is [`ExtensionHeader::Hidden`], which keeps the headless and
+    /// no-extension header byte-identical to the pre-Stage-71 surface.
+    pub extension_header: ExtensionHeader,
+}
+
+/// What the built-in startup header says about loaded extensions.
+///
+/// A `ctx.ui.setHeader` from an extension still replaces the whole built-in
+/// header (including this row): upstream renders `customHeader ??
+/// builtInHeader` (`interactive-mode.ts:958`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ExtensionHeader {
+    /// No extension row. Nothing was loaded (or the caller says nothing).
+    #[default]
+    Hidden,
+    /// `N extension(s): <display names>` right under the title.
+    Loaded {
+        /// How many sources loaded.
+        count: usize,
+        /// Display names, already shortened by the driver (`~` / `./`).
+        names: Vec<String>,
+    },
+    /// The user turned extension loading off (`--no-extensions`): the header
+    /// says `extensions: none (--no-extensions)`.
+    Disabled,
 }
 
 impl Default for AppConfig {
@@ -487,6 +532,7 @@ impl Default for AppConfig {
             startup_header: false,
             startup_header_expanded: true,
             locale: Locale::default(),
+            extension_header: ExtensionHeader::Hidden,
         }
     }
 }
@@ -982,6 +1028,14 @@ pub struct App {
     /// Set when the App should exit at the next opportunity. The TUI
     /// exit path checks this between key events.
     exit_requested: bool,
+    /// When the last idle `app.clear` (`Ctrl+C`) press landed. A second
+    /// press within [`CLEAR_EXIT_WINDOW`] exits; see [`App::step_key_at`].
+    /// `None` before the first press of the session.
+    last_clear_at: Option<Instant>,
+    /// Geometry of the jump-to-latest indicator painted on the viewport's
+    /// bottom edge, in absolute terminal cells. `width == 0` means the
+    /// last frame did not paint one (the viewport was following the tail),
+    /// which is also what the mouse hit test reads.
     /// Width of the message viewport as of the last render. Scroll keys use
     /// it to wrap the log exactly like the renderer does, so a "page" is a
     /// real screenful.
@@ -1156,6 +1210,7 @@ impl App {
             last_turn_usage: None,
             turn_busy: Arc::new(AtomicBool::new(false)),
             exit_requested: false,
+            last_clear_at: None,
             viewport_width: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
@@ -1411,7 +1466,7 @@ impl App {
         }
         let kb = get_keybindings();
         let locale = self.config.locale;
-        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 3);
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 4);
         // Logo, upstream `interactive-mode.ts:913`.
         lines.push(vec![
             StyledSpan::new(
@@ -1423,6 +1478,14 @@ impl App {
                 SpanStyle::fg(ThemeColor::Dim),
             ),
         ]);
+        // Extension summary, right under the title so it is the first thing
+        // a user who ran `pi -e ./ext.mjs` reads. Absent by default.
+        if let Some(summary) = self.extension_header_line() {
+            lines.push(vec![StyledSpan::new(
+                summary,
+                SpanStyle::fg(ThemeColor::Muted),
+            )]);
+        }
         for hint in STARTUP_HINTS {
             // Two filters: the id must resolve to a chord in the live table
             // *and* name an action this port consumes. The second is what
@@ -1451,6 +1514,30 @@ impl App {
             SpanStyle::fg(ThemeColor::Dim),
         )]);
         lines
+    }
+
+    /// The header's extension row, or `None` when there is nothing to
+    /// advertise.
+    ///
+    /// The copy lives in [`crate::locale`]; the width budget is one row
+    /// (`plan_chrome` counts lines, and the renderer clips — it never
+    /// wraps — a line wider than the viewport).
+    fn extension_header_line(&self) -> Option<String> {
+        let locale = self.config.locale;
+        match &self.config.extension_header {
+            ExtensionHeader::Hidden => None,
+            ExtensionHeader::Disabled => Some(
+                locale
+                    .tr(EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH)
+                    .to_string(),
+            ),
+            // A `Loaded` with no names carries no information; hide it
+            // rather than print a dangling count.
+            ExtensionHeader::Loaded { names, .. } if names.is_empty() => None,
+            ExtensionHeader::Loaded { count, names } => Some(
+                crate::locale::extensions_summary_line(locale, *count, names),
+            ),
+        }
     }
 
     /// Whether markdown links render as OSC 8 hyperlinks.
@@ -1768,6 +1855,10 @@ impl App {
                 });
             }
             AgentEvent::UserMessage(_) => {}
+            // Run brackets. The TUI renders turn/message state, not the run
+            // boundary itself, so these need no UI work — but the extension
+            // fan-out hook (if installed) still sees them.
+            AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {}
             AgentEvent::Error(message) => {
                 self.pending_error = Some(message);
             }
@@ -1941,6 +2032,14 @@ impl App {
     /// event without taking it out of the App.
     pub fn replace_selector(&mut self, selector: Selector) {
         self.selector = Some(selector);
+    }
+
+    /// Mutably borrow the open selector.
+    ///
+    /// The driver uses it to move the cursor after it rebuilt the picker
+    /// items itself (e.g. the `/tree` fold chords' branch jump).
+    pub fn selector_mut(&mut self) -> Option<&mut Selector> {
+        self.selector.as_mut()
     }
 
     /// Whether the selector modal is currently visible.
@@ -2375,8 +2474,19 @@ impl App {
     }
 
     /// Process a single [`Key`]. Public so tests can step the App
-    /// with explicit keys.
+    /// with explicit keys. Equivalent to [`App::step_key_at`] with the
+    /// current wall clock; the production render loop goes through here.
     pub fn step_key(&mut self, key: Key) -> StepOutcome {
+        self.step_key_at(key, Instant::now())
+    }
+
+    /// Process a single [`Key`] at the caller-supplied instant.
+    ///
+    /// The instant is what the `app.clear` (`Ctrl+C`) double-press window is
+    /// measured against, so tests can drive the window without sleeping;
+    /// nothing else reads it. `Instant::now()` must not appear in the
+    /// decision itself (LUM-1238 acceptance 2).
+    pub fn step_key_at(&mut self, key: Key, now: Instant) -> StepOutcome {
         // A transient status message lives for exactly one key press
         // (upstream's `showStatus` clears on a timer; this port has no timer
         // in the App, and a key press is the next thing the reader does).
@@ -2428,14 +2538,28 @@ impl App {
             self.cancel();
             return StepOutcome::Redraw;
         }
-        // `app.clear` (`Ctrl+C`).
+        // `app.clear` (`Ctrl+C`): cancel while a turn is in flight; when
+        // idle, clear the composer on the first press and exit on a second
+        // press inside [`CLEAR_EXIT_WINDOW`] — upstream `handleCtrlC`
+        // (`interactive-mode.ts:3931-3939`). Only the composer is touched by
+        // the clearing press (`Prompt::clear` drops the draft text, chips,
+        // history browsing and undo stack), so nothing else about the
+        // session changes.
         if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
             if self.is_busy() {
                 self.cancel();
                 return StepOutcome::Redraw;
             }
-            self.exit_requested = true;
-            return StepOutcome::Exit;
+            let double_press = self
+                .last_clear_at
+                .is_some_and(|last| now.saturating_duration_since(last) < CLEAR_EXIT_WINDOW);
+            if double_press {
+                self.exit_requested = true;
+                return StepOutcome::Exit;
+            }
+            self.last_clear_at = Some(now);
+            self.prompt.clear();
+            return StepOutcome::Redraw;
         }
         // `app.model.select` (`Ctrl+L`) is **not** claimed here. Upstream's
         // `app.model.select` means "open the model selector"
@@ -3075,6 +3199,13 @@ impl App {
     /// slash commands to print help / errors).
     pub fn info(&mut self, text: impl Into<String>) {
         self.messages.push_info(text);
+    }
+
+    /// Append a system info block — command-reference output such as
+    /// `/help` / `/hotkeys` — with the `· ` prefix instead of the composer's
+    /// `> ` (LUM-1238 §15.4).
+    pub fn info_block(&mut self, text: impl Into<String>) {
+        self.messages.push_info_block(text);
     }
 
     /// Size of the message viewport as of the last render — `(0, 0)`
@@ -4229,12 +4360,81 @@ impl App {
 
     /// Jump the chat log back to the tail — `tui.altScreen.bottom`. New
     /// output pins the viewport again.
+    ///
+    /// Returns `false` only when the viewport is already following the tail
+    /// and pinned to it; a detached viewport whose offset happens to be `0`
+    /// (possible through [`MessageView::set_following`]) is still re-attached
+    /// so the jump-to-latest indicator always clears.
     pub fn scroll_viewport_to_bottom(&mut self) -> bool {
-        if self.messages.scroll_offset() == 0 {
+        if self.messages.is_following() && self.messages.scroll_offset() == 0 {
             return false;
         }
         self.messages.scroll_to_bottom();
         true
+    }
+
+    /// The jump-to-latest label for the current viewport state, or `None`
+    /// while the viewport follows the tail.
+    ///
+    /// `" ↓ Jump to latest message · End "` mirrors upstream
+    /// `scrollToEndIndicator`
+    /// (`packages/coding-agent/src/modes/interactive/tui-renderer.ts:29-33`),
+    /// with the effective `tui.altScreen.bottom` chord in place of
+    /// `keyDisplayText`. The shortcut is omitted when the id is unbound.
+    pub fn jump_to_latest_label(&self) -> Option<String> {
+        if self.messages.is_following() {
+            return None;
+        }
+        Some(self.scroll_to_end_label().text)
+    }
+
+    /// The rectangle of the jump-to-latest indicator as of the last painted
+    /// frame — `(x, y, width)`, with `width == 0` when no indicator was
+    /// painted. Used by the mouse hit test and by tests.
+    pub fn jump_to_latest_indicator(&self) -> (u16, u16, u16) {
+        self.scroll_to_end_rect()
+            .map(|rect| (rect.x, rect.y, rect.width))
+            .unwrap_or((0, 0, 0))
+    }
+
+    /// Paint the composer's autocomplete dropdown above the prompt.
+    ///
+    /// [`Editor::autocomplete_render_lines`] supplies the visible window
+    /// (already centred on the selection and carrying the `❯` marker); the
+    /// highlighted row additionally gets the list-selection background.
+    /// Nothing is painted while the dropdown is closed, so a caller that
+    /// never installs a provider keeps the pre-autocomplete frame byte for
+    /// byte.
+    fn apply_autocomplete(&self, area: Rect, buf: &mut Buffer) {
+        let editor = self.prompt.editor();
+        if !editor.is_showing_autocomplete() || area.width == 0 || area.height == 0 {
+            return;
+        }
+        let rows = editor.autocomplete_render_lines(area.width as usize);
+        if rows.is_empty() {
+            return;
+        }
+        let height = rows.len().min(area.height as usize);
+        let selected = editor.autocomplete_selected_row();
+        let top = area.y + area.height - height as u16;
+        let body = SpanStyle::fg(ThemeColor::Text).to_style(&self.theme);
+        let highlight =
+            SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg).to_style(&self.theme);
+        for (offset, row) in rows.iter().take(height).enumerate() {
+            let is_selected = selected == Some(offset);
+            let y = top + offset as u16;
+            let mut text: String = row.chars().take(area.width as usize).collect();
+            if is_selected {
+                let width = text.chars().count();
+                text.extend(std::iter::repeat(' ').take(area.width as usize - width));
+            }
+            for (col, ch) in text.chars().enumerate() {
+                if let Some(cell) = buf.cell_mut((area.x + col as u16, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(if is_selected { highlight } else { body });
+                }
+            }
+        }
     }
 
     /// Render the App into a `Buffer` at the given area.
@@ -4377,6 +4577,13 @@ impl App {
         } else {
             self.scroll_to_end.2.store(0, Ordering::Relaxed);
         }
+
+        // The composer's autocomplete dropdown hangs off the bottom edge of
+        // the message viewport, directly above the prompt, and is painted
+        // over the indicator when both are on screen. Unlike the pointer
+        // overlay it is part of the composer, so it is painted on both the
+        // live and snapshot paths.
+        self.apply_autocomplete(message_area, buf);
 
         // The editor region: a custom component (a non-overlay `custom`
         // session or `set_editor_component`) replaces the prompt line

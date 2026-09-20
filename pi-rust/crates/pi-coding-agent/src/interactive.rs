@@ -33,31 +33,40 @@ use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy, ThinkingLevel}
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Content, Message, Model, ProviderId, SessionEntry, ToolCall, ToolResult};
+use pi_protocol::{
+    CompactReason, Content, ExtensionEvent, Message, Model, ProviderId, SessionEntry,
+    SessionShutdownReason, ToolCall, ToolResult,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
 
 use pi_session::{SessionReader, SessionWriter};
 
+use crate::commands::resume::{
+    delete_session, rename_session, SessionFilter, SessionRef, SessionSort,
+};
 use crate::commands::session::new_session_id;
 use crate::commands::tree::{
-    clone_session, fork_selector, fork_session, session_tip, tree_selector, CreatedSession,
+    clone_session, fork_selector, fork_session, session_tip, tree_selector_with, CreatedSession,
+    TreeFilter, TreeView,
 };
 use crate::commands::{handle_command, SlashCommand};
 use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
 };
 use crate::config::{self, ConfigSources};
+use crate::extensions::events::ExtensionEventMapper;
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
-use crate::extensions::wiring::ExtensionRuntime;
+use crate::extensions::wiring::{ExtensionReport, ExtensionRuntime};
 use crate::prompt_templates::PromptTemplate;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
 use crate::tools::AgentTool;
 
-use pi_tui::app::{App, AppConfig, FollowUpOutcome, Submission};
+use pi_tui::app::{App, AppConfig, ExtensionHeader, FollowUpOutcome, Submission};
+use pi_tui::dialog::{Dialog, DialogAction};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
 use pi_tui::selector::{Selector, SelectorItem};
@@ -132,6 +141,10 @@ pub struct InteractiveOptions {
     /// Loaded JS extensions, when any. `None` disables extension
     /// command dispatch and side-effect persistence.
     pub extensions: Option<Arc<ExtensionRuntime>>,
+    /// UI-facing projection of the load pass (startup header summary +
+    /// `/extensions`). Always populated by `main.rs`, including the
+    /// `--no-extensions` case; empty means "nothing to show".
+    pub extension_report: ExtensionReport,
     /// Interactive UI bridge for `ctx.ui.confirm / input / select`.
     /// `None` keeps the headless behaviour (deny / cancel), which is
     /// what tests and non-TTY runs get.
@@ -145,6 +158,16 @@ pub struct InteractiveOptions {
     /// tests inject a fake so the image / text / empty paths can be driven
     /// without a system clipboard.
     pub clipboard: Option<Arc<dyn crate::clipboard::ClipboardReader>>,
+    /// View state of the `/resume` and `/tree` pickers.
+    ///
+    /// The Rust port has one shared [`Selector`] for every picker and
+    /// rebuilds it on each open, so the view state upstream keeps inside
+    /// `SessionSelector` / `TreeSelector` (`sortMode`, `showPath`,
+    /// `nameFilter`, `filterMode`, `foldedNodes`, `showLabelTimestamps`)
+    /// lives here instead. Driver-internal: it is not part of the launch
+    /// surface, but it must outlive a selector open.
+    #[doc(hidden)]
+    pub pickers: PickerState,
     /// Suppress the built-in startup header (the key-hint screen above the
     /// transcript).
     ///
@@ -173,8 +196,10 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("stream_fn", &"<dyn StreamFn>")
             .field("tool_executor", &"<dyn ToolExecutor>")
             .field("extensions", &self.extensions.is_some())
+            .field("extension_report", &self.extension_report)
             .field("extension_ui", &self.extension_ui.is_some())
             .field("retry", &self.retry)
+            .field("pickers", &self.pickers)
             .field("quiet_startup", &self.quiet_startup)
             .finish()
     }
@@ -198,9 +223,11 @@ impl Default for InteractiveOptions {
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
             tool_executor: default_executor(),
             extensions: None,
+            extension_report: ExtensionReport::default(),
             extension_ui: None,
             retry: RetryPolicy::default(),
             clipboard: None,
+            pickers: PickerState::default(),
             quiet_startup: false,
         }
     }
@@ -234,6 +261,32 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // and a folded header costs no rows.
         startup_header_expanded: true,
         locale: locale_from_env(std::env::var("PI_LANG").ok().as_deref()),
+        extension_header: extension_header_for(options),
+    }
+}
+
+/// Project the extension report onto the startup header's extension row.
+///
+/// `--no-extensions` is its own state (the header says so); an empty report
+/// hides the row, which keeps a no-extension run byte-identical to the
+/// pre-Stage-71 header.
+fn extension_header_for(options: &InteractiveOptions) -> ExtensionHeader {
+    let report = &options.extension_report;
+    if report.disabled {
+        return ExtensionHeader::Disabled;
+    }
+    if report.loaded.is_empty() {
+        return ExtensionHeader::Hidden;
+    }
+    let home = crate::paths::home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    ExtensionHeader::Loaded {
+        count: report.loaded.len(),
+        names: report
+            .loaded
+            .iter()
+            .map(|path| crate::commands::display_path(path, home.as_deref(), &cwd))
+            .collect(),
     }
 }
 
@@ -306,20 +359,60 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     outcome
 }
 
-/// Install the composer's command / file completion provider.
+/// Install the composer's command / file completion provider, plus the
+/// commands the loaded extensions registered (`pi.registerCommand`).
 ///
 /// Split out of [`run_loop`] so the wiring itself is testable without a
 /// terminal: the LUM-1236 defect was exactly that this call did not exist,
-/// and a provider-only test could not have caught it.
+/// and a provider-only test could not have caught it. Extension commands
+/// complete through the same dropdown because they are real commands —
+/// `/extensions` lists them and `handle_command` dispatch does not care who
+/// registered them.
+/// Installation with no extension-registered commands — what the binary
+/// used before Stage 70 and what the LUM-1236 regression test still drives.
+/// The binary itself now goes through the three-argument form (it always has
+/// extension commands to offer, possibly none), so this is test-only.
+#[cfg(test)]
 fn install_composer_autocomplete(app: &mut App, base_path: PathBuf) {
+    install_composer_autocomplete_with(app, base_path, Vec::new());
+}
+
+fn install_composer_autocomplete_with(
+    app: &mut App,
+    base_path: PathBuf,
+    extra: Vec<pi_tui::autocomplete::SlashCommand>,
+) {
+    let mut commands = crate::commands::slash::autocomplete_commands();
+    commands.extend(extra);
     app.prompt_mut()
         .editor_mut()
         .set_autocomplete_provider(Arc::new(
-            pi_tui::autocomplete::CombinedAutocompleteProvider::new(
-                crate::commands::slash::autocomplete_commands(),
-                base_path,
-            ),
+            pi_tui::autocomplete::CombinedAutocompleteProvider::new(commands, base_path),
         ));
+}
+
+/// The extension-registered commands as dropdown rows.
+fn extension_autocomplete_commands(
+    options: &InteractiveOptions,
+) -> Vec<pi_tui::autocomplete::SlashCommand> {
+    options
+        .extensions
+        .as_ref()
+        .map(|runtime| {
+            runtime
+                .commands()
+                .iter()
+                .map(|command| {
+                    let entry = pi_tui::autocomplete::SlashCommand::new(command.name.clone());
+                    if command.description.is_empty() {
+                        entry
+                    } else {
+                        entry.with_description(command.description.clone())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn run_loop(
@@ -340,6 +433,7 @@ async fn run_loop(
     // adapter and the App owns the folding (collapsed preview, Ctrl+O,
     // click-to-toggle). Print mode keeps its own session in `text_fallback`.
     let tool_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
     app.set_tool_block_renderer(Box::new(crate::tools::InteractiveToolRenderer::new(
         tool_cwd.clone(),
     )));
@@ -348,8 +442,13 @@ async fn run_loop(
     // since LUM-1122, but nothing ever installed a provider in the binary:
     // typing `/` showed no candidates (LUM-1236). Upstream installs the same
     // `CombinedAutocompleteProvider` on the editor at startup; `tool_cwd` is
-    // the base the `@` file completion walks.
-    install_composer_autocomplete(&mut app, tool_cwd);
+    // the base the `@` file completion walks, and the extension-registered
+    // commands ride in the same table (Stage 70 / LUM-1238).
+    install_composer_autocomplete_with(
+        &mut app,
+        tool_cwd,
+        extension_autocomplete_commands(&options),
+    );
 
     // Stage 67 — seed the session thinking level from the persisted
     // `defaultThinkingLevel`, clamp it to what the active model can honour,
@@ -366,6 +465,16 @@ async fn run_loop(
         app.set_thinking_supported(supports);
         app.set_thinking_level(level);
     }
+
+    // Extension lifecycle fan-out (LUM-1246). Extensions subscribe to the
+    // *upstream* event names (`turn_start`, `tool_execution_start`, …) that
+    // the JS shim exposes, but until now nothing fed the agent's own event
+    // stream into the host — `pi.on(...)` only ever fired for
+    // `session_start` / `resources_discover`. A second subscriber to the
+    // agent's fan-out (the first belongs to the App) drives every mapped
+    // event into the host on its own task, so a slow plugin cannot stall
+    // rendering. Skipped entirely when no loaded extension subscribed.
+    let extension_pump = start_extension_event_pump(&agent, options.extensions.as_ref()).await;
 
     // Local `!` / `!!` commands: one at a time, run off the render loop so
     // `Esc` can cancel them.
@@ -507,6 +616,21 @@ async fn run_loop(
     // Nothing is pumping dialogs any more: deny instead of queueing.
     if let Some(ui) = options.extension_ui.as_ref() {
         ui.disarm();
+    }
+    // Stop the fan-out, then let extensions observe the teardown. Upstream
+    // emits `session_shutdown` on quit / reload / session replacement; a
+    // plugin that flushes state there must not be able to hold the exit open,
+    // so the delivery is bounded independently of the host's (much longer)
+    // interactive timeout.
+    if let Some(pump) = extension_pump {
+        pump.abort();
+    }
+    if let Some(runtime) = options.extensions.as_ref() {
+        let _ = tokio::time::timeout(
+            EXTENSION_SHUTDOWN_TIMEOUT,
+            runtime.deliver_shutdown(SessionShutdownReason::Quit),
+        )
+        .await;
     }
     Ok(InteractiveExit::UserExit)
 }
@@ -723,12 +847,30 @@ async fn handle_input_event(
     bash: &mut BashRunner,
     event: InputEvent,
 ) -> anyhow::Result<Option<InternalAction>> {
+    // A rename modal the driver opened itself owns the keyboard until it
+    // is answered: the App would drop the resolved dialog before the new
+    // name could be read.
+    if app.dialog_open() && options.pickers.session.pending_rename.is_some() {
+        let InputEvent::Key(key) = event else {
+            return Ok(None);
+        };
+        handle_rename_dialog_key(app, options, key);
+        return Ok(None);
+    }
+
     // When the selector is open (and no extension dialog is on top of
     // it), handle selection first.
     if app.selector_open() && !app.dialog_open() {
         let InputEvent::Key(key) = event else {
             return Ok(None);
         };
+        // The picker-scoped `app.session.*` / `app.tree.*` chords go to the
+        // driver: the shared `Selector` does not know them
+        // (`session-selector.ts:537-601`, `tree-selector.ts:996-1091`).
+        let kind = app.selector().map(picker_kind).unwrap_or(PickerKind::Other);
+        if kind != PickerKind::Other && handle_picker_key(app, options, kind, key) {
+            return Ok(None);
+        }
         // `app.thinking.save` (Ctrl+S) inside the thinking selector persists
         // the highlighted level as the default — upstream consumes the chord
         // in `ThinkingSelectorComponent.handleInput`, a behaviour no other
@@ -749,7 +891,14 @@ async fn handle_input_event(
                 )
             {
                 app.close_selector();
-                apply_thinking_selector_value(app, agent, &value, true).await;
+                apply_thinking_selector_value(
+                    app,
+                    agent,
+                    &value,
+                    true,
+                    options.extensions.as_ref(),
+                )
+                .await;
                 return Ok(None);
             }
         }
@@ -827,7 +976,7 @@ async fn handle_input_event(
             "app.thinking.cycle",
             &["shift+tab"],
         ) {
-            handle_thinking_cycle(app, agent).await;
+            handle_thinking_cycle(app, agent, options.extensions.as_ref()).await;
             return Ok(None);
         }
         if pi_tui::keybindings::matches_with_fallback(
@@ -976,6 +1125,19 @@ async fn handle_submitted(
         }
         // Upstream memoises the raw line including its prefix.
         app.prompt_mut().push_history(text);
+        // Upstream `user_bash`: plugins see local commands too (a shell
+        // history / audit extension is the usual consumer).
+        deliver_extension_event(
+            options.extensions.as_ref(),
+            ExtensionEvent::UserBash {
+                command: command.command.clone(),
+                exclude_from_context: command.excluded,
+                cwd: std::env::current_dir()
+                    .map(|cwd| cwd.display().to_string())
+                    .unwrap_or_default(),
+            },
+        )
+        .await;
         bash.start(command.command, command.excluded);
         return Ok(());
     }
@@ -1092,7 +1254,11 @@ fn sync_thinking_for_model(app: &mut App, agent: &mut Agent) {
 /// cannot reason has no next level, so the request is reported instead of
 /// silently ignored. Everything else funnels through
 /// [`apply_thinking_level`], the same path `/thinking` and the selector use.
-async fn handle_thinking_cycle(app: &mut App, agent: &Arc<AsyncMutex<Agent>>) {
+async fn handle_thinking_cycle(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    extensions: Option<&Arc<ExtensionRuntime>>,
+) {
     let supports = {
         let agent_guard = agent.lock().await;
         crate::thinking::model_supports_thinking(agent_guard.model())
@@ -1103,7 +1269,7 @@ async fn handle_thinking_cycle(app: &mut App, agent: &Arc<AsyncMutex<Agent>>) {
     // the model would ignore.
     let next = crate::thinking::cycle_thinking_level(supports, app.thinking_level())
         .unwrap_or(ThinkingLevel::Max);
-    apply_thinking_level(app, agent, next, false).await;
+    apply_thinking_level(app, agent, next, false, extensions).await;
 }
 
 /// The single switching code path behind every thinking-level entry point.
@@ -1119,7 +1285,9 @@ async fn apply_thinking_level(
     agent: &Arc<AsyncMutex<Agent>>,
     level: ThinkingLevel,
     persist: bool,
+    extensions: Option<&Arc<ExtensionRuntime>>,
 ) {
+    let previous = app.thinking_level();
     let mut agent_guard = agent.lock().await;
     let supports = crate::thinking::model_supports_thinking(agent_guard.model());
     let clamped = crate::thinking::clamp_thinking_level(supports, level);
@@ -1127,6 +1295,20 @@ async fn apply_thinking_level(
     drop(agent_guard);
     app.set_thinking_supported(supports);
     app.set_thinking_level(clamped);
+
+    // Upstream `thinking_level_select`: plugins track the reasoning budget
+    // (e.g. to annotate transcripts). Report the level that is actually in
+    // force, not the one that was requested.
+    if clamped != previous {
+        deliver_extension_event(
+            extensions,
+            ExtensionEvent::ThinkingLevelSelect {
+                level: clamped.as_str().to_string(),
+                previous_level: previous.as_str().to_string(),
+            },
+        )
+        .await;
+    }
 
     if persist && !persist_default_thinking_level(app, &settings_sources(), level) {
         return;
@@ -1158,6 +1340,7 @@ async fn apply_thinking_selector_value(
     agent: &Arc<AsyncMutex<Agent>>,
     value: &str,
     persist: bool,
+    extensions: Option<&Arc<ExtensionRuntime>>,
 ) {
     let Some(level) = value
         .strip_prefix("thinking:")
@@ -1165,7 +1348,7 @@ async fn apply_thinking_selector_value(
     else {
         return;
     };
-    apply_thinking_level(app, agent, level, persist).await;
+    apply_thinking_level(app, agent, level, persist, extensions).await;
 }
 
 /// Write `level` to `defaultThinkingLevel` in the discovered settings
@@ -1366,7 +1549,7 @@ async fn apply_selector_choice(
     } else if value.starts_with("thinking:") {
         // The `/thinking` selector reuses the shared [`Selector`]; its values
         // carry the `thinking:` prefix.
-        apply_thinking_selector_value(app, agent, value, false).await;
+        apply_thinking_selector_value(app, agent, value, false, options.extensions.as_ref()).await;
     } else if let Some(session_id) = value.strip_prefix("resume:") {
         resume_session(app, agent, options, session_id).await;
     } else if let Some(entry_id) = value.strip_prefix("tree:") {
@@ -1488,38 +1671,660 @@ fn open_current_session(
     }
 }
 
+/// View state of the `/resume` session picker.
+///
+/// Upstream keeps this inside `SessionSelector`
+/// (`session-selector.ts`: `sortMode`, `showPath`, `nameFilter`,
+/// `confirmingDeletePath`). The Rust port has one shared [`Selector`] for
+/// every picker, so the state lives in the driver and the selector is
+/// rebuilt in place whenever it changes.
+#[derive(Debug, Default)]
+struct SessionPickerState {
+    /// Sort mode (`app.session.toggleSort`).
+    sort: SessionSort,
+    /// Show the session file path in the description
+    /// (`app.session.togglePath`).
+    show_path: bool,
+    /// All sessions, or only the named ones
+    /// (`app.session.toggleNamedFilter`).
+    filter: SessionFilter,
+    /// Session waiting for its second delete chord
+    /// (`app.session.delete` / `app.session.deleteNoninvasive`).
+    pending_delete: Option<String>,
+    /// Session being renamed through the input dialog, plus the reply
+    /// channel that keeps the App from treating the dialog as abandoned
+    /// (`App::poll_ui_dialogs` closes dialogs whose host stopped
+    /// listening).
+    pending_rename: Option<PendingRename>,
+}
+
+/// A rename awaiting the input dialog's answer.
+struct PendingRename {
+    /// The session the typed name belongs to.
+    session: SessionRef,
+    /// Kept alive (never awaited) so the dialog is not reaped.
+    _reply: tokio::sync::oneshot::Receiver<Option<pi_protocol::UiResponse>>,
+}
+
+impl std::fmt::Debug for PendingRename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingRename")
+            .field("session", &self.session.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Everything the driver remembers about the pickers it clips chords off.
+///
+/// One struct rather than free variables so the loop owns a single value
+/// that outlives every selector open — upstream's selector components
+/// live for the whole session; the port's selectors are rebuilt on every
+/// open.
+#[derive(Debug, Default)]
+#[doc(hidden)]
+pub struct PickerState {
+    /// `/resume` picker view state.
+    session: SessionPickerState,
+    /// `/tree` picker view state (filter, folds, label timestamps).
+    tree: TreeView,
+}
+
+/// Which picker is open, decided from the item values rather than the
+/// title so a search filter never changes the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerKind {
+    /// The `/resume` picker (`resume:*` values).
+    Session,
+    /// The `/tree` overlay (`tree:*` values).
+    Tree,
+    /// Any other selector (`/model`, `/thinking`, `/fork`, extension
+    /// dialogs): no picker chords apply.
+    Other,
+}
+
+/// Classify the open selector, or `Other` when none is open.
+fn picker_kind(selector: &Selector) -> PickerKind {
+    if let Some(value) = selector.items().first().map(|item| item.value.as_str()) {
+        if value.starts_with("resume:") {
+            return PickerKind::Session;
+        }
+        if value.starts_with("tree:") {
+            return PickerKind::Tree;
+        }
+        // A populated picker with other values (`model:`, `thinking:`, …)
+        // is never one of ours, whatever its title says.
+        return PickerKind::Other;
+    }
+    // An empty picker is still ours: a filter that hid every session, or a
+    // session with no entries for `/tree`. The chord that undoes the filter
+    // must keep working, so fall back to the title.
+    if selector.title().starts_with("Pick a session to resume") {
+        PickerKind::Session
+    } else if selector.title() == "Session tree" {
+        PickerKind::Tree
+    } else {
+        PickerKind::Other
+    }
+}
+
+/// Handle the picker-scoped chord `key` for the open selector.
+///
+/// Returns `true` when the key was consumed. These are the `app.session.*`
+/// and `app.tree.*` ids upstream consumes inside its selector components
+/// (`session-selector.ts:537-601`, `tree-selector.ts:996-1091`); the
+/// shared [`Selector`] knows nothing about them, so the driver claims them
+/// before it forwards the key.
+fn handle_picker_key(
+    app: &mut App,
+    options: &mut InteractiveOptions,
+    kind: PickerKind,
+    key: pi_tui::input::Key,
+) -> bool {
+    let keybindings = pi_tui::keybindings::get_keybindings();
+    let event = InputEvent::Key(key);
+    // The built-in chords stand in when the installed table does not
+    // define the id (a bare `pi-tui` registry in tests), and the
+    // coding-agent table wins when it does.
+    let matches = |id: &str, builtin: &[&str]| {
+        pi_tui::keybindings::matches_with_fallback(&keybindings, &event, id, builtin)
+    };
+
+    match kind {
+        PickerKind::Session => {
+            // An open delete confirmation swallows every other key
+            // (upstream `session-selector.ts:537-547`).
+            if let Some(pending) = options.pickers.session.pending_delete.clone() {
+                if matches("tui.select.confirm", &["enter"]) {
+                    options.pickers.session.pending_delete = None;
+                    confirm_session_delete(app, options, &pending);
+                } else if matches("tui.select.cancel", &["escape"]) {
+                    options.pickers.session.pending_delete = None;
+                    refresh_session_selector(app, options);
+                }
+                return true;
+            }
+            if matches("app.session.toggleSort", &["ctrl+s"]) {
+                options.pickers.session.sort = options.pickers.session.sort.next();
+                refresh_session_selector(app, options);
+                return true;
+            }
+            if matches("app.session.toggleNamedFilter", &["ctrl+n"]) {
+                options.pickers.session.filter = options.pickers.session.filter.toggled();
+                refresh_session_selector(app, options);
+                return true;
+            }
+            if matches("app.session.togglePath", &["ctrl+p"]) {
+                options.pickers.session.show_path = !options.pickers.session.show_path;
+                refresh_session_selector(app, options);
+                return true;
+            }
+            if matches("app.session.rename", &["ctrl+r"]) {
+                if let Some(session) = selected_session(app, options) {
+                    options.pickers.session.pending_rename = Some(open_rename_dialog(app, session));
+                }
+                return true;
+            }
+            if matches("app.session.delete", &["ctrl+d"]) {
+                begin_session_delete(app, options);
+                return true;
+            }
+            if matches("app.session.deleteNoninvasive", &["ctrl+backspace"]) {
+                // Upstream forwards the chord to the search input while a
+                // query is typed, and only treats it as "delete" when the
+                // query is empty (`session-selector.ts:592-601`).
+                let query = app
+                    .selector()
+                    .map(|selector| selector.filter().to_string())
+                    .unwrap_or_default();
+                if query.is_empty() {
+                    begin_session_delete(app, options);
+                    return true;
+                }
+                return false;
+            }
+            false
+        }
+        PickerKind::Tree => {
+            if matches("app.tree.foldOrUp", &["ctrl+left", "alt+left"]) {
+                return tree_fold_or_up(app, options);
+            }
+            if matches("app.tree.unfoldOrDown", &["ctrl+right", "alt+right"]) {
+                return tree_unfold_or_down(app, options);
+            }
+            if matches("app.tree.toggleLabelTimestamp", &["shift+t"]) {
+                options.pickers.tree.show_label_timestamps =
+                    !options.pickers.tree.show_label_timestamps;
+                refresh_tree_selector(app, options);
+                return true;
+            }
+            let direct: [(&str, &[&str], TreeFilter); 5] = [
+                ("app.tree.filter.default", &["ctrl+d"], TreeFilter::Default),
+                ("app.tree.filter.noTools", &["ctrl+t"], TreeFilter::NoTools),
+                (
+                    "app.tree.filter.userOnly",
+                    &["ctrl+u"],
+                    TreeFilter::UserOnly,
+                ),
+                (
+                    "app.tree.filter.labeledOnly",
+                    &["ctrl+l"],
+                    TreeFilter::LabeledOnly,
+                ),
+                ("app.tree.filter.all", &["ctrl+a"], TreeFilter::All),
+            ];
+            for (id, builtin, mode) in direct {
+                if matches(id, builtin) {
+                    // Upstream's direct chords are toggles: pressing the
+                    // active mode falls back to `default`
+                    // (`tree-selector.ts:1044-1062`), except the explicit
+                    // `default` chord which always resets.
+                    options.pickers.tree.filter =
+                        if mode != TreeFilter::Default && options.pickers.tree.filter == mode {
+                            TreeFilter::Default
+                        } else {
+                            mode
+                        };
+                    options.pickers.tree.folded.clear();
+                    refresh_tree_selector(app, options);
+                    return true;
+                }
+            }
+            if matches("app.tree.filter.cycleForward", &["ctrl+o"]) {
+                options.pickers.tree.filter = options.pickers.tree.filter.next();
+                options.pickers.tree.folded.clear();
+                refresh_tree_selector(app, options);
+                return true;
+            }
+            if matches("app.tree.filter.cycleBackward", &["shift+ctrl+o"]) {
+                options.pickers.tree.filter = options.pickers.tree.filter.prev();
+                options.pickers.tree.folded.clear();
+                refresh_tree_selector(app, options);
+                return true;
+            }
+            false
+        }
+        PickerKind::Other => false,
+    }
+}
+
+/// The [`SessionRef`] the session picker highlights, resolved by session
+/// id against the current listing.
+fn selected_session(app: &App, options: &InteractiveOptions) -> Option<SessionRef> {
+    let id = app
+        .selector()
+        .and_then(|selector| selector.selected_value())
+        .and_then(|value| value.strip_prefix("resume:"))
+        .map(str::to_string)?;
+    let directory = session_directory(options)?;
+    crate::list_resumable(&directory)
+        .ok()?
+        .into_iter()
+        .find(|session| session.session_id == id)
+}
+
+/// First chord of the two-step delete: refuse the live session outright
+/// (upstream `Cannot delete the currently active session`,
+/// `session-selector.ts:398-402`) and otherwise arm the confirmation.
+fn begin_session_delete(app: &mut App, options: &mut InteractiveOptions) {
+    let Some(session) = selected_session(app, options) else {
+        return;
+    };
+    if is_live_session(options, &session) {
+        app.info("Cannot delete the currently active session".to_string());
+        return;
+    }
+    options.pickers.session.pending_delete = Some(session.session_id);
+    refresh_session_selector(app, options);
+}
+
+/// Second chord of the two-step delete.
+fn confirm_session_delete(app: &mut App, options: &mut InteractiveOptions, session_id: &str) {
+    let Some(directory) = session_directory(options) else {
+        return;
+    };
+    let Some(session) = crate::list_resumable(&directory)
+        .ok()
+        .and_then(|refs| refs.into_iter().find(|s| s.session_id == session_id))
+    else {
+        app.info(format!("/resume: session {session_id} disappeared"));
+        refresh_session_selector(app, options);
+        return;
+    };
+    let keep_file = options.session_database.clone();
+    match delete_session(&session, keep_file.as_deref()) {
+        Ok((rows, file_removed)) => {
+            app.info(format!(
+                "Deleted session {session_id} ({rows} rows{})",
+                if file_removed { ", file removed" } else { "" }
+            ));
+        }
+        Err(err) => app.info(format!("/resume: could not delete {session_id}: {err}")),
+    }
+    refresh_session_selector(app, options);
+}
+
+/// Whether `session` is the one the running TUI is attached to.
+fn is_live_session(options: &InteractiveOptions, session: &SessionRef) -> bool {
+    options.session_id == session.session_id
+        || options
+            .session_database
+            .as_deref()
+            .is_some_and(|path| path == session.database)
+}
+
+/// Open the rename input modal for `session` and return the pending
+/// rename bookkeeping.
+fn open_rename_dialog(app: &mut App, session: SessionRef) -> PendingRename {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let request = pi_protocol::UiRequest::Input {
+        title: format!("Rename session {}", session.session_id),
+        placeholder: session.name.clone(),
+    };
+    if !app.open_dialog(Dialog::new(request, tx)) {
+        app.info("Rename: another dialog is already open".to_string());
+    }
+    PendingRename {
+        session,
+        _reply: rx,
+    }
+}
+
+/// Drive the rename modal for one key and apply the answer.
+///
+/// The dialog is taken out of the App so its answer can be read: the App
+/// drops a resolved dialog (`App::step_dialog`), and the rename must not
+/// be lost with it. An unresolved key puts the dialog straight back.
+fn handle_rename_dialog_key(
+    app: &mut App,
+    options: &mut InteractiveOptions,
+    key: pi_tui::input::Key,
+) -> bool {
+    let Some(pending) = options.pickers.session.pending_rename.take() else {
+        return false;
+    };
+    let Some(mut dialog) = app.take_dialog() else {
+        options.pickers.session.pending_rename = Some(pending);
+        return false;
+    };
+    match dialog.handle_key(key) {
+        DialogAction::Resolved(response) => {
+            let value = match response {
+                Some(pi_protocol::UiResponse::Input { value }) => value,
+                _ => String::new(),
+            };
+            let name = crate::interactive::normalize_session_name(&value);
+            if name.is_empty() {
+                app.info("Rename cancelled".to_string());
+            } else {
+                match rename_session(&pending.session, &name) {
+                    Ok(()) => app.info(format!(
+                        "Renamed session {} to {name:?}",
+                        pending.session.session_id
+                    )),
+                    Err(err) => app.info(format!("Rename failed: {err}")),
+                }
+            }
+            refresh_session_selector(app, options);
+            true
+        }
+        _ => {
+            let _ = app.open_dialog(dialog);
+            options.pickers.session.pending_rename = Some(pending);
+            true
+        }
+    }
+}
+
+/// `app.tree.foldOrUp`: fold the highlighted branch, else jump to the
+/// previous branch segment start (`tree-selector.ts:1002-1009`).
+fn tree_fold_or_up(app: &mut App, options: &mut InteractiveOptions) -> bool {
+    let Some(entry_id) = selected_tree_entry(app) else {
+        return true;
+    };
+    let rows = current_tree_rows(options);
+    let Some(index) = rows.iter().position(|row| row.value == entry_id) else {
+        return true;
+    };
+    if rows[index].foldable && !options.pickers.tree.folded.contains(&entry_id) {
+        options.pickers.tree.folded.insert(entry_id);
+        refresh_tree_selector(app, options);
+        return true;
+    }
+    if let Some(target) = branch_segment_start(&rows, index, TreeSegment::Up) {
+        set_tree_cursor(app, &rows, target);
+    }
+    true
+}
+
+/// `app.tree.unfoldOrDown`: unfold the highlighted branch, else jump to
+/// the next branch segment start (`tree-selector.ts:1010-1017`).
+fn tree_unfold_or_down(app: &mut App, options: &mut InteractiveOptions) -> bool {
+    let Some(entry_id) = selected_tree_entry(app) else {
+        return true;
+    };
+    if options.pickers.tree.folded.remove(&entry_id) {
+        refresh_tree_selector(app, options);
+        return true;
+    }
+    let rows = current_tree_rows(options);
+    let Some(index) = rows.iter().position(|row| row.value == entry_id) else {
+        return true;
+    };
+    if let Some(target) = branch_segment_start(&rows, index, TreeSegment::Down) {
+        set_tree_cursor(app, &rows, target);
+    }
+    true
+}
+
+/// Direction for the branch-segment jump the fold chords fall back to.
+#[derive(Debug, Clone, Copy)]
+enum TreeSegment {
+    /// Previous segment start (the fold chord when nothing folds).
+    Up,
+    /// Next segment start (the unfold chord when nothing unfolds).
+    Down,
+}
+
+/// The visible rows of the current tree view, or none when the session
+/// database cannot be read.
+fn current_tree_rows(options: &InteractiveOptions) -> Vec<pi_tui::tree::TreeRow> {
+    let Some(database) = options.session_database.clone() else {
+        return Vec::new();
+    };
+    let Ok(reader) = SessionReader::open(&database) else {
+        return Vec::new();
+    };
+    let active_leaf = options
+        .session_leaf
+        .clone()
+        .or_else(|| session_tip(&reader, &options.session_id).ok().flatten());
+    crate::commands::tree::tree_rows(
+        &reader,
+        &options.session_id,
+        active_leaf.as_deref(),
+        &options.pickers.tree,
+    )
+    .unwrap_or_default()
+}
+
+/// The entry id the tree overlay highlights (`tree:<entry_id>`).
+fn selected_tree_entry(app: &App) -> Option<String> {
+    app.selector()
+        .and_then(|selector| selector.selected_value())
+        .and_then(|value| value.strip_prefix("tree:"))
+        .map(str::to_string)
+}
+
+/// Index of the nearest visible parent of `index`.
+///
+/// The port draws the tree with indent prefixes instead of the parent
+/// maps upstream keeps, so the nearest preceding row one indent shallower
+/// *is* the parent.
+fn visible_parent(rows: &[pi_tui::tree::TreeRow], index: usize) -> Option<usize> {
+    if rows[index].indent == 0 {
+        return None;
+    }
+    let depth = rows[index].indent - 1;
+    (0..index).rev().find(|&idx| rows[idx].indent == depth)
+}
+
+/// Number of visible children of `index` (the rows below it one indent
+/// deeper, up to the first row at its own depth or shallower).
+fn visible_children_count(rows: &[pi_tui::tree::TreeRow], index: usize) -> usize {
+    let depth = rows[index].indent + 1;
+    let mut count = 0;
+    for row in &rows[index + 1..] {
+        if row.indent < depth {
+            break;
+        }
+        if row.indent == depth {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Index of the first visible child of `index`.
+fn first_visible_child(rows: &[pi_tui::tree::TreeRow], index: usize) -> Option<usize> {
+    let depth = rows[index].indent + 1;
+    for (offset, row) in rows[index + 1..].iter().enumerate() {
+        if row.indent < depth {
+            return None;
+        }
+        if row.indent == depth {
+            return Some(index + 1 + offset);
+        }
+    }
+    None
+}
+
+/// Upstream `findBranchSegmentStart` (`tree-selector.ts:1127-1158`): a
+/// segment start is the first child of a branch point. `down` descends
+/// through single-child chains to the first leaf or branch point; `up`
+/// climbs the visible parents to the first segment start above the
+/// cursor, falling back to the root.
+fn branch_segment_start(
+    rows: &[pi_tui::tree::TreeRow],
+    index: usize,
+    direction: TreeSegment,
+) -> Option<usize> {
+    if rows.is_empty() || index >= rows.len() {
+        return None;
+    }
+    match direction {
+        TreeSegment::Down => {
+            let mut current = index;
+            loop {
+                let children = visible_children_count(rows, current);
+                if children == 0 {
+                    return Some(current);
+                }
+                if children > 1 {
+                    return first_visible_child(rows, current);
+                }
+                current = first_visible_child(rows, current)?;
+            }
+        }
+        TreeSegment::Up => {
+            let mut current = index;
+            loop {
+                let Some(parent) = visible_parent(rows, current) else {
+                    return Some(current);
+                };
+                if visible_children_count(rows, parent) > 1 && current < index {
+                    return Some(current);
+                }
+                current = parent;
+            }
+        }
+    }
+}
+
+/// Move the tree cursor onto `target`, i.e. the row whose value is
+/// `rows[target].value`.
+///
+/// The selector's own items are the same rows in the same order (the
+/// plain `/tree` overlay has no typed search filter when the fold chords
+/// run, because a typed query would have reordered the fuzzy hits), so
+/// the row index maps onto the item index directly.
+fn set_tree_cursor(app: &mut App, rows: &[pi_tui::tree::TreeRow], target: usize) {
+    let Some(value) = rows.get(target).map(|row| format!("tree:{}", row.value)) else {
+        return;
+    };
+    let Some(selector) = app.selector_mut() else {
+        return;
+    };
+    if let Some(index) = selector.items().iter().position(|item| item.value == value) {
+        selector.set_cursor(index);
+    }
+}
 /// `/resume` and `app.session.resume` share this one code path: it lists
 /// the stored sessions through `list_resumable` and opens the picker.
 /// Values are `resume:<session_id>`.
-fn open_resume_selector(app: &mut App, options: &InteractiveOptions) {
+fn open_resume_selector(app: &mut App, options: &mut InteractiveOptions) {
     let Some(dir) = session_directory(options) else {
         app.info("/resume: session directory not configured".to_string());
         return;
     };
-    let refs = match crate::list_resumable(&dir) {
-        Ok(refs) => refs,
-        Err(err) => {
-            app.info(format!("/resume: {err}"));
-            return;
-        }
-    };
-    if refs.is_empty() {
-        app.info("/resume: no saved sessions".to_string());
-        return;
+    // A pending delete confirmation belongs to the previous visit.
+    options.pickers.session.pending_delete = None;
+    match build_session_selector(&dir, &options.pickers.session) {
+        Ok(selector) => app.open_selector(selector),
+        Err(err) => app.info(format!("/resume: {err}")),
     }
+}
+
+/// Build the `/resume` picker for the current [`SessionPickerState`].
+///
+/// Returns `Err` when the session directory cannot be listed. An empty
+/// list is *not* an error: the selector is still built (with no items and
+/// a footer explaining which filter hid everything), so the user can
+/// clear the named filter with the chord the footer names instead of
+/// being thrown back to the prompt with no way back.
+fn build_session_selector(
+    directory: &Path,
+    state: &SessionPickerState,
+) -> anyhow::Result<Selector> {
+    let mut refs = crate::list_resumable(directory)?;
+    refs.retain(|session| state.filter.accepts(session));
+    state.sort.apply(&mut refs);
     let items = refs
-        .into_iter()
-        .map(|r| {
-            let value = format!("resume:{}", r.session_id);
-            let label = r.session_id.clone();
-            SelectorItem::new(value, label).with_description(r.display())
+        .iter()
+        .map(|reference| {
+            let confirming = state.pending_delete.as_deref() == Some(reference.session_id.as_str());
+            let label = if confirming {
+                format!("⚠ {}", reference.session_id)
+            } else {
+                reference.session_id.clone()
+            };
+            SelectorItem::new(format!("resume:{}", reference.session_id), label)
+                .with_description(reference.display_with(state.show_path))
         })
         .collect::<Vec<_>>();
-    let selector = Selector::new("Pick a session to resume", items)
+    Ok(Selector::new(session_picker_title(state), items)
         .searchable(true)
         // Upstream `session-selector.ts`: `maxVisible = 10`.
-        .with_max_visible(10);
-    app.open_selector(selector);
+        .with_max_visible(10)
+        .with_footer(session_picker_footer(state)))
+}
+
+/// Upstream renders the active sort / name-filter mode into the picker
+/// title (`session-selector.ts:131-136`); the port has no separate header
+/// row, so the modes ride along here.
+fn session_picker_title(state: &SessionPickerState) -> String {
+    format!(
+        "Pick a session to resume · sort: {} · name: {}",
+        state.sort.name(),
+        state.filter.name()
+    )
+}
+
+/// The `/resume` key hints, mirroring upstream's two hint lines
+/// (`session-selector.ts:168-182`) with the live mode values folded in.
+fn session_picker_footer(state: &SessionPickerState) -> Vec<String> {
+    if let Some(pending) = &state.pending_delete {
+        return vec![
+            format!("  Delete session {pending}?"),
+            "  enter confirm · esc cancel".to_string(),
+        ];
+    }
+    let mut hints = vec![
+        format!(
+            "  ctrl+s sort ({}) · ctrl+n named ({}) · ctrl+p path ({}) · ctrl+r rename",
+            state.sort.name(),
+            state.filter.name(),
+            if state.show_path { "on" } else { "off" }
+        ),
+        "  ctrl+d delete · ctrl+backspace delete · enter resume · esc cancel".to_string(),
+    ];
+    if state.filter == SessionFilter::NamedOnly {
+        hints.push("  no sessions listed? ctrl+n shows every session".to_string());
+    }
+    hints
+}
+
+/// Rebuild the open session picker in place after a view change.
+///
+/// The filter text and the cursor survive the rebuild, so `Ctrl+S` does
+/// not lose the user's place in a long list.
+fn refresh_session_selector(app: &mut App, options: &mut InteractiveOptions) {
+    let Some(dir) = session_directory(options) else {
+        return;
+    };
+    let (cursor, filter) = app
+        .selector()
+        .map(|selector| (selector.cursor(), selector.filter().to_string()))
+        .unwrap_or((0, String::new()));
+    match build_session_selector(&dir, &options.pickers.session) {
+        Ok(mut selector) => {
+            if !filter.is_empty() {
+                selector.set_filter(filter);
+            }
+            selector.set_cursor(cursor);
+            app.replace_selector(selector);
+        }
+        Err(err) => app.info(format!("/resume: {err}")),
+    }
 }
 
 /// Open the `/tree` overlay for the current session.
@@ -1536,8 +2341,44 @@ fn open_tree_selector(app: &mut App, options: &InteractiveOptions) {
         .session_leaf
         .clone()
         .or_else(|| session_tip(&reader, &options.session_id).ok().flatten());
-    match tree_selector(&reader, &options.session_id, active_leaf.as_deref()) {
+    match tree_selector_with(
+        &reader,
+        &options.session_id,
+        active_leaf.as_deref(),
+        &options.pickers.tree,
+    ) {
         Ok(selector) => app.open_selector(selector),
+        Err(err) => app.info(format!("/tree: {err}")),
+    }
+}
+
+/// Rebuild the open `/tree` overlay after a filter / fold / label change,
+/// keeping the cursor and the search text.
+fn refresh_tree_selector(app: &mut App, options: &InteractiveOptions) {
+    let Some((_, reader)) = open_current_session(app, options, "/tree") else {
+        return;
+    };
+    let active_leaf = options
+        .session_leaf
+        .clone()
+        .or_else(|| session_tip(&reader, &options.session_id).ok().flatten());
+    let (cursor, filter) = app
+        .selector()
+        .map(|selector| (selector.cursor(), selector.filter().to_string()))
+        .unwrap_or((0, String::new()));
+    match tree_selector_with(
+        &reader,
+        &options.session_id,
+        active_leaf.as_deref(),
+        &options.pickers.tree,
+    ) {
+        Ok(mut selector) => {
+            if !filter.is_empty() {
+                selector.set_filter(filter);
+            }
+            selector.set_cursor(cursor);
+            app.replace_selector(selector);
+        }
         Err(err) => app.info(format!("/tree: {err}")),
     }
 }
@@ -1766,7 +2607,7 @@ fn persist_session_name(options: &mut InteractiveOptions, name: &str) -> anyhow:
 /// Set `/name <text>`: normalize, persist, then reflect the name in the
 /// status bar. Mirrors upstream `handleNameCommand`
 /// (`interactive-mode.ts:6193`).
-fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) {
+async fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) {
     let name = normalize_session_name(raw);
     if name.is_empty() {
         app.info("usage: /name <name>".to_string());
@@ -1785,6 +2626,14 @@ fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) 
             }
             options.session_name = Some(name.clone());
             app.set_session_name(Some(name.clone()));
+            // Upstream `session_info_changed`.
+            deliver_extension_event(
+                options.extensions.as_ref(),
+                ExtensionEvent::SessionInfoChanged {
+                    name: Some(name.clone()),
+                },
+            )
+            .await;
             app.info(format!("Session name set: {name}"));
         }
         Err(err) => app.info(format!("/name: could not save the session name: {err}")),
@@ -1907,7 +2756,10 @@ async fn run_slash_command(
                 help_text_with_extensions(commands),
                 &options.prompt_templates,
             );
-            app.info(help);
+            // Command-reference output, not user input: the info prefix keeps
+            // `/help`'s body from reading as something the user typed
+            // (LUM-1238 §15.4).
+            app.info_block(help);
         }
         SlashCommand::Clear => {
             app.messages_mut().clear();
@@ -1919,7 +2771,7 @@ async fn run_slash_command(
             copy_last_assistant_message(app);
         }
         SlashCommand::Name { name } => match name {
-            Some(name) => set_session_name(app, options, &name),
+            Some(name) => set_session_name(app, options, &name).await,
             None => match options.session_name.as_deref() {
                 Some(name) => app.info(format!("Session name: {name}")),
                 None => app.info("usage: /name <name>".to_string()),
@@ -1932,7 +2784,16 @@ async fn run_slash_command(
             open_model_selector(app, options);
         }
         SlashCommand::Hotkeys => {
-            app.info(crate::commands::slash::hotkeys_text());
+            app.info_block(crate::commands::slash::hotkeys_text());
+        }
+        SlashCommand::Extensions => {
+            let home = crate::paths::home_dir();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            app.info(crate::commands::extensions_text(
+                &options.extension_report,
+                home.as_deref(),
+                &cwd,
+            ));
         }
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;
@@ -2065,7 +2926,16 @@ async fn run_slash_command(
                     let requested = crate::thinking::parse_thinking_level(&raw)
                         .filter(|candidate| available.contains(candidate));
                     match requested {
-                        Some(level) => apply_thinking_level(app, agent, level, false).await,
+                        Some(level) => {
+                            apply_thinking_level(
+                                app,
+                                agent,
+                                level,
+                                false,
+                                options.extensions.as_ref(),
+                            )
+                            .await
+                        }
                         None => app.info(format!(
                             "Unknown thinking level \"{raw}\". Available levels: {}.",
                             available
@@ -2315,7 +3185,14 @@ async fn run_compact(
         }
     };
 
-    let report = apply_compaction(agent, options, history.len(), compaction).await;
+    let report = apply_compaction(
+        agent,
+        options,
+        history.len(),
+        compaction,
+        CompactReason::Manual,
+    )
+    .await;
     app.info(format!(
         "/compact: summarized {} message(s) → kept {} ({} → {} est. tokens; {} read, {} modified)\n\n{}",
         report.summarized(),
@@ -2402,6 +3279,11 @@ async fn maybe_auto_compact(
     } else {
         "threshold"
     };
+    let compact_reason = if context_overflow {
+        CompactReason::Overflow
+    } else {
+        CompactReason::Threshold
+    };
 
     let compaction = match compact(
         &history,
@@ -2429,7 +3311,7 @@ async fn maybe_auto_compact(
         return false;
     }
 
-    let report = apply_compaction(agent, options, history.len(), compaction).await;
+    let report = apply_compaction(agent, options, history.len(), compaction, compact_reason).await;
     app.info(format!(
         "auto-compact ({trigger}): context {context_tokens} vs {} window − {} reserve; summarized {} message(s) → kept {} ({} → {} est. tokens)\n\n{}",
         model.context_window,
@@ -2469,6 +3351,7 @@ async fn apply_compaction(
     options: &InteractiveOptions,
     history_len: usize,
     compaction: Compaction,
+    reason: CompactReason,
 ) -> CompactionReport {
     if let Some(log) = options.session_log.as_ref() {
         let _ = log.append_compaction(
@@ -2492,6 +3375,19 @@ async fn apply_compaction(
         let mut guard = agent.lock().await;
         guard.state_mut().messages = compacted_history;
     }
+
+    // Upstream `session_compact`, emitted from the one place that knows the
+    // compaction actually landed; the manual and automatic paths share it.
+    deliver_extension_event(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionCompact {
+            reason,
+            tokens_before,
+            tokens_after,
+            retained,
+        },
+    )
+    .await;
 
     CompactionReport {
         history_len,
@@ -2573,6 +3469,68 @@ fn help_text_with_extensions(commands: &[pi_extensions::RegisteredCommand]) -> S
 /// The host accumulates whatever extensions recorded via
 /// `pi.appendEntry` / `pi.sendMessage` / `pi.sendUserMessage` /
 /// `pi.setSessionName`; this runs every loop tick so nothing is lost.
+/// How long extension `session_shutdown` handlers may run before the process
+/// exits without them.
+///
+/// The host's interactive timeout is five minutes (a human may be reading a
+/// dialog), which is the wrong ceiling for teardown: shutdown is not
+/// interactive, so a plugin that blocks there is simply abandoned.
+const EXTENSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Subscribe to the agent's event fan-out and drive extension lifecycle
+/// events.
+///
+/// Returns `None` when no runtime is attached or none of the loaded
+/// extensions subscribed to an event — without subscribers the pump would
+/// only cost a task and a channel.
+async fn start_extension_event_pump(
+    agent: &Arc<AsyncMutex<Agent>>,
+    extensions: Option<&Arc<ExtensionRuntime>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let runtime = extensions?;
+    if !runtime.has_any_subscriber() {
+        return None;
+    }
+    let events = agent.lock().await.subscribe();
+    let runtime = runtime.clone();
+    Some(tokio::spawn(async move {
+        run_extension_event_pump(runtime, events).await;
+    }))
+}
+
+/// The pump body: translate every agent event and deliver the ones the
+/// runtime subscribed to. Ends when the agent drops its fan-out senders.
+async fn run_extension_event_pump(
+    runtime: Arc<ExtensionRuntime>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+) {
+    let mut mapper = ExtensionEventMapper::new();
+    while let Some(event) = events.recv().await {
+        for extension_event in mapper.map(&event, now_millis()) {
+            runtime.deliver_event(&extension_event).await;
+        }
+    }
+}
+
+/// Unix milliseconds — the timestamp upstream's `turn_start` carries.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// Best-effort delivery of one lifecycle event from a call site outside the
+/// agent fan-out (`user_bash`, `thinking_level_select`, …).
+async fn deliver_extension_event(
+    extensions: Option<&Arc<ExtensionRuntime>>,
+    event: ExtensionEvent,
+) {
+    if let Some(runtime) = extensions {
+        runtime.deliver_event(&event).await;
+    }
+}
+
 fn persist_extension_side_effects(app: &mut App, options: &InteractiveOptions) {
     let Some(runtime) = options.extensions.as_ref() else {
         return;
@@ -2729,6 +3687,7 @@ fn _keep_writer() -> Option<Box<dyn Write>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_extensions::JsExtensionHost;
 
     #[test]
     fn extension_command_args_returns_text_after_the_name() {
@@ -4457,6 +5416,29 @@ mod tests {
         assert!(rendered.contains("/m"), "{rendered}");
     }
 
+    /// Stage 70 (LUM-1238) folded the extension-registered commands into the
+    /// same dropdown: `pi.registerCommand("ext-echo")` has to complete like a
+    /// built-in, or the user cannot discover it.
+    #[test]
+    fn extension_commands_complete_through_the_same_dropdown() {
+        let agent = Agent::new(AgentOptions::new(
+            small_window_model(1_000_000),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let mut app = App::new(&agent, AppConfig::default());
+        let extra = vec![pi_tui::autocomplete::SlashCommand::new("ext-echo")
+            .with_description("echo through an extension")];
+        install_composer_autocomplete_with(&mut app, std::env::temp_dir(), extra);
+
+        for ch in ['/', 'e', 'x', 't'] {
+            app.step(key(KeyCode::Char(ch)));
+        }
+
+        let rendered = app.render_snapshot(72, 14).lines.join("\n");
+        assert!(rendered.contains("ext-echo"), "{rendered}");
+    }
+
     // -----------------------------------------------------------------------
     // `app.clipboard.pasteImage` (Stage 63 / LUM-1224)
     // -----------------------------------------------------------------------
@@ -4590,7 +5572,7 @@ mod tests {
         app.set_thinking_supported(true);
         app.set_thinking_level(ThinkingLevel::Medium);
 
-        handle_thinking_cycle(&mut app, &agent).await;
+        handle_thinking_cycle(&mut app, &agent, None).await;
 
         assert_eq!(app.thinking_level(), ThinkingLevel::High);
         assert_eq!(
@@ -4606,7 +5588,7 @@ mod tests {
         app.set_thinking_supported(true);
         app.set_thinking_level(ThinkingLevel::Max);
 
-        handle_thinking_cycle(&mut app, &agent).await;
+        handle_thinking_cycle(&mut app, &agent, None).await;
 
         assert_eq!(app.thinking_level(), ThinkingLevel::Off);
         assert_eq!(app.status_flash(), Some("Thinking level: off"));
@@ -4617,7 +5599,7 @@ mod tests {
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         app.set_thinking_level(ThinkingLevel::Medium);
 
-        handle_thinking_cycle(&mut app, &agent).await;
+        handle_thinking_cycle(&mut app, &agent, None).await;
 
         assert!(!app.thinking_supported());
         assert_eq!(app.thinking_level(), ThinkingLevel::Off, "clamped to off");
@@ -4694,7 +5676,7 @@ mod tests {
             .await
             .expect("thinking");
 
-        apply_thinking_selector_value(&mut app, &agent, "thinking:high", false).await;
+        apply_thinking_selector_value(&mut app, &agent, "thinking:high", false, None).await;
 
         assert_eq!(app.thinking_level(), ThinkingLevel::High);
         assert_eq!(
@@ -4708,9 +5690,9 @@ mod tests {
     async fn thinking_selector_values_ignore_anything_but_a_level() {
         let (mut app, agent) = app_starting_at(reasoning_model()).await;
 
-        apply_thinking_selector_value(&mut app, &agent, "model:gpt-4o", false).await;
+        apply_thinking_selector_value(&mut app, &agent, "model:gpt-4o", false, None).await;
         assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
-        apply_thinking_selector_value(&mut app, &agent, "thinking:bogus", false).await;
+        apply_thinking_selector_value(&mut app, &agent, "thinking:bogus", false, None).await;
         assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
     }
 
@@ -4745,5 +5727,816 @@ mod tests {
             ThinkingLevel::Low
         ));
         assert!(transcript(&app).contains("/thinking:"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `/resume` + `/tree` picker chords (Stage 68 / LUM-1255)
+    // -----------------------------------------------------------------------
+
+    /// Two stored sessions in `dir`, the second one named. The names are
+    /// what `app.session.toggleNamedFilter` filters on.
+    fn two_sessions(dir: &Path) -> (SessionRef, SessionRef) {
+        let mut first = None;
+        let mut second = None;
+        for (index, name) in [None, Some("named one")].into_iter().enumerate() {
+            let id = format!("picker-{index}");
+            let path = dir.join(format!("{id}.sqlite"));
+            let writer = SessionWriter::open(&path).expect("writer");
+            writer
+                .write_header(SessionEntry::Header {
+                    id: id.clone(),
+                    created_at: chrono::Utc::now(),
+                    version: "0.1.0".into(),
+                })
+                .expect("header");
+            writer.append(session_user("hello")).expect("append");
+            if let Some(name) = name {
+                writer.set_session_name(name).expect("name");
+            }
+            writer.checkpoint().expect("checkpoint");
+            drop(writer);
+            let reference = crate::list_resumable(dir)
+                .expect("list")
+                .into_iter()
+                .find(|reference| reference.session_id == id)
+                .expect("stored session");
+            if index == 0 {
+                first = Some(reference);
+            } else {
+                second = Some(reference);
+            }
+        }
+        (first.expect("first"), second.expect("second"))
+    }
+
+    /// An App with the `/resume` picker open over `dir`, and the two
+    /// stored sessions.
+    async fn resume_picker(dir: &Path) -> (App, Arc<AsyncMutex<Agent>>, InteractiveOptions) {
+        // The sessions must be on disk before the picker reads them.
+        let (_first, _second) = two_sessions(dir);
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = stored_options(dir, "picker-0");
+        open_resume_selector(&mut app, &mut options);
+        assert!(app.selector_open(), "the picker is open");
+        (app, agent, options)
+    }
+
+    /// Put the session picker's cursor on `resume:<session_id>`.
+    ///
+    /// Never "row 0" or "one row down": the listing order depends on the
+    /// sort mode and on how close together the two fixtures were created.
+    fn move_resume_cursor_to(app: &mut App, session_id: &str) {
+        let index = app
+            .selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .position(|item| item.value == format!("resume:{session_id}"))
+            .unwrap_or_else(|| panic!("{session_id} is not listed"));
+        app.selector_mut().expect("selector").set_cursor(index);
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some(format!("resume:{session_id}").as_str())
+        );
+    }
+
+    /// Every visible row's description, in order.
+    fn selector_descriptions(app: &App) -> Vec<String> {
+        app.selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .map(|item| item.description.clone().unwrap_or_default())
+            .collect()
+    }
+
+    fn chord(code: KeyCode, modifiers: pi_tui::input::KeyModifiers) -> pi_tui::input::Key {
+        pi_tui::input::Key::new(code, modifiers)
+    }
+
+    fn ctrl(c: char) -> pi_tui::input::Key {
+        chord(
+            KeyCode::Char(c),
+            pi_tui::input::KeyModifiers {
+                control: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Drive one chord through `handle_input_event` — the same path a
+    /// real keypress takes, so the interception is what is under test.
+    async fn send(
+        app: &mut App,
+        agent: &Arc<AsyncMutex<Agent>>,
+        options: &mut InteractiveOptions,
+        key: pi_tui::input::Key,
+    ) {
+        let mut bash = BashRunner::default();
+        handle_input_event(app, agent, options, &mut bash, InputEvent::Key(key))
+            .await
+            .expect("handle event");
+    }
+
+    #[tokio::test]
+    async fn the_resume_picker_blocks_a_rename_from_deleting_the_live_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        // The live session is `picker-0` (the App is attached to it).
+        move_resume_cursor_to(&mut app, "picker-0");
+        let mut bash = BashRunner::default();
+        handle_input_event(
+            &mut app,
+            &agent,
+            &mut options,
+            &mut bash,
+            InputEvent::Key(ctrl('d')),
+        )
+        .await
+        .expect("ctrl+d");
+
+        // Upstream `cannot delete the currently active session`: no
+        // confirmation is armed and the file survives.
+        assert!(options.pickers.session.pending_delete.is_none());
+        assert!(transcript(&app).contains("Cannot delete the currently active session"));
+        assert!(dir.path().join("picker-0.sqlite").is_file());
+    }
+
+    #[tokio::test]
+    async fn ctrl_d_arms_and_enter_confirms_a_session_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        // Move onto the second session, which is not the live one.
+        move_resume_cursor_to(&mut app, "picker-1");
+
+        send(&mut app, &agent, &mut options, ctrl('d')).await;
+        assert_eq!(
+            options.pickers.session.pending_delete.as_deref(),
+            Some("picker-1"),
+            "the first chord only arms the confirmation"
+        );
+        assert!(
+            dir.path().join("picker-1.sqlite").is_file(),
+            "nothing is deleted before the second chord"
+        );
+        // While confirming, every other key is swallowed.
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Down, Default::default()),
+        )
+        .await;
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("resume:picker-1"),
+            "the cursor does not move while confirming"
+        );
+        assert_eq!(
+            options.pickers.session.pending_delete.as_deref(),
+            Some("picker-1")
+        );
+
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+        assert!(options.pickers.session.pending_delete.is_none());
+        assert!(
+            !dir.path().join("picker-1.sqlite").is_file(),
+            "file removed"
+        );
+        assert!(
+            crate::list_resumable(dir.path())
+                .expect("list")
+                .iter()
+                .all(|reference| reference.session_id != "picker-1"),
+            "the deleted session is gone from the listing"
+        );
+        assert!(dir.path().join("picker-0.sqlite").is_file(), "live kept");
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_the_delete_confirmation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        move_resume_cursor_to(&mut app, "picker-1");
+        send(&mut app, &agent, &mut options, ctrl('d')).await;
+        assert_eq!(
+            options.pickers.session.pending_delete.as_deref(),
+            Some("picker-1")
+        );
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Esc, Default::default()),
+        )
+        .await;
+
+        assert!(options.pickers.session.pending_delete.is_none());
+        assert!(app.selector_open(), "the picker survives the cancel");
+        assert!(dir.path().join("picker-1.sqlite").is_file());
+    }
+
+    #[tokio::test]
+    async fn the_resume_picker_cycles_sort_name_filter_and_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        let title = |app: &App| app.selector().expect("selector").title().to_string();
+        let description = |app: &App| selector_descriptions(app).join(" | ");
+
+        assert!(
+            title(&app).contains("sort: newest · name: all"),
+            "{}",
+            title(&app)
+        );
+        send(&mut app, &agent, &mut options, ctrl('s')).await;
+        assert!(title(&app).contains("sort: oldest"), "{}", title(&app));
+        send(&mut app, &agent, &mut options, ctrl('s')).await;
+        assert!(title(&app).contains("sort: name"), "{}", title(&app));
+        send(&mut app, &agent, &mut options, ctrl('s')).await;
+        assert!(title(&app).contains("sort: newest"), "{}", title(&app));
+
+        // `Ctrl+N` keeps only the named sessions.
+        send(&mut app, &agent, &mut options, ctrl('n')).await;
+        assert!(title(&app).contains("name: named"), "{}", title(&app));
+        let values = app
+            .selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .map(|item| item.value.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec!["resume:picker-1".to_string()], "{values:?}");
+        send(&mut app, &agent, &mut options, ctrl('n')).await;
+        assert_eq!(app.selector().expect("selector").items().len(), 2);
+
+        // `Ctrl+P` adds the file path to every row.
+        assert!(
+            !description(&app).contains(".sqlite"),
+            "{}",
+            description(&app)
+        );
+        send(&mut app, &agent, &mut options, ctrl('p')).await;
+        assert!(
+            description(&app).contains("picker-0.sqlite"),
+            "{}",
+            description(&app)
+        );
+        send(&mut app, &agent, &mut options, ctrl('p')).await;
+        assert!(
+            !description(&app).contains(".sqlite"),
+            "{}",
+            description(&app)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_resume_picker_still_answers_its_chords() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = session_options(dir.path(), "empty-picker");
+        options.pickers.session.filter = SessionFilter::NamedOnly;
+        open_resume_selector(&mut app, &mut options);
+
+        let selector = app.selector().expect("selector");
+        assert!(selector.items().is_empty(), "nothing to resume");
+        assert!(
+            selector.footer().iter().any(|line| line.contains("ctrl+n")),
+            "the footer names the way out: {:?}",
+            selector.footer()
+        );
+        assert_eq!(picker_kind(selector), PickerKind::Session, "classified");
+
+        // The chord that undoes the filter works on an empty list.
+        send(&mut app, &agent, &mut options, ctrl('n')).await;
+        assert_eq!(options.pickers.session.filter, SessionFilter::All);
+    }
+
+    #[tokio::test]
+    async fn ctrl_r_opens_the_rename_dialog_and_enter_applies_the_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        move_resume_cursor_to(&mut app, "picker-0");
+        send(&mut app, &agent, &mut options, ctrl('r')).await;
+        assert!(options.pickers.session.pending_rename.is_some());
+        assert!(app.dialog_open(), "the input modal is up");
+
+        // Type a name and confirm it.
+        for c in "renamed".chars() {
+            send(
+                &mut app,
+                &agent,
+                &mut options,
+                chord(KeyCode::Char(c), Default::default()),
+            )
+            .await;
+        }
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+
+        assert!(options.pickers.session.pending_rename.is_none());
+        let stored = SessionReader::open(dir.path().join("picker-0.sqlite"))
+            .expect("reader")
+            .session_name("picker-0")
+            .expect("name")
+            .expect("renamed");
+        assert_eq!(stored, "renamed");
+        let named = crate::list_resumable(dir.path())
+            .expect("list")
+            .into_iter()
+            .find(|reference| reference.session_id == "picker-0")
+            .expect("session");
+        assert_eq!(named.name.as_deref(), Some("renamed"));
+    }
+
+    #[tokio::test]
+    async fn escape_abandons_the_rename_dialog_and_keeps_the_picker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        move_resume_cursor_to(&mut app, "picker-0");
+        send(&mut app, &agent, &mut options, ctrl('r')).await;
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Esc, Default::default()),
+        )
+        .await;
+
+        assert!(options.pickers.session.pending_rename.is_none());
+        assert!(!app.dialog_open());
+        assert!(app.selector_open(), "the picker is still there");
+        let stored = SessionReader::open(dir.path().join("picker-0.sqlite"))
+            .expect("reader")
+            .session_name("picker-0")
+            .expect("name");
+        assert!(stored.is_none(), "nothing was renamed: {stored:?}");
+    }
+
+    #[tokio::test]
+    async fn ctrl_backspace_only_deletes_with_an_empty_query() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = resume_picker(dir.path()).await;
+
+        move_resume_cursor_to(&mut app, "picker-1");
+        // A typed query forwards `Ctrl+Backspace` to the search input.
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Char('p'), Default::default()),
+        )
+        .await;
+        let ctrl_backspace = chord(
+            KeyCode::Backspace,
+            pi_tui::input::KeyModifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        send(&mut app, &agent, &mut options, ctrl_backspace).await;
+        assert!(
+            options.pickers.session.pending_delete.is_none(),
+            "the chord belongs to the search input while a query is typed"
+        );
+
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Esc, Default::default()),
+        )
+        .await;
+        assert!(!app.selector_open(), "Esc clears the query first");
+        open_resume_selector(&mut app, &mut options);
+        move_resume_cursor_to(&mut app, "picker-1");
+        send(&mut app, &agent, &mut options, ctrl_backspace).await;
+        assert_eq!(
+            options.pickers.session.pending_delete.as_deref(),
+            Some("picker-1"),
+            "with no query it arms the confirmation"
+        );
+    }
+
+    /// A two-branch session in a `/tree` overlay, plus the driver state.
+    async fn tree_picker(dir: &Path) -> (App, Arc<AsyncMutex<Agent>>, InteractiveOptions) {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let path = build_branch_session(dir, "tree-picker");
+        let mut options = InteractiveOptions {
+            session_id: "tree-picker".into(),
+            session_database: Some(path),
+            session_log: Some(SessionLog::open(dir, "tree-picker").expect("log")),
+            ..InteractiveOptions::default()
+        };
+        run_slash_command(&mut app, &agent, &mut options, "/tree")
+            .await
+            .expect("/tree");
+        assert!(app.selector_open(), "the overlay is open");
+        (app, agent, options)
+    }
+
+    fn tree_values(app: &App) -> Vec<String> {
+        app.selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .filter_map(|item| item.value.strip_prefix("tree:").map(str::to_string))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_tree_filter_chords_narrow_and_widen_the_overlay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+
+        let all = tree_values(&app);
+        assert!(all.len() >= 4, "the branch session renders: {all:?}");
+        assert_eq!(tree_footer_filter(&app), "default");
+
+        // `Ctrl+U` keeps user messages only.
+        send(&mut app, &agent, &mut options, ctrl('u')).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::UserOnly);
+        assert_eq!(tree_footer_filter(&app), "user-only");
+        let user = tree_values(&app);
+        assert!(user.len() < all.len(), "narrowed: {user:?} vs {all:?}");
+        assert!(user.contains(&"e1".to_string()), "{user:?}");
+
+        // Pressing the active mode again falls back to `default`.
+        send(&mut app, &agent, &mut options, ctrl('u')).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::Default);
+
+        // The explicit `default` chord always resets, even from a mode the
+        // toggle would have left alone.
+        send(&mut app, &agent, &mut options, ctrl('t')).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::NoTools);
+        send(&mut app, &agent, &mut options, ctrl('d')).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::Default);
+
+        // Cycling walks the whole ring in both directions.
+        send(&mut app, &agent, &mut options, ctrl('o')).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::NoTools);
+        let backward = chord(
+            KeyCode::Char('o'),
+            pi_tui::input::KeyModifiers {
+                control: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        send(&mut app, &agent, &mut options, backward).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::Default);
+    }
+
+    /// The `filter: …` field of the overlay footer.
+    fn tree_footer_filter(app: &App) -> String {
+        app.selector()
+            .expect("selector")
+            .footer()
+            .iter()
+            .filter(|line| line.contains("filter: "))
+            .find_map(|line| line.split("filter: ").nth(1))
+            .map(|tail| tail.split(" ·").next().unwrap_or(tail).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn ctrl_left_folds_a_branch_and_ctrl_left_again_jumps_to_its_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+
+        // `e2` is the branch point (children `e3` and `e5`), so its
+        // children — not `e2` itself — are foldable, exactly like
+        // upstream's `isFoldable`: the only child of a single-child chain
+        // is not foldable, because folding it would hide the rest of the
+        // chain.
+        move_cursor_to(&mut app, "e2");
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Left, mods_ctrl()),
+        )
+        .await;
+        assert!(
+            options.pickers.tree.folded.is_empty(),
+            "the branch point is not foldable"
+        );
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("tree:e2"),
+            "so the chord climbs to the segment start"
+        );
+
+        // Put the cursor on `e3`, which does start a segment: `⌃←` folds
+        // it and hides `e4`.
+        move_cursor_to(&mut app, "e3");
+        let before = tree_values(&app);
+        assert!(before.contains(&"e4".to_string()), "{before:?}");
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Left, mods_ctrl()),
+        )
+        .await;
+        assert!(
+            options.pickers.tree.folded.contains("e3"),
+            "the segment start folds: {:?}",
+            options.pickers.tree.folded
+        );
+        let folded = tree_values(&app);
+        assert!(folded.len() < before.len(), "{folded:?} vs {before:?}");
+        assert!(!folded.contains(&"e4".to_string()), "{folded:?}");
+        assert!(folded.contains(&"e3".to_string()), "{folded:?}");
+
+        // Already folded: the chord climbs the visible parents to the
+        // first segment start above the cursor (`e2`).
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Left, mods_ctrl()),
+        )
+        .await;
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("tree:e2"),
+            "the fold chord falls back to moving up"
+        );
+    }
+
+    /// Put the picker cursor on the row whose value is `tree:<entry_id>`.
+    fn move_cursor_to(app: &mut App, entry_id: &str) {
+        let index = app
+            .selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .position(|item| item.value == format!("tree:{entry_id}"))
+            .unwrap_or_else(|| panic!("{entry_id} is not visible"));
+        app.selector_mut().expect("selector").set_cursor(index);
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some(format!("tree:{entry_id}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_right_unfolds_what_ctrl_left_folded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+
+        move_cursor_to(&mut app, "e3");
+        let all = tree_values(&app);
+
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Left, mods_ctrl()),
+        )
+        .await;
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Right, mods_ctrl()),
+        )
+        .await;
+        assert!(options.pickers.tree.folded.is_empty());
+        assert_eq!(tree_values(&app), all, "the whole tree is back");
+    }
+
+    fn mods_ctrl() -> pi_tui::input::KeyModifiers {
+        pi_tui::input::KeyModifiers {
+            control: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn shift_t_toggles_the_entry_timestamp_in_the_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+
+        let descriptions = selector_descriptions;
+        assert!(!options.pickers.tree.show_label_timestamps);
+        let before = descriptions(&app);
+
+        let shift_t = chord(
+            KeyCode::Char('t'),
+            pi_tui::input::KeyModifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        send(&mut app, &agent, &mut options, shift_t).await;
+        assert!(options.pickers.tree.show_label_timestamps);
+        assert_ne!(descriptions(&app), before, "the column switched");
+
+        send(&mut app, &agent, &mut options, shift_t).await;
+        assert!(!options.pickers.tree.show_label_timestamps);
+        assert_eq!(descriptions(&app), before);
+    }
+
+    #[tokio::test]
+    async fn another_selector_keeps_its_own_keys() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+        let mut options = InteractiveOptions::default();
+        run_slash_command(&mut app, &agent, &mut options, "/thinking")
+            .await
+            .expect("/thinking");
+        assert_eq!(
+            picker_kind(app.selector().expect("selector")),
+            PickerKind::Other,
+            "the thinking picker is not a session/tree picker"
+        );
+
+        // `Ctrl+D` in the thinking picker is nobody's chord here: the
+        // picker stays open and nothing is armed.
+        send(&mut app, &agent, &mut options, ctrl('d')).await;
+        assert!(app.selector_open());
+        assert!(options.pickers.session.pending_delete.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Extension lifecycle fan-out (LUM-1246)
+    // -----------------------------------------------------------------------
+
+    /// Load one extension source into a fresh host and wrap it in a runtime
+    /// that reports exactly `subscribed`.
+    async fn extension_runtime(
+        tag: &str,
+        source: &str,
+        subscribed: &[&str],
+    ) -> (ExtensionRuntime, JsExtensionHost) {
+        let dir = std::env::temp_dir().join(format!("pi-ext-events-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("extension.js");
+        std::fs::write(&file, source).expect("write extension");
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            pi_extensions::ExtensionEntry {
+                source: file.clone(),
+                id: tag.to_string(),
+                label: None,
+            },
+            source,
+        )
+        .await
+        .expect("load");
+        let _ = std::fs::remove_dir_all(&dir);
+        (ExtensionRuntime::for_test(host.clone(), subscribed), host)
+    }
+
+    /// Poll until the extension has recorded an entry named `name` and
+    /// return every recorded entry type in order.
+    async fn wait_for_entry(host: &JsExtensionHost, name: &str) -> Vec<String> {
+        for _ in 0..300 {
+            let kinds: Vec<String> = host
+                .log()
+                .entries
+                .iter()
+                .map(|entry| entry.custom_type.clone())
+                .collect();
+            if kinds.iter().any(|kind| kind == name) {
+                return kinds;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "extension never saw {name:?}; recorded {:?}",
+            host.log().entries.len()
+        );
+    }
+
+    /// The whole point of the fan-out: an extension that subscribes to the
+    /// upstream lifecycle names sees a real turn, today only `session_start`
+    /// and `resources_discover` ever fired.
+    #[tokio::test]
+    async fn a_js_extension_sees_a_live_turn_through_the_pump() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("agent_start", () => pi.appendEntry("agent_start", {}));
+                pi.on("turn_start", (event) => pi.appendEntry("turn_start", {
+                    index: event.turnIndex,
+                }));
+                pi.on("message_update", (event) => pi.appendEntry("message_update", {
+                    kind: event.assistantMessageEvent.type,
+                }));
+                pi.on("message_end", () => pi.appendEntry("message_end", {}));
+                pi.on("turn_end", () => pi.appendEntry("turn_end", {}));
+                pi.on("agent_end", (event) => pi.appendEntry("agent_end", {
+                    messages: event.messages.length,
+                }));
+                pi.on("session_shutdown", () => pi.appendEntry("session_shutdown", {}));
+                // Subscribed by the runtime but intentionally absent from the
+                // handler table above: `message_start` is dropped by the shim.
+                pi.on("message_start", () => pi.appendEntry("message_start", {}));
+            };
+        "#;
+        let (runtime, host) = extension_runtime(
+            "fanout",
+            source,
+            &[
+                "agent_start",
+                "turn_start",
+                "message_update",
+                "message_end",
+                "turn_end",
+                "agent_end",
+                "session_shutdown",
+            ],
+        )
+        .await;
+        let runtime = Arc::new(runtime);
+        let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
+
+        let pump = start_extension_event_pump(&agent, Some(&runtime))
+            .await
+            .expect("a subscribing extension installs the pump");
+        agent.lock().await.prompt("hi").await.expect("turn");
+
+        let kinds = wait_for_entry(&host, "agent_end").await;
+        pump.abort();
+
+        assert_eq!(kinds.first().map(String::as_str), Some("agent_start"));
+        for expected in ["turn_start", "message_update", "message_end", "turn_end"] {
+            assert!(kinds.iter().any(|kind| kind == expected), "{kinds:?}");
+        }
+        assert_eq!(kinds.last().map(String::as_str), Some("agent_end"));
+        // `message_start` was subscribed by the runtime but has no handler,
+        // and the gating test below covers the other direction: an event
+        // nobody subscribed to never reaches the shim.
+        let agent_end = host
+            .log()
+            .entries
+            .iter()
+            .find(|entry| entry.custom_type == "agent_end")
+            .cloned()
+            .expect("agent_end entry");
+        assert!(agent_end.data["messages"].as_u64().unwrap_or(0) >= 2);
+
+        // Teardown event: on the exit path, not through the fan-out.
+        assert!(runtime.deliver_shutdown(SessionShutdownReason::Quit).await);
+        let kinds = wait_for_entry(&host, "session_shutdown").await;
+        assert_eq!(kinds.last().map(String::as_str), Some("session_shutdown"));
+    }
+
+    /// No subscribers → no task, no channel, no serialisation.
+    #[tokio::test]
+    async fn the_pump_is_skipped_when_nothing_subscribed() {
+        let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
+        assert!(start_extension_event_pump(&agent, None).await.is_none());
+
+        let (runtime, _host) =
+            extension_runtime("silent", "module.exports = function (pi) {};", &[]).await;
+        assert!(!runtime.has_any_subscriber());
+        let runtime = Arc::new(runtime);
+        assert!(start_extension_event_pump(&agent, Some(&runtime))
+            .await
+            .is_none());
+    }
+
+    /// A runtime only forwards the names its extensions subscribed to.
+    #[tokio::test]
+    async fn unsubscribed_events_never_cross_into_js() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("turn_start", (event) => pi.appendEntry("turn_start", {
+                    index: event.turnIndex,
+                }));
+            };
+        "#;
+        let (runtime, host) = extension_runtime("gated", source, &["turn_start"]).await;
+
+        assert!(!runtime.deliver_event(&ExtensionEvent::AgentStart).await);
+        assert!(
+            runtime
+                .deliver_event(&ExtensionEvent::TurnStart {
+                    turn_index: 0,
+                    timestamp: 0,
+                })
+                .await
+        );
+        assert_eq!(host.log().entries.len(), 1);
+        assert_eq!(host.log().entries[0].custom_type, "turn_start");
     }
 }

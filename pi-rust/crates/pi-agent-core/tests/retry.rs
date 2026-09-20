@@ -621,6 +621,8 @@ async fn event_labels(receiver: &mut UnboundedReceiver<AgentEvent>) -> Vec<&'sta
     let mut labels = Vec::new();
     while let Ok(event) = receiver.try_recv() {
         labels.push(match event {
+            AgentEvent::AgentStart => "AgentStart",
+            AgentEvent::AgentEnd { .. } => "AgentEnd",
             AgentEvent::TurnStart => "TurnStart",
             AgentEvent::MessageStart { .. } => "MessageStart",
             AgentEvent::MessageUpdate(_) => "MessageUpdate",
@@ -671,16 +673,19 @@ async fn agent_retries_a_transient_provider_failure_and_recovers() {
     assert_eq!(stream.calls(), 2);
     assert_eq!(last_assistant_text(&agent), "recovered");
     // The failed attempt never opened a stream, so the recovered attempt's
-    // sequence is the only one the observer sees.
+    // sequence is the only one the observer sees. `AgentStart` / `AgentEnd`
+    // bracket the whole `prompt` call (LUM-1246), outside the retry loop.
     assert_eq!(
         event_labels(&mut events).await,
         vec![
             "UserMessage",
+            "AgentStart",
             "TurnStart",
             "MessageStart",
             "MessageUpdate",
             "MessageEnd",
             "TurnEnd",
+            "AgentEnd",
         ]
     );
 }
@@ -704,12 +709,14 @@ async fn agent_restarts_the_sequence_when_a_mid_stream_failure_is_retried() {
         event_labels(&mut events).await,
         vec![
             "UserMessage",
+            "AgentStart",
             "TurnStart",
             "MessageStart",
             "MessageStart",
             "MessageUpdate",
             "MessageEnd",
             "TurnEnd",
+            "AgentEnd",
         ]
     );
 }
@@ -802,6 +809,12 @@ async fn agent_reports_an_aborted_message_when_the_signal_fires_during_backoff()
     assert_eq!(stream.calls(), 1);
     assert_eq!(
         event_labels(&mut events).await,
-        vec!["UserMessage", "TurnStart", "TurnEnd"]
+        vec![
+            "UserMessage",
+            "AgentStart",
+            "TurnStart",
+            "TurnEnd",
+            "AgentEnd",
+        ]
     );
 }

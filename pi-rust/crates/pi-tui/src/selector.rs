@@ -189,6 +189,14 @@ pub struct Selector {
     cursor: usize,
     /// Initial cursor position used when the selector is re-opened.
     initial_cursor: usize,
+    /// Key-hint lines drawn under the list, muted.
+    ///
+    /// Upstream every interactive list ships its own help footer
+    /// (`session-selector.ts`, `tree-selector.ts` `TreeHelp`,
+    /// `model-selector.ts`); this port keeps that per-selector wiring in
+    /// the coding agent and hands the already-formatted lines to the
+    /// shared list so the layout stays in one place.
+    footer: Vec<String>,
 }
 
 impl Selector {
@@ -205,7 +213,22 @@ impl Selector {
             layout: SelectorLayout::default(),
             cursor: 0,
             initial_cursor: 0,
+            footer: Vec::new(),
         }
+    }
+
+    /// Builder: draw these key-hint lines under the list.
+    ///
+    /// The lines are rendered verbatim as muted text, so the caller owns
+    /// the wording and any key formatting.
+    pub fn with_footer(mut self, lines: Vec<String>) -> Self {
+        self.footer = lines;
+        self
+    }
+
+    /// The key-hint lines configured by [`Selector::with_footer`].
+    pub fn footer(&self) -> &[String] {
+        &self.footer
     }
 
     /// Builder: route typed characters into the filter.
@@ -333,6 +356,17 @@ impl Selector {
     /// Current cursor index (into the filtered view).
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Move the cursor to `index` (clamped to the last match).
+    ///
+    /// Used when a selector's item list is rebuilt in place — the session
+    /// picker re-sorts, re-filters and deletes rows without closing, and
+    /// the user's position should survive the rebuild (upstream keeps
+    /// `selectedIndex` and re-clamps it in `setItems`).
+    pub fn set_cursor(&mut self, index: usize) {
+        let last = self.filtered.len().saturating_sub(1);
+        self.cursor = index.min(last);
     }
 
     /// Highlighted item, if any.
@@ -689,6 +723,7 @@ impl Selector {
                 line,
                 SpanStyle::fg(ThemeColor::Muted),
             )]);
+            self.append_footer(&mut lines);
             return lines;
         }
         let (start, end) = self.visible_range();
@@ -709,7 +744,18 @@ impl Selector {
                 SpanStyle::fg(ThemeColor::Muted),
             )]);
         }
+        self.append_footer(&mut lines);
         lines
+    }
+
+    /// Append the muted key-hint lines, if any.
+    fn append_footer(&self, lines: &mut Vec<StyledLine>) {
+        for hint in &self.footer {
+            lines.push(vec![StyledSpan::new(
+                hint.clone(),
+                SpanStyle::fg(ThemeColor::Muted),
+            )]);
+        }
     }
 }
 

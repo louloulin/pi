@@ -225,7 +225,7 @@ pub fn app_default_keybindings(
 
     vec![
         entry("app.interrupt", ["escape"], "Cancel or abort"),
-        entry("app.clear", ["ctrl+c"], "Clear editor"),
+        entry("app.clear", ["ctrl+c"], "Clear the prompt (twice to exit)"),
         entry("app.exit", ["ctrl+d"], "Exit when editor is empty"),
         entry(
             "app.suspend",
