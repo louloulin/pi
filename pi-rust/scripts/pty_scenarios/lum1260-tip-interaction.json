@@ -1,0 +1,27 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1260 tip b5769b585 (binary built 19:55 from that tip)",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs", "src/lib.rs", "README.md", "Cargo.toml"],
+  "distinct_panels": true,
+  "panels": [
+    {"label": "1. idle: startup header hints + onboarding line + composer placeholder + footer (model/session/tokens)", "send": "", "wait": 2.5},
+    {"label": "2. type / -> completion opens above the composer, (1/19) = every implemented command", "send": "/", "wait": 1.2},
+    {"label": "3. type mo -> 8 candidates survive, and copy/thinking/export/fork are among them (upstream filters the name only, so it would show just /model)", "send": "mo", "wait": 0.8},
+    {"label": "4. Down -> the marker moves from /model to the next candidate", "send": "<Down>", "wait": 0.6},
+    {"label": "5. Tab -> applies that candidate (/copy) into the composer", "send": "<Tab>", "wait": 0.8},
+    {"label": "6. Enter -> /copy runs and reports that there is nothing to copy yet", "send": "<Enter>", "wait": 1.0},
+    {"label": "7. Ctrl+U then /model + Enter -> model selector overlay with the faux provider", "send": "<C-u>/model<Enter>", "wait": 1.5},
+    {"label": "8. Esc -> overlay closes, composer back to its placeholder", "send": "<Esc>", "wait": 1.0},
+    {"label": "9. Ctrl+U then @ -> file-path completion over the fixture tree", "send": "<C-u>@", "wait": 1.2},
+    {"label": "10. src -> file candidates narrow", "send": "src", "wait": 0.8},
+    {"label": "11. Tab -> composes the @src/ path token", "send": "<Tab>", "wait": 0.8},
+    {"label": "12. a real turn through the faux provider: the reply lands in the transcript", "send": "<C-u>hi<Enter>", "wait": 4.0},
+    {"label": "13. !local bash: command, output and duration land in the transcript", "send": "!echo pty-harness-ok<Enter>", "wait": 2.5},
+    {"label": "14. Ctrl+O -> footer reports the tool-output state (expanded)", "send": "<C-o>", "wait": 1.0},
+    {"label": "15. /help -> the command surface, wrapped into the transcript (see the clipping/`\\u00b7` reflow finding)", "send": "/help<Enter>", "wait": 1.5},
+    {"label": "16. /hotkeys -> the chord table", "send": "/hotkeys<Enter>", "wait": 1.5},
+    {"label": "17. PgUp -> transcript scrolls back and the jump-to-latest indicator (LUM-1257) appears", "send": "<PgUp><PgUp>", "wait": 1.2}
+  ]
+}

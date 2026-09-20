@@ -1,0 +1,613 @@
+# lum1260-tip-interaction.png — chars, 120x34 cells
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [1] 1. idle: startup header hints + onboarding line + composer placeholder + footer (model/session/tokens)  (cursor 120,33, frame 2fcd27d8fd47, px 6e5b10c5c52f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [2] 2. type / -> completion opens above the composer, (1/19) = every implemented command  (cursor 36,32, frame 81de29578313, px 10c08cb8c0ac, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ help  Show this help text
+  clear  Clear the message view
+  new  Start a new session
+  copy  Copy last agent message to clipboard
+  name  <name> — Set session display name
+  (1/19)
+> /▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [3] 3. type mo -> 8 candidates survive, and copy/thinking/export/fork are among them (upstream filters the name only, so it would show just /model)  (cursor 6,32, frame e0ca6c90f45a, px f8bde40fc53e, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ model  <provider/model> — Select model (opens selector UI)
+  copy  Copy last agent message to clipboard
+  thinking  off|minimal|low|medium|high|xhigh|max — Set the reasoning level
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  (1/8)
+> /mo▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [4] 4. Down -> the marker moves from /model to the next candidate  (cursor 4,31, frame b0f980f461fb, px 1577a14a3a60, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+  model  <provider/model> — Select model (opens selector UI)
+❯ copy  Copy last agent message to clipboard
+  thinking  off|minimal|low|medium|high|xhigh|max — Set the reasoning level
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  (2/8)
+> /mo▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [5] 5. Tab -> applies that candidate (/copy) into the composer  (cursor 9,32, frame 308f31faa8b9, px 08cc0789b932, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> /copy ▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [6] 6. Enter -> /copy runs and reports that there is nothing to copy yet  (cursor 36,32, frame 16eae5b6ba23, px f245c39aa23a, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [7] 7. Ctrl+U then /model + Enter -> model selector overlay with the faux provider  (cursor 56,31, frame 755126bacc94, px 5ec4dcbe51bf, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+Pick a model
+────────────────────────────────────────
+❯ Ling 2.6 1T                     ant-ling
+  Ling 2.6 Flash                  ant-ling
+  Ring 2.6 1T                     ant-ling
+  Claude Haiku 4.5                anthropic
+  Claude Opus 4.5                 anthropic
+  Claude Sonnet 4.5               anthropic
+  GPT-4                           azure-openai-responses
+  GPT-4 Turbo                     azure-openai-responses
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [8] 8. Esc -> overlay closes, composer back to its placeholder  (cursor 56,31, frame 16eae5b6ba23, px 22f850e3606e, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [9] 9. Ctrl+U then @ -> file-path completion over the fixture tree  (cursor 36,32, frame 118b7d502abd, px 97b1da08abc1, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+❯ src/  src
+  README.md  README.md
+  Cargo.toml  Cargo.toml
+  lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [10] 10. src -> file candidates narrow  (cursor 7,32, frame 47a02bcf77ca, px d8279fb0ea2a, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+❯ src/  src
+  lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @src▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [11] 11. Tab -> composes the @src/ path token  (cursor 8,32, frame ff5b9b519381, px 7de35c327a5a, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+
+
+
+> @src/▍
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [12] 12. a real turn through the faux provider: the reply lands in the transcript  (cursor 36,32, frame 28aa469046ed, px ffd5ac89d95b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+> hi
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [13] 13. !local bash: command, output and duration land in the transcript  (cursor 11,26, frame 98637a874f1e, px aedc4c7f340b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+> hi
+  faux-model (faux) hello
+* bash echo pty-harness-ok
+* pty-harness-ok
+* Took 0.1s
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [14] 14. Ctrl+O -> footer reports the tool-output state (expanded)  (cursor 120,33, frame b231369f0ce6, px 480a6aa1af54, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+> hi
+  faux-model (faux) hello
+* bash echo pty-harness-ok
+* pty-harness-ok
+* Took 0.1s
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                       in 0 out 0 ?/8.2k  Tool output: expanded
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [15] 15. /help -> the command surface, wrapped into the transcript (see the clipping/`\u00b7` reflow finding)  (cursor 120,33, frame a4c50ba59186, px 8a262625ca3b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· slash commands: /help show this help text /clear clear the message view /new start a new session /copy copy the last │
+· assistant message to the clipboard /name [name] show or set the session display name /model pick a model (opens      │
+· selector) /session show the current session info /export [path] export the session (HTML, or JSONL for a .jsonl path)│
+· /resume resume a previous session /tree navigate the session tree and switch branches /fork branch a new session from│
+· a user message /clone copy the current session into a new session file /settings show or change interface settings   ┃
+· /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project trust ┃
+· (/trust yes|no) /compact summarize the conversation prefix to free context /hotkeys list the keyboard shortcuts      ┃
+· /extensions list loaded extensions and what they register /exit quit the interactive session keys: Enter submit promp┃
+· Up / Down navigate prompt history PgUp/PgDn scroll the chat log one page Home / End jump to the start / end of the   ┃
+· chat log Ctrl+C abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit on an empty prompt     ┃
+· Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close selector / cancel turn                       ┃
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [16] 16. /hotkeys -> the chord table  (cursor 96,31, frame b8c6c9e577b8, px a025bb513880, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· Ctrl+Shift+Down / Ctrl+Down jump to the next prompt Ctrl+Shift+F search the chat log Enter / Ctrl+G next search hit  │
+· Shift+Enter / Ctrl+Shift+G previous search hit Esc close the search bar app: Esc cancel autocomplete / abort streamin│
+· Ctrl+C clear the prompt (twice: exit) Ctrl+D exit when the prompt is empty Shift+Tab cycle the thinking level Ctrl+P │
+· cycle to the next model Shift+Ctrl+P cycle to the previous model Ctrl+X copy the last assistant message Alt+Enter    │
+· queue a follow-up message Alt+Up restore queued messages to the editor Ctrl+T show or hide thinking blocks Ctrl+O    │
+· expand or collapse tool output (Ctrl+O by default) Alt+H expand or collapse the startup header (Alt+H by default)    │
+· Ctrl+L open the model selector Alt+N start a new session Alt+T open the session tree Alt+F fork a session from a     │
+· message Alt+R resume a session Ctrl+V attach a clipboard image (falls back to pasting text) selectors and completion:│
+· Up move the selection up Down move the selection down PgUp selection page up PgDn selection page down Enter confirm  ┃
+· the selection Esc / Ctrl+C close the selection list Tab path completion / accept autocomplete commands: / slash      ┃
+· commands (/help, /model, /hotkeys, …) Esc close the selector / overlay first                                         ┃
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 (binary built 19:55 from that tip)  |  [17] 17. PgUp -> transcript scrolls back and the jump-to-latest indicator (LUM-1257) appears  (cursor 120,31, frame ddce40391ff4, px fcc557cf600f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+* pty-harness-ok                                                                                                       │
+* Took 0.1s                                                                                                            ┃
+· slash commands: /help show this help text /clear clear the message view /new start a new session /copy copy the last ┃
+· assistant message to the clipboard /name [name] show or set the session display name /model pick a model (opens      ┃
+· selector) /session show the current session info /export [path] export the session (HTML, or JSONL for a .jsonl path)│
+· /resume resume a previous session /tree navigate the session tree and switch branches /fork branch a new session from│
+· a user message /clone copy the current session into a new session file /settings show or change interface settings   │
+· /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project trust │
+· (/trust yes|no) /compact summarize the conversation prefix to free context /hotkeys list the keyboard shortcuts      │
+· /extensions list loaded extensions and what they register /exit quit the interactive session keys: Enter submit promp│
+· Up / Down navigate prompt history PgUp/Pg ↓ Jump to latest message · End Home / End jump to the start / end of the   │
+> type a prompt — /help for commands
+Faux test model  session-18d721a4ccab5a7d                                                  in 0 out 0 ?/8.2k  ? for help
