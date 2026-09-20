@@ -4319,45 +4319,6 @@ impl App {
     }
 
     /// Paint the composer's autocomplete dropdown above the prompt.
-    ///
-    /// [`Editor::autocomplete_render_lines`] supplies the visible window
-    /// (already centred on the selection and carrying the `❯` marker); the
-    /// highlighted row additionally gets the list-selection background.
-    /// Nothing is painted while the dropdown is closed, so a caller that
-    /// never installs a provider keeps the pre-autocomplete frame byte for
-    /// byte.
-    fn apply_autocomplete(&self, area: Rect, buf: &mut Buffer) {
-        let editor = self.prompt.editor();
-        if !editor.is_showing_autocomplete() || area.width == 0 || area.height == 0 {
-            return;
-        }
-        let rows = editor.autocomplete_render_lines(area.width as usize);
-        if rows.is_empty() {
-            return;
-        }
-        let height = rows.len().min(area.height as usize);
-        let selected = editor.autocomplete_selected_row();
-        let top = area.y + area.height - height as u16;
-        let body = SpanStyle::fg(ThemeColor::Text).to_style(&self.theme);
-        let highlight =
-            SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg).to_style(&self.theme);
-        for (offset, row) in rows.iter().take(height).enumerate() {
-            let is_selected = selected == Some(offset);
-            let y = top + offset as u16;
-            let mut text: String = row.chars().take(area.width as usize).collect();
-            if is_selected {
-                let width = text.chars().count();
-                text.extend(std::iter::repeat(' ').take(area.width as usize - width));
-            }
-            for (col, ch) in text.chars().enumerate() {
-                if let Some(cell) = buf.cell_mut((area.x + col as u16, y)) {
-                    cell.set_char(ch);
-                    cell.set_style(if is_selected { highlight } else { body });
-                }
-            }
-        }
-    }
-
     /// Paint the jump-to-latest indicator on the viewport's bottom edge and
     /// record its rectangle for the mouse hit test.
     ///
@@ -4532,13 +4493,6 @@ impl App {
             // `render_snapshot` stays content-only (see the module docs).
             self.apply_jump_to_latest(message_area, buf);
         }
-
-        // The composer's autocomplete dropdown hangs off the bottom edge of
-        // the message viewport, directly above the prompt, and is painted
-        // over the indicator when both are on screen. Unlike the pointer
-        // overlay it is part of the composer, so it is painted on both the
-        // live and snapshot paths.
-        self.apply_autocomplete(message_area, buf);
 
         // The editor region: a custom component (a non-overlay `custom`
         // session or `set_editor_component`) replaces the prompt line

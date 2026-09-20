@@ -193,6 +193,81 @@ pub fn help_text() -> String {
     out
 }
 
+/// The composer's autocomplete index: one row per command this binary
+/// actually implements, in the order [`help_text`] prints them.
+///
+/// The dropdown must list exactly the commands [`handle_command`] accepts —
+/// advertising a command that does not run is worse than advertising
+/// nothing. `autocomplete_commands_lists_every_implemented_command` pins
+/// both ends of that contract.
+pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
+    ("help", "Show this help text", None),
+    ("clear", "Clear the message view", None),
+    ("new", "Start a new session", None),
+    ("copy", "Copy last agent message to clipboard", None),
+    ("name", "Set session display name", Some("<name>")),
+    (
+        "model",
+        "Select model (opens selector UI)",
+        Some("<provider/model>"),
+    ),
+    ("session", "Show session info and stats", None),
+    (
+        "export",
+        "Export session (HTML default, or a .jsonl path)",
+        Some("[path]"),
+    ),
+    ("resume", "Resume a different session", None),
+    ("tree", "Navigate session tree (switch branches)", None),
+    (
+        "fork",
+        "Create a new fork from a previous user message",
+        None,
+    ),
+    (
+        "clone",
+        "Duplicate the current session at the current position",
+        None,
+    ),
+    ("settings", "Open settings menu", None),
+    (
+        "thinking",
+        "Set the reasoning level (opens the selector)",
+        Some("[level]"),
+    ),
+    ("trust", "Show or set project trust", Some("yes|no")),
+    (
+        "compact",
+        "Manually compact the session context",
+        Some("[instructions]"),
+    ),
+    ("hotkeys", "Show all keyboard shortcuts", None),
+    (
+        "extensions",
+        "List loaded extensions and what they register",
+        None,
+    ),
+    ("exit", "Quit the interactive session", None),
+];
+
+/// Build the [`pi_tui::autocomplete`] command list for
+/// [`AUTOCOMPLETE_COMMANDS`].
+///
+/// No argument completions are registered: the port has no argument
+/// completer for any of these (upstream ships one only for `/model`'s
+/// provider list, which the selector owns).
+pub fn autocomplete_commands() -> Vec<pi_tui::autocomplete::SlashCommand> {
+    AUTOCOMPLETE_COMMANDS
+        .iter()
+        .map(|(name, description, hint)| {
+            let command =
+                pi_tui::autocomplete::SlashCommand::new(*name).with_description(*description);
+            match hint {
+                Some(hint) => command.with_argument_hint(*hint),
+                None => command,
+            }
+        })
+        .collect()
 }
 
 /// The `/extensions` overview: every loaded source, what the extensions
@@ -1042,8 +1117,25 @@ mod tests {
     #[test]
     fn autocomplete_commands_match_the_parser_exactly() {
         const IMPLEMENTED: &[&str] = &[
-            "help", "clear", "new", "copy", "name", "model", "session", "export", "resume", "tree",
-            "fork", "clone", "settings", "trust", "compact", "hotkeys", "exit",
+            "help",
+            "clear",
+            "new",
+            "copy",
+            "name",
+            "model",
+            "session",
+            "export",
+            "resume",
+            "tree",
+            "fork",
+            "clone",
+            "settings",
+            "thinking",
+            "trust",
+            "compact",
+            "hotkeys",
+            "extensions",
+            "exit",
         ];
         let names: Vec<String> = autocomplete_commands()
             .into_iter()
@@ -1075,7 +1167,10 @@ mod tests {
             .filter(|command| command.argument_hint.is_some())
             .map(|command| command.name)
             .collect();
-        assert_eq!(with_hints, ["name", "model", "export", "trust", "compact"]);
+        assert_eq!(
+            with_hints,
+            ["name", "model", "export", "thinking", "trust", "compact"]
+        );
     }
 
     /// The installed list has to produce candidates through the same trait

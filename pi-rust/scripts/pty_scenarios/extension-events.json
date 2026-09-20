@@ -1,0 +1,15 @@
+{
+  "cols": 110,
+  "rows": 44,
+  "caption": "LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs", "README.md"],
+  "extensions": ["scripts/pty_scenarios/extension-events.js"],
+  "final_send": "<C-d>",
+  "panels": [
+    {"label": "1. boot: widget is installed by the session_start handler", "send": "", "wait": 4.0},
+    {"label": "2. `!echo hello` → user_bash delivered (driver-level emit)", "send": "!echo hello<Enter>", "wait": 3.5},
+    {"label": "3. a full faux turn → agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end", "send": "hi there<Enter>", "wait": 9.0},
+    {"label": "4. second turn: counters keep climbing (per-turn events are not one-shot)", "send": "again<Enter>", "wait": 9.0}
+  ]
+}

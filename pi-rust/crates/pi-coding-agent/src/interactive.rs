@@ -351,14 +351,11 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
 /// complete through the same dropdown because they are real commands —
 /// `/extensions` lists them and `handle_command` dispatch does not care who
 /// registered them.
-fn install_composer_autocomplete(app: &mut App, base_path: PathBuf) {
-    install_composer_autocomplete_with(app, base_path, Vec::new());
-}
-
 /// [`install_composer_autocomplete`] plus the commands the loaded extensions
-/// registered. Split from the two-argument form so the existing LUM-1236
-/// regression test keeps driving the built-in table alone.
-fn install_composer_autocomplete_with(
+/// registered (`pi.registerCommand`), which Stage 70 (LUM-1238) folds into
+/// the same dropdown — an extension command is a real command, so it must
+/// complete like one.
+fn install_composer_autocomplete(
     app: &mut App,
     base_path: PathBuf,
     extra: Vec<pi_tui::autocomplete::SlashCommand>,
@@ -425,7 +422,7 @@ async fn run_loop(
     // `CombinedAutocompleteProvider` on the editor at startup; `tool_cwd` is
     // the base the `@` file completion walks, and the extension-registered
     // commands ride in the same table (Stage 70 / LUM-1238).
-    install_composer_autocomplete_with(
+    install_composer_autocomplete(
         &mut app,
         tool_cwd,
         extension_autocomplete_commands(&options),
@@ -4666,7 +4663,7 @@ mod tests {
             "you are pi",
         ));
         let mut app = App::new(&agent, AppConfig::default());
-        install_composer_autocomplete(&mut app, std::env::temp_dir());
+        install_composer_autocomplete(&mut app, std::env::temp_dir(), Vec::new());
 
         for ch in ['/', 'c', 'o', 'm'] {
             app.step(key(KeyCode::Char(ch)));
@@ -4702,7 +4699,7 @@ mod tests {
         let mut app = App::new(&agent, AppConfig::default());
         app.messages_mut()
             .push(pi_tui::message::MessageItem::assistant("existing output"));
-        install_composer_autocomplete(&mut app, std::env::temp_dir());
+        install_composer_autocomplete(&mut app, std::env::temp_dir(), Vec::new());
 
         for ch in ['/', 'm'] {
             app.step(key(KeyCode::Char(ch)));
@@ -4734,7 +4731,7 @@ mod tests {
         let mut app = App::new(&agent, AppConfig::default());
         let extra = vec![pi_tui::autocomplete::SlashCommand::new("ext-echo")
             .with_description("echo through an extension")];
-        install_composer_autocomplete_with(&mut app, std::env::temp_dir(), extra);
+        install_composer_autocomplete(&mut app, std::env::temp_dir(), extra);
 
         for ch in ['/', 'e', 'x', 't'] {
             app.step(key(KeyCode::Char(ch)));

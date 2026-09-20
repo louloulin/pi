@@ -1143,25 +1143,6 @@ impl Editor {
         rows
     }
 
-    /// The index within [`Editor::autocomplete_render_lines`] that is
-    /// highlighted, or `None` when the list is empty or the selection sits
-    /// outside the visible window.
-    ///
-    /// The App paints the dropdown's selected row with the list-selection
-    /// background; the row index depends on the same centring
-    /// [`Editor::autocomplete_visible_range`] does, so it lives here next to
-    /// the renderer rather than being recomputed by the caller.
-    pub fn autocomplete_selected_row(&self) -> Option<usize> {
-        let len = self.autocomplete_items.len();
-        if len == 0 {
-            return None;
-        }
-        let visible = self.autocomplete_max_visible.min(len);
-        let (start, _) = self.autocomplete_visible_range(visible);
-        (self.autocomplete_selected >= start && self.autocomplete_selected < start + visible)
-            .then(|| self.autocomplete_selected - start)
-    }
-
     /// The `(start, end)` window of candidates to render, keeping the
     /// selection centred like [`crate::Selector`].
     fn autocomplete_visible_range(&self, visible: usize) -> (usize, usize) {

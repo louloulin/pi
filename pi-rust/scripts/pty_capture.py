@@ -29,12 +29,25 @@ Scenario file schema (JSON):
       "cols": 120, "rows": 34,
       "args": ["--model", "faux/faux-model"],
       "fixtures": ["src/main.rs", "README.md"],
+      "extensions": ["scripts/pty_scenarios/lifecycle.js"],
       "panels": [
         {"label": "idle", "send": "",     "wait": 1.5},
         {"label": "slash", "send": "/",   "wait": 0.8},
         {"label": "narrow", "send": "mo", "wait": 0.6, "skip_capture": true}
       ]
     }
+
+`extensions` lists JS sources to load as global extensions. Each entry
+is either an object mapping a file name to inline source, or a path
+(relative to the repo root) whose file is used. They are written into
+the child's `$HOME/.pi/agent/extensions/` so the run exercises the real
+global-extension search path (project-local `.pi/extensions` is gated by
+project trust, which a fresh temp cwd has not granted).
+
+`final_send` (optional) is a key sequence sent after the last panel and
+before the harness falls back to SIGTERM/SIGKILL. Use it to let a
+scenario exit *gracefully* — `<C-d>` quits the TUI, which is the only way
+the process runs its shutdown path (extension `session_shutdown`).
 
 `send` is literal text plus key tokens: `<Enter> <Esc> <Tab> <BS> <Up>
 <Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>`.
@@ -387,6 +400,21 @@ def main() -> int:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("// fixture for pty_capture.py\n")
+    # Real extension sources, under the global search path so the run
+    # covers extension loading + the event fan-out end to end.
+    declared = scenario.get("extensions") or {}
+    if isinstance(declared, dict):
+        sources = dict(declared)
+    else:
+        sources = {}
+        for rel in declared:
+            with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                sources[os.path.basename(rel)] = fh.read()
+    for name, source in sources.items():
+        path = os.path.join(home, ".pi", "agent", "extensions", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(source)
 
     env = dict(os.environ)
     env.update(
@@ -425,6 +453,31 @@ def main() -> int:
             head = f"[{index}] {label}" if not caption else f"{caption}  |  [{index}] {label}"
             cards.append((head, snapshot(screen), screen.cursor.x, screen.cursor.y))
     finally:
+        send = scenario.get("final_send")
+        exited = False
+        status = 0
+        if send:
+            try:
+                os.write(master, encode_keys(send))
+                drain(master, stream, idle=0.6, hard_timeout=10.0)
+            except OSError:
+                pass  # the child may already be gone; the kill path below decides
+            # Give the graceful path a moment to finish (shutdown hooks,
+            # session flush) before the kill fallback below.
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    exited = True
+                    break
+                time.sleep(0.1)
+        if exited:
+            if os.WIFEXITED(status):
+                print(f"child exited on {send!r}: code {os.WEXITSTATUS(status)}")
+            else:
+                print(f"child exited on {send!r}: signal {os.WTERMSIG(status)}")
+        else:
+            print(f"child did not exit on {send!r}; sending SIGTERM/SIGKILL")
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -434,7 +487,10 @@ def main() -> int:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        os.waitpid(pid, 0)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
         os.close(master)
         if not args.keep_temp:
             shutil.rmtree(home, ignore_errors=True)

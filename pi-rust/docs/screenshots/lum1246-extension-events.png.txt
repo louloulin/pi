@@ -1,0 +1,185 @@
+# lum1246-extension-events.png — chars, 110x44 cells
+
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [1] 1. boot: widget is installed by the session_start handler  (cursor 110,43) =====
+pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=0
+  turn_start=0
+  message_start=0
+  message_update=0
+  message_end=0
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=0
+  agent_end=0
+  user_bash=0
+  input=0
+  handlers-run=1
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [2] 2. `!echo hello` → user_bash delivered (driver-level emit)  (cursor 11,40) =====
+pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=0
+  turn_start=0
+  message_start=0
+  message_update=0
+  message_end=0
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=0
+  agent_end=0
+  user_bash=1
+  input=0
+  handlers-run=2
+* bash echo hello
+* hello
+* Took 0.1s
+
+> type a prompt — /help for commands
+Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [3] 3. a full faux turn → agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end  (cursor 110,41) =====
+pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=1
+  turn_start=1
+  message_start=1
+  message_update=1
+  message_end=1
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=1
+  agent_end=1
+  user_bash=1
+  input=1
+  handlers-run=10
+* hello                                                                                                      │
+* Took 0.1s                                                                                                  ┃
+> hi there                                                                                                   ┃
+  faux-model (faux) hello                                                                                    ┃
+> type a prompt — /help for commands
+Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [4] 4. second turn: counters keep climbing (per-turn events are not one-shot)  (cursor 10,40) =====
+pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+LUM-1246 lifecycle events delivered by the host:
+  session_start=1
+  agent_start=2
+  turn_start=2
+  message_start=2
+  message_update=2
+  message_end=2
+  tool_execution_start=0
+  tool_execution_update=0
+  tool_execution_end=0
+  turn_end=2
+  agent_end=2
+  user_bash=1
+  input=2
+  handlers-run=18
+> hi there                                                                                                   │
+  faux-model (faux) hello                                                                                    │
+> again                                                                                                      ┃
+  faux-model (faux) hello                                                                                    ┃
+> type a prompt — /help for commands
+Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
