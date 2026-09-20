@@ -11825,3 +11825,9 @@ pub fn split_deferred_tools<'a>(context: &'a Context, enabled: bool,
   `crates/pi-ai/tests/{estimate,error_body,deferred_tools}.rs`、
   `crates/pi-coding-agent/src/compaction.rs` 与本文档；未碰 `pi-tui` / `pi-extensions` /
   `pi-coding-agent/src/tools/*` / `pi-protocol`。
+
+补记（推送哈希）：本轮代码提交 `ebce093b1`（+ 合并提交 `efef7fbba`）+ 本轮章节提交
+`f9533a60a`，`git push origin HEAD:feature/pi.rs` 把 `feature/pi.rs` 从 `026b6827c`（LUM-1090 轮）
+**快进至 `f9533a60a`**，`git ls-remote` 复查一致：`f9533a60af164e411e1a8cc8b961559136a5376b`；
+留档分支 `work/lum-1157` 一并推送（同哈希）。本条哈希补记是紧随其后的纯文档提交，
+tips 再前进一格后以 `git ls-remote` 为准。
