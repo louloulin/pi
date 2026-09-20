@@ -13298,3 +13298,71 @@ frontier 上两条最大的缺口**都横切 `pi-extensions` + `pi-coding-agent`
 * 复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1179`（LUM-1179 遗留，11G；依赖产物命中，增量 check 24s / clippy 31s / 全量 test 6m11s）。开工根分区 `50G` 用 `34G`、**14G 可用**，全程 `--offline`。
 * 教训沿用：**只用 `rustfmt --edition 2021 <leaf-file>`**；协调轮的基线取两次（动手前一次、推送前一次），本轮推送前 `feature/pi.rs` 未前进（仍是 `368b68564`），无需重接。
 * Git 身份沿用 `multica-agent <agent@multica.local>`；本轮推送 `work/lum-1183-integrate` 与 `feature/pi.rs`。
+
+## LUM-1185 round — 协调轮：3/3 满槽 + frontier 全阻塞 → 本轮不派发；跨 workdir 复用 target dir 的实测结论 + 磁盘交接
+
+### 一、开工盘点（无可派发项、无可合并项）
+
+* `feature/pi.rs` tip = `fb189e466`（LUM-1183 轮末），与本 run 基线一致，已含 LUM-1178 / LUM-1179 / LUM-1181 的全部内容。
+* 并发 **3/3 满**：本 run（LUM-1185）+ LUM-1180（`pi-ai/compat` 内建工厂 + host 流式桥，在飞）+ LUM-1184（pi-tui 扩展 UI 宿主面，`in_progress`，实测正在 `cargo test -p pi-tui` 链接中）。
+  → **本轮不派发任何新任务**：「最多 3 个并发」是硬约束而非目标，满槽时协调轮的职责退化为盘点 + 验证 + 交接。
+* 可合并性逐条复核：`origin` 上 77 条 `work/*` 分支中 76 条 `ahead_of_feature.rs = 0`（`feature/pi.rs` 的祖先，或内容已被后续轮次覆盖）；唯一非祖先的 `work/lum-1173` 领先的 11 个提交**全是 LUM-1138 的 rustfmt 风格提交**，其树相对 `feature/pi.rs` **无任何独有文件**（`git diff --name-status origin/feature/pi.rs origin/work/lum-1173 | grep '^A'` 为空，`git diff --stat` 只有 `feature/pi.rs` 单方向的新增）。
+  → **本轮没有可合并的分支**；`work/lum-1180` / `work/lum-1184` 尚未推送（仍在飞）。
+
+### 二、验证（`work/lum-1185` @ `fb189e466`）
+
+| 命令（`--offline`，`CARGO_HOME=/tmp/cargo-home`，`CARGO_TARGET_DIR=/tmp/pi-fresh-1179`） | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | **exit 0**，0 行输出 |
+| `cargo check --workspace --all-targets` | **exit 0**（1m39s，复用第三方依赖产物） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **exit 0**（仅 `rquickjs-core` 依赖的既有上游提示） |
+| `cargo test -p pi-protocol -p pi-extensions` | **exit 0**（pi-protocol 14 passed；pi-extensions 全绿） |
+| `cargo test --workspace` | **未跑完 → ENOSPC** |
+
+全量测试本轮**没有跑成**，且失败原因是环境而非代码：
+
+```
+error: couldn't create a temp dir: No space left on device (os error 28) at path "/tmp/pi-fresh-1179/debug/deps/..."
+collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped
+error: could not compile `pi-ai` (test "error_body") due to 1 previous error
+```
+
+**但结论可以严格继承**：本轮 tip `fb189e466` 与 LUM-1183 轮实测全绿的 `85753a581` 之间
+
+```console
+$ git diff --name-only 85753a581 fb189e466
+pi-rust/docs/FEATURE_PI_RS_STATUS.md          # 唯一差异，且只是本文档自身
+```
+
+即两份提交的**代码树完全相同**，LUM-1183 轮实测的 `127 套件 / 1941 passed / 0 failed / 2 ignored` 对本轮 tip 逐字成立，无需重跑。**唯一欠账**是 LUM-1180 / LUM-1184 合入后必须重新做一次全量确认（那时代码树才会真正变化）。
+
+### 三、跨 workdir 复用 `CARGO_TARGET_DIR` 的实测结论（本轮新增运维知识）
+
+LUM-1183 轮留下的 `/tmp/pi-fresh-1179` 实测 **19G**：`debug/deps` 16G（约 200 个测试二进制，单个 80–195MB，最大 `pi` 193M、`pi_coding_agent` 188M）、`debug/incremental` 7G、`debug/examples` 0.6G、`debug/build` 0.3G。
+
+**结论：跨 workdir 复用 target dir 只能复用第三方依赖产物，本地 crate 必须重编重链。** 本轮在 `lum-1185-…` workdir 复用 `lum-1183-…` 留下的 1179 时，`cargo test --workspace` 仍然重新编译并链接了全部 `pi-*` 测试目标——因为本地 crate 的 fingerprint 含源码**绝对路径**，路径一变就全部失效。也就是说 1179 里那 4.2G / 200 个陈旧测试二进制对本轮**零复用价值**，只有 rlib 层面的第三方依赖（serde / tokio / reqwest / ring / rquickjs…）命中缓存（这也是 `check` / `clippy` 仍能在 24–100s 内完成的原因）。
+
+由此得出两条可执行建议：
+
+1. **分层 target dir**：第三方依赖固定一个共享目录（真正可复用），本地 crate 每轮独立；或干脆每轮自建目录，别指望 19G 的旧目录能省链接时间。
+2. **全量 `cargo test --workspace` 需要 ≥15G 余量**（约 200 个测试二进制 × 平均 100MB），链接阶段是最吃盘的一步；`CARGO_INCREMENTAL=0`（incremental 实测占 7G）与 `CARGO_PROFILE_TEST_DEBUG=0` 可把总产物压到 1/4。
+
+本轮据此清理：（a）`/tmp/pi-fresh-1178`（2.9G）与 `/tmp/pi-fresh-1173`（1.5G）——对应 issue 均已 `in_review`、无 cargo 进程持有；（b）1179 里 04:44 之前的陈旧可执行产物 + `examples` + 全部 `incremental`。合计交还约 18G 给并发中的 LUM-1184（其自建 target 在同一块 overlay 上，开工时根分区仅余 592M，中途又掉到 3.6G——若不清盘，LUM-1184 会踩到与本轮相同的 ENOSPC）。
+
+### 四、frontier（本轮后）
+
+1. **质量门**：fmt / clippy `-D warnings` / check 本轮实跑全绿；全量 test 结果按上面第二节的论证继承，合并 1180/1184 后需补跑。
+2. **插件生态桥**（两个最大缺口，都在飞，故本轮零派发）：
+   * `@earendil-works/pi-ai/compat` 内建 provider 工厂 + host 流式事件桥 —— **LUM-1180 在飞**；
+   * `ctx.ui.custom()` / `setWidget` / `setFooter` / `setHeader` / `setEditorText` 的 pi-tui 宿主面 —— **LUM-1184 在飞**（pi-extensions 侧的 `ctx.ui.*` 接线仍待后续轮）。
+3. **`pi.registerProvider(...)` host 桥**：与 LUM-1180 同属 `pi-ai/compat` 一族、同一批文件，等 LUM-1180 合入后再评估，避免同文件并发。
+4. **pi-extensions 引擎级残余**：`fs.watch`、key-based WebCrypto（`crypto.subtle` 的 `importKey` / `sign` / `encrypt`）、`node:test` / `node:assert` 全局。三条都维持原判：**本环境做不了或无消费方**。
+   * 补充一个此前没写下的候选：`fs.watch` 理论上可用「基于既有 `fs.stat` 的轮询 watcher」绕开离线 registry 里缺失的 `notify` crate，但这会**改变语义**（失去 sub-second 事件时延、inotify 的 rename 语义、以及 Node 的 `recursive` 行为），属于需要用一轮专门决策的 divergence，不建议顺手做。
+5. **provider 家族**（`bedrock-converse` / `cohere-v2` / `google-vertex`）、**图像侧**、**`assistant-message-frame` / 事件枚举扩宽**：维持 LUM-1177 / LUM-1183 结论不变（无消费方 / 无云凭据 / 横切全部 provider 适配器并与在飞任务同域）。
+
+### 五、下一轮（LUM-1186 或后续协调轮）的明确动作
+
+1. 开工先 `git fetch` 并核对 `active_task_count`，再决定派发；满槽则重复本轮流程（盘点 → 定向验证 → 交接），**不要为了「有事做」而制造同文件并发**。
+2. LUM-1180 / LUM-1184 推送后按「文件面窄的先合」排序：先 `work/lum-1180`（`pi-extensions` + `pi-ai` + `pi-coding-agent`），再 `work/lum-1184`（只碰 `pi-tui`）；冲突大概率只在 `crates/pi-extensions/docs/NODE_BUILTINS.md` 的 frontier 表。
+3. **合并后必须补跑全量 `cargo test --workspace`**（本轮欠账），并确认套件数 / passed 相对 `127 / 1941` 的增量与两路新单测数量相符。
+4. 磁盘：开工先看 `df -h /`，余量 < 15G 时先清陈旧 target dir，再动构建。
