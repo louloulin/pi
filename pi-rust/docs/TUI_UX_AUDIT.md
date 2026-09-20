@@ -34,6 +34,11 @@ worker 的 stage 划分。
 > followUp），**不是**中途插入当前 turn；真正的 mid-turn steer 需要 core 暴露共享队列并补发
 > `UserMessage` 事件，留作后续切片。
 
+> **第三轮审计（LUM-1221）**：P0-1 与 P1-3 均已落地（Stage 58 / Stage 61），本轮把注意力从
+> 「会话内容的呈现」转到「用户到 agent 的输入通道」与「状态反馈」，结论是**入口缺失**还在：
+> `!`/`!!` 本地 bash 通道零实现（P1-4）、`app.clipboard.pasteImage`（alt+v）零消费者、
+> `TurnUsage` 不进界面。新增可执行切片见「三点五、第三轮补充」与第五节 62/63/64。
+
 > **行号校正（LUM-1219，tip `570f6158d`）**：LUM-1215 写下的 `app.rs:1849-1852` / `:1236-1239` /
 > `:1772` / `:1778` 是 `3e7566bf2` 之前的旧坐标，被 LUM-1213（thinking 渲染）的合并往下推了约 83 行。
 > 现在请一律以 P1-3 表格里校正后的坐标为准；**代码结构未变**（同一处 `prompt.clear()` + 同一处忙时
@@ -68,6 +73,14 @@ worker 的 stage 划分。
 ## 三、问题清单（按用户体验影响排序）
 
 ### P0-1 工具输出不折叠、不可展开
+
+> **已修（Stage 58 = LUM-1214，`6d4f64e62`，LUM-1221 轮合入 `feature/pi.rs` 的 `76d1d634e`）**。
+> 交互路径接上了已有的富渲染器：`pi-tui` 定义 `ToolBlock` / `ToolBlockRenderer` 接口与
+> `MessageView::tools_expanded` / `tool_preview_lines`（默认 `TOOL_PREVIEW_LINES = 4`），
+> 折叠时只画尾部 N 行 + `… (+M lines, Ctrl+O to expand)`；`app.tools.expand`（ctrl+o，可被
+> `keybindings.json` 覆盖）一键全展开并给状态栏 flash；鼠标单击只切该块
+> （同格释放才生效，拖拽选词与滚轮语义不变）；`pi-coding-agent` 侧 `InteractiveToolRenderer`
+> 以 `expanded=true` 运行渲染器，避免其自身常量先裁行。下面的原始分析保留作为对照。
 
 - 现象：一次 `read`/`bash` 的完整结果被塞进一行，既没有截断预览，也没有展开入口。
 - 证据：`crates/pi-tui/src/message.rs:715` `format_tool` 拼 `[tool:name] args → result`；
@@ -182,11 +195,17 @@ worker 的 stage 划分。
 修复方向：按上面 1/2/3 三刀切，建议先落 2+3（`App` 内队列 + 键位），1 视是否需要跨 turn 持久化再定。
 已停放为 **Stage 61 = LUM-1216**（见第五节），建议优先级高于 Stage 58。
 
-### P1-4 没有 `!cmd` 本地 shell 通道
+### P1-4 没有 `!cmd` 本地 shell 通道（LUM-1221 复核后升级为「入口缺失」）
 
 - 上游 `!` 直接跑本地命令、`!!` 跑但不进上下文；这是「不问模型先看一眼」的常用动作。
+  上游证据（LUM-1221 复核）：`isBashMode` 由编辑器 `onChange` 从 `text.trimStart().startsWith("!")` 推出并发起
+  编辑器边框换色（`packages/coding-agent/src/modes/interactive/interactive-mode.ts:2907-2912`），提交分支在
+   `:3106-3123` 拆分 `!!`（`isExcluded`）与 `!`，忙时给 `A bash command is already running. Press Esc to cancel it first.`
+  而不是静默排队；启动头用 `rawKeyHint("!", …)` 提示（`:932`、`:943`）。
+- Rust 侧零实现：`pi-rust/crates/pi-coding-agent/src/` 全树无 `isBashMode` / `startsWith("!")` 等价物。
 - 修复方向：编辑器前缀识别（已有 `autocomplete.rs` 的前缀逻辑可参考）+ `tool_executor` 的
-  bash 通路。
+  bash 通路。与 Stage 61 已落地的 pending 队列有一处交集：bash 忙时应「拒绝并提示」而不是入队（上游语义）。
+- 建议：Stage 62。
 
 ### P2 其它
 
@@ -196,6 +215,22 @@ worker 的 stage 划分。
 - 会话级 keybindings 热重载：`reload_keybindings` 已实现（`keybindings.rs:789`），但渲染循环
   没有触发点（`interactive.rs:222` 的 `_keybindings` 注释已写明这点）。
 - 启动头可展开（上游 `ExpandableText`）：与 P0-1 用同一套折叠机制，建议合并实现。
+
+## 三点五、第三轮补充（LUM-1221，对照 Martty 的「输入通道 / 信息密度」）
+
+第二轮把注意力放在「会话内容的呈现」上；第三轮改看「用户到 agent 的输入通道」与「状态反馈」，
+因为 Stage 61 / 60 / 58 已经把队列、会话命令与折叠补齐，剩下的缺口集中在**入口**和**反馈**两类：
+
+| 问题 | pi-rust 现状 | 上游 / Martty 对位 | 建议 stage |
+| --- | --- | --- | --- |
+| `!cmd` / `!!cmd` 本地 shell | 零实现（见 P1-4） | 上游 `interactive-mode.ts:2907-2912`、`:3106-3123`；Martty 把客户端命令留在本地、不进 agent 上下文（`src/app.rs` 测试 `client_plugin_command_invocation_stays_out_of_the_agent_prompt`） | 62 |
+| `app.clipboard.pasteImage`（alt+v） | 键位已定义（`keybindings.rs:165`、`:273`），**零消费者**（`grep -rn pasteImage pi-rust/crates --include=*.rs` 只剩 `tests/keybindings.rs`） | 上游 `onPasteImage`：按路径挂图片，无图片时退化为纯文本粘贴（`interactive-mode.ts:2913-2915`）；Martty 有 composer 图片 chip 全语义：`chip_at` / `delete_token_at`（退格吃掉整个 token 而不是一个字符）/ `draft_split_keeps_text_and_images_interleaved` | 63 |
+| token / cache 指标不进界面 | `TurnUsage` 只在 `maybe_auto_compact` 里被读一次（`crates/pi-coding-agent/src/interactive.rs:1438`），界面无脚注 | Martty 有 footer usage 快照（`acp_resume_usage_snapshot_reaches_the_footer_once`） | 64（低优先，与折叠提示共用脚注行） |
+| 流式等待没有动效 | `pi-tui` 全树无 spinner（`grep -rn spinner` 零命中），忙时只有状态行文本 | Martty 有 subagent/turn spinner（`a_running_subagent_keeps_the_spinner_advancing`） | 低优先，随 62 一起评估 |
+
+结论：TUI 的下一批工作按「先入口、后密度」排序，即 **62（`!cmd`）→ 63（图片 chip + `pasteImage`）→ 64（指标脚注）**。
+Stage 58/61/60 均已合入，62/63 的文件面（`editor.rs` + 提交分支 + `app.rs`）与已合入的折叠面**只共享
+`interactive.rs` 的拦截块**，可顺序落地。
 
 ## 四、本轮已交付
 
@@ -213,14 +248,17 @@ worker 的 stage 划分。
 
 | Stage | 内容 | 验收 | 依赖 / 风险 |
 | --- | --- | --- | --- |
-| 58 | 工具输出折叠 + `app.tools.expand` + 点击工具块展开 + 启动头可展开 | 默认只渲染 N 行 + `(+M lines)` 提示，Ctrl+O 与点击都能展开；`format_tool` 之外的富渲染器接到交互路径 | 选词/搜索/快照测试坐标会变，需要一次性更新；建议先加注入参数再改默认值 |
-| 59 | 补齐 `app.*` 动作第 1 批：`app.thinking.toggle`、`app.editor.external`、`app.session.new`/`tree`/`fork`/`resume` | 每个动作有独立测试 + `/hotkeys` 同步列出 | `/tree`、`/fork` 依赖 LUM-1209 写路径；外部编辑器需要 teardown/restore 终端 |
-| 60 | 会话命令补齐：`/new`、`/copy`、`/name`、`/tree`、`/fork` | 命令解析 + 行为测试 | `/login`、`/logout` 涉及凭据，单独评估后再排 |
-| 61（LUM-1216） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 忙时 `App::submit` 入队而非 `return`；turn 结束后按 steer / followUp 语义投递；dequeue 取回编辑器；测试覆盖入队 / 取回 / 消费 | 与 58 的富渲染器接线不重叠；`MessageItem` 加字段会碰 58/59 也可能改的结构体，需协调；**建议优先于 58**（正确性缺陷） |
+| 58（LUM-1214，已合入） | 工具输出折叠 + `app.tools.expand` + 点击工具块展开 | 已交付 `6d4f64e62`，LUM-1221 轮合入（`76d1d634e`）；折叠提示 + N 可注入 + 键位可覆盖 + 单击单块，测试 `tests/tool_blocks.rs` 与 `tools_render.rs` 快照 | 无（选词/搜索快照未受影响，因折叠只在装了渲染器的交互路径生效） |
+| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）。剩余：`app.editor.external`、`app.session.tree`/`fork`/`resume` | `/tree`、`/fork` 依赖 LUM-1212 的 `branch_*` 读路径；外部编辑器需要 teardown/restore 终端 |
+| 60（LUM-1218，已合入） | 会话命令补齐：`/new`、`/copy`、`/name` | 已交付 `86f46dea0`，LUM-1220 轮合入 `feature/pi.rs`（3 个命令 + `app.session.new` 键位 + 6 个新测试） | `/tree`、`/fork` 仍等 Stage 56 |
+| 61（LUM-1216，已合入） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 已交付 `8cab3a136`，LUM-1220 轮合入 `feature/pi.rs` | 无；mid-turn steer 需 core 暴露共享队列，留作后续切片 |
+| 62（LUM-1221 新建） | `!cmd` / `!!cmd` 本地 bash 通道 + 忙时拒绝语义 | 前缀识别 + 执行 + `!!` 不进上下文 + 忙时提示 | 提交分支与 Stage 61 的队列相邻，需先判 bash 再判队列 |
+| 63（LUM-1221 新建，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧 |
 
-并发约束：LUM-1210 轮时 LUM-1209（Stage 55）+ LUM-1211（Stage 57）+ 协调轮已占满 3 槽；
-LUM-1215 轮（第二轮 TUI 审计）仍是 3 个在飞（另加 LUM-1213 = 重复协调轮），故两轮都**不派发**，
-上面的 58/59/60/61 留给下一轮协调按槽位释放情况逐个开。
+并发约束：LUM-1219 轮是 3 worker 在飞的重复轮（零派发）；LUM-1221 开工时在飞 2 个
+（LUM-1214 Stage 58、LUM-1220 协调轮），LUM-1214 与 LUM-1220 均在本轮内收工（且 LUM-1214 的
+产物未提交、由本轮抢救），故本轮把 58 合入后按「非冲突面优先」派发 Stage 56 = LUM-1212
+（`backlog` → `todo`，解 `/tree`/`/fork` 的读路径阻塞），62/63 待其占用槽位释放后晋升。
 
 > **落地状态（LUM-1220 更新）**：Stage 61（LUM-1216）已合入 `feature/pi.rs`（`c234068d1`）；
 > Stage 60（LUM-1218）已合入（`b91a3ae12`），实际落地 `/new`、`/copy`、`/name` + `app.session.new`
@@ -229,7 +267,21 @@ LUM-1215 轮（第二轮 TUI 审计）仍是 3 个在飞（另加 LUM-1213 = 重
 
 ## 六、验证
 
+第三轮（LUM-1221，合入 Stage 58 + Stage 61 + Stage 60 后的 `feature/pi.rs` 全量实跑）：
+
 ```
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test --workspace --offline
+  145 套件 / 2159 passed / 0 failed / 2 ignored    （上一基线 144 / 2149 / 0 / 2）
+
+$ … cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished `dev` profile … （仅依赖 crate `rquickjs-core` 有 12 条 warning，本仓零 warning）
+
+$ cargo fmt --all -- --check
+  干净
+```
+
+首轮（LUM-1210）：
 $ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p pi-coding-agent -p pi-tui --offline
   59 个 test target：1291 passed / 0 failed / 0 ignored

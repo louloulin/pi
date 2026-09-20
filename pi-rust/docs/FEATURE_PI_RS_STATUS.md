@@ -15047,3 +15047,112 @@ $ cargo fmt --all -- --check
 * **流程提醒（第五次记录）**：autopilot 每 20 分钟一轮，LUM-1213 / 1215 / 1217 / 1219 / 1220 / 1221 已是同题多轮；
   LUM-1221 与本轮**并发**，会看到同一批已完成 worker 线。建议把该 autopilot 周期调长或暂停，
   由「合并轮」按需触发，否则多轮会争抢同一批槽位与磁盘。
+
+## LUM-1221 round — 与 LUM-1220 **并发的重复协调轮**：核验 61+60 已在 tip（门数字与 LUM-1220 逐字一致）→ **抢救 Stage 58（LUM-1214 完成后零提交、产物在工作树里）并合入** → 合并 tip 全量实跑 **145 / 2159 / 0 / 2**；回收 22G target；第三轮 TUI 审计（输入通道）；派发 Stage 56 + Stage 62
+
+### 一、开工基线与并发实况
+
+* 开工 `origin/feature/pi.rs` = `e87bc59ee`（LUM-1219 文档轮）。本轮按惯例先合并 Stage 61（`8cab3a136`）
+  与 Stage 60（`86f46dea0`），四处冲突全部人工过；合并后**发现 LUM-1220（11:00 起的同题轮）已经做了同一件事**
+  并推到 `d22c5d694`（含 `c234068d1` = Stage 61、`403bcb6c8` = Stage 60）。
+* 对账结论：LUM-1220 的 `interactive.rs` 冲突解比本轮的版本多一行分隔注释，**语义完全相同**；
+  本轮在自己那份等价合并树上跑全量门得到 `144 / 2149 / 0 / 2`，与 LUM-1220 自报的
+  `144 / 2149 / 0 / 2` **逐字一致** —— 两条独立合并线的交叉验证，故弃用本轮那份重复提交，
+  改以 `d22c5d694` 为基（不重复 push）。
+* `multica agent tasks`：本轮开工时 `running = 3`（LUM-1214 / LUM-1220 / 本轮）；
+  11:35:17 LUM-1214 的 run 完成，11:20 起的 LUM-1222 又是同题轮。**连续第六轮同题 autopilot**。
+
+### 二、抢救 Stage 58（本轮最高价值动作）
+
+LUM-1214 的 run 于 `11:35:17` 完成并自报「已完成」（评论含完整改动清单 + 自测门），
+但其工作树状态是 **13 个文件、1,093 insertions 全部未提交、未 push**（`git log` 仍停在 `570f6158d`），
+`.gc_meta.json` 已登记完成、`pi-rust/target` 22G 等待回收 —— 产物随时会随工作树一起消失。
+
+处置（LUM-1219 的「已并入即删 target」不适用于此，因为**根本没有提交**）：
+
+1. 在 LUM-1214 工作树上按其自报清单 `git add` 13 个文件（含新增 `pi-tui/tests/tool_blocks.rs`），
+   用 `multica-agent` 身份提交为 `6d4f64e62`，并 `git push origin HEAD:refs/heads/work/LUM-1214` 固定证据。
+2. 在自己的 worktree 以 `d22c5d694` 为基 `git merge --no-ff origin/work/LUM-1214`，四处冲突全部人工解：
+
+| 文件 | 冲突 | 解法 |
+| --- | --- | --- |
+| `pi-coding-agent/src/interactive.rs` | Stage 61 的 `app.set_session_name(...)` vs Stage 58 安装 `InteractiveToolRenderer` | 两者都留（同一段 `run_loop` 初始化，顺序无关） |
+| `pi-tui/src/app.rs` | 两条 `use crate::message::{…}` | 合并为一行（`PendingMessageKind` + `Role` + `ToolBlockRenderer`） |
+| `pi-tui/src/lib.rs` | 两条 `pub use message::{…}` | 合并为一条（8 个导出项） |
+| `pi-tui/src/message.rs` | 两处：`MessageView` 末尾字段（61 加 2 个 pending 字段 vs 58 加 2 个折叠字段）+ `Clone` 字段列表 | 字段全部保留；**58 把 `#[derive(Debug, Default)]` 改成了手写 `impl Default`**（为了 `TOOL_PREVIEW_LINES`），故手写 `Default` 里补上 `pending_steering` / `pending_follow_up`（这是唯一需要「想清楚」的一处，不是机械合并） |
+
+合并提交 = `76d1d634e`（`--no-ff`，保留 58 的单线历史）。
+
+### 三、合并后全量门（`76d1d634e` 上实跑）
+
+```console
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test --workspace --offline
+  145 套件 / 2159 passed / 0 failed / 2 ignored
+$ … cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished `dev` profile …（仅 vendor `rquickjs-core` 12 条 warning，本仓零 warning）
+$ cargo fmt --all -- --check
+  干净
+```
+
+* 相对上一权威基线 `144 / 2149 / 0 / 2`：**套件 +1、passed +10、failed 0**（= Stage 58 的
+  `tests/tool_blocks.rs` 新套件 + 10 个新用例）；`pi-extensions` 那条已知并行满载偶发用例本轮未复现。
+* 验证点：这是「58 折叠 × 61 pending 队列 × 60 拦截块」三条线的首次同树验证 —— 也是 58 与 61
+  两个**都改 `MessageView`** 的切片第一次共存，全绿说明手写的 `Default` 与 `Clone` 都补齐了。
+* 本轮的等价合并树（61+60）单独也跑过一次全量门：`144 / 2149 / 0 / 2`，与 LUM-1220 逐字一致。
+
+### 四、第三轮 TUI 审计：从「内容呈现」转到「输入通道」
+
+Stage 58/60/61 把「呈现」与「会话入口」补齐后，本轮复核 Martty（ratatui）与上游 TS 的**输入通道**，
+把两处原属 P2 的条目升级为「入口缺失」（写入 `docs/TUI_UX_AUDIT.md` 的「三点五、第三轮补充」）：
+
+| 问题 | 证据 | 新建 stage |
+| --- | --- | --- |
+| `!` / `!!` 本地 bash 通道零实现 | 上游 `interactive-mode.ts:2907-2912`（`isBashMode`）+ `:3106-3123`（`!!` 拆分、忙时拒绝并回填编辑器）；Rust 全树无等价物 | 62 = LUM-1223 |
+| `app.clipboard.pasteImage`（alt+v）零消费者 | `grep -rn pasteImage pi-rust/crates --include=*.rs` 只剩键位定义与测试；上游 `onPasteImage` 在 `:2913-2915`；Martty 有 chip 全语义（`chip_at` / `backspace_on_a_chip_cuts_the_whole_token`） | 63 = LUM-1224（停放） |
+
+另记录两条低优先项（token/cache 脚注、流式 spinner），不单独开 stage。
+
+### 五、派发决定（本轮派发 2 个）
+
+LUM-1214 / LUM-1220 都在本轮内收工，槽位释放；按「TUI 优先 + 非冲突面优先」派发：
+
+1. **Stage 62 = LUM-1223（新建，`backlog` → `todo`）**：P1-4 `!cmd`/`!!cmd` 本地 bash 通道。
+   与已合入的 58/61 共享 `interactive.rs` 的提交分支，故描述里点明「先判 bash 前缀、再判 pending 队列」
+   与「忙时拒绝而非入队」的语义分界。
+2. **Stage 56 = LUM-1212（`backlog` → `todo`，补写本轮基线）**：`pi-session` 的
+   `usage_ledger` / `session-stats` / `branch_*` 读路径。选它的理由：与 LUM-1223 **零文件重叠**、
+   且是 `/tree`、`/fork`（Stage 59 停车场）唯一的前置读路径。
+3. **Stage 63 = LUM-1224 保持 `backlog`（停放）**：与 LUM-1223 同时改 `editor.rs`/`app.rs`，必须串行。
+
+派发后 `multica daemon status` → `running = 4`（LUM-1212 + LUM-1223 + 本轮 + 11:40 起的 LUM-1222 同题轮）。
+**这一瞬时的 4 是「并发同题轮」造成的**：LUM-1221（本轮）与 LUM-1222 都会在分钟级内收工，
+稳态 = 2 个工人 ≤ 上限 3。为不再叠加，本轮**没有**把 LUM-1224 一起 promote。
+
+### 六、磁盘（本轮净回收 22G）
+
+| 时点 | `df` | 说明 |
+| --- | --- | --- |
+| 开工 | `44G / 50G`（余 2.7G） | 仍在 LUM-1214 的 22G target 阴影下 |
+| 抢救后、回收前 | `45G / 50G`（余 2.3G） | 本轮全量门 + clippy 后的峰值 |
+| 回收 LUM-1214 的 22G target（已完成 run、工作树已提交并 push） | **`23G / 50G`（余 24G）** | 本轮净收益 |
+
+* 本轮私有 target 1.3G（关 debuginfo / incremental），收尾删除。
+* 记录一条实测结论：**平台会在 run 完成后自动回收其 `target/`** —— LUM-1218 的 workdir 在本轮进行中
+  从 2.2G 掉到 36M（只剩源码与 sidecar），导致「跨 workdir 复用 target」的做法不可靠
+  （本轮因此浪费了一次 `cargo check`）。跨 run 复用只在**对方 run 仍在飞**时有效。
+* LUM-1214 的 22G 也印证了 LUM-1220 的怀疑：该 run 没开 `CARGO_PROFILE_{DEV,TEST}_DEBUG=0`。
+  新一轮派发的两个 worker 已在描述里写明必须带这组环境变量。
+
+### 七、frontier / 下一轮衔接
+
+* **第一件事**：确认 `work/LUM-1214`（`6d4f64e62`）与 `work/LUM-1212` 的产物是否已合入；
+  `work/LUM-1214` 已由本轮合入 `feature/pi.rs`，无需再合。
+* **第二件事**：把 **LUM-1223（Stage 62）** 的产物合入；它是 `interactive.rs` 提交分支的改动，
+  与已合入的 58/61 在同一函数，冲突要逐处过。
+* **第三件事**：LUM-1212（Stage 56）落地后晋升 **LUM-1224（Stage 63）** + Stage 59 余下的
+  `app.session.tree`/`fork`/`resume`（`/tree`、`/fork` 届时才具备读路径）。
+* **流程提醒（第六次记录）**：autopilot 20 分钟一轮，LUM-1213 / 1215 / 1217 / 1219 / 1220 / 1221 / 1222 已七轮同题。
+  本轮与 LUM-1220 的重复成本是真实发生的（两份合并 + 两份全量门）；建议调长周期，或只保留合并轮按需触发。
+* **给 worker 的硬约束（已写进 LUM-1212 / LUM-1223 描述）**：**run 结束前必须先 commit 再 push**。
+  Stage 58 的 run 就是完成时零提交，产物差点随工作树被回收。
