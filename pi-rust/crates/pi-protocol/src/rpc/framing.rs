@@ -114,7 +114,8 @@ impl FrameDecoder {
         let mut offset = 0usize;
         while offset < chunk.len() {
             if self.expected_payload_length.is_none() {
-                let header_bytes = (FRAME_HEADER_LENGTH - self.header_length).min(chunk.len() - offset);
+                let header_bytes =
+                    (FRAME_HEADER_LENGTH - self.header_length).min(chunk.len() - offset);
                 self.header[self.header_length..self.header_length + header_bytes]
                     .copy_from_slice(&chunk[offset..offset + header_bytes]);
                 self.header_length += header_bytes;
@@ -142,7 +143,8 @@ impl FrameDecoder {
             let expected = self.expected_payload_length.unwrap_or(0);
             let remaining = expected - self.payload.len();
             let take = remaining.min(chunk.len() - offset);
-            self.payload.extend_from_slice(&chunk[offset..offset + take]);
+            self.payload
+                .extend_from_slice(&chunk[offset..offset + take]);
             offset += take;
             if self.payload.len() == expected {
                 let frame = std::mem::take(&mut self.payload);

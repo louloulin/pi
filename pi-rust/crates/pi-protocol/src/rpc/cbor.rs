@@ -221,9 +221,9 @@ fn write_number(writer: &mut Writer, number: &Number) -> Result<(), CborError> {
     }
     if let Some(value) = number.as_i64() {
         // Non-negative i64 values were already handled by `as_u64`.
-        let encoded = (-1_i64).checked_sub(value).ok_or_else(|| {
-            CborError::new("CBOR integers must be safe JavaScript integers")
-        })?;
+        let encoded = (-1_i64)
+            .checked_sub(value)
+            .ok_or_else(|| CborError::new("CBOR integers must be safe JavaScript integers"))?;
         return write_argument(writer, 1, encoded as u64);
     }
     let value = number
@@ -272,7 +272,11 @@ impl Reader<'_> {
     }
 }
 
-fn read_item(reader: &mut Reader<'_>, options: CborOptions, depth: usize) -> Result<Value, CborError> {
+fn read_item(
+    reader: &mut Reader<'_>,
+    options: CborOptions,
+    depth: usize,
+) -> Result<Value, CborError> {
     if depth > options.max_depth {
         return Err(CborError::new(format!(
             "CBOR nesting depth exceeds configured limit of {}",
@@ -283,7 +287,9 @@ fn read_item(reader: &mut Reader<'_>, options: CborOptions, depth: usize) -> Res
     let major_type = initial >> 5;
     let additional = initial & 0x1f;
     match major_type {
-        0 => Ok(Value::Number(Number::from(read_argument(reader, additional)?))),
+        0 => Ok(Value::Number(Number::from(read_argument(
+            reader, additional,
+        )?))),
         1 => {
             let magnitude = read_argument(reader, additional)?;
             if magnitude > i64::MAX as u64 {
@@ -459,7 +465,11 @@ mod tests {
         let encoded = encode_cbor(&json!(8.0), CborOptions::default()).unwrap();
         assert_eq!(encoded, vec![0x08]);
         assert_eq!(
-            decode_cbor(&[0xfb, 0x40, 0x20, 0, 0, 0, 0, 0, 0], CborOptions::default()).unwrap(),
+            decode_cbor(
+                &[0xfb, 0x40, 0x20, 0, 0, 0, 0, 0, 0],
+                CborOptions::default()
+            )
+            .unwrap(),
             json!(8)
         );
     }
