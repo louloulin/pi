@@ -33,6 +33,60 @@ const SESSION_JSONL: &str = concat!(
     "\n",
 );
 
+/// A session with one pre-renderable call (`find`, `grep`) and one the
+/// template renders itself (`bash`), each with a matching result.
+const TOOLS_SESSION_JSONL: &str = concat!(
+    r#"{"type":"session","version":3,"id":"session-tools","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/tmp/project"}"#,
+    "\n",
+    r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_find","name":"find","arguments":{"pattern":"*.rs","path":"."}}],"model":"faux-model","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3},"stopReason":"toolUse","timestamp":1733234401000}}"#,
+    "\n",
+    r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"toolResult","toolCallId":"call_find","toolName":"find","content":[{"type":"text","text":"src/main.rs\nsrc/lib.rs"}],"isError":false,"timestamp":1733234402000}}"#,
+    "\n",
+    r#"{"type":"message","id":"b1","parentId":"a2","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_grep","name":"grep","arguments":{"pattern":"fn main","path":"src"}}],"model":"faux-model","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3},"stopReason":"toolUse","timestamp":1733234403000}}"#,
+    "\n",
+    r#"{"type":"message","id":"b2","parentId":"b1","timestamp":"2024-12-03T14:00:04.000Z","message":{"role":"toolResult","toolCallId":"call_grep","toolName":"grep","content":[{"type":"text","text":"src/main.rs:1:fn main() {}"}],"isError":false,"timestamp":1733234404000}}"#,
+    "\n",
+    r#"{"type":"message","id":"c1","parentId":"b2","timestamp":"2024-12-03T14:00:05.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_bash","name":"bash","arguments":{"command":"ls"}}],"model":"faux-model","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3},"stopReason":"toolUse","timestamp":1733234405000}}"#,
+    "\n",
+    r#"{"type":"message","id":"c2","parentId":"c1","timestamp":"2024-12-03T14:00:06.000Z","message":{"role":"toolResult","toolCallId":"call_bash","toolName":"bash","content":[{"type":"text","text":"a.txt"}],"isError":false,"timestamp":1733234406000}}"#,
+    "\n",
+);
+
+/// Decode the `{{SESSION_DATA}}` base64 payload out of an exported document.
+fn payload_session_data(html: &str) -> serde_json::Value {
+    const PREFIX: &str = "<script id=\"session-data\" type=\"application/json\">";
+    let start = html.find(PREFIX).expect("payload node") + PREFIX.len();
+    let end = html[start..].find("</script>").expect("payload end") + start;
+    let decoded = decode_base64(&html[start..end]);
+    serde_json::from_slice(&decoded).expect("payload is JSON")
+}
+
+/// Minimal standard-alphabet base64 decoder for the test payload.
+fn decode_base64(input: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' => continue,
+            _ => continue,
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
 fn write_session(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, contents).expect("write session fixture");
@@ -73,6 +127,38 @@ fn exports_a_session_file_to_a_self_contained_html_document() {
     let second = dir.path().join("again.html");
     export_from_file(&input, Some(&second)).expect("export again");
     assert_eq!(html, std::fs::read_to_string(&second).expect("read again"));
+}
+
+#[test]
+fn pre_renders_non_template_tools_into_the_html_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = write_session(dir.path(), "tools.jsonl", TOOLS_SESSION_JSONL);
+    let output = dir.path().join("tools.html");
+
+    export_from_file(&input, Some(&output)).expect("export");
+
+    let html = std::fs::read_to_string(&output).expect("read html");
+    let payload = payload_session_data(&html);
+    let rendered = payload.get("renderedTools").expect("renderedTools present");
+
+    // `find` / `grep` are outside the template's own set, so the Rust
+    // renderer produced inline-styled HTML for both the call and the result.
+    let find = &rendered["call_find"];
+    let call_html = find["callHtml"].as_str().expect("find callHtml");
+    assert!(call_html.contains("<span style="), "{call_html}");
+    assert!(call_html.contains("find"), "{call_html}");
+    let result_html = find["resultHtmlExpanded"]
+        .as_str()
+        .expect("find resultHtmlExpanded");
+    assert!(result_html.contains("src/main.rs"), "{result_html}");
+
+    let grep_call = rendered["call_grep"]["callHtml"]
+        .as_str()
+        .expect("grep callHtml");
+    assert!(grep_call.contains("/fn main/"), "{grep_call}");
+
+    // `bash` is rendered by `template.js` itself, so it is never pre-rendered.
+    assert!(rendered.get("call_bash").is_none(), "{rendered}");
 }
 
 #[test]
@@ -121,6 +207,7 @@ fn exports_an_active_session_to_html_and_jsonl() {
         &messages,
         Some("be helpful"),
         &tools,
+        Some("dark"),
     );
     assert_eq!(data.entries.len(), 3);
     assert_eq!(data.tools.as_ref().unwrap()[0].name, "bash");

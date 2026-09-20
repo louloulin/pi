@@ -15,9 +15,10 @@
 use std::collections::BTreeMap;
 
 use pi_tui::theme::{
-    ansi256_to_hex, builtin_theme_json, default_custom_themes_dir, resolve_var_refs, ColorValue,
-    ThemeJson,
+    ansi256_to_hex, builtin_theme, builtin_theme_json, default_custom_themes_dir, load_theme,
+    resolve_var_refs, ColorValue, ThemeJson,
 };
+use pi_tui::{ColorMode, Theme};
 
 /// Theme used when the caller passes no name — upstream falls back to the
 /// default theme (`getDefaultTheme()`), which is `dark`.
@@ -97,6 +98,27 @@ pub fn theme_export_colors(
         resolve(&export.card_bg),
         resolve(&export.info_bg),
     )
+}
+
+/// Resolve a theme document into the painted [`Theme`] the pre-renderer needs
+/// (upstream's `theme` object handed to `createToolHtmlRenderer`).
+///
+/// Built-ins win over the custom themes directory (same lookup order as
+/// [`load_theme_json`]); an unknown name falls back to the default theme so an
+/// export never fails over a bad theme name.
+///
+/// The mode is true colour: the export paints into HTML, where every ANSI
+/// sequence is translated to hex/rgb inline styles, so there is no reason to
+/// degrade to the 256-colour approximation a terminal might need.
+pub fn resolved_theme(theme_name: Option<&str>) -> Option<Theme> {
+    let name = theme_name.unwrap_or(DEFAULT_THEME_NAME);
+    load_theme(
+        name,
+        ColorMode::TrueColor,
+        default_custom_themes_dir().as_deref(),
+    )
+    .or_else(|_| builtin_theme(DEFAULT_THEME_NAME, ColorMode::TrueColor))
+    .ok()
 }
 
 /// Build the `{{THEME_VARS}}` block: one `--token: value;` line per resolved
@@ -292,5 +314,14 @@ mod tests {
     fn unknown_theme_degrades_to_derived_colors() {
         let colors = export_colors(Some("does-not-exist"));
         assert!(colors.page_bg.starts_with("rgb("), "{:?}", colors);
+    }
+
+    #[test]
+    fn resolved_theme_falls_back_to_the_default() {
+        assert!(resolved_theme(Some("dark")).is_some());
+        assert!(resolved_theme(Some("light")).is_some());
+        // An unknown name still yields a paintable theme.
+        assert!(resolved_theme(Some("does-not-exist")).is_some());
+        assert!(resolved_theme(None).is_some());
     }
 }

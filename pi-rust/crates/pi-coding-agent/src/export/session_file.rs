@@ -72,12 +72,16 @@ impl EntryChain {
 ///
 /// `messages` is the agent's in-memory message log in Rust's flat shape; it
 /// is converted to the upstream entry tree with a linear `parentId` chain.
+/// `theme_name` selects the palette the pre-rendered tool HTML (upstream
+/// `preRenderCustomTools`) is painted with; pass the same name that is handed
+/// to `generate_html` so both halves of the document agree.
 pub fn session_data_from_messages(
     session_id: &str,
     cwd: &str,
     messages: &[Message],
     system_prompt: Option<&str>,
     tools: &[ToolDefinition],
+    theme_name: Option<&str>,
 ) -> SessionData {
     let now = Utc::now();
     let mut chain = EntryChain::default();
@@ -105,6 +109,8 @@ pub fn session_data_from_messages(
         .and_then(Value::as_str)
         .map(str::to_string);
 
+    let rendered_tools = super::pre_render_custom_tools(&entries, cwd, theme_name);
+
     SessionData {
         header: Some(json!({
             "type": "session",
@@ -128,7 +134,7 @@ pub fn session_data_from_messages(
                 })
                 .collect()
         }),
-        rendered_tools: None,
+        rendered_tools,
     }
 }
 
@@ -320,13 +326,22 @@ pub fn parse_session_jsonl(content: &str, label: &str) -> Result<SessionData, Ex
         .and_then(Value::as_str)
         .map(str::to_string);
 
+    // The CLI export has no live agent state, so the theme falls back to the
+    // default one — the same theme `generate_html(…, None)` uses.
+    let cwd = header
+        .get("cwd")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let rendered_tools = super::pre_render_custom_tools(&entries, &cwd, None);
+
     Ok(SessionData {
         header: Some(header),
         entries,
         leaf_id,
         system_prompt: None,
         tools: None,
-        rendered_tools: None,
+        rendered_tools,
     })
 }
 
@@ -557,6 +572,9 @@ pub fn fixture_session_data() -> SessionData {
             },
         }),
     ];
+    // Only `bash` is present, which `template.js` renders itself, so this is
+    // always `None` — but it exercises the same wiring a real fixture would.
+    let rendered_tools = super::pre_render_custom_tools(&entries, "/tmp/project", Some("dark"));
     SessionData {
         header: Some(header),
         entries,
@@ -567,7 +585,7 @@ pub fn fixture_session_data() -> SessionData {
             description: "Run a shell command".to_string(),
             parameters: json!({"type": "object"}),
         }]),
-        rendered_tools: None,
+        rendered_tools,
     }
 }
 
@@ -586,8 +604,14 @@ mod tests {
     #[test]
     fn converts_in_memory_messages_to_a_linked_entry_tree() {
         let messages = vec![user("hello")];
-        let data =
-            session_data_from_messages("session-1", "/tmp/project", &messages, Some("system"), &[]);
+        let data = session_data_from_messages(
+            "session-1",
+            "/tmp/project",
+            &messages,
+            Some("system"),
+            &[],
+            Some("dark"),
+        );
         assert_eq!(data.entries.len(), 1);
         let entry = &data.entries[0];
         assert_eq!(entry["type"], "message");
