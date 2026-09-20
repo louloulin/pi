@@ -265,7 +265,7 @@ use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
-use crate::message::{MessageItem, MessageView};
+use crate::message::{MessageItem, MessageView, PendingMessageKind};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
 use crate::search::{
@@ -714,6 +714,20 @@ pub enum StepOutcome {
     /// User pressed Ctrl+C / Ctrl+D — the caller should shut the App
     /// down and (optionally) fall back to print mode.
     Exit,
+}
+
+/// What [`App::follow_up_from_editor`] did with the editor buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowUpOutcome {
+    /// The editor was empty — nothing to submit or queue.
+    Empty,
+    /// The App was idle, so the chord behaves exactly like Enter. The
+    /// caller runs its normal submit path on the returned text (slash
+    /// commands included); the App has already cleared the buffer.
+    Submitted(String),
+    /// A turn was in flight, so the text was queued behind it
+    /// (upstream's `streamingBehavior: "followUp"`). The buffer is clear.
+    Queued,
 }
 
 /// Geometry of the chat-log scrollbar, in absolute terminal cells.
@@ -1306,7 +1320,15 @@ impl App {
     /// by [`App::drain_agent_events`].
     pub fn submit(&mut self, agent: Arc<AsyncMutex<Agent>>, text: String) {
         if self.turn_busy.load(Ordering::SeqCst) {
-            return; // already busy
+            // A turn is in flight: never drop the input. Upstream submits
+            // this with `streamingBehavior: "steer"` so it joins the turn;
+            // the port has no window into the locked `Agent`, so it queues
+            // the text and the driver delivers it at the next turn
+            // boundary. See `App::pending_len` / `App::take_next_pending`.
+            self.messages
+                .push_pending(PendingMessageKind::Steer, text.clone());
+            self.prompt.push_history(&text);
+            return;
         }
         if self.event_rx.is_none() {
             // App constructed without a subscription — re-establish one.
@@ -1335,6 +1357,62 @@ impl App {
             }
             busy.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Submit the editor buffer with `app.message.followUp` semantics
+    /// (upstream's `handleFollowUp`,
+    /// `packages/coding-agent/src/modes/interactive/interactive-mode.ts`).
+    ///
+    /// While a turn is in flight the text is queued and delivered after it
+    /// ends; when the App is idle the chord behaves exactly like Enter, so
+    /// the caller runs its normal submit path on the returned text. Either
+    /// way the editor buffer ends up empty — the text is never dropped.
+    pub fn follow_up_from_editor(&mut self) -> FollowUpOutcome {
+        if self.prompt.text().trim().is_empty() {
+            return FollowUpOutcome::Empty;
+        }
+        let text = self.prompt.text().to_string();
+        self.prompt.clear();
+        if self.turn_busy.load(Ordering::SeqCst) {
+            self.messages
+                .push_pending(PendingMessageKind::FollowUp, text.clone());
+            self.prompt.push_history(&text);
+            FollowUpOutcome::Queued
+        } else {
+            FollowUpOutcome::Submitted(text)
+        }
+    }
+
+    /// Number of prompts queued behind the in-flight turn.
+    pub fn pending_len(&self) -> usize {
+        self.messages.pending_len()
+    }
+
+    /// Remove and return the next queued prompt, steering before follow-up.
+    /// The driver calls this once a turn has finished and feeds the text
+    /// back through its normal submit path.
+    pub fn take_next_pending(&mut self) -> Option<String> {
+        self.messages.take_next_pending()
+    }
+
+    /// Restore every queued prompt to the editor (upstream's
+    /// `restoreQueuedMessagesToEditor`), steering before follow-up, keeping
+    /// any text already in the buffer at the end. Returns how many prompts
+    /// were restored; `0` means the queues were empty and the editor is
+    /// untouched.
+    pub fn restore_pending_to_editor(&mut self) -> usize {
+        let queued = self.messages.take_all_pending();
+        if queued.is_empty() {
+            return 0;
+        }
+        let restored = queued.len();
+        let mut parts: Vec<String> = queued.into_iter().map(|(_, text)| text).collect();
+        let current = self.prompt.text().to_string();
+        if !current.trim().is_empty() {
+            parts.push(current);
+        }
+        self.prompt.editor_mut().set_text(parts.join("\n\n"));
+        restored
     }
 
     /// Cancel the in-flight turn (if any).
