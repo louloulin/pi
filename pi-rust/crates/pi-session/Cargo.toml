@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SQLite session backend for the Pi Rust port. Round-trips SessionEntry values with the TS `packages/session-backends/sqlite-node` port (via JSON payloads)."
+description = "SQLite session backend for the Pi Rust port. Reads both the upstream `packages/session-backends/sqlite-node` format (AgentHarness storage format 4) and its own Stage 5 layout; writing the upstream layout is a later slice."
 
 [lints]
 workspace = true

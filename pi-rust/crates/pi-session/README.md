@@ -2,11 +2,13 @@
 
 `pi-session` is the Rust analogue of
 [`packages/session-backends/sqlite-node`](../../packages/session-backends/sqlite-node)
-in the TS monorepo. It writes
-[`SessionEntry`](https://docs.rs/pi-protocol) rows to a SQLite database
-(one row per entry) with the payload column zstd-compressed (level 3)
-and JSON-encoded. The TS port reads/writes the same payload format, so
-files written by either side round-trip cleanly.
+in the TS monorepo. It opens session databases produced by **either**
+side: this crate's own `SessionWriter` layout, or the upstream
+`AgentHarness storage format 4 / storageVersion 1` layout the TS writer
+produces. Reading the upstream layout is supported today; **writing** it
+is not — `SessionWriter` still emits the Rust layout, so a file written
+here is only readable by this crate. Aligning the write path is a later
+slice (see [Layouts](#layouts) below).
 
 ## When to use
 
@@ -15,7 +17,22 @@ files written by either side round-trip cleanly.
 - Migrating the Stage 4 JSONL session files into a single, queryable
   SQLite database (see `pi session migrate`).
 
-## Schema (v1)
+## Layouts
+
+Two incompatible layouts exist on disk. `SessionReader::open` detects
+which one a file uses by probing the table structure
+(`SchemaLayout::{RustLegacy, UpstreamV4}`) — never `PRAGMA user_version`,
+which the upstream writer does not set.
+
+| | upstream `session-backends/sqlite-node` (AgentHarness storage format 4 / `storageVersion 1`) | `pi-session` (`RustLegacy`) |
+| --- | --- | --- |
+| session row | `sessions(id, created_at, parent_session_id, storage_version, metadata, message_count, usage_payload, next_seq)` | `sessions(id, created_at, parent_session, cwd, version, metadata)` |
+| entry row | `entries(session_id, id, parent_id, seq, type, custom_type, timestamp, payload TEXT)`, PK `(session_id, id)` | `entries(session_id, seq, parent_seq, entry_id, parent_entry_id, type, timestamp, payload BLOB)`, PK `(session_id, seq)` |
+| payload | plain JSON text (`entries.ts` `JSON.parse(row.payload)`) | zstd (level 3) compressed JSON BLOB |
+| other tables | `scalar_values`, `list_values`, `usage_ledger`, `branch_entries`, `branch_meta` + 3 triggers | `meta(key, value)` |
+| version marker | `sessions.storage_version = 1` column (does **not** write `PRAGMA user_version`) | `PRAGMA user_version = 1` |
+
+### Rust layout (what `SessionWriter` writes)
 
 ```sql
 CREATE TABLE sessions (
@@ -42,9 +59,49 @@ CREATE TABLE entries (
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 ```
 
-The schema is versioned via `PRAGMA user_version`. Stage 5 ships
-version `1`. The reader refuses to open a database with a newer
-`user_version` (returns `SessionError::Corrupt`).
+This layout is versioned via `PRAGMA user_version` (currently `1`). The
+reader refuses a newer `user_version` with `SessionError::Corrupt`.
+
+### Upstream layout (read-only for now)
+
+`SessionReader` maps upstream rows onto the Rust types:
+
+- `sessions.created_at` (milliseconds) → `SessionRow::created_at` and
+  `SessionEntry::Header::created_at`; the unit is already milliseconds,
+  so no conversion happens.
+- upstream has no `sessions.version` and no `sessions.cwd`: the version
+  is read from the `metadata` JSON (`{"version": "..."}`) and falls back
+  to an empty string, while `SessionRow::cwd` is always `None`.
+- `entries.type = "message"` is dispatched on `payload.message.role`
+  into `UserMessage` / `AssistantMessage` / `ToolResult`;
+  `"compaction"` becomes `SessionEntry::Compaction`; `"custom"` becomes
+  `SessionEntry::Extension` with `kind = custom_type`.
+- `entries.id` / `entries.parent_id` become `entry_id` /
+  `parent_entry_id`; `get_entry` still looks up by `seq` and
+  `get_message` matches the upstream primary key.
+
+Known degradations (deliberate, all logged with `tracing::warn!` rather
+than silently dropped):
+
+- **`branch_summary`** has no `SessionEntry` variant because
+  `pi-coding-agent` matches that enum exhaustively; the full upstream
+  payload is passed through as an `Extension`
+  (`extension = "branch_summary"`).
+- Assistant **`thinking` content blocks** have no `pi_protocol::Content`
+  variant yet and are skipped.
+- A **tool result** with several content blocks is folded into the single
+  block `pi_protocol::ToolResult::content` can hold: text blocks are
+  joined with `\n`, a text/image mix keeps the first block.
+- Upstream `terminate`, `fromHook`, `api`, `provider`, `responseId`,
+  `diagnostics` and per-message `timestamp` fields have no Rust
+  counterpart.
+- A file whose `sessions` and `entries` tables disagree about the layout
+  (or whose layout is unknown) is rejected as `SessionError::Corrupt`
+  instead of being guessed at.
+
+Still open (later slices): writing the upstream layout, `usage_ledger` /
+`message_count` / `usage_payload` aggregation, and `branch_entries` /
+`branch_meta` reads.
 
 ## Public API
 
@@ -79,16 +136,19 @@ preserved on disk. The binary ships this as `pi session migrate
 
 ## TS compatibility
 
-The schema and payload format intentionally mirror the TS port. A TS-side
-recorded fixture (built with `node scripts/make-ts-fixture.mjs`) round-trips
-through the Rust reader with byte-identical JSON output:
+The `tests/ts_compat.rs` fixture (`fixtures/ts_recorded.sqlite`) is built
+from the **upstream** `001_initial.sql` DDL by
+`scripts/make-ts-fixture.mjs`, with plain-JSON upstream entry payloads —
+it is not a file the Rust writer could have produced. The generator is a
+hand-written SQL script rather than an invocation of the real TS
+`SqliteStorage`, because that would need a `node_modules` install; the
+test asserts the fixture's columns, payload types and decoded entries so
+the shape cannot silently drift back into the Rust layout.
 
 ```
-$ node scripts/make-ts-fixture.mjs fixtures/ts_recorded.sqlite
-$ pi session show ts-recorded-fixture --database fixtures/ts_recorded.sqlite
-{"type":"header", ...}
-{"type":"user_message", ...}
-...
+$ node pi-rust/crates/pi-session/scripts/make-ts-fixture.mjs \
+    pi-rust/crates/pi-session/fixtures/ts_recorded.sqlite
+$ cargo test -p pi-session --test ts_compat
 ```
 
 ## Tests
@@ -100,12 +160,12 @@ cargo clippy -p pi-session --all-targets -- -D warnings
 
 The `tests/` directory contains:
 
-- `round_trip.rs` — five tests covering header idempotency, full
-  user/assistant/tool/tool-result/extension round-trips, latest-session
-  resolution, corrupt-DB detection, and empty-DB behavior.
-- `ts_compat.rs` — five tests that read the recorded TS fixture and
-  assert every entry decodes to the expected `SessionEntry` shape.
+- `round_trip.rs` — six tests covering header idempotency, full
+  user/assistant/tool/tool-result/extension round-trips, compaction,
+  latest-session resolution, corrupt-DB detection, and empty-DB behavior.
+- `ts_compat.rs` — eight tests that open the upstream-format fixture and
+  assert its structure, its decoded `SessionEntry` sequence, the
+  upstream key lookups, and that Rust legacy files still read.
 
-The fixture itself is generated by `scripts/make-ts-fixture.mjs` using
-Node 22's built-in `node:sqlite` and `node:zlib` modules — no npm
-install required.
+The fixture is generated by `scripts/make-ts-fixture.mjs` using Node 22's
+built-in `node:sqlite` module — no npm install required.

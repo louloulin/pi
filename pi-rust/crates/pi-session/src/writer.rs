@@ -22,8 +22,12 @@ use rusqlite::{params, Connection};
 use crate::error::{Result, SessionError};
 use crate::schema;
 
-/// Default zstd compression level — matches the level the TS port uses
-/// for its `messages` blob (level 3 in `zstd::DEFAULT_LEVEL`).
+/// Default zstd compression level for the Rust layout's `payload` BLOB:
+/// zstd's own default (3).
+///
+/// Note: the upstream TS layout does **not** compress its payload at all
+/// (it stores plain JSON in a TEXT column), so this constant only applies
+/// to the Rust legacy layout.
 pub const ZSTD_LEVEL: i32 = 3;
 
 /// In-memory staging area for one [`SessionEntry`].
@@ -95,8 +99,10 @@ impl SessionWriter {
         self.inner.lock().path.clone()
     }
 
-    /// Current next-seq value (1-based). Mirrors the TS port's
-    /// `sessions.next_seq`.
+    /// Current next-seq value (1-based). Upstream tracks the same counter
+    /// in `sessions.next_seq`; this writer keeps it in memory only (the
+    /// Rust layout has no such column) — persisting it is part of the
+    /// later write-path alignment.
     pub fn next_seq(&self) -> i64 {
         self.inner.lock().next_seq
     }
