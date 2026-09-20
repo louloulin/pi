@@ -275,6 +275,17 @@ pub struct HostOptions {
     /// factories still import and return a stream, but that stream
     /// terminates with a named error event.
     pub pi_ai_stream_runner: Option<Arc<dyn PiAiStreamRunner>>,
+    /// Optional host of the region / overlay surface behind
+    /// `ctx.ui.setWidget` / `setHeader` / `setFooter` /
+    /// `setEditorComponent` / `custom`.
+    ///
+    /// `pi-extensions` cannot depend on the crate that owns the TUI, so the
+    /// adapter that owns the interactive `App` implements [`UiRegionHost`]
+    /// and injects it here; the shim reaches it through the synchronous
+    /// `host_ui_region` import and the host forwards each mutation on a
+    /// dedicated worker task. Without it the methods degrade to the
+    /// non-interactive behaviour (no region is installed).
+    pub ui_region_host: Option<Arc<dyn UiRegionHost>>,
 }
 
 /// The session context an extension tool sees as its second argument.
@@ -327,6 +338,10 @@ impl std::fmt::Debug for HostOptions {
                     .as_ref()
                     .map(|_| "<dyn PiAiStreamRunner>"),
             )
+            .field(
+                "ui_region_host",
+                &self.ui_region_host.as_ref().map(|_| "<dyn UiRegionHost>"),
+            )
             .finish()
     }
 }
@@ -355,6 +370,13 @@ impl HostOptions {
     /// Install the runner behind the built-in pi-ai provider factories.
     pub fn with_pi_ai_stream_runner(mut self, runner: Arc<dyn PiAiStreamRunner>) -> Self {
         self.pi_ai_stream_runner = Some(runner);
+        self
+    }
+    /// Install the host of the region / overlay surface behind
+    /// `ctx.ui.setWidget` / `setHeader` / `setFooter` /
+    /// `setEditorComponent` / `custom`.
+    pub fn with_ui_region_host(mut self, host: Arc<dyn UiRegionHost>) -> Self {
+        self.ui_region_host = Some(host);
         self
     }
 }
@@ -433,6 +455,505 @@ pub trait BuiltinToolRunner: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<BuiltinToolOutcome, String>> + Send + 'a>>;
 }
 
+// ---------------------------------------------------------------------------
+// Region / overlay surface (`ctx.ui.setWidget` / `setHeader` / `setFooter` /
+// `setEditorComponent` / `custom`).
+//
+// `pi-extensions` cannot depend on the TUI crate, so the adapter that owns
+// the `App` implements [`UiRegionHost`] and installs it through
+// [`HostOptions::ui_region_host`]. The shim registers every JS component
+// under a numeric id; the host wraps that id in a [`JsComponent`] and the
+// adapter calls back into it from its render loop.
+// ---------------------------------------------------------------------------
+
+/// Where an extension widget renders relative to the editor region.
+///
+/// Mirrors upstream `ExtensionWidgetOptions.placement`
+/// (`packages/coding-agent/src/core/extensions/types.ts`), whose two legal
+/// values are `"aboveEditor"` and `"belowEditor"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiWidgetPlacement {
+    /// Between the message view and the editor (the upstream default).
+    #[default]
+    Above,
+    /// Between the editor and the status bar.
+    Below,
+}
+
+impl UiWidgetPlacement {
+    /// Parse the JS spelling; anything unknown is `aboveEditor`, matching
+    /// upstream's `?? "aboveEditor"` fallback.
+    pub fn from_js(value: &str) -> Self {
+        match value {
+            "belowEditor" => Self::Below,
+            _ => Self::Above,
+        }
+    }
+}
+
+/// Anchor for a `ctx.ui.custom` overlay when `overlay: true`.
+///
+/// The upstream `OverlayAnchor` union has nine members; the four centre-edge
+/// variants collapse onto [`UiCustomAnchor::Center`] because the port's
+/// overlay placement only distinguishes the corners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiCustomAnchor {
+    /// Centred (the upstream default).
+    #[default]
+    Center,
+    /// Top-left corner.
+    TopLeft,
+    /// Top-right corner.
+    TopRight,
+    /// Bottom-left corner.
+    BottomLeft,
+    /// Bottom-right corner.
+    BottomRight,
+}
+
+impl UiCustomAnchor {
+    /// Parse an upstream `OverlayAnchor`; unrecognised values are `center`.
+    pub fn from_js(value: &str) -> Self {
+        match value {
+            "top-left" => Self::TopLeft,
+            "top-right" => Self::TopRight,
+            "bottom-left" => Self::BottomLeft,
+            "bottom-right" => Self::BottomRight,
+            _ => Self::Center,
+        }
+    }
+}
+
+/// Options a `ctx.ui.custom(factory, options)` call passes through to the
+/// region host.
+///
+/// Upstream nests the geometry under `options.overlayOptions`; the shim
+/// flattens the fields the port honours onto this struct.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UiCustomOptions {
+    /// Render as a floating overlay instead of an editor-region panel.
+    pub overlay: bool,
+    /// Overlay width in columns (`overlayOptions.width`).
+    pub width: Option<u16>,
+    /// Maximum overlay height in rows (`overlayOptions.maxHeight`).
+    pub max_height: Option<u16>,
+    /// Overlay anchor (`overlayOptions.anchor`).
+    pub anchor: Option<UiCustomAnchor>,
+    /// Inset from the overlay's anchor, in cells (`overlayOptions.margin`).
+    pub margin: u16,
+}
+
+/// A component the shim registered on behalf of an extension.
+///
+/// The struct is a handle to the QuickJS side: [`render`](Self::render),
+/// [`handle_input`](Self::handle_input) and [`dispose`](Self::dispose) call
+/// back into the shim (`__pi_ui_render_component` / …) from whichever thread
+/// the region host drives its render loop. It is `Send + Sync`, so it travels
+/// from the host's region worker into the TUI.
+///
+/// The QuickJS context is **not** re-entrant from a render thread that already
+/// holds it, and [`AsyncContext`](rquickjs_core::AsyncContext) serialises access
+/// behind an async mutex, so every call here is a plain `async_with!` on the
+/// runtime: the caller awaits it, and a component that stalls is cut off by the
+/// host's per-call timeout rather than deadlocking the frame.
+#[derive(Clone)]
+pub struct JsComponent {
+    inner: Arc<Inner>,
+    id: u64,
+}
+
+impl std::fmt::Debug for JsComponent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsComponent").field("id", &self.id).finish()
+    }
+}
+
+impl JsComponent {
+    /// The shim-side registry id.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Call the component's `render(width)`.
+    ///
+    /// A component that throws, or a render that exceeds the host's per-call
+    /// timeout, yields no lines: a broken extension widget must leave the rest
+    /// of the frame intact rather than take the TUI down.
+    pub async fn render(&self, width: u16) -> UiComponentRender {
+        let context = self.inner.context.clone();
+        let id = self.id;
+        let future = async_with!(context => |ctx| {
+            let Ok(func) = ctx.globals().get::<_, Function>("__pi_ui_render_component") else {
+                return UiComponentRender::default();
+            };
+            let Ok(raw) = func.call::<_, String>((id, width)) else {
+                return UiComponentRender::default();
+            };
+            parse_component_render(&raw)
+        });
+        match tokio::time::timeout(self.inner.timeout, future).await {
+            Ok(rendered) => rendered,
+            Err(_) => {
+                tracing::warn!(
+                    target: "pi_extension",
+                    "ctx.ui component {id} render timed out after {:?}",
+                    self.inner.timeout
+                );
+                UiComponentRender::default()
+            }
+        }
+    }
+
+    /// Deliver raw terminal input to the component's `handleInput`.
+    ///
+    /// Returns whether the component declares `handleInput` at all. Upstream's
+    /// `handleInput(data)` returns `void` — the TUI, not the component, decides
+    /// whether a key was consumed — so the port reports "handled" for any
+    /// component that implements the hook.
+    pub async fn handle_input(&self, data: &str) -> bool {
+        let context = self.inner.context.clone();
+        let id = self.id;
+        let data = data.to_string();
+        let future = async_with!(context => |ctx| {
+            let Ok(func) = ctx.globals().get::<_, Function>("__pi_ui_component_input") else {
+                return false;
+            };
+            func.call::<_, bool>((id, data)).unwrap_or(false)
+        });
+        match tokio::time::timeout(self.inner.timeout, future).await {
+            Ok(handled) => handled,
+            Err(_) => {
+                tracing::warn!(target: "pi_extension", "ctx.ui component {id} handleInput timed out");
+                false
+            }
+        }
+    }
+
+    /// Drop the component, calling its `dispose` exactly once. Idempotent:
+    /// the shim removes the component from its registry on the first call.
+    pub async fn dispose(&self) {
+        let context = self.inner.context.clone();
+        let id = self.id;
+        let future = async_with!(context => |ctx| {
+            if let Ok(func) = ctx.globals().get::<_, Function>("__pi_ui_dispose_component") {
+                let _ = func.call::<_, bool>((id,));
+            }
+        });
+        let _ = tokio::time::timeout(self.inner.timeout, future).await;
+    }
+}
+
+/// One render of a JS component.
+///
+/// `has_input` comes from the shim rather than an extra round trip: the
+/// render envelope already knows whether the component object carries a
+/// `handleInput` method, and the TUI needs that flag synchronously (see
+/// [`JsComponent::handle_input`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiComponentRender {
+    /// Lines the component produced for the requested width.
+    pub lines: Vec<String>,
+    /// Whether the component implements `handleInput`.
+    pub has_input: bool,
+}
+
+/// Parse the shim's `__pi_ui_render_component` envelope.
+fn parse_component_render(raw: &str) -> UiComponentRender {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return UiComponentRender::default();
+    };
+    if value.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+            tracing::warn!(target: "pi_extension", "ctx.ui component render failed: {error}");
+        }
+        return UiComponentRender::default();
+    }
+    let lines = value
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| line.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_input = value
+        .get("hasInput")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    UiComponentRender { lines, has_input }
+}
+
+/// Adapter behind the `ctx.ui` region surface.
+///
+/// `pi-extensions` cannot depend on the crate that owns the TUI, so that crate
+/// implements this trait and injects it through
+/// [`HostOptions::ui_region_host`]; the shim reaches it through the
+/// synchronous `host_ui_region` import and every mutation is forwarded on the
+/// host's region worker task. Implementations therefore never run on the
+/// render thread and must not block.
+#[async_trait]
+pub trait UiRegionHost: Send + Sync + 'static {
+    /// Install (`Some`) or clear (`None`) the widget registered under `key`.
+    async fn set_widget(
+        &self,
+        key: String,
+        placement: UiWidgetPlacement,
+        component: Option<JsComponent>,
+    );
+    /// Install or clear the header region.
+    async fn set_header(&self, component: Option<JsComponent>);
+    /// Install or clear the footer region.
+    async fn set_footer(&self, component: Option<JsComponent>);
+    /// Install or clear the editor-region component.
+    async fn set_editor_component(&self, component: Option<JsComponent>);
+    /// Open a `ctx.ui.custom` session. `session` is the token the shim passes
+    /// back to [`set_custom_visible`](Self::set_custom_visible) and
+    /// [`close_custom`](Self::close_custom).
+    async fn open_custom(&self, session: u64, component: JsComponent, options: UiCustomOptions);
+    /// Close a custom session, handing the factory's result back to Rust
+    /// consumers (`None` when the extension resolved with nothing).
+    async fn close_custom(&self, session: u64, result: Option<String>);
+    /// Show or hide a custom session without closing it.
+    async fn set_custom_visible(&self, session: u64, visible: bool);
+}
+
+/// One queued region mutation from the shim to the [`UiRegionHost`].
+enum RegionCommand {
+    /// Install / clear the widget registered under `key`.
+    Widget {
+        key: String,
+        placement: UiWidgetPlacement,
+        component: Option<JsComponent>,
+    },
+    /// Install / clear the header.
+    Header(Option<JsComponent>),
+    /// Install / clear the footer.
+    Footer(Option<JsComponent>),
+    /// Install / clear the editor-region component.
+    Editor(Option<JsComponent>),
+    /// Open a custom session.
+    OpenCustom {
+        session: u64,
+        component: JsComponent,
+        options: UiCustomOptions,
+    },
+    /// Close a custom session.
+    CloseCustom {
+        session: u64,
+        result: Option<String>,
+    },
+    /// Show / hide a custom session.
+    SetCustomVisible { session: u64, visible: bool },
+}
+
+/// Drain region mutations into the injected [`UiRegionHost`].
+///
+/// The shim's `host_ui_region` import is synchronous (it has to hand the
+/// `custom` session token straight back), so it only enqueues here; this worker
+/// is what actually awaits the adapter and the TUI. The worker only exists when
+/// an adapter was injected — [`handle_region_call`] reports `ok:false`
+/// otherwise, which is the non-interactive path.
+async fn region_worker(
+    mut rx: mpsc::UnboundedReceiver<RegionCommand>,
+    host: Arc<dyn UiRegionHost>,
+) {
+    while let Some(command) = rx.recv().await {
+        match command {
+            RegionCommand::Widget {
+                key,
+                placement,
+                component,
+            } => host.set_widget(key, placement, component).await,
+            RegionCommand::Header(component) => host.set_header(component).await,
+            RegionCommand::Footer(component) => host.set_footer(component).await,
+            RegionCommand::Editor(component) => host.set_editor_component(component).await,
+            RegionCommand::OpenCustom {
+                session,
+                component,
+                options,
+            } => host.open_custom(session, component, options).await,
+            RegionCommand::CloseCustom { session, result } => {
+                host.close_custom(session, result).await
+            }
+            RegionCommand::SetCustomVisible { session, visible } => {
+                host.set_custom_visible(session, visible).await
+            }
+        }
+    }
+}
+
+/// Body of the synchronous `host_ui_region(op, payloadJson)` import.
+///
+/// Returns a JSON envelope: `{"ok":true}` (plus `session` for `customOpen`) or
+/// `{"ok":false,"error":"…"}`. The shim is the only caller and turns
+/// `ok:false` into the same "region unavailable" behaviour it uses in
+/// non-interactive mode, so a missing or dead adapter never throws into the
+/// extension.
+fn handle_region_call(
+    op: &str,
+    payload_json: &str,
+    region_tx: Option<&mpsc::UnboundedSender<RegionCommand>>,
+    inner: &Arc<Inner>,
+) -> String {
+    let payload: serde_json::Value =
+        serde_json::from_str(payload_json).unwrap_or(serde_json::Value::Null);
+    let component_id = payload
+        .get("componentId")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let component = (component_id != 0).then(|| JsComponent {
+        inner: inner.clone(),
+        id: component_id,
+    });
+    let send =
+        |command: RegionCommand| -> bool { region_tx.is_some_and(|tx| tx.send(command).is_ok()) };
+    match op {
+        "setWidget" => {
+            let key = payload
+                .get("key")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let placement = UiWidgetPlacement::from_js(
+                payload
+                    .get("placement")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("aboveEditor"),
+            );
+            region_envelope(
+                send(RegionCommand::Widget {
+                    key,
+                    placement,
+                    component,
+                }),
+                serde_json::Value::Null,
+            )
+        }
+        "setHeader" => region_envelope(
+            send(RegionCommand::Header(component)),
+            serde_json::Value::Null,
+        ),
+        "setFooter" => region_envelope(
+            send(RegionCommand::Footer(component)),
+            serde_json::Value::Null,
+        ),
+        "setEditorComponent" => region_envelope(
+            send(RegionCommand::Editor(component)),
+            serde_json::Value::Null,
+        ),
+        "customOpen" => {
+            let Some(component) = component else {
+                return region_envelope(
+                    false,
+                    serde_json::json!({"error": "custom component is not registered"}),
+                );
+            };
+            let options = UiCustomOptions {
+                overlay: payload
+                    .get("overlay")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                width: payload
+                    .get("width")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as u16),
+                max_height: payload
+                    .get("maxHeight")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as u16),
+                anchor: payload
+                    .get("anchor")
+                    .and_then(|value| value.as_str())
+                    .map(UiCustomAnchor::from_js),
+                margin: payload
+                    .get("margin")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0) as u16,
+            };
+            let session = inner.next_ui_session.fetch_add(1, Ordering::Relaxed);
+            if !send(RegionCommand::OpenCustom {
+                session,
+                component,
+                options,
+            }) {
+                return region_envelope(
+                    false,
+                    serde_json::json!({"error": "region host is not running"}),
+                );
+            }
+            region_envelope(true, serde_json::json!({"session": session}))
+        }
+        "customClose" => {
+            let session = payload
+                .get("session")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let result = payload
+                .get("result")
+                .filter(|value| !value.is_null())
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                });
+            region_envelope(
+                send(RegionCommand::CloseCustom { session, result }),
+                serde_json::Value::Null,
+            )
+        }
+        "customSetVisible" => {
+            let session = payload
+                .get("session")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let visible = payload
+                .get("visible")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+            region_envelope(
+                send(RegionCommand::SetCustomVisible { session, visible }),
+                serde_json::Value::Null,
+            )
+        }
+        // Not a mutation: the shim asks the host to poll its async driver so
+        // a component factory it just scheduled actually runs. See
+        // [`wake_async_driver`].
+        "wake" => region_envelope(true, serde_json::Value::Null),
+        other => region_envelope(
+            false,
+            serde_json::json!({"error": format!("unknown region op `{other}`")}),
+        ),
+    }
+}
+
+/// Ask the async driver to poll: a region call can schedule JS work (the
+/// `custom` factory runs on a microtask) that only the driver's job loop can
+/// run. Pushing a no-op Rust task wakes the driver (its waker is registered
+/// with the runtime's spawner), and the driver drains the JS job queue on the
+/// next poll.
+///
+/// The push has to happen *after* the current JS turn ends — draining the job
+/// queue synchronously inside the import would run a `custom` factory before
+/// the extension's own turn finished, so an immediately-resolved handle would
+/// open and close a session it deliberately never opened.
+fn wake_async_driver(ctx: &Ctx<'_>) {
+    ctx.spawn(async {});
+}
+
+/// Render the `host_ui_region` envelope, merging `extra`'s object fields in.
+fn region_envelope(ok: bool, extra: serde_json::Value) -> String {
+    let mut value = serde_json::json!({"ok": ok});
+    if let (Some(map), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+        for (key, item) in extra {
+            map.insert(key.clone(), item.clone());
+        }
+    }
+    value.to_string()
+}
+
 /// Embedded QuickJS host. Cloning shares the underlying runtime +
 /// context; both must be driven from a tokio runtime.
 #[derive(Clone)]
@@ -476,6 +997,13 @@ struct Inner {
     /// In-flight `pi.exec` calls: the cancel channel and the deadline
     /// extension (see [`ExecBridge`]).
     execs: ExecBridge,
+    /// Region mutations queued by the synchronous `host_ui_region` import
+    /// and drained by [`region_worker`]. `None` when no
+    /// [`UiRegionHost`] was injected: every region call then reports
+    /// `ok:false` instead of queueing work nobody will apply.
+    region_tx: Option<mpsc::UnboundedSender<RegionCommand>>,
+    /// Allocates the session tokens `ctx.ui.custom` hands back to the shim.
+    next_ui_session: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -596,6 +1124,14 @@ impl JsExtensionHost {
             .await
             .map_err(ExtensionError::from)?;
         let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiRequestEnvelope>();
+        // The region channel only exists alongside a [`UiRegionHost`]; see
+        // the `region_tx` field docs.
+        let (region_tx, region_rx) = if opts.ui_region_host.is_some() {
+            let (tx, rx) = mpsc::unbounded_channel::<RegionCommand>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let state = Arc::new(Mutex::new(HostState::default()));
         let deadline_nanos = Arc::new(AtomicU64::new(u64::MAX));
         let execs = ExecBridge::new();
@@ -614,6 +1150,8 @@ impl JsExtensionHost {
             pi_ai,
             deadline_nanos: deadline_nanos.clone(),
             execs,
+            region_tx,
+            next_ui_session: Arc::new(AtomicU64::new(1)),
         });
 
         // Install host imports + shim.
@@ -673,6 +1211,14 @@ impl JsExtensionHost {
         let worker_state = inner.state.clone();
         let worker_handler = opts.ui_handler.clone();
         tokio::spawn(ui_worker(ui_rx, worker_handler, worker_state));
+
+        // Spawn the region worker, but only when a [`UiRegionHost`] is
+        // actually attached: without one there is nothing to drive, and
+        // `handle_region_call` reports `ok:false` so the shim's
+        // non-interactive path takes over.
+        if let (Some(region_ui_host), Some(region_rx)) = (opts.ui_region_host.clone(), region_rx) {
+            tokio::spawn(region_worker(region_rx, region_ui_host));
+        }
 
         Ok(Self { inner })
     }
@@ -2904,6 +3450,25 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
         Ok(())
     });
     globals.set("host_pi_ai_stream_cancel", pi_ai_stream_cancel_fn)?;
+
+    // host_ui_region(op, payloadJson) -> JSON string — the one
+    // *synchronous* bridge behind `ctx.ui.setWidget` / `setHeader` /
+    // `setFooter` / `setEditorComponent` / `custom`. Synchronous because the
+    // shim needs the `custom` session token before it can hand the handle
+    // back to the extension; the actual region mutation is forwarded to the
+    // [`UiRegionHost`] on [`region_worker`].
+    let region_tx = inner.region_tx.clone();
+    let region_inner = inner.clone();
+    let region_fn = Func::from(
+        move |ctx: Ctx<'_>, op: String, payload_json: String| -> String {
+            let reply = handle_region_call(&op, &payload_json, region_tx.as_ref(), &region_inner);
+            if op == "wake" {
+                wake_async_driver(&ctx);
+            }
+            reply
+        },
+    );
+    globals.set("host_ui_region", region_fn)?;
 
     Ok(())
 }
