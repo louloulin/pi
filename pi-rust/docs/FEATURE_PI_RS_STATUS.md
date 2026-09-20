@@ -14236,3 +14236,103 @@ origin|mirror/work/lum-1200   已全量合并（bce4942bc 为本片最后 commit
 * 开工 `26G / 50G`，收尾 `33G / 50G`（70%），余 15G；本轮自建 `/tmp/pi-target-1202`（2.4G）。
 * 可清理（run 已结束、无进程持有）：`/tmp/lum-1197-target`（2.4G）、`/tmp/pi-target-1192`（863M）、`/tmp/lum-1200-target`（2.6G）。
 * **保留** `/tmp/pi-target-lum1199`（LUM-1199 在飞）。本轮未执行删除（只报告，交由下一轮按例程清理）。
+
+## LUM-1203 round — 与 LUM-1202 重复的协调轮：核验 `138 / 2070 / 0 / 2`（`9639b3fae`）→ 可合并性扫描零命中 → **发现并派发真正的新缺口：`pi-session` 的「TS 兼容」是自造 fixture 的同义反复（LUM-1205 / Stage 54）**
+
+### 一、开工盘点：本轮与 LUM-1202 是同刻重复轮
+
+`multica issue list` 显示 autopilot 对同一目标连开了多个无 parent 的 `pi` issue（`LUM-1182`、`LUM-1202`、`LUM-1203` …），每个都拿到同一段 prompt。本轮开工时 `multica daemon status` 报 `running_task_count = 3`，其中一路就是**已经跑完并推了 tip 的 LUM-1202**：
+
+```console
+$ git ls-remote origin feature/pi.rs
+0a70fc4e885382b274d877540527df6ed38d9153      # = LUM-1202 的状态文档提交
+```
+
+所以本轮**没有可重复的合并动作**（LUM-1202 已把 LUM-1199 切片 1 + LUM-1200 全片合入并推送）。本轮改为三步：**核验基线 → 双向扫可合并性 → 找并派发一个真正的新缺口**（第四节）。
+
+### 二、核验：全量门在 `9639b3fae` 实跑
+
+私有 target dir `/tmp/pi-target-1203`（`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0`）：
+
+```console
+$ cargo fmt --all -- --check                                    # 干净
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0（1m13s）
+$ cargo test --workspace --offline --no-fail-fast                   # exit 0（5m35s）
+  suites = 138, passed = 2070, failed = 0, ignored = 2
+```
+
+与 LUM-1202 自报的 `138 / 2070 / 0 / 2` **逐位一致**；本轮 LUM-1202 反复提到的 `pi-extensions/tests/pi_ai_provider.rs` wall-clock flake（`a_live_stream_extends_the_host_call_deadline`）**未复现**（本轮只有本 run 在跑全量，机器负载低 —— 佐证那是负载竞争而非代码回归）。
+
+`9639b3fae..0a70fc4e8` 的差异经 `git diff --stat` 确认是**纯文档**（`pi-rust/docs/FEATURE_PI_RS_STATUS.md`，103 行插入，无 `.rs` 改动）→ 上表的质量门结果对本轮 tip `0a70fc4e8` **逐字成立**，无需重跑。
+
+### 三、可合并性扫描（`origin` 全量 ref，含 `agent/devbox1/*`）
+
+对每个 `origin/*` 分支算 `rev-list --count <tip>..<branch>`（ahead）与 `git cherry <tip> <branch> | grep -c '^+'`（patch 级唯一提交）：
+
+| 分支 | ahead | patch 级唯一 | 判定 |
+| --- | --- | --- | --- |
+| `origin/work/lum-1173` | 11 | 1（`b6656384` rustfmt） | **不合并**：behind 79，`git diff --stat tip..branch` = `73 files, +315/−26600`（会删掉整个终端图片子系统与状态文档）；唯一独有提交是 fmt 对齐，tip 的 `fmt --all -- --check` 已干净 |
+| `origin/agent/devbox1/{e3a55b14fe9d,lum-1020,lum-1023,lum-1058}` | 1–2 | 各 1–2 | **不合并**：behind 391–436 的旧树，独有提交（Gemini provider / QuickJS host / telemetry / clippy 修复）都已被后续 stage 以更新实现落地 |
+| `origin/feature/pi.rs` | 1 | 1 | 就是本轮 tip 自身（本地 tracking ref 指向它） |
+| `work/LUM-1199` | — | — | **远端不存在**：LUM-1199 的切片 1 由 worker 自己合进 tip（`61afe3031`），run 仍在飞 |
+
+→ **零待合并产物**，本轮不产生合并提交。
+
+### 四、本轮真正的新缺口：`pi-session` 宣称的「TS 双向兼容」站不住
+
+扫 `packages/session-backends/sqlite-node/src/sqlite/migrations/001_initial.sql` 时发现，上游 schema 与 Rust `pi-session` 的 schema **没有一列是对得上的**：
+
+| | 上游（`AgentHarness storage format 4 / storageVersion 1`） | Rust `pi-session` |
+| --- | --- | --- |
+| 会话行 | `sessions(id, created_at, parent_session_id, storage_version, metadata, message_count, usage_payload, next_seq)` | `sessions(id, created_at, parent_session, cwd, version, metadata)` |
+| 条目行 | `entries(session_id, id, parent_id, seq, type, custom_type, timestamp, payload TEXT)`，PK `(session_id, id)` | `entries(session_id, seq, parent_seq, entry_id, parent_entry_id, type, timestamp, payload BLOB)`，PK `(session_id, seq)` |
+| payload | **明文 JSON**（`session/entries.ts:66` `JSON.parse(row.payload)`） | **zstd BLOB**（`writer.rs` `ZSTD_LEVEL`） |
+| 其它表 | `scalar_values` / `list_values` / `usage_ledger` / `branch_entries` / `branch_meta` + 3 trigger | 只有 `meta(key, value)` |
+| 版本标记 | `sessions.storage_version = 1` 列（不写 `PRAGMA user_version`） | `PRAGMA user_version = 1` |
+
+而 `pi-rust/crates/pi-session/src/{lib.rs:1-8,schema.rs:3-9}` 明确写着「TS 端口读写同一 payload 格式，双向 round-trip 干净」。**这条声明是被自造 fixture 掩盖的**：
+
+```console
+$ sqlite3 pi-rust/crates/pi-session/fixtures/ts_recorded.sqlite '.schema'
+CREATE TABLE sessions (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL,
+  parent_session TEXT, cwd TEXT, version TEXT, metadata TEXT)     -- Rust 的列，不是上游的
+...
+PRAGMA user_version = 1                                          -- 上游根本不写这个
+$ head -5 pi-rust/crates/pi-session/scripts/make-ts-fixture.mjs
+// Mirrors the schema the Rust reader expects:                   -- 同义反复
+```
+
+即 LUM-989 的「TS → Rust round-trip」验收用的是**自己按 Rust 期望形状造的文件**，`tests/ts_compat.rs` 再断言它能读 —— 与真实上游会话无任何关系。影响是真实的：TS `pi` 与 Rust `pi` 无法共用 `~/.pi/sessions/*.sqlite`，`--continue` / `/resume` / `pi session migrate` 跨实现全部失效，而这正是 LUM-981「兼容 pi 生态」的一部分。
+
+→ 本轮把**读路径对齐 + 真 fixture + 诚实文档**作为新 stage 派发（不加依赖、可离线全测、文件面只碰 `pi-session`）：
+
+| issue | 动作 | 依据 |
+| --- | --- | --- |
+| **LUM-1205**（Stage 54，本轮新建） | `todo`，已入队（worker run） | §四：上游 `001_initial.sql` 逐字 DDL 造 fixture + `SchemaLayout` 结构探测 + 上游条目 → `SessionEntry` 映射（含 `branch_summary` 不丢数据）+ 改写 `make-ts-fixture.mjs` / `ts_compat.rs` 的伪兼容写法 + 修正 `lib.rs` / `schema.rs` 顶部声明 |
+| Stage 55 / 56（写路径 v4 + `migrate`；`usage_ledger` / `session-stats` / `branch_*`） | **只在 LUM-1205 正文里记为后续切片**，未建 issue | 写路径必然碰 `pi-coding-agent` 的 session 命令，而 LUM-1199 正在改该 crate → 等 LUM-1199 落盘后由协调轮晋升 |
+| **LUM-1199**（Stage 51） | 不动作（`in_progress`） | 切片 1 已由 LUM-1202 合入；run 在飞 |
+| **LUM-1204**（Stage 53） | 不动作（`backlog`） | 与 LUM-1199 同改 `pi-ext-shim.mjs`，等其落盘 |
+
+派发后 `running_task_count = 3`（本 run + LUM-1199 + LUM-1205），**3/3 满槽**，符合「最多 3 个任务同时运行」。
+
+### 五、例程修订：重复轮出现后的处理序
+
+1. **开工第一步 `git ls-remote origin feature/pi.rs` 之外，还要读 `multica issue list --status todo --sort created_at desc`**：本轮就是靠它看到 `LUM-1202` 同刻在飞，才没有把「合并 LUM-1199 切片 1 + LUM-1200」再做一遍（那会产生重复的合并提交与全量编译）。
+2. **重复轮的正确产出不是再合一次，而是「新缺口发现 + 派发」**：LUM-1202 已经覆盖合并/门/推送/停放，本轮如果再写一份同样的报告就是零信息；改成上游 schema 面的新缺口后，本轮对项目是**净增量**。
+3. **`pi-session` 的兼容性声明从今天起不可信**：凡涉及「与 TS 互通」的结论，必须能贴出**上游工具真实产物的 dump**（`.schema` + 行内容），自造 fixture 的同义反复（`make-*-fixture.mjs` 按 Rust 期望形状生成）不得作为兼容性证据。建议把这条写进后续所有 session/provider 兼容任务的验收要求。
+
+### 六、frontier（本轮后）
+
+1. **质量门基线** = **138 套件 / 2070 passed / 0 failed / 2 ignored（`9639b3fae` 实跑；tip `0a70fc4e8` 相对它只多 103 行文档）**；下一欠账点 = LUM-1199 或 LUM-1205 任一合入时。
+2. **Stage 51（LUM-1199）**：切片 1（native Provider 对象 + `oauth` + `streamSimple` 桥）已合入；端到端验收（用例 + `EXTENSIONS.md` 兼容表 + 全量门）仍欠 → run 在飞。
+3. **Stage 52（LUM-1200）**：已交付并合入，`pi-tui` 图片链路闭环。
+4. **Stage 53（LUM-1204）**：已停放，等 LUM-1199。
+5. **Stage 54（LUM-1205，本轮新）**：`pi-session` 上游 v4 **读**路径 + 真 fixture + 文档纠偏 —— 本轮新发现的最大「静默不兼容」。
+6. **Stage 55 / 56**（session 写路径 v4 + `migrate`；`usage_ledger` / `session-stats` / `branch_*`）：已在 LUM-1205 正文里成型，等 LUM-1199 落盘。
+7. **Autopilot 重复轮**（`LUM-1182` / `LUM-1202` / `LUM-1203` 同目标并行）已连续四轮进入 frontier：建议 owner 把周期放宽到 ≥1h，或对同一 autopilot 目标串行化。
+
+### 七、磁盘（本轮）
+
+* 开工 `33G / 50G`（70%），余 15G。本轮自建 `/tmp/pi-target-1203`（fmt/clippy/test 用时 1m13s + 5m35s）。
+* **已清理**（run 均已 `completed`、无进程持有、逐一 `fuser -m` 复核）：`/tmp/lum-1197-target`（2.4G）、`/tmp/pi-target-1192`（863M）、`/tmp/lum-1200-target`（2.6G）、`/tmp/pi-target-1202`（2.4G）、本 run 的 `/tmp/pi-target-1203`。
+* **保留** `/tmp/pi-target-lum1199`（LUM-1199 在飞）。
