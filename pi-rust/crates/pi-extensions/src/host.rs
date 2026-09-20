@@ -11,8 +11,10 @@
 //! function via [`JsExtensionHost::execute_tool`].
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -254,6 +256,15 @@ pub struct HostOptions {
     pub ui_handler: Option<Arc<dyn UiHandler>>,
     /// Context the shim hands to a tool's `execute(args, ctx)`.
     pub tool_context: ToolContext,
+    /// Optional runner behind the JS `create*Tool` factories.
+    ///
+    /// `pi-extensions` cannot depend on the crate that owns the
+    /// concrete built-in bundle, so the host is injected here and the
+    /// shim reaches it through the `host_builtin_tool_definition` (sync)
+    /// and `host_builtin_tool` (async) imports. Without it the factories
+    /// still import and return objects, but their `execute` rejects with
+    /// a clear error.
+    pub builtin_tool_runner: Option<Arc<dyn BuiltinToolRunner>>,
 }
 
 /// The session context an extension tool sees as its second argument.
@@ -292,6 +303,13 @@ impl std::fmt::Debug for HostOptions {
                 &self.ui_handler.as_ref().map(|_| "<dyn UiHandler>"),
             )
             .field("tool_context", &self.tool_context)
+            .field(
+                "builtin_tool_runner",
+                &self
+                    .builtin_tool_runner
+                    .as_ref()
+                    .map(|_| "<dyn BuiltinToolRunner>"),
+            )
             .finish()
     }
 }
@@ -312,6 +330,85 @@ impl HostOptions {
         self.tool_context = context;
         self
     }
+    /// Install the runner behind the built-in `create*Tool` factories.
+    pub fn with_builtin_tool_runner(mut self, runner: Arc<dyn BuiltinToolRunner>) -> Self {
+        self.builtin_tool_runner = Some(runner);
+        self
+    }
+}
+
+/// Outcome of running one built-in tool through [`BuiltinToolRunner`].
+///
+/// Mirrors [`ToolExecutionOutcome`] on the wire: `content` is a list of
+/// serialized [`pi_protocol::Content`] blocks, `is_error` the error flag
+/// and `details` the opaque structured payload. `content` is a block list
+/// rather than a single `String` so an image returned by the built-in
+/// `read` tool survives the bridge instead of being flattened to text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinToolOutcome {
+    /// Content blocks, each a serialized [`pi_protocol::Content`].
+    #[serde(default)]
+    pub content: Vec<serde_json::Value>,
+    /// Whether the tool surfaced an error result.
+    #[serde(default)]
+    pub is_error: bool,
+    /// Optional structured details surfaced by the tool.
+    #[serde(default)]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Definition metadata for one built-in tool.
+///
+/// [`BuiltinToolRunner::definition`] returns it and the shim hands
+/// `parameters` to the JS factory, so the schema an extension sees is
+/// the exact one the host executor coerces arguments against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinToolDefinition {
+    /// Tool name (`read`, `bash`, …).
+    pub name: String,
+    /// Human-readable label.
+    pub label: String,
+    /// Model-facing description.
+    pub description: String,
+    /// JSON Schema for the tool's argument object.
+    pub parameters: serde_json::Value,
+}
+
+/// Host-side implementation of the built-in tools the JS `create*Tool`
+/// factories wrap.
+///
+/// `pi-extensions` cannot depend on `pi-coding-agent` (that would be a
+/// cycle), so the concrete built-in bundle is injected through
+/// [`HostOptions::builtin_tool_runner`]. Two host imports reach it:
+/// [`BuiltinToolRunner::definition`] backs the *synchronous*
+/// `host_builtin_tool_definition` import, because a factory has to hand
+/// out `parameters` the moment `createReadTool(cwd)` is called, and
+/// [`BuiltinToolRunner::run`] backs the async `host_builtin_tool` import
+/// the tool's `execute` awaits.
+pub trait BuiltinToolRunner: Send + Sync + 'static {
+    /// Definition for a built-in tool, or `None` when the runner does not
+    /// know the name. `None` makes the JS factory fall back to a
+    /// permissive `{ "type": "object" }` schema, and its `execute`
+    /// reject with "not available".
+    fn definition(&self, name: &str) -> Option<BuiltinToolDefinition>;
+
+    /// Run one built-in tool.
+    ///
+    /// `cwd` is the directory the factory was created with
+    /// (`createReadTool(cwd)`), or `None` when the extension passed no
+    /// argument. An [`Err`] is a *host-level* failure — the runner is
+    /// unusable or the name is unknown — and the shim turns it into a
+    /// rejected promise. A tool that merely failed returns
+    /// `Ok(BuiltinToolOutcome { is_error: true, .. })`, which the shim
+    /// passes through as a structured tool result.
+    fn run<'a>(
+        &'a self,
+        name: String,
+        args: serde_json::Value,
+        cwd: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<BuiltinToolOutcome, String>> + Send + 'a>>;
 }
 
 /// Embedded QuickJS host. Cloning shares the underlying runtime +
@@ -342,6 +439,9 @@ struct Inner {
     timeout: Duration,
     /// Context handed to tool executions (see [`ToolContext`]).
     tool_context: ToolContext,
+    /// Runner behind the JS `create*Tool` factories (see
+    /// [`BuiltinToolRunner`]).
+    builtin_tool_runner: Option<Arc<dyn BuiltinToolRunner>>,
     /// Wall-clock nanos deadline the JS interrupt handler checks on
     /// every iteration. `u64::MAX` means "no deadline active".
     deadline_nanos: Arc<AtomicU64>,
@@ -466,6 +566,7 @@ impl JsExtensionHost {
             state,
             timeout,
             tool_context: opts.tool_context.clone(),
+            builtin_tool_runner: opts.builtin_tool_runner.clone(),
             deadline_nanos: deadline_nanos.clone(),
             execs,
         });
@@ -2669,7 +2770,89 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
     let fetch_function = Function::new(ctx.clone(), Async(fetch_fn))?;
     globals.set("host_fetch", fetch_function)?;
 
+    // host_builtin_tool_definition(name) -> JSON string — synchronous,
+    // because a JS `create*Tool` factory hands out `parameters` the
+    // moment it is called. Resolves to
+    // `{"ok":true,"definition":{name,label,description,parameters}}` /
+    // `{"ok":false,"error":"…"}`. The shim never rejects on this; it
+    // falls back to a permissive schema when the runner is missing.
+    let definition_runner = inner.builtin_tool_runner.clone();
+    let builtin_tool_definition_fn = Func::from(move |name: String| -> String {
+        match definition_runner
+            .as_ref()
+            .and_then(|runner| runner.definition(&name))
+        {
+            Some(definition) => {
+                serde_json::json!({"ok": true, "definition": definition}).to_string()
+            }
+            None => serde_json::json!({
+                "ok": false,
+                "error": format!(
+                    "built-in tool `{name}` is not available (no runner installed or unknown name)"
+                ),
+            })
+            .to_string(),
+        }
+    });
+    globals.set("host_builtin_tool_definition", builtin_tool_definition_fn)?;
+
+    // host_builtin_tool(name, argsJson, cwd) -> Promise<string> — the
+    // bridge behind the JS `create*Tool` factories' `execute`. Resolves
+    // with a JSON envelope (`{"ok":true,"content":[…],"isError":…,
+    // "details":…}` / `{"ok":false,"error":"…"}`); never rejects, like
+    // `host_exec`, so the shim owns the JS `Error` shape.
+    let builtin_runner = inner.builtin_tool_runner.clone();
+    let builtin_tool_fn = move |name: String, args_json: String, cwd: Option<String>| {
+        let runner = builtin_runner.clone();
+        async move { host_builtin_tool_impl(runner, name, args_json, cwd).await }
+    };
+    let builtin_tool_function = Function::new(ctx.clone(), Async(builtin_tool_fn))?;
+    globals.set("host_builtin_tool", builtin_tool_function)?;
+
     Ok(())
+}
+
+/// Body of the `host_builtin_tool` import.
+///
+/// Returns a JSON envelope and never rejects: `{"ok":false,"error":…}`
+/// covers a missing runner, malformed arguments and a runner-level
+/// failure alike, so the shim can construct the JS `Error` with a stable
+/// code. A tool that ran but failed is still `ok:true` with `isError`
+/// set, matching how [`ToolExecutionOutcome`] reports tool errors.
+async fn host_builtin_tool_impl(
+    runner: Option<Arc<dyn BuiltinToolRunner>>,
+    name: String,
+    args_json: String,
+    cwd: Option<String>,
+) -> rquickjs_core::Result<String> {
+    let Some(runner) = runner else {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "error": "the extension host has no built-in tool runner; `create*Tool` factories cannot execute here",
+        })
+        .to_string());
+    };
+    let args: serde_json::Value = match serde_json::from_str(&args_json) {
+        Ok(args) => args,
+        Err(err) => {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": format!("invalid tool arguments: {err}"),
+            })
+            .to_string())
+        }
+    };
+    let cwd = cwd.filter(|value| !value.is_empty());
+    match runner.run(name, args, cwd).await {
+        Ok(outcome) => Ok(serde_json::json!({
+            "ok": true,
+            "content": outcome.content,
+            "isError": outcome.is_error,
+            "details": outcome.details,
+        })
+        .to_string()),
+        Err(err) => Ok(serde_json::json!({"ok": false, "error": err}).to_string()),
+    }
 }
 
 /// Convert an [`Instant`] to a wall-clock nanos-since-epoch value

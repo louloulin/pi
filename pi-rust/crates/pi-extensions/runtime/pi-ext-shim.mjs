@@ -6579,6 +6579,123 @@ function __pi_sdk_define_tool(tool) {
   return tool;
 }
 
+// --- built-in tool factories ----------------------------------------------
+//
+// `createReadTool` / `createWriteTool` / … wrap the host's built-in tool
+// bundle so an extension can delegate to the same implementation the agent
+// uses (upstream's `built-in-tool-renderer.ts` re-registers a built-in tool
+// with custom rendering but the original `execute`).
+//
+// The host exposes two imports: `host_builtin_tool_definition(name)` is
+// synchronous, so the factory can hand out the exact schema the Rust
+// executor coerces arguments against, and `host_builtin_tool(name, argsJson,
+// cwd)` is async and actually runs the tool. Without a runner the factory
+// still returns an object (with a permissive schema) and `execute` rejects
+// with `ERR_PI_BUILTIN_TOOL` instead of the import failing the whole
+// extension.
+
+function __pi_builtin_tool_definition(name) {
+  if (typeof globalThis.host_builtin_tool_definition !== "function") return null;
+  let envelope;
+  try {
+    envelope = JSON.parse(globalThis.host_builtin_tool_definition(name));
+  } catch (_e) {
+    return null;
+  }
+  if (envelope && envelope.ok === true && envelope.definition) return envelope.definition;
+  return null;
+}
+
+function __pi_builtin_tool_error(message, details) {
+  const error = new Error(message);
+  error.code = "ERR_PI_BUILTIN_TOOL";
+  if (details !== undefined) error.details = details;
+  return error;
+}
+
+function __pi_make_builtin_tool(name, cwd) {
+  const info = __pi_builtin_tool_definition(name);
+  const resolvedCwd = cwd === undefined || cwd === null ? __pi_process_module.cwd() : String(cwd);
+  return {
+    name: info && typeof info.name === "string" ? info.name : name,
+    label: info && typeof info.label === "string" ? info.label : name,
+    description: info && typeof info.description === "string" ? info.description : name,
+    parameters: info && info.parameters ? info.parameters : { type: "object" },
+    /**
+     * Run the built-in tool through the host.
+     *
+     * Two call conventions reach this function and both work:
+     *
+     *   1. upstream `AgentTool.execute(toolCallId, params, signal, onUpdate)`
+     *      – a string first argument is the tool-call id;
+     *   2. the shim's own registered-tool convention
+     *      `execute(args, ctx)` – a non-string first argument is the params
+     *      object.
+     *
+     * Resolves to `{ content, details, isError }`; `isError` is passed
+     * through so a failed built-in surfaces as a structured tool result the
+     * way a `pi.registerTool` tool does. Rejects only when the host bridge
+     * itself failed (no runner, unknown name, malformed reply).
+     */
+    execute: function (a, b) {
+      const params = typeof a === "string" ? b : a;
+      const args = params && typeof params === "object" ? params : {};
+      let raw;
+      try {
+        if (typeof globalThis.host_builtin_tool !== "function") {
+          return Promise.reject(
+            __pi_builtin_tool_error(
+              'built-in tool "' + name + '" is not available: the extension host exposes no host_builtin_tool bridge',
+            ),
+          );
+        }
+        raw = globalThis.host_builtin_tool(name, JSON.stringify(args), resolvedCwd);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      return Promise.resolve(raw).then(function (json) {
+        let envelope;
+        try {
+          envelope = JSON.parse(json);
+        } catch (e) {
+          throw __pi_builtin_tool_error(
+            'built-in tool "' + name + '" returned an unparsable host reply',
+          );
+        }
+        if (!envelope || envelope.ok !== true) {
+          throw __pi_builtin_tool_error(
+            envelope && typeof envelope.error === "string"
+              ? envelope.error
+              : 'built-in tool "' + name + '" failed in the host',
+          );
+        }
+        return {
+          content: Array.isArray(envelope.content) ? envelope.content : [],
+          details: envelope.details === undefined ? null : envelope.details,
+          isError: envelope.isError === true,
+        };
+      });
+    },
+  };
+}
+
+function __pi_sdk_create_builtin_tool(name) {
+  return function (cwd, _options) {
+    // Upstream `createBashTool(cwd, { spawnHook })` takes a second options
+    // argument; the hook has no host equivalent, so it is accepted and
+    // ignored (documented in docs/SDK_MODULES.md).
+    return __pi_make_builtin_tool(name, cwd);
+  };
+}
+
+const __pi_sdk_create_read_tool = __pi_sdk_create_builtin_tool("read");
+const __pi_sdk_create_write_tool = __pi_sdk_create_builtin_tool("write");
+const __pi_sdk_create_edit_tool = __pi_sdk_create_builtin_tool("edit");
+const __pi_sdk_create_bash_tool = __pi_sdk_create_builtin_tool("bash");
+const __pi_sdk_create_find_tool = __pi_sdk_create_builtin_tool("find");
+const __pi_sdk_create_grep_tool = __pi_sdk_create_builtin_tool("grep");
+const __pi_sdk_create_ls_tool = __pi_sdk_create_builtin_tool("ls");
+
 // --- pi-ai helpers --------------------------------------------------------
 
 function __pi_sdk_string_enum(values, options) {
@@ -6989,9 +7106,6 @@ const __pi_sdk_pi_tui = __pi_sdk_module("@earendil-works/pi-tui", {
   wrapTextWithAnsi: __pi_sdk_wrap_text,
 });
 
-const __pi_sdk_tool_factory_gap =
-  "tool factories need the host tool-invocation bridge, which the extension host does not expose yet";
-
 const __pi_sdk_pi_coding_agent = __pi_sdk_module(
   "@earendil-works/pi-coding-agent",
   {
@@ -7003,6 +7117,13 @@ const __pi_sdk_pi_coding_agent = __pi_sdk_module(
     DynamicBorder: DynamicBorder,
     VERSION: "0.85.1-pi-rust",
     convertToLlm: __pi_sdk_convert_to_llm,
+    createBashTool: __pi_sdk_create_bash_tool,
+    createEditTool: __pi_sdk_create_edit_tool,
+    createFindTool: __pi_sdk_create_find_tool,
+    createGrepTool: __pi_sdk_create_grep_tool,
+    createLsTool: __pi_sdk_create_ls_tool,
+    createReadTool: __pi_sdk_create_read_tool,
+    createWriteTool: __pi_sdk_create_write_tool,
     defineTool: __pi_sdk_define_tool,
     formatSize: __pi_sdk_format_size,
     getAgentDir: __pi_sdk_get_agent_dir,
@@ -7017,15 +7138,7 @@ const __pi_sdk_pi_coding_agent = __pi_sdk_module(
     truncateLine: __pi_sdk_truncate_line,
     withFileMutationQueue: __pi_sdk_with_file_mutation_queue,
   },
-  {
-    createBashTool: __pi_sdk_tool_factory_gap,
-    createEditTool: __pi_sdk_tool_factory_gap,
-    createFindTool: __pi_sdk_tool_factory_gap,
-    createGrepTool: __pi_sdk_tool_factory_gap,
-    createLsTool: __pi_sdk_tool_factory_gap,
-    createReadTool: __pi_sdk_tool_factory_gap,
-    createWriteTool: __pi_sdk_tool_factory_gap,
-  },
+  {},
 );
 
 const __pi_sdk_stream_gap = "streaming assistant-message events need the model-streaming bridge, which the extension host does not expose yet";
