@@ -13915,3 +13915,96 @@ LUM-1187 / 1189 / 1191 / 1195 连续四轮把「`pi-ai` 请求级 telemetry span
 
 * 开工 `22G / 50G`（47%），余 25G；本轮自建 `/tmp/pi-target-1196`（全量 fmt/clippy/test 后 2.0G）。
 * 既无「owner 已出轮且无进程持有」的大 target 目录（LUM-1195 已清），也未做额外清理。
+
+## LUM-1198 round — 合并 LUM-1194（pi-tui 终端图片内核切片 3：几何 / 四格式尺寸解析 / `renderImage` / `imageFallback`）→ `feature/pi.rs` 全量实跑 **133 套件 / 2032 passed / 0 failed / 2 ignored**；晋升 LUM-1192（`Image` 组件片）；记录「重派 run 自愈完成」与磁盘 89% 告警
+
+本轮是 **LUM-981** 的推进/协调轮。开工时两个在飞 run 都活着（与上一轮「两个 run 同刻 EOF」不同），本轮只需合并已落盘产物 + 补槽。
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `0ed6e6153`（LUM-1196 文档提交），`origin` 与工作区 `mirror` 双向同 SHA。
+* `multica daemon status --output json`：`running_task_count = 2` / `active_task_count = 2`（LUM-1197 + 本协调轮）→ 头上 **1 个空槽**。
+* 在飞 issue：**LUM-1194**（切片 3，run `01a0bda6-8787`，07:10:02 起）+ **LUM-1197**（Stage 50 `pi.registerProvider`，run `01a0bda6-72a7`，07:09:57 起）。
+* `df -h /`：**42G / 50G（89%），余 5.3G** —— 见第八节，本轮前序 run 的 target dir 未被清理。
+
+### 二、合并：`work/LUM-1194`（本轮唯一有新产物的分支）
+
+**关键观察：LUM-1196 轮重派的 LUM-1194 run 已自愈完成**。上一轮（LUM-1196）看到它「work 分支 == tip、零提交」，判定为只能重派；重派后该 run 于 **07:21:18 正常完成**并自报「切片 3 已完成并推送，未合并 `feature/pi.rs`」，推送了 `origin/work/LUM-1194 = 23b923cb5`（基线 `c85b4ec65`，已含切片 2）。→ 承接上一轮的例程修订：**重派不是零收益的兜底**，重派后的 run 会基于新 tip 重新落盘；协调轮开工必须先扫 work 分支 SHA，而不是只看上一轮的结论文档。
+
+合并（在自有分支 `work/LUM-1198` 上，`--no-ff`，**无冲突**）：
+
+```console
+$ git merge --no-ff work/LUM-1194
+Merge made by the 'ort' strategy.
+ pi-rust/crates/pi-tui/src/lib.rs                   |  21 +-
+ pi-rust/crates/pi-tui/src/terminal_image.rs        | 461 ++++++++++++++++++++-
+ pi-rust/crates/pi-tui/tests/terminal_image_render.rs | 403 ++++++++++++++++++
+ 3 files changed, 873 insertions(+), 12 deletions(-)
+ create mode 100644 pi-rust/crates/pi-tui/tests/terminal_image_render.rs
+```
+
+合并提交 `c10d1ce39`（第一父 `0ed6e6153`、第二父 `23b923cb5`）。分支自报 `c85b4ec65` 为基线（落后 tip 3 个提交），但**只触碰 `pi-tui/terminal_image.rs` + `lib.rs` + 新测试文件**，三方合并结果里 LUM-1190 的 `ctx.ui.*` / LUM-1188 切片 2 的编码器全部保留。
+
+`terminal_image.rs` 切片 3 交付面（对齐上游 `packages/tui/src/terminal-image.ts`）：`calculate_image_cell_size` / `calculate_image_rows`（`f64` 中间量 + `Math.ceil` 取整方向）、自建 base64 前缀解码器（零新依赖）、PNG / JPEG / GIF / WebP 四种像素尺寸解析、`render_image`（kitty `image_id` 元数据登记 + iTerm2 `width/height/auto` + `preserveAspectRatio`）、`image_fallback`（内嵌 OSC 8 段）。
+
+### 三、质量门：私有 target dir 实跑，**133 套件 / 2032 passed / 0 failed / 2 ignored**
+
+```console
+$ CARGO_TARGET_DIR=/tmp/pi-target-1196 cargo fmt --all -- --check          # OK
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings      # 干净（39s）
+$ ... cargo test --workspace --offline --no-fail-fast                      # exit 0
+  suites = 133, passed = 2032, failed = 0, ignored = 2
+```
+
+* 基线（`0ed6e6153`，LUM-1196 实跑）= **132 / 2029 / 0 / 2** → 本轮 **+1 套件、+3 passed**（`tests/terminal_image_render.rs` 是新增套件文件，内含 3 个离线用例：几何/尺寸解析、kitty 渲染、iTerm2 + 回退），零倒退。
+* 私有 target dir 结论维持：**不要跨 run 复用 `CARGO_TARGET_DIR`**（会伪造 `E0463`）。
+
+### 四、可合并性扫描（`origin` + `mirror` 双向）
+
+除 `work/LUM-1194` 外，两侧非祖先 ref 逐个用 `git cherry` 核实，无独有产物：
+
+```
+origin/work/LUM-1194, mirror/work/LUM-1194   # ahead=2 → 本轮合并 ✓
+mirror/work/lum-1173, origin/work/lum-1173   # ahead=11/behind=55；cherry: 10 个提交已在上游
+                                             #   唯一 `+` b6656384「style(pi-coding-agent) rustfmt」
+                                             #   已被 tip 的 fmt 基线覆盖（fmt --check 干净）
+mirror/work/lum-1177                         # cherry: 2/2 全 `-`（URL 全局 + 文档已在 tip）
+```
+
+### 五、派发（加本 run = **3/3** 满槽）
+
+| issue | 动作 | 依据 |
+| --- | --- | --- |
+| **LUM-1192**（`backlog` → `todo`） | `Image` 组件 + ANSI/OSC-8 aware `truncate_to_width` + 主题回退着色 | 该 issue 的依赖写死「LUM-1188 合入并推送 `feature/pi.rs` 后**才由协调轮把它晋升为 `todo`**」；切片 2（`343ab6978`）+ 切片 3（本轮 `c10d1ce39`）都已在 tip，它的 `renderImage` 消费接口就绪 ✓ |
+| **LUM-1194** | `in_progress` → `in_review`（`--no-start`） | run 已完成并自报产物；协调轮已把它合入 `feature/pi.rs`，等验收 |
+| LUM-1197 | 不动作 | run 仍在飞（worktree 有未提交改动），**不加压**、不重派 |
+
+文件面互斥核对：LUM-1192 只碰 `pi-tui/{src/image.rs,src/lib.rs,tests/image.rs}`；LUM-1197 只碰 `pi-extensions/**` + `pi-coding-agent/{provider.rs,extensions/**}` —— 零重叠。
+
+### 六、frontier（本轮后）
+
+1. **质量门基线** = **133 套件 / 2032 passed / 0 failed / 2 ignored（`c10d1ce39`）**；下一欠账点 = LUM-1197 或 LUM-1192 任一合入时。
+2. **pi-tui 终端图片**：切片 1/2/3 全部合入 → **内核完成**；组件片 LUM-1192 **本轮已晋升**（`Image` + `truncate_to_width`）；再后续 = `pi-coding-agent` 三个消费点接线（`tool-execution.ts` / `markdown.ts` / `read.ts` 的图片块）→ **已停放为 LUM-1200**（`backlog` + Stage 52，parent LUM-1198，等 LUM-1192 合入后晋升）。
+3. **插件生态 provider 面**：`pi.registerProvider` host 桥 = LUM-1197（在飞）；后续 slice = native `Provider` 对象 + `oauth` + `streamSimple` handler 注册 → **已停放为 LUM-1199**（`backlog` + Stage 51，parent LUM-1198，等 LUM-1197 合入后晋升）。
+4. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert`）与 provider 家族（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1185 / 1177 结论（环境做不了 / 无凭据无消费方）。
+5. **~~`pi-ai` telemetry span~~**：LUM-1196 轮已证伪并移除，不复活。
+6. **run 可靠性**：本轮两个在飞 run 都**正常活着**（无 EOF），且 LUM-1194 作为「上一轮重派的 run」自愈完成 —— 说明重派后的 run 会重新落盘，**不是**只能靠协调轮手工救回。
+
+### 七、下一轮动作（按优先级）
+
+1. **LUM-1197 / LUM-1192 任一推分支就合并它**：双向扫（`origin` + `mirror`，两种大小写）→ **先看 work 分支 SHA**（不要只看上一轮文档的结论）→ `git cherry` 核实 → 合并后私有 target dir 补跑全量门并核对 passed 增量。
+2. LUM-1197 若仍无产物且 run 已终止：按 provider EOF / 16384 两种终止原因分别处置（分支有提交 = 直接合并，零提交 = 重派）。
+3. 图片子系统收口后，可切 `pi-coding-agent` 图片渲染消费点（`tool-execution` / `markdown` / `read`）为本子系统最后一环。
+4. **Autopilot 节奏**：`1189→1191→1193→1195→1196→1198` 仍是每 20 分钟一轮。本轮开工时 LUM-1194 的上一轮 run 已是 `completed` 但 issue 仍挂 `in_progress`，建议 owner 放宽周期到 ≥1h 或对同 issue 串行化（维持 LUM-1195 / LUM-1196 建议）。
+
+### 八、磁盘（本轮）：**89% 告警 + 一条作业规程修正**
+
+* 开工 `42G / 50G`（**89%**，余 5.3G）——上一轮（LUM-1196）声明自建 `/tmp/pi-target-1196` 仅 2.0G，但实际已被本轮 clippy + test 撑到 **17G**（`debug/deps` 13G + `debug/incremental` 3G）。
+* **根因（本轮新修订的作业规程）**：LUM-1195 / LUM-1196 实跑时带了 `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0`，本轮只设了 `CARGO_TARGET_DIR` —— 默认 `dev` profile 的 `debug = true` + 增量编译会把 target dir 撑大 **~8 倍**。→ **今后全量门统一用**：
+
+```console
+CARGO_TARGET_DIR=/tmp/pi-target-<issue> CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --workspace --offline --no-fail-fast
+```
+
+* 本轮收尾已清：`/tmp/pi-target-1196`（17G，本 run 私有，产物已落盘并推送）+ `/tmp/pi-target-1194`（853M，LUM-1194 run 已 `completed`，无进程持有）。**保留** `/tmp/lum-1197-target`（LUM-1197 run 在飞）。

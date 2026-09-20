@@ -5,9 +5,10 @@
 //! (`terminal-image.ts:6-211`): the [`TerminalCapabilities`] record and its
 //! environment detection, the resettable capability cache, the cell-pixel
 //! dimensions, the kitty/iTerm2 line prefixes, [`is_image_line`] and
-//! [`allocate_image_id`]. The encoders, kitty metadata/cropping, geometry, the
-//! four pixel-parsers, `renderImage` and `imageFallback` land in the following
-//! slices (see `FEATURE_PI_RS_STATUS.md`).
+//! [`allocate_image_id`]. Slice 2 added the encoders and the kitty
+//! metadata/cropping surface, slice 3 the geometry, the four pixel-size
+//! parsers, [`render_image`] and [`image_fallback`]; the three sections below
+//! therefore cover all of upstream `terminal-image.ts`.
 //!
 //! Two divergences from upstream, both shared with [`crate::hyperlink`]:
 //!
@@ -1013,4 +1014,458 @@ pub fn crop_kitty_image_line(line: &str, hidden_rows: u32, visible_rows: u32) ->
         controls.join(","),
         &line[match_index + match_len..]
     )
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3 — geometry, the four pixel-size parsers, `renderImage` and
+// `imageFallback`.
+// Ported from `terminal-image.ts:435-696`.
+// ---------------------------------------------------------------------------
+
+/// What [`render_image`] produces.
+///
+/// Mirrors the object upstream returns (`terminal-image.ts:610-613`); the
+/// `imageId` key is [`Option::None`] for iTerm2 and for kitty when the caller
+/// did not supply one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderImageResult {
+    /// The escape sequence to write to the terminal.
+    pub sequence: String,
+    /// Columns the image occupies.
+    pub columns: u32,
+    /// Rows the image occupies.
+    pub rows: u32,
+    /// Kitty image id, when the caller supplied one.
+    pub image_id: Option<u32>,
+}
+
+/// Fit an image into a box of cells while keeping its aspect ratio.
+///
+/// Mirrors `calculateImageCellSize` (`terminal-image.ts:435-467`): the scale is
+/// `min(widthScale, heightScale)` and both counts round *up*, so an image never
+/// gets fewer cells than it needs. `max_width_cells` / `max_height_cells`
+/// below 1 clamp up to 1, as does a zero-sized image.
+///
+/// The scaling runs in `f64` because upstream does: `Math.ceil` on a value that
+/// lands exactly on an integer can still round up when the intermediate product
+/// is inexact in binary, and matching that rounding direction is the point of
+/// the port.
+pub fn calculate_image_cell_size(
+    image_dimensions: ImageDimensions,
+    max_width_cells: u32,
+    max_height_cells: Option<u32>,
+    cell_dimensions: CellDimensions,
+) -> ImageCellSize {
+    // Upstream's `Math.max(1, Math.floor(x))`; `u32` has neither fractional nor
+    // negative values, so only the clamp is left.
+    let max_width = max_width_cells.max(1);
+    let max_height = max_height_cells.map(|cells| cells.max(1));
+    let image_width = f64::from(image_dimensions.width_px.max(1));
+    let image_height = f64::from(image_dimensions.height_px.max(1));
+    let cell_width = f64::from(cell_dimensions.width_px);
+    let cell_height = f64::from(cell_dimensions.height_px);
+
+    let width_scale = f64::from(max_width) * cell_width / image_width;
+    let height_scale = match max_height {
+        Some(max_height) => f64::from(max_height) * cell_height / image_height,
+        None => width_scale,
+    };
+    let scale = width_scale.min(height_scale);
+
+    // `f64 as u32` saturates (Rust >= 1.45), which is what upstream's
+    // `Math.min(maxWidth, Infinity)` amounts to for zero-sized cells.
+    let columns = (image_width * scale / cell_width).ceil() as u32;
+    let rows = (image_height * scale / cell_height).ceil() as u32;
+
+    ImageCellSize {
+        columns: columns.clamp(1, max_width),
+        rows: match max_height {
+            Some(max_height) => rows.clamp(1, max_height),
+            None => rows.max(1),
+        },
+    }
+}
+
+/// Rows an image occupies when it is fitted to `target_width_cells` columns.
+///
+/// Mirrors `calculateImageRows` (`terminal-image.ts:469-475`).
+pub fn calculate_image_rows(
+    image_dimensions: ImageDimensions,
+    target_width_cells: u32,
+    cell_dimensions: CellDimensions,
+) -> u32 {
+    calculate_image_cell_size(image_dimensions, target_width_cells, None, cell_dimensions).rows
+}
+
+/// The 6-bit value of one base64 alphabet byte.
+fn base64_symbol(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Decode at most `max_bytes` bytes from the front of a base64 payload.
+///
+/// Upstream hands the whole payload to `Buffer.from(data, "base64")`. The port
+/// only ever needs a *header*, so it stops at `max_bytes` (and at the input's
+/// `=` padding) instead of decoding a multi-megabyte image twice. Like Node,
+/// bytes outside the alphabet are skipped and a trailing partial group of two
+/// or three symbols still yields its one or two bytes.
+fn decode_base64_prefix(base64_data: &str, max_bytes: usize) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(max_bytes.min(64));
+    let mut accumulator: u32 = 0;
+    let mut symbols = 0usize;
+    for byte in base64_data.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let Some(value) = base64_symbol(byte) else {
+            continue;
+        };
+        accumulator = (accumulator << 6) | u32::from(value);
+        symbols += 1;
+        if symbols == 4 {
+            out.push((accumulator >> 16) as u8);
+            out.push((accumulator >> 8) as u8);
+            out.push(accumulator as u8);
+            accumulator = 0;
+            symbols = 0;
+            if out.len() >= max_bytes {
+                break;
+            }
+        }
+    }
+    if out.len() < max_bytes {
+        match symbols {
+            2 => out.push((accumulator >> 4) as u8),
+            3 => {
+                out.push((accumulator >> 10) as u8);
+                out.push((accumulator >> 2) as u8);
+            }
+            _ => {}
+        }
+    }
+    out.truncate(max_bytes);
+    out
+}
+
+/// Big-endian `u16` at `offset`, or `None` when the buffer is too short.
+///
+/// Upstream's `readUInt16BE`/`readUInt32BE` throw on a short buffer and its
+/// callers catch that into `null`; `Option` spells the same contract without
+/// exceptions.
+fn read_u16_be(buffer: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(
+        buffer.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+/// Big-endian `u32` at `offset`, or `None` when the buffer is too short.
+fn read_u32_be(buffer: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        buffer.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+/// Little-endian `u16` at `offset`, or `None` when the buffer is too short.
+fn read_u16_le(buffer: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        buffer.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+/// Little-endian `u32` at `offset`, or `None` when the buffer is too short.
+fn read_u32_le(buffer: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        buffer.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+/// Pixel size of a PNG, read from the IHDR header.
+///
+/// Mirrors `getPngDimensions` (`terminal-image.ts:477-496`): only the 24-byte
+/// header is decoded, a wrong signature or a short buffer is `None`.
+pub fn get_png_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    const HEADER_BYTES: usize = 24;
+    let buffer = decode_base64_prefix(base64_data, HEADER_BYTES);
+    if buffer.len() < HEADER_BYTES || buffer[..4] != [0x89, b'P', b'N', b'G'] {
+        return None;
+    }
+    Some(ImageDimensions {
+        width_px: read_u32_be(&buffer, 16)?,
+        height_px: read_u32_be(&buffer, 20)?,
+    })
+}
+
+/// Pixel size of a JPEG, read from the first SOF0-SOF2 frame header.
+///
+/// Mirrors `getJpegDimensions` (`terminal-image.ts:498-539`): the marker walk
+/// skips each segment by its big-endian length until a start-of-frame marker
+/// turns up. Upstream walks the whole decoded buffer; the port decodes at most
+/// `JPEG_HEADER_SCAN_LIMIT` (64 KiB) bytes, so a JPEG whose SOF marker sits
+/// behind a
+/// larger APP segment (a very large EXIF block, say) is reported as `None`
+/// instead of being scanned — a documented divergence that keeps the parser
+/// from decoding multi-megabyte payloads.
+pub fn get_jpeg_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    let buffer = decode_base64_prefix(base64_data, JPEG_HEADER_SCAN_LIMIT);
+    if buffer.len() < 2 || buffer[0] != 0xff || buffer[1] != 0xd8 {
+        return None;
+    }
+
+    let mut offset = 2usize;
+    while offset + 9 < buffer.len() {
+        if buffer[offset] != 0xff {
+            offset += 1;
+            continue;
+        }
+        let marker = buffer[offset + 1];
+        if (0xc0..=0xc2).contains(&marker) {
+            return Some(ImageDimensions {
+                width_px: u32::from(read_u16_be(&buffer, offset + 7)?),
+                height_px: u32::from(read_u16_be(&buffer, offset + 5)?),
+            });
+        }
+        if offset + 3 >= buffer.len() {
+            return None;
+        }
+        let length = read_u16_be(&buffer, offset + 2)?;
+        if length < 2 {
+            return None;
+        }
+        offset += 2 + usize::from(length);
+    }
+    None
+}
+
+/// Pixel size of a GIF, read from the logical screen descriptor.
+///
+/// Mirrors `getGifDimensions` (`terminal-image.ts:541-560`): only the 10-byte
+/// header is decoded, and GIF87a/GIF89a are the only accepted signatures.
+pub fn get_gif_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    const HEADER_BYTES: usize = 10;
+    let buffer = decode_base64_prefix(base64_data, HEADER_BYTES);
+    if buffer.len() < HEADER_BYTES {
+        return None;
+    }
+    if buffer[..6] != *b"GIF87a" && buffer[..6] != *b"GIF89a" {
+        return None;
+    }
+    Some(ImageDimensions {
+        width_px: u32::from(read_u16_le(&buffer, 6)?),
+        height_px: u32::from(read_u16_le(&buffer, 8)?),
+    })
+}
+
+/// Pixel size of a WebP, for all three container flavours.
+///
+/// Mirrors `getWebpDimensions` (`terminal-image.ts:562-608`): lossy `VP8 `
+/// stores a 14-bit size at offset 26, lossless `VP8L` packs both sizes into a
+/// little-endian `u32` at offset 21 (minus one each), and the extended `VP8X`
+/// carries the 24-bit sizes minus one at offsets 24 and 27.
+pub fn get_webp_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    const HEADER_BYTES: usize = 30;
+    let buffer = decode_base64_prefix(base64_data, HEADER_BYTES);
+    if buffer.len() < HEADER_BYTES {
+        return None;
+    }
+    if buffer[..4] != *b"RIFF" || buffer[8..12] != *b"WEBP" {
+        return None;
+    }
+
+    match &buffer[12..16] {
+        b"VP8 " => Some(ImageDimensions {
+            width_px: u32::from(read_u16_le(&buffer, 26)? & 0x3fff),
+            height_px: u32::from(read_u16_le(&buffer, 28)? & 0x3fff),
+        }),
+        b"VP8L" => {
+            let bits = read_u32_le(&buffer, 21)?;
+            Some(ImageDimensions {
+                width_px: (bits & 0x3fff) + 1,
+                height_px: ((bits >> 14) & 0x3fff) + 1,
+            })
+        }
+        b"VP8X" => Some(ImageDimensions {
+            width_px: (u32::from(buffer[24])
+                | (u32::from(buffer[25]) << 8)
+                | (u32::from(buffer[26]) << 16))
+                + 1,
+            height_px: (u32::from(buffer[27])
+                | (u32::from(buffer[28]) << 8)
+                | (u32::from(buffer[29]) << 16))
+                + 1,
+        }),
+        _ => None,
+    }
+}
+
+/// Bytes [`get_jpeg_dimensions`] decodes before giving up on the marker walk.
+const JPEG_HEADER_SCAN_LIMIT: usize = 64 * 1024;
+
+/// Pixel size of an image, chosen by MIME type.
+///
+/// Mirrors `getImageDimensions` (`terminal-image.ts:610-621`); an unsupported
+/// MIME type is `None` rather than a guess.
+pub fn get_image_dimensions(base64_data: &str, mime_type: &str) -> Option<ImageDimensions> {
+    match mime_type {
+        "image/png" => get_png_dimensions(base64_data),
+        "image/jpeg" => get_jpeg_dimensions(base64_data),
+        "image/gif" => get_gif_dimensions(base64_data),
+        "image/webp" => get_webp_dimensions(base64_data),
+        _ => None,
+    }
+}
+
+/// Render an image as an inline escape sequence.
+///
+/// Mirrors `renderImage` (`terminal-image.ts:625-663`). `None` means the
+/// terminal cannot show inline images. Upstream's `maxWidthCells` default of
+/// 80 and `preserveAspectRatio` default of `true` are applied here, and cell
+/// dimensions come from [`get_cell_dimensions`].
+///
+/// A caller-supplied `image_id` registers the computed box in the kitty
+/// metadata table *before* encoding, so the line that is written can later be
+/// looked up, placed or cropped (`terminal-image.ts:630-638`).
+///
+/// The surrounding `moveUp` assembly stays out of this function: it belongs to
+/// the component layer (LUM-1192).
+pub fn render_image(
+    base64_data: &str,
+    image_dimensions: ImageDimensions,
+    options: &ImageRenderOptions,
+) -> Option<RenderImageResult> {
+    let protocol = get_capabilities().images?;
+    let max_width = options.max_width_cells.unwrap_or(80);
+    let size = calculate_image_cell_size(
+        image_dimensions,
+        max_width,
+        options.max_height_cells,
+        get_cell_dimensions(),
+    );
+
+    match protocol {
+        ImageProtocol::Kitty => {
+            if let Some(image_id) = options.image_id {
+                register_kitty_image_metadata(KittyImageMetadata {
+                    image_id,
+                    columns: size.columns,
+                    rows: size.rows,
+                    width_px: image_dimensions.width_px,
+                    height_px: image_dimensions.height_px,
+                });
+            }
+            let sequence = encode_kitty(
+                base64_data,
+                &KittyEncodeOptions {
+                    columns: Some(size.columns),
+                    rows: Some(size.rows),
+                    image_id: options.image_id,
+                    move_cursor: options.move_cursor,
+                },
+            );
+            Some(RenderImageResult {
+                sequence,
+                columns: size.columns,
+                rows: size.rows,
+                image_id: options.image_id,
+            })
+        }
+        ImageProtocol::Iterm2 => {
+            let sequence = encode_iterm2(
+                base64_data,
+                &Iterm2EncodeOptions {
+                    width: Some(size.columns.to_string()),
+                    height: Some("auto".to_string()),
+                    name: None,
+                    preserve_aspect_ratio: Some(options.preserve_aspect_ratio.unwrap_or(true)),
+                    inline: None,
+                },
+            );
+            Some(RenderImageResult {
+                sequence,
+                columns: size.columns,
+                rows: size.rows,
+                image_id: None,
+            })
+        }
+    }
+}
+
+/// Whether `path` is absolute in the POSIX sense.
+///
+/// Upstream uses Node's `path.isAbsolute`, which also accepts Windows forms.
+/// This crate's callers only ever pass POSIX absolute paths, so `starts_with
+/// ('/')` is the whole rule (documented divergence).
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+}
+
+/// `$HOME`, or `None` when it is unset or empty.
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok().filter(|home| !home.is_empty())
+}
+
+/// Shorten a home-prefixed absolute path to `~/...` for compact display.
+///
+/// Mirrors `shortenImagePath` (`terminal-image.ts:682-689`). `$HOME` stands in
+/// for Node's `os.homedir()` — no `dirs`/`home` crate — and a path that is
+/// neither `$HOME` itself nor below it is returned unchanged. An unset or empty
+/// `$HOME` disables the shortening, matching upstream's falsy check.
+pub fn shorten_image_path(filename: &str) -> String {
+    let Some(home) = home_dir() else {
+        return filename.to_string();
+    };
+    if filename == home {
+        return "~".to_string();
+    }
+    // Upstream slices at `home.length`, so the separator stays part of `rest`.
+    if let Some(rest) = filename.strip_prefix(&home) {
+        if rest.starts_with('/') || rest.starts_with('\\') {
+            return format!("~{rest}");
+        }
+    }
+    filename.to_string()
+}
+
+/// Text fallback for a terminal that cannot render inline images.
+///
+/// Mirrors `imageFallback` (`terminal-image.ts:695-707`). The shape is
+/// `[Image: <display> [<mime>] <W>x<H>]`, with the display name and the pixel
+/// size omitted entirely when there is no filename / no parsed dimensions (an
+/// empty filename counts as absent, as upstream's truthiness check does). An
+/// absolute path is shortened with [`shorten_image_path`] and, when the
+/// terminal renders OSC 8, wrapped in a `file://` hyperlink so the full path
+/// stays openable.
+///
+/// Divergence: upstream builds the target with `pathToFileURL(...).href`, which
+/// percent-escapes the path. This crate's callers only pass POSIX absolute
+/// paths, so the target is `file://{path}` verbatim — no escaping — which keeps
+/// the sequence readable for the paths the TUI actually hands over.
+pub fn image_fallback(
+    mime_type: &str,
+    dimensions: Option<ImageDimensions>,
+    filename: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(filename) = filename.filter(|name| !name.is_empty()) {
+        let display = shorten_image_path(filename);
+        if is_absolute_path(filename) && get_capabilities().hyperlinks {
+            parts.push(hyperlink::hyperlink(
+                &display,
+                &format!("file://{filename}"),
+            ));
+        } else {
+            parts.push(display);
+        }
+    }
+    parts.push(format!("[{mime_type}]"));
+    if let Some(dimensions) = dimensions {
+        parts.push(format!("{}x{}", dimensions.width_px, dimensions.height_px));
+    }
+    format!("[Image: {}]", parts.join(" "))
 }
