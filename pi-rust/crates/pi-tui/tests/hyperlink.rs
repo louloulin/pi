@@ -60,6 +60,9 @@ fn assistant_with_link() -> MessageView {
         text: "see [docs](https://example.com/x) now".into(),
         thinking: String::new(),
         streaming: false,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
     });
     view
 }
@@ -146,6 +149,9 @@ fn selection_never_includes_osc8_sequences() {
         text: "see [docs](https://example.com/x) now".into(),
         thinking: String::new(),
         streaming: false,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
     });
     let area = Rect::new(0, 0, WIDTH, HEIGHT);
     let mut buf = Buffer::empty(area);
@@ -180,6 +186,9 @@ fn snapshot_export_stays_plain_text_when_hyperlinks_are_on() {
         text: "see [docs](https://example.com/x) now".into(),
         thinking: String::new(),
         streaming: false,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
     });
     let snapshot = app.render_snapshot(WIDTH, HEIGHT);
     assert!(!snapshot.lines.iter().any(|line| line.contains('\u{1b}')));

@@ -7,15 +7,23 @@
 //! display" chain covered by one test instead of three unit-level assertions.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use pi_agent_core::{Agent, AgentEvent, AgentOptions};
+use pi_ai::providers::faux::FauxProvider;
 use pi_coding_agent::tools::{
     render_lines_ansi, render_lines_plain, AbortLike, AgentTool, BashTool, FindTool, GrepTool,
-    LsTool, ReadTool, ToolOutput, ToolRenderSession, WriteTool,
+    InteractiveToolRenderer, LsTool, ReadTool, ToolOutput, ToolRenderSession, WriteTool,
 };
-use pi_protocol::{Content, ToolCall, ToolResult};
+use pi_protocol::{Api, Content, Model, ProviderId, ToolCall, ToolResult};
+use pi_tui::app::{App, AppConfig, StepOutcome};
+use pi_tui::input::{Key, KeyCode, KeyModifiers};
 use pi_tui::{builtin_theme, ColorMode, Theme, ThemeColor};
 use serde_json::json;
+
+/// Snapshot size for the interactive App test below.
+const WIDTH: u16 = 80;
+const HEIGHT: u16 = 20;
 
 fn fresh_tmp(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -457,4 +465,186 @@ fn renderers_mark_invalid_arguments_and_default_ls_to_dot() {
     session.call(&call("c8", "bash", json!({ "command": "true" })), false);
     let empty = session.result(&as_result("c8", ToolOutput::text(""), false));
     assert!(empty.is_empty(), "{empty:?}");
+}
+
+#[test]
+fn interactive_app_renders_the_rich_bash_block_and_ctrl_o_expands_it() {
+    // The whole point of this slice: the `pi-tui` App has no dependency on
+    // the renderers, so the driver installs `InteractiveToolRenderer` and the
+    // command + highlighted result show up in the interactive snapshot.
+    let dir = fresh_tmp("interactive-tool-render");
+    let agent = Agent::new(AgentOptions::new(
+        Model {
+            provider: ProviderId::new("faux"),
+            id: "faux-model".into(),
+            api: Api::Faux,
+            label: Some("Faux".into()),
+            context_window: 1024,
+            max_output_tokens: 256,
+        },
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ));
+    let mut app = App::new(
+        &agent,
+        AppConfig {
+            session_id: "interactive-tool-render".into(),
+            ..AppConfig::default()
+        },
+    );
+    app.set_tool_block_renderer(Box::new(InteractiveToolRenderer::new(&dir)));
+    let _ = app.render_snapshot(WIDTH, HEIGHT);
+
+    let id = "call-bash";
+    app.apply_agent_event(AgentEvent::ToolExecutionStart {
+        call: call(id, "bash", json!({ "command": "echo hi" })),
+    });
+    let output: String = (1..=6)
+        .map(|i| format!("line-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.apply_agent_event(AgentEvent::ToolExecutionEnd {
+        result: ToolResult {
+            tool_call_id: id.to_string(),
+            content: Box::new(Content::text(output)),
+            is_error: false,
+            details: None,
+            added_tool_names: None,
+        },
+        duration_ms: 4,
+    });
+
+    let snapshot = app.render_snapshot(WIDTH, HEIGHT);
+    let text = snapshot.lines.join("\n");
+    // The renderer's call summary stays visible while the result folds to a
+    // tail preview with the expand hint.
+    assert!(text.contains("bash echo hi"), "{text}");
+    assert!(text.contains("… (+2 lines, Ctrl+O to expand)"), "{text}");
+    assert!(text.contains("line-6"), "{text}");
+    assert!(!text.contains("line-1"), "{text}");
+
+    // Porting the renderer at all is worth it only if the styling survives:
+    // the call title keeps the `toolTitle` slot the renderer set.
+    let styled = app.messages().render_styled_lines(WIDTH);
+    assert!(
+        styled
+            .iter()
+            .flatten()
+            .any(|span| { span.text == "bash" && span.style.fg == Some(ThemeColor::ToolTitle) }),
+        "the rich call title keeps its theme slot"
+    );
+
+    // `app.tools.expand` (Ctrl+O) reveals the hidden head of the result.
+    assert_eq!(
+        app.step_key(Key::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        StepOutcome::Redraw
+    );
+    let text = app.render_snapshot(WIDTH, HEIGHT).lines.join("\n");
+    assert!(text.contains("line-1"), "{text}");
+    assert!(!text.contains("Ctrl+O to expand"), "{text}");
+}
+
+/// A wire-shaped result for the interactive adapter tests below.
+fn wire_result(
+    id: &str,
+    text: &str,
+    details: Option<serde_json::Value>,
+    is_error: bool,
+) -> ToolResult {
+    ToolResult {
+        tool_call_id: id.to_string(),
+        content: Box::new(Content::text(text)),
+        is_error,
+        details,
+        added_tool_names: None,
+    }
+}
+
+#[test]
+fn bash_read_and_edit_blocks_reach_the_interactive_snapshot_with_styling() {
+    // Requirement 4: the adapter is not bash-only — `read` and `edit` go
+    // through the same `InteractiveToolRenderer` and show up styled and
+    // folded in the App snapshot.
+    let dir = fresh_tmp("interactive-multi");
+    let source: String = (1..=12)
+        .map(|i| format!("let v{i} = {i};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(dir.join("sample.rs"), &source).unwrap();
+    let diff = " 1 fn main() {\n-2     let x = 1;\n+2     let x = 42;\n 3     let y = 2;\n-4     let z = 3;\n+4     let z = 30;\n 5     let w = 4;\n-6     let v = 5;\n+6     let v = 50;\n 7 }";
+
+    let cases: Vec<(&str, serde_json::Value, ToolResult)> = vec![
+        (
+            "bash",
+            json!({ "command": "seq 1 12" }),
+            wire_result(
+                "call-0",
+                "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12",
+                None,
+                false,
+            ),
+        ),
+        (
+            "read",
+            json!({ "path": "sample.rs" }),
+            wire_result("call-1", &source, None, false),
+        ),
+        (
+            "edit",
+            json!({ "path": "sample.rs", "old_text": "let v1 = 1;", "new_text": "let v1 = 100;" }),
+            wire_result("call-2", "", Some(json!({ "diff": diff })), false),
+        ),
+    ];
+
+    let agent = Agent::new(AgentOptions::new(
+        Model {
+            provider: ProviderId::new("faux"),
+            id: "faux-model".into(),
+            api: Api::Faux,
+            label: Some("Faux".into()),
+            context_window: 1024,
+            max_output_tokens: 256,
+        },
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ));
+
+    for (name, args, result) in cases {
+        let mut app = App::new(
+            &agent,
+            AppConfig {
+                session_id: format!("interactive-multi-{name}"),
+                ..AppConfig::default()
+            },
+        );
+        app.set_tool_block_renderer(Box::new(InteractiveToolRenderer::new(&dir)));
+        let _ = app.render_snapshot(WIDTH, HEIGHT);
+
+        let id = result.tool_call_id.clone();
+        app.apply_agent_event(AgentEvent::ToolExecutionStart {
+            call: call(&id, name, args),
+        });
+        app.apply_agent_event(AgentEvent::ToolExecutionEnd {
+            result,
+            duration_ms: 2,
+        });
+
+        let text = app.render_snapshot(WIDTH, HEIGHT).lines.join("\n");
+        assert!(
+            text.contains(name),
+            "{name}: the call header is visible\n{text}"
+        );
+        assert!(
+            text.contains("Ctrl+O to expand"),
+            "{name}: a long result folds\n{text}"
+        );
+        let styled = app.messages().render_styled_lines(WIDTH);
+        assert!(
+            styled
+                .iter()
+                .flatten()
+                .any(|span| span.style.fg == Some(ThemeColor::ToolTitle)),
+            "{name}: the call title keeps its theme slot"
+        );
+    }
 }

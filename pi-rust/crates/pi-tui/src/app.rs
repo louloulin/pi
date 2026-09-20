@@ -111,7 +111,7 @@
 //! table have **no consumer** in this port yet and are deliberately not
 //! implemented here: `app.suspend`, `app.thinking.cycle`,
 //! `app.thinking.save`, `app.model.cycleForward` / `cycleBackward` /
-//! `select`, `app.tools.expand`, the `app.session.*`,
+//! `select`, the `app.session.*`,
 //! `app.tree.*`, `app.models.*`, `app.message.*`, `app.clipboard.*` and
 //! `app.editor.*` families, and `tui.altScreen.halfPageUp` / `halfPageDown`
 //! / `lineUp` / `lineDown` / `previousPrompt` / `nextPrompt`.
@@ -119,6 +119,11 @@
 //! `app.thinking.toggle` (`ctrl+t`) **is** wired: it collapses / expands
 //! assistant thinking blocks and reports the new state through the transient
 //! status hint (see [`App::toggle_thinking_visibility`]).
+//!
+//! `app.tools.expand` (`ctrl+o`) **is** wired too: it collapses / expands
+//! every tool block and reports the new state through the transient status
+//! hint (see [`App::toggle_tools_expanded`]). A mouse click on a single block
+//! toggles just that block.
 //!
 //! One deliberate deviation: upstream's `app.model.select` also defaults to
 //! `ctrl+l`, but there it means "open the model selector"
@@ -265,7 +270,7 @@ use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
-use crate::message::{MessageItem, MessageView, PendingMessageKind};
+use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
 use crate::search::{
@@ -417,6 +422,14 @@ pub struct AppConfig {
     /// OSC 8 pair and drops the inline `(url)`; the `/transcript` snapshot
     /// stays plain text. See [`crate::hyperlink`].
     pub hyperlinks: Option<bool>,
+    /// Lines a collapsed tool block previews before showing the
+    /// `… (+M lines, Ctrl+O to expand)` hint.
+    ///
+    /// Defaults to [`crate::message::TOOL_PREVIEW_LINES`] (4). This is the
+    /// injection point for the interactive TUI: the driver maps a user
+    /// setting onto it, and tests pin it to make a fold assertion exact. It
+    /// only seeds the view — [`App::messages_mut`] exposes the live value.
+    pub tool_preview_lines: usize,
 }
 
 impl Default for AppConfig {
@@ -428,6 +441,7 @@ impl Default for AppConfig {
             markdown: true,
             copy_on_select: true,
             hyperlinks: None,
+            tool_preview_lines: crate::message::TOOL_PREVIEW_LINES,
         }
     }
 }
@@ -937,6 +951,17 @@ pub struct App {
     /// to acknowledge a chord that changes no visible text on its own, e.g.
     /// `app.thinking.toggle`.
     status_flash: Option<String>,
+    /// Driver-supplied rich renderer for tool blocks.
+    ///
+    /// `pi-tui` cannot depend on the crate that owns the tool renderers, so
+    /// the driver installs one with [`App::set_tool_block_renderer`] and the
+    /// App hands it each finished [`pi_protocol::ToolResult`] for styling.
+    /// See [`ToolBlockRenderer`](crate::message::ToolBlockRenderer).
+    tool_block_renderer: Option<Box<dyn ToolBlockRenderer>>,
+    /// Cell a left press landed on when it hit a tool block, kept until its
+    /// release: a click that starts and ends on the same tool block toggles
+    /// that block's expansion instead of starting a text selection.
+    tool_press: Option<(u16, u16, usize)>,
 }
 
 impl App {
@@ -958,6 +983,7 @@ impl App {
         prompt.set_placeholder(config.prompt_placeholder.clone());
         let event_rx = agent.subscribe();
         let markdown = config.markdown;
+        let tool_preview_lines = config.tool_preview_lines;
         let hyperlinks = config
             .hyperlinks
             .unwrap_or_else(crate::hyperlink::supports_hyperlinks);
@@ -966,7 +992,8 @@ impl App {
             prompt,
             messages: MessageView::new()
                 .with_markdown(markdown)
-                .with_hyperlinks(hyperlinks),
+                .with_hyperlinks(hyperlinks)
+                .with_tool_preview_lines(tool_preview_lines),
             status_bar: StatusBar::new(),
             status_data,
             theme: builtin_theme("dark", ColorMode::TrueColor)
@@ -1000,7 +1027,24 @@ impl App {
             extension: ExtensionUi::new(),
             custom_saved_editor: None,
             status_flash: None,
+            tool_block_renderer: None,
+            tool_press: None,
         }
+    }
+
+    /// Install the driver's rich tool-block renderer.
+    ///
+    /// The App owns the folding policy (collapsed tail preview +
+    /// `app.tools.expand`); the driver owns the syntax highlighting. Passing
+    /// `None` (or never calling this) keeps the plain `[tool:…]` body, which
+    /// is what headless tests and the print-mode path want.
+    pub fn set_tool_block_renderer(&mut self, renderer: Box<dyn ToolBlockRenderer>) {
+        self.tool_block_renderer = Some(renderer);
+    }
+
+    /// Remove the rich tool-block renderer, if any.
+    pub fn clear_tool_block_renderer(&mut self) {
+        self.tool_block_renderer = None;
     }
 
     /// Whether assistant bodies are currently rendered as markdown.
@@ -1037,6 +1081,21 @@ impl App {
         let visible = !self.messages.thinking_visible();
         self.messages.set_thinking_visible(visible);
         visible
+    }
+
+    /// Whether tool blocks render expanded.
+    pub fn tools_expanded(&self) -> bool {
+        self.messages.tools_expanded()
+    }
+
+    /// Flip every tool block's expansion, returning the new state.
+    ///
+    /// Backs `app.tools.expand` (`Ctrl+O`), upstream's `setToolsExpanded`:
+    /// one press expands every block, including any a click had collapsed,
+    /// and the status bar echoes `Tool output: expanded/collapsed` the way
+    /// upstream's `showStatus` does.
+    pub fn toggle_tools_expanded(&mut self) -> bool {
+        self.messages.toggle_tools_expanded()
     }
 
     /// Whether markdown links render as OSC 8 hyperlinks.
@@ -1214,7 +1273,8 @@ impl App {
     /// [`App::drain_agent_events`] funnels every queued event through this;
     /// it is public so a driver (or a test) can inject a synthetic event —
     /// the faux provider only streams text, so a thinking or tool event has
-    /// no other way in.
+    /// no other way in (the render loop itself goes through
+    /// [`App::drain_agent_events`]).
     pub fn apply_agent_event(&mut self, event: AgentEvent) {
         self.apply_event(event);
     }
@@ -1269,6 +1329,9 @@ impl App {
                     .add_tokens(message.usage.input, message.usage.output);
             }
             AgentEvent::ToolExecutionStart { call } => {
+                if let Some(renderer) = self.tool_block_renderer.as_mut() {
+                    renderer.begin_tool(&call);
+                }
                 let args = if call.arguments.is_null() {
                     String::new()
                 } else {
@@ -1292,11 +1355,27 @@ impl App {
                     Content::Text(t) => t.text.clone(),
                     _ => "(binary result)".to_string(),
                 };
-                self.messages.finish_tool_execution(
+                // Let the driver's renderer style the block against the
+                // viewport we last painted at. Before the first render there
+                // is no width, so fall back to a sane 80 columns.
+                let width = {
+                    let w = self.viewport_width.load(Ordering::Relaxed);
+                    if w == 0 {
+                        80
+                    } else {
+                        w
+                    }
+                };
+                let styled = self
+                    .tool_block_renderer
+                    .as_mut()
+                    .and_then(|renderer| renderer.finish_tool(&result, width));
+                self.messages.finish_tool_execution_with_lines(
                     &result.tool_call_id,
                     duration_ms,
                     &body,
                     is_error,
+                    styled,
                 );
             }
             AgentEvent::TurnEnd {
@@ -1966,6 +2045,19 @@ impl App {
             self.flash_status(format!(
                 "Thinking blocks: {}",
                 if visible { "visible" } else { "hidden" }
+            ));
+            return StepOutcome::Redraw;
+        }
+        // `app.tools.expand` (`Ctrl+O`): expand / collapse every tool block
+        // (upstream's `setToolsExpanded` / `toggleToolOutputExpansion`,
+        // `interactive-mode.ts:4231-4246`, which also reports the new state
+        // through `showStatus`). The rich bodies were rendered by the driver
+        // at execution end; this only flips how much of them the App paints.
+        if Self::matches_app_key(&kb, &event, "app.tools.expand", &["ctrl+o"]) {
+            let expanded = self.toggle_tools_expanded();
+            self.flash_status(format!(
+                "Tool output: {}",
+                if expanded { "expanded" } else { "collapsed" }
             ));
             return StepOutcome::Redraw;
         }
@@ -2821,6 +2913,8 @@ impl App {
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
                 self.stop_selection_autoscroll();
+                // A fresh press invalidates any pending tool-block click.
+                self.tool_press = None;
                 let Some(point) = self.selection_point(gesture.x, gesture.y) else {
                     return StepOutcome::Idle;
                 };
@@ -2830,6 +2924,15 @@ impl App {
                 // `packages/tui/src/tui-alt-screen.ts:1364-1367`).
                 let word = self.word_selection(point);
                 let click_count = self.next_click_count(point, word);
+                // A single click on a tool block is an expand / collapse, not
+                // the start of a selection. Remember the cell so only a
+                // release on that same cell commits (a drag away still
+                // selects text).
+                if click_count == 1 {
+                    if let Some(index) = self.tool_block_at(point.0) {
+                        self.tool_press = Some((gesture.x, gesture.y, index));
+                    }
+                }
                 let next = match click_count {
                     2 => word.map(|(start, end)| {
                         Selection::range(start, end, SelectionGranularity::Word)
@@ -2874,6 +2977,20 @@ impl App {
             MouseGestureKind::Release(MouseButton::Left) => {
                 self.selection_dragging = false;
                 self.stop_selection_autoscroll();
+                // A press and release on the same cell of a tool block is a
+                // click on that block: toggle it and swallow the selection
+                // the press started, so nothing is copied.
+                if let Some((px, py, index)) = self.tool_press.take() {
+                    if px == gesture.x && py == gesture.y {
+                        self.clear_selection();
+                        self.pending_clipboard = None;
+                        return if self.messages.toggle_tool_at(index).is_some() {
+                            StepOutcome::Redraw
+                        } else {
+                            StepOutcome::Idle
+                        };
+                    }
+                }
                 let changed = self
                     .selection_point(gesture.x, gesture.y)
                     .map(|point| self.extend_selection(point) == StepOutcome::Redraw)
@@ -3220,6 +3337,24 @@ impl App {
         self.selection_autoscroll_pointer = None;
     }
 
+    /// Index of the tool block whose rendered lines cover log line `line`,
+    /// or `None` when that line belongs to a user / assistant message (or
+    /// the log is empty).
+    ///
+    /// Uses [`MessageView::item_index_at_line`], so a click lands on exactly
+    /// the block the renderer painted at that row.
+    fn tool_block_at(&self, line: usize) -> Option<usize> {
+        let (width, _) = self.viewport();
+        if width == 0 {
+            return None;
+        }
+        let index = self.messages.item_index_at_line(line, width)?;
+        match self.messages.items().get(index) {
+            Some(item) if item.role == Role::Tool => Some(index),
+            _ => None,
+        }
+    }
+
     /// Map an absolute terminal cell onto a rendered-log coordinate, or
     /// `None` when it falls outside the message viewport or before the
     /// first render.
@@ -3237,7 +3372,6 @@ impl App {
 
     /// Like [`App::selection_point`], but clamps a pointer outside the
     /// viewport back onto its nearest row.
-    ///
     /// Upstream keeps tracking a drag that left the viewport and maps the
     /// pointer through `getScrollSelectionPoint`, so the focus follows a
     /// pointer resting on the status / prompt rows while the autoscroll

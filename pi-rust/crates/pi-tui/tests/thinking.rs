@@ -178,6 +178,9 @@ fn thinking_is_visible_by_default() {
         text: "the answer".into(),
         thinking: "weigh the options".into(),
         streaming: false,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
     });
     assert!(rendered(&app).contains("weigh the options"));
 }
@@ -190,6 +193,9 @@ fn ctrl_t_toggles_thinking_and_flashes_the_status_hint() {
         text: "the answer".into(),
         thinking: "weigh the options".into(),
         streaming: false,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
     });
 
     assert_eq!(app.step(ctrl('t')), StepOutcome::Redraw);
