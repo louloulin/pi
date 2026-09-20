@@ -53,14 +53,28 @@ the process runs its shutdown path (extension `session_shutdown`).
 <Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>`.
 Every panel is fed into the *same* process, so panels are cumulative
 frames of one interactive session. `skip_capture` drives the UI without
-emitting a panel (useful for intermediate keystrokes).
+emitting a panel (useful for intermediate keystrokes). `wait_for` (with
+`wait_timeout`, default 8s) keeps pumping until that text is on the grid
+before the frame is frozen, which is how an async panel (a model reply, a
+completed tool call) is captured *after* the thing it claims happened.
+
+Panels can also carry `expect` / `reject` / `probe` / `xfail` /
+`xfail_reject` assertions over their frozen grid — see the "panel assertions"
+section below. A failing `expect`/`reject`, or an `xfail` that unexpectedly
+passes, makes the harness exit non-zero with the failing needle named. Use
+`probe` when a behaviour only a *fixed* binary can show: an unmet probe is
+reported as XFAIL, so one scenario documents both sides of an A/B (`probe`
+rows that PASS name the binary's post-fix behaviour).
 
 Every emitted panel is rendered from a **frozen copy of the terminal at
 that panel's moment**, not from the emulator's final state, and the
-harness prints a per-panel frame hash. Set `"distinct_panels": true` to
-turn "two adjacent panels are byte-identical" into a hard failure; the
-harness then exits non-zero instead of shipping a collage whose captions
-claim interaction the images do not show.
+harness prints a per-panel frame hash. Before the first panel the harness
+pumps until the app has painted *something* — a startup that outran the
+first sleep used to produce an empty first panel that still looked like
+evidence — and `wait_for` does the same per panel. Set
+`"distinct_panels": true` to turn "two adjacent panels are byte-identical"
+into a hard failure; the harness then exits non-zero instead of shipping a
+collage whose captions claim interaction the images do not show.
 """
 
 from __future__ import annotations
@@ -72,6 +86,7 @@ import hashlib
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -397,6 +412,161 @@ def snapshot(screen) -> str:
     return body
 
 
+# ------------------------------------------------------- panel assertions
+#
+# A screenshot plus a caption is a claim; these turn the claim into a check
+# the harness evaluates. Each panel may carry:
+#
+#   "expect":        ["text"]   must be present           -> FAIL when missing
+#   "reject":        ["text"]   must be absent            -> FAIL when present
+#   "probe":         ["text"]   A/B evidence             -> XFAIL when missing
+#   "xfail":         ["text"]   a KNOWN defect: present today -> FAIL when missing
+#   "xfail_reject":  ["text"]   a known defect: present today -> FAIL when absent
+#
+# `probe` is for a behaviour that only a *fixed* binary can show: it records
+# "this binary does not satisfy it yet" as XFAIL instead of failing the run, so
+# one scenario documents both sides of an A/B. `xfail` is a stronger claim — a
+# defect that must be fixed — so a marker that unexpectedly starts passing is a
+# hard failure here and has to be moved to `expect`.
+#
+# An entry is either a plain substring, or an object:
+#
+#   {"text": "/mo", "count": 2}      {"text": "x", "count": ">=2"}
+#   {"text": "x", "count": "2..4"}   {"count": ">=2", "regex": "^> "}
+#   {"text": "...", "why": "LUM-1262"}
+#
+# `count` accepts an int, "N..M", ">=N" or "<=N"; without it the entry asserts
+# presence (expect/xfail_reject) or absence (reject/xfail). `regex` switches the
+# needle from a literal substring to a pattern (counted per line).
+
+_STATUS_FOR = {
+    # kind -> (status when the needle is found, status when it is not)
+    "expect": ("PASS", "FAIL"),
+    "reject": ("FAIL", "PASS"),
+    # A/B evidence: describes post-fix behaviour that the binary under test may
+    # not have yet. Unmet is recorded as XFAIL (with its reason) instead of a
+    # failure, so the same scenario documents "before" and "after" runs; it is
+    # not a gate.
+    "probe": ("PASS", "XFAIL"),
+    # A known defect that is supposed to disappear: it must keep failing until
+    # the fix lands, and *passing* is a hard failure here, so the marker cannot
+    # outlive the bug.
+    "xfail": ("XPASS", "XFAIL"),
+    "xfail_reject": ("XFAIL", "XPASS"),
+}
+
+
+def parse_count(spec):
+    """Normalize a `count` field into an inclusive `(low, high)` range."""
+    if spec is None:
+        return None
+    if isinstance(spec, int):
+        return (spec, spec)
+    text = str(spec).strip()
+    if text.startswith(">="):
+        return (int(text[2:]), None)
+    if text.startswith("<="):
+        return (None, int(text[2:]))
+    if ".." in text:
+        low, _, high = text.partition("..")
+        return (int(low), int(high))
+    return (int(text), int(text))
+
+
+def count_needle(body: str, needle: str, pattern: bool, count) -> tuple[int, bool]:
+    """Return `(occurrences, satisfied)` for one needle against a panel grid."""
+    if pattern:
+        found = len(re.findall(needle, body, flags=re.MULTILINE))
+    else:
+        found = body.count(needle)
+    bounds = parse_count(count)
+    if bounds is None:
+        return found, found > 0
+    low, high = bounds
+    ok = (low is None or found >= low) and (high is None or found <= high)
+    return found, ok
+
+
+def evaluate_panel(panel: dict, body: str) -> list[dict]:
+    """Evaluate one frozen panel's assertions. One row per assertion."""
+    rows: list[dict] = []
+    for kind, found_status, absent_status in (
+        ("expect", *_STATUS_FOR["expect"]),
+        ("reject", *_STATUS_FOR["reject"]),
+        ("probe", *_STATUS_FOR["probe"]),
+        ("xfail", *_STATUS_FOR["xfail"]),
+        ("xfail_reject", *_STATUS_FOR["xfail_reject"]),
+    ):
+        for entry in panel.get(kind) or []:
+            if isinstance(entry, str):
+                spec = {"text": entry}
+            else:
+                spec = dict(entry)
+            needle = spec.get("text", "")
+            is_pattern = "regex" in spec or spec.get("pattern") is True
+            if is_pattern and not needle:
+                needle = spec["regex"]
+            found, satisfied = count_needle(body, needle, is_pattern, spec.get("count"))
+            rows.append(
+                {
+                    "kind": kind,
+                    "needle": needle,
+                    "pattern": is_pattern,
+                    "count": spec.get("count"),
+                    "found": found,
+                    "status": found_status if satisfied else absent_status,
+                    "why": spec.get("why", ""),
+                }
+            )
+    return rows
+
+
+def describe_assertion(row: dict) -> str:
+    counts = f" (x{row['found']})" if row["count"] is not None else ""
+    why = f"  — {row['why']}" if row["why"] else ""
+    return f"{row['kind']:<12} {row['needle']!r}{counts}{why}"
+
+
+def summarize_assertions(rows: list[dict], allow_xpass: bool) -> tuple[bool, list[str]]:
+    """Return `(failed, report lines)` for every panel's assertions."""
+    tally = {"PASS": 0, "FAIL": 0, "XFAIL": 0, "XPASS": 0}
+    failures: list[str] = []
+    populated = [(head, panel_rows) for head, panel_rows in rows if panel_rows]
+    for head, panel_rows in populated:
+        for row in panel_rows:
+            status = row["status"]
+            if status == "XPASS" and allow_xpass:
+                status = "XFAIL"
+            tally[status] += 1
+            if status in ("FAIL", "XPASS"):
+                name = head.split("  |  ")[-1]
+                failures.append(f"{name}: {status} {describe_assertion(row)}")
+    checks = sum(tally.values())
+    report = [
+        f"assertions: {checks} checks over {len(populated)} panels — "
+        f"{tally['PASS']} PASS, {tally['FAIL']} FAIL, "
+        f"{tally['XFAIL']} XFAIL, {tally['XPASS']} XPASS"
+    ]
+    return bool(failures), report + failures
+
+
+def pump_until(master, stream, predicate, timeout: float, slice_s: float = 0.25) -> bool:
+    """Pump the PTY until `predicate()` holds or `timeout` elapses.
+
+    Startup timing is not constant: the app loads models and extensions before
+    its first paint, and a scenario that outruns that paints a blank panel that
+    still *looks* like evidence. Waiting on a condition instead of a fixed
+    sleep is what makes a first panel trustworthy.
+    """
+    deadline = time.time() + timeout
+    while True:
+        if predicate():
+            return True
+        if time.time() >= deadline:
+            return False
+        pump(master, stream, slice_s)
+
+
 def child_alive(pid) -> bool:
     """Has the app process already exited? Reaps it if so.
 
@@ -440,6 +610,11 @@ def main() -> int:
     ap.add_argument("--keep-temp", action="store_true")
     ap.add_argument("--font-size", type=int, default=15)
     ap.add_argument("--scale", type=int, default=2)
+    ap.add_argument(
+        "--allow-xpass",
+        action="store_true",
+        help="treat a fixed `xfail` marker as a warning instead of a failure",
+    )
     ap.add_argument(
         "--sheet",
         type=int,
@@ -512,9 +687,18 @@ def main() -> int:
     master, pid = spawn(os.path.abspath(args.bin), scenario.get("args", []), cwd, env, cols, rows)
 
     cards = []
+    assertion_rows: list[tuple[str, list[dict]]] = []
     text_sections = []
     try:
         drain(master, stream, idle=0.6, hard_timeout=8.0)
+        if not pump_until(
+            master, stream, lambda: bool(snapshot(screen).strip()), timeout=12.0
+        ):
+            print(
+                "WARN: the app painted nothing within 12s of startup — the first "
+                "panel may be a blank frame",
+                file=sys.stderr,
+            )
         for index, panel in enumerate(panels, start=1):
             send = panel.get("send", "")
             if send:
@@ -522,6 +706,21 @@ def main() -> int:
             wait = float(panel.get("wait", 0.7))
             if wait > 0:
                 pump(master, stream, wait)
+            # Optional synchronization: `"wait_for": "text"` keeps pumping
+            # until that text is on the grid (or `wait_timeout` expires), so a
+            # panel that claims "the reply landed" cannot silently capture the
+            # frame from before the reply.
+            wait_for = panel.get("wait_for")
+            if wait_for and wait_for not in snapshot(screen):
+                timeout = float(panel.get("wait_timeout", max(wait, 8.0)))
+                if not pump_until(
+                    master, stream, lambda: wait_for in snapshot(screen), timeout
+                ):
+                    print(
+                        f"WARN: panel {index} waited {timeout:.1f}s for "
+                        f"{wait_for!r} and it never appeared",
+                        file=sys.stderr,
+                    )
             if panel.get("skip_capture"):
                 continue
             label = panel.get("label") or f"panel {index}"
@@ -531,16 +730,18 @@ def main() -> int:
             # as later keys arrive, so rendering `screen` after the loop would
             # paint every panel with the *last* frame (the bug this fixes).
             frame = copy.deepcopy(screen)
+            body = snapshot(frame)
             cards.append(
                 (
                     head,
-                    snapshot(frame),
+                    body,
                     frame,
                     frame.cursor.x,
                     frame.cursor.y,
                     child_alive(pid),
                 )
             )
+            assertion_rows.append((head, evaluate_panel(panel, body)))
     finally:
         send = scenario.get("final_send")
         exited = False
@@ -608,6 +809,8 @@ def main() -> int:
                 f"\n===== {head}  (cursor {cx},{cy}, frame {hashes[i]}, px {pix[i]}, "
                 f"alive={alive}) =====\n{body}\n"
             )
+            for row in assertion_rows[i][1]:
+                fh.write(f"  assert {row['status']:<6} {describe_assertion(row)}\n")
 
     print(f"wrote {args.out}")
     print(f"wrote {text_out}")
@@ -630,6 +833,25 @@ def main() -> int:
         else:
             seen[digest] = idx
 
+    assert_failed, assert_report = summarize_assertions(assertion_rows, args.allow_xpass)
+    if any(row for _, rows in assertion_rows for row in rows):
+        for head, rows in assertion_rows:
+            if not rows:
+                continue
+            worst = {
+                "FAIL": 0,
+                "XPASS": 1,
+                "XFAIL": 2,
+                "PASS": 3,
+            }
+            print(f"--- {head} assertions ---")
+            for row in sorted(rows, key=lambda r: worst[r["status"]]):
+                print(f"  {row['status']:<6} {describe_assertion(row)}")
+        for line in assert_report[:1]:
+            print(line)
+        for line in assert_report[1:]:
+            print(line, file=sys.stderr)
+
     if duplicates:
         panels = ", ".join(str(i + 1) for i in duplicates)
         message = (
@@ -644,6 +866,13 @@ def main() -> int:
                 print(f"--- {head} (cursor {cx},{cy}, alive={alive}) ---")
                 print(body)
             return 1
+    if assert_failed:
+        print(
+            "wrote the PNG and the text dump; refusing to report success because "
+            "panel assertions failed (see the FAIL/XPASS rows above)",
+            file=sys.stderr,
+        )
+        return 1
     for head, body, _, cx, cy, alive in cards:
         print(f"--- {head} (cursor {cx},{cy}, alive={alive}) ---")
         print(body)
