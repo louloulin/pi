@@ -872,10 +872,12 @@ async fn maybe_auto_compact(
     // window (z.ai answers an oversized prompt instead of failing it), and a
     // length stop with zero output that filled the window (Xiaomi MiMo
     // truncates the input to fit and generates nothing) — `utils/overflow.ts`.
-    // The error-message case cannot fire here: `pi-protocol::AssistantMessage`
-    // carries no error text, and a failed attempt is retried by
-    // `pi-agent-core::retry` instead (which excludes overflow from the retry
-    // budget).
+    // The error-message case (upstream `isContextOverflow` case 1) cannot
+    // fire here yet: `pi-protocol::AssistantMessage` now carries
+    // `error_message`, but a finished turn reaches this function as a
+    // `TurnUsage`, which has no error slot (`pi_tui::TurnUsage`). A failed
+    // attempt is retried by `pi-agent-core::retry` instead (which excludes
+    // overflow from the retry budget).
     let context_overflow = pi_ai::is_context_overflow(
         turn.stop_reason,
         None,

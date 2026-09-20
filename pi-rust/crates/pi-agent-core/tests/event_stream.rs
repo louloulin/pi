@@ -98,6 +98,7 @@ fn text_reply(text: &str) -> (Duration, Vec<AssistantMessageEvent>) {
         content: vec![Content::text(text)],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     };
     (
         Duration::ZERO,
@@ -184,6 +185,7 @@ impl ToolExecutor for SleepyExecutor {
             content: Box::new(Content::text(format!("ran {}", call.name))),
             is_error: false,
             details: None,
+            added_tool_names: None,
         })
     }
 }
@@ -353,6 +355,7 @@ async fn text_deltas_are_forwarded_before_message_end() {
         content: vec![Content::text("hello world")],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     };
     let stream = Arc::new(ScriptedEvents::new(vec![(
         Duration::ZERO,

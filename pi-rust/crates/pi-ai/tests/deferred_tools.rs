@@ -3,11 +3,15 @@
 //!
 //! Upstream drives the split through the provider payloads; this port has no
 //! wiring yet (`Compat::supports_additional_tools` does not exist), so the
-//! util is pinned directly. The transcript's `addedToolNames` are supplied to
-//! [`split_deferred_tools`] as a slice because `pi_protocol::ToolResult` has no
-//! such field — see the module docs for why.
+//! util is pinned directly. Most vectors hand the transcript's `addedToolNames`
+//! to [`split_deferred_tools`] as a slice; the `*_from_context` vectors below
+//! instead carry them on `pi_protocol::ToolResult::added_tool_names` and let
+//! [`split_deferred_tools_from_context`] read them back out.
 
-use pi_ai::utils::deferred_tools::{identity_tool_name, split_deferred_tools};
+use pi_ai::utils::deferred_tools::{
+    added_tool_names_from_messages, identity_tool_name, split_deferred_tools,
+    split_deferred_tools_from_context,
+};
 use pi_protocol::{Content, Context, Message, Role, ToolCall, ToolDefinition};
 
 fn tool(name: &str, description: &str) -> ToolDefinition {
@@ -41,6 +45,11 @@ fn assistant_tool_call(name: &str) -> Message {
 }
 
 fn tool_result_message(text: &str) -> Message {
+    tool_result_message_with_added(text, None)
+}
+
+/// A tool result that advertises the deferred tools it just loaded.
+fn tool_result_message_with_added(text: &str, added: Option<Vec<&str>>) -> Message {
     Message {
         role: Role::Tool,
         content: vec![Content::ToolResult(pi_protocol::ToolResult {
@@ -48,6 +57,7 @@ fn tool_result_message(text: &str) -> Message {
             content: Box::new(Content::text(text)),
             is_error: false,
             details: None,
+            added_tool_names: added.map(|names| names.into_iter().map(String::from).collect()),
         })],
         model: None,
     }
@@ -236,4 +246,51 @@ fn keeps_the_original_tool_order_for_immediate_tools() {
     let split = split_deferred_tools(&context, true, &[], identity_tool_name);
 
     assert_eq!(immediate_names(&split), vec!["a", "b", "c", "d"]);
+}
+
+// ---------------------------------------------------------------------------
+// Transcript-driven entry point: `added_tool_names` on the real protocol field.
+// ---------------------------------------------------------------------------
+
+/// The context-shaped entry point reads `added_tool_names` off the transcript,
+/// like upstream's `getDeferredToolNames`.
+#[test]
+fn reads_added_names_from_the_transcript() {
+    let mut context = context(vec![tool("base_tool", "base"), tool("late_tool", "late")]);
+    context.messages[2] = tool_result_message_with_added("done", Some(vec!["late_tool"]));
+
+    let split = split_deferred_tools_from_context(&context, true, identity_tool_name);
+
+    assert_eq!(immediate_names(&split), vec!["base_tool"]);
+    assert_eq!(deferred_names(&split), vec!["late_tool"]);
+}
+
+/// Names are collected in first-seen order and de-duplicated, and only
+/// `Role::Tool` messages contribute.
+#[test]
+fn extracts_added_names_in_order_without_duplicates() {
+    let messages = vec![
+        user("hi"),
+        tool_result_message_with_added("first", Some(vec!["b", "a"])),
+        assistant_tool_call("a"),
+        tool_result_message_with_added("second", Some(vec!["a", "c"])),
+        tool_result_message("third"),
+    ];
+
+    assert_eq!(
+        added_tool_names_from_messages(&messages),
+        vec!["b", "a", "c"]
+    );
+}
+
+/// With no transcript marker the split defers nothing, even with the
+/// context-shaped entry point.
+#[test]
+fn adds_nothing_when_no_result_advertises_tools() {
+    let context = context(vec![tool("base_tool", "base"), tool("late_tool", "late")]);
+
+    let split = split_deferred_tools_from_context(&context, true, identity_tool_name);
+
+    assert_eq!(immediate_names(&split), vec!["base_tool", "late_tool"]);
+    assert!(split.deferred.is_empty());
 }

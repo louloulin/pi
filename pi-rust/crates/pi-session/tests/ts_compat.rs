@@ -89,9 +89,11 @@ fn fixture_iter_entries_decodes_all_variants() {
             content,
             stop_reason,
             usage,
+            error_message,
         }) => {
             assert_eq!(model, "faux/faux-model");
             assert_eq!(*stop_reason, StopReason::Stop);
+            assert_eq!(*error_message, None);
             match &content[0] {
                 Content::Text(t) => assert_eq!(t.text, "Paris."),
                 other => panic!("expected text content, got {other:?}"),

@@ -120,6 +120,7 @@ mod tests {
             content: vec![Content::text(text)],
             stop_reason: StopReason::Stop,
             usage: Usage::default(),
+            error_message: None,
         }
     }
 
@@ -166,6 +167,7 @@ mod tests {
                 content: Box::new(Content::text("ok")),
                 is_error: false,
                 details: Some(json!({"lines": 3})),
+                added_tool_names: None,
             },
             duration_ms: 12,
         };

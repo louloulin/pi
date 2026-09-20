@@ -51,6 +51,7 @@ fn as_result(id: &str, output: ToolOutput, is_error: bool) -> ToolResult {
         content: Box::new(content),
         is_error,
         details: output.details,
+        added_tool_names: None,
     }
 }
 

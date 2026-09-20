@@ -268,6 +268,7 @@ impl ToolExecutor for ExtensionToolExecutor {
             content: Box::new(Content::text(first_text(&outcome).unwrap_or_default())),
             is_error: outcome.is_error,
             details: outcome.details,
+            added_tool_names: None,
         })
     }
 }

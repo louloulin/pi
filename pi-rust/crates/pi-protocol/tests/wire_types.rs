@@ -76,6 +76,7 @@ fn extension_event_tagged() {
 content: Box::new(Content::Text(TextContent { text: "ok".into() })),
             is_error: false,
             details: None,
+            added_tool_names: None,
         },
     };
     let v = serde_json::to_value(&ev).unwrap();
@@ -138,8 +139,92 @@ fn assistant_message_round_trip() {
         content: vec![Content::Text(TextContent { text: "hi".into() })],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     };
     let s = serde_json::to_string(&m).unwrap();
     let back: AssistantMessage = serde_json::from_str(&s).unwrap();
     assert_eq!(m, back);
+}
+
+#[test]
+fn tool_result_added_tool_names_round_trip() {
+    let result = ToolResult {
+        tool_call_id: "call_1".into(),
+        content: Box::new(Content::Text(TextContent { text: "ok".into() })),
+        is_error: false,
+        details: None,
+        added_tool_names: Some(vec!["late_tool".into(), "other_tool".into()]),
+    };
+    let v = serde_json::to_value(&result).unwrap();
+    assert_eq!(v["added_tool_names"], json!(["late_tool", "other_tool"]));
+    let back: ToolResult = serde_json::from_value(v).unwrap();
+    assert_eq!(back, result);
+    assert_eq!(
+        back.added_tool_names.as_deref(),
+        Some(["late_tool".to_string(), "other_tool".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn tool_result_omits_added_tool_names_when_none() {
+    let result = ToolResult {
+        tool_call_id: "call_1".into(),
+        content: Box::new(Content::Text(TextContent { text: "ok".into() })),
+        is_error: false,
+        details: None,
+        added_tool_names: None,
+    };
+    let v = serde_json::to_value(&result).unwrap();
+    assert!(
+        v.get("added_tool_names").is_none(),
+        "an absent field must not be serialized: {v}"
+    );
+    // Backward compatibility: a payload written before the field existed
+    // still decodes.
+    let back: ToolResult = serde_json::from_value(v).unwrap();
+    assert_eq!(back, result);
+    assert_eq!(back.added_tool_names, None);
+}
+
+#[test]
+fn assistant_message_error_message_round_trip() {
+    let m = AssistantMessage {
+        model: "faux-model".into(),
+        content: Vec::new(),
+        stop_reason: StopReason::Error,
+        usage: Usage::default(),
+        error_message: Some("prompt is too long: 213462 tokens > 200000 maximum".into()),
+    };
+    let v = serde_json::to_value(&m).unwrap();
+    assert_eq!(
+        v["error_message"],
+        json!("prompt is too long: 213462 tokens > 200000 maximum")
+    );
+    let back: AssistantMessage = serde_json::from_value(v).unwrap();
+    assert_eq!(back, m);
+    assert_eq!(
+        back.error_message.as_deref(),
+        Some("prompt is too long: 213462 tokens > 200000 maximum")
+    );
+}
+
+#[test]
+fn assistant_message_omits_error_message_when_none() {
+    let m = AssistantMessage {
+        model: "faux-model".into(),
+        content: vec![Content::Text(TextContent { text: "hi".into() })],
+        stop_reason: StopReason::Stop,
+        usage: Usage::default(),
+        error_message: None,
+    };
+    let v = serde_json::to_value(&m).unwrap();
+    assert!(
+        v.get("error_message").is_none(),
+        "an absent field must not be serialized: {v}"
+    );
+    // Backward compatibility: a payload written before the field existed
+    // still decodes.
+    let back: AssistantMessage = serde_json::from_value(v).unwrap();
+    assert_eq!(back, m);
+    assert_eq!(back.error_message, None);
 }

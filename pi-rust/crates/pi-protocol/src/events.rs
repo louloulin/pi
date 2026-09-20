@@ -91,6 +91,15 @@ pub struct AssistantMessage {
     pub stop_reason: StopReason,
     /// Token usage.
     pub usage: Usage,
+    /// Provider error text, present when [`AssistantMessage::stop_reason`] is
+    /// [`StopReason::Error`] or [`StopReason::Aborted`].
+    ///
+    /// Mirrors upstream `AssistantMessage.errorMessage`
+    /// (`packages/ai/src/types.ts`). Overflow / retry classification reads it
+    /// before falling back to scanned content text (see
+    /// `pi_ai::is_context_overflow`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 /// Lifecycle event delivered to extensions.

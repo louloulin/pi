@@ -2004,6 +2004,7 @@ mod tests {
             content: Box::new(Content::text("fn main() {}")),
             is_error: false,
             details: None,
+            added_tool_names: None,
         };
         let rendered = session.result(&result);
         assert!(
@@ -2033,6 +2034,7 @@ mod tests {
             content: Box::new(Content::text("ok")),
             is_error: false,
             details: None,
+            added_tool_names: None,
         };
         assert!(session.result(&result).is_empty());
     }

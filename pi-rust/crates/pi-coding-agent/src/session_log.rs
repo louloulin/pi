@@ -159,6 +159,7 @@ mod tests {
             content: vec![Content::text(text)],
             stop_reason: StopReason::Stop,
             usage: Usage::default(),
+            error_message: None,
         }
     }
 

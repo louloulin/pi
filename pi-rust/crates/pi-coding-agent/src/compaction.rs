@@ -39,10 +39,12 @@
 //!   [`RetryPolicy`] the caller passes to [`compact`]. `None` or a
 //!   disabled policy reproduces the pre-port "fail on the first error"
 //!   behaviour. Upstream classifies the failure via
-//!   `AssistantMessage.errorMessage`, which `pi-protocol` does not carry;
-//!   this port derives the text from the stream's own `Error` event instead
-//!   and falls back to the wrapper wording (`provider returned error`) when
-//!   a `Done` arrives with `stop_reason: error` and no wording.
+//!   `AssistantMessage.errorMessage`. The Rust agent loop surfaces a
+//!   provider failure as an `Err` (a failed attempt never becomes an
+//!   assistant message), so this port derives the text from the stream's own
+//!   `Error` event instead and falls back to the wrapper wording (`provider
+//!   returned error`) when a `Done` arrives with `stop_reason: error` and no
+//!   wording.
 //!
 //!   The classifier and the backoff schedule are the shared agent-level
 //!   primitives (`pi_agent_core::{is_retryable_error_message,
@@ -957,11 +959,12 @@ async fn summarize_once(
     }
 
     match response {
-        // `stop_reason: Error` with no `Error` event. `pi-protocol` has no
-        // `AssistantMessage.errorMessage`, so the provider's wording either
-        // rides in the content or is missing entirely; the fallback matches
-        // upstream's wrapper wording, which the classifier treats as
-        // retryable (see the module docs).
+        // `stop_reason: Error` with no `Error` event. The provider's wording
+        // would live in `AssistantMessage.error_message`, but the stream
+        // event that reaches here (`AssistantMessageEvent::Done`) has no
+        // error slot, so the wording either rides in the content or is
+        // missing entirely; the fallback matches upstream's wrapper wording,
+        // which the classifier treats as retryable (see the module docs).
         Some(SummarizationResponse {
             stop_reason: StopReason::Error,
             content,
@@ -1103,6 +1106,7 @@ mod tests {
                 content: Box::new(Content::text(text)),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             })],
             model: None,
         }
@@ -1257,6 +1261,7 @@ mod tests {
                     total: 150,
                     ..Usage::default()
                 },
+                error_message: None,
             };
             let events = vec![
                 Ok(AssistantMessageEvent::Start {

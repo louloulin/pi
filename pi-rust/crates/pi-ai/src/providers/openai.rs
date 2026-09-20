@@ -390,6 +390,7 @@ impl ChatResponse {
             content,
             stop_reason,
             usage,
+            error_message: None,
         })
     }
 }
@@ -473,6 +474,13 @@ fn chat_message_from(msg: &Message) -> Result<ChatMessage, StreamError> {
             })
         }
         Role::Tool => {
+            // `added_tool_names` has nowhere to go in the Chat Completions
+            // body. Upstream consumes it in `openai-completions.ts` only when
+            // `compat.deferredToolsMode == "kimi"`, where it removes the
+            // deferred tools from `params.tools` and re-registers them as the
+            // transcript is walked; this port has neither that compat flag nor
+            // a compat module. The names stay on the transcript
+            // (`pi_ai::utils::deferred_tools` reads them back).
             let tool_call_id = msg
                 .content
                 .iter()
@@ -889,6 +897,7 @@ mod tests {
                 content: Box::new(Content::text("72F and sunny")),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             })],
             model: None,
         });
@@ -917,6 +926,7 @@ mod tests {
                     content: Box::new(Content::text("first")),
                     is_error: true,
                     details: None,
+                    added_tool_names: None,
                 }),
                 Content::text("second"),
             ],

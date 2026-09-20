@@ -199,6 +199,7 @@ fn message(text: &str, stop_reason: StopReason) -> AssistantMessage {
         },
         stop_reason,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 

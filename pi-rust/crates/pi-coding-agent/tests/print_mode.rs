@@ -315,6 +315,7 @@ async fn legacy_jsonl_session_is_migrated_on_continue() {
         content: vec![Content::text("old reply")],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     })
     .expect("assistant");
     log.close().expect("close");

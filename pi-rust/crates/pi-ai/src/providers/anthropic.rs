@@ -433,6 +433,13 @@ fn anthropic_message_from(msg: &Message) -> Result<AnthropicMessage, StreamError
             Ok(AnthropicMessage::Assistant { content: blocks })
         }
         Role::Tool => {
+            // `added_tool_names` is deliberately not projected here. Upstream
+            // `anthropic-messages.ts::convertToolResult` turns `addedToolNames`
+            // into `tool_reference` sibling blocks next to the `tool_result`,
+            // but this request model has no `tool_reference` content variant
+            // and `pi-ai`'s compat layer has no deferred-tools flag. The field
+            // stops at the transcript (see `pi_ai::utils::deferred_tools`).
+            //
             // Anthropic expects tool results as user-side `tool_result`
             // blocks. Pull the tool call id from the first ToolResult
             // block; concatenate the textual content of the rest.
@@ -1006,6 +1013,7 @@ impl SseStream {
             content,
             stop_reason,
             usage,
+            error_message: None,
         };
         self.pending.push_back(Ok(message_to_done(message)));
     }
@@ -1230,6 +1238,7 @@ mod tests {
                     content: Box::new(Content::text("72F and sunny")),
                     is_error: false,
                     details: None,
+                    added_tool_names: None,
                 }),
             ],
             model: None,

@@ -69,6 +69,7 @@ fn tool_call_message(calls: &[(&str, &str)]) -> AssistantMessage {
             .collect(),
         stop_reason: StopReason::ToolUse,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn text_reply(text: &str) -> AssistantMessage {
         content: vec![Content::text(text)],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -224,6 +226,7 @@ impl ToolExecutor for TimingExecutor {
             content: Box::new(Content::text(format!("ran {}", call.name))),
             is_error: false,
             details: None,
+            added_tool_names: None,
         })
     }
 }
@@ -257,6 +260,7 @@ impl ToolExecutor for DefaultModeExecutor {
             content: Box::new(Content::text(format!("ran {}", call.name))),
             is_error: false,
             details: None,
+            added_tool_names: None,
         })
     }
 }

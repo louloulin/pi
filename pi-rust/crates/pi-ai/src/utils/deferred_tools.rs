@@ -13,16 +13,18 @@
 //! half of the port. Wiring precondition: a `Compat::supports_additional_tools`
 //! field plus the provider request-side split (a separate stage).
 //!
-//! **Added tool names are supplied by the caller.** Upstream reads
-//! `message.addedToolNames` from `toolResult` messages. Rust
-//! [`ToolResult`](pi_protocol::ToolResult) has no such field, and adding one is
-//! not a leaf change: `ToolResult` has ~20 struct-literal construction sites
-//! across `pi-agent-core`, `pi-coding-agent`, `pi-tui`, `pi-evals` and the
-//! `pi-protocol` wire tests, all of which would have to grow the field. Since
-//! this issue does not wire the util, the extraction stays with the caller and
-//! [`split_deferred_tools`] takes the already-extracted names. When the
-//! protocol field lands, the caller passes `message.content`'s names and this
-//! signature is unchanged.
+//! **Added tool names are read from the transcript.** Upstream reads
+//! `message.addedToolNames` off `toolResult` messages. Rust
+//! [`ToolResult`](pi_protocol::ToolResult) now carries the analogous
+//! [`added_tool_names`](pi_protocol::ToolResult::added_tool_names) field, and
+//! [`split_deferred_tools_from_context`] extracts it from the transcript the
+//! way upstream's `getDeferredToolNames` does.
+//!
+//! [`split_deferred_tools`] itself still takes the names as an explicit slice:
+//! its unit vectors hand-build the marker set, and callers that already have
+//! the names (or want to merge several sources) stay in control. When the
+//! provider-side split is wired, `split_deferred_tools_from_context` is the
+//! entry point to reach for.
 //!
 //! One semantic consequence: upstream checks each added name against the
 //! assistant tool calls seen *so far* while walking the transcript, so a name
@@ -32,7 +34,7 @@
 
 use std::collections::BTreeSet;
 
-use pi_protocol::{Content, Context, Role, ToolDefinition};
+use pi_protocol::{Content, Context, Message, Role, ToolDefinition};
 
 /// Result of [`split_deferred_tools`].
 ///
@@ -52,6 +54,48 @@ pub struct SplitDeferredTools<'a> {
 /// `identityToolName` — the default [`split_deferred_tools`] normalizer.
 pub fn identity_tool_name(name: &str) -> String {
     name.to_string()
+}
+
+/// Collect the tool names the transcript's tool results advertise.
+///
+/// Mirrors upstream `getDeferredToolNames(messages)`: walks the messages in
+/// order, reads every `toolResult` message's `addedToolNames` (here
+/// [`ToolResult::added_tool_names`](pi_protocol::ToolResult::added_tool_names))
+/// and returns them de-duplicated, first occurrence first. Messages of any
+/// other role, and results without the field, contribute nothing.
+pub fn added_tool_names_from_messages(messages: &[Message]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for message in messages {
+        if message.role != Role::Tool {
+            continue;
+        }
+        for block in &message.content {
+            if let Content::ToolResult(result) = block {
+                for name in result.added_tool_names.iter().flatten() {
+                    if !names.iter().any(|seen| seen == name) {
+                        names.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// [`split_deferred_tools`] with the added names read from the transcript.
+///
+/// This is the upstream-shaped entry point:
+/// `splitDeferredTools(context, enabled, normalizeName)` reads each tool
+/// result's `addedToolNames`, so callers do not have to extract them. The
+/// explicit-slice version stays available for callers that build the marker
+/// set themselves.
+pub fn split_deferred_tools_from_context<'a>(
+    context: &'a Context,
+    enabled: bool,
+    normalize_name: impl Fn(&str) -> String,
+) -> SplitDeferredTools<'a> {
+    let added_tool_names = added_tool_names_from_messages(&context.messages);
+    split_deferred_tools(context, enabled, &added_tool_names, normalize_name)
 }
 
 /// Split the context's tools into prefix and transcript-loaded definitions.

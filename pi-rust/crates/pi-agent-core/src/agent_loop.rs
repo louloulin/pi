@@ -494,6 +494,7 @@ impl AgentLoop {
                     content: Vec::new(),
                     stop_reason: pi_protocol::StopReason::Empty,
                     usage: pi_protocol::Usage::default(),
+                    error_message: None,
                 }),
             tool_results: last_completed_turn
                 .as_ref()
@@ -673,6 +674,7 @@ async fn stream_assistant_events(
                     content: Vec::new(),
                     stop_reason: pi_protocol::StopReason::Empty,
                     usage: pi_protocol::Usage::default(),
+                    error_message: None,
                 });
                 emit_event(observer, AgentEvent::MessageStart { model });
             }
@@ -691,6 +693,7 @@ async fn stream_assistant_events(
                         content,
                         stop_reason,
                         usage,
+                        error_message: None,
                     });
                 }
                 if let Some(message) = final_message.as_ref() {
@@ -890,6 +893,7 @@ async fn prepare_call(hooks: &AgentHookAdapter, call: &ToolCall) -> (CallPrepara
                 content: Box::new(Content::text(format!("tool call blocked: {reason}"))),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             }),
             decision.terminate,
         )
@@ -1041,6 +1045,7 @@ fn aborted_tool_result(call: &ToolCall) -> ToolResult {
         content: Box::new(Content::text("Operation aborted")),
         is_error: true,
         details: None,
+        added_tool_names: None,
     }
 }
 
@@ -1084,6 +1089,7 @@ async fn run_call(
                     content: Box::new(Content::text(err.to_string())),
                     is_error: true,
                     details: None,
+                    added_tool_names: None,
                 })
         }
     };
@@ -1109,6 +1115,7 @@ async fn dispatch_tool(
                 content: Box::new(Content::text(err.to_string())),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             },
         },
         // Backward compatibility: no executor registered, so keep the
@@ -1118,6 +1125,7 @@ async fn dispatch_tool(
             content: Box::new(Content::text(format!("(stub) executed {}", call.name))),
             is_error: false,
             details: None,
+            added_tool_names: None,
         },
     }
 }

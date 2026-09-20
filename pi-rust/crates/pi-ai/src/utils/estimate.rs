@@ -19,11 +19,12 @@
 //!   signal exists on the Rust message type, so the caller owns that decision:
 //!   `pi-coding-agent` only has a `TurnUsage` for a turn that finished, and it
 //!   passes `None` for a zero-usage turn.
-//! * **No transcript-added tool tokens.** Upstream adds the tokens of tools
-//!   named by `toolResult.addedToolNames` when usage exists. Rust
-//!   `ToolResult` has no such field (see
-//!   [`crate::utils::deferred_tools`]), so that adjustment is skipped; the
-//!   system-prompt + tool tokens of the no-usage path are unaffected.
+//! * **No transcript-added tool tokens (yet).** Upstream adds the tokens of
+//!   tools named by `toolResult.addedToolNames` when usage exists.
+//!   `pi_protocol::ToolResult::added_tool_names` now carries that list (see
+//!   [`crate::utils::deferred_tools`]), but this util still skips the
+//!   adjustment: wiring it belongs with the deferred-tools provider stage.
+//!   The system-prompt + tool tokens of the no-usage path are unaffected.
 //! * **Characters are Unicode scalar values**, not JavaScript UTF-16 code
 //!   units: `str::chars().count()`. That is the metric
 //!   `pi-coding-agent::compaction` already used, so sharing this module keeps

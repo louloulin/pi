@@ -68,6 +68,7 @@ fn tool_call_message(calls: &[(&str, &str)]) -> AssistantMessage {
             .collect(),
         stop_reason: StopReason::ToolUse,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -77,6 +78,7 @@ fn text_reply(text: &str) -> AssistantMessage {
         content: vec![Content::text(text)],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -182,6 +184,7 @@ impl ToolExecutor for MockToolExecutor {
                 content: Box::new(Content::text("mock failure")),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             }),
             "abort" => Err(AgentError::Tool {
                 tool: call.name.clone(),
@@ -192,6 +195,7 @@ impl ToolExecutor for MockToolExecutor {
                 content: Box::new(Content::text(format!("ran {name}"))),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             }),
         }
     }

@@ -220,6 +220,10 @@ impl ToolExecutor for ExtensionToolExecutor {
                 content: Box::new(fold_content(content_blocks_from_json(&outcome.content))),
                 is_error: outcome.is_error,
                 details: outcome.details,
+                // Extension tools cannot advertise deferred tools yet —
+                // `pi_extensions::ToolExecutionOutcome` has no
+                // `addedToolNames` field (see `deferred_tools` module docs).
+                added_tool_names: None,
             }),
             // A host-level failure (timeout, JS exception, missing
             // execute function) is reported as an error *result*, not a
@@ -233,6 +237,7 @@ impl ToolExecutor for ExtensionToolExecutor {
                 ))),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             }),
         }
     }
@@ -306,6 +311,10 @@ impl ToolExecutor for BuiltinToolExecutor {
                 content: Box::new(fold_content(output.content)),
                 is_error: false,
                 details: output.details,
+                // Built-in tools return a `ToolOutput`, which carries no
+                // `addedToolNames` equivalent (upstream `AgentToolResult`);
+                // none of them load tools mid-transcript.
+                added_tool_names: None,
             }),
             // Cancellation keeps a dedicated error path so callers can tell
             // an abort apart from a tool that legitimately failed.
@@ -318,6 +327,7 @@ impl ToolExecutor for BuiltinToolExecutor {
                 content: Box::new(Content::text(err.to_string())),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             }),
         }
     }

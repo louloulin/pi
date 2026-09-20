@@ -70,6 +70,7 @@ fn tool_call_message(calls: &[(&str, &str)]) -> AssistantMessage {
             cache_write: 1,
             total: 15,
         },
+        error_message: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn text_reply(text: &str) -> AssistantMessage {
             cache_write: 0,
             total: 9,
         },
+        error_message: None,
     }
 }
 
@@ -178,6 +180,7 @@ impl ToolExecutor for MockToolExecutor {
             content: Box::new(Content::text(format!("ran {}", call.name))),
             is_error: false,
             details: None,
+            added_tool_names: None,
         })
     }
 }

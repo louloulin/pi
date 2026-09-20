@@ -25,12 +25,16 @@
 //! # Deliberate difference from TypeScript
 //!
 //! Upstream reads the error text from `AssistantMessage.errorMessage`.
-//! `pi-protocol::AssistantMessage` has no such field (the Rust agent loop
-//! surfaces a failed provider call as `Err`, not as an assistant message), so
-//! [`is_context_overflow`] takes the error text as an explicit
-//! `Option<&str>` parameter. Callers that only have a finished
-//! `AssistantMessage` pass `None`, which disables case 1 but keeps cases 2
-//! and 3 — exactly the information the message still carries.
+//! `pi-protocol::AssistantMessage` now carries the equivalent
+//! `error_message` field, but it is not threaded to this classifier yet: the
+//! Rust agent loop surfaces a failed provider call as `Err`, and the only
+//! finished-turn event the agent loop keeps (`AssistantMessageEvent::Done`)
+//! has no error slot. [`is_context_overflow`] therefore still takes the error
+//! text as an explicit `Option<&str>`. Passing
+//! `Some(message.error_message.as_deref())` gives upstream's case-1
+//! behaviour; callers that only have the `stop_reason` pass `None`, which
+//! disables case 1 but keeps cases 2 and 3 — exactly the information the
+//! message still carries.
 
 use std::sync::OnceLock;
 
@@ -125,11 +129,13 @@ pub fn is_context_overflow_error_text(error_message: &str) -> bool {
 
 /// Whether a finished assistant message indicates a context overflow.
 ///
-/// `error_message` is the provider's error text when the turn failed (the
-/// Rust `AssistantMessage` does not carry it; see the module docs) and
-/// `context_window` is the model's window size, used for the silent and
-/// length-stop cases. A `None` or zero window disables those two cases, and a
-/// `None` error text disables the error-message case.
+/// `error_message` is the provider's error text when the turn failed — for a
+/// finished [`pi_protocol::AssistantMessage`] that is
+/// `message.error_message.as_deref()`, which the Rust call sites do not thread
+/// through yet (see the module docs) — and `context_window` is the model's
+/// window size, used for the silent and length-stop cases. A `None` or zero
+/// window disables those two cases, and a `None` error text disables the
+/// error-message case.
 ///
 /// Mirrors `isContextOverflow(message, contextWindow?)`.
 pub fn is_context_overflow(

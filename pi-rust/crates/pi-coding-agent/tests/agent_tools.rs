@@ -53,6 +53,7 @@ fn tool_call_message(name: &str, id: &str, arguments: serde_json::Value) -> Assi
         })],
         stop_reason: StopReason::ToolUse,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn text_reply(text: &str) -> AssistantMessage {
         content: vec![Content::text(text)],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -387,6 +389,7 @@ async fn parallel_read_batch_lands_in_source_order() {
         ],
         stop_reason: StopReason::ToolUse,
         usage: Usage::default(),
+        error_message: None,
     };
 
     let stream = Arc::new(ScriptedStream::new(vec![batch, text_reply("done")]));

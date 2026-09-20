@@ -326,6 +326,13 @@ fn append_message(
             Ok(())
         }
         Role::Tool => {
+            // `added_tool_names` is not projected: upstream
+            // `openai-responses-shared.ts` follows a `function_call_output`
+            // with an `additional_tools` input item when
+            // `deferredToolsMode == "additional-tools"`, but
+            // `ResponsesInputItem` has no such variant and there is no compat
+            // flag to gate it. The names remain available on the transcript
+            // for `pi_ai::utils::deferred_tools` callers.
             let mut call_id: Option<String> = None;
             let mut output = String::new();
             for block in &msg.content {
@@ -674,6 +681,7 @@ impl ResponsesResponse {
             content,
             stop_reason,
             usage,
+            error_message: None,
         })
     }
 }
@@ -1321,6 +1329,7 @@ mod tests {
                 content: Box::new(Content::text("72F and sunny")),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             })],
             model: None,
         });

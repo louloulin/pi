@@ -55,6 +55,7 @@ fn tool_call_message(tool_name: &str, tool_call_id: &str) -> AssistantMessage {
         })],
         stop_reason: StopReason::ToolUse,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn text_reply(text: &str) -> AssistantMessage {
         content: vec![Content::text(text)],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 

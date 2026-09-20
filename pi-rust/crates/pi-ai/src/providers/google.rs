@@ -517,6 +517,12 @@ fn assistant_content(msg: &Message) -> Option<GoogleContent> {
 /// parts. Google keys responses by tool *name*, which the Rust
 /// [`Message`] type does not carry — resolve it from the tool calls
 /// seen earlier in the conversation, falling back to the call id.
+///
+/// `added_tool_names` is not projected: Google's `functionResponse` and
+/// `GoogleContent` have no slot for a list of newly loaded tools, and
+/// upstream's Google provider does not read `addedToolNames` either (`grep`
+/// for it across `packages/ai/src/api/google*` is empty). The field stays on
+/// the transcript for `pi_ai::utils::deferred_tools` consumers.
 fn function_response_parts(
     msg: &Message,
     tool_names: &HashMap<String, String>,
@@ -795,6 +801,7 @@ impl GoogleSseStream {
             content,
             stop_reason,
             usage,
+            error_message: None,
         };
         self.pending
             .push_back(Ok(AssistantMessageEvent::Done {
@@ -1169,6 +1176,7 @@ mod tests {
                     content: Box::new(Content::text(text)),
                     is_error: false,
                     details: None,
+                    added_tool_names: None,
                 })],
                 model: None,
             });
@@ -1199,6 +1207,7 @@ mod tests {
                 content: Box::new(Content::text("boom")),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             })],
             model: None,
         });

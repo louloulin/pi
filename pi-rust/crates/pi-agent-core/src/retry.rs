@@ -4,16 +4,16 @@
 //! Upstream keeps this module in `@earendil-works/pi-ai` and drives it from
 //! two layers: `completeSimpleWithRetries` (compaction) and `AgentSession`,
 //! which restarts a *finished* turn whose last assistant message carries a
-//! retryable `errorMessage`. The Rust protocol has no `errorMessage` field on
-//! [`AssistantMessage`] and the loop does not turn a provider failure into an
-//! assistant message at all — it returns [`AgentError`] and truncates the
-//! event sequence (see `stream_assistant_events`). This port therefore hangs
-//! the same policy off the assistant call itself: `stream_assistant_response`
-//! wraps one provider attempt in [`retry_assistant_call`], which classifies
-//! the [`AgentError`] the attempt returned. The classifier, the attempt
-//! numbering, the delay schedule and the callback contract are the same as the
-//! TypeScript; only the classification *input* differs (error text from `Err`
-//! instead of `errorMessage`).
+//! retryable `errorMessage`. The Rust agent loop does not turn a provider
+//! failure into an assistant message at all — it returns [`AgentError`] and
+//! truncates the event sequence (see `stream_assistant_events`) — so
+//! [`AssistantMessage::error_message`] is never consulted here. This port
+//! therefore hangs the same policy off the assistant call itself:
+//! `stream_assistant_response` wraps one provider attempt in
+//! [`retry_assistant_call`], which classifies the [`AgentError`] the attempt
+//! returned. The classifier, the attempt numbering, the delay schedule and the
+//! callback contract are the same as the TypeScript; only the classification
+//! *input* differs (error text from `Err` instead of `errorMessage`).
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -254,9 +254,11 @@ fn retryable_message_text(error: &AgentError) -> Option<&str> {
 /// assistant message carrying `errorMessage`.
 ///
 /// Provider and stream failures are classified by their message text; tool
-/// failures never are. An assistant message that ended with
-/// [`StopReason::Error`] carries no message text in `pi-protocol`, so it can
-/// never be classified as retryable.
+/// failures never are. A finished [`AssistantMessage`] that ended with
+/// [`StopReason::Error`] carries its wording in
+/// [`AssistantMessage::error_message`], but the agent loop never reaches this
+/// function with one — it returns [`AgentError`] instead — so that case is not
+/// classified here.
 pub fn is_retryable_agent_error(error: &AgentError) -> bool {
     match retryable_message_text(error) {
         Some(message) => is_retryable_error_message(message),
@@ -463,6 +465,7 @@ fn aborted_message(model: &str) -> AssistantMessage {
         content: Vec::new(),
         stop_reason: StopReason::Aborted,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 

@@ -3,13 +3,16 @@
 //!
 //! Each submodule carries its own "deliberate differences" notes, because the
 //! Rust protocol types are narrower than the TypeScript ones (no per-message
-//! usage, no `addedToolNames`, no SDK-shaped error objects).
+//! usage, no SDK-shaped error objects).
 
 pub mod deferred_tools;
 pub mod error_body;
 pub mod estimate;
 
-pub use deferred_tools::{identity_tool_name, split_deferred_tools, SplitDeferredTools};
+pub use deferred_tools::{
+    added_tool_names_from_messages, identity_tool_name, split_deferred_tools,
+    split_deferred_tools_from_context, SplitDeferredTools,
+};
 pub use error_body::{
     format_provider_error, normalize_provider_error, truncate_error_text,
     truncate_provider_error_body, NormalizedProviderError, MAX_PROVIDER_ERROR_BODY_CHARS,

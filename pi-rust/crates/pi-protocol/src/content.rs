@@ -51,6 +51,17 @@ pub struct ToolResult {
     /// to the host (e.g. diff metadata, exit codes, structured errors).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+    /// Names of tools this result introduced and made available from this
+    /// transcript point onward.
+    ///
+    /// Mirrors upstream `ToolResultMessage.addedToolNames`
+    /// (`packages/agent/src/types.ts`). Providers that support mid-transcript
+    /// tool loading (Anthropic `tool_reference` blocks, OpenAI
+    /// `additional_tools` items, Kimi's deferred declarations) read it off the
+    /// tool-result message; the deferred-tool splitter in `pi-ai` uses it to
+    /// keep such tools out of the request prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_tool_names: Option<Vec<String>>,
 }
 
 // Manual `Default` impl — `Content` is a recursive enum (it contains
@@ -62,6 +73,7 @@ impl Default for ToolResult {
             content: Box::new(Content::Text(TextContent::default())),
             is_error: false,
             details: None,
+            added_tool_names: None,
         }
     }
 }

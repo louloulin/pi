@@ -49,6 +49,7 @@ fn tool_result_message(text: &str) -> Message {
             content: Box::new(Content::text(text)),
             is_error: false,
             details: None,
+            added_tool_names: None,
         })],
         model: None,
     }

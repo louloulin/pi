@@ -226,6 +226,7 @@ impl ToolExecutor for HelloTool {
             content: Box::new(Content::text(format!("Hello, {name}!"))),
             is_error: false,
             details: None,
+            added_tool_names: None,
         })
     }
 }

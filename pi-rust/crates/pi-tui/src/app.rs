@@ -3468,6 +3468,7 @@ mod tool_stream_tests {
             content: Vec::new(),
             stop_reason: StopReason::ToolUse,
             usage: Usage::default(),
+            error_message: None,
         }
     }
 
@@ -3530,6 +3531,7 @@ mod tool_stream_tests {
                 content: Box::new(Content::text("ok")),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             },
             duration_ms: 3,
         });
@@ -3570,6 +3572,7 @@ mod tool_stream_tests {
                 content: Box::new(Content::text("done")),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             },
             duration_ms: 1,
         });

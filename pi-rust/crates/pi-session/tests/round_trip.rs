@@ -29,6 +29,7 @@ fn assistant_message(text: &str) -> AssistantMessage {
         content: vec![Content::text(text)],
         stop_reason: StopReason::Stop,
         usage: Usage::default(),
+        error_message: None,
     }
 }
 
@@ -72,6 +73,7 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
             content: Box::new(Content::text("hi")),
             is_error: false,
             details: None,
+            added_tool_names: None,
         }))
         .expect("tool result");
     writer
