@@ -309,6 +309,7 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | 63（LUM-1224，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧；62 已落地，可开工 |
 | 65（LUM-1227，已交付） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼（`pi-session` 树 + `pi-tui` 预序展平/gutter/活动分支优先）；`/fork` 选 user message 建新会话（含该条，空转录提示）；`/clone` 逐条复制整个会话为新文件，源文件零改写（`verify_stats` 断言）；`app.session.resume` 与 `/resume` 同一 `open_resume_selector` | 读路径来自 Stage 56（`branch_*`）；写路径新增 `SessionWriter::copy_entries_from` + `set_leaf`（对齐上游 `SessionManager.forkFrom`/`createBranchedSession`）；未改 `pi-protocol` 枚举 |
 | 66（LUM-1226，停放 `backlog`） | 流式反馈与可发现性：spinner + 轮耗时 + 启动头 key hints + `app.header` | `spinner` 全仓命中从 0 到有；耗时与 Stage 64 同 footer 行；启动头可折叠且不占行 | 对照 Martty `src/app.rs` 的 `SPINNER`/`spinner_idx`/`spinner()` 与测试 `a_running_subagent_keeps_the_spinner_advancing`；文案对照 Martty `src/locale.rs`，用常量表不引 i18n 框架 |
+| **P0-修（建议排到 Stage 67 之前，编号待定）** | 修交互输入循环：内层改成 `while ct_event::poll(Duration::ZERO)?` 再 `read()`（详见第十节） | 普通按键之后仍持续出帧（PTY 断言帧字节数增长）；`Esc` / `Ctrl+C` / `Ctrl+D` 语义不变；启动即有输入时首帧仍会画 | 一行改动 + 一个 PTY 回归测试；与 Stage 65/66 同处 `interactive.rs`，必须排在它们落地之后合并 |
 | 67（LUM-1230，停放 `backlog`） | 思考级别：`/thinking [level]` + `app.thinking.cycle`（`shift+tab`）/ `app.thinking.save`（`ctrl+s`）+ 编辑器边框随级别着色 +「当前模型不支持思考」提示 | 4 个入口全部接线；`/thinking` 与键位走同一段切换代码；边框色用 `Theme::thinking_border`；不支持时给状态行而非静默 | 上游 `interactive-mode.ts:2884`（cycle）、`:2986`（`/thinking` 选择器）、`:2139`（边框色）、`:4170`（不支持提示）；`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`）与 `Theme::thinking_border`（`pi-tui/src/theme.rs:1108`）已在位，缺的是 App/session 之间的级别贯通；`slash.rs` / `interactive.rs` 与 Stage 65 同文件，须排在 65 之后 |
 | 68（LUM-1231，停放 `backlog`） | 斜杠命令第二批：`/reload`、`/changelog`、`/import`、`/login`、`/logout`、`/scoped-models` | 解析分支 + 实际行为 + `/help` 文案；`/reload` 重载 keybindings/extensions/skills/prompts/themes/context 至少覆盖已实现的子集 | 上游 `slash-commands.ts:24-42`；auth 子系统（LUM-1171 / LUM-1180）与 session 导入导出（LUM-1174）已在位；`/share` 需 GitHub gist + 凭据，单独停放；与 Stage 67 同文件，串联在 67 之后 |
 | 69（LUM-1232，停放 `backlog`） | Martty 风格会话级持久 shell：`!` 命令之间保留 `cd` / 环境变量，退出 TUI 时回收 | 连续 `!cd sub` + `!pwd` 看到目录延续；一个 `!export X=1` 在下一个 `!` 可见；`Esc` 仍可中断；进程随 TUI 退出而终止；`!!` 语义不变 | **非上游对齐**（上游 `bash-executor.ts:50` 每条命令新起进程），属「最佳体验」增强，需先决定默认开/关；实现对标 Martty `src/app.rs:718-835`（`PersistentShell` + 控制 fd 9 + `shell_quote`）；与 Stage 62 的 `BashRunner` 同文件 |
@@ -579,7 +580,178 @@ tip 的门已由 LUM-1225 实跑（147 / 2202 / 0 / 2）。磁盘剩 25G，无�
 `cargo fmt --all -- --check` 干净；本文件 fence 计数为偶数、新增段落零相对链接
 （满足 `pi-evals/src/suites/docs.rs:123` 与 `:130` 两个 case）。
 
-## 十、Stage 65 交付（LUM-1227）：会话树导航与分叉
+## 十、第八轮（LUM-1233）：PTY 实机驱动 —— 第一次普通按键之后，TUI 再也画不出一帧（P0，已复现）
+
+前七轮都是**读代码**得到的结论；本轮第一次把真实二进制放进 PTY 驱动并截图，得到的是一个
+比「缺功能」严重得多的结论：**当前 `feature/pi.rs` 的交互 TUI 在第一次普通按键之后就停止出帧**，
+后续所有 `terminal.draw()` 都不再执行。也就是说，编辑器、斜杠面板、模型选择器、流式输出
+全都「接好了线但不显示」——因为在按键那一刻，渲染循环已经卡死在 crossterm 的阻塞读取里。
+本轮因此没有产出「交互截图」（拿不到），产出的是这一条可复现证据链 + 一行修复补丁。
+
+### 10.1 方法（可复现）
+
+- harness（临时脚本，只存在于本轮协调工作目录、未入库）：`pty.openpty` + `fork` + `setsid` + `TIOCSCTTY` 把真实二进制跑在
+  `TERM=xterm-256color` 的伪终端上，自写 VT 解析器还原屏幕，再渲成 PNG。
+- 受测二进制取自**在飞 worker 的 target 目录**（LUM-1227 的副本 + LUM-1224 / LUM-1228 原位执行），
+  三者现象一致 → 不是某一 stage 引入的偶发，也不是构建损坏。
+- 对照组（同一 harness、同一段驱动代码）：`less /etc/hostname` 收到 `q` 正常退出；
+  用 `rustc` 对预编译 `libcrossterm-*.rlib` 编出的 crossterm 0.28.1 最小程序能依次收到
+  `a` / `b` / `c`；另有 raw-mode `select` / `epoll`（LT 与 ET 两种）子进程实验，均能唤醒。
+  → **harness 的输入通道没有问题，问题在被测程序。**
+- 离线回合：`pi --model faux/faux-model`（`main.rs:600` 的 faux 优先分支），无需网络。
+- 帧级对照：空闲启动帧与「键入 `hello` + Enter 之后」的帧渲染出的 PNG **md5 相同**
+  （`df7e71d92ba9f777b7c618c4d8a0d226`）——屏幕逐像素没变。
+- 内核侧旁证：`/proc/<pid>/wchan`、`/proc/<pid>/fdinfo`、`TIOCINQ`、`/proc/<pid>/stat` 的 CPU 计数，
+  以及一个 `LD_PRELOAD` 的 `epoll_ctl` / `epoll_wait` / `read` 记录器（`trace.c`，gcc 编译）。
+
+### 10.2 现象
+
+| 时刻 | 观察 |
+| --- | --- |
+| 启动后空闲 | 每 ~50ms 一帧（增量 25B 的 SGR 复位序列），CPU 2.6–3.5% |
+| 按一个普通键（`a` / `h` / `q` / `Esc`） | 输出**立即归零**，其后 5s 内 0 字节；CPU 0.0%；主线程与一个 tokio worker 停在 `wchan=ep_poll` |
+| 其后每个按键 | 只有**下一次按键**才能把它唤醒一次（处理完立刻再次睡死），屏幕始终不更新 |
+| `Ctrl+D` / `Ctrl+C` | 仍能正常退出（退出码 0）——它们是唯一会 `break` 内层循环的动作 |
+| `Enter` | 不提交、不渲染（`hello\r` 之后帧与空闲帧逐像素相同） |
+| 启动瞬间就有待处理输入 | **整屏空白**：连第一帧都不画（alternate screen 里什么都没有） |
+| 会话文件 | `.pi/sessions/session-*.jsonl` 始终 0 字节，回放/迁移类观察不受影响 |
+
+启动瞬间有输入就整屏空白，是因为 `last_render` 在进循环前初始化（`interactive.rs:309`），
+第一帧要等 `last_render.elapsed() >= 50ms`（`interactive.rs:352`）才画；而首轮 `poll` 在
+50ms 之前就返回 `true` 并进入内层循环，于是第一帧被永久跳过。
+
+### 10.3 根因（`crates/pi-coding-agent/src/interactive.rs`）
+
+```rust
+// interactive.rs:362-372（外层渲染循环内）
+if ct_event::poll(config.event_poll_interval)? {
+    while let Some(event) = read_event()? {
+        let translated = App::translate_event(event);
+        if let Some(action) =
+            handle_input_event(&mut app, &agent, &mut options, &mut bash, translated).await?
+        {
+            match action {
+                InternalAction::Exit => break,   // 唯一的 break
+            }
+        }
+    }
+}
+```
+
+```rust
+// interactive.rs:2017-2025
+fn read_event() -> anyhow::Result<Option<CtEvent>> {
+    match ct_event::read()? {
+        event @ (CtEvent::Key(_) | CtEvent::Mouse(_) | CtEvent::Resize(_, _)
+        | CtEvent::FocusGained | CtEvent::FocusLost | CtEvent::Paste(_)) => Ok(Some(event)),
+    }
+}
+```
+
+`crossterm::Event` 只有这 6 个 variant，没有 `None` 分支，所以 `read_event()` **永远返回
+`Ok(Some(_))`**；`while let Some(..)` 因而只会在 `handle_input_event` 返回
+`Some(InternalAction::Exit)` 时退出（这正是 `Ctrl+C` / `Ctrl+D` 能退出的原因），
+其余任何按键都会再调用一次 `ct_event::read()` → **阻塞**（`epoll_wait(..., -1)`）。
+渲染循环顶部的 `drain_agent_events()` / `draw()` / 退出检查全部在内层循环**之后**，
+因此从第一次普通按键起：不再出帧、不再排空 agent 事件（正在流的输出永远不会出现）、
+`Esc` 的中断请求即便被投递给 agent 也没有任何界面反馈。
+`ct_event::read()` 是**阻塞 API**，正确用法是先 `poll` 再 `read`
+（crossterm 0.28.1 `src/event/read.rs` 的 `read()` 会在无事件时一直等下一条输入）。
+
+### 10.4 证据：`LD_PRELOAD` 的 epoll 轨迹
+
+`trace.so` 记录 crossterm mio poller（`epfd=11`，注册了 tty `fd=0` 与 waker `fd=12`）的每次
+`epoll_wait` 进出，`###` 行是注入按键的时刻：
+
+```console
+ENTER epoll_wait(epfd=11,timeout=50)
+### USER TYPES 'h' (one keystroke, 1 byte)
+EXIT  epoll_wait(epfd=11,timeout=50) -> n=1 in 50.1ms [fd=0 ev=0x1]
+ENTER epoll_wait(epfd=11,timeout=-1)          <-- 内层 while 立刻进阻塞 read()
+### USER TYPES 'i' (another keystroke)
+EXIT  epoll_wait(epfd=11,timeout=-1) -> n=1 in 1199.9ms [fd=0 ev=0x1]
+ENTER epoll_wait(epfd=11,timeout=-1)          <-- 处理完后再次阻塞，永不返回渲染循环
+### USER PRESSES Ctrl+C
+EXIT  epoll_wait(epfd=11,timeout=-1) -> n=1 in 1199.5ms [fd=0 ev=0x1]
+EXIT  epoll_wait(epfd=3,timeout=-1) -> n=1 in 3330.0ms [fd=0 ev=0x1]
+```
+
+第一键之后再没有任何 `timeout=50` 的轮询 —— 渲染 tick 消失，与「输出 0 字节 / CPU 0% /
+主线程 `wchan=ep_poll`」三路观察一致。
+
+### 10.5 修复（建议补丁，本轮未编译验证）
+
+```rust
+// interactive.rs:362 起：让内层循环只用非阻塞 poll 作为条件
+if ct_event::poll(config.event_poll_interval)? {
+    while ct_event::poll(Duration::ZERO)? {
+        let event = ct_event::read()?;   // poll 已经保证有事件，read 不会阻塞
+        let translated = App::translate_event(event);
+        if let Some(action) =
+            handle_input_event(&mut app, &agent, &mut options, &mut bash, translated).await?
+        {
+            match action {
+                InternalAction::Exit => break,
+            }
+        }
+    }
+}
+```
+
+`Duration::ZERO` 的 `poll` 是 crossterm 的标准「排空当前可用事件」写法：有事件就返回 true
+（紧接着的 `read()` 必不阻塞），没有就返回 false 并回到渲染 tick。`InternalAction::Exit`
+的 `break` 语义不变。`read_event()` 可随之简化成 `Ok(ct_event::read()?)`（`CtEvent` 的
+variant 已穷尽），或直接删掉。回归测试建议二选一：(a) PTY 集成测试驱动真实二进制，
+断言「发一个普通键之后仍然持续出帧（字节数增长）」；(b) 把内层循环抽成纯函数，用可注入的
+事件源做单元测试。**补丁未在本轮编译验证**（本轮不构建，见 10.8）。
+
+### 10.6 顺带核实的其它差距（截图同批产出）
+
+- **P1 `--resume <路径/ID>` 启动只贴名字、不回放**：`main.rs:179-186` 只取
+  `reference.name` 与 `Some(reference.database)`，transcript 仍为空（截图显示状态栏名字是
+  传入的 SQLite 路径）；真正的回放只在 `/resume`（`interactive.rs:985-1013`）。
+- **P1 回放保真**：`/resume` 走 `entry_to_item` → `content_text`（`interactive.rs:1152`），
+  只保留 `Content::Text`，`SessionEntry::ToolCall` 没有对应 item、`tool_header` /
+  `tool_lines` / `thinking`（`pi-tui/src/message.rs:160+` 已支持）填不上 → 带工具的会话回放会
+  退化成纯文本。
+- **P1 `initial_prompt` 接线死路**：`main.rs:116-119` 只在 `Command::Print` 下赋值，
+  而该子命令把 `target_mode` 强制成 `ModeTarget::Print`（`main.rs:90`）→ 交互模式永远拿不到
+  初始提示，也没有上游那种 `pi "<prompt>"` 的入口；`interactive.rs:302` 的提交分支在本版 CLI 下不可达。
+- **P2 扩展 `pi.sendUserMessage` 不触发新轮**：只落成会话条目 + 一行 info
+  （`crates/pi-extensions/docs/EXTENSIONS.md:490`、`interactive.rs:1930-1936`）。
+- **P2 扩展 `pi.setSessionName` 不刷新状态栏**：info 行出现（`[extension] session renamed to …`），
+  但状态栏仍是 `session-<hex>`（`persist_extension_side_effects` 没有回写 `App` 的名字）。
+- **P2 `Content` 缺 `Thinking` variant**（`pi-protocol/src/content.rs`；思考只以流事件
+  `ThinkingDelta` 存在，`events.rs:46-48`），v4 会话里的 `thinking` 无法往返。
+- **P2** `pi session migrate` 只认 Rust Stage-4 JSONL（上游 v3 `{"type":"session",…}` 不能导入）；
+  Rust 默认会话目录 `~/.pi/sessions`（`main.rs:472`）与上游 `~/.pi/agent/sessions` 仍不一致。
+- **作废声明**：更早几轮里基于「屏幕上出现了 `/he` 等字符」得出的斜杠面板结论**不成立** ——
+  本轮确认那些字符是 PTY 的内核回显、以及状态栏自带的提示文本，不是 App 渲染出来的。
+
+### 10.7 优先级（本轮结论）
+
+1. **P0：修 10.5 的输入循环**（一行 + 一个回归测试）。这是所有其它 TUI 工作（Stage 63/65/66/67）
+   的**前置**：不修它，任何交互特性都无法被人工验收，也无法产出可信的交互截图。
+2. P1：`--resume` 启动回放 + 回放保真（工具卡 / thinking 进 transcript）。
+3. P2：`initial_prompt` 接线（`pi "<prompt>"`）、扩展消息的运行时可见性。
+4. Stage 67/68/69 的排序不变（思考级别 / 命令面 / 持久 shell），但都要等 P0。
+
+### 10.8 本轮动作
+
+docs-only：新增本节 + 第五节表新增一行 P0 修复切片，并给出「按键即死」的可复现证据链。
+**零派发**：开工时 3 个 stage 在飞（Stage 63 = LUM-1224、Stage 65 = LUM-1227、Stage 66 =
+LUM-1228）；本轮进行中 Stage 65（LUM-1227）转 `in_review`，收工时在飞 2 个 run
+（`multica issue runs 01a0b4d6-… --siblings`：LUM-1224 与 LUM-1228 均为 `running`）。
+即便按「最多 3 个并发」还空着一格，本轮仍**主动不派发**：(a) 磁盘只剩 1.6G / 97% 已用，
+两个 worker 正在 `cargo test`，再起一个 shell 会同时争磁盘与 CPU；(b) 10.5 的 P0 补丁与
+尚未合并的 Stage 65 改的是同一个 `interactive.rs`，应当先合 65 再切 P0，否则必冲突。
+**未跑全量门**，也**未编译 10.5 的补丁**：当时磁盘只剩 2.0G / 96% 已用、两个 worker 正在
+`cargo test -j 4 --workspace` 与 `cargo test -p pi-coding-agent -p pi-tui`，第三方构建会同时
+争磁盘与 CPU（并且会让补丁与其他 worker 的 `interactive.rs` 改动混在一起）。tip 的门沿用
+LUM-1225 的实跑结果（147 / 2202 / 0 / 2）。校验：本文件 fence 计数为偶数、本节零相对链接
+（满足 `pi-evals/src/suites/docs.rs:123` 与 `:130`）。
+
+## 十一、Stage 65 交付（LUM-1227）：会话树导航与分叉
 
 Stage 65 是 Stage 59 停车场里最大的一块：会话树导航与从历史节点分叉。上游的 `/tree`、`/fork`、
 `/clone` 三个命令 + `app.session.tree`/`fork`/`resume` 三个键位此前在 Rust 侧零实现，`/resume`
