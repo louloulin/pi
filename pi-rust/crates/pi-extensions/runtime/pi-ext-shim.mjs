@@ -1850,9 +1850,9 @@ const __pi_typebox_module = (() => {
 //     text comes from Rust's `io::Error`;
 //   - `fs.mkdirSync(path, {recursive: true})` returns `undefined`
 //     instead of the first created directory;
-//   - `node:stream`, `node:http`, … and
-//     `crypto.createHmac` are not provided: importing them fails with
-//     the readable "unsupported import" error that lists what exists.
+//   - `node:stream`, `node:http`, … are not provided: importing them
+//     fails with the readable "unsupported import" error that lists what
+//     exists.
 // ---------------------------------------------------------------------------
 
 /**
@@ -2924,9 +2924,10 @@ const __pi_crypto_module = (() => {
   }
 
   /**
-   * `crypto.subtle` — only `digest` is bridged. Key import/export, signing,
-   * HMAC and encryption are not: the host bundles no crypto backend for them,
-   * and `crypto.createHmac` below reports the same limitation.
+   * `crypto.subtle` — only `digest` is bridged. Key import/export, signing
+   * and encryption are not: the host bundles no asymmetric crypto backend.
+   * HMAC is available through the Node `createHmac` surface below, which
+   * uses the same SHA-1 / SHA-256 primitives.
    */
   const subtle = Object.freeze({
     async digest(algorithm, data) {
@@ -2969,30 +2970,52 @@ const __pi_crypto_module = (() => {
   }
 
   /**
+   * Coerce a Node-style data argument — a string (with the given encoding) or
+   * any `BufferSource` — to a `Buffer`. Shared by `createHash` / `createHmac`;
+   * `op` names the caller so the `TypeError` says which argument was wrong.
+   */
+  function sourceBytes(data, encoding, op) {
+    if (typeof data === "string") {
+      return BufferCtor.from(data, encoding || "utf8");
+    }
+    if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) {
+      return BufferCtor.from(new Uint8Array(data));
+    }
+    if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(data)) {
+      return BufferCtor.from(
+        new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+      );
+    }
+    throw new TypeError(`${op} must be a string or BufferSource`);
+  }
+
+  /**
    * `createHash(algorithm)` — buffering hash with Node's `update` /
    * `digest([encoding])` shape. The host digests the whole message at once,
    * so `update` only accumulates; that is invisible to callers and avoids
-   * reimplementing the streaming state machine on the JS side.
+   * reimplementing the streaming state machine on the JS side. Reusing a hash
+   * after `digest` throws instead of silently hashing stale state.
    */
   function createHash(algorithm) {
     const name = String(algorithm);
     const chunks = [];
+    let finalized = false;
     const hash = {
       update(data, encoding) {
-        if (typeof data === "string") {
-          chunks.push(BufferCtor.from(data, encoding || "utf8"));
-        } else if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) {
-          chunks.push(BufferCtor.from(new Uint8Array(data)));
-        } else if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(data)) {
-          chunks.push(
-            BufferCtor.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)),
-          );
-        } else {
-          throw new TypeError("createHash.update: data must be a string or BufferSource");
+        if (finalized) {
+          // Node raises ERR_CRYPTO_HASH_FINALIZED here; an extension that
+          // reuses a finished hash gets a clear error instead of a silently
+          // ignored update.
+          throw new Error("createHash.update: the hash was already finalized by digest()");
         }
+        chunks.push(sourceBytes(data, encoding, "createHash.update"));
         return hash;
       },
       digest(encoding) {
+        if (finalized) {
+          throw new Error("createHash.digest: the hash was already finalized");
+        }
+        finalized = true;
         const message = BufferCtor.concat(chunks);
         // `crypto.digest` rejects unknown names, so the failure carries the
         // host's readable message for e.g. `sha512`.
@@ -3001,6 +3024,55 @@ const __pi_crypto_module = (() => {
       },
     };
     return hash;
+  }
+
+  /**
+   * `createHmac(algorithm, key)` — Node's buffering HMAC. `update(data[,
+   * encoding])` chains and `digest([encoding])` returns the MAC, exactly like
+   * `createHash`. Both refuse to be reused once `digest` has run (Node's
+   * `ERR_CRYPTO_HASH_FINALIZED`). The host's `crypto.hmac` op applies RFC 2104
+   * on top of the same hand-rolled SHA-1 / SHA-256 primitives, so HMAC needs
+   * no crypto backend of its own; `key` is a string (UTF-8, or the given
+   * encoding) or a `BufferSource`, and is copied when `createHmac` is called.
+   * A third `{ encoding }` argument sets the encoding of a string key (Node's
+   * `createHmac(algorithm, key[, options])`).
+   */
+  function createHmac(algorithm, key, options) {
+    const name = String(algorithm);
+    if (key === undefined || key === null) {
+      throw new TypeError("createHmac: the key argument is required");
+    }
+    const keyEncoding =
+      options && typeof options === "object" ? options.encoding : undefined;
+    const keyBytes = sourceBytes(key, keyEncoding, "createHmac key");
+    const chunks = [];
+    let finalized = false;
+    const hmac = {
+      update(data, encoding) {
+        if (finalized) {
+          throw new Error("createHmac.update: the hmac was already finalized by digest()");
+        }
+        chunks.push(sourceBytes(data, encoding, "createHmac.update"));
+        return hmac;
+      },
+      digest(encoding) {
+        if (finalized) {
+          throw new Error("createHmac.digest: the hmac was already finalized");
+        }
+        finalized = true;
+        const message = BufferCtor.concat(chunks);
+        // `crypto.hmac` rejects unknown names with the host's readable
+        // message (e.g. `md5`), never a wrong MAC.
+        const result = __pi_node_call("crypto.hmac", {
+          algorithm: name,
+          keyBase64: keyBytes.toString("base64"),
+          base64: message.toString("base64"),
+        });
+        const digest = BufferCtor.from(result.base64, "base64");
+        return encoding === undefined ? digest : digest.toString(String(encoding));
+      },
+    };
+    return hmac;
   }
 
   const webcrypto = Object.freeze({
@@ -3015,13 +3087,9 @@ const __pi_crypto_module = (() => {
     randomInt: randomInt,
     getRandomValues: getRandomValues,
     createHash: createHash,
+    createHmac: createHmac,
     subtle: subtle,
     webcrypto: webcrypto,
-    createHmac: () => {
-      throw new Error(
-        "crypto.createHmac is not implemented in the pi extension host (only SHA-1/SHA-256 digests are bridged)",
-      );
-    },
   };
   mod.default = mod;
   return Object.freeze(mod);

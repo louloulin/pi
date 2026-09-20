@@ -111,22 +111,33 @@ iteration, `instanceof` and `Buffer.isBuffer` behave like Node.
 `randomInt([min,] max)` (rejection sampling, no modulo bias). Entropy
 comes from `/dev/urandom`; there is no fallback PRNG on purpose.
 
-Hashing is bridged for SHA-1 and SHA-256 through the `crypto.digest` op
-(`crate::digest`, hand-rolled because the offline registry has no `digest`
-backend):
+Hashing is bridged for SHA-1 and SHA-256 through the `crypto.digest` op,
+and HMAC through `crypto.hmac` (`crate::digest`, hand-rolled because the
+offline registry has no `digest` / `hmac` backend):
 
 - `createHash(algorithm)` with `update(data[, encoding])` (chaining) and
   `digest([encoding])` — a `Buffer` by default, a string for `hex` /
   `base64` / …; `sha256` / `sha-256` / `SHA-256` all parse.
+- `createHmac(algorithm, key[, {encoding}])` with the same `update` /
+  `digest` shape (LUM-1181). `key` is a string (UTF-8 unless `options.encoding`
+  says otherwise) or any `BufferSource`; RFC 2104 is applied in Rust over the
+  same SHA-1 / SHA-256 primitives, so keys longer than the 64-byte block are
+  hashed first and no new dependency is needed. `tests/web_globals.rs` checks
+  the RFC 4231 and RFC 2202 vectors (including the block-size-key cases) and
+  `crate::digest`'s own tests cover the same vectors against Python.
+- Both hash objects refuse `update` / `digest` after `digest` has run (Node's
+  `ERR_CRYPTO_HASH_FINALIZED`), so a reused object fails loudly instead of
+  hashing stale state.
 - `getRandomValues(typedArray)` (fills in place, 64 KiB quota per call,
   rejects float and `DataView` views) and `randomUUID()`.
 - `subtle.digest(name | {name}, data)` — resolves to an `ArrayBuffer`.
 - `webcrypto` — `{ getRandomValues, randomUUID, subtle }`.
 
-`createHmac` and the key-based WebCrypto operations (`importKey`,
-`sign`, `encrypt`, …) still throw, and names other than SHA-1/SHA-256
-(`md5`, `sha512`, …) surface the host's "unsupported digest algorithm"
-error rather than a wrong digest.
+The key-based WebCrypto operations (`subtle.importKey`, `sign`, `encrypt`,
+…) still throw, and names other than SHA-1/SHA-256 (`md5`, `sha512`, …)
+surface the host's "unsupported digest algorithm" error rather than a wrong
+digest. HMAC is available through the Node `createHmac` surface above, not
+through `subtle`, because the host bundles no key-object model.
 
 ### `node:zlib`
 
@@ -361,7 +372,7 @@ plain "undefined is not a function":
 |---|---|---|
 | `node:module`'s disk resolution (`require` of a real path, `registerHooks`, `findSourceMap`) | The virtual-module sandbox deliberately stops at the bridged set; `createRequire` / `Module` / `builtinModules` themselves **are** bridged (LUM-1129). | A deliberate decision to widen the sandbox (e.g. require-from-`node_modules`-only); `doom-overlay/doom-engine.ts` would then load its local CJS blob. |
 | `node:stream` / `node:http` / `node:net` / `node:worker_threads` | No event loop integration for streams. | Substantial; probably out of scope for the QuickJS host. |
-| `crypto.createHmac` / key-based WebCrypto (`importKey`, `sign`, `encrypt`, …) / algorithms other than SHA-1 + SHA-256 | Only one-shot digests are bridged (`crypto.digest`); an HMAC or cipher needs a backend the workspace does not bundle, and a wrong result would be worse than a clear failure. | Add the primitive (or a crate that provides it) and a second bridge op. |
+| `crypto.createHmac` / key-based WebCrypto (`importKey`, `sign`, `encrypt`, …) / algorithms other than SHA-1 + SHA-256 | Only one-shot digests **and HMAC** are bridged (`crypto.digest` / `crypto.hmac`); `createHmac` was closed by LUM-1181. The remaining key-based WebCrypto surface needs a key-object model and a cipher backend the workspace does not bundle, and a wrong result would be worse than a clear failure. | Add the key-object model plus a cipher backend (or a crate that provides one) when an extension actually imports/signs with keys. |
 | `fs.watch`, `fs.createWriteStream` | `createReadStream` **is** bridged (LUM-1172) as a buffered replay of `fs.readFile`, so the read half of this row is closed; a write stream needs the same `Writable` plumbing over `fs.writeFile`/`fs.appendFile`, and `fs.watch` needs a filesystem watcher. | Wrap the write ops in a `Writable` the way LUM-1172 wrapped the read op; `notify` crate for `watch`. |
 | `os.cpus()`, `os.totalmem()`, `os.networkInterfaces()` | Machine topology has no consumer yet; inventing numbers would be worse than failing. | Straightforward `sysinfo`-style additions when needed. |
 | `process.argv`, `process.execPath`, `process.stdin`, `process.kill` | The host owns the process; extensions must not steer it. | Probably never. |
@@ -376,7 +387,9 @@ table and the shim cannot drift apart silently.
 
 Two rows this table used to carry are now closed: `node:zlib`'s
 gzip/deflate family (LUM-1131, see the `node:zlib` section) and the zstd
-family (LUM-1125).
+family (LUM-1125). `crypto.createHmac` (LUM-1181) is closed too — only the
+key-based WebCrypto half of that row remains, and it is now listed on its
+own.
 
 ## Adding a new op
 

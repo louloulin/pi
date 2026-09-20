@@ -3302,6 +3302,21 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
             }))
         }
 
+        "crypto.hmac" => {
+            // `crypto.createHmac` backing: the shim buffers the message and
+            // the key, the host computes one RFC 2104 HMAC on top of the
+            // same hand-rolled SHA-1 / SHA-256 primitives as `crypto.digest`.
+            let argument = node_arg_str(args, "algorithm")?;
+            let algorithm = crate::digest::Algorithm::parse(&argument).ok_or_else(|| {
+                NodeError::invalid(format!("unsupported hmac algorithm `{argument}`"))
+            })?;
+            let key = node_arg_bytes(args, "keyBase64")?;
+            let bytes = node_arg_bytes(args, "base64")?;
+            Ok(serde_json::json!({
+                "base64": base64_encode(&crate::digest::hmac(algorithm, &key, &bytes))
+            }))
+        }
+
         // -- zlib ------------------------------------------------------------
         //
         // Two compression backends: the zstd family (the workspace already
