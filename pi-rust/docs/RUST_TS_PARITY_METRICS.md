@@ -15,6 +15,45 @@
 
 一句话结论：**pi-rust 不是"差不多完成了"，它已经是一个能跑、能测、能交互的完整实现（核心循环 + 5 个 API family + 7 个内置工具 + 真 TUI 全部可用）；差距集中在两个地方——TUI 快捷键/组件的接线率，和扩展生态的生命周期事件。** 移除/补上扩展事件这一轴，加权值会从 76.1% 跳到 81.7%（见 §4.2 敏感性）。
 
+> 本表是 `af3aa30a4` 的快照。之后三条完整交付被抢救合并（LUM-1256），**当前 tip 的复测数字见 §0.1**（加权 **79.9%**）。
+
+### 0.1 合并后复测（LUM-1256，tip `d90555fb6`）
+
+上一快照之后有三条**已经写完但长期未合并**的交付一直漂在各自的 `work/*` 分支上：
+Stage 68 扩展生命周期事件（LUM-1246）、Stage 71 扩展可见性（LUM-1239）、Stage 70 输入面收尾（LUM-1238）。
+本 round 把三条并入 `feature/pi.rs` 并重测（合并细节、合并期发现的真实缺陷见
+`docs/TUI_UX_AUDIT.md` 二十）。
+
+| 口径 | 旧快照 | 本 tip | 变化 |
+|---|---|---|---|
+| 纯代码规模 | 82.5% | **82.1%** | Rust `src` 125,652 行 / TS 153,106 行 |
+| 测试规模 | 42.0% | **43.4%** | Rust 2,303 个 `#[test]` / TS 5,309 个用例 |
+| 功能面加权（主口径） | 76.1% | **79.9%** | 三条轴变动，见下表 |
+| TUI 交互+视觉 | 69.6% | **73.8%** | (14×0.64 + 8×0.91) / 22 |
+
+变动的三条轴：
+
+| 轴 | 旧 | 新 | 依据（可复现） |
+|---|---|---|---|
+| 扩展生命周期事件（权重 7%） | 20% | **57%** | 枚举 tag 对齐上游 **21/35 = 60%**（`pi-protocol/src/events.rs` 的 `ExtensionEvent::name()`）；生产代码真有构造点 **20/35 = 57.1%**（`grep -rho 'ExtensionEvent::[A-Za-z]*' crates --include=*.rs` 去掉测试后 21 个变体，其中 `UserMessage` 是 Rust 原生名）；PTY 实拍证明一次 faux turn 里 `agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end/input` 与 `user_bash` 全部真触发 |
+| slash 命令（权重 7%） | 74% | **78%** | `/thinking`（Stage 67 已实现、却漏进补全表）与 `/extensions`（Stage 71 新增）补入，对上上游 23 条为 **18/23** |
+| TUI 交互面（权重 14%） | 58% | **64%** | 模块面 80.5% 不变；12.3/12.4 的四条输入面缺口（补全零接线、Ctrl+C 无 500 ms 窗口、jump-to-latest 无指示、`/help` 与用户输入同前缀）本轮关闭 → 取「模块 80.5% 与接线 47.7% 的算术均值」= 64%（旧的 58% 比该均值还低：把已修缺口仍算作缺口） |
+
+扩展事件轴剩余 14 个缺口（上游名）：
+`before_agent_start, agent_settled, before_provider_request, before_provider_headers, after_provider_response,
+project_trust, session_before_compact, session_before_fork, session_before_switch, session_before_tree,
+session_compact_failed, session_tree, ui_prompt_start, ui_prompt_end`。
+另有 `model_select` 已有变体与 wire tag、却**没有生产构造点**（`/model` 选完不广播）。
+
+加权重算：
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.64 + 8×0.91 + 7×0.78 + 7×0.70 + 8×0.95 + 7×0.57 + 9×0.85 + 5×0.46 + 3×0.95 = **79.9%**
+
+敏感性（更新）：
+
+- 扩展事件轴补到 100%：**82.9%**（+3.0pt）——仍是最大的单一摆动项，但已经从「20% 的巨大空洞」变成「还差 14 个事件」。
+- `app.*` 接线率从 47.7% 补到 100%：交互轴 64% → 90.3%，总分 **83.6%**（+3.7pt）——**现在这是性价比最高的一轴**。
+
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
@@ -126,6 +165,11 @@ editor.external 3  session.fork 3  thinking.save 1
 - **运行期真正会触发**的只有 **2 个**：`wiring.rs:374` 的 `SessionStart`（每进程一次）与 `bridge.rs:71` 的 `discover_resources`（`resources_discover`）。`UserMessage/ToolCall/ToolResult/AgentEnd/SessionEnd` 除了测试代码，**没有任何生产调用点**（`grep -rn 'ExtensionEvent::(UserMessage|ToolCall|ToolResult|AgentEnd|SessionEnd)'` 仅命中 `tests/`）。
 - 分发是**精确名匹配**（`pi-ext-shim.mjs:1040 _pi_dispatch` → `_pi.handlers[parsed.type]`），没有别名表：所以上游插件写 `pi.on("session_shutdown", …)`、`pi.on("tool_execution_start", …)`、`pi.on("turn_start", …)` 在 Rust 下**永远不会触发**（Rust 的对应名是 `session_end`，且 `turn_start`/`tool_execution_start` 连变体都没有）。
 → 声明面 7/36 = **19.4%**；运行期 2/36 = **5.6%**；本审计取 **20%** 作为该轴得分（偏乐观，给在途的 LUM-1239 Stage 71"扩展可见性"留空间）。
+
+> **已修正（LUM-1256 合并后）**：上面这段是 `af3aa30a4` 的实测，LUM-1246 的 Stage 68 合并进来后该轴为
+> 声明 **21/35 = 60%**、运行期构造 **20/35 = 57.1%**，本审计取 **57%**。新枚举在
+> `pi-protocol/src/events.rs`（含上游 paritiy 变体，字段名带显式 `rename` 对齐 `types.ts`）。
+> 复测与剩余缺口清单见 **§0.1**。
 
 ### 3.7 TUI 组件与交互面
 

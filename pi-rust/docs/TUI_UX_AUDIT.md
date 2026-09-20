@@ -1654,20 +1654,22 @@ harness：`pty.fork` + `TIOCSWINSZ`，`pyte` 还原屏幕、Pillow 渲成 PNG（
 
 12.3 的诊断（引擎与下拉层完整、生产调用点为零）按原计划落地，只加了一张表和一处装配：
 
-- **命令表** `crates/pi-coding-agent/src/commands/slash.rs:191 autocomplete_commands()`：17 条内置命令，
-  带参数提示（`export [path]`、`trust yes|no`、`compact [instructions]`）与短描述。它与 `help_text()`
+- **命令表** `crates/pi-coding-agent/src/commands/slash.rs:203 AUTOCOMPLETE_COMMANDS`（LUM-1256 合并后为 **19 条**，`/thinking` 与 `/extensions` 已补入）+ `:259 autocomplete_commands()`：带参数提示（`export [path]`、`trust yes|no`、`compact [instructions]`）与短描述。它与 `help_text()`
   **故意不共享字符串**：`help_text` 是固定列宽的对齐块，下拉要的是「短标签 + 描述」。两者不许漂移
   这件事交给单测：`autocomplete_commands_match_the_slash_command_table`（`slash.rs:399`，每条表项都要能过
   `handle_command`，`/help` 里每个 `/xxx` 行都必须出现在表里）与
   `autocomplete_commands_carry_hints_and_descriptions`（`slash.rs:430`）。
-- **装配** `crates/pi-coding-agent/src/interactive.rs:336-355`：内置表 + 已加载扩展注册的命令
-  （`runtime.commands()` 映射成 `SlashCommand`），一起交给
+- **装配** `crates/pi-coding-agent/src/interactive.rs:358 install_composer_autocomplete()`（LUM-1236 已合并的装配点，
+  LUM-1256 合并时把 LUM-1238 的同名内联版本去重，并保留其新能力：`extension_autocomplete_commands()`（`interactive.rs:373`）
+  把已加载扩展注册的命令折进同一张表）：内置表 + 扩展命令一起交给
   `CombinedAutocompleteProvider::new(commands, tool_cwd)`，通过
-  `app.prompt_mut().editor_mut().set_autocomplete_provider(...)` 装上。provider 是 opt-in 的
-  （`editor.rs:101-103` 自己写着「没有调用点就保持补全前的行为」），这就是 12.3 里「引擎在、屏幕上没有」的根因。
-- **上屏** `crates/pi-tui/src/app.rs:4176 apply_autocomplete`：下拉挂在消息视口底边（紧贴 prompt），
-  候选行取自 `Editor::autocomplete_render_lines(width)`，选中行由
-  `crates/pi-tui/src/editor.rs:1154 autocomplete_selected_row()`（复用滚动窗口的居中规则）整行铺选中底。
+  `app.prompt_mut().editor_mut().set_autocomplete_provider(...)`（`editor.rs:965`）装上。provider 是 opt-in 的
+  （`editor.rs:97` 的模块注释自己写着「没有调用点就保持补全前的行为」），这就是 12.3 里「引擎在、屏幕上没有」的根因。
+- **上屏** `crates/pi-tui/src/app.rs:4710 paint_autocomplete`（LUM-1236 的实现）：下拉挂在消息视口底边（紧贴 prompt），
+  候选行取自 `Editor::autocomplete_render_lines(width)`，选中行靠行首的 `❯` 标记加强调色。
+  *合并修正*：LUM-1238 另写了一份 `apply_autocomplete` + `Editor::autocomplete_selected_row`，
+  两者都在同一帧被调用（`apply_autocomplete` 在 `paint_autocomplete` 之前），是同一张下拉框画两遍；
+  LUM-1256 删掉重复的那份，并保留 `paint_autocomplete` 的「借用转录行、不覆盖 prompt」策略。
   标签是**裸命令名**（`help`，不带 `/`），与上游 `packages/tui/src/autocomplete.ts:318-328` 的
   `label: name` 一致；描述只在宽度 44 列以上才追加。
 - 与滚动条 / jump-to-latest 不同，下拉属于 composer，所以 live frame 与 `render_snapshot`
@@ -1800,3 +1802,104 @@ harness 与 14.3 同源：`pty.fork` + `TIOCSWINSZ`，用 `pyte` 解析字节流
 2. **扩展命令的中文/多字节标签**：下拉宽度按列截断，未验证 CJK 命令名。
 3. 14.5 的四条（resume 保真度、扩展可见性、`Ctrl+G` 外部编辑器、`/tree` 无会话）维持原状。
 
+## 二十、LUM-1256：三条未合并交付的抢救合并 + 合并期真实缺陷 + 复测
+
+本节记录的不是新功能，而是**仓库状态本身的一次修复**：`feature/pi.rs` 上有三条早已写完、
+各自测试全绿、却一直留在 `work/*` 分支没被合并的交付。它们对应的 issue 都停在 `in_review`，
+于是"Rust 侧缺口"里最重的几项（扩展生命周期事件、扩展可见性、输入面收尾）**在源码里存在、
+在 `feature/pi.rs` 上不存在**——审计口径因此长期低估。
+
+### 20.1 并入的三条交付
+
+| 来源 | 分支 / commit | 内容 |
+| --- | --- | --- |
+| LUM-1246 | `work/lum-1246` `76dfbd9b0`（父 `6f45602ec`） | Stage 68 扩展生命周期事件贯通：`pi-protocol/src/events.rs` +301（上游 paritiy 变体 + 显式 `rename`）、`extensions/events.rs` +398（驱动侧事件泵）、`interactive.rs` +376、`wiring.rs` +97 |
+| LUM-1239 | `origin/work/LUM-1239` `4d9333bad`（父 `00bb42bec`） | Stage 71 扩展可见性：启动头摘要行、`/extensions`、`RegisteredCommand::commands()` 上报、`docs/TUI_UX_AUDIT.md` 十八 |
+| LUM-1238 | `work/LUM-1238` `e25c45c78`（父 `00bb42bec`，且 worktree 卡在半个 merge 里） | Stage 70 输入面收尾：`AUTOCOMPLETE_COMMANDS` 表 + 装配、`app.clear` 的 500 ms 双击窗口、jump-to-latest 指示器、`Role::Info` / `· ` 信息块前缀 |
+
+合并顺序 LUM-1246 → LUM-1239 → LUM-1238，全部 `--no-ff`。
+
+### 20.2 合并期发现的四个**真实**缺陷（都不是"冲突怎么合"的行政问题）
+
+三条分支各自的测试在自己的分支上都是绿的；下面四条只有在合并树上才会暴露，属于**集成缺陷**：
+
+1. **同一帧把下拉框画两遍**（`pi-tui/src/app.rs`）。LUM-1236 已合并的 `paint_autocomplete`
+   与 LUM-1238 新写的 `apply_autocomplete` 都被 `render_frame` 调用（前者在 `match &frame.editor`
+   分支里，后者在它之前），两个函数各自从 `autocomplete_render_lines` 取同一批候选行，
+   只是画法与几何规则不同。LUM-1238 的 worktree 里留着作者**未提交**的收尾（删掉
+   `Editor::autocomplete_selected_row` 与那段内联装配），说明作者自己也发现了——但没收尾。
+   → 本轮删除 LUM-1238 的重复实现，保留 LUM-1236 的 `paint_autocomplete`（它不会覆盖 prompt 行）。
+2. **`/help` 与补全表第一次互相矛盾**（`commands/slash.rs`）。LUM-1238 的
+   `autocomplete_commands_match_the_slash_command_table` 断言"`/help` 里每个 `/xxx` 都必须出现在
+   补全表里"；而 Stage 67 的 `/thinking` 与 Stage 71 的 `/extensions` 是在 `/help` 里、却不在 LUM-1238
+   那张表里（它写表时基线还没有这两条）。单分支各自绿，合并后必红。
+   → 补入两条命令（表变 19 条），同步更新 `autocomplete_commands_match_the_parser_exactly`
+   与 `every_offered_command_carries_a_description` 的固定表。
+3. **retry 事件序列的期望值未提交**（`pi-agent-core/tests/retry.rs`）。Stage 68 给
+   `AgentStart` / `AgentEnd` 加了真正的发送点，三条 retry 用例的事件序列断言随之失效。
+   LUM-1246 的 worktree 里同样留着**未提交**的修正（+9/-3）。→ 一并带上。
+4. **LUM-1238 的截图没有可复现的场景文件**。三张 `input-surface-*.png` 是真实 PTY 录制，
+   但驱动它们的 `--steps` JSON 没入库（§15.5 只写了送键序列）。→ 本轮补
+   `scripts/pty_scenarios/input-surface.json`，并把复现命令写进本节。
+
+### 20.3 门禁（合并后本 tip 实测）
+
+```bash
+cargo fmt --all                                             # 干净
+cargo check --offline --workspace --all-targets             # 退出 0
+cargo clippy --offline --workspace --all-targets -- -D warnings   # 退出 0（仅 vendored rquickjs-core 既有 warning）
+cargo test  --offline --workspace                           # 64 个 target / 1,307 条用例通过
+```
+
+一条已知**环境性 flake**（不是回归）：`pi-extensions/tests/child_process.rs` 的
+`child_process_honours_cwd_env_and_drains_large_output` 对扩展调用设了 5 s 上限，
+在工作区并行跑 65 个测试二进制、且卷只剩约 11 G 的机器上偶发超时；单独重跑
+`cargo test -p pi-extensions --test child_process` 连续 3 次全绿。
+
+编译环境仍受卷容量限制，沿用既有约定：`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`
+（仓库 `Cargo.toml` 没有 `[profile.dev] debug = 0`），并在构建前回收已死任务的陈旧 `target/`
+（本轮回收 lum-1238 的 4.1 G 与 lum-1246 的 9.9 G）。
+
+### 20.4 实机证据（合并 tip 上的真 PTY 一镜到底）
+
+场景 `scripts/pty_scenarios/input-surface.json`（110×44，`--model faux/faux-model`，
+加载真实全局扩展 `extension-events.js`），一次进程里走完：
+
+```
+python3 scripts/pty_capture.py --bin ./target/debug/pi \
+    --steps scripts/pty_scenarios/input-surface.json \
+    --out docs/screenshots/lum1256-input-surface.png
+```
+
+一帧里同时可见（见截图与同名 `.txt` 字符网格）：
+
+- 启动头摘要行 `1 extension(s): ~/.pi/agent/extensions/extension-events.js`（Stage 71）与
+  `/extensions` 的 `> providers: (none)`（LUM-1256 补进补全表后，`/extensions` 也进了下拉）；
+- 扩展自己打印的计数器（Stage 68）：`session_start=1` → 四个 turn 之后
+  `agent_start=4 / turn_start=4 / message_start=4 / message_update=4 / message_end=4 /
+  turn_end=4 / agent_end=4 / input=4 / handlers-run=33`——**这些不是单测断言，是真扩展在真 TUI 里收到的**；
+- `/` → 内置命令候选、`/he` → 模糊收窄、`@src/` → `❯ lib.rs  src/lib.rs` / `main.rs  src/main.rs`
+  （Stage 70 的补全接线，且选中行是 `❯` 而不是重复绘制的底色块）；
+- PgUp 脱钩后消息视口底行出现 `↓ Jump to latest message · End`；
+- `/help` 正文以 `· ` 开头、composer 仍是 `> `（`Role::Info`）。
+
+![LUM-1256 合并 tip：一镜覆盖补全 / 扩展可见性 / 生命周期事件 / jump-to-latest / 信息块前缀](screenshots/lum1256-input-surface.png)
+
+### 20.5 一个**不是**缺陷的现象（诚实条目）
+
+同一场景在 26 行的矮终端下，composer 行会被扩展 widget 挤掉。这不是本轮引入的：
+`extension_ui.rs:plan_chrome` 的策略是"先保留 status 行与一行 message，剩下的按
+header → Above → editor → Below → footer 顺序发，发不出的截断尾部"，并已有单测
+`plan_chrome_truncates_the_tail_when_the_chrome_overflows` 把 `editor == 0` 钉成**预期行为**——
+它与上游 `Container`"全部渲染、由终端裁掉"的观感一致：22 行的快捷键头 + 14 行的扩展 widget
+在 44 行终端里给 prompt 留得下，26 行就留不下。截图因此取 44 行（与既有 `lum1246-*` 一致）。
+
+### 20.6 仍然缺的（顺延给后续 round）
+
+1. 二十.2 的第 3 条说明：**worktree 里未提交的收尾改动是真实存在的风险面**。本轮侥幸在回收
+   `target/` 之前先读了三个 worktree 的 `git status`；如果先删目录或直接 `checkout --fresh`，
+   这三处修正会永久丢失。建议后续轮次把"合并前 diff 一遍源 worktree 的未提交改动"写成固定步骤。
+2. 扩展事件轴仍有 14 个上游事件未实现，且 `model_select` 有变体无构造点（详见
+   `docs/RUST_TS_PARITY_METRICS.md` §0.1）。
+3. `app.*` 接线率仍为 21/44（47.7%），是本轮之后**性价比最高**的一轴（补满 +3.7pt）。
+4. 十九.7 的三条（Tab 接受路径的真机断言、CJK 候选标签、`Ctrl+G`）维持原状。
