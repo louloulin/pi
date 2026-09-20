@@ -141,8 +141,8 @@ fn a_missing_dependency_is_reported_and_partial_setup_is_cleaned_up() {
 #[test]
 fn a_failing_setup_facet_aborts_the_generation() {
     let failing = define_facet("failing", |_env| Err(FacetError::new("setup exploded")));
-    let error = block_on(create_facet_host(FacetOptions::new(vec![failing])))
-        .expect_err("setup failed");
+    let error =
+        block_on(create_facet_host(FacetOptions::new(vec![failing]))).expect_err("setup failed");
     assert_eq!(error.to_string(), "setup exploded");
 }
 
@@ -216,8 +216,8 @@ fn a_dependency_cycle_is_rejected() {
         })
     };
 
-    let error = block_on(create_facet_host(FacetOptions::new(vec![first, second])))
-        .expect_err("cycle");
+    let error =
+        block_on(create_facet_host(FacetOptions::new(vec![first, second]))).expect_err("cycle");
     assert_eq!(error.to_string(), "Facet dependency cycle: first, second");
 }
 
@@ -233,8 +233,8 @@ fn a_requirement_nothing_provides_is_not_satisfiable_by_a_host_singleton() {
             Ok(())
         })
     };
-    let error = block_on(create_facet_host(FacetOptions::new(vec![consumer])))
-        .expect_err("unsatisfied");
+    let error =
+        block_on(create_facet_host(FacetOptions::new(vec![consumer]))).expect_err("unsatisfied");
     assert!(error
         .to_string()
         .starts_with("Facet consumer requires local/test.orphan/singleton"));
@@ -284,7 +284,10 @@ fn disposal_runs_in_reverse_activation_order_and_aggregates_failures() {
     assert_eq!(*host.use_service(&count).expect("active"), 1);
 
     let error = block_on(host.dispose()).expect_err("one disposal failed");
-    assert_eq!(error.to_string(), "Failed to dispose facet consumer: cleanup failed");
+    assert_eq!(
+        error.to_string(),
+        "Failed to dispose facet consumer: cleanup failed"
+    );
     assert_eq!(host.phase(), HostPhase::Dead);
     assert_eq!(
         seen(&log),
@@ -340,8 +343,8 @@ fn reload_rejects_unknown_and_duplicate_facet_ids() {
             Ok(())
         })
     };
-    let mut host = block_on(create_facet_host(FacetOptions::new(vec![make("provider")])))
-        .expect("starts");
+    let mut host =
+        block_on(create_facet_host(FacetOptions::new(vec![make("provider")]))).expect("starts");
 
     let error = block_on(host.reload(vec![make("other")])).expect_err("unknown id");
     assert_eq!(error.to_string(), "Facet other is not active");
@@ -424,10 +427,11 @@ fn keyed_instances_reach_observers() {
 
     // Disposing the generation retires the instances and stops observation.
     block_on(host.dispose()).expect("disposes");
-    spawner
-        .spawn("three", 3u32)
-        .expect_err("the facet is gone");
-    assert_eq!(seen(&log), ["observed=1", "observed=2", "provider:disposed"]);
+    spawner.spawn("three", 3u32).expect_err("the facet is gone");
+    assert_eq!(
+        seen(&log),
+        ["observed=1", "observed=2", "provider:disposed"]
+    );
 }
 
 #[test]
@@ -470,10 +474,7 @@ fn a_panicking_observer_is_reported_without_breaking_the_provider() {
 
     let errors = errors.lock().expect("lock");
     assert_eq!(errors.len(), 1);
-    assert_eq!(
-        errors[0],
-        "Facet observer observer panicked: observer boom"
-    );
+    assert_eq!(errors[0], "Facet observer observer panicked: observer boom");
     drop(errors);
     block_on(host.dispose()).expect("disposes");
 }

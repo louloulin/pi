@@ -4,8 +4,8 @@
 //! against the *public* API only, so they also pin the crate's exported surface.
 
 use pi_chord::delta::{
-    apply, apply_immutable, diff, is_base, ops_from_json, ops_to_json, wire_ops_to_json,
-    Decoder, Encoder, NonEmptyPath, Op, Seg, Tracker,
+    apply, apply_immutable, diff, is_base, ops_from_json, ops_to_json, wire_ops_to_json, Decoder,
+    Encoder, NonEmptyPath, Op, Seg, Tracker,
 };
 use pi_chord::json::JsonValue;
 use serde_json::json;
@@ -43,7 +43,10 @@ fn a_batch_applies_in_order() {
     ];
 
     let value = apply(None, &ops).expect("the batch applies");
-    assert_eq!(value, json!({ "list": ["a", "b", 99, 3], "text": " world" }));
+    assert_eq!(
+        value,
+        json!({ "list": ["a", "b", 99, 3], "text": " world" })
+    );
 }
 
 #[test]
@@ -201,7 +204,10 @@ fn conflicting_paths_are_rejected() {
     // Arrays only accept integer segments, in range.
     let ops = vec![
         Op::Replace(json!({ "list": [1, 2] })),
-        Op::Set(NonEmptyPath::try_new(vec![Seg::key("list"), Seg::key("nope")]).expect("non-empty"), json!(1)),
+        Op::Set(
+            NonEmptyPath::try_new(vec![Seg::key("list"), Seg::key("nope")]).expect("non-empty"),
+            json!(1),
+        ),
     ];
     assert!(matches!(
         apply(None, &ops),
@@ -210,7 +216,10 @@ fn conflicting_paths_are_rejected() {
 
     let ops = vec![
         Op::Replace(json!({ "list": [1, 2] })),
-        Op::Set(NonEmptyPath::try_new(vec![Seg::key("list"), Seg::index(9)]).expect("non-empty"), json!(1)),
+        Op::Set(
+            NonEmptyPath::try_new(vec![Seg::key("list"), Seg::index(9)]).expect("non-empty"),
+            json!(1),
+        ),
     ];
     assert!(matches!(
         apply(None, &ops),

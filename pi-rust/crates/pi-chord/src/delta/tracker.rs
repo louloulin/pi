@@ -128,7 +128,10 @@ mod tests {
     #[test]
     fn first_flush_is_a_base_batch() {
         let mut tracker = Tracker::new(json!({ "a": 1 }));
-        assert_eq!(tracker.flush().unwrap(), vec![Op::Replace(json!({ "a": 1 }))]);
+        assert_eq!(
+            tracker.flush().unwrap(),
+            vec![Op::Replace(json!({ "a": 1 }))]
+        );
     }
 
     #[test]
@@ -159,7 +162,10 @@ mod tests {
         let mut tracker = Tracker::new(json!({ "a": 1 }));
         tracker.flush().unwrap();
         tracker.replace_root(json!({ "b": 2 }));
-        assert_eq!(tracker.flush().unwrap(), vec![Op::Replace(json!({ "b": 2 }))]);
+        assert_eq!(
+            tracker.flush().unwrap(),
+            vec![Op::Replace(json!({ "b": 2 }))]
+        );
     }
 
     #[test]

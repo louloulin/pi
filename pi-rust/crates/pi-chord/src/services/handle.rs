@@ -101,10 +101,12 @@ mod tests {
 
         let denied = slot
             .resolve(
-                || Err(ServiceError::remote(
-                    super::super::errors::RemoteServiceErrorCode::ServiceStaleInstance,
-                    "observation is closed",
-                )),
+                || {
+                    Err(ServiceError::remote(
+                        super::super::errors::RemoteServiceErrorCode::ServiceStaleInstance,
+                        "observation is closed",
+                    ))
+                },
                 |value| *value,
             )
             .unwrap_err();

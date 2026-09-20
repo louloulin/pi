@@ -49,7 +49,9 @@ impl SourceListeners {
         let mut next = self.next_id.lock();
         *next += 1;
         let id = *next;
-        self.entries.lock().push(SourceListenerEntry { id, listener });
+        self.entries
+            .lock()
+            .push(SourceListenerEntry { id, listener });
         id
     }
 
@@ -188,7 +190,10 @@ impl<T> StateSubscription<T> {
         if self.id == 0 {
             return;
         }
-        self.shared.listeners.lock().retain(|entry| entry.id != self.id);
+        self.shared
+            .listeners
+            .lock()
+            .retain(|entry| entry.id != self.id);
         self.id = 0;
     }
 }
@@ -459,7 +464,9 @@ where
         };
         if sequence != current_sequence + 1 {
             self.clear();
-            return Err(FacetError::new("Replicated state update sequence has a gap"));
+            return Err(FacetError::new(
+                "Replicated state update sequence has a gap",
+            ));
         }
         let json = to_json(&current)?;
         let json = apply_immutable(Some(json), ops)?;
@@ -482,7 +489,9 @@ fn to_json<T: Serialize>(value: &T) -> Result<JsonValue, FacetError> {
 
 fn from_json<T: DeserializeOwned>(json: JsonValue, kind: &str) -> Result<T, FacetError> {
     serde_json::from_value(json).map_err(|error| {
-        FacetError::new(format!("Replicated state {kind} is not a valid value: {error}"))
+        FacetError::new(format!(
+            "Replicated state {kind} is not a valid value: {error}"
+        ))
     })
 }
 

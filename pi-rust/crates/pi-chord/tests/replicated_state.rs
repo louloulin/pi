@@ -68,10 +68,11 @@ fn source_listeners_receive_the_batches_in_order() {
     let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = Arc::clone(&batches);
     let subscription = state.subscribe_source(move |ops, sequence, context| {
-        captured
-            .lock()
-            .expect("lock")
-            .push((sequence, ops_to_json(ops), context.label().to_owned()));
+        captured.lock().expect("lock").push((
+            sequence,
+            ops_to_json(ops),
+            context.label().to_owned(),
+        ));
     });
 
     state.state_mut().count = 1;
@@ -114,15 +115,27 @@ fn a_cold_replica_hydrates_then_applies_consecutive_updates() {
 
     // The snapshot that a transport would deliver first.
     replica
-        .hydrate(0, &[Op::Replace(to_json(&Counter::new(1, "a")))], background_context())
+        .hydrate(
+            0,
+            &[Op::Replace(to_json(&Counter::new(1, "a")))],
+            background_context(),
+        )
         .expect("hydrates");
     assert_eq!(replica.value(), Some(Counter::new(1, "a")));
 
     replica
-        .update(1, &[Op::Set(nested("count"), to_json(&2))], background_context())
+        .update(
+            1,
+            &[Op::Set(nested("count"), to_json(&2))],
+            background_context(),
+        )
         .expect("applies");
     replica
-        .update(2, &[Op::Set(nested("count"), to_json(&3))], background_context())
+        .update(
+            2,
+            &[Op::Set(nested("count"), to_json(&3))],
+            background_context(),
+        )
         .expect("applies");
     assert_eq!(replica.value(), Some(Counter::new(3, "a")));
 
@@ -141,7 +154,11 @@ fn a_cold_replica_hydrates_then_applies_consecutive_updates() {
 fn an_update_before_hydration_is_refused() {
     let replica = StateReplica::<Counter>::new();
     let error = replica
-        .update(1, &[Op::Replace(to_json(&Counter::new(1, "a")))], background_context())
+        .update(
+            1,
+            &[Op::Replace(to_json(&Counter::new(1, "a")))],
+            background_context(),
+        )
         .expect_err("refused");
     assert_eq!(
         error.to_string(),
@@ -154,7 +171,11 @@ fn an_update_before_hydration_is_refused() {
 fn a_non_base_snapshot_is_refused() {
     let replica = StateReplica::<Counter>::new();
     let error = replica
-        .hydrate(0, &[Op::Set(nested("count"), to_json(&1))], background_context())
+        .hydrate(
+            0,
+            &[Op::Set(nested("count"), to_json(&1))],
+            background_context(),
+        )
         .expect_err("refused");
     assert_eq!(
         error.to_string(),
@@ -166,28 +187,54 @@ fn a_non_base_snapshot_is_refused() {
 fn duplicate_and_out_of_order_updates_clear_the_replica() {
     let replica = StateReplica::<Counter>::new();
     replica
-        .hydrate(0, &[Op::Replace(to_json(&Counter::new(1, "a")))], background_context())
+        .hydrate(
+            0,
+            &[Op::Replace(to_json(&Counter::new(1, "a")))],
+            background_context(),
+        )
         .expect("hydrates");
     replica
-        .update(1, &[Op::Set(nested("count"), to_json(&2))], background_context())
+        .update(
+            1,
+            &[Op::Set(nested("count"), to_json(&2))],
+            background_context(),
+        )
         .expect("applies");
 
     // A duplicate of the batch that was already applied.
     let error = replica
-        .update(1, &[Op::Set(nested("count"), to_json(&9))], background_context())
+        .update(
+            1,
+            &[Op::Set(nested("count"), to_json(&9))],
+            background_context(),
+        )
         .expect_err("refused");
-    assert_eq!(error.to_string(), "Replicated state update sequence has a gap");
+    assert_eq!(
+        error.to_string(),
+        "Replicated state update sequence has a gap"
+    );
     assert_eq!(replica.value(), None, "the replica is cleared");
     assert_eq!(replica.sequence(), None);
 
     // Out of order after a gap: the replica is unusable until a new snapshot.
     replica
-        .hydrate(0, &[Op::Replace(to_json(&Counter::new(1, "a")))], background_context())
+        .hydrate(
+            0,
+            &[Op::Replace(to_json(&Counter::new(1, "a")))],
+            background_context(),
+        )
         .expect("hydrates again");
     let error = replica
-        .update(5, &[Op::Set(nested("count"), to_json(&2))], background_context())
+        .update(
+            5,
+            &[Op::Set(nested("count"), to_json(&2))],
+            background_context(),
+        )
         .expect_err("refused");
-    assert_eq!(error.to_string(), "Replicated state update sequence has a gap");
+    assert_eq!(
+        error.to_string(),
+        "Replicated state update sequence has a gap"
+    );
     assert_eq!(replica.value(), None);
 }
 

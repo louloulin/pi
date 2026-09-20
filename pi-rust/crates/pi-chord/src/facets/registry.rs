@@ -226,7 +226,11 @@ impl FacetServiceDirectory {
     }
 
     /// Creates a handle view for `service`, scoped to `lifecycle`.
-    pub fn use_service<T>(&self, service: &Service<T>, lifecycle: Arc<FacetLifecycle>) -> ServiceHandle<T> {
+    pub fn use_service<T>(
+        &self,
+        service: &Service<T>,
+        lifecycle: Arc<FacetLifecycle>,
+    ) -> ServiceHandle<T> {
         ServiceHandle {
             service_id: service.id().to_string(),
             slot: self.singleton_slot(service.id()),
@@ -302,9 +306,9 @@ impl<T: Send + Sync + 'static> ServiceHandle<T> {
     /// in this generation.
     pub fn get(&self) -> Result<Arc<T>, FacetError> {
         self.lifecycle.assert_service_access()?;
-        self.slot.get::<T>().ok_or_else(|| {
-            FacetError::new(format!("Service {} is not provided", self.service_id))
-        })
+        self.slot
+            .get::<T>()
+            .ok_or_else(|| FacetError::new(format!("Service {} is not provided", self.service_id)))
     }
 }
 
@@ -367,8 +371,7 @@ impl<T> KeyedServiceSpawner<T> {
         if self.is_attached() {
             self.slot.insert(key, Arc::clone(&erased))?;
             self.owned_keys.lock().insert(key.to_string());
-            self.slot
-                .notify(key, &erased, background_context());
+            self.slot.notify(key, &erased, background_context());
         } else {
             self.staged.lock().push((key.to_string(), erased));
         }

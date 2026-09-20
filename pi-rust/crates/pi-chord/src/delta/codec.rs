@@ -276,7 +276,12 @@ mod tests {
         let wire = Encoder::new().encode(&batch);
         assert_eq!(
             wire_ops_to_json(&wire),
-            json!([["s", ["a"], 1], ["s", ["b"], 2], ["#", 0, ["a"]], ["s", 0, 3]])
+            json!([
+                ["s", ["a"], 1],
+                ["s", ["b"], 2],
+                ["#", 0, ["a"]],
+                ["s", 0, 3]
+            ])
         );
         assert_eq!(Decoder::new().decode(&wire).unwrap(), batch);
     }
@@ -285,7 +290,10 @@ mod tests {
     fn omits_the_path_when_it_repeats() {
         let batch = ops(&[json!(["t", ["s"], 1]), json!(["a", ["s"], "x"])]);
         let wire = Encoder::new().encode(&batch);
-        assert_eq!(wire_ops_to_json(&wire), json!([["t", ["s"], 1], ["a", "x"]]));
+        assert_eq!(
+            wire_ops_to_json(&wire),
+            json!([["t", ["s"], 1], ["a", "x"]])
+        );
         assert_eq!(Decoder::new().decode(&wire).unwrap(), batch);
     }
 

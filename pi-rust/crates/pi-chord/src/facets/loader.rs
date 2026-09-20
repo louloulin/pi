@@ -33,7 +33,9 @@ impl StaticFacetLoader {
 impl FacetLoader for StaticFacetLoader {
     fn load(&self) -> LoadResultFuture {
         let facets = self.facets.clone();
-        Box::pin(async move { Ok(Box::new(LoadedFacetsImpl::new(facets)) as Box<dyn LoadedFacets>) })
+        Box::pin(
+            async move { Ok(Box::new(LoadedFacetsImpl::new(facets)) as Box<dyn LoadedFacets>) },
+        )
     }
 }
 
@@ -211,9 +213,10 @@ impl LoadedFacets for CombinedLoadedFacets {
             let failures = dispose_loaded_facets(&entries).await;
             match failures.len() {
                 0 => Ok(()),
-                1 => Err(failures.into_iter().next().unwrap_or_else(|| {
-                    FacetError::new("Failed to dispose loaded facets")
-                })),
+                1 => Err(failures
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| FacetError::new("Failed to dispose loaded facets"))),
                 _ => Err(FacetError::with_causes(
                     "Failed to dispose loaded facets",
                     failures,

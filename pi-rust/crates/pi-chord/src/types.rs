@@ -56,7 +56,10 @@ impl FacetError {
         message: impl Into<String>,
         failures: impl IntoIterator<Item = FacetError>,
     ) -> FacetError {
-        let causes: Vec<String> = failures.into_iter().map(|error| error.to_string()).collect();
+        let causes: Vec<String> = failures
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect();
         Self {
             message: message.into(),
             causes,
@@ -340,7 +343,8 @@ pub trait FacetLoader: Send + Sync {
 }
 
 /// The future returned by [`FacetLoader::load`].
-pub type LoadResultFuture = Pin<Box<dyn Future<Output = Result<Box<dyn LoadedFacets>, FacetError>> + Send>>;
+pub type LoadResultFuture =
+    Pin<Box<dyn Future<Output = Result<Box<dyn LoadedFacets>, FacetError>> + Send>>;
 
 /// One entry in a service catalogue: what a source offers and how.
 #[derive(Clone, Debug, PartialEq, Eq)]

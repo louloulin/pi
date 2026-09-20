@@ -132,7 +132,8 @@ impl ServiceImplementation {
         name: impl Into<String>,
         state: Arc<dyn ReplicatedStateMember>,
     ) -> Self {
-        self.members.insert(name.into(), ServiceMember::State(state));
+        self.members
+            .insert(name.into(), ServiceMember::State(state));
         self
     }
 
@@ -482,7 +483,10 @@ impl RemoteServiceProvider {
         let shape = implementation.shape();
         self.assert_singleton_shape(&registration, &shape)?;
         let replacement = create_instance(&registration, implementation, None);
-        let previous = registration.singleton.lock().replace(Arc::clone(&replacement));
+        let previous = registration
+            .singleton
+            .lock()
+            .replace(Arc::clone(&replacement));
         if let Some(previous) = previous {
             previous.deactivate();
         }
@@ -773,7 +777,12 @@ impl RemoteSpawnHandle {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        let current = self.registration.instances.lock().get(&self.address.key).cloned();
+        let current = self
+            .registration
+            .instances
+            .lock()
+            .get(&self.address.key)
+            .cloned();
         match current {
             Some(current) if Arc::ptr_eq(&current, &self.instance) => {}
             _ => return Ok(()),
@@ -812,7 +821,9 @@ impl ServiceSubscription for ProviderSubscription {
     }
 
     fn activate(&self) -> Result<(), ServiceError> {
-        if self.subscriber.closed.load(Ordering::SeqCst) || self.subscriber.active.load(Ordering::SeqCst) {
+        if self.subscriber.closed.load(Ordering::SeqCst)
+            || self.subscriber.active.load(Ordering::SeqCst)
+        {
             return Ok(());
         }
         self.subscriber.active.store(true, Ordering::SeqCst);
@@ -973,12 +984,7 @@ fn resolve_instance(
             ),
         ));
     };
-    if instance
-        .address
-        .as_ref()
-        .map(|current| current.generation)
-        != Some(address.generation)
-    {
+    if instance.address.as_ref().map(|current| current.generation) != Some(address.generation) {
         return Err(ServiceError::remote(
             RemoteServiceErrorCode::ServiceStaleInstance,
             format!(
@@ -1079,7 +1085,9 @@ impl RemoteServiceEndpoint {
 }
 
 /// Creates a [`RemoteServiceEndpoint`] over `provider`.
-pub fn create_remote_service_endpoint(provider: Arc<RemoteServiceProvider>) -> RemoteServiceEndpoint {
+pub fn create_remote_service_endpoint(
+    provider: Arc<RemoteServiceProvider>,
+) -> RemoteServiceEndpoint {
     RemoteServiceEndpoint::new(provider)
 }
 
@@ -1109,7 +1117,8 @@ mod tests {
 
     fn implementation(revision: i64) -> ServiceImplementation {
         let state: Arc<dyn ReplicatedStateMember> = Arc::new(
-            replicated_state(serde_json::json!({ "selected": null, "revision": revision })).unwrap(),
+            replicated_state(serde_json::json!({ "selected": null, "revision": revision }))
+                .unwrap(),
         );
         ServiceImplementation::new().shared_state("state", state)
     }
@@ -1120,7 +1129,10 @@ mod tests {
         let error = RemoteServiceProvider::new([ServiceProviderEntry::singleton(&local)])
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "Local service test.local cannot be published remotely");
+        assert_eq!(
+            error,
+            "Local service test.local cannot be published remotely"
+        );
 
         let error = RemoteServiceProvider::new([
             ServiceProviderEntry::singleton(&models()),
@@ -1133,17 +1145,24 @@ mod tests {
 
     #[test]
     fn mode_mixing_is_reported() {
-        let provider = RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).unwrap();
+        let provider =
+            RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).unwrap();
         provider.provide(&models(), implementation(0)).unwrap();
-        let error = provider.spawn(&models(), "wrong", implementation(0)).unwrap_err();
-        assert_eq!(error.code(), Some(RemoteServiceErrorCode::ServiceModeMismatch));
+        let error = provider
+            .spawn(&models(), "wrong", implementation(0))
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some(RemoteServiceErrorCode::ServiceModeMismatch)
+        );
         assert!(error.to_string().contains("singleton"));
         provider.dispose().unwrap();
     }
 
     #[test]
     fn replacement_requires_the_same_shape() {
-        let provider = RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).unwrap();
+        let provider =
+            RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).unwrap();
         provider.provide(&models(), implementation(1)).unwrap();
         let shape_change = ServiceImplementation::new().method("state", |_, _| Ok(JsonValue::Null));
         let error = provider.replace(&models(), shape_change).unwrap_err();
@@ -1156,11 +1175,15 @@ mod tests {
 
     #[test]
     fn an_empty_implementation_is_refused() {
-        let provider = RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).unwrap();
+        let provider =
+            RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).unwrap();
         let error = provider
             .provide(&models(), ServiceImplementation::new())
             .unwrap_err();
-        assert_eq!(error.to_string(), "Remote service test.models has no members");
+        assert_eq!(
+            error.to_string(),
+            "Remote service test.models has no members"
+        );
         provider.dispose().unwrap();
     }
 }

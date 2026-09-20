@@ -168,7 +168,12 @@ fn read_child<'a>(parent: &'a Value, key: &Seg, path: &[Seg]) -> Result<&'a str,
     }
 }
 
-fn write_child(parent: &mut Value, key: &Seg, value: Value, path: &[Seg]) -> Result<(), DeltaError> {
+fn write_child(
+    parent: &mut Value,
+    key: &Seg,
+    value: Value,
+    path: &[Seg],
+) -> Result<(), DeltaError> {
     match (parent, key) {
         (Value::Array(items), Seg::Index(index)) => {
             let index = *index as usize;
@@ -264,15 +269,20 @@ fn lookup<'a>(node: &'a Value, segment: &Seg, full: &[Seg]) -> Result<&'a Value,
         (Value::Object(map), Seg::Index(index)) => {
             map.get(&index.to_string()).ok_or_else(|| path_error(full))
         }
-        (Value::Array(items), Seg::Index(index)) => items
-            .get(*index as usize)
-            .ok_or_else(|| path_error(full)),
+        (Value::Array(items), Seg::Index(index)) => {
+            items.get(*index as usize).ok_or_else(|| path_error(full))
+        }
         (Value::Array(_), Seg::Key(key)) => Err(DeltaError::UnsafePath(key.clone())),
         _ => Err(path_error(full)),
     }
 }
 
-fn set_child(copy: &mut Value, segment: &Seg, value: Value, full: &[Seg]) -> Result<(), DeltaError> {
+fn set_child(
+    copy: &mut Value,
+    segment: &Seg,
+    value: Value,
+    full: &[Seg],
+) -> Result<(), DeltaError> {
     match (copy, segment) {
         (Value::Object(map), Seg::Key(key)) => {
             map.insert(key.clone(), value);
@@ -328,7 +338,10 @@ mod tests {
             set_op(non_empty(&["a"]), json!(2)),
             set_op(non_empty(&["a"]), json!(2)),
         ];
-        assert_eq!(apply(Some(json!({ "a": 1 })), &ops).unwrap(), json!({ "a": 2 }));
+        assert_eq!(
+            apply(Some(json!({ "a": 1 })), &ops).unwrap(),
+            json!({ "a": 2 })
+        );
     }
 
     #[test]
@@ -365,7 +378,10 @@ mod tests {
     fn string_ops_work_on_utf16_units() {
         let target = Some(json!({ "s": "a😀b" }));
         let truncate = Op::from_json(&json!(["t", ["s"], 3])).unwrap();
-        assert_eq!(apply(target.clone(), &[truncate]).unwrap(), json!({ "s": "b" }));
+        assert_eq!(
+            apply(target.clone(), &[truncate]).unwrap(),
+            json!({ "s": "b" })
+        );
         let misaligned = Op::from_json(&json!(["t", ["s"], 2])).unwrap();
         assert!(matches!(
             apply(target, &[misaligned]),

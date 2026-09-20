@@ -12,7 +12,7 @@
 
 use serde_json::{Map, Number, Value};
 
-use super::path::{Path, RESERVED_SEGMENTS, Seg};
+use super::path::{Path, Seg, RESERVED_SEGMENTS};
 use super::{DeltaError, NonEmptyPath, Op};
 
 /// Default cap on how far back the string-overlap scan looks.
@@ -102,9 +102,15 @@ fn diff_value(
                 return Ok(());
             }
             match (before, after) {
-                (Value::String(before), Value::String(after)) => diff_string(before, after, path, scan, out),
-                (Value::Array(before), Value::Array(after)) => diff_array(before, after, path, scan, out)?,
-                (Value::Object(before), Value::Object(after)) => diff_object(before, after, path, scan, out)?,
+                (Value::String(before), Value::String(after)) => {
+                    diff_string(before, after, path, scan, out)
+                }
+                (Value::Array(before), Value::Array(after)) => {
+                    diff_array(before, after, path, scan, out)?
+                }
+                (Value::Object(before), Value::Object(after)) => {
+                    diff_object(before, after, path, scan, out)?
+                }
                 _ => emit_set(path, after, out),
             }
         }
@@ -125,7 +131,9 @@ fn emit_set(path: &[Seg], value: &Value, out: &mut Vec<Op>) {
 
 fn emit_delete(path: &[Seg], out: &mut Vec<Op>) -> Result<(), DeltaError> {
     if path.is_empty() {
-        return Err(DeltaError::InvalidOp("the tracked root cannot be deleted".to_owned()));
+        return Err(DeltaError::InvalidOp(
+            "the tracked root cannot be deleted".to_owned(),
+        ));
     }
     out.push(Op::Delete(
         NonEmptyPath::try_new(path.to_vec()).expect("path is non-empty"),
@@ -223,13 +231,19 @@ fn diff_array(
     }
 
     let mut prefix = 0usize;
-    while prefix < before.len() && prefix < after.len() && json_equal(&before[prefix], &after[prefix]) {
+    while prefix < before.len()
+        && prefix < after.len()
+        && json_equal(&before[prefix], &after[prefix])
+    {
         prefix += 1;
     }
     let mut suffix = 0usize;
     while suffix < before.len() - prefix
         && suffix < after.len() - prefix
-        && json_equal(&before[before.len() - 1 - suffix], &after[after.len() - 1 - suffix])
+        && json_equal(
+            &before[before.len() - 1 - suffix],
+            &after[after.len() - 1 - suffix],
+        )
     {
         suffix += 1;
     }
@@ -294,7 +308,9 @@ pub fn json_equal(left: &Value, right: &Value) -> bool {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| json_equal(a, b))
         }
         (Value::Object(a), Value::Object(b)) => {
-            a.len() == b.len() && a.iter().all(|(key, value)| b.get(key).is_some_and(|other| json_equal(value, other)))
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, value)| b.get(key).is_some_and(|other| json_equal(value, other)))
         }
         _ => false,
     }
@@ -328,7 +344,8 @@ fn find_subslice(haystack: &[u16], needle: &[u16], from: usize) -> Option<usize>
     if needle.is_empty() || haystack.len() < needle.len() || from > haystack.len() - needle.len() {
         return None;
     }
-    (from..=haystack.len() - needle.len()).find(|&start| &haystack[start..start + needle.len()] == needle)
+    (from..=haystack.len() - needle.len())
+        .find(|&start| &haystack[start..start + needle.len()] == needle)
 }
 
 #[cfg(test)]
@@ -353,19 +370,29 @@ mod tests {
     #[test]
     fn tracks_numbers_by_value() {
         assert!(json_equal(&json!(1), &json!(1.0)));
-        assert!(json_equal(&json!([1, { "a": null }]), &json!([1.0, { "a": null }])));
+        assert!(json_equal(
+            &json!([1, { "a": null }]),
+            &json!([1.0, { "a": null }])
+        ));
         assert!(!json_equal(&json!(1), &json!("1")));
     }
 
     #[test]
     fn identical_values_produce_no_ops() {
-        assert!(diff(&json!({ "a": [1, { "b": "c" }] }), &json!({ "a": [1, { "b": "c" }] })).is_empty());
+        assert!(diff(
+            &json!({ "a": [1, { "b": "c" }] }),
+            &json!({ "a": [1, { "b": "c" }] })
+        )
+        .is_empty());
     }
 
     #[test]
     fn emits_an_append_for_a_string_growth() {
         let ops = diff(&json!({ "s": "ab" }), &json!({ "s": "abcd" }));
-        assert_eq!(ops, vec![Op::Append(NonEmptyPath::from_keys(&["s"]), "cd".into())]);
+        assert_eq!(
+            ops,
+            vec![Op::Append(NonEmptyPath::from_keys(&["s"]), "cd".into())]
+        );
     }
 
     #[test]
@@ -429,9 +456,6 @@ mod tests {
     #[test]
     fn reserved_keys_degrade_to_a_set() {
         let ops = diff(&json!({ "a": 1 }), &json!({ "a": 1, "constructor": 2 }));
-        assert_eq!(
-            ops,
-            vec![Op::Replace(json!({ "a": 1, "constructor": 2 }))]
-        );
+        assert_eq!(ops, vec![Op::Replace(json!({ "a": 1, "constructor": 2 }))]);
     }
 }

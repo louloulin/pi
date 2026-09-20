@@ -51,7 +51,9 @@ pub use consumer::{
 };
 pub use errors::{RemoteServiceError, RemoteServiceErrorCode, ServiceError};
 pub use handle::ServiceSlot;
-pub use instances::{DirectoryErrorReporter, InstanceDirectory, InstanceDirectoryEntry, ObserveHandle};
+pub use instances::{
+    DirectoryErrorReporter, InstanceDirectory, InstanceDirectoryEntry, ObserveHandle,
+};
 pub use loopback::{create_loopback_service_transport, LoopbackServiceTransport};
 pub use provider::{
     create_remote_service_endpoint, service_catalogue_call, validate_remote_service_implementation,
@@ -70,12 +72,11 @@ pub use wire::{
     parse_service_catalogue, parse_service_instance_address, parse_service_mode,
     parse_service_provider_update, parse_service_subscription_snapshot,
     parse_wire_service_provider_update, parse_wire_service_subscription_snapshot,
-    service_catalogue_to_json, service_instance_address_to_json,
-    wire_ops_from_json_value, wire_ops_to_json_value, InstanceSnapshot, MemberSnapshot,
-    ProviderUpdate, ServiceCall, ServiceControlCall, ServiceInstanceSnapshot,
-    ServiceMemberKind, ServiceMemberSnapshot, ServiceProviderUpdate, ServiceSubscriptionSnapshot,
-    SubscriptionSnapshot, WireServiceInstanceSnapshot, WireServiceMemberSnapshot,
-    WireServiceProviderUpdate, WireServiceSubscriptionSnapshot, WireOpCodec,
-    SERVICE_CATALOGUE_MEMBER, SERVICE_CONTROL_ID, SERVICE_SUBSCRIBE_MEMBER,
-    SERVICE_UNSUBSCRIBE_MEMBER,
+    service_catalogue_to_json, service_instance_address_to_json, wire_ops_from_json_value,
+    wire_ops_to_json_value, InstanceSnapshot, MemberSnapshot, ProviderUpdate, ServiceCall,
+    ServiceControlCall, ServiceInstanceSnapshot, ServiceMemberKind, ServiceMemberSnapshot,
+    ServiceProviderUpdate, ServiceSubscriptionSnapshot, SubscriptionSnapshot, WireOpCodec,
+    WireServiceInstanceSnapshot, WireServiceMemberSnapshot, WireServiceProviderUpdate,
+    WireServiceSubscriptionSnapshot, SERVICE_CATALOGUE_MEMBER, SERVICE_CONTROL_ID,
+    SERVICE_SUBSCRIBE_MEMBER, SERVICE_UNSUBSCRIBE_MEMBER,
 };

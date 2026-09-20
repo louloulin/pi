@@ -15,9 +15,9 @@ use pi_chord::{
     create_loopback_service_transport, create_remote_service_binding, define_local_service,
     define_service, replicated_state, MemberSnapshot, ProviderUpdate, RemoteServiceBinding,
     RemoteServiceBindingOptions, RemoteServiceErrorCode, RemoteServiceProvider,
-    RemoteServiceTransport, ServiceCall, ServiceError, ServiceImplementation, ServiceMode,
-    ServiceProviderEntry, ServiceProviderListener, ServiceSubscription, ServiceSubscriptionSnapshot,
-    Service, SubscriptionSnapshot,
+    RemoteServiceTransport, Service, ServiceCall, ServiceError, ServiceImplementation, ServiceMode,
+    ServiceProviderEntry, ServiceProviderListener, ServiceSubscription,
+    ServiceSubscriptionSnapshot, SubscriptionSnapshot,
 };
 use serde_json::{json, Value};
 
@@ -35,11 +35,15 @@ fn echo_service() -> Service<Json> {
     define_service("test.echo").expect("valid id")
 }
 
-fn models_provider() -> (Arc<RemoteServiceProvider>, Arc<pi_chord::MutableReplicatedState<Json>>) {
+fn models_provider() -> (
+    Arc<RemoteServiceProvider>,
+    Arc<pi_chord::MutableReplicatedState<Json>>,
+) {
     let provider = Arc::new(
         RemoteServiceProvider::new([ServiceProviderEntry::singleton(&models())]).expect("provider"),
     );
-    let state = Arc::new(replicated_state(json!({ "selected": null, "revision": 0 })).expect("state"));
+    let state =
+        Arc::new(replicated_state(json!({ "selected": null, "revision": 0 })).expect("state"));
     provider
         .provide(
             &models(),
@@ -191,7 +195,10 @@ fn keeps_facades_stable_across_withdraw_and_replace() {
     let error = proxy
         .call("select", &[json!(null)], background_context())
         .unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceNotFound), "{error}");
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceNotFound),
+        "{error}"
+    );
 
     let published = Arc::new(AtomicUsize::new(0));
     provider
@@ -226,7 +233,10 @@ fn keeps_facades_stable_across_withdraw_and_replace() {
             ServiceImplementation::new().method("select", |_args, _context| Ok(Value::Null)),
         )
         .unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceMemberMismatch), "{error}");
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceMemberMismatch),
+        "{error}"
+    );
     assert_eq!(handle.value().unwrap().unwrap()["revision"], json!(2));
 
     // Late bindings still see the current revision.
@@ -234,7 +244,12 @@ fn keeps_facades_stable_across_withdraw_and_replace() {
     let late_models = late.use_service(&models()).unwrap();
     late.ready().unwrap();
     assert_eq!(
-        late_models.state("state").unwrap().value().unwrap().unwrap()["revision"],
+        late_models
+            .state("state")
+            .unwrap()
+            .value()
+            .unwrap()
+            .unwrap()["revision"],
         json!(2)
     );
 }
@@ -257,7 +272,10 @@ fn maps_transport_failures_to_remote_codes() {
         args: Vec::new(),
     };
     let error = provider.invoke(&call, background_context()).unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceMemberNotFound), "{error}");
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceMemberNotFound),
+        "{error}"
+    );
 
     let unknown = ServiceCall {
         service_id: "test.unknown".to_owned(),
@@ -266,7 +284,10 @@ fn maps_transport_failures_to_remote_codes() {
         args: Vec::new(),
     };
     let error = provider.invoke(&unknown, background_context()).unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceNotAllowed), "{error}");
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceNotAllowed),
+        "{error}"
+    );
 
     let keyed = ServiceCall {
         service_id: service.id().to_owned(),
@@ -275,7 +296,10 @@ fn maps_transport_failures_to_remote_codes() {
         args: Vec::new(),
     };
     let error = provider.invoke(&keyed, background_context()).unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceModeMismatch), "{error}");
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceModeMismatch),
+        "{error}"
+    );
 
     // A singleton member used as method is a member mismatch.
     let (provider, _state) = models_provider();
@@ -285,8 +309,13 @@ fn maps_transport_failures_to_remote_codes() {
         member: "state".to_owned(),
         args: Vec::new(),
     };
-    let error = provider.invoke(&state_call, background_context()).unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceMemberMismatch), "{error}");
+    let error = provider
+        .invoke(&state_call, background_context())
+        .unwrap_err();
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceMemberMismatch),
+        "{error}"
+    );
 
     // Spawning a key is refused for a singleton.
     let error = provider
@@ -296,7 +325,10 @@ fn maps_transport_failures_to_remote_codes() {
             ServiceImplementation::new().method("select", |_args, _context| Ok(Value::Null)),
         )
         .unwrap_err();
-    assert!(error.is_code(RemoteServiceErrorCode::ServiceModeMismatch), "{error}");
+    assert!(
+        error.is_code(RemoteServiceErrorCode::ServiceModeMismatch),
+        "{error}"
+    );
 }
 
 #[test]
@@ -434,9 +466,8 @@ fn stops_delivering_after_a_subscription_is_closed() {
 #[test]
 fn buffers_updates_that_race_subscription_hydration() {
     let service = models();
-    let provider = Arc::new(
-        RemoteServiceProvider::new([ServiceProviderEntry::singleton(&service)]).unwrap(),
-    );
+    let provider =
+        Arc::new(RemoteServiceProvider::new([ServiceProviderEntry::singleton(&service)]).unwrap());
     let state = Arc::new(replicated_state(json!({ "selected": null, "revision": 0 })).unwrap());
     provider
         .provide(
@@ -508,12 +539,14 @@ fn clears_replicated_state_after_a_duplicate_or_gap_sequence() {
         let transport = Arc::new(ScriptedTransport::new(service.id()));
         let errors = Arc::new(Mutex::new(Vec::new()));
         let binding = create_remote_service_binding(
-            RemoteServiceBindingOptions::new(Arc::clone(&transport) as Arc<dyn RemoteServiceTransport>)
-                .service(&service)
-                .on_error(Arc::new({
-                    let errors = Arc::clone(&errors);
-                    move |error| errors.lock().expect("lock").push(error)
-                })),
+            RemoteServiceBindingOptions::new(
+                Arc::clone(&transport) as Arc<dyn RemoteServiceTransport>
+            )
+            .service(&service)
+            .on_error(Arc::new({
+                let errors = Arc::clone(&errors);
+                move |error| errors.lock().expect("lock").push(error)
+            })),
         )
         .unwrap();
         let models = binding.use_service(&service).unwrap();
@@ -527,7 +560,9 @@ fn clears_replicated_state_after_a_duplicate_or_gap_sequence() {
             instance: None,
             member: "state".to_owned(),
             sequence,
-            ops: vec![Op::Replace(json!({ "selected": null, "revision": sequence }))],
+            ops: vec![Op::Replace(
+                json!({ "selected": null, "revision": sequence }),
+            )],
         });
         assert_eq!(models.state("state").unwrap().value().unwrap(), None);
         let reported = errors.lock().expect("lock");
@@ -666,7 +701,9 @@ fn defers_handles_until_the_host_activates_them() {
     let models = binding.use_service(&models()).unwrap();
     assert!(models.state("state").unwrap().value().is_err());
     assert!(models.state("state").unwrap().subscribe(|_, _| {}).is_err());
-    assert!(models.call("select", &[json!(null)], background_context()).is_err());
+    assert!(models
+        .call("select", &[json!(null)], background_context())
+        .is_err());
 
     binding.rebind(true).unwrap();
     active.store(true, Ordering::SeqCst);
@@ -750,9 +787,8 @@ fn clears_facades_when_the_provider_and_binding_are_disposed() {
 #[test]
 fn hydrates_keyed_state_before_observe_handlers_and_fences_reused_keys() {
     let service = dialogs();
-    let provider = Arc::new(
-        RemoteServiceProvider::new([ServiceProviderEntry::keyed(&service)]).unwrap(),
-    );
+    let provider =
+        Arc::new(RemoteServiceProvider::new([ServiceProviderEntry::keyed(&service)]).unwrap());
     assert_eq!(provider.catalogue()[0].mode, ServiceMode::Keyed);
     let transport: Arc<dyn RemoteServiceTransport> =
         create_loopback_service_transport(Arc::clone(&provider));
@@ -779,7 +815,11 @@ fn hydrates_keyed_state_before_observe_handlers_and_fences_reused_keys() {
     let captured = Arc::clone(&observed);
     let observation = binding
         .observe_service(&service, move |service, context| {
-            let question = service.state("request").and_then(|handle| handle.value()).ok().flatten();
+            let question = service
+                .state("request")
+                .and_then(|handle| handle.value())
+                .ok()
+                .flatten();
             let submit = service.method("submit").ok();
             captured.lock().expect("lock").push(Observed {
                 question,
@@ -819,11 +859,7 @@ fn hydrates_keyed_state_before_observe_handlers_and_fences_reused_keys() {
     first_state.state_mut()["question"] = json!("Updated?");
     first_state.publish(background_context()).unwrap();
     assert_eq!(
-        first_service
-            .state("request")
-            .unwrap()
-            .value()
-            .unwrap(),
+        first_service.state("request").unwrap().value().unwrap(),
         Some(json!({ "question": "Updated?" }))
     );
     let accepted = first_service
@@ -838,13 +874,14 @@ fn hydrates_keyed_state_before_observe_handlers_and_fences_reused_keys() {
         .expect("captured method handle");
     let first_context = observed.lock().expect("lock")[0].context.clone();
     first.close().unwrap();
-    assert!(
-        first_context
-            .abort_signal()
-            .is_some_and(pi_chord::context::AbortSignal::is_aborted)
-    );
+    assert!(first_context
+        .abort_signal()
+        .is_some_and(pi_chord::context::AbortSignal::is_aborted));
     let error = first_service.state("request").unwrap_err();
-    assert_eq!(error.code(), Some(RemoteServiceErrorCode::ServiceStaleInstance));
+    assert_eq!(
+        error.code(),
+        Some(RemoteServiceErrorCode::ServiceStaleInstance)
+    );
     assert!(error.to_string().contains("observation is closed"));
     let error = retained_submit
         .call(&[json!("late")], background_context())
@@ -891,7 +928,10 @@ fn rejects_unsupported_keyed_members() {
     let error = provider
         .spawn(&service, "invalid", ServiceImplementation::new())
         .unwrap_err();
-    assert_eq!(error.to_string(), "Remote service test.question-dialog has no members");
+    assert_eq!(
+        error.to_string(),
+        "Remote service test.question-dialog has no members"
+    );
     let error = provider
         .spawn(
             &service,

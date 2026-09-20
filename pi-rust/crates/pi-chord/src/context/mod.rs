@@ -256,7 +256,10 @@ impl SignalInner {
         if self.aborted.swap(true, Ordering::AcqRel) {
             return;
         }
-        *self.reason.lock().expect("signal reason lock is never poisoned") = Some(reason.clone());
+        *self
+            .reason
+            .lock()
+            .expect("signal reason lock is never poisoned") = Some(reason.clone());
         for waker in self
             .wakers
             .lock()
@@ -520,7 +523,10 @@ impl CancelHandle {
 ///
 /// Cancellation rejects only this waiter; it does not cancel the underlying
 /// future. A context with no signal observes the future directly.
-pub async fn await_with_context<F: Future>(future: F, context: &Context) -> Result<F::Output, AbortError> {
+pub async fn await_with_context<F: Future>(
+    future: F,
+    context: &Context,
+) -> Result<F::Output, AbortError> {
     let Some(signal) = context.abort_signal().cloned() else {
         return Ok(future.await);
     };
@@ -537,15 +543,12 @@ pub async fn await_with_context<F: Future>(future: F, context: &Context) -> Resu
             return Poll::Ready(Ok(value));
         }
         if wait.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Err(AbortError::new(
-                signal.reason().unwrap_or_default(),
-            )));
+            return Poll::Ready(Err(AbortError::new(signal.reason().unwrap_or_default())));
         }
         Poll::Pending
     })
     .await
 }
-
 
 /// Drives `future` to completion on the calling thread.
 ///
@@ -672,5 +675,4 @@ mod tests {
         canceller.join().expect("canceller thread panicked");
         assert_eq!(result.unwrap_err().reason().message(), "late");
     }
-
 }
