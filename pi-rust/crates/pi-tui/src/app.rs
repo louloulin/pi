@@ -154,6 +154,84 @@
 //! * **The overlay is anchored to the message viewport**, not the whole
 //!   terminal: the App does not own the status / prompt rows. It is painted
 //!   *last*, so an extension dialog cannot cover it.
+//!
+//! # Extension UI host surface
+//!
+//! Extensions reach the App through `ctx.ui.*`. This port hosts the six
+//! region-shaped methods directly on the App, backed by
+//! [`crate::component::Component`] objects; the JavaScript side of the bridge
+//! is deliberately **not** part of this surface yet (see the closing note).
+//!
+//! | upstream `ctx.ui` | Rust host surface |
+//! | --- | --- |
+//! | `setHeader(factory)` | [`App::set_header`] / [`App::clear_header`] |
+//! | `setFooter(factory)` | [`App::set_footer`] / [`App::clear_footer`] |
+//! | `setWidget(key, content, { placement })` | [`App::set_widget`] |
+//! | `setEditorText(text)` | [`App::set_editor_text`] |
+//! | `getEditorText()` | [`App::editor_text`] |
+//! | `custom(factory, { overlay, overlayOptions, onHandle })` | [`App::open_custom`] → [`crate::component::CustomHandle`], [`App::close_custom`] |
+//! | `setEditorComponent(factory)` | [`App::set_editor_component`] / [`App::clear_editor_component`] |
+//!
+//! `setStatus` / `setWorkingMessage` / `setTitle` and the remaining
+//! `ctx.ui` methods are *not* region-shaped and stay with the coding-agent
+//! layer; they are out of scope here, as is the JS factory → Rust component
+//! bridge (`pi-extensions` still answers `ERR_PI_UI_UNSUPPORTED` for
+//! `ctx.ui.custom` and the setters).
+//!
+//! **Render order** was rearranged by this surface to match upstream's
+//! container stack (`header` → chat → widget-above → editor → widget-below →
+//! footer, `packages/coding-agent/src/modes/interactive/interactive-mode.ts:547-570,876-885`),
+//! where the model / session status line lives inside the footer at the very
+//! bottom:
+//!
+//! ```text
+//! header
+//! message view                                        ← keeps >= 1 row
+//! Above widgets (insertion order)
+//! editor region (custom non-overlay → editor component → prompt)
+//! Below widgets (insertion order)
+//! status bar
+//! footer
+//! custom overlay (topmost: drawn after the search bar) ← when visible
+//! ```
+//!
+//! All region rects are computed once per frame by
+//! `crate::extension_ui::plan_chrome`; the message viewport's geometry (and
+//! therefore the scroll, selection and search coordinates) follows the
+//! message rect, so extension regions never shift the transcript under the
+//! pointer. Height budgeting reserves the status row and one message row
+//! first, then hands out the rest in render order, **truncating the tail** of
+//! any region that does not fit (see the `extension_ui` module docs).
+//!
+//! Keyboard priority while a `custom` overlay is visible is: the overlay's
+//! [`Component::handle_input`] first, and only if it returns `false` the
+//! existing dialog / settings / selector / search / viewport layers, and
+//! finally the prompt. A non-overlay `custom` session or a custom editor
+//! component takes the key just before the prompt, so the app-level chords
+//! (interrupt, clear, page up/down, search) keep working. A visible
+//! component is never hidden by a theme swap: the host resolves its
+//! [`crate::styled::SpanStyle`] slots through the live [`Theme`] on every
+//! frame.
+//!
+//! Deliberate deviations, documented here rather than silently omitted:
+//!
+//! * **One custom session.** Upstream stacks overlays and resolves focus
+//!   between them (`showOverlay` / `hideOverlay`,
+//!   `packages/tui/src/tui.ts:685-800`). The App hosts at most one, and
+//!   opening a second closes the first with a `None` result.
+//! * **No mouse routing to extension components.** Upstream's `Component`
+//!   has `handleMouse`; this host surface only routes keys, so a gesture
+//!   under a `custom` overlay still reaches the chat log. The trait will
+//!   grow a mouse hook when the region rectangles are worth hit-testing.
+//! * **`OverlayOptions` is a subset.** `width` / `maxHeight` / `anchor` /
+//!   `margin` are honoured; percentage sizes, `row` / `col` offsets and the
+//!   `visible(termWidth, termHeight)` predicate are not.
+//! * **Status row swap.** The status bar is now the second-to-last row and
+//!   the prompt sits above it, the reverse of the pre-surface port and the
+//!   order upstream uses. `tests/app_theme.rs` pins the new rows.
+//!
+//! JS factory → Rust component bridge is a later task: nothing in this
+//! module executes extension JavaScript.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -174,8 +252,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::component::{Component, CustomHandle, CustomOptions, OverlayAnchor, WidgetPlacement};
 use crate::dialog::{Dialog, DialogAction, DialogKind};
 use crate::editor::EditorAction;
+use crate::extension_ui::{plan_chrome, ChromeLayout, ExtensionFrame, ExtensionUi};
 use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
@@ -190,7 +270,7 @@ use crate::search::{
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
-use crate::styled::{plain_text, write_styled_line, SpanStyle};
+use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine};
 use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeColor, ThemeError};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
@@ -208,6 +288,75 @@ const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
 fn round_div(value: usize, divisor: usize) -> usize {
     debug_assert!(divisor > 0, "round_div divisor must not be zero");
     (value + divisor / 2) / divisor
+}
+
+/// The message viewport's rectangle for a planned frame layout.
+///
+/// It sits below the header and the above-editor widgets, and its height is
+/// whatever [`plan_chrome`] left after the chrome regions.
+fn message_rect(area: Rect, layout: &ChromeLayout) -> Rect {
+    Rect {
+        x: area.x,
+        y: area.y + layout.header + layout.above,
+        width: area.width,
+        height: layout.message,
+    }
+}
+
+/// Position a `custom` overlay box inside `area`.
+///
+/// `line_count` is how many rows the component rendered; `max_height` and
+/// `margin` shrink that box and the anchor decides which corner it hugs
+/// (centred by default, upstream's `OverlayAnchor` default). The result is
+/// always clamped inside `area`, so a large margin or a tiny terminal can
+/// never place the box off-screen.
+fn overlay_rect(area: Rect, options: CustomOptions, line_count: usize) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect {
+            x: area.x,
+            y: area.y,
+            width: 0,
+            height: 0,
+        };
+    }
+    let margin = options.margin;
+    let inner_width = area.width.saturating_sub(margin.saturating_mul(2)).max(1);
+    let inner_height = area.height.saturating_sub(margin.saturating_mul(2)).max(1);
+    let width = options.width.unwrap_or(area.width).min(inner_width).max(1);
+    let requested = u16::try_from(line_count).unwrap_or(u16::MAX);
+    let height = options
+        .max_height
+        .unwrap_or(requested)
+        .min(requested.max(1))
+        .min(inner_height)
+        .max(1);
+    let (x, y) = match options.anchor {
+        OverlayAnchor::Center => (
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+        ),
+        OverlayAnchor::TopLeft => (area.x + margin, area.y + margin),
+        OverlayAnchor::TopRight => (
+            area.x + area.width.saturating_sub(width).saturating_sub(margin),
+            area.y + margin,
+        ),
+        OverlayAnchor::BottomLeft => (
+            area.x + margin,
+            area.y + area.height.saturating_sub(height).saturating_sub(margin),
+        ),
+        OverlayAnchor::BottomRight => (
+            area.x + area.width.saturating_sub(width).saturating_sub(margin),
+            area.y + area.height.saturating_sub(height).saturating_sub(margin),
+        ),
+    };
+    let x = x.max(area.x).min(area.x + area.width - width);
+    let y = y.max(area.y).min(area.y + area.height - height);
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 /// Window in which two presses on the same word count as a double click
@@ -757,6 +906,13 @@ pub struct App {
     /// bounds it to one assistant message. See
     /// [`MessageView::begin_tool_stream`].
     tool_call_ids: HashMap<u32, String>,
+    /// Extension UI regions (header, footer, widgets, custom editor, `custom`
+    /// overlay). See the module docs' "Extension UI host surface" section.
+    extension: ExtensionUi,
+    /// Prompt text to restore when a non-overlay `custom` session closes
+    /// (upstream saves `this.editor.getText()` on `showExtensionCustom`,
+    /// `packages/coding-agent/src/modes/interactive/interactive-mode.ts:2755,2778`).
+    custom_saved_editor: Option<String>,
 }
 
 impl App {
@@ -817,6 +973,8 @@ impl App {
             scrollbar_hover: false,
             scrollbar_drag: None,
             tool_call_ids: HashMap::new(),
+            extension: ExtensionUi::new(),
+            custom_saved_editor: None,
         }
     }
 
@@ -1312,11 +1470,183 @@ impl App {
         })
     }
 
+    // -----------------------------------------------------------------
+    // Extension UI host surface (upstream `ctx.ui.*`)
+    //
+    // The regions are described in the module docs; the state and the
+    // layout policy live in [`crate::extension_ui`].
+    // -----------------------------------------------------------------
+
+    /// Attach or replace the header component, the region above the message
+    /// view (upstream `ctx.ui.setHeader`).
+    ///
+    /// Passing `None` is equivalent to [`App::clear_header`]. Any previously
+    /// attached component is disposed first.
+    pub fn set_header(&mut self, component: Option<Box<dyn Component>>) {
+        self.extension.set_header(component);
+    }
+
+    /// Remove the header component, disposing it (upstream
+    /// `ctx.ui.setHeader(undefined)` restores the built-in header).
+    pub fn clear_header(&mut self) {
+        self.extension.clear_header();
+    }
+
+    /// Whether a header component is attached.
+    pub fn has_header(&self) -> bool {
+        self.extension.has_header()
+    }
+
+    /// Attach or replace the footer component, the region below the status
+    /// bar (upstream `ctx.ui.setFooter`).
+    ///
+    /// Passing `None` is equivalent to [`App::clear_footer`]. Any previously
+    /// attached component is disposed first.
+    pub fn set_footer(&mut self, component: Option<Box<dyn Component>>) {
+        self.extension.set_footer(component);
+    }
+
+    /// Remove the footer component, disposing it (upstream
+    /// `ctx.ui.setFooter(undefined)` restores the built-in footer).
+    pub fn clear_footer(&mut self) {
+        self.extension.clear_footer();
+    }
+
+    /// Whether a footer component is attached.
+    pub fn has_footer(&self) -> bool {
+        self.extension.has_footer()
+    }
+
+    /// Attach or replace the custom editor component, the region that
+    /// otherwise shows the prompt (upstream `ctx.ui.setEditorComponent`).
+    ///
+    /// The component receives keys just before the prompt: anything it
+    /// consumes is not typed into the built-in editor, anything it ignores
+    /// falls through, so the app-level chords keep working. Passing `None` is
+    /// equivalent to [`App::clear_editor_component`]. Any previously attached
+    /// component is disposed first.
+    pub fn set_editor_component(&mut self, component: Option<Box<dyn Component>>) {
+        self.extension.set_editor_component(component);
+    }
+
+    /// Remove the custom editor component, disposing it (upstream
+    /// `ctx.ui.setEditorComponent(undefined)` restores the default editor).
+    pub fn clear_editor_component(&mut self) {
+        self.extension.clear_editor_component();
+    }
+
+    /// Whether a custom editor component is attached.
+    pub fn has_editor_component(&self) -> bool {
+        self.extension.has_editor_component()
+    }
+
+    /// Set (or clear, with `None`) the widget registered under `key`
+    /// (upstream `ctx.ui.setWidget`).
+    ///
+    /// Widgets render in insertion order within their placement. Setting an
+    /// existing key again — under either placement — replaces the component,
+    /// disposing the old one, and moves the key to the end of the order;
+    /// `None` removes it. `placement` defaults to
+    /// [`WidgetPlacement::Above`] upstream, so pass it explicitly here or use
+    /// [`WidgetPlacement::default`].
+    pub fn set_widget(
+        &mut self,
+        key: String,
+        component: Option<Box<dyn Component>>,
+        placement: WidgetPlacement,
+    ) {
+        self.extension.set_widget(key, component, placement);
+    }
+
+    /// The registered widget keys, in insertion order, with their placements.
+    pub fn widget_keys(&self) -> Vec<(String, WidgetPlacement)> {
+        self.extension.widget_keys()
+    }
+
+    /// Replace the text in the core input editor (upstream
+    /// `ctx.ui.setEditorText`).
+    ///
+    /// The hidden editor that a non-overlay `custom` session parked keeps its
+    /// text: this writes the same buffer, so a session that closes restores
+    /// what was there when it opened.
+    pub fn set_editor_text(&mut self, text: &str) {
+        self.prompt.editor_mut().set_text(text);
+    }
+
+    /// The current text of the core input editor (upstream
+    /// `ctx.ui.getEditorText`).
+    pub fn editor_text(&self) -> &str {
+        self.prompt.text()
+    }
+
+    /// Show a custom component with keyboard focus (upstream
+    /// `ctx.ui.custom`), returning the handle that controls its visibility
+    /// and carries the close result.
+    ///
+    /// With [`CustomOptions::overlay`] the component is painted on top of
+    /// every other region and receives keys before any other layer. Without
+    /// it, it replaces the editor region, receives keys just before the
+    /// prompt, and the prompt's text is saved and restored around the
+    /// session, matching upstream's `showExtensionCustom`. Only one session is
+    /// open at a time: opening a second closes the first with a `None`
+    /// result.
+    ///
+    /// Close the session with [`App::close_custom`]. The JS factory → Rust
+    /// component bridge is a later task — `pi-extensions` still answers
+    /// `ERR_PI_UI_UNSUPPORTED` for `ctx.ui.custom`.
+    pub fn open_custom(
+        &mut self,
+        component: Box<dyn Component>,
+        options: CustomOptions,
+    ) -> CustomHandle {
+        self.custom_saved_editor = if options.overlay {
+            None
+        } else {
+            Some(self.prompt.text().to_string())
+        };
+        self.extension.open_custom(component, options)
+    }
+
+    /// Close the open `custom` session, delivering `result` to the handle's
+    /// result channel and disposing the component exactly once. Returns
+    /// whether a session was open.
+    ///
+    /// A non-overlay session restores the editor text captured by
+    /// [`App::open_custom`].
+    pub fn close_custom(&mut self, result: Option<String>) -> bool {
+        let closed = self.extension.close_custom(result);
+        if closed {
+            if let Some(text) = self.custom_saved_editor.take() {
+                self.prompt.editor_mut().set_text(text);
+            }
+        }
+        closed
+    }
+
+    /// Whether a `custom` session is open.
+    pub fn custom_open(&self) -> bool {
+        self.extension.custom_open()
+    }
+
+    /// Whether a `custom` session is open *and* currently visible (it can be
+    /// hidden temporarily through [`CustomHandle::set_visible`]).
+    pub fn custom_visible(&self) -> bool {
+        self.extension.custom_visible()
+    }
+
     /// Process a single [`InputEvent`]. Returns the outcome so the
     /// caller can decide whether to redraw.
     pub fn step(&mut self, event: InputEvent) -> StepOutcome {
         if self.exit_requested {
             return StepOutcome::Exit;
+        }
+        // A visible custom overlay has the highest keyboard priority: it sees
+        // the key before every other layer, and only an unconsumed key falls
+        // through to them (module docs, "Extension UI host surface").
+        if let InputEvent::Key(key) = &event {
+            if self.extension.handle_overlay_input(*key) {
+                return StepOutcome::Redraw;
+            }
         }
         // Mouse gestures are routed by rectangle rather than through the
         // keyboard's modal guard: `step_mouse_gesture` hit-tests the open
@@ -1396,6 +1726,10 @@ impl App {
     /// Process a single [`Key`]. Public so tests can step the App
     /// with explicit keys.
     pub fn step_key(&mut self, key: Key) -> StepOutcome {
+        // A visible custom overlay is the outermost layer; see [`App::step`].
+        if self.extension.handle_overlay_input(key) {
+            return StepOutcome::Redraw;
+        }
         // A modal dialog swallows every key — including Ctrl+C / Esc,
         // which cancel the dialog instead of the turn or the App.
         if self.dialog.is_some() {
@@ -1495,6 +1829,14 @@ impl App {
             } else {
                 StepOutcome::Idle
             };
+        }
+
+        // The editor region's component (a non-overlay `custom` session or a
+        // custom editor component) gets the key before the prompt. The
+        // app-level chords above already had their chance, so an extension
+        // editor cannot shadow interrupt / clear / scrolling.
+        if self.extension.handle_editor_input(key) {
+            return StepOutcome::Redraw;
         }
 
         match self.prompt.handle_key(key) {
@@ -2965,26 +3307,35 @@ impl App {
     /// not tick.
     pub fn render_to_buffer(&mut self, area: Rect, buf: &mut Buffer) {
         let _ = self.advance_selection_autoscroll();
+        // Render the extension regions and budget the chrome before anything
+        // else: the message viewport this frame paints is what the scroll,
+        // selection and search paths must index.
+        let frame = self.extension.frame(area.width);
+        let layout = plan_chrome(area.height, &frame);
         // Record the geometry first so the refresh below indexes the exact
         // viewport this frame is about to paint.
-        self.record_viewport(area);
+        self.record_viewport(message_rect(area, &layout));
         // Keep the search results in step with the transcript they indexed —
         // streaming output and `/clear` both change the corpus under an open
         // bar, which is where upstream refreshes it too (from `render`).
         let _ = self.refresh_search();
-        self.render_to_buffer_impl(area, buf, true, self.messages.hyperlinks());
+        self.render_to_buffer_impl(area, buf, true, self.messages.hyperlinks(), &frame, &layout);
     }
 
     /// Remember the message viewport's geometry as of a render: the width the
     /// log wraps at, its height (the page size), and its top-left cell so
     /// pointer coordinates can be mapped back into it.
-    fn record_viewport(&self, area: Rect) {
-        let message_height = area.height.saturating_sub(2);
-        self.viewport_width.store(area.width, Ordering::Relaxed);
+    fn record_viewport(&self, message_area: Rect) {
+        self.viewport_width
+            .store(message_area.width, Ordering::Relaxed);
         self.viewport_height
-            .store(message_height, Ordering::Relaxed);
-        self.viewport_origin.0.store(area.x, Ordering::Relaxed);
-        self.viewport_origin.1.store(area.y, Ordering::Relaxed);
+            .store(message_area.height, Ordering::Relaxed);
+        self.viewport_origin
+            .0
+            .store(message_area.x, Ordering::Relaxed);
+        self.viewport_origin
+            .1
+            .store(message_area.y, Ordering::Relaxed);
     }
 
     /// Paint the App without advancing the autoscroll clock.
@@ -3001,35 +3352,59 @@ impl App {
         buf: &mut Buffer,
         scrollbar: bool,
         hyperlinks: bool,
+        frame: &ExtensionFrame,
+        layout: &ChromeLayout,
     ) {
-        // Layout: message view fills the top, prompt the bottom row,
-        // status bar the row above the prompt.
-        let status_height = 1u16;
-        let prompt_height = 1u16;
-        let message_height = area.height.saturating_sub(status_height + prompt_height);
-        let message_area = Rect {
+        // Layout: the extension regions wrap the message view, which keeps at
+        // least one row. See the module docs for the order and
+        // [`crate::extension_ui::plan_chrome`] for the budget.
+        let message_height = layout.message;
+        let message_area = message_rect(area, layout);
+        let header_area = Rect {
             x: area.x,
             y: area.y,
             width: area.width,
-            height: message_height,
+            height: layout.header,
+        };
+        let above_area = Rect {
+            x: area.x,
+            y: header_area.y + layout.header,
+            width: area.width,
+            height: layout.above,
+        };
+        let editor_area = Rect {
+            x: area.x,
+            y: message_area.y + message_height,
+            width: area.width,
+            height: layout.editor,
+        };
+        let below_area = Rect {
+            x: area.x,
+            y: editor_area.y + layout.editor,
+            width: area.width,
+            height: layout.below,
         };
         let status_area = Rect {
             x: area.x,
-            y: area.y + message_height,
+            y: below_area.y + layout.below,
             width: area.width,
-            height: status_height,
+            height: layout.status,
         };
-        let prompt_area = Rect {
+        let footer_area = Rect {
             x: area.x,
-            y: area.y + message_height + status_height,
+            y: status_area.y + layout.status,
             width: area.width,
-            height: prompt_height,
+            height: layout.footer,
         };
 
         // Record the viewport the scroll keys clamp against. Keys arrive
         // between renders, so the previous render's geometry is what they
         // see — exactly what the reader was looking at.
-        self.record_viewport(area);
+        self.record_viewport(message_area);
+
+        // Header, then the above-editor widgets (insertion order).
+        self.paint_extension_lines(header_area, &frame.header, buf);
+        self.paint_extension_lines(above_area, &frame.above, buf);
 
         self.messages.render_to_buffer_themed_with_links(
             message_area,
@@ -3047,20 +3422,22 @@ impl App {
         if scrollbar {
             self.apply_scrollbar(message_area, buf);
         }
+
+        // The editor region: a custom component (a non-overlay `custom`
+        // session or `set_editor_component`) replaces the prompt line
+        // entirely.
+        match &frame.editor {
+            Some(lines) => self.paint_extension_lines(editor_area, lines, buf),
+            None => self.paint_prompt(editor_area, buf),
+        }
+
+        // Below-editor widgets.
+        self.paint_extension_lines(below_area, &frame.below, buf);
+
         self.status_bar
             .render_to_buffer_themed(&self.status_data, status_area, buf, &self.theme);
 
-        // Prompt line.
-        let line = self.prompt.render_line(area.width);
-        for (col, ch) in line.chars().enumerate() {
-            let x = prompt_area.x + col as u16;
-            if x >= prompt_area.x + prompt_area.width {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((x, prompt_area.y)) {
-                cell.set_char(ch);
-            }
-        }
+        self.paint_extension_lines(footer_area, &frame.footer, buf);
 
         // Selector overlay — when open, draw on top of everything
         // except the prompt and status.
@@ -3143,6 +3520,64 @@ impl App {
                 }
             }
         }
+
+        // The `custom` overlay is the topmost layer: it paints after the
+        // transcript search bar so an extension component can cover every
+        // region, exactly like a focus-owning upstream overlay.
+        if let Some(overlay) = &frame.overlay {
+            let rect = overlay_rect(area, overlay.options, overlay.lines.len());
+            if rect.width > 0 && rect.height > 0 {
+                // Blank the box first: it must be readable over the
+                // transcript underneath (the dialog overlay does the same).
+                for y in rect.y..rect.y + rect.height {
+                    for x in rect.x..rect.x + rect.width {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                        }
+                    }
+                }
+                self.paint_extension_lines(rect, &overlay.lines, buf);
+            }
+        }
+    }
+
+    /// Paint a region's styled lines, resolving each [`SpanStyle`] through the
+    /// live theme and truncating both the lines' width and a too-tall block's
+    /// tail to the region.
+    fn paint_extension_lines(&self, rect: Rect, lines: &[StyledLine], buf: &mut Buffer) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        for (row, line) in lines.iter().enumerate() {
+            if row as u16 >= rect.height {
+                break;
+            }
+            write_styled_line(
+                buf,
+                rect.x,
+                rect.y + row as u16,
+                rect.width,
+                line,
+                &self.theme,
+            );
+        }
+    }
+
+    /// Paint the built-in prompt into the first row of the editor region.
+    fn paint_prompt(&self, rect: Rect, buf: &mut Buffer) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let line = self.prompt.render_line(rect.width);
+        for (col, ch) in line.chars().enumerate() {
+            let x = rect.x + col as u16;
+            if x >= rect.x + rect.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, rect.y)) {
+                cell.set_char(ch);
+            }
+        }
     }
 
     /// Render the App into a flat snapshot (used by the snapshot tests
@@ -3164,7 +3599,9 @@ impl App {
         // `/transcript` (and the snapshot tests) want plain text, never
         // OSC 8 escapes, so links fall back to the inline `(url)` form
         // regardless of the live capability.
-        self.render_to_buffer_impl(area, &mut buf, false, false);
+        let frame = self.extension.frame(width);
+        let layout = plan_chrome(height, &frame);
+        self.render_to_buffer_impl(area, &mut buf, false, false, &frame, &layout);
         let lines = buf
             .content()
             .chunks(width as usize)
@@ -3577,5 +4014,172 @@ mod tool_stream_tests {
             duration_ms: 1,
         });
         assert_eq!(tool_items(&app), vec!["[tool:] → done".to_string()]);
+    }
+}
+
+/// Placement maths for the `custom` overlay box.
+///
+/// These pin the exact geometry so the integration tests only have to prove
+/// the box is painted last, covers what it spans, and disappears when hidden.
+#[cfg(test)]
+mod overlay_rect_tests {
+    use super::*;
+
+    fn area(width: u16, height: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn default_overlay_is_centred_and_inset_by_the_margin() {
+        // `CustomOptions::overlay()` carries a 1-cell margin, so the box is
+        // the full terminal minus the margin on each side.
+        let rect = overlay_rect(area(24, 8), CustomOptions::overlay(), 2);
+        assert_eq!(
+            rect,
+            Rect {
+                x: 1,
+                y: 3,
+                width: 22,
+                height: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn width_and_max_height_shrink_the_box() {
+        let options = CustomOptions::overlay().width(10).max_height(1);
+        let rect = overlay_rect(area(24, 8), options, 4);
+        assert_eq!(
+            rect,
+            Rect {
+                x: 7,
+                y: 3,
+                width: 10,
+                height: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_max_height_larger_than_the_content_does_not_over_allocate() {
+        let options = CustomOptions::overlay().max_height(20);
+        let rect = overlay_rect(area(20, 10), options, 1);
+        assert_eq!(rect.height, 1);
+    }
+
+    #[test]
+    fn anchors_hug_the_corners_inside_the_margin() {
+        let cases = [
+            (
+                OverlayAnchor::TopLeft,
+                Rect {
+                    x: 1,
+                    y: 1,
+                    width: 6,
+                    height: 2,
+                },
+            ),
+            (
+                OverlayAnchor::TopRight,
+                Rect {
+                    x: 13,
+                    y: 1,
+                    width: 6,
+                    height: 2,
+                },
+            ),
+            (
+                OverlayAnchor::BottomLeft,
+                Rect {
+                    x: 1,
+                    y: 7,
+                    width: 6,
+                    height: 2,
+                },
+            ),
+            (
+                OverlayAnchor::BottomRight,
+                Rect {
+                    x: 13,
+                    y: 7,
+                    width: 6,
+                    height: 2,
+                },
+            ),
+        ];
+        for (anchor, expected) in cases {
+            let options = CustomOptions::overlay().anchor(anchor).width(6);
+            assert_eq!(
+                overlay_rect(area(20, 10), options, 2),
+                expected,
+                "{anchor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_huge_margin_collapses_the_box_without_leaving_the_screen() {
+        let options = CustomOptions::overlay()
+            .anchor(OverlayAnchor::BottomRight)
+            .margin(50);
+        let rect = overlay_rect(area(10, 4), options, 2);
+        assert!(
+            rect.x + rect.width <= 10 && rect.y + rect.height <= 4,
+            "clamped box: {rect:?}"
+        );
+        // The margin eats the whole inner area, so the box shrinks to a
+        // single clamped cell rather than underflowing.
+        assert_eq!(
+            rect,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_sized_terminal_yields_an_empty_box() {
+        assert_eq!(
+            overlay_rect(area(0, 0), CustomOptions::overlay(), 3),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn the_box_stays_inside_a_non_zero_origin() {
+        let rect = overlay_rect(
+            Rect {
+                x: 5,
+                y: 7,
+                width: 20,
+                height: 10,
+            },
+            CustomOptions::overlay()
+                .anchor(OverlayAnchor::BottomRight)
+                .width(6),
+            2,
+        );
+        assert_eq!(
+            rect,
+            Rect {
+                x: 18,
+                y: 14,
+                width: 6,
+                height: 2,
+            }
+        );
     }
 }

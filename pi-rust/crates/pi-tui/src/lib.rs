@@ -13,8 +13,10 @@
 pub mod app;
 pub mod autocomplete;
 pub mod clipboard;
+pub mod component;
 pub mod dialog;
 pub mod editor;
+pub mod extension_ui;
 pub mod fuzzy;
 pub mod highlight;
 pub mod hyperlink;
@@ -42,8 +44,12 @@ pub use autocomplete::{
     CombinedAutocompleteProvider, CompletionResult, SlashCommand,
 };
 pub use clipboard::{base64_encode, osc52_sequence};
+pub use component::{
+    Component, CustomHandle, CustomOptions, OverlayAnchor, TextComponent, WidgetPlacement,
+};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{Editor, EditorAction, JumpDirection};
+pub use extension_ui::ExtensionUi;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
 pub use highlight::{
     get_language_from_path, highlight_code, supports_language, tokenize, Token, TokenKind,
