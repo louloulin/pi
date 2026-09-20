@@ -198,6 +198,10 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
         // Let the App detect the terminal's OSC 8 support from the
         // environment (`Hyperlinks: None` = auto).
         hyperlinks: None,
+        // Collapsed tool blocks preview this many tail lines before the
+        // `… (+M lines, Ctrl+O to expand)` hint. `pi_tui::TOOL_PREVIEW_LINES`
+        // is the 4-line default; a user setting can override it here.
+        tool_preview_lines: pi_tui::TOOL_PREVIEW_LINES,
     };
 
     let mut terminal = match setup_terminal() {
@@ -245,6 +249,15 @@ async fn run_loop(
     // Build the App on the stack first so we can drop it before
     // tearing down the terminal.
     let mut app = App::new(&*agent.lock().await, config.clone());
+    // Wire the existing rich tool renderers (`tools/render.rs`) into the
+    // interactive transcript. The App cannot name that type (no
+    // `pi-tui` → `pi-coding-agent` dependency), so the driver installs the
+    // adapter and the App owns the folding (collapsed preview, Ctrl+O,
+    // click-to-toggle). Print mode keeps its own session in `text_fallback`.
+    let tool_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    app.set_tool_block_renderer(Box::new(crate::tools::InteractiveToolRenderer::new(
+        tool_cwd,
+    )));
 
     // Extension dialogs: the App drains the bridge every tick, and the
     // gate only opens now that the loop is running (see `ui_bridge`).
@@ -1995,12 +2008,18 @@ mod tests {
             text: "first reply".into(),
             thinking: String::new(),
             streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         });
         app.messages_mut().push(pi_tui::message::MessageItem {
             role: pi_tui::message::Role::Assistant,
             text: "second reply\nwith two lines".into(),
             thinking: String::new(),
             streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         });
 
         copy_last_assistant_message(&mut app);

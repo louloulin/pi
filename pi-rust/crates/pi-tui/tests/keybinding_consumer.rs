@@ -13,7 +13,8 @@ use pi_tui::app::{App, AppConfig, StepOutcome};
 use pi_tui::editor::{Editor, EditorAction};
 use pi_tui::input::{Key, KeyCode, KeyModifiers};
 use pi_tui::keybindings::{
-    reset_keybindings, set_keybindings, KeybindingsConfig, KeybindingsManager,
+    reset_keybindings, set_keybindings, tui_default_keybindings, KeybindingDefinition,
+    KeybindingsConfig, KeybindingsManager,
 };
 
 const WIDTH: u16 = 40;
@@ -36,12 +37,21 @@ fn faux_model() -> Model {
 
 #[test]
 fn installed_overrides_win_over_the_builtin_chords() {
-    // One override per consumer: the editor's cursor-up moves to `Ctrl+P`
-    // and the App's page-up to `Ctrl+O`, releasing `Up` / `PageUp`.
+    // One override per consumer: the editor's cursor-up moves to `Ctrl+P`,
+    // the App's page-up to `Ctrl+Y`, and the tool-block toggle to `Ctrl+G`,
+    // releasing `Up` / `PageUp` / `Ctrl+O`.
     let mut config = KeybindingsConfig::new();
     config.set("tui.editor.cursorUp", ["ctrl+p"]);
-    config.set("tui.altScreen.pageUp", ["ctrl+o"]);
-    let mut manager = KeybindingsManager::tui_defaults();
+    config.set("tui.altScreen.pageUp", ["ctrl+y"]);
+    config.set("app.tools.expand", ["ctrl+g"]);
+    // `pi-tui`'s own table has no `app.*` entries (the coding-agent driver
+    // installs those), so add the one the App consumes before overriding it.
+    let mut definitions = tui_default_keybindings();
+    definitions.push((
+        "app.tools.expand".to_string(),
+        KeybindingDefinition::new(["ctrl+o"]),
+    ));
+    let mut manager = KeybindingsManager::new(definitions, KeybindingsConfig::new());
     manager.set_user_bindings(config);
     set_keybindings(manager);
 
@@ -88,10 +98,25 @@ fn installed_overrides_win_over_the_builtin_chords() {
     assert_eq!(app.messages().scroll_offset(), 0);
     // The override scrolls a page.
     assert_eq!(
-        app.step_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        app.step_key(key(KeyCode::Char('y'), KeyModifiers::CONTROL)),
         StepOutcome::Redraw
     );
     assert!(app.messages().scroll_offset() > 0);
+
+    // --- Tool-block expansion ------------------------------------------
+    // `app.tools.expand` was moved off its default `Ctrl+O` by the override
+    // above, so the freed chord no longer toggles and the new one does.
+    assert!(!app.tools_expanded());
+    assert_eq!(
+        app.step_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        StepOutcome::Idle
+    );
+    assert!(!app.tools_expanded());
+    assert_eq!(
+        app.step_key(key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        StepOutcome::Redraw
+    );
+    assert!(app.tools_expanded());
 
     reset_keybindings();
 }

@@ -69,7 +69,10 @@ pub use keybindings::{
 };
 pub use kill_ring::{KillDirection, KillRing};
 pub use markdown::{render_markdown, render_markdown_with_links, render_markdown_with_theme};
-pub use message::{MessageItem, MessageView};
+pub use message::{
+    tool_fold_hint, MessageItem, MessageView, Role, ToolBlock, ToolBlockRenderer,
+    TOOL_PREVIEW_LINES,
+};
 pub use mouse_region::{MouseRegion, MouseRegionPoint};
 pub use prompt::{Prompt, PromptAction};
 pub use search::{

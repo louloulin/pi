@@ -1474,6 +1474,21 @@ impl ToolRenderSession {
         self
     }
 
+    /// Set the image width in place.
+    pub fn set_width(&mut self, width: u16) {
+        self.width = width;
+    }
+
+    /// Toggle expanded rendering in place.
+    pub fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+    }
+
+    /// Toggle image rendering in place.
+    pub fn set_show_images(&mut self, show_images: bool) {
+        self.show_images = show_images;
+    }
+
     /// Render a tool call started by the agent. Returns an empty vector when
     /// the tool has no renderer.
     pub fn call(&mut self, call: &ToolCall, is_error: bool) -> Vec<StyledLine> {
@@ -1533,6 +1548,83 @@ impl std::fmt::Debug for ToolRenderSession {
             .field("show_images", &self.show_images)
             .field("in_flight", &self.renderers.len())
             .finish()
+    }
+}
+
+/// [`ToolRenderSession`] as a [`pi_tui::ToolBlockRenderer`], for the
+/// interactive TUI.
+///
+/// The App cannot depend on this crate, so the driver installs this adapter
+/// on the App (`App::set_tool_block_renderer`): the adapter renders the call
+/// summary and the full, expanded result body into styled lines, and the App
+/// owns the interactive folding policy (collapsed tail preview,
+/// `app.tools.expand`, per-block click).
+///
+/// The session runs **expanded** on purpose: the renderers' own fold
+/// constants (`READ_FOLD_LINES`, `BASH_PREVIEW_LINES`, …) would otherwise
+/// hide lines a single `Ctrl+O` could not reveal, because the lines would
+/// never have been rendered. `pi-tui` is the one place that folds.
+///
+/// The call summary is cached per call id at [`begin_tool`] and returned as
+/// [`pi_tui::ToolBlock::header`] beside the result body at [`finish_tool`],
+/// so a block reads like the plain fallback's `[tool:name] args → result` but
+/// styled — with the header pinned while the body folds. A tool with no
+/// renderer contributes no lines and the App keeps the plain body.
+///
+/// [`begin_tool`]: pi_tui::ToolBlockRenderer::begin_tool
+/// [`finish_tool`]: pi_tui::ToolBlockRenderer::finish_tool
+pub struct InteractiveToolRenderer {
+    session: ToolRenderSession,
+    call_lines: HashMap<String, Vec<StyledLine>>,
+}
+
+impl InteractiveToolRenderer {
+    /// A renderer rooted at `cwd`, expanded, with images off.
+    pub fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            session: ToolRenderSession::new(cwd).with_expanded(true),
+            call_lines: HashMap::new(),
+        }
+    }
+
+    /// Allow inline image blocks (kitty / iTerm2 escape sequences).
+    pub fn with_show_images(mut self, show_images: bool) -> Self {
+        self.session.set_show_images(show_images);
+        self
+    }
+}
+
+impl std::fmt::Debug for InteractiveToolRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InteractiveToolRenderer")
+            .field("session", &self.session)
+            .field("pending_calls", &self.call_lines.len())
+            .finish()
+    }
+}
+
+impl pi_tui::ToolBlockRenderer for InteractiveToolRenderer {
+    fn begin_tool(&mut self, call: &ToolCall) {
+        let lines = self.session.call(call, false);
+        if !lines.is_empty() {
+            self.call_lines.insert(call.id.clone(), lines);
+        }
+    }
+
+    fn finish_tool(&mut self, result: &ToolResult, width: u16) -> Option<pi_tui::ToolBlock> {
+        if width > 0 {
+            self.session.set_width(width);
+        }
+        let header = self
+            .call_lines
+            .remove(&result.tool_call_id)
+            .unwrap_or_default();
+        let body = self.session.result(result);
+        if header.is_empty() && body.is_empty() {
+            return None;
+        }
+        // `pi-tui` folds the body, never the header (see `ToolBlock`).
+        Some(pi_tui::ToolBlock::new(header, body))
     }
 }
 

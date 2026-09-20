@@ -538,6 +538,9 @@ fn streaming_caret_sits_on_the_last_markdown_line() {
         text: "first\nsecond".to_string(),
         thinking: String::new(),
         streaming: true,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
     });
     let lines = view.render_styled_lines(40);
     assert_eq!(lines.len(), 2);

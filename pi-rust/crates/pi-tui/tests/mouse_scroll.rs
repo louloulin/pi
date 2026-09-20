@@ -14,7 +14,10 @@ use pi_protocol::{Api, Model, ProviderId};
 use pi_tui::app::{App, AppConfig, StepOutcome};
 use pi_tui::backend::event::{Event as CtEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use pi_tui::input::{InputEvent, MouseButton, MouseGesture, MouseGestureKind};
+use pi_tui::message::ToolBlock;
 use pi_tui::selector::{Selector, SelectorItem};
+use pi_tui::styled::{SpanStyle, StyledLine, StyledSpan};
+use pi_tui::theme::ThemeColor;
 
 const WIDTH: u16 = 40;
 /// Snapshot height; the message viewport is this minus the status bar and
@@ -256,4 +259,38 @@ fn wheel_moves_multiple_lines_like_page_keys_and_leaves_the_editor_untouched() {
         app.step(InputEvent::wheel(true, false));
     }
     assert_eq!(top_line(&app), "> line 0");
+}
+
+#[test]
+fn wheel_over_a_tool_block_scrolls_instead_of_toggling_it() {
+    // Tool blocks are click-targets for expansion, but the wheel is still a
+    // scroll: only the left button toggles.
+    let mut app = app_with_lines(40);
+    app.messages_mut()
+        .start_tool_execution("call-1", "bash", "{\"command\":\"echo hi\"}");
+    let body: Vec<StyledLine> = (0..10)
+        .map(|i| {
+            vec![StyledSpan::new(
+                format!("bash-line-{i}"),
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            )]
+        })
+        .collect();
+    app.messages_mut().finish_tool_execution_with_lines(
+        "call-1",
+        1,
+        "hi",
+        false,
+        Some(ToolBlock::new(Vec::new(), body)),
+    );
+    let _ = app.render_snapshot(WIDTH, HEIGHT);
+
+    assert_eq!(app.messages().scroll_offset(), 0);
+    assert!(!app.tools_expanded());
+    assert_eq!(
+        app.step(InputEvent::wheel(true, false)),
+        StepOutcome::Redraw
+    );
+    assert_eq!(app.messages().scroll_offset(), 1);
+    assert!(!app.tools_expanded(), "the wheel must not toggle expansion");
 }

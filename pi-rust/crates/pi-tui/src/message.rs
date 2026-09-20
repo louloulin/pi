@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
+use pi_protocol::{ToolCall, ToolResult};
+
 use crate::styled::{
     plain_text, themed_text, write_styled_line_hyperlinked, SpanStyle, StyledLine, StyledSpan,
 };
@@ -35,6 +37,87 @@ pub enum Role {
 /// `packages/coding-agent/src/modes/interactive/components/assistant-message.ts:30`).
 pub const HIDDEN_THINKING_LABEL: &str = "Thinking...";
 
+/// Lines a collapsed tool block previews by default.
+///
+/// The slice follows Martty's fixed 4-line tail (`src/transcript.rs:1698`)
+/// rather than upstream's `FALLBACK_PREVIEW_LINES = 10`: the interactive
+/// transcript is narrow, and the goal is that one `read` or `bash` cannot
+/// flood it. Override it per view with
+/// [`MessageView::with_tool_preview_lines`] / [`MessageView::set_tool_preview_lines`]
+/// (the driver maps a user setting onto those).
+pub const TOOL_PREVIEW_LINES: usize = 4;
+
+/// The `… (+M lines, Ctrl+O to expand)` line a collapsed tool block shows.
+///
+/// Kept as a free function so the renderer and any driver-side hint agree on
+/// the wording.
+pub fn tool_fold_hint(hidden: usize) -> String {
+    format!("… (+{hidden} lines, Ctrl+O to expand)")
+}
+
+/// A driver-rendered tool block: a call header plus the result body.
+///
+/// The split exists so folding can keep the header visible. Requirement 1 of
+/// the audit slice is about the *result*: "工具结果超过 N 行时只渲染最后 N 行"
+/// — dropping the call line would hide which tool ran, so [`ToolBlock::header`]
+/// is never folded and only [`ToolBlock::body`] is.
+pub struct ToolBlock {
+    /// Call-summary lines (e.g. `bash ls .`), always shown.
+    pub header: Vec<StyledLine>,
+    /// Result lines; folded to the tail preview when collapsed.
+    pub body: Vec<StyledLine>,
+}
+
+impl ToolBlock {
+    /// A block from its two halves.
+    pub fn new(header: Vec<StyledLine>, body: Vec<StyledLine>) -> Self {
+        Self { header, body }
+    }
+
+    /// True when there is nothing to paint.
+    pub fn is_empty(&self) -> bool {
+        self.header.is_empty() && self.body.is_empty()
+    }
+}
+
+impl std::fmt::Debug for ToolBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolBlock")
+            .field("header", &self.header.len())
+            .field("body", &self.body.len())
+            .finish()
+    }
+}
+
+/// Driver-supplied rich renderer for tool blocks.
+///
+/// The interactive driver (`pi-coding-agent`) owns the renderer family in
+/// `tools/render.rs`; `pi-tui` must not depend on that crate (the dependency
+/// runs the other way). So the driver implements this trait and hands the App
+/// the **already styled** lines, and the App only decides how many of those
+/// lines a collapsed preview keeps. That is the interface the audit calls
+/// for: "App 接受已渲染的带样式的行 + 折叠预览行数".
+///
+/// Both halves are keyed by the provider tool-call id, exactly like the
+/// renderer session the driver wraps.
+pub trait ToolBlockRenderer: Send {
+    /// Feed the call arguments at execution start.
+    ///
+    /// A stateful renderer uses this to cache derived state (the write
+    /// highlight cache, the read language) before the result arrives; the
+    /// returned summary lines are not shown by the live log, which keeps its
+    /// own `[tool:…]` streaming header until the result lands.
+    fn begin_tool(&mut self, call: &ToolCall);
+
+    /// Render a finished result into a [`ToolBlock`], or `None` when the tool
+    /// has no rich presentation (the App then falls back to the plain
+    /// `[tool:…] args → result` body).
+    ///
+    /// `width` is the message viewport width in cells, for renderers that
+    /// size a block against the terminal (inline images).
+    fn finish_tool(&mut self, result: &ToolResult, width: u16) -> Option<ToolBlock>;
+}
+
 /// One entry in the rendered message log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageItem {
@@ -51,6 +134,27 @@ pub struct MessageItem {
     /// True while an assistant message is still streaming (the TUI
     /// shows a caret indicator).
     pub streaming: bool,
+    /// Pre-rendered, already-styled call header for a tool block.
+    ///
+    /// The driver's [`ToolBlockRenderer`] supplies it alongside
+    /// [`MessageItem::tool_lines`]. It is always painted (never folded) so a
+    /// collapsed block still says which tool ran; `None` keeps the plain
+    /// `[tool:…]` text as the whole block.
+    pub tool_header: Option<Vec<StyledLine>>,
+    /// Pre-rendered, already-styled result lines for a tool block.
+    ///
+    /// `pi-tui` cannot depend on the crate that owns the rich tool renderers
+    /// (`pi-coding-agent`), so the driver renders the block and hands the
+    /// lines over through [`ToolBlockRenderer`]. When present these replace
+    /// the result half of [`MessageItem::text`]; `None` keeps the single-line
+    /// `[tool:…]` format.
+    pub tool_lines: Option<Vec<StyledLine>>,
+    /// Per-block expand override.
+    ///
+    /// `None` follows [`MessageView::tools_expanded`]. A click on the block
+    /// sets `Some(...)`; a global [`MessageView::toggle_tools_expanded`]
+    /// clears every override again so one chord really does toggle all.
+    pub tool_expanded: Option<bool>,
 }
 
 impl MessageItem {
@@ -61,6 +165,9 @@ impl MessageItem {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         }
     }
 
@@ -71,6 +178,9 @@ impl MessageItem {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         }
     }
 
@@ -82,6 +192,9 @@ impl MessageItem {
             text: String::new(),
             thinking: String::new(),
             streaming: true,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         }
     }
 
@@ -92,6 +205,9 @@ impl MessageItem {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         }
     }
 }
@@ -117,7 +233,7 @@ struct ToolStream {
 /// Conversation log rendered by the TUI. Holds an ordered list of
 /// [`MessageItem`] entries and supports incremental updates so the
 /// TUI redraws only the tail while the assistant streams.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MessageView {
     items: Vec<MessageItem>,
     /// In-flight tool calls, keyed by call id. See [`ToolStream`].
@@ -154,6 +270,30 @@ pub struct MessageView {
     /// (`packages/coding-agent/src/core/settings-manager.ts:962`), so reasoning
     /// is visible unless the reader hides it with `app.thinking.toggle`.
     hide_thinking: bool,
+    /// Whether tool blocks render expanded. False by default: a tool result
+    /// can be thousands of lines, so the collapsed preview is the safe first
+    /// impression. Toggled by `app.tools.expand` (Ctrl+O).
+    tools_expanded: bool,
+    /// Lines a collapsed tool block previews. See [`TOOL_PREVIEW_LINES`].
+    tool_preview_lines: usize,
+}
+
+impl Default for MessageView {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            tool_streams: HashMap::new(),
+            scroll_from_bottom: 0,
+            detached: false,
+            last_render_width: AtomicU16::new(0),
+            last_render_lines: AtomicUsize::new(0),
+            markdown: false,
+            hyperlinks: false,
+            hide_thinking: false,
+            tools_expanded: false,
+            tool_preview_lines: TOOL_PREVIEW_LINES,
+        }
+    }
 }
 
 impl Clone for MessageView {
@@ -168,6 +308,8 @@ impl Clone for MessageView {
             markdown: self.markdown,
             hyperlinks: self.hyperlinks,
             hide_thinking: self.hide_thinking,
+            tools_expanded: self.tools_expanded,
+            tool_preview_lines: self.tool_preview_lines,
         }
     }
 }
@@ -238,6 +380,85 @@ impl MessageView {
     /// Show or collapse assistant thinking blocks in place.
     pub fn set_thinking_visible(&mut self, visible: bool) {
         self.hide_thinking = !visible;
+    }
+
+    /// Whether tool blocks render expanded (builder form).
+    pub fn with_tools_expanded(mut self, expanded: bool) -> Self {
+        self.tools_expanded = expanded;
+        self
+    }
+
+    /// Whether tool blocks render expanded when they carry no per-block
+    /// override.
+    pub fn tools_expanded(&self) -> bool {
+        self.tools_expanded
+    }
+
+    /// Set the global expand state in place. Does not touch per-block
+    /// overrides; use [`MessageView::toggle_tools_expanded`] for the chord so
+    /// one press really toggles every block.
+    pub fn set_tools_expanded(&mut self, expanded: bool) {
+        self.tools_expanded = expanded;
+    }
+
+    /// Flip the global expand state and clear every per-block override.
+    ///
+    /// Clearing is what makes the chord "toggle all blocks" rather than
+    /// "toggle the default for blocks nobody clicked": after it, every block
+    /// follows the new global value. Returns the new global state so the
+    /// driver can echo it in the status bar, matching upstream's
+    /// `setToolsExpanded`.
+    pub fn toggle_tools_expanded(&mut self) -> bool {
+        self.tools_expanded = !self.tools_expanded;
+        for item in &mut self.items {
+            item.tool_expanded = None;
+        }
+        self.tools_expanded
+    }
+
+    /// Lines a collapsed tool block previews (builder form).
+    pub fn with_tool_preview_lines(mut self, lines: usize) -> Self {
+        self.tool_preview_lines = lines;
+        self
+    }
+
+    /// Lines a collapsed tool block previews.
+    pub fn tool_preview_lines(&self) -> usize {
+        self.tool_preview_lines
+    }
+
+    /// Set the collapsed preview height in place.
+    pub fn set_tool_preview_lines(&mut self, lines: usize) {
+        self.tool_preview_lines = lines;
+    }
+
+    /// Flip one tool block's expand state, taking the current effective state
+    /// as the starting point.
+    ///
+    /// Returns the block's new state, or `None` when `index` is not a tool
+    /// block (an out-of-range index, a user/assistant message). This is the
+    /// mouse-click path: a click toggles the block under the pointer and
+    /// leaves every other block alone.
+    pub fn toggle_tool_at(&mut self, index: usize) -> Option<bool> {
+        let global = self.tools_expanded;
+        let item = self.items.get_mut(index)?;
+        if item.role != Role::Tool {
+            return None;
+        }
+        let next = !item.tool_expanded.unwrap_or(global);
+        item.tool_expanded = Some(next);
+        Some(next)
+    }
+
+    /// Index of the item whose rendered block covers `line` at `width`.
+    ///
+    /// Uses the exact line accounting of the renderer, so the hit test and
+    /// the painted transcript cannot disagree. Used by the App's mouse
+    /// handling to find the tool block under a click.
+    pub fn item_index_at_line(&self, line: usize, width: u16) -> Option<usize> {
+        self.item_line_ranges(width)
+            .iter()
+            .position(|(start, end)| line >= *start && line < *end)
     }
 
     /// Number of items in the log.
@@ -359,6 +580,31 @@ impl MessageView {
     pub fn push_tool(&mut self, name: &str, args: &str, result: &str, is_error: bool) {
         self.push(MessageItem::tool(format_tool(name, args, result, is_error)));
     }
+
+    /// Append a tool execution block whose result body is `lines` (already
+    /// styled by the driver's [`ToolBlockRenderer`]).
+    ///
+    /// Used by tests and by callers that render out of band; the live path is
+    /// [`MessageView::finish_tool_execution_with_lines`].
+    pub fn push_tool_styled(&mut self, text: impl Into<String>, lines: Vec<StyledLine>) {
+        let mut item = MessageItem::tool(text);
+        item.tool_lines = Some(lines);
+        self.push(item);
+    }
+
+    /// [`MessageView::push_tool_styled`] with a separate, always-visible call
+    /// header.
+    pub fn push_tool_block(
+        &mut self,
+        text: impl Into<String>,
+        header: Vec<StyledLine>,
+        body: Vec<StyledLine>,
+    ) {
+        let mut item = MessageItem::tool(text);
+        item.tool_header = Some(header);
+        item.tool_lines = Some(body);
+        self.push(item);
+    }
     /// Start (or look up) the streamed tool-call block for `call_id`.
     ///
     /// The first `ToolCallDelta` for a call carries its provider id and name;
@@ -477,16 +723,48 @@ impl MessageView {
         result: &str,
         is_error: bool,
     ) {
+        self.finish_tool_execution_with_lines(call_id, duration_ms, result, is_error, None);
+    }
+
+    /// [`MessageView::finish_tool_execution`] with the driver's rich body.
+    ///
+    /// `styled` is what the driver's [`ToolBlockRenderer`] returned for this
+    /// result; `None` (or an unrenderable tool) keeps the plain
+    /// `[tool:…] args → result` body. The rich lines and the plain body are
+    /// stored together so `/transcript`, copy and search keep working off the
+    /// text while the screen paints the styled body. The block's header is
+    /// stored separately from its body so a collapsed preview can keep the
+    /// call summary on screen (requirement 1 folds the *result*).
+    pub fn finish_tool_execution_with_lines(
+        &mut self,
+        call_id: &str,
+        duration_ms: u64,
+        result: &str,
+        is_error: bool,
+        styled: Option<ToolBlock>,
+    ) {
         let _ = duration_ms;
+        let (header, body) = match styled {
+            Some(block) => (Some(block.header), Some(block.body)),
+            None => (None, None),
+        };
         match self.tool_streams.remove(call_id) {
             Some(stream) => {
-                self.items[stream.index].text =
-                    format_tool(&stream.name, &stream.args, result, is_error);
+                let index = stream.index;
+                self.items[index].text = format_tool(&stream.name, &stream.args, result, is_error);
+                self.items[index].tool_header = header;
+                self.items[index].tool_lines = body;
+                self.items[index].tool_expanded = None;
                 self.repin_if_following();
             }
             // No start event for this id (synthetic / replayed turn): keep
             // the standalone block the previous implementation produced.
-            None => self.push_tool("", "", result, is_error),
+            None => {
+                let mut item = MessageItem::tool(format_tool("", "", result, is_error));
+                item.tool_header = header;
+                item.tool_lines = body;
+                self.push(item);
+            }
         }
     }
 
@@ -498,6 +776,9 @@ impl MessageView {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
         });
     }
 
@@ -622,58 +903,11 @@ impl MessageView {
     /// [`MessageView::render_styled_lines`] with an explicit hyperlink
     /// capability, overriding [`MessageView::hyperlinks`].
     pub fn render_styled_lines_with_links(&self, width: u16, hyperlinks: bool) -> Vec<StyledLine> {
-        let prefix_width = 2usize; // "> " or "* "
-        let text_width = (width as usize).saturating_sub(prefix_width).max(1);
+        let text_width = text_width_for(width);
 
         let mut out: Vec<StyledLine> = Vec::new();
         for item in &self.items {
-            let (prefix, prefix_style, body_style) = match item.role {
-                Role::User => (
-                    "> ",
-                    SpanStyle::fg(ThemeColor::Accent),
-                    SpanStyle::fg(ThemeColor::UserMessageText),
-                ),
-                Role::Assistant => ("  ", SpanStyle::PLAIN, SpanStyle::fg(ThemeColor::Text)),
-                Role::Tool => (
-                    "* ",
-                    SpanStyle::fg(ThemeColor::Muted),
-                    SpanStyle::fg(ThemeColor::ToolOutput),
-                ),
-            };
-
-            // Thinking precedes the body inside an assistant item, matching
-            // upstream's ordered `message.content` walk
-            // (`assistant-message.ts:106-160`). A whitespace-only block is
-            // skipped, exactly like upstream's `content.thinking.trim()`.
-            if item.role == Role::Assistant && !item.thinking.trim().is_empty() {
-                out.extend(self.thinking_lines(
-                    &item.thinking,
-                    text_width,
-                    prefix,
-                    prefix_style,
-                    hyperlinks,
-                ));
-            }
-
-            if self.markdown && item.role == Role::Assistant {
-                out.extend(markdown_lines(
-                    &item.text,
-                    text_width,
-                    prefix,
-                    prefix_style,
-                    item.streaming,
-                    hyperlinks,
-                ));
-                continue;
-            }
-
-            let mut lines = plain_lines(&item.text, text_width, prefix, prefix_style, body_style);
-            if item.role == Role::Assistant && item.streaming {
-                if let Some(first) = lines.first_mut() {
-                    first.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
-                }
-            }
-            out.extend(lines);
+            out.extend(self.item_lines(item, text_width, hyperlinks));
         }
 
         if out.is_empty() {
@@ -681,6 +915,142 @@ impl MessageView {
         }
         self.last_render_width.store(width, Ordering::Relaxed);
         self.last_render_lines.store(out.len(), Ordering::Relaxed);
+        out
+    }
+
+    /// `(start, end)` line ranges of every item in the rendered log, in
+    /// render order.
+    ///
+    /// Built from the exact same [`MessageView::item_lines`] the renderer
+    /// paints, so a hit test on a screen row cannot disagree with what is
+    /// drawn there. `end` is exclusive, matching `slice` ranges.
+    pub fn item_line_ranges(&self, width: u16) -> Vec<(usize, usize)> {
+        let text_width = text_width_for(width);
+        let mut ranges = Vec::with_capacity(self.items.len());
+        let mut start = 0usize;
+        for item in &self.items {
+            let count = self.item_lines(item, text_width, self.hyperlinks).len();
+            ranges.push((start, start + count));
+            start += count;
+        }
+        ranges
+    }
+
+    /// The styled lines one item contributes to the log.
+    ///
+    /// This is the single per-item layout implementation behind
+    /// [`MessageView::render_styled_lines_with_links`],
+    /// [`MessageView::item_line_ranges`] and the App's hit testing. Thinking
+    /// precedes the body inside an assistant item, matching upstream's ordered
+    /// `message.content` walk (`assistant-message.ts:106-160`); a
+    /// whitespace-only thinking block is skipped, exactly like upstream's
+    /// `content.thinking.trim()`.
+    fn item_lines(
+        &self,
+        item: &MessageItem,
+        text_width: usize,
+        hyperlinks: bool,
+    ) -> Vec<StyledLine> {
+        let (prefix, prefix_style, body_style) = match item.role {
+            Role::User => (
+                "> ",
+                SpanStyle::fg(ThemeColor::Accent),
+                SpanStyle::fg(ThemeColor::UserMessageText),
+            ),
+            Role::Assistant => ("  ", SpanStyle::PLAIN, SpanStyle::fg(ThemeColor::Text)),
+            Role::Tool => (
+                "* ",
+                SpanStyle::fg(ThemeColor::Muted),
+                SpanStyle::fg(ThemeColor::ToolOutput),
+            ),
+        };
+
+        let mut out: Vec<StyledLine> = Vec::new();
+        if item.role == Role::Assistant && !item.thinking.trim().is_empty() {
+            out.extend(self.thinking_lines(
+                &item.thinking,
+                text_width,
+                prefix,
+                prefix_style,
+                hyperlinks,
+            ));
+        }
+
+        if self.markdown && item.role == Role::Assistant {
+            out.extend(markdown_lines(
+                &item.text,
+                text_width,
+                prefix,
+                prefix_style,
+                item.streaming,
+                hyperlinks,
+            ));
+            return out;
+        }
+
+        let mut lines = if item.role == Role::Tool {
+            self.tool_body_lines(item, text_width, prefix, prefix_style, body_style)
+        } else {
+            plain_lines(&item.text, text_width, prefix, prefix_style, body_style)
+        };
+        if item.role == Role::Assistant && item.streaming {
+            if let Some(first) = lines.first_mut() {
+                first.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
+            }
+        }
+        out.extend(lines);
+        out
+    }
+
+    /// The lines of a tool block: an always-visible header followed by the
+    /// result body, the latter folded to the collapsed preview when neither
+    /// the per-block override nor [`MessageView::tools_expanded`] says
+    /// otherwise.
+    ///
+    /// When the driver supplied [`MessageItem::tool_header`] /
+    /// [`MessageItem::tool_lines`] those styled lines are used verbatim
+    /// (prefix added, inline-image rows left alone) and only the body is
+    /// folded; otherwise the plain `[tool:…]` block is laid out as before.
+    /// Folding is a *tail* slice (upstream's `FALLBACK_PREVIEW_LINES` also
+    /// keeps the bottom, which is where the interesting output of `bash` /
+    /// `read` sits), preceded by the [`tool_fold_hint`] line so the reader
+    /// knows how many lines are hidden and how to reveal them.
+    fn tool_body_lines(
+        &self,
+        item: &MessageItem,
+        text_width: usize,
+        prefix: &str,
+        prefix_style: SpanStyle,
+        body_style: SpanStyle,
+    ) -> Vec<StyledLine> {
+        // The header (the call summary the renderer styled) is never folded:
+        // a collapsed block must still say which tool ran. Only the result
+        // body below it is tail-sliced.
+        let mut out: Vec<StyledLine> = match &item.tool_header {
+            Some(header) => prefix_styled_lines(header, prefix, prefix_style),
+            None => Vec::new(),
+        };
+        let full = match &item.tool_lines {
+            Some(lines) => prefix_styled_lines(lines, prefix, prefix_style),
+            // No driver renderer: the whole plain `[tool:…] args → result`
+            // line is both header and body, exactly as before this slice.
+            None if item.tool_header.is_none() => {
+                plain_lines(&item.text, text_width, prefix, prefix_style, body_style)
+            }
+            None => Vec::new(),
+        };
+        let expanded = item.tool_expanded.unwrap_or(self.tools_expanded);
+        if expanded || full.len() <= self.tool_preview_lines {
+            out.extend(full);
+            return out;
+        }
+        let hidden = full.len() - self.tool_preview_lines;
+        out.reserve(self.tool_preview_lines + 1);
+        out.push(vec![
+            StyledSpan::new(prefix, prefix_style),
+            StyledSpan::new(tool_fold_hint(hidden), SpanStyle::fg(ThemeColor::Muted)),
+        ]);
+        out.extend(full.into_iter().skip(hidden));
         out
     }
 
@@ -865,6 +1235,37 @@ fn streaming_tool_text(name: &str, args: &str, running: bool) -> String {
         text.push_str(" (running)");
     }
     text
+}
+
+/// Text width left for a body after the two-cell role prefix (`"> "` / `"* "`).
+fn text_width_for(width: u16) -> usize {
+    (width as usize).saturating_sub(2).max(1)
+}
+
+/// Prepend the role prefix to pre-rendered, already-styled lines.
+///
+/// Inline-image rows — the escape sequence itself and the blank rows an image
+/// was told to occupy — pass through **verbatim**, for the same reason
+/// [`markdown_lines`] does: prefixing an escape sequence corrupts it, and
+/// writing into an image's rows would draw the prefix over the picture.
+fn prefix_styled_lines(
+    lines: &[StyledLine],
+    prefix: &str,
+    prefix_style: SpanStyle,
+) -> Vec<StyledLine> {
+    let verbatim = image_row_mask(lines);
+    lines
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            if verbatim[idx] {
+                return line.clone();
+            }
+            let mut spans: StyledLine = vec![StyledSpan::new(prefix, prefix_style)];
+            spans.extend(line.iter().cloned());
+            spans
+        })
+        .collect()
 }
 
 /// Wrap `body` and prepend the role prefix to every line, without the
@@ -1133,5 +1534,105 @@ mod tests {
         // body is broken across multiple lines.
         assert!(lines.iter().all(|l| l.starts_with("> ")));
         assert!(lines.len() >= 5);
+    }
+
+    /// Build a view with one tool block whose rich body is `count` styled
+    /// lines, so the fold / expand assertions can count exact lines.
+    fn view_with_tool_body(count: usize) -> MessageView {
+        let mut view = MessageView::new();
+        view.start_tool_execution("call-1", "bash", "{\"command\":\"echo hi\"}");
+        let header = vec![vec![StyledSpan::new(
+            "bash echo hi",
+            SpanStyle::fg(ThemeColor::ToolTitle),
+        )]];
+        let body: Vec<StyledLine> = (0..count)
+            .map(|idx| {
+                vec![StyledSpan::new(
+                    format!("body-{idx}"),
+                    SpanStyle::fg(ThemeColor::ToolOutput),
+                )]
+            })
+            .collect();
+        view.finish_tool_execution_with_lines(
+            "call-1",
+            3,
+            "body",
+            false,
+            Some(ToolBlock::new(header, body)),
+        );
+        view
+    }
+
+    #[test]
+    fn collapsed_tool_block_keeps_the_header_tail_and_a_hint() {
+        let view = view_with_tool_body(10);
+        let lines = view.render_lines(40);
+        // Header + hint + the 4-line preview.
+        assert_eq!(lines.len(), 2 + TOOL_PREVIEW_LINES);
+        assert_eq!(lines[0], "* bash echo hi");
+        assert_eq!(lines[1], "* … (+6 lines, Ctrl+O to expand)");
+        // The preview is the *tail*: body-6 … body-9.
+        assert_eq!(
+            &lines[2..],
+            &["* body-6", "* body-7", "* body-8", "* body-9"]
+        );
+        // Rich styling survives the fold, on both the header and the body.
+        let styled = view.render_styled_lines(40);
+        assert!(styled[0]
+            .iter()
+            .any(|span| span.style.fg == Some(ThemeColor::ToolTitle)));
+        assert!(styled[2]
+            .iter()
+            .any(|span| span.style.fg == Some(ThemeColor::ToolOutput)));
+    }
+
+    #[test]
+    fn tool_preview_lines_is_injectable_and_a_short_block_never_folds() {
+        let mut view = view_with_tool_body(3);
+        view.set_tool_preview_lines(10);
+        assert_eq!(view.tool_preview_lines(), 10);
+        let lines = view.render_lines(40);
+        // Header + 3 body lines, no hint: it fits the preview.
+        assert_eq!(lines.len(), 4);
+        assert!(!lines.iter().any(|line| line.contains("Ctrl+O")));
+    }
+
+    #[test]
+    fn toggle_tools_expanded_reveals_every_line_and_clears_overrides() {
+        let mut view = view_with_tool_body(10);
+        assert!(!view.tools_expanded());
+        // A per-block click expands just this block …
+        assert_eq!(view.toggle_tool_at(0), Some(true));
+        // Header + every body line.
+        assert_eq!(view.render_lines(40).len(), 11);
+        // … the chord then toggles every block: global collapse wins, and the
+        // overrides are cleared so the next chord really is global.
+        assert!(view.toggle_tools_expanded());
+        assert_eq!(view.render_lines(40).len(), 11);
+        assert!(!view.toggle_tools_expanded());
+        assert_eq!(view.render_lines(40).len(), 2 + TOOL_PREVIEW_LINES);
+        assert!(view.toggle_tools_expanded());
+        assert_eq!(view.render_lines(40).len(), 11);
+    }
+
+    #[test]
+    fn toggle_tool_at_ignores_non_tool_items() {
+        let mut view = MessageView::new();
+        view.push(MessageItem::user("hello"));
+        assert_eq!(view.toggle_tool_at(0), None);
+        assert_eq!(view.toggle_tool_at(99), None);
+    }
+
+    #[test]
+    fn item_index_at_line_maps_rows_to_items() {
+        let mut view = MessageView::new();
+        view.push(MessageItem::user("hello"));
+        view.push(MessageItem::assistant("one\ntwo"));
+        let ranges = view.item_line_ranges(40);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(view.item_index_at_line(0, 40), Some(0));
+        assert_eq!(view.item_index_at_line(ranges[1].0, 40), Some(1));
+        assert_eq!(view.item_index_at_line(ranges[1].1 - 1, 40), Some(1));
+        assert_eq!(view.item_index_at_line(999, 40), None);
     }
 }
