@@ -13431,3 +13431,63 @@ $ cargo test   --workspace -j 16                        # exit 0（1m35s，128 �
 1. **LUM-1180 一推分支就合并它**——双向扫分支（`git fetch` 后 `git ls-remote --heads mirror` 与 `--heads origin`，注意 `work/lum-1180` 与 `work/LUM-1180` 两种写法），合并后**必须补跑一次全量 `cargo test --workspace`**（用本轮的 frugal 配置），核对 passed 增量与新增单测数量是否相符。
 2. **紧接着派发 `ctx.ui.*` 端到端接线**（第四节第 2 条），立项时把文件面写死为 `crates/pi-extensions/src/{host.rs, pi-ext-shim.mjs}` + `crates/pi-coding-agent/src/extensions/ui_bridge.rs`，并明确禁止触碰 `crates/pi-tui/**`（已合入，属消费方）。
 3. **协调轮开工例程**：`git fetch` → 双向扫 `work/*` 的可合并性 → `multica daemon status --output json` 核对 `running_task_count` → `df -h /`（余量 < 5G 先清陈旧 target dir）→ 再决定派发。满槽时不要为了「有事做」制造同文件并发，但**合并已完成的分支是本轮硬职责**，不算派发。
+
+## LUM-1187 round — 双向扫 `work/*` + **全 workdir HEAD 对账**（本轮新增的第三种可合并性扫描）零可合并分支；清 2.1G 陈旧 target；派发 pi-tui 终端图片子系统 LUM-1188（唯一并发槽，文件面零重叠）；质量门继承 LUM-1186 全绿
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `d62e1f1dd`（LUM-1186 的文档提交），`origin` 与工作区 `mirror` 同位同 SHA。
+* `multica daemon status`：`active_task_count = 2`、`running_task_count = 2`（在飞的 **LUM-1180** + 本协调轮）→ 头上只有 **1 个空槽**。
+* 在飞进程实测（`/proc`）：LUM-1180 正在自己的 workdir 跑 `timeout 5400 cargo test --workspace --offline`（`CARGO_TARGET_DIR=/tmp/pi-fresh-1179`）；其 `work/lum-1180` 在 `origin` 与 `mirror` 上**都还不存在** → 无可合并产物。
+
+### 二、可合并性扫描：三种扫法都零命中（本轮把第三种做成例程）
+
+1. **双向 + 大小写扫 `work/*`**（LUM-1186 定下的做法）：`git fetch --all` 后分别 `git ls-remote --heads origin` 与 `--heads mirror`，并按 `work/lum-XXXX` / `work/LUM-XXXX` 两种写法各查一次。结果：`origin` 上最新到 `work/lum-1186`，`mirror` 上最新同样到 `work/lum-1186`，**`work/lum-1180` 双方皆无** → 本轮无可合并分支（这是本轮的硬职责结论，不是「跳过派发」的托词）。
+2. `git merge-base --is-ancestor` 对 `work/*` 全量：非祖先仍只有 `work/lum-1173`、`work/lum-1177`（内容早已合入，diff 主要是对更新工作的删除）。
+3. **全 workdir HEAD 对账（本轮新增，建议后续轮次照做）**：`work/*` 只能看见「推上去了的分支」，看不见「任务完成了但只活在自己 workdir 里」的树。于是遍历 `lum-*/workdir/pi` 的 **HEAD** 逐个与 `origin/feature/pi.rs` 比祖先关系，命中 11 个历史 workdir，再逐个核对内容是否已被后续轮次吸收：
+
+| workdir HEAD | 内容 | 判定 |
+| --- | --- | --- |
+| `lum-1160` `5b373578c` | `pi-ai` auth/ 凭证子系统（LUM-1160） | **已落地**：tip 的 `auth/` 相对它只多不少（差异仅 `auth/mod.rs` 7 行 + `provider_registry.rs` +135） |
+| `lum-1088` `f958615d6` | 多扩展加载不再互相覆盖工具表 | **已落地**：tip 的 `ExtensionRegistry::set_tools`（含同义注释）与 `host.rs` 的按 id 折叠即同一修复 |
+| `lum-984/985/996/1016/1022/1028/1043/1053/1061` | Stage 1/2/9 早期树、旧协调轮文档提交 | 被后续 Stage 取代 |
+
+另外两个「内容很新但已被取代」的分支（此前几轮都未给出明确判定，本轮查实）：
+
+* `origin/agent/devbox1/e3a55b14fe9d`：新增 `pi-ai/fixtures/google/error_event.sse` + `function_call_response.sse`。tip 的 google 夹具是**另一套 5 个**（`text_response` / `thinking_response` / `tool_use_response` / `error_frame` / `cache_read`），`tests/google.rs:78` 是按目录取用的 → 这两个文件属于被重命名/替代的旧迭代，**不合并**。
+* `mirror/agent/devbox1/lum-1061`（`16c97841e`，「wire telemetry into pi-ai and pi-agent-core」）：其中 **`pi-ai` 的那一半在 tip 上确实没落地**（`pi-ai` 全 crate 没有任何 telemetry 接线），但该分支的设计是 **default-off `telemetry` feature + `SimpleStreamOptions::telemetry`**，而 tip 上 `pi-agent-core` 的 telemetry 是后来的**非 feature-gate**接线（`agent.rs` / `agent_loop.rs` / `state.rs` / `telemetry.rs` / `tests/telemetry.rs`）——两者不同源，直接合并会把一个旧设计的 pi-ai 半成品塞进新设计旁边 → **不合并**，改记为 frontier 第 6 项（见第四节）。
+
+### 三、验证：代码树与 LUM-1186 实测全绿的树**逐字相同**，本轮只补跑 fmt
+
+```console
+$ git diff --quiet f807e74b3 d62e1f1dd -- pi-rust/crates pi-rust/Cargo.toml pi-rust/Cargo.lock && echo IDENTICAL
+IDENTICAL
+$ git diff --name-only f807e74b3 d62e1f1dd
+pi-rust/docs/FEATURE_PI_RS_STATUS.md          # 唯一差异（+65），且只是本文档自身
+```
+
+即 tip `d62e1f1dd` 与 LUM-1186 实跑全绿的合并树 `f807e74b3` **代码侧零差异**，`128 套件 / 1981 passed / 0 failed / 2 ignored` 对本轮 tip 逐字成立，无需重跑全量（重跑只会和并发中的 LUM-1180 抢 CPU/磁盘）。本轮另实跑：
+
+```console
+$ cargo fmt --all -- --check      # exit 0，0 行输出
+```
+
+**下一次全量欠账点仍是 LUM-1180 合入时**（那时代码树才会真正变化）。
+
+磁盘：清理 `/tmp/pi-lum-1186`（2.1G；对应 issue 已 `in_review` 且无进程持有，与 LUM-1185 的清理判据一致）→ 根分区由 5.1G / 90% 回到 **6.7G / 86%**，给并发中的 LUM-1180 让出余量；`/tmp/pi-fresh-1179`（16G）仍在飞，未动。
+
+### 四、frontier（本轮后）
+
+1. **质量门**：fmt 本轮实跑 exit 0；check / clippy / 全量 test 按第二节的树同一性论证继承 LUM-1186 的 `128 / 1981 / 0 / 2`。
+2. **`ctx.ui.*` 端到端接线**：仍是「下一项应当派发的插件生态任务」，**唯一阻塞仍是 LUM-1180 的文件面**（`pi-extensions/src/host.rs` + `pi-ext-shim.mjs` 正是它的改动面）。文件面已写死，LUM-1180 一合入即可直接派发，无需再调研。
+3. **`@earendil-works/pi-ai/compat` 内建 provider 工厂 + host 流式事件桥 / `pi.registerProvider(...)` host 桥**：LUM-1180 在飞，等其合入后评估后一半。
+4. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert`）：维持 LUM-1185 的四条判断不变。
+5. **pi-tui 终端图片子系统** —— **本轮已收官为 LUM-1188**（原为「唯一还没移植的大子系统」，此前几轮的 frontier 清单一直漏项）：上游 `terminal-image.ts`（696 行）+ `components/image.ts`（127 行），LUM-1152 只搬了同一文件里的 `hyperlink()` 与能力探测。纯函数、零新增依赖（入参已是 base64，尺寸只读文件头）、可离线全测，且与 LUM-1180 **零文件重叠** → 本轮把唯一空槽投给它。
+6. **`pi-ai` 请求级 telemetry span（本轮新发现的缺口）**：`pi-agent-core` 已有 telemetry 接线，但 `pi-ai` 侧**没有任何 telemetry**，`pi.ai.request` span 缺失。注意这也是**横切 pi-ai 全部 provider 适配器**的改动（与 LUM-1180 同 crate），且 `lum-1061` 那个旧分支不可复用（见第二节）→ 等 LUM-1180 合入后按现行 `pi-telemetry` API 另立一轮。
+7. **provider 家族**（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1177 结论（无云凭据 / 无消费方）；`images` 已由 LUM-1164/1168 收口。
+
+### 五、下一轮动作（按优先级）
+
+1. **LUM-1180 一推分支就合并它**：双向扫（`origin` + `mirror`，`work/lum-1180` 与 `work/LUM-1180` 两种写法），合并后**必须补跑一次全量 `cargo test --workspace`**（frugal 配置），核对 passed 增量与新增单测数相符；LUM-1188 与 LUM-1180 文件面不相交，先后顺序不影响后续合并（窄面优先）。
+2. **紧接着派发 `ctx.ui.*` 端到端接线**，立项时把文件面写死为 `crates/pi-extensions/src/{host.rs, pi-ext-shim.mjs}` + `crates/pi-coding-agent/src/extensions/ui_bridge.rs`，并明确禁止触碰 `crates/pi-tui/**`。
+3. **协调轮开工例程（本轮补充第 4 步）**：`git fetch --all` → 双向 + 大小写扫 `work/*` → **全 workdir HEAD 对账**（找「完成了但没推分支」的树）→ `multica daemon status --output json` 核对 `running_task_count` → `df -h /`（余量 < 5G 先清陈旧 target dir）→ 再决定派发。**满槽时不要为了「有事做」制造同文件并发**，但要主动去找**文件面零重叠**的切片，别把空槽白白饿着；合并已完成的分支是本轮硬职责，不算派发。
