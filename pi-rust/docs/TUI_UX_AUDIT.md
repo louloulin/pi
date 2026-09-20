@@ -21,6 +21,11 @@ worker 的 stage 划分。
    交互 TUI 完全没接上 —— 这是「已有零件没装机」，不是「要从零造」。
 5. 同时发现一个静默的确定性缺陷：`Models` 内部是 `HashMap`，`/model` 列表顺序、`default_model`
    的选择结果每次都不同。本轮已修（见第四节）。
+6. 第二轮审计（LUM-1215）把 P1-3 从「缺功能」升级为**确定性缺陷**：流式期间在编辑器里敲
+   Enter，文本会被静默丢弃 —— 编辑器先清空，`App::submit` 再因忙直接 `return`
+   （`crates/pi-tui/src/app.rs:1849-1852` → `:1236-1239`），全程没有队列、没有提示、没有日志。
+   这是输入丢失，严重度高于 P0-1 的「刷屏」；修复面与 P0-1 的富渲染器接线互不重叠，因此单独
+   停放为 Stage 61（见第五节）。
 
 ## 一、基线
 
@@ -113,14 +118,50 @@ worker 的 stage 划分。
 - 影响：长思考会淹没答案；高噪音。
 - 修复方向：先做「显示/隐藏」这一层（纯 UI 状态），等级要等协议模型字段补齐。
 
-### P1-3 没有 follow-up 队列 / steer / dequeue
+### P1-3 流式期间的输入被静默丢弃（follow-up 队列 / steer / dequeue 全缺）
 
-- 上游：`app.message.followUp`（alt+enter 排队追加）、`app.message.dequeue`（编辑全部排队消息）、
-  流式期间 ctrl+x steer。
-- Rust：`App::submit` 在 busy 时的行为没有队列语义，只能打断。
-- 影响：多轮迭代时被迫等待，交互节奏断裂。
-- 修复方向：`MessageView` 增加 pending 队列区 + 提交路由；与 `app.message.copy`（本轮已占
-  ctrl+x）的键位冲突需要按上游优先级裁决。
+首轮把这条写成「交互节奏断裂」偏轻了。第二轮审计（LUM-1215）给出的证据链说明它是**输入丢失**：
+
+| 环节 | 位置 | 行为 |
+| --- | --- | --- |
+| 编辑器提交 | `crates/pi-tui/src/app.rs:1849-1852` | `PromptAction::Submit` → **先 `prompt.clear()`**，再抛 `StepOutcome::Submitted` |
+| 驱动转发 | `crates/pi-coding-agent/src/interactive.rs:459` | 无条件 `app.submit(agent.clone(), text)` |
+| 忙时丢弃 | `crates/pi-tui/src/app.rs:1236-1239` | `if self.turn_busy.load(..) { return; }` —— 文本到此为止 |
+
+也就是说：一个长 turn 里敲进去的每一句话，按 Enter 就永久消失，没有任何反馈。`turn_busy` 只被
+`app.interrupt`（`:1772`）、`app.clear`（`:1778`）、`/compact`（`interactive.rs:950`）读取，
+编辑器与提交路径都不看它，所以这不是「禁止输入」，而是「接受后扔掉」。
+
+同时 `app.message.followUp`、`app.message.dequeue`、`app.clipboard.pasteImage` 三个上游键位 id
+在 Rust 全仓**没有任何消费者**（只在 `keybindings.rs` 里定义，另有 `app.rs:114` 的文档注释提及）。
+
+上游语义（`packages/coding-agent/src/modes/interactive/interactive-mode.ts`）：
+
+| 输入 | 上游行为 | 位置 |
+| --- | --- | --- |
+| 流式中 Enter | `session.prompt(text, { streamingBehavior: "steer" })`，进当前 turn | `:3136-3143` |
+| 流式中 alt+enter | `{ streamingBehavior: "followUp" }`，排队等 turn 结束 | `:4146-4149` |
+| 空闲时 alt+enter | 等同 Enter（`handleFollowUp` 用 `onSubmit` 兜底） | `:4151-4155` |
+| `app.message.dequeue` | 取回 steering + followUp 全部消息；状态栏 `No queued messages to restore` / `Restored N queued message(s) to editor` | `:4157-4163`、`:4336-4372` |
+| 排队消息可见 | `pendingMessagesContainer` + `hasPendingMessages: () => session.pendingMessageCount > 0` | `:385`、`:550`、`:2052` |
+
+更正首轮的一处说法：**ctrl+x 不是 steer**。上游 `app.message` 只注册 copy / followUp / dequeue
+（`:2895-2899`），steer 是「流式期间的 Enter」，没有独立键位 id；ctrl+x（`app.message.copy`）不冲突。
+
+底座并非空白：核心侧队列已存在 —— `crates/pi-agent-core/src/queue.rs:18`
+（`MessageQueue::push/is_empty/drain`）、`crates/pi-agent-core/src/agent_loop.rs:221-227`
+（`push_follow_up` / `follow_up_len`），agent loop 会在工具迭代之间消费它（`agent_loop.rs:305`、
+`:463-478`）。缺的是三件事：
+
+1. `MessageQueue` 补 `len()` / `take_all()`（dequeue 取回需要）与 steering / followUp 两段式
+   （上游 `clearQueue()` 返回 `{ steering, followUp }`，`:4353-4364`）；
+2. `App` 持有一份 pending 列表：忙时 `submit` 入队而不是 `return`，并让 `MessageView` 渲染「待发送」
+   样式（`MessageItem` 目前只有 `role/text/streaming`，`message.rs:34-43`）；
+3. 驱动接 `app.message.followUp` / `app.message.dequeue`，并让流式 Enter 走 steer。
+
+影响：任何「边看输出边补话」的场景（长 turn、多轮迭代）都在丢输入。
+修复方向：按上面 1/2/3 三刀切，建议先落 2+3（`App` 内队列 + 键位），1 视是否需要跨 turn 持久化再定。
+已停放为 **Stage 61 = LUM-1216**（见第五节），建议优先级高于 Stage 58。
 
 ### P1-4 没有 `!cmd` 本地 shell 通道
 
@@ -156,9 +197,11 @@ worker 的 stage 划分。
 | 58 | 工具输出折叠 + `app.tools.expand` + 点击工具块展开 + 启动头可展开 | 默认只渲染 N 行 + `(+M lines)` 提示，Ctrl+O 与点击都能展开；`format_tool` 之外的富渲染器接到交互路径 | 选词/搜索/快照测试坐标会变，需要一次性更新；建议先加注入参数再改默认值 |
 | 59 | 补齐 `app.*` 动作第 1 批：`app.thinking.toggle`、`app.editor.external`、`app.session.new`/`tree`/`fork`/`resume` | 每个动作有独立测试 + `/hotkeys` 同步列出 | `/tree`、`/fork` 依赖 LUM-1209 写路径；外部编辑器需要 teardown/restore 终端 |
 | 60 | 会话命令补齐：`/new`、`/copy`、`/name`、`/tree`、`/fork` | 命令解析 + 行为测试 | `/login`、`/logout` 涉及凭据，单独评估后再排 |
+| 61（LUM-1216） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 忙时 `App::submit` 入队而非 `return`；turn 结束后按 steer / followUp 语义投递；dequeue 取回编辑器；测试覆盖入队 / 取回 / 消费 | 与 58 的富渲染器接线不重叠；`MessageItem` 加字段会碰 58/59 也可能改的结构体，需协调；**建议优先于 58**（正确性缺陷） |
 
-并发约束：当前 LUM-1209（Stage 55）、LUM-1211（Stage 57）在跑，加上本轮协调 = 3 个槽位已满，
-所以本轮**不派发**新的 stage；上面的 58/59/60 留给下一轮协调按槽位释放情况逐个开。
+并发约束：LUM-1210 轮时 LUM-1209（Stage 55）+ LUM-1211（Stage 57）+ 协调轮已占满 3 槽；
+LUM-1215 轮（第二轮 TUI 审计）仍是 3 个在飞（另加 LUM-1213 = 重复协调轮），故两轮都**不派发**，
+上面的 58/59/60/61 留给下一轮协调按槽位释放情况逐个开。
 
 ## 六、验证
 
