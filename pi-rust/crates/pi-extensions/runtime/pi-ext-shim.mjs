@@ -2740,6 +2740,214 @@ const __pi_fs_module = (() => {
     return new ReadStream(path, options);
   }
 
+  /** The `Writable` subset `fs.createWriteStream` needs.
+   *
+   *  The write half of the same blocking bridge: `fs.writeFile` /
+   *  `fs.appendFile` take the whole payload in one base64 hop and hand back no
+   *  descriptor, so a write stream accumulates its chunks in memory and flushes
+   *  once, on `end()` — the mirror image of `ReadStream`'s buffered replay.
+   *
+   *  What each event therefore means:
+   *  - `write(chunk, …)` means "the bytes are in this stream's buffer", *not*
+   *    "the bytes are on disk". Its callback succeeds as soon as it runs, and
+   *    `bytesWritten` counts accepted bytes (Node's `bytesWritten` is also the
+   *    number handed to the stream, so the accounting matches).
+   *  - `finish`, the `end()` callback and `close` only fire after the single
+   *    `fs.writeFile` / `fs.appendFile` call has returned.
+   *  - A failed flush surfaces both as an `error` event and as the `end()`
+   *    callback's error argument; it is never swallowed, and `finish` is not
+   *    emitted.
+   *  - `write()` always returns `true`: there is no backpressure to signal
+   *    (the buffer grows until `end()`), so `drain` is never emitted.
+   *  - `cork()` / `uncork()` are no-ops — every write already waits in the
+   *    buffer until the flush, so there is nothing for cork to hold back.
+   */
+  class WriteStream extends Emitter {
+    constructor(path, options) {
+      super();
+      const opts = typeof options === "string" ? { encoding: options } : options || {};
+      this.path = String(path);
+      this.flags = opts.flags === undefined ? "w" : String(opts.flags);
+      if (this.flags !== "w" && this.flags !== "a") {
+        throw new Error(
+          "pi extension host fs.createWriteStream only supports the `w` (truncate) and `a` (append) flags, got " +
+            this.flags,
+        );
+      }
+      this.__append = this.flags === "a";
+      // Default like Node; only consulted for string chunks.
+      this.__encoding = streamEncoding(opts.encoding) || "utf8";
+      this.bytesWritten = 0;
+      this.writable = true;
+      this.writableEnded = false;
+      this.writableFinished = false;
+      this.destroyed = false;
+      this.closed = false;
+      // There is no descriptor to expose; a numeric `fd` would be a fabricated
+      // handle the `fs.*` ops cannot use.
+      this.fd = null;
+      this.autoClose = opts.autoClose !== false;
+      this.__chunks = [];
+      this.__endCallbacks = [];
+      this.__flushed = false;
+      const self = this;
+      __pi_schedule(function () {
+        self.__open();
+      });
+    }
+
+    __open() {
+      if (this.destroyed) return;
+      // The bridge cannot open a file without also writing it, so `open` /
+      // `ready` are announced optimistically; a real failure arrives with the
+      // flush as `error`.
+      this.emit("open", this.fd);
+      this.emit("ready");
+    }
+
+    __toBuffer(chunk, encoding) {
+      if (typeof chunk === "string") {
+        return BufferCtor.from(chunk, streamEncoding(encoding) || this.__encoding);
+      }
+      if (BufferCtor.isBuffer(chunk) || chunk instanceof Uint8Array) {
+        return BufferCtor.from(chunk);
+      }
+      throw new TypeError(
+        'The "chunk" argument must be of type string or an instance of Buffer or Uint8Array',
+      );
+    }
+
+    write(chunk, encoding, callback) {
+      if (typeof encoding === "function") {
+        callback = encoding;
+        encoding = undefined;
+      }
+      const done = typeof callback === "function" ? callback : null;
+      if (this.writableEnded || this.destroyed) {
+        const err = new Error("write after end");
+        err.code = "ERR_STREAM_WRITE_AFTER_END";
+        const self = this;
+        __pi_schedule(function () {
+          if (done) done(err);
+          else self.emit("error", err);
+        });
+        return false;
+      }
+      let buffer;
+      try {
+        buffer = this.__toBuffer(chunk, encoding);
+      } catch (err) {
+        const self = this;
+        __pi_schedule(function () {
+          if (done) done(err);
+          else self.emit("error", err);
+        });
+        return false;
+      }
+      this.__chunks.push(buffer);
+      this.bytesWritten += buffer.length;
+      if (done) {
+        __pi_schedule(function () {
+          done(null);
+        });
+      }
+      return true;
+    }
+
+    end(chunk, encoding, callback) {
+      if (typeof chunk === "function") {
+        callback = chunk;
+        chunk = undefined;
+        encoding = undefined;
+      } else if (typeof encoding === "function") {
+        callback = encoding;
+        encoding = undefined;
+      }
+      const done = typeof callback === "function" ? callback : null;
+      if (this.writableEnded || this.destroyed) {
+        if (done) {
+          const err = new Error("write after end");
+          err.code = "ERR_STREAM_ALREADY_FINISHED";
+          __pi_schedule(function () {
+            done(err);
+          });
+        }
+        return this;
+      }
+      if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+      this.writableEnded = true;
+      if (done) this.__endCallbacks.push(done);
+      const self = this;
+      // Scheduled, not inline: `write` callbacks queued before this call must
+      // run before `finish`, the order Node gives them.
+      __pi_schedule(function () {
+        self.__flush();
+      });
+      return this;
+    }
+
+    __flush() {
+      if (this.__flushed || this.destroyed) return;
+      this.__flushed = true;
+      const payload = BufferCtor.concat(this.__chunks);
+      this.__chunks = [];
+      const callbacks = this.__endCallbacks;
+      this.__endCallbacks = [];
+      let failure = null;
+      try {
+        __pi_node_call(this.__append ? "fs.appendFile" : "fs.writeFile", {
+          path: this.path,
+          base64: payload.toString("base64"),
+        });
+      } catch (err) {
+        failure = err;
+      }
+      if (failure) {
+        this.writable = false;
+        this.emit("error", failure);
+        for (const cb of callbacks) cb(failure);
+        this.__close();
+        return;
+      }
+      this.writableFinished = true;
+      this.emit("finish");
+      for (const cb of callbacks) cb();
+      this.__close();
+    }
+
+    __close() {
+      if (this.closed) return;
+      this.closed = true;
+      this.destroyed = true;
+      this.writable = false;
+      this.emit("close");
+      return this;
+    }
+
+    destroy(error) {
+      if (this.destroyed) return this;
+      // Buffered bytes are dropped: `destroy()` abandons the stream before the
+      // single flush, exactly like Node cancelling its pending writes.
+      this.__chunks = [];
+      this.__endCallbacks = [];
+      this.writableEnded = true;
+      if (error) this.emit("error", error);
+      return this.__close();
+    }
+
+    cork() {
+      return this;
+    }
+
+    uncork() {
+      return this;
+    }
+  }
+
+  function createWriteStream(path, options) {
+    return new WriteStream(path, options);
+  }
+
   const mod = {
     readFileSync: readFileSync,
     writeFileSync: writeFileSync,
@@ -2758,6 +2966,8 @@ const __pi_fs_module = (() => {
     accessSync: accessSync,
     createReadStream: createReadStream,
     ReadStream: ReadStream,
+    createWriteStream: createWriteStream,
+    WriteStream: WriteStream,
     readFile: callbackify(readFileSync),
     writeFile: callbackify(writeFileSync),
     appendFile: callbackify(appendFileSync),
