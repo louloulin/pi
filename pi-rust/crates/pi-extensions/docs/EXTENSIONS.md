@@ -253,9 +253,12 @@ that created it, so it uses two extra async host imports.
 The web-platform names extensions treat as ambient are polyfilled by the
 shim when the engine lacks them: `atob` / `btoa`, `crypto` (`getRandomValues`
 / `randomUUID` / `subtle.digest`, backed by the host `crypto.digest` op over
-SHA-1 / SHA-256) and `URLSearchParams`. `npx`-style legacy OAuth extensions
-such as `custom-provider-anthropic/index.ts` need exactly this set to build a
-PKCE challenge and an authorize URL. `URL` is still unbridged; see the
+SHA-1 / SHA-256), `URLSearchParams`, and `URL` (LUM-1177). `npx`-style legacy
+OAuth extensions such as `custom-provider-anthropic/index.ts` need exactly this
+set to build a PKCE challenge and an authorize URL, and the sibling
+`custom-provider-gitlab-duo/index.ts` additionally parses the OAuth callback
+with `new URL(callbackUrl).searchParams.get("code")`, which is what motivated
+the `URL` global. Its divergences from Node are listed in the
 [globals table](NODE_BUILTINS.md#globals).
 
 ### SDK virtual modules (`@earendil-works/*`)
