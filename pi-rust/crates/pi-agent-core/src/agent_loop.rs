@@ -135,6 +135,13 @@ pub struct AgentLoop {
     follow_up: Vec<Message>,
     signal: CancellationToken,
     observer: Option<EventObserver>,
+    /// Session thinking level applied to the next provider call.
+    ///
+    /// Carried on the loop (not on [`AgentConfig`]) so the value survives the
+    /// per-run `LoopConfig` rebuild and is overridable per turn by a
+    /// `prepare_next_turn` hook. `None` until the session sets one; the
+    /// provider call then keeps its previous default.
+    thinking_level: Option<crate::hooks::ThinkingLevel>,
 }
 
 impl AgentLoop {
@@ -148,6 +155,7 @@ impl AgentLoop {
             follow_up: Vec::new(),
             signal: CancellationToken::new(),
             observer: None,
+            thinking_level: None,
         }
     }
 
@@ -186,6 +194,22 @@ impl AgentLoop {
     /// to swap the active model between turns.
     pub fn config_mut(&mut self) -> &mut AgentConfig {
         &mut self.config
+    }
+
+    /// The session thinking level applied to the next provider call.
+    ///
+    /// `None` means no level has been chosen; a `prepare_next_turn` hook can
+    /// still install one for a single turn via
+    /// [`AgentLoopTurnUpdate::thinking_level`](crate::hooks::AgentLoopTurnUpdate::thinking_level).
+    pub fn thinking_level(&self) -> Option<crate::hooks::ThinkingLevel> {
+        self.thinking_level
+    }
+
+    /// Set the session thinking level for every following turn. The value is
+    /// copied into each run's [`LoopConfig`] before the provider call is
+    /// assembled.
+    pub fn set_thinking_level(&mut self, level: crate::hooks::ThinkingLevel) {
+        self.thinking_level = Some(level);
     }
 
     /// Borrow the hook adapter driving this loop.
@@ -295,6 +319,10 @@ impl AgentLoop {
             tools: self.config.tool_definitions(),
         };
         let mut loop_config: LoopConfig = (&self.config).into();
+        // The session-level thinking level seeds every run of the loop; a
+        // `prepare_next_turn` hook may still override it per turn through
+        // `apply_turn_update`.
+        loop_config.thinking_level = self.thinking_level;
 
         let mut last_completed_turn: Option<ShouldStopAfterTurnContext> = None;
         let mut has_more_tool_calls = false;
@@ -652,7 +680,24 @@ async fn stream_assistant_events(
     config: &LoopConfig,
     observer: Option<&EventObserver>,
 ) -> Result<AssistantMessage, AgentError> {
-    let options = pi_ai::SimpleStreamOptions::default();
+    let mut options = pi_ai::SimpleStreamOptions::default();
+    // Stage 67 — the session thinking level reaches the provider call here.
+    //
+    // The Rust port cannot yet encode a thinking budget on the wire:
+    // `pi_ai::SimpleStreamOptions` has no `reasoning`/`thinking` field
+    // (`pi-ai/src/types.rs:11`), and the descriptor the provider receives has
+    // no `reasoning` flag either (`pi-ai/src/providers/registry.rs:585` drops
+    // upstream's `Model.reasoning`). Both live in the frozen `pi-ai` crate, so
+    // this is the deepest seam available: an extended level is consumed while
+    // the request is assembled and suppresses the temperature override, which
+    // is upstream's rule for thinking-enabled requests
+    // (`pi-ai/src/providers/anthropic.rs:263`).
+    if config
+        .thinking_level
+        .is_some_and(|level| level.is_reasoning())
+    {
+        options.temperature = None;
+    }
     let mut stream = stream_fn
         .stream_simple(&config.model, context, &options)
         .await

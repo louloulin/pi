@@ -69,6 +69,7 @@ pub mod session_log;
 pub mod skills;
 pub mod system_prompt;
 pub mod text_fallback;
+pub mod thinking;
 pub mod tool_executor;
 pub mod tool_validation;
 pub mod tools;

@@ -29,7 +29,7 @@ use crossterm::terminal::{
 };
 use parking_lot::Mutex as SyncMutex;
 use pi_agent_core::tools::ToolExecutor;
-use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy};
+use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy, ThinkingLevel};
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
@@ -350,6 +350,22 @@ async fn run_loop(
     // `CombinedAutocompleteProvider` on the editor at startup; `tool_cwd` is
     // the base the `@` file completion walks.
     install_composer_autocomplete(&mut app, tool_cwd);
+
+    // Stage 67 — seed the session thinking level from the persisted
+    // `defaultThinkingLevel`, clamp it to what the active model can honour,
+    // and publish it to both the agent (the next provider call) and the App
+    // (status bar + editor chrome).
+    {
+        let mut agent_guard = agent.lock().await;
+        let supports = crate::thinking::model_supports_thinking(agent_guard.model());
+        let level = crate::thinking::clamp_thinking_level(
+            supports,
+            config::load_default_thinking_level(&settings_sources()),
+        );
+        agent_guard.set_thinking_level(level);
+        app.set_thinking_supported(supports);
+        app.set_thinking_level(level);
+    }
 
     // Local `!` / `!!` commands: one at a time, run off the render loop so
     // `Esc` can cancel them.
@@ -713,6 +729,30 @@ async fn handle_input_event(
         let InputEvent::Key(key) = event else {
             return Ok(None);
         };
+        // `app.thinking.save` (Ctrl+S) inside the thinking selector persists
+        // the highlighted level as the default — upstream consumes the chord
+        // in `ThinkingSelectorComponent.handleInput`, a behaviour no other
+        // selector has. Intercepted here because the shared `Selector`
+        // ignores it; the model selector's own Ctrl+S is a separate gap.
+        let selected = app
+            .selector()
+            .and_then(|selector| selector.selected_value())
+            .map(str::to_string);
+        if let Some(value) = selected {
+            let keybindings = pi_tui::keybindings::get_keybindings();
+            if value.starts_with("thinking:")
+                && pi_tui::keybindings::matches_with_fallback(
+                    &keybindings,
+                    &InputEvent::Key(key),
+                    "app.thinking.save",
+                    &["ctrl+s"],
+                )
+            {
+                app.close_selector();
+                apply_thinking_selector_value(app, agent, &value, true).await;
+                return Ok(None);
+            }
+        }
         let selector_state = app.selector().cloned();
         if let Some(sel) = selector_state {
             let mut owned = sel;
@@ -763,6 +803,17 @@ async fn handle_input_event(
             &["shift+ctrl+p"],
         ) {
             cycle_model(app, agent, options, CycleDirection::Backward).await;
+            return Ok(None);
+        }
+        // `app.thinking.cycle` (Shift+Tab) — the same switching path
+        // `/thinking` and the selector take.
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.thinking.cycle",
+            &["shift+tab"],
+        ) {
+            handle_thinking_cycle(app, agent).await;
             return Ok(None);
         }
         if pi_tui::keybindings::matches_with_fallback(
@@ -1002,6 +1053,164 @@ async fn deliver_pending(
     handle_submitted(app, agent, options, bash, text.into()).await
 }
 
+/// The status line upstream prints when `app.thinking.cycle` has nowhere to
+/// go (`interactive-mode.ts:4179`).
+const UNSUPPORTED_THINKING_STATUS: &str = "Current model does not support thinking";
+
+/// Re-derive the thinking level after a model switch: recompute the support
+/// flag, then clamp the session level to what the new model can honour.
+///
+/// `app` and `agent` must already reflect the new model (call this right after
+/// [`App::queue_model_switch`]). Upstream keeps a per-model level in
+/// `modelThinkingLevels`; this port has no such memory yet, so the session
+/// level carries over and is clamped.
+fn sync_thinking_for_model(app: &mut App, agent: &mut Agent) {
+    let supports = crate::thinking::model_supports_thinking(agent.model());
+    let level = crate::thinking::clamp_thinking_level(supports, app.thinking_level());
+    agent.set_thinking_level(level);
+    app.set_thinking_supported(supports);
+    app.set_thinking_level(level);
+}
+
+/// `app.thinking.cycle` — the Shift+Tab cycle.
+///
+/// Upstream `cycleThinkingLevel` (`interactive-mode.ts:4177`): a model that
+/// cannot reason has no next level, so the request is reported instead of
+/// silently ignored. Everything else funnels through
+/// [`apply_thinking_level`], the same path `/thinking` and the selector use.
+async fn handle_thinking_cycle(app: &mut App, agent: &Arc<AsyncMutex<Agent>>) {
+    let supports = {
+        let agent_guard = agent.lock().await;
+        crate::thinking::model_supports_thinking(agent_guard.model())
+    };
+    // `cycle_thinking_level` returns `None` exactly when the model cannot
+    // reason. `Max` then routes through the shared path, which reports the
+    // limitation (`UNSUPPORTED_THINKING_STATUS`) instead of echoing a level
+    // the model would ignore.
+    let next = crate::thinking::cycle_thinking_level(supports, app.thinking_level())
+        .unwrap_or(ThinkingLevel::Max);
+    apply_thinking_level(app, agent, next, false).await;
+}
+
+/// The single switching code path behind every thinking-level entry point.
+///
+/// Mirrors upstream `AgentSession::setThinkingLevel`
+/// (`agent-session.ts:1814`) plus the status lines `selectThinkingLevel`
+/// prints (`interactive-mode.ts:4806`): the requested level is clamped to what
+/// the model supports, published to the agent (the next provider call) and to
+/// the App (status bar + editor chrome), and — when `persist` is set — written
+/// to `defaultThinkingLevel`.
+async fn apply_thinking_level(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    level: ThinkingLevel,
+    persist: bool,
+) {
+    let mut agent_guard = agent.lock().await;
+    let supports = crate::thinking::model_supports_thinking(agent_guard.model());
+    let clamped = crate::thinking::clamp_thinking_level(supports, level);
+    agent_guard.set_thinking_level(clamped);
+    drop(agent_guard);
+    app.set_thinking_supported(supports);
+    app.set_thinking_level(clamped);
+
+    if persist && !persist_default_thinking_level(app, &settings_sources(), level) {
+        return;
+    }
+
+    if !supports && level.is_reasoning() {
+        // An attempt to raise the level on a model that cannot reason reports
+        // the limitation rather than echoing a level that will be ignored.
+        app.flash_status(UNSUPPORTED_THINKING_STATUS);
+    } else if persist {
+        app.flash_status(format!(
+            "Default thinking level: {}",
+            crate::thinking::level_label(level)
+        ));
+    } else {
+        app.flash_status(format!(
+            "Thinking level: {}",
+            crate::thinking::level_label(clamped)
+        ));
+    }
+}
+
+/// Apply a `/thinking` selector value (`thinking:<level>`).
+///
+/// `persist` distinguishes Enter (in-session) from `app.thinking.save`
+/// (Ctrl+S), matching upstream's `onSelect` / `onSelectAsDefault` callbacks.
+async fn apply_thinking_selector_value(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    value: &str,
+    persist: bool,
+) {
+    let Some(level) = value
+        .strip_prefix("thinking:")
+        .and_then(crate::thinking::parse_thinking_level)
+    else {
+        return;
+    };
+    apply_thinking_level(app, agent, level, persist).await;
+}
+
+/// Write `level` to `defaultThinkingLevel` in the discovered settings
+/// locations, reporting a failure through the message view.
+///
+/// Returns `false` when the write failed (the caller then skips the status
+/// flash). Split out of [`apply_thinking_level`] so the persistence rule is
+/// testable against a throwaway settings file; upstream persists the
+/// *requested* level, not the clamped one (`setThinkingLevel(level, {
+/// persist: true })`, `agent-session.ts:1814`), so a level the current model
+/// cannot honour still becomes the default for the models that can.
+fn persist_default_thinking_level(
+    app: &mut App,
+    sources: &ConfigSources,
+    level: ThinkingLevel,
+) -> bool {
+    match config::save_default_thinking_level(sources, level) {
+        Ok(_) => true,
+        Err(err) => {
+            app.info(format!("/thinking: {err}"));
+            false
+        }
+    }
+}
+
+/// Open the `/thinking` selector — upstream `showThinkingSelector`
+/// (`interactive-mode.ts:4817`), reusing the shared [`Selector`] the model
+/// picker uses.
+fn open_thinking_selector(app: &mut App, supports: bool) {
+    let current = app.thinking_level();
+    let default = config::load_default_thinking_level(&settings_sources());
+    let available = crate::thinking::available_thinking_levels(supports);
+    let items = available
+        .iter()
+        .map(|level| {
+            let marker = if *level == current { '✓' } else { ' ' };
+            let description = if *level == default {
+                format!("{} · default", crate::thinking::level_description(*level))
+            } else {
+                crate::thinking::level_description(*level).to_string()
+            };
+            SelectorItem::new(
+                format!("thinking:{}", level.as_str()),
+                format!("{marker} {}", level.as_str()),
+            )
+            .with_description(description)
+        })
+        .collect::<Vec<_>>();
+    let mut selector = Selector::new("Thinking Level", items).searchable(true);
+    // Upstream opens with the current level highlighted, so Enter on an
+    // untouched list keeps the level (`setSelectedIndex`).
+    if let Some(index) = available.iter().position(|level| *level == current) {
+        for _ in 0..index {
+            selector.next();
+        }
+    }
+    app.open_selector(selector);
+}
+
 /// Which way `app.model.cycleForward` / `app.model.cycleBackward` move
 /// through the model catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1060,6 +1269,7 @@ async fn cycle_model(
     let (provider, model) = catalog[next].clone();
     let label = model.label.clone().unwrap_or_else(|| model.id.clone());
     app.queue_model_switch(&mut agent_guard, model);
+    sync_thinking_for_model(app, &mut agent_guard);
     app.info(format!("model → {provider}/{label}"));
 }
 
@@ -1103,9 +1313,16 @@ async fn apply_selector_choice(
             }
         }
         if let Some((_, model)) = found {
-            app.queue_model_switch(&mut *agent.lock().await, model);
+            let mut agent_guard = agent.lock().await;
+            app.queue_model_switch(&mut agent_guard, model);
+            sync_thinking_for_model(app, &mut agent_guard);
+            drop(agent_guard);
             app.info(format!("model → {}", id));
         }
+    } else if value.starts_with("thinking:") {
+        // The `/thinking` selector reuses the shared [`Selector`]; its values
+        // carry the `thinking:` prefix.
+        apply_thinking_selector_value(app, agent, value, false).await;
     } else if let Some(session_id) = value.strip_prefix("resume:") {
         resume_session(app, agent, options, session_id).await;
     } else if let Some(entry_id) = value.strip_prefix("tree:") {
@@ -1802,6 +2019,38 @@ async fn run_slash_command(
         }
         SlashCommand::Settings => {
             open_settings(app, options, &settings_sources());
+        }
+        SlashCommand::Thinking { level } => {
+            let (supports, available) = {
+                let agent_guard = agent.lock().await;
+                let supports = crate::thinking::model_supports_thinking(agent_guard.model());
+                (
+                    supports,
+                    crate::thinking::available_thinking_levels(supports),
+                )
+            };
+            match level {
+                Some(raw) => {
+                    // Upstream matches the argument case-insensitively against
+                    // the levels the *model* offers (`handleThinkingCommand`,
+                    // `interactive-mode.ts:4789`), so an unsupported level is
+                    // reported rather than applied.
+                    let requested = crate::thinking::parse_thinking_level(&raw)
+                        .filter(|candidate| available.contains(candidate));
+                    match requested {
+                        Some(level) => apply_thinking_level(app, agent, level, false).await,
+                        None => app.info(format!(
+                            "Unknown thinking level \"{raw}\". Available levels: {}.",
+                            available
+                                .iter()
+                                .map(|level| level.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                    }
+                }
+                None => open_thinking_selector(app, supports),
+            }
         }
         SlashCommand::Compact { instructions } => {
             run_compact(app, agent, options, instructions.as_deref()).await;
@@ -4183,5 +4432,185 @@ mod tests {
 
         assert_eq!(app.image_count(), 0, "/new must drop the old draft's chips");
         assert_eq!(app.editor_text(), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Thinking level (Stage 67 / LUM-1230)
+    // -----------------------------------------------------------------------
+
+    /// A model whose API family plus id mark it reasoning-capable — the port's
+    /// equivalent of upstream's `Model.reasoning === true`.
+    fn reasoning_model() -> Model {
+        Model {
+            provider: ProviderId::new("openai"),
+            id: "o3-mini".into(),
+            api: Api::OpenAiChatCompletions,
+            label: None,
+            context_window: 1_000_000,
+            max_output_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_thinking_cycle_moves_the_level_and_the_agent() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+        app.set_thinking_supported(true);
+        app.set_thinking_level(ThinkingLevel::Medium);
+
+        handle_thinking_cycle(&mut app, &agent).await;
+
+        assert_eq!(app.thinking_level(), ThinkingLevel::High);
+        assert_eq!(
+            agent.lock().await.thinking_level(),
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(app.status_flash(), Some("Thinking level: high"));
+    }
+
+    #[tokio::test]
+    async fn the_thinking_cycle_wraps_from_max_to_off() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+        app.set_thinking_supported(true);
+        app.set_thinking_level(ThinkingLevel::Max);
+
+        handle_thinking_cycle(&mut app, &agent).await;
+
+        assert_eq!(app.thinking_level(), ThinkingLevel::Off);
+        assert_eq!(app.status_flash(), Some("Thinking level: off"));
+    }
+
+    #[tokio::test]
+    async fn the_thinking_cycle_reports_a_model_that_cannot_reason() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        app.set_thinking_level(ThinkingLevel::Medium);
+
+        handle_thinking_cycle(&mut app, &agent).await;
+
+        assert!(!app.thinking_supported());
+        assert_eq!(app.thinking_level(), ThinkingLevel::Off, "clamped to off");
+        assert_eq!(
+            app.status_flash(),
+            Some("Current model does not support thinking"),
+            "raising the level on a non-reasoning model must not be silent"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_thinking_sets_the_level_directly() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+        let mut options = InteractiveOptions::default();
+
+        run_slash_command(&mut app, &agent, &mut options, "/thinking high")
+            .await
+            .expect("thinking");
+
+        assert_eq!(app.thinking_level(), ThinkingLevel::High);
+        assert_eq!(
+            agent.lock().await.thinking_level(),
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(app.status_flash(), Some("Thinking level: high"));
+        assert!(
+            !app.selector_open(),
+            "an explicit level never opens the selector"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_thinking_rejects_a_level_the_model_cannot_honour() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+
+        run_slash_command(&mut app, &agent, &mut options, "/thinking high")
+            .await
+            .expect("thinking");
+
+        // Upstream `handleThinkingCommand` only reports; it never calls
+        // `setThinkingLevel`, so the level is left exactly as it was.
+        assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
+        assert_eq!(agent.lock().await.thinking_level(), None);
+        assert!(app.status_flash().is_none());
+        let text = transcript(&app);
+        assert!(text.contains("Unknown thinking level \"high\""), "{text}");
+        assert!(text.contains("Available levels: off"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn slash_thinking_without_an_argument_opens_the_selector() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+        let mut options = InteractiveOptions::default();
+        app.set_thinking_level(ThinkingLevel::Medium);
+
+        run_slash_command(&mut app, &agent, &mut options, "/thinking")
+            .await
+            .expect("thinking");
+
+        assert!(app.selector_open());
+        // Upstream highlights the current level when the list opens.
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("thinking:medium")
+        );
+    }
+
+    #[tokio::test]
+    async fn choosing_a_thinking_level_from_the_selector_applies_it() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+        let mut options = InteractiveOptions::default();
+        run_slash_command(&mut app, &agent, &mut options, "/thinking")
+            .await
+            .expect("thinking");
+
+        apply_thinking_selector_value(&mut app, &agent, "thinking:high", false).await;
+
+        assert_eq!(app.thinking_level(), ThinkingLevel::High);
+        assert_eq!(
+            agent.lock().await.thinking_level(),
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(app.status_flash(), Some("Thinking level: high"));
+    }
+
+    #[tokio::test]
+    async fn thinking_selector_values_ignore_anything_but_a_level() {
+        let (mut app, agent) = app_starting_at(reasoning_model()).await;
+
+        apply_thinking_selector_value(&mut app, &agent, "model:gpt-4o", false).await;
+        assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
+        apply_thinking_selector_value(&mut app, &agent, "thinking:bogus", false).await;
+        assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
+    }
+
+    #[test]
+    fn persisting_the_default_thinking_level_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+
+        assert!(persist_default_thinking_level(
+            &mut app,
+            &sources,
+            ThinkingLevel::High
+        ));
+        let raw = std::fs::read_to_string(user_settings_path(dir.path())).expect("settings");
+        assert!(raw.contains("\"defaultThinkingLevel\": \"high\""), "{raw}");
+        assert_eq!(
+            config::load_default_thinking_level(&sources),
+            ThinkingLevel::High
+        );
+
+        // A failed write is reported, never a silent drop.
+        std::fs::write(dir.path().join("blocked"), b"not a directory").expect("blocker");
+        let unwritable = ConfigSources {
+            user: Some(dir.path().join("blocked").join(config::SETTINGS_FILE_NAME)),
+            project: None,
+        };
+        let mut app = settings_app();
+        assert!(!persist_default_thinking_level(
+            &mut app,
+            &unwritable,
+            ThinkingLevel::Low
+        ));
+        assert!(transcript(&app).contains("/thinking:"));
     }
 }

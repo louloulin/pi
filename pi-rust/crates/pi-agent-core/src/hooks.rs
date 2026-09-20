@@ -102,9 +102,79 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
+    /// Every level in upstream declaration order (off → max). Mirrors
+    /// `EXTENDED_THINKING_LEVELS` in `packages/ai/src/models.ts:913` and
+    /// `THINKING_LEVEL_OPTIONS` in
+    /// `packages/coding-agent/src/core/defaults.ts`.
+    pub const ALL: [ThinkingLevel; 7] = [
+        ThinkingLevel::Off,
+        ThinkingLevel::Minimal,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+        ThinkingLevel::Xhigh,
+        ThinkingLevel::Max,
+    ];
+
+    /// The wire / settings spelling of this level (upstream's
+    /// `ModelThinkingLevel` string union).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ThinkingLevel::Off => "off",
+            ThinkingLevel::Minimal => "minimal",
+            ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Xhigh => "xhigh",
+            ThinkingLevel::Max => "max",
+        }
+    }
+
     /// True when the level would request reasoning tokens from the model.
     pub fn is_reasoning(self) -> bool {
         !matches!(self, Self::Off)
+    }
+}
+
+impl std::fmt::Display for ThinkingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error returned when a string is not one of the seven thinking levels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseThinkingLevelError {
+    /// The offending input, kept for the message.
+    pub input: String,
+}
+
+impl std::fmt::Display for ParseThinkingLevelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown thinking level {:?}", self.input)
+    }
+}
+
+impl std::error::Error for ParseThinkingLevelError {}
+
+impl std::str::FromStr for ThinkingLevel {
+    type Err = ParseThinkingLevelError;
+
+    /// Parse the upstream spelling, case-insensitively
+    /// (`packages/ai/src/models.ts` compares `toLowerCase()`).
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(ThinkingLevel::Off),
+            "minimal" => Ok(ThinkingLevel::Minimal),
+            "low" => Ok(ThinkingLevel::Low),
+            "medium" => Ok(ThinkingLevel::Medium),
+            "high" => Ok(ThinkingLevel::High),
+            "xhigh" | "x-high" | "extra-high" => Ok(ThinkingLevel::Xhigh),
+            "max" => Ok(ThinkingLevel::Max),
+            _ => Err(ParseThinkingLevelError {
+                input: text.trim().to_string(),
+            }),
+        }
     }
 }
 
