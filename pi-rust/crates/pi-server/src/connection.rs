@@ -34,7 +34,8 @@ pub trait ByteConnectionHandler: Send + Sync {
 }
 
 /// Creates a handler for an accepted connection.
-pub type ByteConnectionAcceptor = Arc<dyn Fn(Arc<dyn ByteConnection>) -> Arc<dyn ByteConnectionHandler> + Send + Sync>;
+pub type ByteConnectionAcceptor =
+    Arc<dyn Fn(Arc<dyn ByteConnection>) -> Arc<dyn ByteConnectionHandler> + Send + Sync>;
 
 /// The lifecycle stage of one accepted connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -132,9 +132,10 @@ impl ProtocolTestClient {
         let index = self.inner.messages.lock().len();
         self.send_message(&ClientMessage::request(id.clone(), target, call.to_json()))?;
         let message = self
-            .next_from(index, |message| {
-                matches!(message, ServerMessage::Response { id: rid, .. } if *rid == id)
-            })
+            .next_from(
+                index,
+                |message| matches!(message, ServerMessage::Response { id: rid, .. } if *rid == id),
+            )
             .await?;
         match message {
             ServerMessage::Response {
@@ -153,7 +154,11 @@ impl ProtocolTestClient {
     }
 
     /// Attaches to `session_id` through the test server services.
-    pub async fn attach(&self, server_id: &str, session_id: &str) -> Result<ResponseEnvelope, ServerError> {
+    pub async fn attach(
+        &self,
+        server_id: &str,
+        session_id: &str,
+    ) -> Result<ResponseEnvelope, ServerError> {
         self.request_service(
             RpcTarget::Server(pi_protocol::rpc::ServerTarget {
                 server_id: server_id.to_owned(),
@@ -189,7 +194,9 @@ impl ProtocolTestClient {
         id: Option<String>,
     ) -> Result<ResponseEnvelope, ServerError> {
         let target = match self.attachment() {
-            Some(attachment) if attachment.session_id == session_id => RpcTarget::Session(attachment),
+            Some(attachment) if attachment.session_id == session_id => {
+                RpcTarget::Session(attachment)
+            }
             _ => RpcTarget::Session(SessionTarget {
                 server_id: server_id.to_owned(),
                 session_id: session_id.to_owned(),
@@ -244,7 +251,11 @@ impl ProtocolTestClient {
     }
 
     /// Awaits the next message matching `predicate`, scanning from `index`.
-    pub async fn next_from<F>(&self, index: usize, predicate: F) -> Result<ServerMessage, ServerError>
+    pub async fn next_from<F>(
+        &self,
+        index: usize,
+        predicate: F,
+    ) -> Result<ServerMessage, ServerError>
     where
         F: Fn(&ServerMessage) -> bool,
     {
@@ -253,7 +264,11 @@ impl ProtocolTestClient {
             let notified = self.inner.notify.notified();
             {
                 let messages = self.inner.messages.lock();
-                if let Some(found) = messages.iter().skip(index).find(|message| predicate(message)) {
+                if let Some(found) = messages
+                    .iter()
+                    .skip(index)
+                    .find(|message| predicate(message))
+                {
                     return Ok(found.clone());
                 }
             }
@@ -261,7 +276,9 @@ impl ProtocolTestClient {
                 return Err(ServerError::internal("Wire connection closed"));
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Err(ServerError::internal("Timed out waiting for a server message"));
+                return Err(ServerError::internal(
+                    "Timed out waiting for a server message",
+                ));
             }
         }
     }

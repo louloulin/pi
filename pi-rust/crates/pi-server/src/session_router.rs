@@ -166,7 +166,9 @@ impl<TMetadata: SessionMetadata> SessionRouter<TMetadata> {
                     )));
                 }
             }
-            state.attachments_by_client.insert(client, Arc::clone(&attachment));
+            state
+                .attachments_by_client
+                .insert(client, Arc::clone(&attachment));
         }
         attachment.sink.publish(Some(SessionTarget {
             server_id: self.server_id.clone(),
@@ -378,11 +380,9 @@ impl<TMetadata: SessionMetadata> SessionRouter<TMetadata> {
                 .collect::<Vec<_>>()
         };
         for attachment in attachments {
-            if let Err(release_error) = self.release_attachment(
-                &attachment,
-                pi_chord::context::background_context(),
-                true,
-            ) {
+            if let Err(release_error) =
+                self.release_attachment(&attachment, pi_chord::context::background_context(), true)
+            {
                 self.report(release_error);
             }
         }

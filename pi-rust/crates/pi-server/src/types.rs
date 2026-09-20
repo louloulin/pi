@@ -22,9 +22,8 @@ pub type TerminationFuture = Shared<BoxFuture<'static, Option<ServerError>>>;
 /// This is the synchronous Rust form of upstream's `publish` callback: the
 /// current subscription state encoder is applied by the server before the
 /// update reaches the wire.
-pub type ServicePublish = Arc<
-    dyn Fn(&str, &ServiceProviderUpdate, &Context) -> Result<(), ServerError> + Send + Sync,
->;
+pub type ServicePublish =
+    Arc<dyn Fn(&str, &ServiceProviderUpdate, &Context) -> Result<(), ServerError> + Send + Sync>;
 
 /// The durable identity of one hosted session.
 ///
@@ -100,7 +99,11 @@ pub trait RoutedServerPresentation: Send + Sync {
     fn detach_session(&self, context: &Context) -> Result<(), ServerError>;
 
     /// Releases routed attachments and handles before durable metadata is deleted.
-    fn prepare_session_removal(&self, session_id: &str, context: &Context) -> Result<(), ServerError>;
+    fn prepare_session_removal(
+        &self,
+        session_id: &str,
+        context: &Context,
+    ) -> Result<(), ServerError>;
 }
 
 /// One connection's server-scoped service endpoint.
@@ -130,7 +133,10 @@ pub trait RoutedServerServiceHost: Send + Sync {
 /// A process-safe handle that acquires presentation-scoped session capabilities.
 pub trait RoutedSessionHandle: Send + Sync {
     /// Acquires a lease for one presentation connection.
-    fn attach_client(&self, context: &Context) -> Result<Arc<dyn RoutedSessionAttachment>, ServerError>;
+    fn attach_client(
+        &self,
+        context: &Context,
+    ) -> Result<Arc<dyn RoutedSessionAttachment>, ServerError>;
 
     /// Resolves when the session terminates.
     fn terminated(&self) -> Option<TerminationFuture> {
@@ -147,7 +153,11 @@ pub trait ServerHost<TMetadata: SessionMetadata>: Send + Sync {
     fn server_services(&self) -> Arc<dyn RoutedServerServiceHost>;
 
     /// Resolves one durable session id, or returns a bounded routing error.
-    fn resolve_session(&self, session_id: &str, context: &Context) -> Result<TMetadata, ServerError>;
+    fn resolve_session(
+        &self,
+        session_id: &str,
+        context: &Context,
+    ) -> Result<TMetadata, ServerError>;
 
     /// Opens one resolved session.
     fn open_session(

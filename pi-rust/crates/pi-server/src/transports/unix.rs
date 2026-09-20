@@ -73,8 +73,9 @@ impl ServerListener for UnixServerListener {
                 .map_err(|error| ServerError::internal(error.to_string()))?;
         }
         remove_stale_socket(&self.path)?;
-        let listener = tokio::net::UnixListener::bind(&self.path)
-            .map_err(|error| ServerError::internal(format!("Unix listener failed to bind: {error}")))?;
+        let listener = tokio::net::UnixListener::bind(&self.path).map_err(|error| {
+            ServerError::internal(format!("Unix listener failed to bind: {error}"))
+        })?;
         let task = tokio::spawn(accept_loop(listener, self.path.clone(), accept));
         let mut state = self.state.lock();
         state.task = Some(task);
@@ -98,7 +99,11 @@ impl ServerListener for UnixServerListener {
     }
 }
 
-async fn accept_loop(listener: tokio::net::UnixListener, path: PathBuf, accept: ByteConnectionAcceptor) {
+async fn accept_loop(
+    listener: tokio::net::UnixListener,
+    path: PathBuf,
+    accept: ByteConnectionAcceptor,
+) {
     let _ = &path;
     while let Ok((stream, _)) = listener.accept().await {
         let accept = Arc::clone(&accept);
@@ -118,8 +123,7 @@ fn remove_stale_socket(path: &Path) -> Result<(), ServerError> {
                     path.display()
                 )));
             }
-            std::fs::remove_file(path)
-                .map_err(|error| ServerError::internal(error.to_string()))
+            std::fs::remove_file(path).map_err(|error| ServerError::internal(error.to_string()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(ServerError::internal(error.to_string())),
