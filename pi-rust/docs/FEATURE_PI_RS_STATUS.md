@@ -11964,3 +11964,162 @@ tips 再前进一格后以 `git ls-remote` 为准。
 - Git 身份用 worktree 级覆盖（`multica-agent <agent@multica.local>`）。
 - 本分支基于 `026b6827c`，rebase 到 `d43df51e8`（LUM-1157 合入后的 feature/pi.rs）后重跑测试，
   全绿；`git push origin HEAD:feature/pi.rs` 为快进。
+
+## LUM-1159 round — pi-extensions 补齐 Web 平台全局（`atob` / `btoa` / `crypto` / `URLSearchParams` + `crypto.digest` 桥）+ 派发 Stage 48 / 撤销 Stage 49 + 合并推送 feature/pi.rs
+
+本轮起点 `d43df51e8`（LUM-1157 轮文档），开工 `cargo check -p pi-extensions --offline` **49.78s** 通过。
+本轮**自实现一刀 + 派发一刀**：`pi-extensions` 的 Web 平台全局（前沿新增项），以及
+`pi-ai` 的 `auth/` 凭据子系统（Stage 48）。另有一条 Stage 49（LUM-1161）因与 LUM-1158 撞车被**撤销**，
+详见第七节。
+
+### 一、本轮定位与选型
+
+- **为什么是 Web 全局**：`packages/coding-agent/examples/extensions/custom-provider-anthropic/index.ts`
+  是仓库内唯一一个把 PKCE 走完的上游例子，它的第 47–83 行依次需要
+  `atob`（解 client id 的 base64）、`crypto.getRandomValues`、`btoa`（base64url 化）、
+  `TextEncoder`、`crypto.subtle.digest("SHA-256", …)` 与 `new URLSearchParams({…})`。
+  LUM-1135 已把 `fetch` 桥好，但这条链上的全局在 QuickJS 里**一个都没有**
+  （`docs/NODE_BUILTINS.md` 的 frontier 表把它们列在「未桥接」），所以该例子仍会死在
+  `undefined is not a function`。
+- **为什么不是别的**：`edit` 渲染器与 `edit-diff.ts` 是 LUM-1158 的地盘（本轮开工时不知道，
+  见第七节）；mistral / azure / vertex / bedrock 的模型目录取自 models.dev，
+  维持「无上游数据源，不猜」；provider catalog 是 P3。
+- **本轮不碰**：`pi-coding-agent/**`（LUM-1158）、`pi-ai/**`（LUM-1157 与 Stage 47）、
+  `pi-tui/**`；`pi-extensions/src/host.rs` 本轮由本人单写（其他轮不得同时写）。
+
+### 二、改动清单（7 文件，+1294 / −12，对 `d43df51e8`）
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-extensions/src/digest.rs`（新，322 行） | 手写 SHA-1 / SHA-256：`Algorithm { Sha1, Sha256 }` + `parse()` / `digest()` / `sha256()` / `sha1()` / `padded_blocks()`；6 个单测（FIPS 向量 + 56/64 字节填充边界） |
+| `crates/pi-extensions/src/lib.rs`（+1） | `mod digest;` |
+| `crates/pi-extensions/src/host.rs`（+14） | `host_node_call` 新增 op `crypto.digest`（`algorithm` + `base64` 入参，返回 base64 摘要） |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs`（+390 / −8） | `node:crypto` 侧：`createHash`（缓冲式 `update`/`digest`）、`getRandomValues`、`subtle.digest`、`webcrypto`、`createHmac` 改为可读报错。新增 Web 全局段：`btoa`/`atob`（Latin-1 二进制字符串契约 + `InvalidCharacterError`）、`globalThis.crypto`、`URLSearchParams` polyfill（全 API + 可迭代） |
+| `crates/pi-extensions/tests/web_globals.rs`（新，513 行） | 4 条：base64 契约、crypto 摘要 + 填充 + 配额/类型错误、`URLSearchParams` 编解码、二次加载幂等 |
+| `crates/pi-extensions/docs/NODE_BUILTINS.md`（+38 / −6） | `node:crypto` 段重写（列出已桥接的摘要面与仍缺的 HMAC/密钥态 WebCrypto）；frontier 表两行改写；新增 `## Globals` 表 |
+| `crates/pi-extensions/docs/EXTENSIONS.md`（+8 / −2） | 「Node builtin virtual modules」段补 Web 全局说明；兼容性表 `node:crypto` 行的覆盖范围细化 |
+
+未新增任何 crate 依赖（离线 registry 的 `Cargo.lock` 里既无 `sha2`/`sha1`/`digest`/`hmac`
+也无 `md5`；`base64`/`url`/`percent-encoding` 有，但它们在 Rust 侧，扩展 JS 拿不到）。
+
+### 三、设计取舍
+
+1. **手写 SHA-1 / SHA-256**（`digest.rs`），而不是加依赖：离线 registry 没有摘要后端，
+   且本 crate 已有手写 `deflate.rs`（DEFLATE/gzip/zlib + CRC32/Adler32）的先例。
+   `Algorithm::parse` 对齐 WebCrypto/Node 的写法兼容性：`sha256` / `SHA-256` / `Sha-256`
+   都可（连字符可选、大小写不敏感）；`md5` / `sha512` → `None` → 明确报错，
+   绝不给出**错误摘要**（离线环境里最贵的 bug 是静默算错）。
+2. **新的桥是 op 而不是新 import**：`crypto.digest` 挂在既有的
+   `host_node_call(op, argsJson)` 上（`node:fs` / `node:os` / `node:buffer` / `node:zlib` /
+   `node:child_process` 同一个入口），所以扩展的 host import 面没有变宽，wasm32 侧的
+   `host_node_call` 缺口数也不变。
+3. **`createHash` 是真正的缓冲实现**，不再是「直接抛」：`update()` 接受 string / ArrayBuffer /
+   ArrayBufferView（`Buffer` 是 `Uint8Array` 子类，两条路都能走），链式返回自身；
+   `digest([encoding])` 无参返回 `Buffer`，带 `hex`/`base64`/… 返回字符串。
+   流式状态机留在宿主（一次性摘要），对调用方不可见。
+4. **`getRandomValues` 按规范收紧**：只接受整型 TypedArray（`DataView` / `Float32Array` /
+   `Float64Array` 抛 `TypeError`）、单次 64 KiB 配额、原地填充并返回入参；
+   字节来自既有的 `/dev/urandom` 通道。
+5. **`btoa`/`atob` 是严格的 Latin-1 二进制字符串契约**：`btoa` 对 > `0xFF` 的码位抛
+   `InvalidCharacterError`（不静默截断成 UTF-8）；`atob` 先按规范剥掉 ASCII 空白，
+   再校验长度是 4 的倍数与字母表，错误同样是 `InvalidCharacterError`。
+   `0xFF` 边界（`btoa("\u00ff") === "/w=="`）有专门断言。
+6. **`URLSearchParams` 是纯 JS polyfill**（QuickJS 没有）：`application/x-www-form-urlencoded`
+   编解码 + `append`/`delete`/`get`/`getAll`/`has`/`set`/`sort`/`size`/`toString`/`forEach`
+   + `keys`/`values`/`entries` 迭代器 + `Symbol.iterator` + `Symbol.toStringTag`；
+   四种构造入参（查询串 / record / 键值对序列 / 另一个 `URLSearchParams`）都吃。
+   `fetch` 的 body 分支原来就在引用 `URLSearchParams`，现在这个名字从「运行时才炸」变成可用。
+7. **幂等安装**：所有全局都用 `typeof globalThis.X === "undefined"` 守卫再赋值，
+   重复求值 shim 不覆盖已有实现（引擎自带 `TextEncoder` 时保留引擎的）；
+   `web_globals.rs` 的 `globals_survive_a_second_extension_load` 就是这个行为的回归测试。
+8. **PNG/图片类扩展提醒**：`crypto.subtle` 只实现 `digest`，`importKey` / `sign` / `encrypt`
+   仍不存在 —— `key-based` WebCrypto 需要一套密钥/分组密码后端，不在本轮射程内。
+
+### 四、验证
+
+- `cargo test -p pi-extensions --offline`：**15 个测试目标全绿**（lib 11 条含 `digest` 6 条、
+  `web_globals` 4 条、其余 14 个既有目标不变），合并 LUM-1158 后的 `feature/pi.rs` 上复跑同样全绿。
+- 关键向量：RFC 7636 附录 B —— verifier `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk`
+  → `S256` challenge `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`（`btoa` + base64url 化后一致）；
+  `btoa(Uint8Array[0,1,254,255]) === "AAH+/w=="`；`sha1("a" * 56)` 命中
+  `c2db330f6083854c99d4b5bfb6e8f29f201be699`（填充边界）。
+- `node --check runtime/pi-ext-shim.mjs` → SYNTAX OK。
+- `cargo check -p pi-coding-agent --offline` → `Finished` 47.99s（下游 crate 不受影响）。
+- 格式：本轮文件 `cargo fmt -p pi-extensions --check` **零命中**。注意：`cargo fmt -p pi-extensions`
+  会顺带重排 3 个**既有**漂移文件（`src/bridge.rs`、`tests/e2e.rs`、`tests/host.rs`），
+  本轮已把这 3 个文件的格式改动**还原**，把清偿留给 LUM-1138，免得制造无关噪声。
+- clippy：`cargo clippy -p pi-extensions --all-targets --offline` 对本轮文件**零告警**
+  （顺手把 `digest.rs` 测试里的 `format!().collect()` 改成 `write!` 循环）。
+  剩余告警全是既有：`deflate.rs:650` precedence、`tests/zlib_deflate.rs:55` format!、
+  `pi-telemetry` 2 条 lifetime。
+- **未验证**：`cargo test --workspace`（磁盘/时间不允许，见第七节）、wasm32 构建、
+  `custom-provider-anthropic/index.ts` 的端到端登录（需要真实 Anthropic OAuth 交互）。
+
+### 五、已知限制 / 接线前置
+
+- **`URL` 仍未桥**：需要 WHATWG URL 解析器（Rust 侧 `url` crate 在，但扩展拿不到），
+  仓库内暂无构造 `URL` 的扩展；`fetch` 收字符串即可。留在 frontier。
+- **`crypto.createHmac` 与密钥态 WebCrypto 仍抛错**，错误文案写明「only SHA-1/SHA-256
+  digests are bridged」；摘要算法只支持 SHA-1 / SHA-256。
+- **`getRandomValues` 超配额抛的是普通 `Error`**（`name` 未设），不是 `QuotaExceededError`
+  DOMException —— QuickJS 无 `DOMException`；`atob`/`btoa` 的错误同样只是
+  `name = "InvalidCharacterError"` 的普通 `Error`。按 `name` 判断的代码可移植，`instanceof` 不可。
+- **`subtle` 只有 `digest`**（无 `generateKey` / `importKey` / `deriveBits` / `wrapKey`）。
+- `createHash` 是缓冲式（内存里攒完整段再摘要），对超大输入（如流式哈希）会整段驻留内存；
+  真实扩展的输入是密钥 / PKCE verifier 量级，不构成问题，若要流式需在宿主加状态机。
+
+### 六、frontier（本轮更新）
+
+1. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；本轮新增行零漂移，
+   并额外记录：`cargo fmt -p pi-extensions` 会改 `bridge.rs` / `tests/e2e.rs` / `tests/host.rs`
+   三个既有文件（其中两处只是缺行尾换行），可作为 LUM-1138 的输入。
+2. **~~Web 平台全局~~**：`atob` / `btoa` / `crypto`（`getRandomValues` / `randomUUID` /
+   `subtle.digest`）/ `URLSearchParams` **本轮收口**；剩 `URL`、`crypto.createHmac`、
+   密钥态 WebCrypto 三项。
+3. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex / oauth / images。
+   `oauth` 已派 **Stage 48（LUM-1160）**；其余四项仍需 models.dev 目录（维持「不猜」），
+   `images` 需先看上游 `packages/ai/src/images/` 的实际形状。
+4. **协议层两处缺口**（`AssistantMessage.error_message` / `ToolResult.added_tool_names`）：
+   已由 LUM-1158 派 **Stage 47**，本轮不重复派。
+5. **`edit` 渲染器 / `edit-diff.ts`**：LUM-1158 已收口（本轮一度误派 Stage 49，见第七节）。
+6. **（本轮新增）`pi-extensions` 侧仍未桥的引擎级全局**：`URL`、`DOMException`、
+   `structuredClone`、`queueMicrotask` 之外的 console 家族（`console.table` / `time*`）、
+   `AbortSignal.timeout` —— 没有被任何上游扩展用到，等真实需求。
+7. **（本轮新增）`pi-extensions` 全局桥的测试口径**：`tests/web_globals.rs` 是第一个专测
+   *全局*（而非 `node:*` 模块）的文件；后续加全局时按同一形状补一条，
+   并保持「二次加载幂等」这条断言（`typeof` 守卫很容易被顺手改坏）。
+
+### 七、派发与协调（含一次撞车复盘）
+
+- **派发 1 路：Stage 48 — `pi-ai` `auth/` 凭据子系统（LUM-1160）**，
+  `status=todo` 立即起跑，`--stage 48`，无父 issue（沿用 LUM-1157 Stage 46 / LUM-1153 Stage 45 的约定）。
+  落点 `pi-ai/src/auth/**` + `pi-ai/src/env_api_keys.rs`，约束里写明「只改 `pi-ai/**`，
+  不要动 `pi-coding-agent` / `pi-extensions` / `pi-tui` / 本状态文档」，并把
+  `env-api-keys.ts` 的表与 `providers/registry.rs::ProviderSpec::api_key_env` 的关系定为
+  「registry 是唯一数据源，别抄第二份」。
+- **撞车复盘（本轮最重要的教训）**：本轮还派了 **Stage 49（LUM-1161）「移植 `edit-diff.ts` +
+  补 `edit` 渲染器」**，理由是开工时读到的 `d43df51e8` 版 frontier 第 4/5 项还说 `edit` 是
+  `renderers/` 唯一缺口。但 **LUM-1158 在同一时间窗内已经完成了同一件事**（`edit_diff.rs` +
+  `text_diff.rs` + `EditRenderer`，00:31 合入 `7a4125092`），本轮随后 `git fetch` 才发现。
+  处置：把 LUM-1161 置 `cancelled`（`--no-start`，并尝试摘除 assignee），
+  槽位从 4 回到 3。根因是**派发前的读序错了**：读完状态文档就派发，没有先
+  `git fetch origin feature/pi.rs && git log --oneline -3`。后续轮次派发前必须先 fetch +
+  看最新 tip 的文档章节（状态文档的「frontier」是快照，不是实时）。
+- **并发**：开工 `multica daemon status` `active_task_count=2`（本人 + LUM-1157 收尾），
+  本轮 1 路派发后为 3；发现撞车时是 4（LUM-1158 又派了 Stage 47），撤销 LUM-1161 后回到 3。
+  上限 3 维持不变。
+
+### 八、环境与并发记录
+
+- 复用 **LUM-1153 检出内的 `pi-rust/target`**（`CARGO_TARGET_DIR` 显式指向）：
+  未新建 / 未删除任何 target；`CARGO_HOME=/tmp/cargo-home`，所有 cargo 命令 `--offline`；
+  未跑 `--workspace`（磁盘：开工约 23G 可用，结束时 **9.9G 可用** —— 其它轮次也在链接目标，
+  本轮自己的增量只有 `pi-extensions` 一个 crate + 1 个新测试目标）。
+- Git 身份用 worktree 级覆盖：`git config --worktree user.name multica-agent` /
+  `user.email agent@multica.local`（与 `feature/pi.rs` 既有历史一致）。
+- 合并：本分支基于 `d43df51e8`，开工后发现 `origin/feature/pi.rs` 已到 `7a4125092`（LUM-1158），
+  `git merge origin/feature/pi.rs` 为**快进**（本轮当时尚未提交，工作区改动未冲突），
+  合并后在合并后的树上复跑 `cargo test -p pi-extensions --offline` 全绿。
+- 本轮本人只写 `crates/pi-extensions/{src/digest.rs,src/lib.rs,src/host.rs,runtime/pi-ext-shim.mjs,
+  tests/web_globals.rs,docs/NODE_BUILTINS.md,docs/EXTENSIONS.md}` 与本文档；
+  **未碰** `pi-coding-agent/**`、`pi-ai/**`、`pi-tui/**`、`pi-protocol/**`。
