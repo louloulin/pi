@@ -1,12 +1,12 @@
 # lum1246-extension-events.png — chars, 110x44 cells
 
 ===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [1] 1. boot: widget is installed by the session_start handler  (cursor 110,43) =====
-pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
   Ctrl+C twice to exit
   Ctrl+D to exit (empty)
-  Ctrl+Z to suspend
   Ctrl+K to delete to end
   Shift+Tab to cycle thinking level
   Ctrl+P/Shift+Ctrl+P to cycle models
@@ -14,7 +14,6 @@ pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-
   Ctrl+O to expand tools
   Alt+H to hide this header
   Ctrl+T to expand thinking
-  Ctrl+G for external editor
   / for commands
   ! to run bash
   !! to run bash (no context)
@@ -43,16 +42,17 @@ LUM-1246 lifecycle events delivered by the host:
 
 
 
-> type a prompt — /help for commands
-Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [2] 2. `!echo hello` → user_bash delivered (driver-level emit)  (cursor 11,40) =====
-pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+> type a prompt — /help for commands
+Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [2] 2. `!echo hello` → user_bash delivered (driver-level emit)  (cursor 11,39) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
   Ctrl+C twice to exit
   Ctrl+D to exit (empty)
-  Ctrl+Z to suspend
   Ctrl+K to delete to end
   Shift+Tab to cycle thinking level
   Ctrl+P/Shift+Ctrl+P to cycle models
@@ -60,7 +60,6 @@ pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-
   Ctrl+O to expand tools
   Alt+H to hide this header
   Ctrl+T to expand thinking
-  Ctrl+G for external editor
   / for commands
   ! to run bash
   !! to run bash (no context)
@@ -89,16 +88,17 @@ LUM-1246 lifecycle events delivered by the host:
 * hello
 * Took 0.1s
 
-> type a prompt — /help for commands
-Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [3] 3. a full faux turn → agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end  (cursor 110,41) =====
-pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+> type a prompt — /help for commands
+Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [3] 3. a full faux turn → agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end  (cursor 25,41) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
   Ctrl+C twice to exit
   Ctrl+D to exit (empty)
-  Ctrl+Z to suspend
   Ctrl+K to delete to end
   Shift+Tab to cycle thinking level
   Ctrl+P/Shift+Ctrl+P to cycle models
@@ -106,7 +106,6 @@ pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-
   Ctrl+O to expand tools
   Alt+H to hide this header
   Ctrl+T to expand thinking
-  Ctrl+G for external editor
   / for commands
   ! to run bash
   !! to run bash (no context)
@@ -131,20 +130,21 @@ LUM-1246 lifecycle events delivered by the host:
   user_bash=1
   input=1
   handlers-run=10
-* hello                                                                                                      │
-* Took 0.1s                                                                                                  ┃
-> hi there                                                                                                   ┃
-  faux-model (faux) hello                                                                                    ┃
+* bash echo hello
+* hello
+* Took 0.1s
+> hi there
+  faux-model (faux) hello
 > type a prompt — /help for commands
-Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [4] 4. second turn: counters keep climbing (per-turn events are not one-shot)  (cursor 10,40) =====
-pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-events.js]
+===== LUM-1246 Stage 68 — a real extension sees real lifecycle events in the TUI  |  [4] 4. second turn: counters keep climbing (per-turn events are not one-shot)  (cursor 49,43) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-57946/.pi/agent/extensions/extension-events.js]
+1 extension(s): ~/.pi/agent/extensions/extension-events.js
   Esc to interrupt
   Ctrl+C to clear
   Ctrl+C twice to exit
   Ctrl+D to exit (empty)
-  Ctrl+Z to suspend
   Ctrl+K to delete to end
   Shift+Tab to cycle thinking level
   Ctrl+P/Shift+Ctrl+P to cycle models
@@ -152,7 +152,6 @@ pi v0.1.0d 1 extension(s) [/tmp/lum1246-pty-home/.pi/agent/extensions/extension-
   Ctrl+O to expand tools
   Alt+H to hide this header
   Ctrl+T to expand thinking
-  Ctrl+G for external editor
   / for commands
   ! to run bash
   !! to run bash (no context)
@@ -177,9 +176,10 @@ LUM-1246 lifecycle events delivered by the host:
   user_bash=1
   input=2
   handlers-run=18
-> hi there                                                                                                   │
-  faux-model (faux) hello                                                                                    │
+* Took 0.1s                                                                                                  │
+> hi there                                                                                                   ┃
+  faux-model (faux) hello                                                                                    ┃
 > again                                                                                                      ┃
   faux-model (faux) hello                                                                                    ┃
 > type a prompt — /help for commands
-Faux test model  session-18d717a9abadd8e5                                        in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d720d3bb717b4b                                        in 0 out 0 ?/8.2k  ? for help

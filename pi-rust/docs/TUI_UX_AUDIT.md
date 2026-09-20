@@ -1985,7 +1985,9 @@ python3 scripts/pty_capture.py --bin ./target/debug/pi \
   turn_end=4 / agent_end=4 / input=4 / handlers-run=33`——**这些不是单测断言，是真扩展在真 TUI 里收到的**；
 - `/` → 内置命令候选、`/he` → 模糊收窄、`@src/` → `❯ lib.rs  src/lib.rs` / `main.rs  src/main.rs`
   （Stage 70 的补全接线，且选中行是 `❯` 而不是重复绘制的底色块）；
-- PgUp 脱钩后消息视口底行出现 `↓ Jump to latest message · End`；
+- PgUp 脱钩后消息视口底行出现 `↓ Jump to latest message · End`，**居中**（列 40~71，居中于 110 列宽）
+  ——这是合并后保留的 LUM-1257 版几何（LUM-1238 的右对齐版已被删除），这张截图是在
+  最终 tip 上重拍并逐字核对的，所以可用来区分两份实现；
 - `/help` 正文以 `· ` 开头、composer 仍是 `> `（`Role::Info`）。
 
 ![LUM-1256 合并 tip：一镜覆盖补全 / 扩展可见性 / 生命周期事件 / jump-to-latest / 信息块前缀](screenshots/lum1256-input-surface.png)
