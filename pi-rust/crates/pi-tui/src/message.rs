@@ -30,6 +30,11 @@ pub enum Role {
     Tool,
 }
 
+/// Label a collapsed thinking block renders in place of its text
+/// (upstream's `hiddenThinkingLabel` default,
+/// `packages/coding-agent/src/modes/interactive/components/assistant-message.ts:30`).
+pub const HIDDEN_THINKING_LABEL: &str = "Thinking...";
+
 /// One entry in the rendered message log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageItem {
@@ -38,6 +43,11 @@ pub struct MessageItem {
     /// Plain text body. For `Role::Tool` the body is the formatted
     /// call / result pair.
     pub text: String,
+    /// Reasoning / "thinking" text streamed before the body. Empty when the
+    /// provider sent none. Rendered above [`MessageItem::text`] (collapsed to
+    /// [`HIDDEN_THINKING_LABEL`] when [`MessageView::hide_thinking`] is set)
+    /// and only ever populated on assistant items.
+    pub thinking: String,
     /// True while an assistant message is still streaming (the TUI
     /// shows a caret indicator).
     pub streaming: bool,
@@ -49,6 +59,7 @@ impl MessageItem {
         Self {
             role: Role::User,
             text: text.into(),
+            thinking: String::new(),
             streaming: false,
         }
     }
@@ -58,6 +69,7 @@ impl MessageItem {
         Self {
             role: Role::Assistant,
             text: text.into(),
+            thinking: String::new(),
             streaming: false,
         }
     }
@@ -68,6 +80,7 @@ impl MessageItem {
         Self {
             role: Role::Assistant,
             text: String::new(),
+            thinking: String::new(),
             streaming: true,
         }
     }
@@ -77,6 +90,7 @@ impl MessageItem {
         Self {
             role: Role::Tool,
             text: text.into(),
+            thinking: String::new(),
             streaming: false,
         }
     }
@@ -134,6 +148,12 @@ pub struct MessageView {
     /// the inline `(url)` suffix. Off by default; the driver turns it on from
     /// [`crate::hyperlink::supports_hyperlinks`] via `AppConfig::hyperlinks`.
     hyperlinks: bool,
+    /// When true, an assistant item's thinking text is collapsed to a single
+    /// [`HIDDEN_THINKING_LABEL`] line instead of being shown. False by
+    /// default, matching upstream's `hideThinkingBlock`
+    /// (`packages/coding-agent/src/core/settings-manager.ts:962`), so reasoning
+    /// is visible unless the reader hides it with `app.thinking.toggle`.
+    hide_thinking: bool,
 }
 
 impl Clone for MessageView {
@@ -147,6 +167,7 @@ impl Clone for MessageView {
             last_render_lines: AtomicUsize::new(self.last_render_lines.load(Ordering::Relaxed)),
             markdown: self.markdown,
             hyperlinks: self.hyperlinks,
+            hide_thinking: self.hide_thinking,
         }
     }
 }
@@ -187,6 +208,36 @@ impl MessageView {
     /// Enable/disable OSC 8 hyperlinks in place.
     pub fn set_hyperlinks(&mut self, enabled: bool) {
         self.hyperlinks = enabled;
+    }
+
+    /// Whether assistant thinking blocks are collapsed (builder form).
+    pub fn with_hide_thinking(mut self, hidden: bool) -> Self {
+        self.hide_thinking = hidden;
+        self
+    }
+
+    /// Whether assistant thinking blocks are collapsed.
+    pub fn hide_thinking(&self) -> bool {
+        self.hide_thinking
+    }
+
+    /// Whether assistant thinking blocks are shown. The inverse of
+    /// [`MessageView::hide_thinking`], matching the upstream boolean
+    /// (`hideThinkingBlock = false` means "visible").
+    pub fn thinking_visible(&self) -> bool {
+        !self.hide_thinking
+    }
+
+    /// Collapse or show assistant thinking blocks in place. Takes effect on
+    /// the next render; the transcript items themselves are untouched, so the
+    /// text survives a collapse / expand round trip.
+    pub fn set_hide_thinking(&mut self, hidden: bool) {
+        self.hide_thinking = hidden;
+    }
+
+    /// Show or collapse assistant thinking blocks in place.
+    pub fn set_thinking_visible(&mut self, visible: bool) {
+        self.hide_thinking = !visible;
     }
 
     /// Number of items in the log.
@@ -252,6 +303,28 @@ impl MessageView {
             _ => {
                 let mut item = MessageItem::assistant_streaming();
                 item.text.push_str(delta);
+                self.items.push(item);
+            }
+        }
+        self.repin_if_following();
+    }
+
+    /// Append a thinking / reasoning delta to the trailing assistant block.
+    ///
+    /// Thinking arrives interleaved with text in the same assistant message
+    /// (Anthropic's extended thinking, OpenAI reasoning deltas), so the delta
+    /// joins the trailing in-flight assistant item when there is one and
+    /// otherwise opens a fresh streaming item — the same rule
+    /// [`MessageView::append_assistant_delta`] uses, which is what keeps the
+    /// streamed order of thinking / text / thinking intact.
+    pub fn append_thinking_delta(&mut self, delta: &str) {
+        match self.items.last_mut() {
+            Some(item) if item.role == Role::Assistant && item.streaming => {
+                item.thinking.push_str(delta);
+            }
+            _ => {
+                let mut item = MessageItem::assistant_streaming();
+                item.thinking.push_str(delta);
                 self.items.push(item);
             }
         }
@@ -423,6 +496,7 @@ impl MessageView {
         self.push(MessageItem {
             role: Role::User,
             text: text.into(),
+            thinking: String::new(),
             streaming: false,
         });
     }
@@ -553,26 +627,33 @@ impl MessageView {
 
         let mut out: Vec<StyledLine> = Vec::new();
         for item in &self.items {
-            let (prefix, body, prefix_style, body_style) = match item.role {
+            let (prefix, prefix_style, body_style) = match item.role {
                 Role::User => (
                     "> ",
-                    item.text.clone(),
                     SpanStyle::fg(ThemeColor::Accent),
                     SpanStyle::fg(ThemeColor::UserMessageText),
                 ),
-                Role::Assistant => (
-                    "  ",
-                    item.text.clone(),
-                    SpanStyle::PLAIN,
-                    SpanStyle::fg(ThemeColor::Text),
-                ),
+                Role::Assistant => ("  ", SpanStyle::PLAIN, SpanStyle::fg(ThemeColor::Text)),
                 Role::Tool => (
                     "* ",
-                    item.text.clone(),
                     SpanStyle::fg(ThemeColor::Muted),
                     SpanStyle::fg(ThemeColor::ToolOutput),
                 ),
             };
+
+            // Thinking precedes the body inside an assistant item, matching
+            // upstream's ordered `message.content` walk
+            // (`assistant-message.ts:106-160`). A whitespace-only block is
+            // skipped, exactly like upstream's `content.thinking.trim()`.
+            if item.role == Role::Assistant && !item.thinking.trim().is_empty() {
+                out.extend(self.thinking_lines(
+                    &item.thinking,
+                    text_width,
+                    prefix,
+                    prefix_style,
+                    hyperlinks,
+                ));
+            }
 
             if self.markdown && item.role == Role::Assistant {
                 out.extend(markdown_lines(
@@ -586,21 +667,13 @@ impl MessageView {
                 continue;
             }
 
-            let wrapped = wrap_text(&body, text_width);
-            if wrapped.is_empty() {
-                out.push(vec![StyledSpan::new(prefix, prefix_style)]);
-                continue;
-            }
-            for (idx, line) in wrapped.iter().enumerate() {
-                let mut spans = vec![
-                    StyledSpan::new(prefix, prefix_style),
-                    StyledSpan::new(line.clone(), body_style),
-                ];
-                if idx == 0 && item.role == Role::Assistant && item.streaming {
-                    spans.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
+            let mut lines = plain_lines(&item.text, text_width, prefix, prefix_style, body_style);
+            if item.role == Role::Assistant && item.streaming {
+                if let Some(first) = lines.first_mut() {
+                    first.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
                 }
-                out.push(spans);
             }
+            out.extend(lines);
         }
 
         if out.is_empty() {
@@ -705,6 +778,55 @@ impl MessageView {
             }
         }
     }
+
+    /// Render an assistant item's thinking text at `width`: a single collapsed
+    /// [`HIDDEN_THINKING_LABEL`] line when [`MessageView::hide_thinking`] is
+    /// set, otherwise the reasoning itself.
+    ///
+    /// The visible form is laid out exactly like the body (markdown when
+    /// [`MessageView::markdown`] is on, wrapped plain text otherwise) and then
+    /// recoloured into the `thinkingText` slot with italics, which mirrors
+    /// upstream passing `color` / `italic` overrides to the thinking
+    /// `Markdown` component (`assistant-message.ts:147-158`).
+    fn thinking_lines(
+        &self,
+        thinking: &str,
+        width: usize,
+        prefix: &str,
+        prefix_style: SpanStyle,
+        hyperlinks: bool,
+    ) -> Vec<StyledLine> {
+        let style = SpanStyle::fg(ThemeColor::ThinkingText).italic();
+        if self.hide_thinking {
+            return vec![vec![
+                StyledSpan::new(prefix, prefix_style),
+                StyledSpan::new(HIDDEN_THINKING_LABEL, style),
+            ]];
+        }
+        let mut lines = if self.markdown {
+            markdown_lines(thinking, width, prefix, prefix_style, false, hyperlinks)
+        } else {
+            plain_lines(thinking, width, prefix, prefix_style, style)
+        };
+        // Recolour every body span (everything after the role prefix).
+        // Inline-image rows stay verbatim: they are escape sequences, so
+        // prefixing or restyling them would corrupt the picture.
+        let verbatim = if self.markdown {
+            image_row_mask(&lines)
+        } else {
+            vec![false; lines.len()]
+        };
+        for (idx, line) in lines.iter_mut().enumerate() {
+            if verbatim[idx] {
+                continue;
+            }
+            for span in line.iter_mut().skip(1) {
+                span.style.fg = Some(ThemeColor::ThinkingText);
+                span.style.italic = true;
+            }
+        }
+        lines
+    }
 }
 
 /// Format a finished tool call exactly like [`MessageView::push_tool`].
@@ -743,6 +865,32 @@ fn streaming_tool_text(name: &str, args: &str, running: bool) -> String {
         text.push_str(" (running)");
     }
     text
+}
+
+/// Wrap `body` and prepend the role prefix to every line, without the
+/// streaming caret (the caller owns caret placement so the plain and
+/// markdown paths agree). Shares [`wrap_text`] with the markdown fallback, so
+/// a thinking block and a plain body wrap identically.
+fn plain_lines(
+    body: &str,
+    width: usize,
+    prefix: &str,
+    prefix_style: SpanStyle,
+    body_style: SpanStyle,
+) -> Vec<StyledLine> {
+    let wrapped = wrap_text(body, width);
+    if wrapped.is_empty() {
+        return vec![vec![StyledSpan::new(prefix, prefix_style)]];
+    }
+    wrapped
+        .into_iter()
+        .map(|line| {
+            vec![
+                StyledSpan::new(prefix, prefix_style),
+                StyledSpan::new(line, body_style),
+            ]
+        })
+        .collect()
 }
 
 /// Render an assistant body through the markdown renderer, prepending the

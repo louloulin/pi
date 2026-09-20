@@ -536,6 +536,7 @@ fn streaming_caret_sits_on_the_last_markdown_line() {
     view.push(MessageItem {
         role: Role::Assistant,
         text: "first\nsecond".to_string(),
+        thinking: String::new(),
         streaming: true,
     });
     let lines = view.render_styled_lines(40);
