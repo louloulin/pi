@@ -54,8 +54,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pi_protocol::{Content, ToolCall, ToolResult};
-use pi_tui::{SpanStyle, StyledLine, StyledSpan, Theme, ThemeColor};
+use pi_protocol::{Content, ImageContent, ToolCall, ToolResult};
+use pi_tui::{
+    Image, ImageOptions, ImageTheme, SpanStyle, StyledLine, StyledSpan, Theme, ThemeColor,
+};
 
 use super::text_diff::{diff_words, DiffKind};
 use super::truncate::{format_size, TruncatedBy, TruncationResult};
@@ -97,6 +99,8 @@ pub struct ToolRenderContext {
     pub is_error: bool,
     /// Whether image content may be shown instead of an indicator.
     pub show_images: bool,
+    /// Terminal width in cells the image component renders against.
+    pub width: u16,
 }
 
 impl ToolRenderContext {
@@ -107,7 +111,14 @@ impl ToolRenderContext {
             expanded: false,
             is_error: false,
             show_images: false,
+            width: DEFAULT_IMAGE_WIDTH,
         }
+    }
+
+    /// Set the width an image block renders against.
+    pub fn with_width(mut self, width: u16) -> Self {
+        self.width = width;
+        self
     }
 
     /// Toggle the expanded flag.
@@ -1429,6 +1440,7 @@ pub struct ToolRenderSession {
     cwd: PathBuf,
     expanded: bool,
     show_images: bool,
+    width: u16,
     renderers: HashMap<String, Box<dyn ToolRenderer>>,
 }
 
@@ -1439,8 +1451,15 @@ impl ToolRenderSession {
             cwd: cwd.into(),
             expanded: false,
             show_images: false,
+            width: DEFAULT_IMAGE_WIDTH,
             renderers: HashMap::new(),
         }
+    }
+
+    /// Set the width image blocks render against.
+    pub fn with_width(mut self, width: u16) -> Self {
+        self.width = width;
+        self
     }
 
     /// Toggle expanded rendering for every tool.
@@ -1478,7 +1497,16 @@ impl ToolRenderSession {
         let options = ToolRenderOptions {
             expanded: self.expanded,
         };
-        renderer.render_result(&output, &options, &ctx)
+        let mut lines = renderer.render_result(&output, &options, &ctx);
+        // Image blocks are not part of the text body: `get_text_output`
+        // already degraded them to an `[Image: …]` line unless `show_images`
+        // is set, and only the escape-sequence rendering is appended here.
+        if ctx.show_images {
+            for block in &output.content {
+                lines.extend(image_lines(block, &ctx));
+            }
+        }
+        lines
     }
 
     /// Drop every in-flight renderer (call at a turn boundary).
@@ -1492,6 +1520,7 @@ impl ToolRenderSession {
             expanded: self.expanded,
             is_error,
             show_images: self.show_images,
+            width: self.width,
         }
     }
 }
@@ -1520,24 +1549,69 @@ pub fn output_from_result(result: &ToolResult) -> ToolOutput {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Default width an image block renders against when the caller has no
+/// terminal width to offer (the `--print` / text-fallback paths).
+pub const DEFAULT_IMAGE_WIDTH: u16 = 80;
+
 /// Concatenate the human-readable text of every text block in `result`.
 ///
 /// Mirrors upstream `getTextOutput`: text blocks are joined with `\n` and
-/// carriage returns are stripped. Image blocks collapse to a one-line
-/// indicator unless `show_images` is set (the actual image bytes are handled by
-/// the image subsystem, which is not ported yet).
+/// carriage returns are stripped. Image blocks degrade to
+/// [`pi_tui::image_fallback`]'s `[Image: <mime> <WxH>]` line unless
+/// `show_images` is set, in which case the caller draws the image itself
+/// through [`image_lines`] and the indicator would be a duplicate.
+///
+/// `details.image_text` carries the text upstream sends *beside* an image
+/// block (`read.ts` returns `[text note, image]`, but [`ToolResult::content`]
+/// is a single block); it is prepended so the caption is not lost.
 pub fn get_text_output(result: &ToolOutput, show_images: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
+    if let Some(note) = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("image_text"))
+        .and_then(serde_json::Value::as_str)
+    {
+        parts.push(note.to_string());
+    }
     for block in &result.content {
         match block {
             Content::Text(text) => parts.push(text.text.replace('\r', "")),
             Content::Image(image) if !show_images => {
-                parts.push(format!("[image: {}]", image.mime_type));
+                parts.push(image_fallback_text(image));
             }
             _ => {}
         }
     }
     parts.join("\n")
+}
+
+/// The `[Image: …]` line a terminal without inline-image support shows.
+pub fn image_fallback_text(image: &ImageContent) -> String {
+    let dimensions = pi_tui::get_image_dimensions(&image.data, &image.mime_type);
+    pi_tui::image_fallback(&image.mime_type, dimensions, None)
+}
+
+/// Render one content block as terminal image rows.
+///
+/// Returns an empty vector for a non-image block. The rows come from
+/// [`pi_tui::Image`], which emits the kitty / iTerm2 escape sequence for the
+/// capability the terminal advertises (`pi_tui::get_capabilities().images`) and
+/// falls back to [`image_fallback_text`] when there is none — so a consumer
+/// that gates on `show_images` still gets usable output on a terminal without
+/// image support. Rows are meant to be pushed into a render as-is: the first
+/// one carries the escape sequence and must stay at column 0.
+pub fn image_lines(block: &Content, ctx: &ToolRenderContext) -> Vec<StyledLine> {
+    let Content::Image(image) = block else {
+        return Vec::new();
+    };
+    let component = Image::new(
+        image.data.clone(),
+        image.mime_type.clone(),
+        ImageTheme::fallback(SpanStyle::fg(ThemeColor::ToolOutput)),
+    )
+    .with_options(ImageOptions::default());
+    pi_tui::Component::render(&component, ctx.width)
 }
 
 /// Paint styled lines with a theme's ANSI escapes.

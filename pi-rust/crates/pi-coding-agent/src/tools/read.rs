@@ -1,13 +1,8 @@
 //! `ReadTool` — read file contents with offset/limit and truncation.
 //!
-//! Mirrors the text half of `createReadTool` from
-//! `packages/coding-agent/src/core/tools/read.ts`. Image support
-//! (`utils/image-process.ts`, MIME sniffing) belongs to the image subsystem
-//! and is not ported yet: a binary file surfaces as a UTF-8 read error
-//! instead of being attached as an image.
-//!
-//! For text files this port matches upstream byte for byte, including the
-//! three continuation notices:
+//! Mirrors `createReadTool` from `packages/coding-agent/src/core/tools/read.ts`.
+//! The text half matches upstream byte for byte, including the three
+//! continuation notices:
 //!
 //! * `[Showing lines a-b of N. Use offset=a+1 to continue.]` when the head
 //!   truncation stopped on the line limit,
@@ -17,10 +12,23 @@
 //!   stopped early even though truncation had not fired,
 //! * `[Line N is xB, exceeds 50.0KB limit. Use bash: sed -n 'Np' <path> | head -c 51200]`
 //!   when a single over-long first line cannot be shown at all.
+//!
+//! The image half ports upstream's `processImage` path as far as a native
+//! image backend is needed: a file whose magic bytes identify PNG / JPEG / GIF /
+//! WebP is returned as a text note **plus** a [`Content::Image`] block, in the
+//! upstream `[text note, image]` order. Upstream additionally resizes the image
+//! to the inline provider limits and converts every other format to PNG
+//! (`utils/image-resize.ts`, `utils/image-convert.ts`); this port has no image
+//! encoder, so an oversized image is passed through unchanged and a format the
+//! sniffer recognizes but the inline path does not accept (BMP) is reported as
+//! omitted instead of converted. The non-vision-model note
+//! (`getNonVisionImageNote`) needs the active model, which the tool does not
+//! see, so it is not emitted here.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use async_trait::async_trait;
+use pi_protocol::{Content, ImageContent, TextContent};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -103,7 +111,18 @@ impl AgentTool for ReadTool {
         let parsed: ReadArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let content = std::fs::read_to_string(&parsed.path).map_err(|e| {
+        let bytes = std::fs::read(&parsed.path).map_err(|e| {
+            ToolError::Execution(format!("failed to read '{}': {}", parsed.path, e))
+        })?;
+
+        // An image file never reaches the text path: it is handed to the
+        // caller as an image block (upstream `ops.detectImageMimeType` +
+        // `processImage`).
+        if let Some(mime_type) = detect_supported_image_mime_type(&bytes) {
+            return Ok(image_output(mime_type, &bytes));
+        }
+
+        let content = String::from_utf8(bytes).map_err(|e| {
             ToolError::Execution(format!("failed to read '{}': {}", parsed.path, e))
         })?;
 
@@ -197,5 +216,157 @@ impl AgentTool for ReadTool {
             );
         }
         Ok(output)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Image path
+// ---------------------------------------------------------------------------
+
+/// MIME types the inline path forwards unchanged to the providers.
+///
+/// Mirrors `normalizeSupportedImageMimeType` (`utils/image-process.ts:29-44`).
+const INLINE_IMAGE_MIME_TYPES: [&str; 4] = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+];
+
+/// Sniff the first bytes of a file for a supported image format.
+///
+/// Byte-for-byte port of `detectSupportedImageMimeType`
+/// (`packages/coding-agent/src/utils/mime.ts`), including its refusals: a JPEG
+/// whose fourth byte is `0xf7` (JPEG-LS, not decodable by the inline path), an
+/// APNG, and a BMP whose header does not describe a single-plane image.
+fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return (bytes.get(3) != Some(&0xf7)).then_some("image/jpeg");
+    }
+    if bytes.starts_with(&PNG_SIGNATURE) {
+        return (is_png(bytes) && !is_animated_png(bytes)).then_some("image/png");
+    }
+    if bytes.starts_with(b"GIF") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP".as_slice()) {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"BM") && is_bmp(bytes) {
+        return Some("image/bmp");
+    }
+    None
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// A PNG whose first chunk is an `IHDR` of the expected length.
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.len() >= 16
+        && read_u32_be(bytes, PNG_SIGNATURE.len()) == 13
+        && bytes.get(12..16) == Some(b"IHDR".as_slice())
+}
+
+/// True for an APNG (an `acTL` chunk before the first `IDAT`).
+fn is_animated_png(bytes: &[u8]) -> bool {
+    let mut offset = PNG_SIGNATURE.len();
+    while offset + 8 <= bytes.len() {
+        let chunk_length = read_u32_be(bytes, offset) as usize;
+        let chunk_type = bytes.get(offset + 4..offset + 8).unwrap_or_default();
+        if chunk_type == b"acTL" {
+            return true;
+        }
+        if chunk_type == b"IDAT" {
+            return false;
+        }
+        let Some(next) = offset
+            .checked_add(8)
+            .and_then(|next| next.checked_add(chunk_length))
+            .and_then(|next| next.checked_add(4))
+        else {
+            return false;
+        };
+        if next <= offset || next > bytes.len() {
+            return false;
+        }
+        offset = next;
+    }
+    false
+}
+
+/// A BMP with a plausible header: single colour plane and a supported depth.
+fn is_bmp(bytes: &[u8]) -> bool {
+    if bytes.len() < 26 {
+        return false;
+    }
+    let declared_file_size = read_u32_le(bytes, 2);
+    let pixel_data_offset = read_u32_le(bytes, 10);
+    let dib_header_size = read_u32_le(bytes, 14);
+    if declared_file_size != 0 && declared_file_size < 26 {
+        return false;
+    }
+    if pixel_data_offset < 14 + dib_header_size {
+        return false;
+    }
+    if declared_file_size != 0 && pixel_data_offset >= declared_file_size {
+        return false;
+    }
+
+    let (color_planes, bits_per_pixel) = if dib_header_size == 12 {
+        (read_u16_le(bytes, 22), read_u16_le(bytes, 24))
+    } else if (40..=124).contains(&dib_header_size) {
+        if bytes.len() < 30 {
+            return false;
+        }
+        (read_u16_le(bytes, 26), read_u16_le(bytes, 28))
+    } else {
+        return false;
+    };
+
+    color_planes == 1 && matches!(bits_per_pixel, 1 | 4 | 8 | 16 | 24 | 32)
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from(bytes.get(offset).copied().unwrap_or(0))
+        + (u32::from(bytes.get(offset + 1).copied().unwrap_or(0)) << 8)
+}
+
+fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
+    u32::from(bytes.get(offset).copied().unwrap_or(0)) * 0x100_0000
+        + (u32::from(bytes.get(offset + 1).copied().unwrap_or(0)) << 16)
+        + (u32::from(bytes.get(offset + 2).copied().unwrap_or(0)) << 8)
+        + u32::from(bytes.get(offset + 3).copied().unwrap_or(0))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from(bytes.get(offset).copied().unwrap_or(0))
+        + (u32::from(bytes.get(offset + 1).copied().unwrap_or(0)) << 8)
+        + (u32::from(bytes.get(offset + 2).copied().unwrap_or(0)) << 16)
+        + u32::from(bytes.get(offset + 3).copied().unwrap_or(0)) * 0x100_0000
+}
+
+/// The `read` result for a file the sniffer identified as an image.
+///
+/// Mirrors upstream's `content: [{ type: "text", text: `Read image file
+/// [${mimeType}]` }, { type: "image", … }]`. A format outside
+/// [`INLINE_IMAGE_MIME_TYPES`] cannot be converted without an image backend,
+/// which is upstream's `ok: false` branch: the text note carries the omission
+/// message and no image block is attached.
+fn image_output(mime_type: &str, bytes: &[u8]) -> ToolOutput {
+    let note = format!("Read image file [{mime_type}]");
+    if !INLINE_IMAGE_MIME_TYPES.contains(&mime_type) {
+        return ToolOutput::text(format!(
+            "{note}\n[Image omitted: could not be converted to a supported inline image format.]"
+        ));
+    }
+    ToolOutput {
+        content: vec![
+            Content::Text(TextContent { text: note }),
+            Content::Image(ImageContent {
+                mime_type: mime_type.to_string(),
+                data: pi_tui::base64_encode(bytes),
+            }),
+        ],
+        details: None,
     }
 }
