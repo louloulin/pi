@@ -37,7 +37,10 @@ fn audited_pages() -> Result<Vec<(PathBuf, String)>, EvalError> {
     for file in markdown_files(&root.join("docs"))? {
         pages.push((
             file.clone(),
-            format!("pi-rust/docs/{}", file.file_name().unwrap_or_default().to_string_lossy()),
+            format!(
+                "pi-rust/docs/{}",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            ),
         ));
     }
     let readme = root.join("README.md");
@@ -128,7 +131,10 @@ fn links_case() -> Case {
     Case::builder("docs-relative-links-resolve")
         .description("every relative Markdown link under pi-rust docs and READMEs resolves")
         .assertion("links", |output| {
-            let broken = output.output["broken"].as_array().cloned().unwrap_or_default();
+            let broken = output.output["broken"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             if !broken.is_empty() {
                 return Err(format!("broken relative links: {broken:?}"));
             }

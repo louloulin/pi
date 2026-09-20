@@ -13,9 +13,7 @@ use async_trait::async_trait;
 use pi_agent_core::{Agent, AgentError, AgentOptions, ToolExecutor};
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::providers::openai::OpenAiProvider;
-use pi_protocol::{
-    Api, Content, StopReason, ToolCall, ToolDefinition, ToolResult,
-};
+use pi_protocol::{Api, Content, StopReason, ToolCall, ToolDefinition, ToolResult};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -91,8 +89,10 @@ fn fixture_answer_case() -> crate::harness::Case {
             Ok(())
         })
         .run(|| async {
-            let server = FixtureServer::start(|_request| FixtureResponse::sse(sse_text(FIXTURE_MODEL, "Paris", 3, 2)))
-                .map_err(|error| EvalError::Case(error.to_string()))?;
+            let server = FixtureServer::start(|_request| {
+                FixtureResponse::sse(sse_text(FIXTURE_MODEL, "Paris", 3, 2))
+            })
+            .map_err(|error| EvalError::Case(error.to_string()))?;
             let provider: pi_ai::SharedStreamFn = Arc::new(OpenAiProvider::with_base_url(
                 "fixture-key",
                 server.base_url(),
@@ -167,12 +167,20 @@ fn fixture_tool_turn_case() -> crate::harness::Case {
                 if has_tool_result {
                     FixtureResponse::sse(sse_text(FIXTURE_MODEL, "Hello, Bob!", 10, 3))
                 } else {
-                    FixtureResponse::sse(sse_tool_call(FIXTURE_MODEL, "hello", "{\"name\":\"Bob\"}", 5, 4))
+                    FixtureResponse::sse(sse_tool_call(
+                        FIXTURE_MODEL,
+                        "hello",
+                        "{\"name\":\"Bob\"}",
+                        5,
+                        4,
+                    ))
                 }
             })
             .map_err(|error| EvalError::Case(error.to_string()))?;
-            let provider: pi_ai::SharedStreamFn =
-                Arc::new(OpenAiProvider::with_base_url("fixture-key", server.base_url()));
+            let provider: pi_ai::SharedStreamFn = Arc::new(OpenAiProvider::with_base_url(
+                "fixture-key",
+                server.base_url(),
+            ));
             let model = support::model("openai", FIXTURE_MODEL, Api::OpenAiChatCompletions);
             let options = AgentOptions::new(model, provider, "Use tools when asked.")
                 .with_tool_executor(Arc::new(HelloTool));

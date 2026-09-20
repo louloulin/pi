@@ -49,17 +49,15 @@ async fn run() -> Result<bool, String> {
     };
 
     let suites = match &cli.options.suite_filter {
-        Some(name) => vec![suite_named(name)
-            .ok_or_else(|| format!("unknown suite `{name}` (expected smoke|models|providers|extensions|docs)"))?],
+        Some(name) => vec![suite_named(name).ok_or_else(|| {
+            format!("unknown suite `{name}` (expected smoke|models|providers|extensions|docs)")
+        })?],
         None => pi_evals::all_suites(),
     };
 
     let report = run_suites(&suites, &cli.options).await;
     if cli.json {
-        println!(
-            "{}",
-            report.to_json().map_err(|error| error.to_string())?
-        );
+        println!("{}", report.to_json().map_err(|error| error.to_string())?);
     } else {
         print!("{}", report.to_text());
     }
@@ -111,8 +109,10 @@ fn parse_args() -> Result<Option<Cli>, String> {
                     .map_err(|error| format!("invalid --repetitions `{value}`: {error}"))?;
             }
             "--out" => {
-                options.artifacts_dir =
-                    Some(PathBuf::from(args.next().ok_or_else(|| "--out needs a value".to_string())?));
+                options.artifacts_dir = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--out needs a value".to_string())?,
+                ));
             }
             other => return Err(format!("unknown argument `{other}` (try --help)")),
         }
@@ -142,7 +142,10 @@ fn summarize(report: &EvalReport) -> bool {
         .map(|case| case.id.as_str())
         .collect();
     if !skipped.is_empty() {
-        eprintln!("skipped (opt in with PI_EVAL_LIVE=1): {}", skipped.join(", "));
+        eprintln!(
+            "skipped (opt in with PI_EVAL_LIVE=1): {}",
+            skipped.join(", ")
+        );
     }
     report.totals.is_success()
 }

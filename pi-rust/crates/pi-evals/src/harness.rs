@@ -676,7 +676,11 @@ async fn run_case(case: &Case, repetition: u32) -> CaseResult {
         description: case.description.clone(),
         repetition,
         status,
-        score: if status == CaseStatus::Passed { 1.0 } else { 0.0 },
+        score: if status == CaseStatus::Passed {
+            1.0
+        } else {
+            0.0
+        },
         threshold: case.threshold,
         rationale,
         duration_ms,
