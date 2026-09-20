@@ -1106,16 +1106,7 @@ impl Theme {
     /// The border colour for a thinking level (upstream
     /// `getThinkingBorderColor`).
     pub fn thinking_border(&self, level: ThinkingLevel, text: &str) -> String {
-        let slot = match level {
-            ThinkingLevel::Off => ThemeColor::ThinkingOff,
-            ThinkingLevel::Minimal => ThemeColor::ThinkingMinimal,
-            ThinkingLevel::Low => ThemeColor::ThinkingLow,
-            ThinkingLevel::Medium => ThemeColor::ThinkingMedium,
-            ThinkingLevel::High => ThemeColor::ThinkingHigh,
-            ThinkingLevel::Xhigh => ThemeColor::ThinkingXhigh,
-            ThinkingLevel::Max => ThemeColor::ThinkingMax,
-        };
-        self.fg(slot, text)
+        self.fg(thinking_border_color(level), text)
     }
 
     /// The bash-mode border colour (upstream `getBashModeBorderColor`).
@@ -1126,6 +1117,23 @@ impl Theme {
     /// True for the built-in `light` theme (upstream `isLightTheme`).
     pub fn is_light(&self) -> bool {
         is_light_theme(self.name.as_deref())
+    }
+}
+
+/// The theme slot upstream's `getThinkingBorderColor` maps a level to.
+///
+/// Shared by the ANSI path ([`Theme::thinking_border`]) and the App's
+/// cell-style render path (which styles the prompt label, the Rust prompt's
+/// stand-in for the editor border).
+pub fn thinking_border_color(level: ThinkingLevel) -> ThemeColor {
+    match level {
+        ThinkingLevel::Off => ThemeColor::ThinkingOff,
+        ThinkingLevel::Minimal => ThemeColor::ThinkingMinimal,
+        ThinkingLevel::Low => ThemeColor::ThinkingLow,
+        ThinkingLevel::Medium => ThemeColor::ThinkingMedium,
+        ThinkingLevel::High => ThemeColor::ThinkingHigh,
+        ThinkingLevel::Xhigh => ThemeColor::ThinkingXhigh,
+        ThinkingLevel::Max => ThemeColor::ThinkingMax,
     }
 }
 

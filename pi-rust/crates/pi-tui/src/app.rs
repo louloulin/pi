@@ -250,7 +250,7 @@ use crossterm::event::{
     Event as CtEvent, KeyModifiers as CtModifiers, MouseEventKind as CtMouseEventKind,
 };
 use parking_lot::Mutex;
-use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate};
+use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate, ThinkingLevel};
 use pi_protocol::{Content, Message, StopReason, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -285,7 +285,9 @@ use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine, StyledSpan};
-use crate::theme::{builtin_theme, load_theme, ColorMode, Theme, ThemeColor, ThemeError};
+use crate::theme::{
+    builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeColor, ThemeError,
+};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -1064,6 +1066,27 @@ pub struct App {
     /// from [`AppConfig::startup_header`] (visible at all) and from an
     /// extension's `ctx.ui.setHeader`, which replaces the built-in lines.
     header_expanded: bool,
+    /// Session thinking level — what the next provider call requests
+    /// (upstream `session.thinkingLevel`). Seeded from the persisted
+    /// `defaultThinkingLevel` by the driver, then moved by
+    /// `app.thinking.cycle`, `/thinking` and `app.thinking.save`.
+    thinking_level: ThinkingLevel,
+    /// Whether the active model reasons at all — upstream's
+    /// `Model.reasoning` (see `pi-coding-agent`'s equivalent flag; the Rust
+    /// descriptor drops the field). When false the status bar omits the
+    /// level and the driver answers a cycle with the "does not support
+    /// thinking" notice.
+    thinking_supported: bool,
+}
+
+/// Upstream's footer join (`components/footer.ts:182-188`): an extended
+/// level renders bare, `off` reads `thinking off`.
+fn thinking_level_suffix(level: ThinkingLevel) -> String {
+    if level == ThinkingLevel::Off {
+        "thinking off".to_string()
+    } else {
+        level.to_string()
+    }
 }
 
 impl App {
@@ -1135,6 +1158,8 @@ impl App {
             turn_started: None,
             spinner_advanced_at: Instant::now(),
             header_expanded,
+            thinking_level: ThinkingLevel::Medium,
+            thinking_supported: false,
         }
     }
 
@@ -1187,6 +1212,30 @@ impl App {
         let visible = !self.messages.thinking_visible();
         self.messages.set_thinking_visible(visible);
         visible
+    }
+
+    /// The session thinking level (what the next provider call requests).
+    pub fn thinking_level(&self) -> ThinkingLevel {
+        self.thinking_level
+    }
+
+    /// Set the session thinking level. The editor chrome (the prompt label,
+    /// standing in for upstream's editor border) and the status bar pick it
+    /// up on the next render.
+    pub fn set_thinking_level(&mut self, level: ThinkingLevel) {
+        self.thinking_level = level;
+    }
+
+    /// Whether the active model reasons at all (upstream `Model.reasoning`).
+    pub fn thinking_supported(&self) -> bool {
+        self.thinking_supported
+    }
+
+    /// Record whether the active model supports thinking. Drives the status
+    /// bar's level segment, which upstream only shows for reasoning models
+    /// (`components/footer.ts:182-188`).
+    pub fn set_thinking_supported(&mut self, supported: bool) {
+        self.thinking_supported = supported;
     }
 
     /// Whether tool blocks render expanded.
@@ -1437,14 +1486,24 @@ impl App {
     /// transient hint layered on top when a flash is pending. Borrowed in the
     /// common case so the render path does not clone on every frame.
     fn status_for_render(&self) -> Cow<'_, StatusData> {
-        match &self.status_flash {
-            None => Cow::Borrowed(&self.status_data),
-            Some(flash) => {
-                let mut data = self.status_data.clone();
-                data.hint = Some(flash.clone());
-                Cow::Owned(data)
-            }
+        let flash = self.status_flash.as_deref();
+        if !self.thinking_supported && flash.is_none() {
+            return Cow::Borrowed(&self.status_data);
         }
+        let mut data = self.status_data.clone();
+        if self.thinking_supported {
+            // Upstream's footer joins `model • level` for reasoning models
+            // (`components/footer.ts:182-188`); `off` reads `thinking off`.
+            data.model = format!(
+                "{} • {}",
+                data.model,
+                thinking_level_suffix(self.thinking_level)
+            );
+        }
+        if let Some(flash) = flash {
+            data.hint = Some(flash.to_string());
+        }
+        Cow::Owned(data)
     }
 
     /// The palette the buffer render path currently consumes.
@@ -4336,11 +4395,17 @@ impl App {
         }
         let line = self.prompt.render_line(rect.width);
         // Upstream paints the editor chrome in `bashMode` while the buffer is
-        // a `!` submission (`updateEditorBorderColor`,
+        // a `!` submission, otherwise in the thinking level's border colour
+        // (`updateEditorBorderColor`,
         // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
-        // the label carries the colour instead.
-        let bash_style = crate::editor::is_bash_mode(&self.prompt.text())
-            .then(|| SpanStyle::fg(ThemeColor::BashMode).to_style(&self.theme));
+        // the label carries the colour instead: bash mode wins, the thinking
+        // level colours everything else.
+        let label_slot = if crate::editor::is_bash_mode(&self.prompt.text()) {
+            ThemeColor::BashMode
+        } else {
+            thinking_border_color(self.thinking_level)
+        };
+        let label_style = Some(SpanStyle::fg(label_slot).to_style(&self.theme));
         let label_width = self.prompt.label().chars().count() as u16;
         for (col, ch) in line.chars().enumerate() {
             let x = rect.x + col as u16;
@@ -4349,7 +4414,7 @@ impl App {
             }
             if let Some(cell) = buf.cell_mut((x, rect.y)) {
                 cell.set_char(ch);
-                if let Some(style) = bash_style {
+                if let Some(style) = label_style {
                     if (col as u16) < label_width {
                         cell.set_style(style);
                     }

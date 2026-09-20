@@ -53,6 +53,14 @@ pub enum SlashCommand {
     /// `/settings` — open the settings modal (upstream
     /// `SettingsSelectorComponent`).
     Settings,
+    /// `/thinking [level]` — open the thinking-level selector, or set the
+    /// level directly when an argument is given. Mirrors upstream
+    /// `handleThinkingCommand` (`interactive-mode.ts:4789`).
+    Thinking {
+        /// The requested level, spelled as upstream does (`off` … `max`).
+        /// `None` (no argument) opens the selector.
+        level: Option<String>,
+    },
     /// `/trust [yes|no]` — show or change the saved project-trust
     /// decision. `None` shows the current state; the decision only takes
     /// effect on the next start. Mirrors upstream `showTrustSelector`.
@@ -100,6 +108,9 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "fork" => SlashCommand::Fork,
         "clone" => SlashCommand::Clone,
         "settings" => SlashCommand::Settings,
+        "thinking" => SlashCommand::Thinking {
+            level: (!args.is_empty()).then(|| args.to_string()),
+        },
         "compact" => SlashCommand::Compact {
             instructions: (!args.is_empty()).then(|| args.to_string()),
         },
@@ -154,6 +165,9 @@ pub fn help_text() -> String {
     out.push_str("  /fork     branch a new session from a user message\n");
     out.push_str("  /clone    copy the current session into a new session file\n");
     out.push_str("  /settings show or change interface settings\n");
+    out.push_str(
+        "  /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)\n",
+    );
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
     out.push_str("  /hotkeys  list the keyboard shortcuts\n");

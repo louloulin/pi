@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use pi_agent_core::{Agent, AgentOptions};
+use pi_agent_core::{Agent, AgentOptions, ThinkingLevel};
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId};
 use pi_tui::app::{App, AppConfig};
@@ -31,6 +31,11 @@ const LIGHT_ACCENT: Color = Color::Rgb(90, 128, 128);
 
 /// Dark palette `bashMode` (`vars.green` in `assets/themes/dark.json`).
 const BASH_MODE: Color = Color::Rgb(181, 189, 104);
+
+/// Dark palette thinking-border slots (`assets/themes/dark.json`).
+const THINKING_MEDIUM: Color = Color::Rgb(129, 162, 190);
+const THINKING_HIGH: Color = Color::Rgb(178, 148, 187);
+const THINKING_MAX: Color = Color::Rgb(255, 95, 255);
 
 fn faux_model() -> Model {
     Model {
@@ -87,6 +92,15 @@ fn symbol_at(buf: &Buffer, x: u16, y: u16) -> String {
         .to_string()
 }
 
+/// The text of one rendered row, used to assert on the status bar's
+/// composed content rather than on individual cells.
+fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+    (0..width)
+        .filter_map(|x| buf.cell((x, y)))
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
 #[test]
 fn app_buffer_cells_carry_the_theme_colours() {
     let mut app = app();
@@ -114,9 +128,11 @@ fn app_buffer_cells_carry_the_theme_colours() {
     assert_eq!(symbol_at(&buf, 12, 3), "i"); // "in 0 out 0 …" starts at column 12
     assert_eq!(style_at(&buf, 12, 3).fg, Some(DIM));
 
-    // The editor region (y = height - 2) keeps the prompt's plain style (out
-    // of scope for this slice).
-    assert!(is_unstyled(style_at(&buf, 0, 2)));
+    // The editor region (y = height - 2) paints the prompt label in the
+    // current thinking level's border colour (upstream
+    // `updateEditorBorderColor`); the buffer itself stays plain.
+    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_MEDIUM));
+    assert!(is_unstyled(style_at(&buf, 2, 2)));
 }
 
 #[test]
@@ -153,10 +169,52 @@ fn bash_mode_colours_the_prompt_label() {
     // Only the label carries the colour; the buffer itself stays plain.
     assert!(is_unstyled(style_at(&buf, 2, 2)));
 
-    // A normal buffer restores the plain prompt chrome.
+    // A normal buffer paints the label in the thinking level's border colour
+    // instead (default level: medium).
     app.set_editor_text("ls");
     let buf = render(&mut app, 40, 4);
-    assert!(is_unstyled(style_at(&buf, 0, 2)));
+    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_MEDIUM));
+}
+
+#[test]
+fn the_prompt_label_follows_the_thinking_level() {
+    let mut app = app();
+
+    app.set_thinking_level(ThinkingLevel::High);
+    let buf = render(&mut app, 40, 4);
+    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_HIGH));
+
+    app.set_thinking_level(ThinkingLevel::Max);
+    let buf = render(&mut app, 40, 4);
+    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_MAX));
+
+    // Bash mode still wins over the thinking colour.
+    app.set_editor_text("!ls");
+    let buf = render(&mut app, 40, 4);
+    assert_eq!(style_at(&buf, 0, 2).fg, Some(BASH_MODE));
+}
+
+#[test]
+fn the_status_bar_shows_the_level_only_for_reasoning_models() {
+    let mut app = app();
+
+    app.set_thinking_supported(true);
+    app.set_thinking_level(ThinkingLevel::Off);
+    let buf = render(&mut app, 60, 4);
+    let status = row_text(&buf, 3, 60);
+    assert!(status.contains("• thinking off"), "got {status:?}");
+
+    app.set_thinking_level(ThinkingLevel::High);
+    let buf = render(&mut app, 60, 4);
+    let status = row_text(&buf, 3, 60);
+    assert!(status.contains("• high"), "got {status:?}");
+
+    // Upstream's footer only shows the segment for reasoning models.
+    app.set_thinking_supported(false);
+    app.set_thinking_level(ThinkingLevel::Medium);
+    let buf = render(&mut app, 60, 4);
+    let status = row_text(&buf, 3, 60);
+    assert!(!status.contains('•'), "got {status:?}");
 }
 
 #[test]

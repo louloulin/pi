@@ -226,6 +226,21 @@ impl Agent {
         self.inner.config_mut().model = model;
     }
 
+    /// The session thinking level applied to the next provider call.
+    ///
+    /// `None` until [`Agent::set_thinking_level`] is called; the session
+    /// layer seeds it from the persisted `defaultThinkingLevel`.
+    pub fn thinking_level(&self) -> Option<crate::hooks::ThinkingLevel> {
+        self.inner.thinking_level()
+    }
+
+    /// Set the thinking level every following turn requests from the
+    /// provider. Backs `app.thinking.cycle`, `/thinking` and the
+    /// `app.thinking.save` chord (upstream `AgentSession::setThinkingLevel`).
+    pub fn set_thinking_level(&mut self, level: crate::hooks::ThinkingLevel) {
+        self.inner.set_thinking_level(level);
+    }
+
     /// Set a per-turn model override. Pass `None` to clear.
     pub fn set_model_override(&mut self, model: Option<Model>) {
         self.inner.state_mut().model_override = model;

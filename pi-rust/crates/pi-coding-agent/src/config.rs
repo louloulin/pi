@@ -34,11 +34,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use pi_agent_core::{RetryPolicy as AgentRetryPolicy, DEFAULT_MAX_AGENT_RETRY_DELAY_MS};
+use pi_agent_core::{
+    RetryPolicy as AgentRetryPolicy, ThinkingLevel, DEFAULT_MAX_AGENT_RETRY_DELAY_MS,
+};
 use pi_ai::ProviderRetryPolicy;
 
 use crate::compaction::{CompactionSettings, DEFAULT_COMPACTION_SETTINGS};
 use crate::paths;
+use crate::thinking::DEFAULT_THINKING_LEVEL;
 
 /// Settings file name inside `~/.pi/agent` and `.pi`.
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -149,6 +152,62 @@ fn read_theme(merged: &Map<String, Value>) -> Option<String> {
             None
         }
     }
+}
+
+/// Load `defaultThinkingLevel` — the level a fresh session starts at.
+///
+/// Upstream writes the key from `setDefaultThinkingLevel`
+/// (`core/settings-manager.ts:792`) and reads it back while constructing an
+/// `AgentSession`. Malformed values warn and fall back to
+/// [`DEFAULT_THINKING_LEVEL`].
+pub fn load_default_thinking_level(sources: &ConfigSources) -> ThinkingLevel {
+    read_thinking_level(&merged_settings(sources), "defaultThinkingLevel")
+}
+
+/// Load the default thinking level from the discovered settings locations.
+pub fn load_default_thinking_level_default() -> ThinkingLevel {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_default_thinking_level(&ConfigSources::discover(&cwd))
+}
+
+/// Read a thinking-level string setting, warning on a malformed value.
+fn read_thinking_level(merged: &Map<String, Value>, key: &str) -> ThinkingLevel {
+    match merged.get(key) {
+        None => DEFAULT_THINKING_LEVEL,
+        Some(Value::String(raw)) => match raw.parse::<ThinkingLevel>() {
+            Ok(level) => level,
+            Err(_) => {
+                warn(&format!(
+                    "{key} must be one of {} (got {raw:?}); using {}",
+                    crate::thinking::available_levels_list(),
+                    DEFAULT_THINKING_LEVEL.as_str()
+                ));
+                DEFAULT_THINKING_LEVEL
+            }
+        },
+        Some(other) => {
+            warn(&format!(
+                "{key} must be a thinking level string (got {}); using {}",
+                json_kind(other),
+                DEFAULT_THINKING_LEVEL.as_str()
+            ));
+            DEFAULT_THINKING_LEVEL
+        }
+    }
+}
+
+/// Persist the session default thinking level (`defaultThinkingLevel`),
+/// mirroring upstream's `setDefaultThinkingLevel`
+/// (`core/settings-manager.ts:792`). Only the user file is touched.
+pub fn save_default_thinking_level(
+    sources: &ConfigSources,
+    level: ThinkingLevel,
+) -> anyhow::Result<PathBuf> {
+    save_user_setting(
+        sources,
+        "defaultThinkingLevel",
+        Value::String(level.as_str().to_string()),
+    )
 }
 
 /// Read a top-level boolean setting, warning on a malformed value.

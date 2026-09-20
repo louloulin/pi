@@ -152,6 +152,12 @@ def parse_color(value, fallback):
         return value
     if value.startswith("#") and len(value) == 7:
         return tuple(int(value[i : i + 2], 16) for i in (1, 3, 5))
+    # pyte reports 24-bit SGR (38;2;r;g;b / 48;2;r;g;b) as a *bare* six-digit
+    # hex string, so a theme that uses hex colors (pi's dark theme does) would
+    # otherwise fall through to the default and every panel would render
+    # monochrome.
+    if len(value) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+        return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
     key = value.replace("_", "").replace(" ", "").lower()
     if key in _NAMED:
         return _NAMED[key]

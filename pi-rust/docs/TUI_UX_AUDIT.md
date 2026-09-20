@@ -305,7 +305,7 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | Stage | 内容 | 验收 | 依赖 / 风险 |
 | --- | --- | --- | --- |
 | 58（LUM-1214，已合入） | 工具输出折叠 + `app.tools.expand` + 点击工具块展开 | 已交付 `6d4f64e62`，LUM-1221 轮合入（`76d1d634e`）；折叠提示 + N 可注入 + 键位可覆盖 + 单击单块，测试 `tests/tool_blocks.rs` 与 `tools_render.rs` 快照 | 无（选词/搜索快照未受影响，因折叠只在装了渲染器的交互路径生效） |
-| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）、`app.session.tree`/`fork`/`resume`（Stage 65）。剩余：`app.editor.external`、`app.thinking.cycle` | 会话三键位已随 Stage 65 接线；外部编辑器需要 teardown/restore 终端，`app.thinking.cycle` 需 `Model.reasoning` 语义 |
+| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.thinking.cycle`（LUM-1230）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）、`app.session.tree`/`fork`/`resume`（Stage 65）。剩余：`app.editor.external` | 会话三键位已随 Stage 65 接线；外部编辑器需要 teardown/restore 终端 |
 | 60（LUM-1218，已合入） | 会话命令补齐：`/new`、`/copy`、`/name` | 已交付 `86f46dea0`，LUM-1220 轮合入 `feature/pi.rs`（3 个命令 + `app.session.new` 键位 + 6 个新测试） | `/tree`、`/fork` 仍待接线 |
 | 61（LUM-1216，已合入） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 已交付 `8cab3a136`，LUM-1220 轮合入 `feature/pi.rs` | 无；mid-turn steer 需 core 暴露共享队列，留作后续切片 |
 | 62（LUM-1223，已交付） | `!cmd` / `!!cmd` 本地 bash 通道 + 忙时拒绝语义 | 已交付 `b2f673922`（LUM-1225 轮合入）：前缀识别 + 执行 + 结果折叠块 + `Esc` 取消；`!!` 因协议层缺 `bashExecution` role 暂以「不入 log」实现；忙时拒回编辑器而不入 Stage 61 队列 | 提交分支与 Stage 61 的队列相邻，需先判 bash 再判队列（已按此顺序实现） |
@@ -313,7 +313,7 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | 65（LUM-1227，已交付） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼（`pi-session` 树 + `pi-tui` 预序展平/gutter/活动分支优先）；`/fork` 选 user message 建新会话（含该条，空转录提示）；`/clone` 逐条复制整个会话为新文件，源文件零改写（`verify_stats` 断言）；`app.session.resume` 与 `/resume` 同一 `open_resume_selector` | 读路径来自 Stage 56（`branch_*`）；写路径新增 `SessionWriter::copy_entries_from` + `set_leaf`（对齐上游 `SessionManager.forkFrom`/`createBranchedSession`）；未改 `pi-protocol` 枚举 |
 | 66（LUM-1226，停放 `backlog`） | 流式反馈与可发现性：spinner + 轮耗时 + 启动头 key hints + `app.header` | `spinner` 全仓命中从 0 到有；耗时与 Stage 64 同 footer 行；启动头可折叠且不占行 | 对照 Martty `src/app.rs` 的 `SPINNER`/`spinner_idx`/`spinner()` 与测试 `a_running_subagent_keeps_the_spinner_advancing`；文案对照 Martty `src/locale.rs`，用常量表不引 i18n 框架 |
 | **P0-修（建议排到 Stage 67 之前，编号待定）** | 修交互输入循环：内层改成 `while ct_event::poll(Duration::ZERO)?` 再 `read()`（详见第十节） | 普通按键之后仍持续出帧（PTY 断言帧字节数增长）；`Esc` / `Ctrl+C` / `Ctrl+D` 语义不变；启动即有输入时首帧仍会画 | 一行改动 + 一个 PTY 回归测试；与 Stage 65/66 同处 `interactive.rs`，必须排在它们落地之后合并 |
-| 67（LUM-1230，停放 `backlog`） | 思考级别：`/thinking [level]` + `app.thinking.cycle`（`shift+tab`）/ `app.thinking.save`（`ctrl+s`）+ 编辑器边框随级别着色 +「当前模型不支持思考」提示 | 4 个入口全部接线；`/thinking` 与键位走同一段切换代码；边框色用 `Theme::thinking_border`；不支持时给状态行而非静默 | 上游 `interactive-mode.ts:2884`（cycle）、`:2986`（`/thinking` 选择器）、`:2139`（边框色）、`:4170`（不支持提示）；`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`）与 `Theme::thinking_border`（`pi-tui/src/theme.rs:1108`）已在位，缺的是 App/session 之间的级别贯通；`slash.rs` / `interactive.rs` 与 Stage 65 同文件，须排在 65 之后 |
+| 67（LUM-1230，已交付） | 思考级别：`/thinking [level]` + `app.thinking.cycle`（`shift+tab`）/ `app.thinking.save`（`ctrl+s`）+ 编辑器边框随级别着色 +「当前模型不支持思考」提示 | 4 个入口全部接线：`shift+tab` 循环、`/thinking <level>` 直设、`/thinking` 选择器、`ctrl+s` 存默认值；三者共用 `apply_thinking_level` 一段切换代码；边框色取 `Theme::thinking_border` 的同一份色表（`thinking_border_color`）；模型不能推理时按 `Current model does not support thinking` / `Unknown thinking level "X". Available levels: off.` 明确回报，不静默；级别经 `AgentLoop.thinking_level` 进入下一次 provider 调用（见第十五节） | 上游 `interactive-mode.ts:4177`（cycle）、`:4817`（选择器）、`:4169`（边框色）、`:4789`（`/thinking`）、`agent-session.ts:1814`（setThinkingLevel）、`settings-manager.ts:792`（`defaultThinkingLevel`）；`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`）与 `Theme::thinking_border`（`pi-tui/src/theme.rs:1108`）已在位，本轮补的是 App/session 之间的级别贯通；`pi-ai` 不在可改范围，`Model.reasoning` 缺失以 `thinking::model_supports_thinking` 等价判定 |
 | 68（LUM-1231，停放 `backlog`） | 斜杠命令第二批：`/reload`、`/changelog`、`/import`、`/login`、`/logout`、`/scoped-models` | 解析分支 + 实际行为 + `/help` 文案；`/reload` 重载 keybindings/extensions/skills/prompts/themes/context 至少覆盖已实现的子集 | 上游 `slash-commands.ts:24-42`；auth 子系统（LUM-1171 / LUM-1180）与 session 导入导出（LUM-1174）已在位；`/share` 需 GitHub gist + 凭据，单独停放；与 Stage 67 同文件，串联在 67 之后 |
 | 69（LUM-1232，停放 `backlog`） | Martty 风格会话级持久 shell：`!` 命令之间保留 `cd` / 环境变量，退出 TUI 时回收 | 连续 `!cd sub` + `!pwd` 看到目录延续；一个 `!export X=1` 在下一个 `!` 可见；`Esc` 仍可中断；进程随 TUI 退出而终止；`!!` 语义不变 | **非上游对齐**（上游 `bash-executor.ts:50` 每条命令新起进程），属「最佳体验」增强，需先决定默认开/关；实现对标 Martty `src/app.rs:718-835`（`PersistentShell` + 控制 fd 9 + `shell_quote`）；与 Stage 62 的 `BashRunner` 同文件 |
 
@@ -1286,3 +1286,90 @@ PTY harness 与 14.3 同源（`pty.fork` + 自写 VT 解析 + PIL），仍**不�
    键入 `#` 依旧无候选。
 4. `/model` 这类「应用后还要回车」的命令仍是两次按键（`Tab` 应用 + `Enter` 提交）；
    上游行为相同，属既有设计，未改。
+## 十六、Stage 67（LUM-1230）：思考级别贯通
+
+### 16.1 接线清单
+
+| 入口 | 行为 | 上游 |
+| --- | --- | --- |
+| `app.thinking.cycle`（`shift+tab`） | `off → minimal → low → medium → high → xhigh → max` 循环并回绕；状态行闪 `Thinking level: <level>` | `interactive-mode.ts:4177` |
+| `/thinking <level>` | 大小写不敏感直设；不在该模型的可用集合内则报 `Unknown thinking level "X". Available levels: …`，且**不改动**当前级别 | `interactive-mode.ts:4789` |
+| `/thinking` | 打开选择器（标题 `Thinking Level`，复用 `pi-tui` 的 `Selector`）：列出可用级别与说明，当前级别预选中并打 `✓`，等于默认值的行尾附 `· default` | `interactive-mode.ts:4817` |
+| `app.thinking.save`（`ctrl+s`） | 选择器内写 `defaultThinkingLevel` 并关闭；状态行闪 `Default thinking level: <level>` | `components/thinking-selector.ts` |
+| 编辑器边框 | `>` 标签取 `Theme::thinking_border` 的同一份色表（`thinking_border_color`，bash 模式优先） | `interactive-mode.ts:4169` |
+| 状态行 | `模型 • <level>`，`off` 写作 `thinking off`；模型不能推理时不显示该段 | `components/footer.ts:182` |
+
+四个入口共用 `apply_thinking_level(app, agent, level, persist)`，即上游
+`AgentSession.setThinkingLevel`（`agent-session.ts:1814`）的语义：按模型可用级别 clamp →
+同时发布给 agent（决定下一次 provider 调用）与 App（状态行 + 边框）→ 仅在 `persist` 时
+把**请求的**（而非 clamp 后的）级别写入 `defaultThinkingLevel`。
+
+### 16.2 语义对齐与两处受限点（`pi-ai` 不在可改范围）
+
+1. **级别确实进到 provider 调用**：`AgentLoop` 新增 `thinking_level: Option<ThinkingLevel>`，
+   每次 `run()` 重建的 `LoopConfig.thinking_level`（`agent_loop.rs:81`、`:522`）由它播种，
+   `stream_assistant_events` 消费该字段（`is_reasoning()` 时不再下发 `temperature`）。
+   上游 `SimpleStreamOptions`（`pi-ai/src/types.rs`）里的 reasoning 字段在本仓不存在且该
+   crate 不在可改范围，故这是可达的最深接缝。
+2. **`Model.reasoning` 缺失**：`pi-protocol::Model` 没有该字段（`pi-ai/src/providers/registry.rs:585`
+   建 `ModelSpec` 时丢弃），139 处 `Model { .. }` 字面量也使其不可加。改以
+   `thinking::model_supports_thinking(model)` 作等价判定：`Api::Faux => false`（上游
+   `providers/faux.ts:468 reasoning: false`，正好是 TUI 默认模型），Anthropic/Google/
+   Bedrock/Mistral 为 `true`，OpenAI 系按 id 保守推断（`o1`/`o3`/`o4`/`gpt-5`/`codex`/
+   `thinking`/`reason`），Cohere 为 `false`。判定与 `getSupportedThinkingLevels`
+   （`packages/ai/src/models.ts:915`）、`clampThinkingLevel`（`:926`）一一对应，日后
+   `Model.reasoning` 到位只需替换这一个函数。
+
+### 16.3 实机对照（PTY）
+
+本轮不再自带一次性 harness：直接复用 LUM-1241（`809648412`）入仓的
+`pi-rust/scripts/pty_capture.py`，场景文件为本轮新增的
+`scripts/pty_scenarios/thinking-unsupported.json` 与 `thinking-reasoning.json`：
+
+```bash
+python3 pi-rust/scripts/pty_capture.py --bin <pi 二进制> \
+    --steps pi-rust/scripts/pty_scenarios/thinking-reasoning.json \
+    --home /tmp/lum1230-home --keep-temp \
+    --out pi-rust/docs/screenshots/lum1230-thinking-reasoning.png
+```
+
+harness 把 `HOME` 指到临时目录（加 `--keep-temp` 才保留，便于核对落盘结果），
+`ctrl+s` 因此不会碰到真实设置；推理模型那一路只注入占位 `ANTHROPIC_API_KEY`，不发网络
+请求。同时修了 harness 的一处取色 bug：`parse_color` 只认 `#rrggbb`，而 `pyte` 把 24-bit
+SGR 报成裸的 6 位 hex，于是所有 truecolor 单元格退化成默认灰、图里根本看不出级别颜色；
+补上 6 位 hex 分支后本节截图才有颜色。
+
+| 画面 | 观察 |
+| --- | --- |
+| `--model faux/faux-model`（非推理）启动 | 状态行无级别段（对齐 `footer.ts:182-188` 只在 `model.reasoning` 时显示） |
+| 同上 + `shift+tab` | 状态行亮出 `Current model does not support thinking`，不是静默 |
+| 同上 + `/thinking high` | 消息区 `Unknown thinking level "high". Available levels: off.`，级别保持不变 |
+| `--model anthropic/claude-sonnet-4-5` 启动 | 状态行 `Claude Sonnet 4.5 • medium` |
+| 同上 + `shift+tab`、再一次 | `• high` / `• xhigh` |
+| 同上 + `/thinking max` | `• max`（直设，不开选择器） |
+| 同上 + `/thinking` | 7 级与说明全部列出，当前级别 `✓ max` 预选中；下移两次后光标到 `minimal` |
+| 同上 + `ctrl+s` | 状态行 `Default thinking level: minimal`，`~/.pi/agent/settings.json` 变为 `{"defaultThinkingLevel": "minimal"}` |
+
+边框色不是只看字段：把 `shift+tab` 到 `/thinking` 每一步的原始 PTY 字节流按
+`38;2;r;g;b` 抓出来，命中的正是色表项——`shift+tab` 后 `38;2;178;148;187`
+（`thinkingHigh` `#b294bb`）、再按一次 `38;2;209;131;232`（`thinkingXhigh` `#d183e8`）、
+`/thinking max` 后 `38;2;255;95;255`（`thinkingMax` `#ff5fff`）；非推理模型那一路整段
+没有任何级别色写出。每张图的文本 dump（`*.png.txt`）与图同目录入库，可 grep。
+
+![非推理模型：`shift+tab` 回报不支持，`/thinking high` 列出可用级别](screenshots/lum1230-thinking-unsupported.png)
+
+![推理模型：`• medium` → `• high` → `• xhigh` → `• max`，`/thinking` 选择器预选中 `✓ max`，`ctrl+s` 落盘 `minimal`](screenshots/lum1230-thinking-reasoning.png)
+
+### 16.4 门禁与新增测试
+
+- `cargo fmt --all -- --check` 干净。
+- `cargo clippy -p pi-tui -p pi-coding-agent -p pi-agent-core --all-targets -- -D warnings`
+  退出码 0（仅剩 vendored `rquickjs-core` 的既有警告）。
+- `cargo test -p pi-tui -p pi-coding-agent -p pi-agent-core` 全绿（80 个 test target
+  全部 `ok`；`pi-coding-agent` lib 462 passed / 0 failed）。
+- 新增测试 19 条：`pi-coding-agent/src/thinking.rs` 8 条（解析与大小写、非推理模型只给
+  `off`、循环顺序与回绕、clamp、`model_supports_thinking` 的 faux/anthropic+google/
+  openai/azure 分支）；`pi-tui/tests/app_theme.rs` 2 条（标签色随级别、状态行只在推理
+  模型上带级别段）；`pi-coding-agent/src/interactive.rs` 9 条（cycle 前进 / 回绕 /
+  不支持回报、`/thinking <level>` 直设与不可用级别、`/thinking` 选择器与预选中、
+  选择器取值过滤、`defaultThinkingLevel` 落盘往返 + 写失败回报）。
