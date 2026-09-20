@@ -17,10 +17,14 @@
 //!
 //! * the OpenAI Chat Completions–compatible family (DeepSeek, Groq,
 //!   Cerebras, Moonshot AI, Z.AI, OpenRouter, Together, Fireworks, Baseten,
-//!   NVIDIA, Hugging Face, Xiaomi, Ant Ling), whose members only differ by
-//!   base URL, credential and model ids;
+//!   NVIDIA, Hugging Face, Xiaomi, Ant Ling, the Qwen and Xiaomi token
+//!   plans), whose members only differ by base URL, credential and model
+//!   ids;
 //! * `xai`, which speaks the OpenAI **Responses** API against a different
-//!   host and credential than `openai-responses`.
+//!   host and credential than `openai-responses`;
+//! * `minimax` / `minimax-cn` and `vercel-ai-gateway`, which speak the
+//!   **Anthropic Messages** protocol from a non-Anthropic host and reuse
+//!   [`super::anthropic::AnthropicProvider`].
 //!
 //! Providers that speak a wire protocol this build has no adapter for
 //! (Bedrock Converse, Cohere v2, Mistral conversations, Azure/Vertex
@@ -273,6 +277,143 @@ const CEREBRAS_MODELS: &[ModelSpec] =
 /// Hugging Face Inference Providers router.
 const HUGGINGFACE_MODELS: &[ModelSpec] =
     &[ModelSpec::new("moonshotai/Kimi-K2.6", "Kimi K2.6").with_limits(256_000, 32_768)];
+
+/// MiniMax (global) — `https://api.minimax.io/anthropic`.
+///
+/// MiniMax speaks the **Anthropic Messages** wire protocol from its own
+/// host and credential, so it reuses `AnthropicMessagesProvider` without a
+/// dedicated adapter. Catalog copied from the version-matched upstream data
+/// snapshot (`dist/providers/data/minimax.json`, `@earendil-works/pi-ai@0.85.1`).
+const MINIMAX_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("MiniMax-M2.7", "MiniMax-M2.7")
+        .with_limits(204_800, 131_072)
+        .with_pricing(Pricing::micro_usd(300_000, 1_200_000, 60_000, 375_000)),
+    ModelSpec::new("MiniMax-M2.7-highspeed", "MiniMax-M2.7-highspeed")
+        .with_limits(204_800, 131_072)
+        .with_pricing(Pricing::micro_usd(600_000, 2_400_000, 60_000, 375_000)),
+    ModelSpec::new("MiniMax-M3", "MiniMax-M3")
+        .with_limits(1_048_576, 512_000)
+        .with_pricing(Pricing::micro_usd(300_000, 1_200_000, 60_000, 0)),
+];
+
+/// MiniMax (mainland China) — `https://api.minimaxi.com/anthropic`.
+///
+/// Same catalog and protocol as the global host; only host, credential and
+/// provider id differ (`data/minimax-cn.json`).
+const MINIMAX_CN_MODELS: &[ModelSpec] = MINIMAX_MODELS;
+
+/// Qwen Token Plan (Singapore) — `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`.
+///
+/// Alibaba's token-plan gateway is OpenAI Chat Completions compatible and
+/// proxies third-party models too (DeepSeek, GLM, Kimi, MiniMax), which is
+/// why its catalog mixes vendors. From `data/qwen-token-plan.json`.
+const QWEN_TOKEN_PLAN_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("MiniMax-M2.5", "MiniMax-M2.5").with_limits(196_608, 32_768),
+    ModelSpec::new("deepseek-v3.2", "DeepSeek V3.2").with_limits(131_072, 65_536),
+    ModelSpec::new("deepseek-v4-flash", "DeepSeek V4 Flash").with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731")
+        .with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-pro", "DeepSeek V4 Pro").with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813")
+        .with_limits(1_000_000, 384_000),
+    ModelSpec::new("glm-5", "GLM-5").with_limits(202_752, 16_384),
+    ModelSpec::new("glm-5.1", "GLM-5.1").with_limits(202_752, 128_000),
+    ModelSpec::new("glm-5.2", "GLM-5.2").with_limits(1_000_000, 131_072),
+    ModelSpec::new("kimi-k2.5", "Kimi K2.5").with_limits(262_144, 98_304),
+    ModelSpec::new("kimi-k2.6", "Kimi K2.6").with_limits(262_144, 262_144),
+    ModelSpec::new("kimi-k2.7-code", "Kimi K2.7 Code").with_limits(262_144, 262_144),
+    ModelSpec::new("qwen3.6-flash", "Qwen3.6 Flash").with_limits(1_000_000, 65_536),
+    ModelSpec::new("qwen3.6-plus", "Qwen3.6 Plus").with_limits(1_000_000, 65_536),
+    ModelSpec::new("qwen3.7-max", "Qwen3.7 Max").with_limits(1_000_000, 131_072),
+    ModelSpec::new("qwen3.7-plus", "Qwen3.7 Plus").with_limits(1_000_000, 65_536),
+    ModelSpec::new("qwen3.8-flash", "Qwen3.8 Flash").with_limits(1_000_000, 131_072),
+    ModelSpec::new("qwen3.8-max", "Qwen3.8 Max").with_limits(1_000_000, 131_072),
+];
+
+/// Qwen Token Plan (mainland China) — `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`.
+///
+/// Same catalog as the Singapore host (`data/qwen-token-plan-cn.json`).
+const QWEN_TOKEN_PLAN_CN_MODELS: &[ModelSpec] = QWEN_TOKEN_PLAN_MODELS;
+
+/// Qwen Token Plan (individual tier) — same host as [`QWEN_TOKEN_PLAN_MODELS`]
+/// and the same `QWEN_TOKEN_PLAN_API_KEY` credential, but a narrower catalog
+/// (paid models only, no free `MiniMax-M2.5`); from
+/// `data/qwen-token-plan-individual.json`.
+const QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731")
+        .with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-pro", "DeepSeek V4 Pro").with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813")
+        .with_limits(1_000_000, 384_000),
+    ModelSpec::new("glm-5.2", "GLM-5.2").with_limits(1_000_000, 131_072),
+    ModelSpec::new("qwen3.6-flash", "Qwen3.6 Flash").with_limits(1_000_000, 65_536),
+    ModelSpec::new("qwen3.7-max", "Qwen3.7 Max").with_limits(1_000_000, 131_072),
+    ModelSpec::new("qwen3.7-plus", "Qwen3.7 Plus").with_limits(1_000_000, 65_536),
+    ModelSpec::new("qwen3.8-flash", "Qwen3.8 Flash").with_limits(1_000_000, 131_072),
+    ModelSpec::new("qwen3.8-max", "Qwen3.8 Max").with_limits(1_000_000, 131_072),
+];
+
+/// Xiaomi token plan (Amsterdam / China / Singapore).
+///
+/// All three hosts share one catalog and one id set (`data/xiaomi-token-plan-*.json`);
+/// the MiMo token-plan tiers are free of charge, so no pricing is declared.
+const XIAOMI_TOKEN_PLAN_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("mimo-v2.5", "MiMo-V2.5").with_limits(1_048_576, 131_072),
+    ModelSpec::new("mimo-v2.5-pro", "MiMo-V2.5-Pro").with_limits(1_048_576, 131_072),
+];
+
+/// Vercel AI Gateway — `https://ai-gateway.vercel.sh`.
+///
+/// The gateway multiplexes hundreds of vendor models over **Anthropic
+/// Messages**, so it reuses the Anthropic adapter with its own host and
+/// `AI_GATEWAY_API_KEY` credential. Upstream ships 237 entries
+/// (`data/vercel-ai-gateway.json`); like the other very large catalogs in
+/// this table (NVIDIA, Hugging Face) the list below is curated — one
+/// flagship per vendor — and `pricing_for` returns `None` for the rest.
+const VERCEL_AI_GATEWAY_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("anthropic/claude-sonnet-4.5", "Claude Sonnet 4.5")
+        .with_limits(1_000_000, 64_000)
+        .with_pricing(Pricing::micro_usd(3_000_000, 15_000_000, 300_000, 3_750_000)),
+    ModelSpec::new("anthropic/claude-opus-4.5", "Claude Opus 4.5")
+        .with_limits(200_000, 64_000)
+        .with_pricing(Pricing::micro_usd(5_000_000, 25_000_000, 500_000, 6_250_000)),
+    ModelSpec::new("openai/gpt-5.2", "GPT 5.2")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
+    ModelSpec::new("openai/gpt-5.5", "GPT 5.5")
+        .with_limits(1_000_000, 128_000)
+        .with_pricing(Pricing::micro_usd(5_000_000, 30_000_000, 500_000, 0)),
+    ModelSpec::new("openai/gpt-4.1", "GPT-4.1")
+        .with_limits(1_047_576, 32_768)
+        .with_pricing(Pricing::micro_usd(2_000_000, 8_000_000, 500_000, 0)),
+    ModelSpec::new("google/gemini-2.5-pro", "Gemini 2.5 Pro")
+        .with_limits(1_048_576, 65_536)
+        .with_pricing(Pricing::micro_usd(1_250_000, 10_000_000, 125_000, 0)),
+    ModelSpec::new("google/gemini-3-flash", "Gemini 3 Flash")
+        .with_limits(1_000_000, 65_000)
+        .with_pricing(Pricing::micro_usd(500_000, 3_000_000, 50_000, 0)),
+    ModelSpec::new("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro")
+        .with_limits(1_000_000, 384_000)
+        .with_pricing(Pricing::micro_usd(660_000, 1_980_000, 22_000, 0)),
+    ModelSpec::new("moonshotai/kimi-k2.6", "Kimi K2.6")
+        .with_limits(262_000, 262_000)
+        .with_pricing(Pricing::micro_usd(950_000, 4_000_000, 160_000, 0)),
+    ModelSpec::new("minimax/minimax-m3", "MiniMax M3")
+        .with_limits(512_000, 512_000)
+        .with_pricing(Pricing::micro_usd(300_000, 1_200_000, 60_000, 0)),
+    ModelSpec::new("zai/glm-5.2", "GLM 5.2")
+        .with_limits(1_000_000, 128_000)
+        .with_pricing(Pricing::micro_usd(800_000, 2_550_000, 160_000, 0)),
+    ModelSpec::new("meta/llama-4-maverick", "Llama 4 Maverick 17B Instruct")
+        .with_limits(128_000, 8_192)
+        .with_pricing(Pricing::micro_usd(240_000, 970_000, 0, 0)),
+    ModelSpec::new("xiaomi/mimo-v2.5", "MiMo M2.5")
+        .with_limits(1_050_000, 131_100)
+        .with_pricing(Pricing::micro_usd(140_000, 280_000, 2_800, 0)),
+    ModelSpec::new("mistral/devstral-2", "Devstral 2")
+        .with_limits(256_000, 256_000)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 0, 0)),
+];
 
 /// Together AI.
 const TOGETHER_MODELS: &[ModelSpec] = &[
@@ -704,6 +845,24 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         models: HUGGINGFACE_MODELS,
     },
     ProviderSpec {
+        id: "minimax",
+        display_name: "MiniMax",
+        api: Api::AnthropicMessages,
+        default_base_url: "https://api.minimax.io/anthropic",
+        api_key_env: &["MINIMAX_API_KEY"],
+        base_url_env: &["MINIMAX_BASE_URL"],
+        models: MINIMAX_MODELS,
+    },
+    ProviderSpec {
+        id: "minimax-cn",
+        display_name: "MiniMax CN",
+        api: Api::AnthropicMessages,
+        default_base_url: "https://api.minimaxi.com/anthropic",
+        api_key_env: &["MINIMAX_CN_API_KEY"],
+        base_url_env: &["MINIMAX_CN_BASE_URL"],
+        models: MINIMAX_CN_MODELS,
+    },
+    ProviderSpec {
         id: "mistral",
         display_name: "Mistral",
         api: Api::MistralConversations,
@@ -749,6 +908,33 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         models: OPENROUTER_MODELS,
     },
     ProviderSpec {
+        id: "qwen-token-plan",
+        display_name: "Qwen Token Plan",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        api_key_env: &["QWEN_TOKEN_PLAN_API_KEY"],
+        base_url_env: &["QWEN_TOKEN_PLAN_BASE_URL"],
+        models: QWEN_TOKEN_PLAN_MODELS,
+    },
+    ProviderSpec {
+        id: "qwen-token-plan-cn",
+        display_name: "Qwen Token Plan CN",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        api_key_env: &["QWEN_TOKEN_PLAN_CN_API_KEY"],
+        base_url_env: &["QWEN_TOKEN_PLAN_CN_BASE_URL"],
+        models: QWEN_TOKEN_PLAN_CN_MODELS,
+    },
+    ProviderSpec {
+        id: "qwen-token-plan-individual",
+        display_name: "Qwen Token Plan Individual",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        api_key_env: &["QWEN_TOKEN_PLAN_API_KEY"],
+        base_url_env: &["QWEN_TOKEN_PLAN_INDIVIDUAL_BASE_URL"],
+        models: QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS,
+    },
+    ProviderSpec {
         id: "together",
         display_name: "Together AI",
         api: Api::OpenAiChatCompletions,
@@ -756,6 +942,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["TOGETHER_API_KEY"],
         base_url_env: &["TOGETHER_BASE_URL"],
         models: TOGETHER_MODELS,
+    },
+    ProviderSpec {
+        id: "vercel-ai-gateway",
+        display_name: "Vercel AI Gateway",
+        api: Api::AnthropicMessages,
+        default_base_url: "https://ai-gateway.vercel.sh",
+        api_key_env: &["AI_GATEWAY_API_KEY"],
+        base_url_env: &["AI_GATEWAY_BASE_URL"],
+        models: VERCEL_AI_GATEWAY_MODELS,
     },
     ProviderSpec {
         id: "xai",
@@ -774,6 +969,33 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["XIAOMI_API_KEY"],
         base_url_env: &["XIAOMI_BASE_URL"],
         models: XIAOMI_MODELS,
+    },
+    ProviderSpec {
+        id: "xiaomi-token-plan-ams",
+        display_name: "Xiaomi Token Plan AMS",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://token-plan-ams.xiaomimimo.com/v1",
+        api_key_env: &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+        base_url_env: &["XIAOMI_TOKEN_PLAN_AMS_BASE_URL"],
+        models: XIAOMI_TOKEN_PLAN_MODELS,
+    },
+    ProviderSpec {
+        id: "xiaomi-token-plan-cn",
+        display_name: "Xiaomi Token Plan CN",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://token-plan-cn.xiaomimimo.com/v1",
+        api_key_env: &["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+        base_url_env: &["XIAOMI_TOKEN_PLAN_CN_BASE_URL"],
+        models: XIAOMI_TOKEN_PLAN_MODELS,
+    },
+    ProviderSpec {
+        id: "xiaomi-token-plan-sgp",
+        display_name: "Xiaomi Token Plan SGP",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://token-plan-sgp.xiaomimimo.com/v1",
+        api_key_env: &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
+        base_url_env: &["XIAOMI_TOKEN_PLAN_SGP_BASE_URL"],
+        models: XIAOMI_TOKEN_PLAN_MODELS,
     },
     ProviderSpec {
         id: "zai",
@@ -964,8 +1186,14 @@ mod tests {
             "moonshotai-cn",
             "nvidia",
             "openrouter",
+            "qwen-token-plan",
+            "qwen-token-plan-cn",
+            "qwen-token-plan-individual",
             "together",
             "xiaomi",
+            "xiaomi-token-plan-ams",
+            "xiaomi-token-plan-cn",
+            "xiaomi-token-plan-sgp",
             "zai",
             "zai-coding-cn",
         ] {
@@ -995,6 +1223,71 @@ mod tests {
             "grok-4.6 must be selectable via `--model xai/grok-4.6`"
         );
         assert!(spec.models.iter().all(|m| m.max_output_tokens > 0));
+    }
+
+    #[test]
+    fn anthropic_protocol_gateways_reuse_the_messages_adapter() {
+        // MiniMax and the Vercel AI Gateway speak the Anthropic Messages
+        // wire protocol from their own host with their own credential, so
+        // they map to `AnthropicMessages` without a dedicated adapter.
+        for (id, base_url, key_env) in [
+            ("minimax", "https://api.minimax.io/anthropic", "MINIMAX_API_KEY"),
+            ("minimax-cn", "https://api.minimaxi.com/anthropic", "MINIMAX_CN_API_KEY"),
+            (
+                "vercel-ai-gateway",
+                "https://ai-gateway.vercel.sh",
+                "AI_GATEWAY_API_KEY",
+            ),
+        ] {
+            let spec = find_provider(id).unwrap_or_else(|| panic!("missing provider `{id}`"));
+            assert_eq!(spec.api, Api::AnthropicMessages, "provider `{id}`");
+            assert_eq!(spec.default_base_url, base_url, "provider `{id}`");
+            assert_eq!(spec.api_key_env, &[key_env], "provider `{id}`");
+            assert!(!spec.models.is_empty(), "provider `{id}`");
+            // None of them may fall back to Anthropic's own credential.
+            assert_ne!(
+                spec.api_key_env,
+                find_provider("anthropic").expect("anthropic").api_key_env,
+                "provider `{id}`"
+            );
+        }
+        // The China host shares the global catalog, and the gateway ships a
+        // curated slice of its 237-entry upstream catalog with real pricing.
+        assert_eq!(
+            find_provider("minimax-cn").expect("minimax-cn").models,
+            find_provider("minimax").expect("minimax").models
+        );
+        let gateway = find_provider("vercel-ai-gateway").expect("vercel-ai-gateway");
+        assert!(gateway.models.len() >= 10);
+        assert!(gateway.pricing_for("anthropic/claude-sonnet-4.5").is_some());
+    }
+
+    #[test]
+    fn token_plan_providers_share_one_catalog_per_vendor() {
+        // The Qwen token plans reuse the Chat Completions adapter; the CN
+        // host mirrors the Singapore catalog while the individual tier is a
+        // documented subset of it.
+        let sg = find_provider("qwen-token-plan").expect("qwen-token-plan");
+        let cn = find_provider("qwen-token-plan-cn").expect("qwen-token-plan-cn");
+        let individual =
+            find_provider("qwen-token-plan-individual").expect("qwen-token-plan-individual");
+        assert_eq!(sg.api, Api::OpenAiChatCompletions);
+        assert_eq!(cn.api, Api::OpenAiChatCompletions);
+        assert_eq!(individual.api, Api::OpenAiChatCompletions);
+        assert_eq!(sg.models, cn.models);
+        assert_ne!(individual.models, sg.models);
+        assert!(individual.models.len() < sg.models.len());
+        // Both tiers authenticate with the same credential env var.
+        assert_eq!(sg.api_key_env, individual.api_key_env);
+        assert_ne!(sg.api_key_env, cn.api_key_env);
+
+        // The three Xiaomi token-plan hosts share both catalog and id set.
+        let ams = find_provider("xiaomi-token-plan-ams").expect("xiaomi-token-plan-ams");
+        let xcn = find_provider("xiaomi-token-plan-cn").expect("xiaomi-token-plan-cn");
+        let sgp = find_provider("xiaomi-token-plan-sgp").expect("xiaomi-token-plan-sgp");
+        assert_eq!(ams.models, xcn.models);
+        assert_eq!(xcn.models, sgp.models);
+        assert!(ams.models.iter().any(|m| m.id == "mimo-v2.5-pro"));
     }
 
     #[test]
