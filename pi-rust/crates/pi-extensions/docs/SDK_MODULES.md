@@ -91,10 +91,12 @@ test instead of silently outrunning the bridge.
 ### `@earendil-works/pi-tui` — fully bridged
 
 The component classes implement the constructor surface upstream code
-uses and `render(width)` returns terminal strings. They are **free-standing
-renderables**: the host has no render loop, so nothing draws them on
-screen, and `ctx.ui.custom()` (the overlay channel) throws instead of
-handing back a live component — see [`ctx.ui`](#ctxiu-divergences).
+uses and `render(width)` returns terminal strings. The host does not run
+its own render loop: a component handed to `ctx.ui.custom()` /
+`setWidget` / `setHeader` / `setFooter` / `setEditorComponent` is rendered
+by the TUI instead, so a component built and used purely inside an
+extension still has to be driven by one of those calls — see
+[`ctx.ui`](#ctxiu-divergences).
 
 | Export | Notes |
 |---|---|
@@ -362,9 +364,10 @@ Loading is unaffected by these — they only matter when an extension
 |---|---|
 | `notify`, `confirm`, `input`, `select` | As before (see [`EXTENSIONS.md`](EXTENSIONS.md#ui-requests)). |
 | `theme` | Identity styling object (no colour). |
-| `custom(factory)` | Throws `ERR_PI_UI_UNSUPPORTED`: the host has no overlay/render channel to run the factory's component. |
+| `custom(factory, options?)` | Returns a thenable `CustomHandle` (`resolve` / `close` / `done` / `isVisible` / `setVisible`). The factory's component is rendered by the TUI overlay (`options.overlay`) or replaces the editor region, until the handle is resolved. The factory may be `async`; a handle resolved before the factory's promise settles never opens a session. Without a region host the handle resolves `undefined` on a microtask and the denial is reported once, exactly like `confirm` in print mode. |
+| `setWidget`, `setHeader`, `setFooter`, `setEditorComponent` | Forwarded to the injected `UiRegionHost` as one synchronous `host_ui_region(op, json)` call each (`clear` for `null` / `undefined`). Each component is registered in the shim and re-rendered by the host with the live terminal width; `handleInput(data)` receives raw key data. Without a region host the call is reported as a denial and nothing is queued. |
 | `editor(title, initial?)` | Returns `null` and reports the denial, like `input` in a non-interactive run. |
-| `setWidget`, `setStatus`, `setTitle`, `setFooter`, `setHeader`, `setEditorText`, `setHiddenThinkingLabel`, `setWorkingIndicator`, `setWorkingVisible`, `setWorkingMessage`, `setEditorComponent`, `addAutocompleteProvider`, `setTheme` | No-op with a one-time warning notification. Accepting the call lets extensions that configure widgets at `session_start` load; the value is inert because there is no widget channel. |
+| `setStatus`, `setTitle`, `setEditorText`, `setHiddenThinkingLabel`, `setWorkingIndicator`, `setWorkingVisible`, `setWorkingMessage`, `addAutocompleteProvider`, `setTheme` | No-op with a one-time warning notification. Accepting the call lets extensions that configure the status line at `session_start` load; the value is inert because there is no channel for it. |
 
 ## Adding a new SDK export
 

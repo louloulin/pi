@@ -7,7 +7,8 @@ use std::sync::Arc;
 use pi_extensions::ExtensionEntry;
 use pi_extensions::{
     DispatchOutcome, ExtensionCapabilities, ExtensionError, ExtensionRegistry, HostOptions,
-    JsExtensionHost, ScriptedUiAnswers, ScriptedUiHandler, ToolExecutionOutcome, UiHandler,
+    JsComponent, JsExtensionHost, ScriptedUiAnswers, ScriptedUiHandler, ToolExecutionOutcome,
+    UiCustomOptions, UiHandler, UiRegionHost, UiWidgetPlacement,
 };
 use pi_protocol::{ExtensionEvent, Message, Role, UiLevel, UiResponse};
 use serde_json::json;
@@ -649,6 +650,342 @@ fn non_interactive_ui_requests_deny_and_report_via_notify() {
         assert_eq!(warning.data["level"], "warning");
         let message = warning.data["message"].as_str().unwrap_or_default();
         assert!(message.contains("denied"), "{message}");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// `ctx.ui` region / overlay host bridge
+// ---------------------------------------------------------------------------
+
+/// A [`UiRegionHost`] that records every mutation, so a test can assert
+/// what the shim forwarded and then render the components it received.
+#[derive(Default)]
+struct RecordingRegionHost {
+    /// One line per received mutation, in arrival order.
+    ops: std::sync::Mutex<Vec<String>>,
+    /// Every header component handed over, in order.
+    headers: std::sync::Mutex<Vec<JsComponent>>,
+    /// Every `setWidget(key, …)` payload that carried a component.
+    widgets: std::sync::Mutex<Vec<(String, JsComponent)>>,
+}
+
+impl RecordingRegionHost {
+    fn push(&self, op: String) {
+        self.ops.lock().expect("region lock").push(op);
+    }
+
+    fn ops(&self) -> Vec<String> {
+        self.ops.lock().expect("region lock").clone()
+    }
+
+    fn header(&self) -> JsComponent {
+        self.headers
+            .lock()
+            .expect("region lock")
+            .first()
+            .expect("a header component")
+            .clone()
+    }
+
+    fn widget(&self, key: &str) -> JsComponent {
+        self.widgets
+            .lock()
+            .expect("region lock")
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, component)| component.clone())
+            .unwrap_or_else(|| panic!("widget {key}"))
+    }
+
+    /// `set` / `clear`, the two states a region slot can be in.
+    fn state(component: &Option<JsComponent>) -> &'static str {
+        if component.is_some() {
+            "set"
+        } else {
+            "clear"
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UiRegionHost for RecordingRegionHost {
+    async fn set_widget(
+        &self,
+        key: String,
+        placement: UiWidgetPlacement,
+        component: Option<JsComponent>,
+    ) {
+        self.push(format!(
+            "widget:{key}:{placement:?}:{}",
+            Self::state(&component)
+        ));
+        if let Some(component) = component {
+            self.widgets
+                .lock()
+                .expect("region lock")
+                .push((key, component));
+        }
+    }
+
+    async fn set_header(&self, component: Option<JsComponent>) {
+        self.push(format!("header:{}", Self::state(&component)));
+        if let Some(component) = component {
+            self.headers.lock().expect("region lock").push(component);
+        }
+    }
+
+    async fn set_footer(&self, component: Option<JsComponent>) {
+        self.push(format!("footer:{}", Self::state(&component)));
+    }
+
+    async fn set_editor_component(&self, component: Option<JsComponent>) {
+        self.push(format!("editor:{}", Self::state(&component)));
+    }
+
+    async fn open_custom(&self, session: u64, _component: JsComponent, options: UiCustomOptions) {
+        self.push(format!(
+            "custom-open:{session}:{}:{}",
+            options.overlay,
+            options.width.unwrap_or(0)
+        ));
+    }
+
+    async fn close_custom(&self, session: u64, result: Option<String>) {
+        self.push(format!(
+            "custom-close:{session}:{}",
+            result.unwrap_or_else(|| "-".to_string())
+        ));
+    }
+
+    async fn set_custom_visible(&self, session: u64, visible: bool) {
+        self.push(format!("custom-visible:{session}:{visible}"));
+    }
+}
+
+/// Wait for the region worker to finish draining: region mutations are
+/// forwarded on a spawned task, so a test has to poll until the expected
+/// number has landed.
+async fn wait_for_region_ops(host: &RecordingRegionHost, expected: usize) -> Vec<String> {
+    let mut ops = Vec::new();
+    for _ in 0..200 {
+        ops = host.ops();
+        if ops.len() >= expected {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    ops
+}
+
+#[test]
+fn region_host_receives_every_ui_region_mutation() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(Arc::new(ScriptedUiHandler::new(
+                    ScriptedUiAnswers::default(),
+                )))
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setWidget("todos", ["- one", "- two"], { placement: "belowEditor" });
+                    ctx.ui.setHeader((tui, theme) => ({
+                        render: (width) => [theme.fg("accent", "HEADER " + width)],
+                    }));
+                    ctx.ui.setFooter(() => ({ render: () => ["FOOTER"] }));
+                    ctx.ui.setEditorComponent(() => ({ render: () => ["EDITOR"] }));
+                    // Clearing a widget key must still reach the host, with no
+                    // component attached.
+                    ctx.ui.setWidget("gone", ["x"]);
+                    ctx.ui.setWidget("gone", undefined);
+
+                    // `done()` before the factory's promise resolves wins the
+                    // race: the handle carries the result and no session is
+                    // opened at all.
+                    const first = ctx.ui.custom(
+                        () => ({ render: () => ["CUSTOM"], handleInput: () => {} }),
+                        { overlay: true, overlayOptions: { width: 20, anchor: "bottom-right" } },
+                    );
+                    first.done("picked");
+
+                    // The awaited path: yielding lets the factory register, so
+                    // `setVisible` and `resolve` see a live session.
+                    const second = ctx.ui.custom(() => ({ render: () => ["SECOND"] }));
+                    const ok = await ctx.ui.confirm("wait", "for the factory");
+                    second.setVisible(false);
+                    second.resolve("second");
+                    pi.appendEntry("region-done", {
+                        ok: ok,
+                        first: await first,
+                        second: await second,
+                    });
+                });
+            };
+        "#;
+        host.load(entry("region-ext"), source).await.expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let ops = wait_for_region_ops(&recorder, 9).await;
+        assert_eq!(
+            ops,
+            vec![
+                "widget:todos:Below:set".to_string(),
+                "header:set".to_string(),
+                "footer:set".to_string(),
+                "editor:set".to_string(),
+                "widget:gone:Above:set".to_string(),
+                "widget:gone:Above:clear".to_string(),
+                "custom-open:1:false:0".to_string(),
+                "custom-visible:1:false".to_string(),
+                "custom-close:1:second".to_string(),
+            ],
+            "every region call reaches the host, in order"
+        );
+
+        // A factory that calls `done()` before the session exists never opens
+        // one: the handle already carries the result the caller awaited.
+        let log = host.log();
+        let done_entry = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "region-done")
+            .expect("region-done entry");
+        assert_eq!(done_entry.data["ok"], false);
+        assert_eq!(done_entry.data["first"], "picked");
+        assert_eq!(done_entry.data["second"], "second");
+
+        // The host holds a live handle to the JS component, so the TUI side
+        // can render it for a width and ask whether it takes input.
+        let header = recorder.header();
+        let rendered = header.render(30).await;
+        assert_eq!(rendered.lines, vec!["HEADER 30".to_string()]);
+        assert!(
+            !rendered.has_input,
+            "a plain header component does not declare handleInput"
+        );
+
+        let todos = recorder.widget("todos");
+        let rendered = todos.render(40).await;
+        assert_eq!(
+            rendered.lines,
+            vec!["- one".to_string(), "- two".to_string()]
+        );
+        assert!(!rendered.has_input, "an array widget has no handleInput");
+        assert!(
+            !todos.handle_input("x").await,
+            "a component without handleInput never consumes a key"
+        );
+
+        // `dispose` drops the shim-side registration; a later render is empty.
+        todos.dispose().await;
+        assert!(todos.render(40).await.lines.is_empty());
+    });
+}
+
+/// A `custom` factory runs on a JS microtask, and the host only drains the JS
+/// job queue while some Rust-side promise is pending. An extension that opens
+/// an overlay from a synchronous turn and never awaits anything would leave
+/// that job queued forever, so the host polls its driver on `custom`'s behalf
+/// (`host_ui_region("wake")`).
+#[test]
+fn region_custom_opens_from_a_synchronous_turn_without_waiting_for_other_work() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(Arc::new(ScriptedUiHandler::new(
+                    ScriptedUiAnswers::default(),
+                )))
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        // Let the host's driver task reach its idle state *before* the
+        // extension queues the factory microtask: once it is parked, only an
+        // explicit wake moves it (the behaviour under test).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_start", function (event, ctx) {
+                    ctx.ui.custom(() => ({ render: () => ["IDLE"] }));
+                });
+            };
+        "#;
+        host.load(entry("idle-custom"), source).await.expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let ops = wait_for_region_ops(&recorder, 1).await;
+        assert_eq!(ops, vec!["custom-open:1:false:0".to_string()]);
+    });
+}
+
+#[test]
+fn non_interactive_region_calls_deny_and_report_via_notify() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        let source = r#"
+            module.exports = async function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setWidget("k", ["x"]);
+                    ctx.ui.setHeader(() => ({ render: () => ["h"] }));
+                    ctx.ui.setFooter(() => ({ render: () => ["f"] }));
+                    ctx.ui.setEditorComponent(() => ({ render: () => ["e"] }));
+                    const resolved = await ctx.ui.custom(() => ({ render: () => ["c"] }));
+                    pi.appendEntry("region-denied", {
+                        resolved: resolved === undefined ? "undefined" : String(resolved),
+                    });
+                });
+            };
+        "#;
+        host.load(entry("non-interactive-region"), source)
+            .await
+            .expect("load");
+        // print / rpc / no-TTY: `ctx.hasUI` is false, so every region call is
+        // denied immediately instead of queueing a mutation nobody renders.
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("rpc"), false, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let log = host.log();
+        let denied = log
+            .entries
+            .iter()
+            .find(|e| e.custom_type == "region-denied")
+            .expect("region-denied entry");
+        assert_eq!(denied.data["resolved"], "undefined");
+
+        let warnings: Vec<String> = log
+            .entries
+            .iter()
+            .filter(|e| e.custom_type == "ui_notify")
+            .filter_map(|e| e.data["message"].as_str().map(str::to_string))
+            .collect();
+        for kind in [
+            "setWidget",
+            "setHeader",
+            "setFooter",
+            "setEditorComponent",
+            "custom",
+        ] {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|m| m.contains(kind) && m.contains("denied")),
+                "ctx.ui.{kind} should report a denial, got {warnings:?}"
+            );
+        }
     });
 }
 

@@ -522,8 +522,14 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                         } catch (err) {
                             captured.gondolinCode = err.code;
                         }
+                        let customIsHandle = false;
                         try {
-                            ctx.ui.custom(function () { return null; });
+                            const handle = ctx.ui.custom(function () { return null; });
+                            customIsHandle =
+                                !!handle &&
+                                typeof handle.resolve === "function" &&
+                                typeof handle.isVisible === "function" &&
+                                typeof handle.then === "function";
                         } catch (err) {
                             captured.customCode = err.code;
                         }
@@ -537,6 +543,7 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
                             content: [{ type: "text", text: "ok" }],
                             details: {
                                 ...captured,
+                                customIsHandle,
                                 widgetThrew,
                                 themeStyled: ctx.ui.theme.fg("accent", "text"),
                                 protocolInert:
@@ -592,7 +599,15 @@ fn sdk_gaps_and_unknown_exports_throw_named_errors() {
             "the bridged builtin provider factories are callable"
         );
         assert_eq!(d["gondolinCode"], "ERR_PI_SDK_UNIMPLEMENTED");
-        assert_eq!(d["customCode"], "ERR_PI_UI_UNSUPPORTED");
+        assert_eq!(
+            d["customCode"],
+            serde_json::Value::Null,
+            "custom no longer throws: it returns a handle and resolves in non-interactive mode"
+        );
+        assert_eq!(
+            d["customIsHandle"], true,
+            "custom returns the CustomHandle shape"
+        );
         assert_eq!(d["widgetThrew"], false, "setWidget is an inert no-op");
         assert_eq!(
             d["themeStyled"], "text",

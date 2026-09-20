@@ -27,7 +27,7 @@ use pi_protocol::{Api, ExtensionEvent, ProviderId, ResourcesDiscoverReason, UiLe
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
 use crate::extensions::pi_ai_runner::BuiltinPiAiStreamRunner;
-use crate::extensions::ui_bridge::TuiUiBridge;
+use crate::extensions::ui_bridge::{TuiRegionHost, TuiUiBridge};
 use crate::provider::{api_wire_name, resolve_extension_api_key, ProviderRouter};
 use crate::tool_executor::{BuiltinToolBridge, BuiltinToolExecutor, ExtensionToolExecutor};
 
@@ -61,6 +61,14 @@ pub struct ExtensionLoadOptions {
     /// [`load`]). Leave it `None` for print / RPC / no-TTY runs, where
     /// the stderr handler is the honest answer.
     pub ui: Option<TuiUiBridge>,
+    /// Region / overlay host behind `ctx.ui.setWidget` / `setHeader` /
+    /// `setFooter` / `setEditorComponent` / `custom`.
+    ///
+    /// Region mutations are not request/response, so they cannot ride the
+    /// [`TuiUiBridge`] dialog channel: the interactive loop owns the
+    /// receiver and applies each queued mutation to the `App` (see
+    /// [`ui_bridge::RegionPump`]). Only set alongside [`Self::ui`].
+    pub ui_region_host: Option<Arc<TuiRegionHost>>,
     /// Set by `--no-extensions`: skip discovery and ship built-ins only.
     pub disabled: bool,
     /// Whether the project directory is trusted.
@@ -96,6 +104,7 @@ impl ExtensionLoadOptions {
             mode: mode.into(),
             has_ui,
             ui: None,
+            ui_region_host: None,
             disabled: false,
             // Deny by default: the CLI sets this from the trust store
             // before loading (see the field docs).
@@ -314,16 +323,22 @@ pub fn load(
     let pi_ai_runner: Arc<dyn pi_extensions::PiAiStreamRunner> =
         Arc::new(BuiltinPiAiStreamRunner::from_env());
     let host_options = match &options.ui {
-        Some(ui) => HostOptions::default()
-            .with_ui_handler(ui.handler())
-            .with_timeout(INTERACTIVE_UI_TIMEOUT)
-            .with_tool_context(ToolContext {
-                mode: mode.clone(),
-                has_ui,
-                cwd: cwd.clone(),
-            })
-            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone())))
-            .with_pi_ai_stream_runner(pi_ai_runner.clone()),
+        Some(ui) => {
+            let mut host_options = HostOptions::default()
+                .with_ui_handler(ui.handler())
+                .with_timeout(INTERACTIVE_UI_TIMEOUT)
+                .with_tool_context(ToolContext {
+                    mode: mode.clone(),
+                    has_ui,
+                    cwd: cwd.clone(),
+                })
+                .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone())))
+                .with_pi_ai_stream_runner(pi_ai_runner.clone());
+            if let Some(region_host) = options.ui_region_host.clone() {
+                host_options = host_options.with_ui_region_host(region_host);
+            }
+            host_options
+        }
         None => HostOptions::default()
             .with_ui_handler(Arc::new(StderrUiHandler))
             .with_tool_context(ToolContext {

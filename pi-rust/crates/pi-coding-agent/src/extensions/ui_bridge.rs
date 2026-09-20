@@ -34,9 +34,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_extensions::UiHandler;
+use parking_lot::Mutex;
+use pi_extensions::{
+    JsComponent, UiCustomAnchor, UiCustomOptions, UiHandler, UiRegionHost, UiWidgetPlacement,
+};
 use pi_protocol::{UiLevel, UiRequest, UiResponse};
 use pi_tui::dialog::Dialog;
+use pi_tui::input::KeyCode;
+use pi_tui::styled::{SpanStyle, StyledLine, StyledSpan};
+use pi_tui::{App, Component, CustomHandle, CustomOptions, Key, OverlayAnchor, WidgetPlacement};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::extensions::wiring::StderrUiHandler;
@@ -108,15 +114,20 @@ impl TuiUiBridge {
 pub struct TuiUi {
     bridge: TuiUiBridge,
     dialogs: Option<TuiUiReceiver>,
+    region_host: Arc<TuiRegionHost>,
+    regions: Option<TuiRegionReceiver>,
 }
 
 impl TuiUi {
     /// Create the pair.
     pub fn new() -> Self {
         let (bridge, dialogs) = TuiUiBridge::channel();
+        let (region_host, regions) = TuiRegionHost::channel();
         Self {
             bridge,
             dialogs: Some(dialogs),
+            region_host: Arc::new(region_host),
+            regions: Some(regions),
         }
     }
 
@@ -125,9 +136,23 @@ impl TuiUi {
         &self.bridge
     }
 
+    /// The region host to install through
+    /// [`ExtensionLoadOptions::ui_region_host`](crate::extensions::wiring::ExtensionLoadOptions::ui_region_host).
+    pub fn region_host(&self) -> Arc<TuiRegionHost> {
+        self.region_host.clone()
+    }
+
     /// Take the receiver (once) to hand it to the App.
     pub fn take_dialogs(&mut self) -> Option<TuiUiReceiver> {
         self.dialogs.take()
+    }
+
+    /// Take the region receiver + its sender (once) to hand to the
+    /// interactive loop's [`RegionPump`].
+    pub fn take_regions(&mut self) -> Option<(TuiRegionReceiver, mpsc::UnboundedSender<RegionOp>)> {
+        self.regions
+            .take()
+            .map(|receiver| (receiver, self.region_host.sender()))
     }
 
     /// Open the gate (see [`TuiUiBridge::arm`]).
@@ -235,6 +260,435 @@ impl UiHandler for TuiUiHandler {
             },
             tx,
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Region / overlay bridge
+//
+// `ctx.ui.setWidget / setHeader / setFooter / setEditorComponent / custom`
+// are *not* request/response like a dialog: the extension mutates a region
+// and moves on. So they travel the other way — the extension host pushes a
+// [`RegionOp`] into an unbounded channel, and the interactive loop applies
+// it to the [`App`] once per tick ([`RegionPump::pump`]). Rendering is the
+// loop's job, not the extension's: this module only adapts a JS component
+// onto [`pi_tui::Component`] and keeps its cached lines fresh.
+//
+// The App routes keyboard input internally and [`pi_tui::Component`] is
+// synchronous, so a proxy cannot round-trip to QuickJS inside
+// `handle_input`. Instead the key is queued on the proxy and delivered to
+// the JS `handleInput(data)` on the next pump; the proxy answers "consumed"
+// whenever the component declares a handler at all (upstream leaves the
+// decision to the focus model, which this port does not have).
+
+/// One region mutation on its way from the extension host to the App.
+#[derive(Debug)]
+pub enum RegionOp {
+    /// Install (`Some`) or clear (`None`) the widget registered under `key`.
+    Widget {
+        /// Extension-chosen widget key.
+        key: String,
+        /// Where the widget sits relative to the editor region.
+        placement: WidgetPlacement,
+        /// The JS component, or `None` to clear the slot.
+        component: Option<JsComponent>,
+    },
+    /// Install (`Some`) or clear (`None`) the header.
+    Header(Option<JsComponent>),
+    /// Install (`Some`) or clear (`None`) the footer.
+    Footer(Option<JsComponent>),
+    /// Install (`Some`) or clear (`None`) the editor region.
+    Editor(Option<JsComponent>),
+    /// Open a `ctx.ui.custom` session.
+    OpenCustom {
+        /// Session token the shim allocated for the `custom()` call.
+        session: u64,
+        /// The factory's root component.
+        component: JsComponent,
+        /// Overlay geometry the factory asked for.
+        options: UiCustomOptions,
+    },
+    /// Close a `custom` session with the factory's `done()` value.
+    CloseCustom {
+        /// Session token to close.
+        session: u64,
+        /// Value the factory passed to `done()`.
+        result: Option<String>,
+    },
+    /// Show / hide an open `custom` session.
+    SetCustomVisible {
+        /// Session token to toggle.
+        session: u64,
+        /// New visibility.
+        visible: bool,
+    },
+    /// The App dropped a component; dispose its QuickJS counterpart.
+    Dispose(JsComponent),
+}
+
+/// Receiver half of the region bridge: everything the loop has to apply.
+pub type TuiRegionReceiver = mpsc::UnboundedReceiver<RegionOp>;
+
+/// [`UiRegionHost`] that forwards region mutations to the interactive loop.
+///
+/// A [`crate::extensions::wiring::load`] pass installs this on
+/// [`HostOptions::ui_region_host`](pi_extensions::HostOptions::ui_region_host)
+/// so the JS shim's `ctx.ui.setWidget` (and friends) reach real TUI state.
+/// Without it the host denies those methods, which keeps
+/// `ctx.hasUI == false` runs honest.
+#[derive(Debug, Clone)]
+pub struct TuiRegionHost {
+    tx: mpsc::UnboundedSender<RegionOp>,
+}
+
+impl TuiRegionHost {
+    /// Create the host and the receiver the interactive loop drains.
+    pub fn channel() -> (Self, TuiRegionReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx }, rx)
+    }
+
+    /// The sender half, shared with the component proxies so a disposal
+    /// triggered by the App reaches the pump.
+    pub fn sender(&self) -> mpsc::UnboundedSender<RegionOp> {
+        self.tx.clone()
+    }
+}
+
+#[async_trait]
+impl UiRegionHost for TuiRegionHost {
+    async fn set_widget(
+        &self,
+        key: String,
+        placement: UiWidgetPlacement,
+        component: Option<JsComponent>,
+    ) {
+        let _ = self.tx.send(RegionOp::Widget {
+            key,
+            placement: widget_placement(placement),
+            component,
+        });
+    }
+
+    async fn set_header(&self, component: Option<JsComponent>) {
+        let _ = self.tx.send(RegionOp::Header(component));
+    }
+
+    async fn set_footer(&self, component: Option<JsComponent>) {
+        let _ = self.tx.send(RegionOp::Footer(component));
+    }
+
+    async fn set_editor_component(&self, component: Option<JsComponent>) {
+        let _ = self.tx.send(RegionOp::Editor(component));
+    }
+
+    async fn open_custom(&self, session: u64, component: JsComponent, options: UiCustomOptions) {
+        let _ = self.tx.send(RegionOp::OpenCustom {
+            session,
+            component,
+            options,
+        });
+    }
+
+    async fn close_custom(&self, session: u64, result: Option<String>) {
+        let _ = self.tx.send(RegionOp::CloseCustom { session, result });
+    }
+
+    async fn set_custom_visible(&self, session: u64, visible: bool) {
+        let _ = self
+            .tx
+            .send(RegionOp::SetCustomVisible { session, visible });
+    }
+}
+
+/// Map the host's widget placement onto the TUI's.
+///
+/// Both enums are foreign here — `pi-extensions` owns one, `pi-tui` the
+/// other — so the orphan rule rules out a `From` impl and this stays a
+/// free function.
+fn widget_placement(value: UiWidgetPlacement) -> WidgetPlacement {
+    match value {
+        UiWidgetPlacement::Above => WidgetPlacement::Above,
+        UiWidgetPlacement::Below => WidgetPlacement::Below,
+    }
+}
+
+/// Translate the host's `custom()` options into the TUI's, collapsing the
+/// edge anchors upstream supports onto this port's centre anchor.
+fn custom_options(value: UiCustomOptions) -> CustomOptions {
+    let anchor = match value.anchor.unwrap_or_default() {
+        UiCustomAnchor::TopLeft => OverlayAnchor::TopLeft,
+        UiCustomAnchor::TopRight => OverlayAnchor::TopRight,
+        UiCustomAnchor::BottomLeft => OverlayAnchor::BottomLeft,
+        UiCustomAnchor::BottomRight => OverlayAnchor::BottomRight,
+        UiCustomAnchor::Center => OverlayAnchor::Center,
+    };
+    CustomOptions {
+        overlay: value.overlay,
+        width: value.width,
+        max_height: value.max_height,
+        anchor,
+        margin: value.margin,
+    }
+}
+
+/// Shared state between a JS component and its [`Component`] proxy.
+struct RegionShared {
+    /// The QuickJS handle the proxy renders and forwards keys to.
+    component: JsComponent,
+    /// Lines from the last render, read by the synchronous
+    /// [`Component::render`].
+    lines: Mutex<Vec<StyledLine>>,
+    /// Keys the App handed to the proxy, delivered on the next pump.
+    pending_keys: Mutex<Vec<String>>,
+    /// Whether the component declared `handleInput` (learned on the first
+    /// render). Until then the proxy declines every key.
+    has_input: AtomicBool,
+    /// Set once [`Component::dispose`] ran; the pump stops rendering and
+    /// drops the entry.
+    disposed: AtomicBool,
+}
+
+/// [`Component`] adapter around one JS component.
+struct RegionProxy {
+    shared: Arc<RegionShared>,
+    tx: mpsc::UnboundedSender<RegionOp>,
+}
+
+impl Component for RegionProxy {
+    fn render(&self, _width: u16) -> Vec<StyledLine> {
+        self.shared.lines.lock().clone()
+    }
+
+    fn handle_input(&mut self, key: Key) -> bool {
+        if !self.shared.has_input.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.shared.pending_keys.lock().push(key_to_input_data(key));
+        true
+    }
+
+    fn dispose(&mut self) {
+        if self.shared.disposed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // The App disposes a component from synchronous code, so the JS
+        // `dispose()` cannot run here; queue it for the next pump.
+        let _ = self
+            .tx
+            .send(RegionOp::Dispose(self.shared.component.clone()));
+    }
+}
+
+/// An open `ctx.ui.custom` session.
+struct CustomSession {
+    /// Session token the shim allocated.
+    session: u64,
+    /// The App's handle, for `setVisible`.
+    handle: CustomHandle,
+}
+
+/// Drives queued region mutations into the [`App`] and keeps every JS
+/// component's cached lines fresh.
+///
+/// The interactive loop owns one and calls [`RegionPump::pump`] once per
+/// tick, before drawing: mutations land first so a `setHeader` in the same
+/// tick as the frame shows up in it. Drop the pump when the loop exits —
+/// the App's own `Drop` disposes the attached components.
+pub struct RegionPump {
+    /// Incoming mutations. `None` once the receiver disconnected (the host
+    /// was dropped), which makes `pump` a no-op.
+    ops: Option<TuiRegionReceiver>,
+    /// Sender shared with the proxies, so their queued disposal arrives here.
+    tx: mpsc::UnboundedSender<RegionOp>,
+    /// Every live proxy's shared state, refreshed each tick.
+    live: Vec<Arc<RegionShared>>,
+    /// The open `custom` session, if any.
+    custom: Option<CustomSession>,
+}
+
+impl RegionPump {
+    /// Create a pump over one bridge's receiver.
+    pub fn new(ops: TuiRegionReceiver, tx: mpsc::UnboundedSender<RegionOp>) -> Self {
+        Self {
+            ops: Some(ops),
+            tx,
+            live: Vec::new(),
+            custom: None,
+        }
+    }
+
+    /// Apply every queued mutation, then re-render the live components for
+    /// `width` and deliver any keys the App collected since the last tick.
+    pub async fn pump(&mut self, app: &mut App, width: u16) {
+        while let Some(op) = self.next_op() {
+            self.apply(app, op).await;
+        }
+        self.refresh(width).await;
+    }
+
+    /// Whether a `custom` overlay is currently open through this pump.
+    pub fn custom_open(&self) -> bool {
+        self.custom.is_some()
+    }
+
+    fn next_op(&mut self) -> Option<RegionOp> {
+        self.ops.as_mut()?.try_recv().ok()
+    }
+
+    async fn apply(&mut self, app: &mut App, op: RegionOp) {
+        match op {
+            RegionOp::Widget {
+                key,
+                placement,
+                component,
+            } => app.set_widget(key, self.wrap(component), placement),
+            RegionOp::Header(component) => app.set_header(self.wrap(component)),
+            RegionOp::Footer(component) => app.set_footer(self.wrap(component)),
+            RegionOp::Editor(component) => app.set_editor_component(self.wrap(component)),
+            RegionOp::OpenCustom {
+                session,
+                component,
+                options,
+            } => {
+                let shared = self.register(component);
+                let proxy = self.proxy(shared);
+                let handle = app.open_custom(proxy, custom_options(options));
+                // `App::open_custom` closes an existing overlay first, so
+                // any previous session is already disposed. Replacing the
+                // record keeps `setVisible` pointing at the live handle.
+                self.custom = Some(CustomSession { session, handle });
+            }
+            RegionOp::CloseCustom { session, result } => {
+                if self.custom.as_ref().is_some_and(|c| c.session == session) {
+                    app.close_custom(result);
+                    self.custom = None;
+                }
+            }
+            RegionOp::SetCustomVisible { session, visible } => {
+                if let Some(custom) = self.custom.as_ref().filter(|c| c.session == session) {
+                    custom.handle.set_visible(visible);
+                }
+            }
+            RegionOp::Dispose(component) => component.dispose().await,
+        }
+    }
+
+    /// Wrap an incoming JS component in a proxy and start tracking it.
+    fn wrap(&mut self, component: Option<JsComponent>) -> Option<Box<dyn Component>> {
+        component.map(|component| {
+            let shared = self.register(component);
+            self.proxy(shared)
+        })
+    }
+
+    fn register(&mut self, component: JsComponent) -> Arc<RegionShared> {
+        let shared = Arc::new(RegionShared {
+            component,
+            lines: Mutex::new(Vec::new()),
+            pending_keys: Mutex::new(Vec::new()),
+            has_input: AtomicBool::new(false),
+            disposed: AtomicBool::new(false),
+        });
+        self.live.push(shared.clone());
+        shared
+    }
+
+    fn proxy(&self, shared: Arc<RegionShared>) -> Box<dyn Component> {
+        Box::new(RegionProxy {
+            shared,
+            tx: self.tx.clone(),
+        })
+    }
+
+    async fn refresh(&mut self, width: u16) {
+        let live = std::mem::take(&mut self.live);
+        let mut keep = Vec::with_capacity(live.len());
+        for shared in live {
+            if shared.disposed.load(Ordering::SeqCst) {
+                continue;
+            }
+            let keys = std::mem::take(&mut *shared.pending_keys.lock());
+            for data in keys {
+                shared.component.handle_input(&data).await;
+            }
+            let rendered = shared.component.render(width).await;
+            shared
+                .has_input
+                .store(rendered.has_input, Ordering::Relaxed);
+            *shared.lines.lock() = rendered
+                .lines
+                .iter()
+                .map(|text| vec![StyledSpan::new(text.clone(), SpanStyle::PLAIN)])
+                .collect();
+            keep.push(shared);
+        }
+        self.live = keep;
+    }
+}
+
+/// Convert a port [`Key`] back into the raw terminal bytes a JS
+/// `handleInput(data)` expects.
+///
+/// The editor side parses terminal input *into* [`Key`]s; extension
+/// components (upstream `matchesKey` / `Key.ctrl('c')` helpers) compare
+/// against the original escape sequences, so the round trip has to rebuild
+/// them.
+fn key_to_input_data(key: Key) -> String {
+    let alt = key.modifiers.alt;
+    let body = match key.code {
+        KeyCode::Char(c) => {
+            if key.modifiers.control {
+                let lower = c.to_ascii_lowercase();
+                if lower.is_ascii_lowercase() {
+                    char::from_u32(lower as u32 - b'a' as u32 + 1)
+                        .unwrap_or(c)
+                        .to_string()
+                } else if lower == '@' || lower == ' ' {
+                    "\0".to_string()
+                } else {
+                    c.to_string()
+                }
+            } else {
+                c.to_string()
+            }
+        }
+        KeyCode::Enter => "\r".to_string(),
+        KeyCode::Tab => "\t".to_string(),
+        KeyCode::BackTab => "\x1b[Z".to_string(),
+        KeyCode::Backspace => "\x7f".to_string(),
+        KeyCode::Esc => "\x1b".to_string(),
+        KeyCode::Left => "\x1b[D".to_string(),
+        KeyCode::Right => "\x1b[C".to_string(),
+        KeyCode::Up => "\x1b[A".to_string(),
+        KeyCode::Down => "\x1b[B".to_string(),
+        KeyCode::Home => "\x1b[H".to_string(),
+        KeyCode::End => "\x1b[F".to_string(),
+        KeyCode::PageUp => "\x1b[5~".to_string(),
+        KeyCode::PageDown => "\x1b[6~".to_string(),
+        KeyCode::Delete => "\x1b[3~".to_string(),
+        KeyCode::Insert => "\x1b[2~".to_string(),
+        KeyCode::F(n) => match n {
+            1 => "\x1bOP".to_string(),
+            2 => "\x1bOQ".to_string(),
+            3 => "\x1bOR".to_string(),
+            4 => "\x1bOS".to_string(),
+            5 => "\x1b[15~".to_string(),
+            6 => "\x1b[17~".to_string(),
+            7 => "\x1b[18~".to_string(),
+            8 => "\x1b[19~".to_string(),
+            9 => "\x1b[20~".to_string(),
+            10 => "\x1b[21~".to_string(),
+            11 => "\x1b[23~".to_string(),
+            12 => "\x1b[24~".to_string(),
+            _ => String::new(),
+        },
+        KeyCode::Other => String::new(),
+    };
+    if alt {
+        format!("\x1b{body}")
+    } else {
+        body
     }
 }
 
