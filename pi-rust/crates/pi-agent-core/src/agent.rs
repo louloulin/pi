@@ -311,10 +311,17 @@ impl Agent {
             emit_to(&subscribers, event);
         });
         self.inner.set_event_observer(Some(observer));
+        // Bracket the run for extensions (upstream `agent_start`).
+        self.emit(AgentEvent::AgentStart);
         let result = self.inner.run(drained, |_turn: &TurnOutcome| {}).await;
         // Clear the observer on every path — including the error path — so a
         // later `run` on the same loop starts without a stale sink.
         self.inner.set_event_observer(None);
+        // `agent_end` brackets the run; emit it before propagating an error so
+        // subscribers always observe the run close.
+        self.emit(AgentEvent::AgentEnd {
+            messages: self.inner.state().messages.clone(),
+        });
         result?;
 
         Ok(())

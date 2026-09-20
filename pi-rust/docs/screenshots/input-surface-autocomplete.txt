@@ -1,0 +1,98 @@
+real pi (feature/pi.rs + LUM-1238), faux provider, 100x30 PTY
+
+=== a1  type `/`  → slash-command candidates ===
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+❯ help  show this help text
+  clear  clear the message view
+  new  start a new session
+  copy  copy the last assistant message to the clipboard
+  name  [name] — show or set the session display name
+> /▍
+Faux test model  session-18d715225e62370d                              in 0 out 0 ?/8.2k  ? for help
+
+=== a2  type `/he`  → /help ranked first ===
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+❯ help  show this help text
+  hotkeys  list the keyboard shortcuts
+  copy  copy the last assistant message to the clipboard
+  exit  quit the interactive session
+  clone  copy the current session into a new session file
+> /he▍
+Faux test model  session-18d715225e62370d                              in 0 out 0 ?/8.2k  ? for help
+
+=== a3  type `@src/`  → file candidates ===
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+❯ app.rs  src/app.rs
+  lib.rs  src/lib.rs
+  tree.rs  src/tree.rs
+  fuzzy.rs  src/fuzzy.rs
+  image.rs  src/image.rs
+> @src/▍
+Faux test model  session-18d715225e62370d                              in 0 out 0 ?/8.2k  ? for help
+

@@ -33,7 +33,10 @@ use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy, ThinkingLevel}
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Content, Message, Model, ProviderId, SessionEntry, ToolCall, ToolResult};
+use pi_protocol::{
+    CompactReason, Content, ExtensionEvent, Message, Model, ProviderId, SessionEntry,
+    SessionShutdownReason, ToolCall, ToolResult,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
@@ -53,15 +56,16 @@ use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
 };
 use crate::config::{self, ConfigSources};
+use crate::extensions::events::ExtensionEventMapper;
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
-use crate::extensions::wiring::ExtensionRuntime;
+use crate::extensions::wiring::{ExtensionReport, ExtensionRuntime};
 use crate::prompt_templates::PromptTemplate;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
 use crate::tools::AgentTool;
 
-use pi_tui::app::{App, AppConfig, FollowUpOutcome, Submission};
+use pi_tui::app::{App, AppConfig, ExtensionHeader, FollowUpOutcome, Submission};
 use pi_tui::dialog::{Dialog, DialogAction};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
@@ -137,6 +141,10 @@ pub struct InteractiveOptions {
     /// Loaded JS extensions, when any. `None` disables extension
     /// command dispatch and side-effect persistence.
     pub extensions: Option<Arc<ExtensionRuntime>>,
+    /// UI-facing projection of the load pass (startup header summary +
+    /// `/extensions`). Always populated by `main.rs`, including the
+    /// `--no-extensions` case; empty means "nothing to show".
+    pub extension_report: ExtensionReport,
     /// Interactive UI bridge for `ctx.ui.confirm / input / select`.
     /// `None` keeps the headless behaviour (deny / cancel), which is
     /// what tests and non-TTY runs get.
@@ -188,6 +196,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("stream_fn", &"<dyn StreamFn>")
             .field("tool_executor", &"<dyn ToolExecutor>")
             .field("extensions", &self.extensions.is_some())
+            .field("extension_report", &self.extension_report)
             .field("extension_ui", &self.extension_ui.is_some())
             .field("retry", &self.retry)
             .field("pickers", &self.pickers)
@@ -214,6 +223,7 @@ impl Default for InteractiveOptions {
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
             tool_executor: default_executor(),
             extensions: None,
+            extension_report: ExtensionReport::default(),
             extension_ui: None,
             retry: RetryPolicy::default(),
             clipboard: None,
@@ -251,6 +261,32 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // and a folded header costs no rows.
         startup_header_expanded: true,
         locale: locale_from_env(std::env::var("PI_LANG").ok().as_deref()),
+        extension_header: extension_header_for(options),
+    }
+}
+
+/// Project the extension report onto the startup header's extension row.
+///
+/// `--no-extensions` is its own state (the header says so); an empty report
+/// hides the row, which keeps a no-extension run byte-identical to the
+/// pre-Stage-71 header.
+fn extension_header_for(options: &InteractiveOptions) -> ExtensionHeader {
+    let report = &options.extension_report;
+    if report.disabled {
+        return ExtensionHeader::Disabled;
+    }
+    if report.loaded.is_empty() {
+        return ExtensionHeader::Hidden;
+    }
+    let home = crate::paths::home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    ExtensionHeader::Loaded {
+        count: report.loaded.len(),
+        names: report
+            .loaded
+            .iter()
+            .map(|path| crate::commands::display_path(path, home.as_deref(), &cwd))
+            .collect(),
     }
 }
 
@@ -323,20 +359,58 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     outcome
 }
 
-/// Install the composer's command / file completion provider.
+/// Install the composer's command / file completion provider, plus the
+/// commands the loaded extensions registered (`pi.registerCommand`).
 ///
 /// Split out of [`run_loop`] so the wiring itself is testable without a
 /// terminal: the LUM-1236 defect was exactly that this call did not exist,
-/// and a provider-only test could not have caught it.
+/// and a provider-only test could not have caught it. Extension commands
+/// complete through the same dropdown because they are real commands —
+/// `/extensions` lists them and `handle_command` dispatch does not care who
+/// registered them.
 fn install_composer_autocomplete(app: &mut App, base_path: PathBuf) {
+    install_composer_autocomplete_with(app, base_path, Vec::new());
+}
+
+/// [`install_composer_autocomplete`] plus the commands the loaded extensions
+/// registered. Split from the two-argument form so the existing LUM-1236
+/// regression test keeps driving the built-in table alone.
+fn install_composer_autocomplete_with(
+    app: &mut App,
+    base_path: PathBuf,
+    extra: Vec<pi_tui::autocomplete::SlashCommand>,
+) {
+    let mut commands = crate::commands::slash::autocomplete_commands();
+    commands.extend(extra);
     app.prompt_mut()
         .editor_mut()
         .set_autocomplete_provider(Arc::new(
-            pi_tui::autocomplete::CombinedAutocompleteProvider::new(
-                crate::commands::slash::autocomplete_commands(),
-                base_path,
-            ),
+            pi_tui::autocomplete::CombinedAutocompleteProvider::new(commands, base_path),
         ));
+}
+
+/// The extension-registered commands as dropdown rows.
+fn extension_autocomplete_commands(
+    options: &InteractiveOptions,
+) -> Vec<pi_tui::autocomplete::SlashCommand> {
+    options
+        .extensions
+        .as_ref()
+        .map(|runtime| {
+            runtime
+                .commands()
+                .iter()
+                .map(|command| {
+                    let entry = pi_tui::autocomplete::SlashCommand::new(command.name.clone());
+                    if command.description.is_empty() {
+                        entry
+                    } else {
+                        entry.with_description(command.description.clone())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn run_loop(
@@ -357,6 +431,7 @@ async fn run_loop(
     // adapter and the App owns the folding (collapsed preview, Ctrl+O,
     // click-to-toggle). Print mode keeps its own session in `text_fallback`.
     let tool_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
     app.set_tool_block_renderer(Box::new(crate::tools::InteractiveToolRenderer::new(
         tool_cwd.clone(),
     )));
@@ -365,8 +440,13 @@ async fn run_loop(
     // since LUM-1122, but nothing ever installed a provider in the binary:
     // typing `/` showed no candidates (LUM-1236). Upstream installs the same
     // `CombinedAutocompleteProvider` on the editor at startup; `tool_cwd` is
-    // the base the `@` file completion walks.
-    install_composer_autocomplete(&mut app, tool_cwd);
+    // the base the `@` file completion walks, and the extension-registered
+    // commands ride in the same table (Stage 70 / LUM-1238).
+    install_composer_autocomplete_with(
+        &mut app,
+        tool_cwd,
+        extension_autocomplete_commands(&options),
+    );
 
     // Stage 67 — seed the session thinking level from the persisted
     // `defaultThinkingLevel`, clamp it to what the active model can honour,
@@ -383,6 +463,16 @@ async fn run_loop(
         app.set_thinking_supported(supports);
         app.set_thinking_level(level);
     }
+
+    // Extension lifecycle fan-out (LUM-1246). Extensions subscribe to the
+    // *upstream* event names (`turn_start`, `tool_execution_start`, …) that
+    // the JS shim exposes, but until now nothing fed the agent's own event
+    // stream into the host — `pi.on(...)` only ever fired for
+    // `session_start` / `resources_discover`. A second subscriber to the
+    // agent's fan-out (the first belongs to the App) drives every mapped
+    // event into the host on its own task, so a slow plugin cannot stall
+    // rendering. Skipped entirely when no loaded extension subscribed.
+    let extension_pump = start_extension_event_pump(&agent, options.extensions.as_ref()).await;
 
     // Local `!` / `!!` commands: one at a time, run off the render loop so
     // `Esc` can cancel them.
@@ -524,6 +614,21 @@ async fn run_loop(
     // Nothing is pumping dialogs any more: deny instead of queueing.
     if let Some(ui) = options.extension_ui.as_ref() {
         ui.disarm();
+    }
+    // Stop the fan-out, then let extensions observe the teardown. Upstream
+    // emits `session_shutdown` on quit / reload / session replacement; a
+    // plugin that flushes state there must not be able to hold the exit open,
+    // so the delivery is bounded independently of the host's (much longer)
+    // interactive timeout.
+    if let Some(pump) = extension_pump {
+        pump.abort();
+    }
+    if let Some(runtime) = options.extensions.as_ref() {
+        let _ = tokio::time::timeout(
+            EXTENSION_SHUTDOWN_TIMEOUT,
+            runtime.deliver_shutdown(SessionShutdownReason::Quit),
+        )
+        .await;
     }
     Ok(InteractiveExit::UserExit)
 }
@@ -784,7 +889,14 @@ async fn handle_input_event(
                 )
             {
                 app.close_selector();
-                apply_thinking_selector_value(app, agent, &value, true).await;
+                apply_thinking_selector_value(
+                    app,
+                    agent,
+                    &value,
+                    true,
+                    options.extensions.as_ref(),
+                )
+                .await;
                 return Ok(None);
             }
         }
@@ -862,7 +974,7 @@ async fn handle_input_event(
             "app.thinking.cycle",
             &["shift+tab"],
         ) {
-            handle_thinking_cycle(app, agent).await;
+            handle_thinking_cycle(app, agent, options.extensions.as_ref()).await;
             return Ok(None);
         }
         if pi_tui::keybindings::matches_with_fallback(
@@ -1011,6 +1123,19 @@ async fn handle_submitted(
         }
         // Upstream memoises the raw line including its prefix.
         app.prompt_mut().push_history(text);
+        // Upstream `user_bash`: plugins see local commands too (a shell
+        // history / audit extension is the usual consumer).
+        deliver_extension_event(
+            options.extensions.as_ref(),
+            ExtensionEvent::UserBash {
+                command: command.command.clone(),
+                exclude_from_context: command.excluded,
+                cwd: std::env::current_dir()
+                    .map(|cwd| cwd.display().to_string())
+                    .unwrap_or_default(),
+            },
+        )
+        .await;
         bash.start(command.command, command.excluded);
         return Ok(());
     }
@@ -1127,7 +1252,11 @@ fn sync_thinking_for_model(app: &mut App, agent: &mut Agent) {
 /// cannot reason has no next level, so the request is reported instead of
 /// silently ignored. Everything else funnels through
 /// [`apply_thinking_level`], the same path `/thinking` and the selector use.
-async fn handle_thinking_cycle(app: &mut App, agent: &Arc<AsyncMutex<Agent>>) {
+async fn handle_thinking_cycle(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    extensions: Option<&Arc<ExtensionRuntime>>,
+) {
     let supports = {
         let agent_guard = agent.lock().await;
         crate::thinking::model_supports_thinking(agent_guard.model())
@@ -1138,7 +1267,7 @@ async fn handle_thinking_cycle(app: &mut App, agent: &Arc<AsyncMutex<Agent>>) {
     // the model would ignore.
     let next = crate::thinking::cycle_thinking_level(supports, app.thinking_level())
         .unwrap_or(ThinkingLevel::Max);
-    apply_thinking_level(app, agent, next, false).await;
+    apply_thinking_level(app, agent, next, false, extensions).await;
 }
 
 /// The single switching code path behind every thinking-level entry point.
@@ -1154,7 +1283,9 @@ async fn apply_thinking_level(
     agent: &Arc<AsyncMutex<Agent>>,
     level: ThinkingLevel,
     persist: bool,
+    extensions: Option<&Arc<ExtensionRuntime>>,
 ) {
+    let previous = app.thinking_level();
     let mut agent_guard = agent.lock().await;
     let supports = crate::thinking::model_supports_thinking(agent_guard.model());
     let clamped = crate::thinking::clamp_thinking_level(supports, level);
@@ -1162,6 +1293,20 @@ async fn apply_thinking_level(
     drop(agent_guard);
     app.set_thinking_supported(supports);
     app.set_thinking_level(clamped);
+
+    // Upstream `thinking_level_select`: plugins track the reasoning budget
+    // (e.g. to annotate transcripts). Report the level that is actually in
+    // force, not the one that was requested.
+    if clamped != previous {
+        deliver_extension_event(
+            extensions,
+            ExtensionEvent::ThinkingLevelSelect {
+                level: clamped.as_str().to_string(),
+                previous_level: previous.as_str().to_string(),
+            },
+        )
+        .await;
+    }
 
     if persist && !persist_default_thinking_level(app, &settings_sources(), level) {
         return;
@@ -1193,6 +1338,7 @@ async fn apply_thinking_selector_value(
     agent: &Arc<AsyncMutex<Agent>>,
     value: &str,
     persist: bool,
+    extensions: Option<&Arc<ExtensionRuntime>>,
 ) {
     let Some(level) = value
         .strip_prefix("thinking:")
@@ -1200,7 +1346,7 @@ async fn apply_thinking_selector_value(
     else {
         return;
     };
-    apply_thinking_level(app, agent, level, persist).await;
+    apply_thinking_level(app, agent, level, persist, extensions).await;
 }
 
 /// Write `level` to `defaultThinkingLevel` in the discovered settings
@@ -1401,7 +1547,7 @@ async fn apply_selector_choice(
     } else if value.starts_with("thinking:") {
         // The `/thinking` selector reuses the shared [`Selector`]; its values
         // carry the `thinking:` prefix.
-        apply_thinking_selector_value(app, agent, value, false).await;
+        apply_thinking_selector_value(app, agent, value, false, options.extensions.as_ref()).await;
     } else if let Some(session_id) = value.strip_prefix("resume:") {
         resume_session(app, agent, options, session_id).await;
     } else if let Some(entry_id) = value.strip_prefix("tree:") {
@@ -2459,7 +2605,7 @@ fn persist_session_name(options: &mut InteractiveOptions, name: &str) -> anyhow:
 /// Set `/name <text>`: normalize, persist, then reflect the name in the
 /// status bar. Mirrors upstream `handleNameCommand`
 /// (`interactive-mode.ts:6193`).
-fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) {
+async fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) {
     let name = normalize_session_name(raw);
     if name.is_empty() {
         app.info("usage: /name <name>".to_string());
@@ -2478,6 +2624,14 @@ fn set_session_name(app: &mut App, options: &mut InteractiveOptions, raw: &str) 
             }
             options.session_name = Some(name.clone());
             app.set_session_name(Some(name.clone()));
+            // Upstream `session_info_changed`.
+            deliver_extension_event(
+                options.extensions.as_ref(),
+                ExtensionEvent::SessionInfoChanged {
+                    name: Some(name.clone()),
+                },
+            )
+            .await;
             app.info(format!("Session name set: {name}"));
         }
         Err(err) => app.info(format!("/name: could not save the session name: {err}")),
@@ -2600,7 +2754,10 @@ async fn run_slash_command(
                 help_text_with_extensions(commands),
                 &options.prompt_templates,
             );
-            app.info(help);
+            // Command-reference output, not user input: the info prefix keeps
+            // `/help`'s body from reading as something the user typed
+            // (LUM-1238 §15.4).
+            app.info_block(help);
         }
         SlashCommand::Clear => {
             app.messages_mut().clear();
@@ -2612,7 +2769,7 @@ async fn run_slash_command(
             copy_last_assistant_message(app);
         }
         SlashCommand::Name { name } => match name {
-            Some(name) => set_session_name(app, options, &name),
+            Some(name) => set_session_name(app, options, &name).await,
             None => match options.session_name.as_deref() {
                 Some(name) => app.info(format!("Session name: {name}")),
                 None => app.info("usage: /name <name>".to_string()),
@@ -2625,7 +2782,16 @@ async fn run_slash_command(
             open_model_selector(app, options);
         }
         SlashCommand::Hotkeys => {
-            app.info(crate::commands::slash::hotkeys_text());
+            app.info_block(crate::commands::slash::hotkeys_text());
+        }
+        SlashCommand::Extensions => {
+            let home = crate::paths::home_dir();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            app.info(crate::commands::extensions_text(
+                &options.extension_report,
+                home.as_deref(),
+                &cwd,
+            ));
         }
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;
@@ -2758,7 +2924,16 @@ async fn run_slash_command(
                     let requested = crate::thinking::parse_thinking_level(&raw)
                         .filter(|candidate| available.contains(candidate));
                     match requested {
-                        Some(level) => apply_thinking_level(app, agent, level, false).await,
+                        Some(level) => {
+                            apply_thinking_level(
+                                app,
+                                agent,
+                                level,
+                                false,
+                                options.extensions.as_ref(),
+                            )
+                            .await
+                        }
                         None => app.info(format!(
                             "Unknown thinking level \"{raw}\". Available levels: {}.",
                             available
@@ -3008,7 +3183,14 @@ async fn run_compact(
         }
     };
 
-    let report = apply_compaction(agent, options, history.len(), compaction).await;
+    let report = apply_compaction(
+        agent,
+        options,
+        history.len(),
+        compaction,
+        CompactReason::Manual,
+    )
+    .await;
     app.info(format!(
         "/compact: summarized {} message(s) → kept {} ({} → {} est. tokens; {} read, {} modified)\n\n{}",
         report.summarized(),
@@ -3095,6 +3277,11 @@ async fn maybe_auto_compact(
     } else {
         "threshold"
     };
+    let compact_reason = if context_overflow {
+        CompactReason::Overflow
+    } else {
+        CompactReason::Threshold
+    };
 
     let compaction = match compact(
         &history,
@@ -3122,7 +3309,7 @@ async fn maybe_auto_compact(
         return false;
     }
 
-    let report = apply_compaction(agent, options, history.len(), compaction).await;
+    let report = apply_compaction(agent, options, history.len(), compaction, compact_reason).await;
     app.info(format!(
         "auto-compact ({trigger}): context {context_tokens} vs {} window − {} reserve; summarized {} message(s) → kept {} ({} → {} est. tokens)\n\n{}",
         model.context_window,
@@ -3162,6 +3349,7 @@ async fn apply_compaction(
     options: &InteractiveOptions,
     history_len: usize,
     compaction: Compaction,
+    reason: CompactReason,
 ) -> CompactionReport {
     if let Some(log) = options.session_log.as_ref() {
         let _ = log.append_compaction(
@@ -3185,6 +3373,19 @@ async fn apply_compaction(
         let mut guard = agent.lock().await;
         guard.state_mut().messages = compacted_history;
     }
+
+    // Upstream `session_compact`, emitted from the one place that knows the
+    // compaction actually landed; the manual and automatic paths share it.
+    deliver_extension_event(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionCompact {
+            reason,
+            tokens_before,
+            tokens_after,
+            retained,
+        },
+    )
+    .await;
 
     CompactionReport {
         history_len,
@@ -3266,6 +3467,68 @@ fn help_text_with_extensions(commands: &[pi_extensions::RegisteredCommand]) -> S
 /// The host accumulates whatever extensions recorded via
 /// `pi.appendEntry` / `pi.sendMessage` / `pi.sendUserMessage` /
 /// `pi.setSessionName`; this runs every loop tick so nothing is lost.
+/// How long extension `session_shutdown` handlers may run before the process
+/// exits without them.
+///
+/// The host's interactive timeout is five minutes (a human may be reading a
+/// dialog), which is the wrong ceiling for teardown: shutdown is not
+/// interactive, so a plugin that blocks there is simply abandoned.
+const EXTENSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Subscribe to the agent's event fan-out and drive extension lifecycle
+/// events.
+///
+/// Returns `None` when no runtime is attached or none of the loaded
+/// extensions subscribed to an event — without subscribers the pump would
+/// only cost a task and a channel.
+async fn start_extension_event_pump(
+    agent: &Arc<AsyncMutex<Agent>>,
+    extensions: Option<&Arc<ExtensionRuntime>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let runtime = extensions?;
+    if !runtime.has_any_subscriber() {
+        return None;
+    }
+    let events = agent.lock().await.subscribe();
+    let runtime = runtime.clone();
+    Some(tokio::spawn(async move {
+        run_extension_event_pump(runtime, events).await;
+    }))
+}
+
+/// The pump body: translate every agent event and deliver the ones the
+/// runtime subscribed to. Ends when the agent drops its fan-out senders.
+async fn run_extension_event_pump(
+    runtime: Arc<ExtensionRuntime>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+) {
+    let mut mapper = ExtensionEventMapper::new();
+    while let Some(event) = events.recv().await {
+        for extension_event in mapper.map(&event, now_millis()) {
+            runtime.deliver_event(&extension_event).await;
+        }
+    }
+}
+
+/// Unix milliseconds — the timestamp upstream's `turn_start` carries.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// Best-effort delivery of one lifecycle event from a call site outside the
+/// agent fan-out (`user_bash`, `thinking_level_select`, …).
+async fn deliver_extension_event(
+    extensions: Option<&Arc<ExtensionRuntime>>,
+    event: ExtensionEvent,
+) {
+    if let Some(runtime) = extensions {
+        runtime.deliver_event(&event).await;
+    }
+}
+
 fn persist_extension_side_effects(app: &mut App, options: &InteractiveOptions) {
     let Some(runtime) = options.extensions.as_ref() else {
         return;
@@ -3422,6 +3685,7 @@ fn _keep_writer() -> Option<Box<dyn Write>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_extensions::JsExtensionHost;
 
     #[test]
     fn extension_command_args_returns_text_after_the_name() {
@@ -5150,6 +5414,29 @@ mod tests {
         assert!(rendered.contains("/m"), "{rendered}");
     }
 
+    /// Stage 70 (LUM-1238) folded the extension-registered commands into the
+    /// same dropdown: `pi.registerCommand("ext-echo")` has to complete like a
+    /// built-in, or the user cannot discover it.
+    #[test]
+    fn extension_commands_complete_through_the_same_dropdown() {
+        let agent = Agent::new(AgentOptions::new(
+            small_window_model(1_000_000),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let mut app = App::new(&agent, AppConfig::default());
+        let extra = vec![pi_tui::autocomplete::SlashCommand::new("ext-echo")
+            .with_description("echo through an extension")];
+        install_composer_autocomplete_with(&mut app, std::env::temp_dir(), extra);
+
+        for ch in ['/', 'e', 'x', 't'] {
+            app.step(key(KeyCode::Char(ch)));
+        }
+
+        let rendered = app.render_snapshot(72, 14).lines.join("\n");
+        assert!(rendered.contains("ext-echo"), "{rendered}");
+    }
+
     // -----------------------------------------------------------------------
     // `app.clipboard.pasteImage` (Stage 63 / LUM-1224)
     // -----------------------------------------------------------------------
@@ -5283,7 +5570,7 @@ mod tests {
         app.set_thinking_supported(true);
         app.set_thinking_level(ThinkingLevel::Medium);
 
-        handle_thinking_cycle(&mut app, &agent).await;
+        handle_thinking_cycle(&mut app, &agent, None).await;
 
         assert_eq!(app.thinking_level(), ThinkingLevel::High);
         assert_eq!(
@@ -5299,7 +5586,7 @@ mod tests {
         app.set_thinking_supported(true);
         app.set_thinking_level(ThinkingLevel::Max);
 
-        handle_thinking_cycle(&mut app, &agent).await;
+        handle_thinking_cycle(&mut app, &agent, None).await;
 
         assert_eq!(app.thinking_level(), ThinkingLevel::Off);
         assert_eq!(app.status_flash(), Some("Thinking level: off"));
@@ -5310,7 +5597,7 @@ mod tests {
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         app.set_thinking_level(ThinkingLevel::Medium);
 
-        handle_thinking_cycle(&mut app, &agent).await;
+        handle_thinking_cycle(&mut app, &agent, None).await;
 
         assert!(!app.thinking_supported());
         assert_eq!(app.thinking_level(), ThinkingLevel::Off, "clamped to off");
@@ -5387,7 +5674,7 @@ mod tests {
             .await
             .expect("thinking");
 
-        apply_thinking_selector_value(&mut app, &agent, "thinking:high", false).await;
+        apply_thinking_selector_value(&mut app, &agent, "thinking:high", false, None).await;
 
         assert_eq!(app.thinking_level(), ThinkingLevel::High);
         assert_eq!(
@@ -5401,9 +5688,9 @@ mod tests {
     async fn thinking_selector_values_ignore_anything_but_a_level() {
         let (mut app, agent) = app_starting_at(reasoning_model()).await;
 
-        apply_thinking_selector_value(&mut app, &agent, "model:gpt-4o", false).await;
+        apply_thinking_selector_value(&mut app, &agent, "model:gpt-4o", false, None).await;
         assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
-        apply_thinking_selector_value(&mut app, &agent, "thinking:bogus", false).await;
+        apply_thinking_selector_value(&mut app, &agent, "thinking:bogus", false, None).await;
         assert_eq!(app.thinking_level(), ThinkingLevel::Medium, "untouched");
     }
 
@@ -6084,5 +6371,168 @@ mod tests {
         send(&mut app, &agent, &mut options, ctrl('d')).await;
         assert!(app.selector_open());
         assert!(options.pickers.session.pending_delete.is_none());
+    // -----------------------------------------------------------------------
+    // Extension lifecycle fan-out (LUM-1246)
+    // -----------------------------------------------------------------------
+
+    /// Load one extension source into a fresh host and wrap it in a runtime
+    /// that reports exactly `subscribed`.
+    async fn extension_runtime(
+        tag: &str,
+        source: &str,
+        subscribed: &[&str],
+    ) -> (ExtensionRuntime, JsExtensionHost) {
+        let dir = std::env::temp_dir().join(format!("pi-ext-events-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("extension.js");
+        std::fs::write(&file, source).expect("write extension");
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            pi_extensions::ExtensionEntry {
+                source: file.clone(),
+                id: tag.to_string(),
+                label: None,
+            },
+            source,
+        )
+        .await
+        .expect("load");
+        let _ = std::fs::remove_dir_all(&dir);
+        (ExtensionRuntime::for_test(host.clone(), subscribed), host)
+    }
+
+    /// Poll until the extension has recorded an entry named `name` and
+    /// return every recorded entry type in order.
+    async fn wait_for_entry(host: &JsExtensionHost, name: &str) -> Vec<String> {
+        for _ in 0..300 {
+            let kinds: Vec<String> = host
+                .log()
+                .entries
+                .iter()
+                .map(|entry| entry.custom_type.clone())
+                .collect();
+            if kinds.iter().any(|kind| kind == name) {
+                return kinds;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "extension never saw {name:?}; recorded {:?}",
+            host.log().entries.len()
+        );
+    }
+
+    /// The whole point of the fan-out: an extension that subscribes to the
+    /// upstream lifecycle names sees a real turn, today only `session_start`
+    /// and `resources_discover` ever fired.
+    #[tokio::test]
+    async fn a_js_extension_sees_a_live_turn_through_the_pump() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("agent_start", () => pi.appendEntry("agent_start", {}));
+                pi.on("turn_start", (event) => pi.appendEntry("turn_start", {
+                    index: event.turnIndex,
+                }));
+                pi.on("message_update", (event) => pi.appendEntry("message_update", {
+                    kind: event.assistantMessageEvent.type,
+                }));
+                pi.on("message_end", () => pi.appendEntry("message_end", {}));
+                pi.on("turn_end", () => pi.appendEntry("turn_end", {}));
+                pi.on("agent_end", (event) => pi.appendEntry("agent_end", {
+                    messages: event.messages.length,
+                }));
+                pi.on("session_shutdown", () => pi.appendEntry("session_shutdown", {}));
+                // Subscribed by the runtime but intentionally absent from the
+                // handler table above: `message_start` is dropped by the shim.
+                pi.on("message_start", () => pi.appendEntry("message_start", {}));
+            };
+        "#;
+        let (runtime, host) = extension_runtime(
+            "fanout",
+            source,
+            &[
+                "agent_start",
+                "turn_start",
+                "message_update",
+                "message_end",
+                "turn_end",
+                "agent_end",
+                "session_shutdown",
+            ],
+        )
+        .await;
+        let runtime = Arc::new(runtime);
+        let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
+
+        let pump = start_extension_event_pump(&agent, Some(&runtime))
+            .await
+            .expect("a subscribing extension installs the pump");
+        agent.lock().await.prompt("hi").await.expect("turn");
+
+        let kinds = wait_for_entry(&host, "agent_end").await;
+        pump.abort();
+
+        assert_eq!(kinds.first().map(String::as_str), Some("agent_start"));
+        for expected in ["turn_start", "message_update", "message_end", "turn_end"] {
+            assert!(kinds.iter().any(|kind| kind == expected), "{kinds:?}");
+        }
+        assert_eq!(kinds.last().map(String::as_str), Some("agent_end"));
+        // `message_start` was subscribed by the runtime but has no handler,
+        // and the gating test below covers the other direction: an event
+        // nobody subscribed to never reaches the shim.
+        let agent_end = host
+            .log()
+            .entries
+            .iter()
+            .find(|entry| entry.custom_type == "agent_end")
+            .cloned()
+            .expect("agent_end entry");
+        assert!(agent_end.data["messages"].as_u64().unwrap_or(0) >= 2);
+
+        // Teardown event: on the exit path, not through the fan-out.
+        assert!(runtime.deliver_shutdown(SessionShutdownReason::Quit).await);
+        let kinds = wait_for_entry(&host, "session_shutdown").await;
+        assert_eq!(kinds.last().map(String::as_str), Some("session_shutdown"));
+    }
+
+    /// No subscribers → no task, no channel, no serialisation.
+    #[tokio::test]
+    async fn the_pump_is_skipped_when_nothing_subscribed() {
+        let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
+        assert!(start_extension_event_pump(&agent, None).await.is_none());
+
+        let (runtime, _host) =
+            extension_runtime("silent", "module.exports = function (pi) {};", &[]).await;
+        assert!(!runtime.has_any_subscriber());
+        let runtime = Arc::new(runtime);
+        assert!(start_extension_event_pump(&agent, Some(&runtime))
+            .await
+            .is_none());
+    }
+
+    /// A runtime only forwards the names its extensions subscribed to.
+    #[tokio::test]
+    async fn unsubscribed_events_never_cross_into_js() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("turn_start", (event) => pi.appendEntry("turn_start", {
+                    index: event.turnIndex,
+                }));
+            };
+        "#;
+        let (runtime, host) = extension_runtime("gated", source, &["turn_start"]).await;
+
+        assert!(!runtime.deliver_event(&ExtensionEvent::AgentStart).await);
+        assert!(
+            runtime
+                .deliver_event(&ExtensionEvent::TurnStart {
+                    turn_index: 0,
+                    timestamp: 0,
+                })
+                .await
+        );
+        assert_eq!(host.log().entries.len(), 1);
+        assert_eq!(host.log().entries[0].custom_type, "turn_start");
     }
 }

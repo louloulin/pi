@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use pi_agent_core::{Agent, AgentOptions};
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId};
-use pi_tui::app::{App, AppConfig};
+use pi_tui::app::{App, AppConfig, ExtensionHeader};
+use pi_tui::component::TextComponent;
 use pi_tui::keybindings::{
     reset_keybindings, set_keybindings, tui_default_keybindings, KeybindingDefinition,
     KeybindingsConfig, KeybindingsManager,
@@ -90,6 +91,25 @@ fn header_lines() -> Vec<String> {
         AppConfig {
             session_id: "startup-header".into(),
             startup_header: true,
+            ..AppConfig::default()
+        },
+    );
+    app.render_snapshot(WIDTH, HEIGHT).lines
+}
+
+/// The header for one [`AppConfig`], with the startup header forced on.
+fn header_lines_with(extension_header: ExtensionHeader) -> Vec<String> {
+    let agent = Agent::new(AgentOptions::new(
+        faux_model(),
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ));
+    let app = App::new(
+        &agent,
+        AppConfig {
+            session_id: "startup-header".into(),
+            startup_header: true,
+            extension_header,
             ..AppConfig::default()
         },
     );
@@ -202,3 +222,78 @@ fn the_header_keeps_the_live_component_rows() {
 
     reset_keybindings();
 }
+
+// --- Stage 71 (LUM-1239): the extension summary row ---------------------
+
+#[test]
+fn the_header_lists_the_loaded_extensions() {
+    let lines = header_lines_with(ExtensionHeader::Loaded {
+        count: 2,
+        names: vec![
+            "./fixture-ext.mjs".into(),
+            "~/.pi/agent/extensions/foo.mjs".into(),
+        ],
+    });
+
+    // Directly under the title row, so `pi -e ./ext.mjs` is discoverable
+    // without scrolling.
+    assert!(lines[0].starts_with("pi v"), "{:?}", lines[0]);
+    assert_eq!(
+        lines[1],
+        "2 extension(s): ./fixture-ext.mjs, ~/.pi/agent/extensions/foo.mjs"
+    );
+}
+
+#[test]
+fn the_header_says_extensions_none_when_they_are_disabled() {
+    let text = header_lines_with(ExtensionHeader::Disabled).join("\n");
+    assert!(
+        text.contains("extensions: none (--no-extensions)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_run_without_extensions_has_no_extension_row() {
+    // Default config = `ExtensionHeader::Hidden`: the pre-Stage-71 header.
+    let text = header_lines().join("\n");
+    assert!(!text.contains("extension"), "{text}");
+}
+
+#[test]
+fn a_loaded_row_with_no_names_is_hidden() {
+    // Defensive: a count with an empty name list carries no information.
+    let text = header_lines_with(ExtensionHeader::Loaded {
+        count: 0,
+        names: Vec::new(),
+    })
+    .join("\n");
+    assert!(!text.contains("extension"), "{text}");
+}
+
+#[test]
+fn an_extension_header_still_overrides_the_extension_summary() {
+    // `ctx.ui.setHeader` replaces the whole built-in header
+    // (`interactive-mode.ts:958`), including the new summary row.
+    let agent = Agent::new(AgentOptions::new(
+        faux_model(),
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ));
+    let mut app = App::new(
+        &agent,
+        AppConfig {
+            session_id: "startup-header".into(),
+            startup_header: true,
+            extension_header: ExtensionHeader::Loaded {
+                count: 1,
+                names: vec!["./fixture-ext.mjs".into()],
+            },
+            ..AppConfig::default()
+        },
+    );
+    app.set_header(Some(Box::new(TextComponent::new(["-- custom header --"]))));
+    let text = app.render_snapshot(WIDTH, HEIGHT).lines.join("\n");
+
+    assert!(text.contains("-- custom header --"), "{text}");
+    assert!(!text.contains("extension(s)"), "{text}");

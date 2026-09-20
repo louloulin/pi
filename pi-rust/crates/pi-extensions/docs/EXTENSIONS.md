@@ -306,14 +306,33 @@ and the JS shim dispatches whatever event names the extension
 subscribes to. The following event tags are emitted by the agent
 runtime today:
 
-| Event          | Wire variant                       | Notes                                                  |
-|----------------|-------------------------------------|--------------------------------------------------------|
-| `session_start`| `ExtensionEvent::SessionStart`      | Host passes `mode`, `hasUI`, `cwd` via `_ctx_*` fields. |
-| `session_end`  | `ExtensionEvent::SessionEnd`        | Mirror of upstream `session_shutdown` (alias for now).  |
-| `user_message` | `ExtensionEvent::UserMessage { … }` | Carries the full `Message` payload.                     |
-| `tool_call`    | `ExtensionEvent::ToolCall { … }`    | Carries the `ToolCall`.                                 |
-| `tool_result`  | `ExtensionEvent::ToolResult { … }`  | Carries the `ToolResult`.                               |
-| `agent_end`    | `ExtensionEvent::AgentEnd { … }`    | Carries the final `AssistantMessage`.                   |
+| Event                | Wire variant                             | Notes                                                  |
+|----------------------|------------------------------------------|--------------------------------------------------------|
+| `session_start`      | `ExtensionEvent::SessionStart`            | Host passes `mode`, `hasUI`, `cwd` via `_ctx_*` fields. |
+| `session_shutdown`   | `ExtensionEvent::SessionShutdown`         | Upstream name. The shim still accepts `session_end` as an alias. |
+| `session_info_changed`| `ExtensionEvent::SessionInfoChanged`     | `/name` and `ctx.setSessionName`.                      |
+| `session_compact`    | `ExtensionEvent::SessionCompact`          | Manual and automatic compaction.                        |
+| `resources_discover` | `ExtensionEvent::ResourcesDiscover`       | Fired while the extension set loads.                    |
+| `agent_start`        | `ExtensionEvent::AgentStart`              | Brackets one agent run.                                 |
+| `agent_end`          | `ExtensionEvent::AgentEnd { messages }`   | Carries the whole message log, as upstream does.        |
+| `turn_start`         | `ExtensionEvent::TurnStart`               | `turnIndex` counts from 0 within the run.               |
+| `turn_end`           | `ExtensionEvent::TurnEnd`                 | `message` + `toolResults`.                              |
+| `message_start`      | `ExtensionEvent::MessageStart`            | Empty assistant message; the loop only streams deltas.  |
+| `message_update`     | `ExtensionEvent::MessageUpdate`           | `assistantMessageEvent` (the `type`-tagged delta).      |
+| `message_end`        | `ExtensionEvent::MessageEnd`              |                                                         |
+| `tool_execution_start`| `ExtensionEvent::ToolExecutionStart`     | Sent after the legacy `tool_call`.                      |
+| `tool_execution_update`| `ExtensionEvent::ToolExecutionUpdate`   | Sent after the legacy `tool_call`.                      |
+| `tool_execution_end` | `ExtensionEvent::ToolExecutionEnd`        | Sent after the legacy `tool_result`.                    |
+| `thinking_level_select`| `ExtensionEvent::ThinkingLevelSelect`   | Shift+Tab cycle, `/thinking`, the selector.             |
+| `user_bash`          | `ExtensionEvent::UserBash`                | Local `!` / `!!` commands.                              |
+| `input`              | `ExtensionEvent::Input`                   | Every submitted user message.                           |
+| `user_message`       | `ExtensionEvent::UserMessage { … }`       | Port-only extra; carries the full `Message` payload.    |
+| `tool_call`          | `ExtensionEvent::ToolCall { … }`          | Port-only extra; carries the `ToolCall`.                |
+| `tool_result`        | `ExtensionEvent::ToolResult { … }`        | Port-only extra; carries the `ToolResult`.              |
+
+`model_select` is declared (`ExtensionEvent::ModelSelect`) and dispatched
+when it is emitted, but this port has no `/model` switch wired to it yet,
+so no `model_select` event is produced today.
 
 Event payloads use `serde_json` tagged representation; the shim
 inserts three underscore-prefixed context fields before serialising
