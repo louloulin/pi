@@ -57,7 +57,7 @@ use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
 use crate::tools::AgentTool;
 
-use pi_tui::app::{App, AppConfig, FollowUpOutcome};
+use pi_tui::app::{App, AppConfig, FollowUpOutcome, Submission};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
 use pi_tui::selector::{Selector, SelectorItem};
@@ -140,6 +140,11 @@ pub struct InteractiveOptions {
     /// `settings.json` by the caller (`config::load_agent_retry_policy`).
     /// Applied to the agent the TUI drives.
     pub retry: RetryPolicy,
+    /// Reader answering `app.clipboard.pasteImage` (`Alt+V`). `None` uses
+    /// the real [`SystemClipboard`](crate::clipboard::SystemClipboard);
+    /// tests inject a fake so the image / text / empty paths can be driven
+    /// without a system clipboard.
+    pub clipboard: Option<Arc<dyn crate::clipboard::ClipboardReader>>,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -186,6 +191,7 @@ impl Default for InteractiveOptions {
             extensions: None,
             extension_ui: None,
             retry: RetryPolicy::default(),
+            clipboard: None,
         }
     }
 }
@@ -317,6 +323,13 @@ async fn run_loop(
     let mut last_render = std::time::Instant::now();
     let render_interval = Duration::from_millis(50);
 
+    // `app.clipboard.pasteImage` reader: the driver owns the terminal, so it
+    // owns the clipboard too (injectable for tests).
+    let clipboard: Arc<dyn crate::clipboard::ClipboardReader> = options
+        .clipboard
+        .clone()
+        .unwrap_or_else(|| Arc::new(crate::clipboard::SystemClipboard::new()));
+
     loop {
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
@@ -402,6 +415,18 @@ async fn run_loop(
             )?;
             terminal.backend_mut().flush()?;
         }
+
+        // `app.clipboard.pasteImage` (`Alt+V`): the App recorded the chord;
+        // read the system clipboard off the render loop (the backends are
+        // blocking) and hand the result back — image chip, or the plain-text
+        // paste fallback.
+        if app.take_image_paste_request() {
+            let reader = clipboard.clone();
+            let paste = tokio::task::spawn_blocking(move || reader.read())
+                .await
+                .unwrap_or(crate::clipboard::ClipboardPaste::Empty);
+            apply_clipboard_paste(&mut app, paste);
+        }
     }
 
     // Nothing is pumping dialogs any more: deny instead of queueing.
@@ -409,6 +434,23 @@ async fn run_loop(
         ui.disarm();
     }
     Ok(InteractiveExit::UserExit)
+}
+
+/// Apply one `app.clipboard.pasteImage` clipboard read to the composer.
+///
+/// An image becomes a chip; otherwise the paste falls back to plain text
+/// (upstream `handleClipboardPaste`, `interactive-mode.ts:2933`: it saves the
+/// image to a temp file and pastes the path, and inserts the text otherwise).
+fn apply_clipboard_paste(app: &mut App, paste: crate::clipboard::ClipboardPaste) {
+    match paste {
+        crate::clipboard::ClipboardPaste::Image(image) => {
+            app.paste_image(image);
+        }
+        crate::clipboard::ClipboardPaste::Text(text) => app.paste_text(&text),
+        // Nothing usable on the clipboard: leave the draft and the status
+        // hint alone rather than flashing a spurious failure.
+        crate::clipboard::ClipboardPaste::Empty => {}
+    }
 }
 
 /// Internal action returned from `handle_input_event`.
@@ -766,8 +808,8 @@ async fn handle_input_event(
     match step_outcome {
         pi_tui::app::StepOutcome::Idle => Ok(None),
         pi_tui::app::StepOutcome::Redraw => Ok(None),
-        pi_tui::app::StepOutcome::Submitted(text) => {
-            handle_submitted(app, agent, options, bash, text).await?;
+        pi_tui::app::StepOutcome::Submitted(submission) => {
+            handle_submitted(app, agent, options, bash, submission).await?;
             Ok(None)
         }
         pi_tui::app::StepOutcome::Exit => Ok(Some(InternalAction::Exit)),
@@ -784,13 +826,21 @@ async fn handle_submitted(
     agent: &Arc<AsyncMutex<Agent>>,
     options: &mut InteractiveOptions,
     bash: &mut BashRunner,
-    text: String,
+    submission: Submission,
 ) -> anyhow::Result<()> {
+    let text = submission.text.clone();
     // Local `!cmd` / `!!cmd` commands never reach the model. Upstream parses
     // them before the slash and queue branches
     // (`interactive-mode.ts:3106-3118`); a command with nothing after the
     // prefix falls through to the normal prompt path.
     if let Some(command) = pi_tui::editor::parse_bash_command(&text) {
+        if !submission.images.is_empty() {
+            // A local command has no image part; keep the typed text in the
+            // editor and drop the chips rather than sending them nowhere.
+            app.set_editor_text(&text);
+            app.flash_status("Local ! commands cannot carry image attachments");
+            return Ok(());
+        }
         if app.is_busy() || bash.is_running() {
             // Deliberately *not* Stage 61's pending queue: a bash command
             // cannot start while something else runs, so the text goes back
@@ -806,6 +856,12 @@ async fn handle_submitted(
         return Ok(());
     }
     if text.starts_with('/') {
+        if !submission.images.is_empty() {
+            // Slash commands take a string, not a message; there is nowhere
+            // to hand the attachments, so say so instead of dropping them
+            // silently.
+            app.flash_status("Images are ignored for slash commands");
+        }
         // Prompt templates take precedence over built-in slash
         // commands, mirroring the TS CLI: `/<name>` expands to
         // the template body when a template with that name was
@@ -821,7 +877,9 @@ async fn handle_submitted(
             run_slash_command(app, agent, options, &text).await?;
         }
     } else {
-        app.submit(agent.clone(), text);
+        // The plain prompt path: the draft keeps its image chips, which
+        // `App::submit` turns into the `UserMessage`'s image blocks.
+        app.submit(agent.clone(), submission);
     }
     Ok(())
 }
@@ -837,7 +895,13 @@ async fn handle_follow_up(
 ) -> anyhow::Result<()> {
     match app.follow_up_from_editor() {
         FollowUpOutcome::Empty | FollowUpOutcome::Queued => Ok(()),
-        FollowUpOutcome::Submitted(text) => handle_submitted(app, agent, options, bash, text).await,
+        FollowUpOutcome::RefusedImages => {
+            app.flash_status("Cannot attach images while a turn is running");
+            Ok(())
+        }
+        FollowUpOutcome::Submitted(submission) => {
+            handle_submitted(app, agent, options, bash, submission).await
+        }
     }
 }
 
@@ -874,7 +938,9 @@ async fn deliver_pending(
     let Some(text) = app.take_next_pending() else {
         return Ok(());
     };
-    handle_submitted(app, agent, options, bash, text).await
+    // The pending queue is text-only; a drained prompt therefore has no
+    // image chips to carry (`Submission::from`).
+    handle_submitted(app, agent, options, bash, text.into()).await
 }
 
 /// Which way `app.model.cycleForward` / `app.model.cycleBackward` move
@@ -1318,6 +1384,9 @@ async fn start_new_session(
     }
 
     app.messages_mut().clear();
+    // A new session starts with an empty composer: the previous draft's text
+    // and any image chips belong to the old session.
+    app.clear_composer();
     agent.lock().await.state_mut().messages.clear();
 
     options.session_log = Some(log);
@@ -3788,5 +3857,115 @@ mod tests {
             "output: {}",
             block.text
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // `app.clipboard.pasteImage` (Stage 63 / LUM-1224)
+    // -----------------------------------------------------------------------
+
+    /// The production reader shells out to `wl-paste` / `xclip` / `pngpaste` /
+    /// PowerShell, none of which are reachable from the test sandbox; the
+    /// trait exists so the driver can swap in a stub.
+    struct FakeClipboard(crate::clipboard::ClipboardPaste);
+
+    impl crate::clipboard::ClipboardReader for FakeClipboard {
+        fn read(&self) -> crate::clipboard::ClipboardPaste {
+            self.0.clone()
+        }
+    }
+
+    fn clipboard_image() -> pi_protocol::ImageContent {
+        pi_protocol::ImageContent {
+            mime_type: "image/png".into(),
+            data: "QUJD".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn image_paste_attaches_a_chip_and_non_images_fall_back_to_text() {
+        let (mut app, _agent) = app_starting_at(small_window_model(1_000_000)).await;
+
+        // Clipboard holds an image: one chip, no raw bytes in the buffer.
+        apply_clipboard_paste(
+            &mut app,
+            crate::clipboard::ClipboardPaste::Image(clipboard_image()),
+        );
+        assert_eq!(app.image_count(), 1);
+        assert_eq!(app.editor_text(), "[Image #1]");
+
+        // Clipboard holds text: pasted at the cursor like a normal paste.
+        apply_clipboard_paste(
+            &mut app,
+            crate::clipboard::ClipboardPaste::Text(" hello".into()),
+        );
+        assert_eq!(app.editor_text(), "[Image #1] hello");
+        assert_eq!(app.image_count(), 1);
+
+        // Clipboard holds nothing usable: the draft is left untouched.
+        apply_clipboard_paste(&mut app, crate::clipboard::ClipboardPaste::Empty);
+        assert_eq!(app.editor_text(), "[Image #1] hello");
+    }
+
+    #[tokio::test]
+    async fn alt_v_records_the_read_request_for_the_driver() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
+
+        let event = InputEvent::Key(Key::new(
+            KeyCode::Char('v'),
+            pi_tui::input::KeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        ));
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, event)
+            .await
+            .expect("alt+v");
+
+        // The App only records the chord; the render loop owns the blocking
+        // clipboard read, so the flag must still be pending here.
+        assert!(app.take_image_paste_request());
+        assert!(!app.take_image_paste_request());
+    }
+
+    #[tokio::test]
+    async fn clipboard_reader_is_injectable_through_the_options() {
+        let options = InteractiveOptions {
+            clipboard: Some(Arc::new(FakeClipboard(
+                crate::clipboard::ClipboardPaste::Image(clipboard_image()),
+            ))),
+            ..InteractiveOptions::default()
+        };
+
+        let reader = options.clipboard.clone().expect("injected reader");
+        match reader.read() {
+            crate::clipboard::ClipboardPaste::Image(image) => {
+                assert_eq!(image.mime_type, "image/png");
+                assert_eq!(image.data, "QUJD");
+            }
+            other => panic!("unexpected paste: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn new_session_clears_the_composer_chips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = session_options(dir.path(), "chips-old");
+
+        app.set_editor_text("draft");
+        apply_clipboard_paste(
+            &mut app,
+            crate::clipboard::ClipboardPaste::Image(clipboard_image()),
+        );
+        assert_eq!(app.image_count(), 1);
+
+        run_slash_command(&mut app, &agent, &mut options, "/new")
+            .await
+            .expect("new");
+
+        assert_eq!(app.image_count(), 0, "/new must drop the old draft's chips");
+        assert_eq!(app.editor_text(), "");
     }
 }

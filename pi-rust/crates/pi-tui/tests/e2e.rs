@@ -147,7 +147,7 @@ async fn slash_command_does_not_reach_agent() {
         KeyModifiers::NONE,
     )));
     match outcome {
-        pi_tui::app::StepOutcome::Submitted(text) => assert_eq!(text, "/help"),
+        pi_tui::app::StepOutcome::Submitted(submission) => assert_eq!(submission.text, "/help"),
         other => panic!("expected Submitted, got {other:?}"),
     }
 

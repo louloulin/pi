@@ -260,6 +260,10 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ("app.session.tree", "open the session tree"),
         ("app.session.fork", "fork a session from a message"),
         ("app.session.resume", "resume a session"),
+        (
+            "app.clipboard.pasteImage",
+            "attach a clipboard image (falls back to pasting text)",
+        ),
     ];
     const SELECTORS: &[(&str, &str)] = &[
         ("tui.select.up", "move the selection up"),

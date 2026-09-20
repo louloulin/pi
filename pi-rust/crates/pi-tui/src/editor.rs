@@ -24,7 +24,8 @@
 //! * `Up` / `Down` navigate the prompt history (most recent first). The
 //!   first `Up` saves the current draft so `Down` past the bottom of
 //!   the history restores it.
-//! * `Enter` returns [`EditorAction::Submit`] with the buffer text.
+//! * `Enter` returns [`EditorAction::Submit`] with the draft text (chips
+//!   expanded to their `[Image #N]` labels).
 //! * `Ctrl+C` is `tui.input.copy`. This editor has no selection model, so
 //!   there is never text to copy: the chord returns
 //!   [`EditorAction::Interrupt`], handing it back to the caller (the `App`
@@ -102,14 +103,41 @@
 //!   installs one (the [`App`] / [`Prompt`] path) keeps the
 //!   pre-autocomplete behaviour byte for byte.
 //!
+//! # Composer image chips
+//!
+//! A pasted image is attached to the draft as a **chip**: one [`CHIP_CHAR`]
+//! sentinel in the buffer plus an [`ImageContent`] in
+//! [`Editor::image_attachments`], aligned by occurrence order (the n-th
+//! sentinel is the n-th attachment). Because a chip is a single character,
+//! the existing single-character rules already give the semantics the
+//! composer needs — `Backspace` / `Delete` remove the whole chip, `Left` /
+//! `Right` step across it in one move, and text and chips interleave
+//! freely. Mutation paths that remove a *range* of text (kill-to-start/end,
+//! word kills, backspace/delete) drop the images whose sentinels fall inside
+//! the removed bytes, and any sentinel reaching the kill ring is stripped so
+//! a later yank cannot resurrect a chip without its payload. At most
+//! [`MAX_IMAGE_ATTACHMENTS`] chips fit in one draft; [`Editor::insert_image`]
+//! reports [`ImageInsertOutcome::AtCapacity`] beyond that rather than
+//! dropping silently.
+//!
+//! [`Editor::display_text`] expands each sentinel to `[Image #N]` — what the
+//! prompt row shows and the submission text carries — and
+//! [`Editor::display_cursor`] maps the raw byte cursor onto that string.
+//! Submitting never sends a bare sentinel to the model; the driver turns the
+//! attachments into `UserMessage` image blocks.
+//!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
 //!
 //! [`App`]: crate::App
 //! [`Prompt`]: crate::Prompt
+//! [`ImageContent`]: pi_protocol::ImageContent
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
+
+use pi_protocol::ImageContent;
 
 use crate::autocomplete::{AutocompleteItem, AutocompleteProvider};
 use crate::input::{InputEvent, Key, KeyCode};
@@ -123,6 +151,20 @@ use crate::input::KeyModifiers;
 
 /// Maximum number of history entries kept by the editor.
 pub const HISTORY_LIMIT: usize = 100;
+
+/// Sentinel standing in for one composer image chip in the buffer.
+///
+/// U+FFFC OBJECT REPLACEMENT CHARACTER is Unicode's "object embedded in
+/// text" marker; it is one character wide from the editor's point of view,
+/// which is what makes backspace and cursor movement treat a chip
+/// atomically. It is never rendered literally —[`Editor::display_text`]
+/// replaces it with `[Image #N]`.
+pub const CHIP_CHAR: char = '\u{FFFC}';
+
+/// Maximum number of image chips a single draft can hold (the issue's
+/// "≤ 8 张" bound). [`Editor::insert_image`] refuses past this instead of
+/// silently discarding the paste.
+pub const MAX_IMAGE_ATTACHMENTS: usize = 8;
 
 /// Characters that open the autocomplete dropdown at a token boundary
 /// by default, upstream `DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS`.
@@ -185,6 +227,16 @@ pub fn parse_bash_command(text: &str) -> Option<BashCommand> {
     })
 }
 
+/// Result of [`Editor::insert_image`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageInsertOutcome {
+    /// The chip was inserted at the cursor.
+    Inserted,
+    /// [`MAX_IMAGE_ATTACHMENTS`] chips are already attached; nothing
+    /// changed. Callers surface a status message.
+    AtCapacity,
+}
+
 /// Action returned from [`Editor::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorAction {
@@ -236,14 +288,17 @@ pub enum JumpDirection {
 /// Editor state captured by an undo snapshot.
 ///
 /// Upstream stores its multi-line `EditorState` plus the paste tables;
-/// the Rust editor is single-line, so the buffer and cursor are the
-/// whole of it.
+/// the Rust editor is single-line, so the buffer, cursor and the chip
+/// attachments are the whole of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorSnapshot {
     /// Buffer contents at capture time.
     buffer: String,
     /// Cursor byte offset at capture time.
     cursor: usize,
+    /// Chip attachments at capture time, aligned with the buffer's
+    /// [`CHIP_CHAR`] occurrences.
+    images: Vec<ImageContent>,
 }
 
 /// Single-line text editor with prompt history and an Emacs-style kill
@@ -289,6 +344,9 @@ pub struct Editor {
     /// Dropdown height in rows (clamped to
     /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`]..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`]).
     autocomplete_max_visible: usize,
+    /// Pasted image chips, aligned with the buffer's [`CHIP_CHAR`]
+    /// occurrences: the n-th sentinel carries `images[n]`.
+    images: Vec<ImageContent>,
 }
 
 impl Default for Editor {
@@ -318,10 +376,15 @@ impl Editor {
             autocomplete_prefix: String::new(),
             autocomplete_force: false,
             autocomplete_max_visible: DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
+            images: Vec::new(),
         }
     }
 
-    /// Borrow the current buffer.
+    /// Borrow the raw buffer.
+    ///
+    /// A composer chip appears here as [`CHIP_CHAR`]; use
+    /// [`Editor::display_text`] for anything the user reads or the model
+    /// receives.
     pub fn text(&self) -> &str {
         &self.buffer
     }
@@ -346,8 +409,9 @@ impl Editor {
     /// [`history_next`](Self::history_next), where resetting the history
     /// index would trap the user at the same entry on every Up arrow.
     fn set_text_internal(&mut self, text: impl Into<String>) {
-        self.buffer = text.into();
+        self.buffer = strip_chips(&text.into());
         self.cursor = self.buffer.len();
+        self.images.clear();
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
     }
@@ -355,9 +419,11 @@ impl Editor {
     /// Clear the buffer without touching history, and drop the undo
     /// stack. Upstream clears its stack the same way when a prompt is
     /// submitted, so `Ctrl+-` cannot resurrect an already-sent prompt.
+    /// Pasted images go with the text.
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
+        self.images.clear();
         self.history_index = None;
         self.history_draft = None;
         self.last_action = LastAction::Other;
@@ -380,6 +446,98 @@ impl Editor {
     /// Current cursor position (byte offset, clamped to `buffer.len()`).
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// The buffer with each chip sentinel rendered as `[Image #N]`.
+    ///
+    /// This is the user-visible draft and the text a submission carries;
+    /// [`Editor::text`] is the raw form that keeps the [`CHIP_CHAR`]
+    /// placeholders.
+    pub fn display_text(&self) -> String {
+        if self.images.is_empty() {
+            return self.buffer.clone();
+        }
+        let mut out = String::with_capacity(self.buffer.len() + self.images.len() * 12);
+        let mut index = 0usize;
+        for ch in self.buffer.chars() {
+            if ch == CHIP_CHAR {
+                index += 1;
+                out.push_str(&chip_label(index));
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Cursor column within [`Editor::display_text`] (character count,
+    /// with each chip counted as its full `[Image #N]` label).
+    pub fn display_cursor(&self) -> usize {
+        let label_width = chip_label(1).chars().count();
+        self.buffer
+            .char_indices()
+            .take_while(|(byte, _)| *byte < self.cursor)
+            .map(|(_, ch)| if ch == CHIP_CHAR { label_width } else { 1 })
+            .sum()
+    }
+
+    /// Attached image chips, in buffer order.
+    pub fn image_attachments(&self) -> &[ImageContent] {
+        &self.images
+    }
+
+    /// Number of attached image chips.
+    pub fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
+    /// Attach `image` as a chip at the cursor.
+    ///
+    /// The chip is one [`CHIP_CHAR`] in the buffer plus an entry in
+    /// [`Editor::image_attachments`]; the attachment is inserted at the
+    /// index matching the sentinel's position, so the two stay aligned.
+    /// Refuses once [`MAX_IMAGE_ATTACHMENTS`] chips are attached.
+    pub fn insert_image(&mut self, image: ImageContent) -> ImageInsertOutcome {
+        if self.images.len() >= MAX_IMAGE_ATTACHMENTS {
+            return ImageInsertOutcome::AtCapacity;
+        }
+        self.push_undo_snapshot();
+        let index = self.buffer[..self.cursor.min(self.buffer.len())]
+            .matches(CHIP_CHAR)
+            .count();
+        self.buffer.insert(self.cursor, CHIP_CHAR);
+        self.images.insert(index, image);
+        self.cursor += CHIP_CHAR.len_utf8();
+        self.reset_history_navigation();
+        self.last_action = LastAction::Other;
+        self.cancel_autocomplete();
+        ImageInsertOutcome::Inserted
+    }
+
+    /// Drop every chip, removing their sentinels from the buffer as well.
+    pub fn clear_images(&mut self) {
+        if self.images.is_empty() && !self.buffer.contains(CHIP_CHAR) {
+            return;
+        }
+        self.images.clear();
+        self.buffer = strip_chips(&self.buffer);
+        self.cursor = self.cursor.min(self.buffer.len());
+    }
+
+    /// Drop the images whose sentinels fall inside `range` (a buffer byte
+    /// range that is about to be deleted), keeping chip and attachment
+    /// indices aligned.
+    fn remove_images_in_range(&mut self, range: Range<usize>) {
+        let start = range.start.min(self.buffer.len());
+        let end = range.end.min(self.buffer.len());
+        if start >= end {
+            return;
+        }
+        let base = self.buffer[..start].matches(CHIP_CHAR).count();
+        let removed = self.buffer[start..end].matches(CHIP_CHAR).count();
+        if removed > 0 {
+            self.images.drain(base..base + removed);
+        }
     }
 
     /// Number of history entries (oldest to newest).
@@ -469,6 +627,11 @@ impl Editor {
     /// makes the state *before* the space the restore point, so undoing
     /// a space removes the space together with the word after it.
     pub fn insert_char(&mut self, c: char) -> EditorAction {
+        if c == CHIP_CHAR {
+            // A literal sentinel would desync the buffer from
+            // `image_attachments`; only `insert_image` may place one.
+            return EditorAction::None;
+        }
         if c.is_whitespace() || self.last_action != LastAction::TypeWord {
             self.push_undo_snapshot();
         }
@@ -489,8 +652,14 @@ impl Editor {
         if s.is_empty() {
             return EditorAction::None;
         }
+        let s = strip_chips(s);
+        if s.is_empty() {
+            // The paste was nothing but chip sentinels; there is no text to
+            // insert and the images themselves are not part of the paste.
+            return EditorAction::None;
+        }
         self.push_undo_snapshot();
-        self.buffer.insert_str(self.cursor, s);
+        self.buffer.insert_str(self.cursor, &s);
         self.cursor += s.len();
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
@@ -506,6 +675,7 @@ impl Editor {
         self.push_undo_snapshot();
         // Walk back one UTF-8 character.
         let prev = self.prev_char_boundary(self.cursor);
+        self.remove_images_in_range(prev..self.cursor);
         self.buffer.replace_range(prev..self.cursor, "");
         self.cursor = prev;
         self.reset_history_navigation();
@@ -521,6 +691,7 @@ impl Editor {
         }
         self.push_undo_snapshot();
         let next = self.next_char_boundary(self.cursor);
+        self.remove_images_in_range(self.cursor..next);
         self.buffer.replace_range(self.cursor..next, "");
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
@@ -611,8 +782,9 @@ impl Editor {
         }
         self.push_undo_snapshot();
         self.cancel_autocomplete();
-        let killed = self.buffer[..self.cursor].to_string();
+        let killed = strip_chips(&self.buffer[..self.cursor]);
         let accumulate = self.last_action == LastAction::Kill;
+        self.remove_images_in_range(0..self.cursor);
         self.buffer.replace_range(..self.cursor, "");
         self.cursor = 0;
         self.kill_ring
@@ -632,8 +804,9 @@ impl Editor {
         }
         self.push_undo_snapshot();
         self.cancel_autocomplete();
-        let killed = self.buffer[self.cursor..].to_string();
+        let killed = strip_chips(&self.buffer[self.cursor..]);
         let accumulate = self.last_action == LastAction::Kill;
+        self.remove_images_in_range(self.cursor..self.buffer.len());
         self.buffer.truncate(self.cursor);
         self.kill_ring
             .push(&killed, KillDirection::Append, accumulate);
@@ -656,11 +829,12 @@ impl Editor {
         }
         self.push_undo_snapshot();
         self.cancel_autocomplete();
-        let killed = self.buffer[delete_from..self.cursor].to_string();
+        let killed = strip_chips(&self.buffer[delete_from..self.cursor]);
         // Read the previous action *before* overwriting it: a kill that
         // follows another kill accumulates into the same ring entry
         // instead of opening a new chain (upstream `deleteWordBackwards`).
         let accumulate = self.last_action == LastAction::Kill;
+        self.remove_images_in_range(delete_from..self.cursor);
         self.buffer.replace_range(delete_from..self.cursor, "");
         self.cursor = delete_from;
         self.kill_ring
@@ -684,8 +858,9 @@ impl Editor {
         }
         self.push_undo_snapshot();
         self.cancel_autocomplete();
-        let killed = self.buffer[self.cursor..delete_to].to_string();
+        let killed = strip_chips(&self.buffer[self.cursor..delete_to]);
         let accumulate = self.last_action == LastAction::Kill;
+        self.remove_images_in_range(self.cursor..delete_to);
         self.buffer.replace_range(self.cursor..delete_to, "");
         self.kill_ring
             .push(&killed, KillDirection::Append, accumulate);
@@ -700,6 +875,10 @@ impl Editor {
         let Some(text) = self.kill_ring.peek().map(str::to_string) else {
             return EditorAction::None;
         };
+        let text = strip_chips(&text);
+        if text.is_empty() {
+            return EditorAction::None;
+        }
         self.cancel_autocomplete();
         self.push_undo_snapshot();
         self.buffer.insert_str(self.cursor, &text);
@@ -723,16 +902,24 @@ impl Editor {
         // Remove the text the previous yank inserted; the cursor sits at
         // its end, so the range is `cursor - last_yank_len .. cursor`.
         let start = self.cursor.saturating_sub(self.last_yank_len);
+        self.remove_images_in_range(start..self.cursor);
         self.buffer.replace_range(start..self.cursor, "");
         self.cursor = start;
         // Rotate first, then read: the next entry to insert is now the
         // most recent one (upstream `yankPop` order).
         self.kill_ring.rotate();
-        let text = self
-            .kill_ring
-            .peek()
-            .map(str::to_string)
-            .unwrap_or_default();
+        let text = strip_chips(
+            &self
+                .kill_ring
+                .peek()
+                .map(str::to_string)
+                .unwrap_or_default(),
+        );
+        if text.is_empty() {
+            self.last_action = LastAction::Yank;
+            self.reset_history_navigation();
+            return EditorAction::Changed;
+        }
         self.buffer.insert_str(self.cursor, &text);
         self.cursor += text.len();
         self.last_yank_len = text.len();
@@ -757,6 +944,7 @@ impl Editor {
         };
         self.buffer = snapshot.buffer;
         self.cursor = snapshot.cursor.min(self.buffer.len());
+        self.images = snapshot.images;
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
         self.reset_history_navigation();
@@ -979,8 +1167,12 @@ impl Editor {
         self.push_undo_snapshot();
         let lines = [self.buffer.clone()];
         let result = provider.apply_completion(&lines, 0, self.cursor, item, prefix);
-        self.buffer = result.lines.into_iter().next().unwrap_or_default();
+        self.buffer = strip_chips(&result.lines.into_iter().next().unwrap_or_default());
         self.cursor = clamp_to_char_boundary(&self.buffer, result.cursor_col);
+        // A completion rewrites the whole line; the chip/attachment pairing
+        // cannot survive that, so the chips go with it (same rule as
+        // `set_text_internal`).
+        self.images.clear();
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
     }
@@ -1069,6 +1261,7 @@ impl Editor {
         self.undo_stack.push(&EditorSnapshot {
             buffer: self.buffer.clone(),
             cursor: self.cursor,
+            images: self.images.clone(),
         });
     }
 
@@ -1224,7 +1417,7 @@ impl Editor {
                 // through to the normal Enter handling when the
                 // prefix starts with `/`.
                 if prefix.starts_with('/') {
-                    return EditorAction::Submit(self.buffer.clone());
+                    return EditorAction::Submit(self.display_text());
                 }
                 return applied;
             }
@@ -1301,7 +1494,7 @@ impl Editor {
 
         // `tui.input.submit` (`Enter`).
         if Self::matches_binding(&kb, &key, "tui.input.submit") {
-            return EditorAction::Submit(self.buffer.clone());
+            return EditorAction::Submit(self.display_text());
         }
 
         // Meta chords are not part of the default table; ignore them
@@ -1331,7 +1524,7 @@ impl Editor {
             // editor cannot honour; the pre-keybinding editor submitted on
             // it, so it keeps submitting (see the module docs).
             KeyCode::Enter if key.modifiers.shift => {
-                let submitted = self.buffer.clone();
+                let submitted = self.display_text();
                 EditorAction::Submit(submitted)
             }
             KeyCode::Left if key.modifiers.shift => self.move_left(),
@@ -1399,6 +1592,25 @@ impl Editor {
             }
         }
         p
+    }
+}
+
+/// The visible label for the n-th composer image chip (1-based).
+fn chip_label(index: usize) -> String {
+    format!("[Image #{index}]")
+}
+
+/// Remove every chip sentinel from `text`.
+///
+/// Used wherever raw text enters the buffer from outside the chip model
+/// (programmatic `set_text`, the kill ring, completion insertions), so a
+/// stray sentinel can never desync the buffer from
+/// [`Editor::image_attachments`].
+fn strip_chips(text: &str) -> String {
+    if text.contains(CHIP_CHAR) {
+        text.replace(CHIP_CHAR, "")
+    } else {
+        text.to_string()
     }
 }
 
@@ -2361,5 +2573,201 @@ mod tests {
         assert!(parse_bash_command("!!").is_none());
         assert!(parse_bash_command("!   ").is_none());
         assert!(parse_bash_command("!!   ").is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Composer image chips (LUM-1224)
+    // -------------------------------------------------------------------
+
+    fn image(data: &str) -> ImageContent {
+        ImageContent {
+            mime_type: "image/png".to_string(),
+            data: data.to_string(),
+        }
+    }
+
+    #[test]
+    fn chip_renders_as_a_label_and_submits_its_display_text() {
+        let mut ed = Editor::new();
+        ed.insert_str("look");
+        assert_eq!(ed.insert_image(image("aaa")), ImageInsertOutcome::Inserted);
+        // Raw buffer keeps the sentinel; the user-visible draft expands it.
+        assert_eq!(ed.text(), format!("look{CHIP_CHAR}"));
+        assert_eq!(ed.display_text(), "look[Image #1]");
+        assert_eq!(ed.image_count(), 1);
+        assert_eq!(ed.display_cursor(), "look[Image #1]".chars().count());
+
+        match ed.handle_key(Key::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            EditorAction::Submit(text) => assert_eq!(text, "look[Image #1]"),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backspace_deletes_the_whole_chip() {
+        let mut ed = Editor::new();
+        ed.insert_str("a");
+        ed.insert_image(image("one"));
+        ed.insert_str("b");
+        assert_eq!(ed.display_text(), "a[Image #1]b");
+
+        // Cursor sits after `b`; one Backspace removes `b` only.
+        ed.backspace();
+        assert_eq!(ed.display_text(), "a[Image #1]");
+        assert_eq!(ed.image_count(), 1);
+        // The next Backspace removes the chip in a single stroke.
+        ed.backspace();
+        assert_eq!(ed.display_text(), "a");
+        assert_eq!(ed.image_count(), 0);
+        assert_eq!(ed.text(), "a");
+    }
+
+    #[test]
+    fn delete_removes_the_chip_at_the_cursor() {
+        let mut ed = Editor::new();
+        ed.insert_image(image("one"));
+        ed.insert_str("tail");
+        ed.move_home();
+        ed.delete();
+        assert_eq!(ed.display_text(), "tail");
+        assert_eq!(ed.image_count(), 0);
+    }
+
+    #[test]
+    fn cursor_steps_across_a_chip_as_one_character() {
+        let mut ed = Editor::new();
+        ed.insert_str("ab");
+        ed.insert_image(image("one"));
+        ed.insert_str("cd");
+        assert_eq!(ed.cursor(), 2 + CHIP_CHAR.len_utf8() + 2);
+
+        // Left crosses `d`, then `c`, then the whole chip in one move, then
+        // `b` — the chip is a single character to the cursor.
+        ed.move_left();
+        assert_eq!(ed.cursor(), 6);
+        ed.move_left();
+        assert_eq!(ed.cursor(), 5);
+        ed.move_left();
+        assert_eq!(ed.cursor(), 2);
+        ed.move_left();
+        assert_eq!(ed.cursor(), 1);
+        // Right steps back across the whole chip.
+        ed.move_right();
+        assert_eq!(ed.cursor(), 2);
+        ed.move_right();
+        assert_eq!(ed.cursor(), 2 + CHIP_CHAR.len_utf8());
+    }
+
+    #[test]
+    fn draft_split_keeps_text_and_images_interleaved() {
+        // Mirrors Martty's `draft_split_keeps_text_and_images_interleaved`:
+        // text typed before, between and after chips must stay in order and
+        // the attachment list must line up with the sentinels.
+        let mut ed = Editor::new();
+        ed.insert_str("before ");
+        ed.insert_image(image("one"));
+        ed.insert_str(" middle ");
+        ed.insert_image(image("two"));
+        ed.insert_str(" after");
+
+        assert_eq!(
+            ed.display_text(),
+            "before [Image #1] middle [Image #2] after"
+        );
+        assert_eq!(ed.image_attachments(), &[image("one"), image("two")]);
+
+        // Inserting at the start shifts the attachment indices with the
+        // sentinel, so the pairing never desyncs.
+        ed.move_home();
+        ed.insert_image(image("zero"));
+        assert_eq!(
+            ed.image_attachments(),
+            &[image("zero"), image("one"), image("two")]
+        );
+        assert!(ed.display_text().starts_with("[Image #1]before "));
+    }
+
+    #[test]
+    fn insert_image_refuses_past_the_capacity() {
+        let mut ed = Editor::new();
+        for index in 0..MAX_IMAGE_ATTACHMENTS {
+            assert_eq!(
+                ed.insert_image(image(&format!("img-{index}"))),
+                ImageInsertOutcome::Inserted
+            );
+        }
+        assert_eq!(
+            ed.insert_image(image("overflow")),
+            ImageInsertOutcome::AtCapacity
+        );
+        assert_eq!(ed.image_count(), MAX_IMAGE_ATTACHMENTS);
+        // The refused paste did not disturb the buffer.
+        assert_eq!(ed.text().matches(CHIP_CHAR).count(), MAX_IMAGE_ATTACHMENTS);
+    }
+
+    #[test]
+    fn kill_ring_never_resurrects_a_chip_without_its_payload() {
+        let mut ed = Editor::new();
+        ed.insert_str("keep ");
+        ed.insert_image(image("one"));
+        ed.insert_str(" tail");
+        ed.move_home();
+        // Kill the whole line: the chip is inside the removed range, and the
+        // sentinel is stripped from the kill-ring text.
+        ed.kill_to_line_end();
+        assert_eq!(ed.image_count(), 0);
+        assert!(!ed.text().contains(CHIP_CHAR));
+        // Yanking the killed text back must not insert a sentinel.
+        ed.yank();
+        assert!(!ed.text().contains(CHIP_CHAR));
+    }
+
+    #[test]
+    fn killing_a_chip_drops_its_attachment() {
+        let mut ed = Editor::new();
+        ed.insert_str("a");
+        ed.insert_image(image("one"));
+        ed.insert_str("b");
+        ed.insert_image(image("two"));
+        // Cursor after the second chip; kill to line start removes both
+        // chips (and the text) in one range.
+        ed.kill_to_line_start();
+        assert_eq!(ed.image_count(), 0);
+        assert!(ed.text().is_empty());
+    }
+
+    #[test]
+    fn programmatic_set_text_drops_chips() {
+        let mut ed = Editor::new();
+        ed.insert_image(image("one"));
+        ed.set_text("replacement");
+        assert_eq!(ed.image_count(), 0);
+        assert_eq!(ed.text(), "replacement");
+        // A stray sentinel in incoming text is stripped, not adopted.
+        ed.set_text(format!("x{CHIP_CHAR}y"));
+        assert_eq!(ed.image_count(), 0);
+        assert_eq!(ed.text(), "xy");
+    }
+
+    #[test]
+    fn clear_drops_chips() {
+        let mut ed = Editor::new();
+        ed.insert_str("a");
+        ed.insert_image(image("one"));
+        ed.clear();
+        assert_eq!(ed.image_count(), 0);
+        assert!(ed.is_empty());
+    }
+
+    #[test]
+    fn undo_restores_a_deleted_chip() {
+        let mut ed = Editor::new();
+        ed.insert_str("a");
+        ed.insert_image(image("one"));
+        ed.backspace();
+        assert_eq!(ed.image_count(), 0);
+        ed.undo();
+        assert_eq!(ed.image_count(), 1);
+        assert_eq!(ed.display_text(), "a[Image #1]");
     }
 }
