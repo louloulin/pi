@@ -501,6 +501,23 @@ impl ProviderRouter {
         Ok(())
     }
 
+    /// Register (or replace) the adapter for one extension-declared
+    /// provider whose streaming is implemented by the extension itself.
+    ///
+    /// The `pi.registerProvider` `streamSimple` overload (and the native
+    /// `Provider` object overload) does not name an API family this build
+    /// owns: the extension speaks its own wire protocol, so there is nothing
+    /// for [`build_adapter`] to do and no `apiKey` for the host to inject. The caller (see
+    /// [`crate::extensions::wiring`]) builds the [`StreamFn`] that calls back
+    /// into the JS host and hands it here.
+    ///
+    /// Re-registering a name replaces the adapter in place, so an extension
+    /// provider overrides a built-in of the same name exactly like
+    /// [`register_provider`](Self::register_provider) does.
+    pub fn register_stream_fn(&mut self, provider_id: &str, adapter: SharedStreamFn) {
+        self.adapters.insert(provider_id.to_string(), adapter);
+    }
+
     /// Remove the adapter registered for `provider_id` (the router half of
     /// `pi.unregisterProvider`). Returns `true` when an entry was removed.
     pub fn unregister_provider(&mut self, provider_id: &str) -> bool {

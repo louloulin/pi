@@ -321,6 +321,89 @@ pub struct RegisteredProviderConfig {
     pub oauth: Option<RegisteredProviderOauth>,
 }
 
+impl RegisteredProviderConfig {
+    /// `true` when the provider streams through extension code rather than a
+    /// host adapter — either overload can produce this, and it is what lets a
+    /// registration name an `api` this build has no adapter for.
+    pub fn is_handler_owned(&self) -> bool {
+        self.native || self.has_stream_simple
+    }
+}
+
+/// Providers registered via `pi.registerProvider`, plus the host that can
+/// drive their `streamSimple` handlers.
+///
+/// The application layer needs both halves at once: the configs to build
+/// `pi_ai::Models` entries and the streaming handle to answer a request for a
+/// provider whose streaming lives in the extension. Bundling them means
+/// [`registered_providers`](JsExtensionHost::registered_providers) can be
+/// threaded through unchanged, and a host-less snapshot (built by embedding
+/// code that only cares about the declarations) is equally valid —
+/// `apply_registered_providers` skips a `streamSimple` provider it cannot
+/// drive, with a warning.
+///
+/// Derefs to `[RegisteredProviderConfig]`, so `.len()`, indexing and `iter()`
+/// read the same way they did when this was a plain `Vec`.
+#[derive(Clone, Default)]
+pub struct RegisteredProviders {
+    configs: Vec<RegisteredProviderConfig>,
+    host: Option<JsExtensionHost>,
+}
+
+impl std::fmt::Debug for RegisteredProviders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredProviders")
+            .field("configs", &self.configs)
+            // The host handle is opaque (no `Debug`); what matters is whether
+            // `streamSimple` handlers can be reached through this snapshot.
+            .field("host", &self.host.is_some())
+            .finish()
+    }
+}
+
+impl RegisteredProviders {
+    /// A snapshot with no host attached: the declarations only.
+    pub fn declarations_only(configs: Vec<RegisteredProviderConfig>) -> Self {
+        Self {
+            configs,
+            host: None,
+        }
+    }
+
+    /// A snapshot paired with the host that can drive its `streamSimple`
+    /// handlers.
+    pub fn with_host(configs: Vec<RegisteredProviderConfig>, host: JsExtensionHost) -> Self {
+        Self {
+            configs,
+            host: Some(host),
+        }
+    }
+
+    /// The raw registrations, in registration order.
+    pub fn configs(&self) -> &[RegisteredProviderConfig] {
+        &self.configs
+    }
+
+    /// The host to call `streamSimple` handlers on, when one was attached.
+    pub fn host(&self) -> Option<&JsExtensionHost> {
+        self.host.as_ref()
+    }
+}
+
+impl std::ops::Deref for RegisteredProviders {
+    type Target = [RegisteredProviderConfig];
+
+    fn deref(&self) -> &Self::Target {
+        &self.configs
+    }
+}
+
+impl From<Vec<RegisteredProviderConfig>> for RegisteredProviders {
+    fn from(configs: Vec<RegisteredProviderConfig>) -> Self {
+        Self::declarations_only(configs)
+    }
+}
+
 /// Validate one [`RegisteredProviderConfig`] before it enters the registry.
 ///
 /// Mirrors the checks upstream performs implicitly: a provider needs a name;
@@ -1701,10 +1784,14 @@ impl JsExtensionHost {
     /// plain host both yield `[]`.
     ///
     /// The snapshot is a clone: the application layer resolves `apiKey`
-    /// and builds adapters from it, and mutating the returned vector must
-    /// not change the host registry.
-    pub fn registered_providers(&self) -> Vec<RegisteredProviderConfig> {
-        self.inner.state.lock().providers.clone()
+    /// and builds adapters from it, and mutating the returned value must
+    /// not change the host registry. It carries this host along so a
+    /// [`has_stream_simple`](RegisteredProviderConfig::has_stream_simple)
+    /// provider can be driven through
+    /// [`invoke_provider_stream_simple`](Self::invoke_provider_stream_simple)
+    /// without the caller having to keep the two values paired.
+    pub fn registered_providers(&self) -> RegisteredProviders {
+        RegisteredProviders::with_host(self.inner.state.lock().providers.clone(), self.clone())
     }
 
     /// Remove one provider registration (the host side of

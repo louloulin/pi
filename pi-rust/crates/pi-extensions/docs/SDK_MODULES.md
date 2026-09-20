@@ -299,42 +299,86 @@ Divergences:
   `calculateCost(model, usage)` from `@earendil-works/pi-ai` if the
   extension needs it.
 
-#### `pi.registerProvider` — ExtensionAPI bridge (slice 1)
+#### `pi.registerProvider` — ExtensionAPI bridge (slices 1–2)
 
 The extension-facing `pi.registerProvider(name, config)` /
-`pi.unregisterProvider(name)` methods are **implemented** for the
-string overload. They are a distinct path from the `compat` registry
-above: the registration lands in the host (`host_register_provider`,
-validated), and `pi-coding-agent` turns it into a `ProviderRouter`
-adapter plus model-catalog entries, so the agent itself can stream from
-the extension's provider.
+`pi.registerProvider(providerObject)` / `pi.unregisterProvider(name)`
+methods are **implemented** for both overloads. They are a distinct path
+from the `compat` registry above: the registration lands in the host
+(`host_register_provider`, validated), and `pi-coding-agent` turns it into
+a `ProviderRouter` adapter plus model-catalog entries, so the agent itself
+can stream from the extension's provider.
 
-Supported fields: `name`, `baseUrl`, `apiKey` (literal or `$VAR` /
-`${VAR}`), `api`, `models`. `api` must be one of `anthropic-messages`,
-`openai-responses`, `openai-completions`, `google-generative-ai`; a
+Supported fields (string overload): `name`, `baseUrl`, `apiKey` (literal
+or `$VAR` / `${VAR}`), `api`, `models`, `streamSimple`, `oauth`. The object
+overload takes upstream's `Provider` shape: `id` (or `name`), `name`,
+`baseUrl`, `apiKey`, `api` (defaulting to `getModels()[0].api`),
+`getModels()` / `models`, `streamSimple`, `oauth` (or
+`auth.oauth`). `api` must be one of `anthropic-messages`,
+`openai-responses`, `openai-completions`, `google-generative-ai` for a
+registration **without** `streamSimple`; with a handler any family string
+is accepted, because the extension speaks that wire protocol itself. A
 `models` array without `api` and an unknown `api` both throw with the
 supported set in the message. A `baseUrl`-only call is accepted as an
 override of a built-in provider.
 
-Documented divergences from upstream `ProviderConfig`:
+`streamSimple(model, context, options)` is answered by the host import
+`_pi_provider_stream_simple(name, modelJson, contextJson, optionsJson)`,
+which `pi-coding-agent`'s `ExtensionStreamFn` adapter calls on every
+request for that provider. The Rust `Model` / `Context` /
+`SimpleStreamOptions` triple is serialised into upstream's shapes
+(`baseUrl` / `contextWindow` / `maxTokens`; `systemPrompt` / `messages` /
+`tools`; `temperature` / `maxTokens` / `apiKey` / `baseUrl`), the
+handler's `AssistantMessageEventStream` is drained, and the events are
+decoded back into `pi_protocol::AssistantMessageEvent`. `options.apiKey`
+is filled in by the host, because the handler owns the HTTP request and
+upstream's own `streamSimple` implementations read exactly that field.
 
-* **Native `Provider` object overload is not bridged.**
-  `pi.registerProvider(providerObject)` throws
-  `ERR_PI_SDK_UNIMPLEMENTED` and points at the string overload.
-* **No `oauth` block.** `/login` support for extension providers is not
-  wired; an `oauth` field is ignored (the provider registers without
-  one).
-* **No `streamSimple`.** A custom api family still needs
-  `compat.registerApiProvider` (LUM-1180), not `registerProvider`.
+Credential resolution for an extension provider is **stored credential →
+declared `apiKey` → (empty)**, which is
+`pi_ai::resolve_provider_auth`'s "a stored credential owns the provider"
+rule applied to a provider whose only host-side handler is api-key: a
+stored api-key credential, or the access token of a stored OAuth
+credential (`oauth.getApiKey`'s equivalent), wins over the declaration.
+
+Documented divergences from upstream `ProviderConfig` / `Provider`:
+
+* **`streamSimple` delivery is buffered.** The host drains the handler's
+  async iterator in one QuickJS call before returning, so events keep
+  their order but arrive in a batch rather than as they are produced; a
+  mid-stream `AbortSignal` is not observed. A `signal` already cancelled
+  when the request starts short-circuits to `aborted` +
+  `done{aborted}`, and the host's per-call deadline (10 minutes for a
+  provider stream) bounds a handler that never returns.
+* **A failing handler fails the stream in-band.** The host call's
+  rejection, a `{ok:false}` envelope and a handler that never emits a
+  terminal event all become an `error` event followed by
+  `done{reason:"error"}`, matching the `StreamFn` contract that request
+  failures are never returned as `Err`.
+* **`cost` is not carried.** `pi_protocol::Model` has no cost field, so a
+  model entry's `cost` is dropped from the catalog; usage keeps a zeroed
+  `cost` object, as in the `compat` divergence above.
+* **Thinking blocks are dropped from `done`.** `pi_protocol::Content` has
+  no thinking variant, so `thinking_delta` events reach the client but the
+  terminal `Done` keeps only text and tool calls.
+* **The `oauth` block is declared, not driven.** `login` / `refreshToken`
+  / `getApiKey` / `modifyModels` stay in the shim and the host records
+  their presence as flags; nothing calls them yet, so an expired stored
+  token is not refreshed and `/login` does not exist for extension
+  providers.
 * **No `headers` / `authHeader` / `refreshModels`.** Same reason as the
   compat divergence above: the Rust adapters take only a credential and
-  a base URL.
+  a base URL, and a handler-owned provider gets `apiKey` / `baseUrl`
+  rather than a header map.
 * **`!command` apiKey is never executed.** The host stores the string but
   the application layer rejects it, logs a warning and skips the
   provider; use a literal or `$VAR`.
 * **A key that does not resolve skips the provider.** Matching the
   built-in router's "unconfigured provider is absent, not broken" rule,
   a `$VAR` that is unset warns and leaves the provider unregistered.
+* **`streamSimple` needs a host.** A `RegisteredProviders` snapshot with
+  no host attached (embedding code that only reads declarations) skips
+  such a provider with a warning instead of registering a broken adapter.
 * **`unregisterProvider` is a host-registry no-op after load.** It
   removes the registration from the host; a live router adapter / catalog
   entry is removed through `ProviderRouter::unregister_provider`, which

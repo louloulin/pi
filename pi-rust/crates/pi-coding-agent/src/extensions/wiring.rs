@@ -15,15 +15,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::executor::block_on;
 use pi_agent_core::tools::ToolExecutor;
 use pi_ai::models::Models;
 use pi_ai::providers::registry::BUILTIN_PROVIDERS;
+use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
 use pi_extensions::{
     CommandExecutionOutcome, DiscoveredResources, ExtensionBridge, ExtensionError,
     ExtensionSideEffects, HostOptions, JsExtensionHost, RegisteredCommand,
-    RegisteredProviderConfig, RegisteredToolPrompt, ToolContext, UiHandler,
+    RegisteredProviderConfig, RegisteredProviders, RegisteredToolPrompt, ToolContext, UiHandler,
 };
-use pi_protocol::{Api, ExtensionEvent, ProviderId, ResourcesDiscoverReason, UiLevel};
+use pi_protocol::{
+    Api, AssistantMessageEvent, Content, Context, ExtensionEvent, Message, Model, ProviderId,
+    ResourcesDiscoverReason, Role, StopReason, UiLevel, Usage,
+};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
 use crate::extensions::pi_ai_runner::BuiltinPiAiStreamRunner;
@@ -171,7 +176,7 @@ pub struct ExtensionRuntime {
     /// adapters and model-catalog entries (see
     /// [`apply_registered_providers`]); a later `pi.unregisterProvider` from
     /// an event handler updates the host registry, not this snapshot.
-    providers: Vec<RegisteredProviderConfig>,
+    providers: RegisteredProviders,
     mode: String,
     has_ui: bool,
     cwd: String,
@@ -217,8 +222,12 @@ impl ExtensionRuntime {
 
     /// Providers registered via `pi.registerProvider`, in registration order.
     /// Empty when no extension registered one or extensions are disabled.
-    pub fn providers(&self) -> &[RegisteredProviderConfig] {
-        &self.providers
+    ///
+    /// Carries the host along, so the caller can drive a `streamSimple`
+    /// provider's handler (see
+    /// [`apply_registered_providers`]).
+    pub fn providers(&self) -> RegisteredProviders {
+        self.providers.clone()
     }
 
     /// True when `name` (without the leading `/`) is an extension
@@ -387,6 +396,8 @@ pub fn load(
                 .map(|(p, e)| (p.clone(), e.to_string()))
                 .collect();
             let registered = host.registered_tools();
+            // The loader's snapshot: the declarations plus the streaming
+            // handle they came with.
             let providers = host.registered_providers();
             let executor =
                 ExtensionToolExecutor::new(builtin.clone(), host.clone(), registered.clone());
@@ -453,40 +464,92 @@ pub fn explicit_paths(extension: &[PathBuf], extensions_dir: &[PathBuf]) -> Vec<
 /// into a streaming adapter plus `pi_ai::Models` entries so `require(&model)`
 /// can resolve a model that only an extension knows about.
 ///
-/// `apiKey` is resolved with [`resolve_extension_api_key`]: a literal is used
-/// verbatim, `$VAR` / `${VAR}` reads the process environment, and the
-/// `!command` form is never executed. A config whose key does not resolve (or
-/// whose `api` this build cannot stream) is **skipped with a warning**, the
-/// same "unconfigured provider is absent, not broken" policy the built-in
-/// router uses.
+/// Both registration shapes are handled:
+///
+/// * a **declarative** provider (`api` + `apiKey` + `models`) becomes one of
+///   the built-in adapters, exactly like the pre-`streamSimple` behaviour;
+/// * a **handler-owned** provider (`streamSimple`, or the native `Provider`
+///   object overload) becomes an [`ExtensionStreamFn`], so the request is
+///   streamed by the extension's own code instead of a host adapter. Its
+///   `api` only names the wire family the handler speaks, so it may be one
+///   this build has no adapter for.
+///
+/// The credential order is `stored credential → declared apiKey → (nothing)`
+/// — the same "a stored credential owns the provider, the declaration only
+/// matters when nothing is stored" policy [`pi_ai::resolve_provider_auth`]
+/// applies to the built-ins. A stored OAuth credential stands in for the
+/// `oauth.getApiKey` handler this build cannot yet run host-side (see
+/// [`resolve_registered_provider_key`]).
+///
+/// A config whose key cannot be used (or whose `api` this build cannot stream
+/// and that brings no handler) is **skipped with a warning**, the same
+/// "unconfigured provider is absent, not broken" policy the built-in router
+/// uses.
 ///
 /// Returns the provider ids that were applied, in registration order.
 pub fn apply_registered_providers(
     router: &mut ProviderRouter,
     models: &mut Models,
-    providers: &[RegisteredProviderConfig],
+    providers: RegisteredProviders,
 ) -> Vec<String> {
-    apply_registered_providers_with_env(router, models, providers, &|name| std::env::var(name).ok())
+    apply_registered_providers_core(
+        router,
+        models,
+        providers.configs(),
+        providers.host(),
+        &|name| std::env::var(name).ok(),
+    )
 }
 
 /// [`apply_registered_providers`] with an injectable environment, so tests
 /// exercise the `$VAR` branches without mutating process state.
+///
+/// No host is attached, so a `streamSimple` provider is skipped with a
+/// warning: its streaming lives in the JS host, and a provider that can never
+/// answer a request is better left out of the router than registered to fail
+/// every turn.
 pub fn apply_registered_providers_with_env(
     router: &mut ProviderRouter,
     models: &mut Models,
     providers: &[RegisteredProviderConfig],
     get_env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<String> {
+    apply_registered_providers_core(router, models, providers, None, get_env)
+}
+
+/// Shared body of the two entry points above.
+fn apply_registered_providers_core(
+    router: &mut ProviderRouter,
+    models: &mut Models,
+    providers: &[RegisteredProviderConfig],
+    host: Option<&JsExtensionHost>,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
     let mut applied = Vec::new();
     for config in providers {
-        let Some(api) = resolve_registered_provider_api(config) else {
+        // A handler-owned provider does not need a family this build streams:
+        // the extension implements the wire protocol itself.
+        let handler_owned = config.is_handler_owned();
+        let Some(api_name) = resolve_registered_provider_api_name(config) else {
             tracing::warn!(
                 provider = %config.name,
                 "extension-registered provider has no `api` and does not override a built-in provider; skipping"
             );
             continue;
         };
-        let api_key = match resolve_extension_api_key(config.api_key.as_deref(), get_env) {
+        // `None` for an api family with no host adapter. Only a handler-owned
+        // provider may declare one of those; the pre-check keeps the warning
+        // precise instead of "no host adapter", which would misdescribe it.
+        let canonical = canonical_api(&api_name);
+        if !handler_owned && canonical.is_none() {
+            tracing::warn!(
+                provider = %config.name,
+                api = %api_name,
+                "extension-registered provider names an api this build cannot stream and brings no `streamSimple` handler; skipping"
+            );
+            continue;
+        }
+        let api_key = match resolve_registered_provider_key(router, config, get_env) {
             Ok(key) => key,
             Err(error) => {
                 tracing::warn!(
@@ -497,9 +560,32 @@ pub fn apply_registered_providers_with_env(
                 continue;
             }
         };
+        if handler_owned {
+            let Some(host) = host else {
+                tracing::warn!(
+                    provider = %config.name,
+                    "extension-registered provider streams through a `streamSimple` handler but no extension host is attached; skipping"
+                );
+                continue;
+            };
+            let adapter = ExtensionStreamFn::new(
+                &config.name,
+                &api_name,
+                config.base_url.clone(),
+                api_key,
+                host.clone(),
+            );
+            router.register_stream_fn(&config.name, Arc::new(adapter));
+            // The catalog entry is what makes `pi --model <provider>/<id>` and
+            // the `/model` selector able to pick the provider up.
+            register_extension_models(models, config, &api_name);
+            applied.push(config.name.clone());
+            continue;
+        }
+        let api = canonical.expect("checked above");
         match router.register_provider(&config.name, api, config.base_url.clone(), api_key) {
             Ok(()) => {
-                register_extension_models(models, config, api);
+                register_extension_models(models, config, &api_name);
                 applied.push(config.name.clone());
             }
             Err(error) => {
@@ -514,23 +600,391 @@ pub fn apply_registered_providers_with_env(
     applied
 }
 
-/// Pick the [`Api`] for a registration: the declared `api` when present,
-/// otherwise the built-in provider's family (a `baseUrl`-only override, which
-/// the host accepts). `None` when neither is available.
-fn resolve_registered_provider_api(config: &RegisteredProviderConfig) -> Option<Api> {
-    if let Some(raw) = config.api.as_deref() {
-        return match raw {
-            "anthropic-messages" => Some(Api::AnthropicMessages),
-            "openai-responses" => Some(Api::OpenAiResponses),
-            "openai-completions" | "openai-chat-completions" => Some(Api::OpenAiChatCompletions),
-            "google-generative-ai" => Some(Api::GoogleGenerativeAi),
-            _ => None,
-        };
+/// Pick the api family name for a registration: the declared `api` when
+/// present, otherwise the built-in provider's family (a `baseUrl`-only
+/// override, which the host accepts). `None` when neither is available.
+fn resolve_registered_provider_api_name(config: &RegisteredProviderConfig) -> Option<String> {
+    if let Some(raw) = config
+        .api
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(raw.to_string());
     }
     BUILTIN_PROVIDERS
         .iter()
         .find(|spec| spec.id == config.name)
-        .map(|spec| spec.api)
+        .map(|spec| api_wire_name(spec.api).to_string())
+}
+
+/// Map a declared family name onto the [`Api`] this build streams.
+///
+/// `None` for a family with no adapter (a handler-owned provider may declare
+/// one of those: the extension streams it itself).
+fn canonical_api(name: &str) -> Option<Api> {
+    match name {
+        "anthropic-messages" => Some(Api::AnthropicMessages),
+        "openai-responses" => Some(Api::OpenAiResponses),
+        "openai-completions" | "openai-chat-completions" => Some(Api::OpenAiChatCompletions),
+        "google-generative-ai" => Some(Api::GoogleGenerativeAi),
+        _ => None,
+    }
+}
+
+/// What a credential store holds for one provider.
+enum StoredCredential {
+    /// The key of a stored api-key credential.
+    ApiKey(String),
+    /// The access token of a stored OAuth credential. What the extension's
+    /// `oauth.getApiKey` would hand back, and what an adapter — or the
+    /// extension's own `streamSimple` handler — can send as the credential.
+    OauthAccess(String),
+    /// Nothing stored.
+    None,
+}
+
+/// Resolve the credential one extension-declared provider registers with.
+///
+/// The order is `stored credential → declared apiKey → (nothing)`:
+///
+/// 1. A **stored credential owns the provider** — the first step
+///    [`pi_ai::resolve_provider_auth`] takes for a built-in. The store is read
+///    directly here because [`pi_ai::provider_auth_for`] only knows the
+///    built-in registry, so an extension provider has no `ProviderAuth` entry
+///    for the resolver to walk. A stored OAuth credential contributes its
+///    access token: upstream's provider `oauth.getApiKey` produces exactly
+///    that, and it is the credential the request needs until the port grows a
+///    host-side refresh loop.
+/// 2. Otherwise the declaration's `apiKey`, via [`resolve_extension_api_key`]
+///    (a literal, or `$VAR` / `${VAR}` through the process environment).
+/// 3. Otherwise `Ok(None)`: the provider registers with an empty key, which is
+///    the honest answer for an `oauth`-declared or `streamSimple`-owned
+///    provider that supplies its credential from the extension side. A
+///    `!command` key is an `Err`, and the caller skips the provider.
+fn resolve_registered_provider_key(
+    router: &ProviderRouter,
+    config: &RegisteredProviderConfig,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    match read_stored_credential(router, &config.name) {
+        StoredCredential::ApiKey(key) => return Ok(Some(key)),
+        StoredCredential::OauthAccess(access) => return Ok(Some(access)),
+        StoredCredential::None => {}
+    }
+    resolve_extension_api_key(config.api_key.as_deref(), get_env)
+}
+
+/// Read the credential store for `provider_id`, narrowing it to a usable key.
+///
+/// A store failure is logged and treated as "nothing stored": the declaration
+/// still gets its chance, so a broken store degrades a provider instead of
+/// hiding it.
+fn read_stored_credential(router: &ProviderRouter, provider_id: &str) -> StoredCredential {
+    let stored = block_on(router.credential_store().read(provider_id, None));
+    match stored {
+        Ok(Some(pi_ai::Credential::ApiKey(credential))) => credential
+            .key
+            .filter(|key| !key.is_empty())
+            .map(StoredCredential::ApiKey)
+            .unwrap_or(StoredCredential::None),
+        Ok(Some(pi_ai::Credential::OAuth(credential))) => {
+            if credential.access.is_empty() {
+                StoredCredential::None
+            } else {
+                StoredCredential::OauthAccess(credential.access)
+            }
+        }
+        Ok(None) => StoredCredential::None,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider_id,
+                %error,
+                "reading the credential store failed; falling back to the provider declaration"
+            );
+            StoredCredential::None
+        }
+    }
+}
+
+/// [`StreamFn`] that streams one extension-registered provider through the
+/// extension's own `streamSimple` handler.
+///
+/// The handler lives in the JS host, so this adapter serialises the Rust
+/// `Model` / `Context` / [`SimpleStreamOptions`] triple into the upstream JSON
+/// shapes the shim parses, calls
+/// [`JsExtensionHost::invoke_provider_stream_simple`], and turns the decoded
+/// events into the stream `pi-agent-core` consumes. The `api` string is the
+/// one the extension declared, not the family the Rust catalog fell back to:
+/// upstream's `streamSimple` implementations switch on `model.api`, and a
+/// custom family has no `pi_protocol::Api` variant to round-trip through.
+///
+/// Two divergences from a built-in adapter are documented in
+/// `crates/pi-extensions/docs/SDK_MODULES.md`:
+///
+/// * the host call **drains the handler's async iterator before returning**,
+///   so events keep their order but arrive in one batch; and
+/// * cancellation is checked before the handler starts, not observed
+///   mid-stream — the QuickJS call is already in flight by then, and the host's
+///   own deadline is what bounds it.
+pub struct ExtensionStreamFn {
+    host: JsExtensionHost,
+    provider: String,
+    api: String,
+    base_url: String,
+    api_key: String,
+}
+
+impl std::fmt::Debug for ExtensionStreamFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionStreamFn")
+            .field("provider", &self.provider)
+            .field("api", &self.api)
+            .field("baseUrl", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExtensionStreamFn {
+    /// Build an adapter for `provider` from its registration.
+    pub fn new(
+        provider: impl Into<String>,
+        api: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        host: JsExtensionHost,
+    ) -> Self {
+        Self {
+            host,
+            provider: provider.into(),
+            api: api.into(),
+            base_url: base_url.unwrap_or_default(),
+            api_key: api_key.unwrap_or_default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamFn for ExtensionStreamFn {
+    async fn stream_simple(
+        &self,
+        model: &Model,
+        ctx: &Context,
+        options: &SimpleStreamOptions,
+    ) -> Result<AssistantMessageEventStream, StreamError> {
+        if options
+            .signal
+            .as_ref()
+            .is_some_and(|signal| signal.is_cancelled())
+        {
+            return Ok(aborted_stream());
+        }
+        let model_json = extension_model_json(model, &self.provider, &self.api, &self.base_url);
+        let context_json = extension_context_json(ctx);
+        let options_json = extension_options_json(options, &self.api_key, &self.base_url);
+        let events = match self
+            .host
+            .invoke_provider_stream_simple(
+                &self.provider,
+                &model_json.to_string(),
+                &context_json.to_string(),
+                &options_json.to_string(),
+            )
+            .await
+        {
+            Ok(events) => events,
+            Err(error) => {
+                // The trait forbids reporting a request failure as a stream
+                // error, so a host-side failure becomes the same
+                // `Error` + `Done { stop_reason: Error }` tail a provider
+                // adapter emits for a transport failure.
+                let message = format!("extension provider `{}` failed: {error}", self.provider);
+                vec![
+                    AssistantMessageEvent::Error { message },
+                    AssistantMessageEvent::Done {
+                        content: Vec::new(),
+                        stop_reason: StopReason::Error,
+                        usage: Usage::default(),
+                    },
+                ]
+            }
+        };
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+/// The two-element tail a cancelled request produces.
+fn aborted_stream() -> AssistantMessageEventStream {
+    Box::pin(futures::stream::iter([
+        Ok(AssistantMessageEvent::Aborted),
+        Ok(AssistantMessageEvent::Done {
+            content: Vec::new(),
+            stop_reason: StopReason::Aborted,
+            usage: Usage::default(),
+        }),
+    ]))
+}
+
+/// The upstream `Model` shape a `streamSimple` handler receives.
+fn extension_model_json(
+    model: &Model,
+    provider: &str,
+    api: &str,
+    base_url: &str,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "id": model.id,
+        "name": model.label.clone().unwrap_or_else(|| model.id.clone()),
+        "provider": provider,
+        "api": api,
+    });
+    if !base_url.is_empty() {
+        value["baseUrl"] = serde_json::Value::from(base_url);
+    }
+    if model.context_window > 0 {
+        value["contextWindow"] = serde_json::Value::from(model.context_window);
+    }
+    if model.max_output_tokens > 0 {
+        value["maxTokens"] = serde_json::Value::from(model.max_output_tokens);
+    }
+    value
+}
+
+/// The upstream `Context` shape: `systemPrompt`, `messages`, `tools`.
+fn extension_context_json(ctx: &Context) -> serde_json::Value {
+    serde_json::json!({
+        "systemPrompt": ctx.system_prompt,
+        "messages": ctx
+            .messages
+            .iter()
+            .map(extension_message_json)
+            .collect::<Vec<_>>(),
+        "tools": ctx
+            .tools
+            .iter()
+            .map(extension_tool_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// One message in the upstream shape.
+///
+/// A tool result is a flat `role: "toolResult"` message upstream, not a
+/// content block, which is also how `pi_ai::ext_bridge::context_from_js`
+/// reads one back.
+fn extension_message_json(message: &Message) -> serde_json::Value {
+    if message.role == Role::Tool {
+        let result = message.content.iter().find_map(|block| match block {
+            Content::ToolResult(result) => Some(result),
+            _ => None,
+        });
+        let Some(result) = result else {
+            return serde_json::json!({ "role": "toolResult", "content": "" });
+        };
+        let mut value = serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": result.tool_call_id,
+            "content": content_text(&result.content),
+            "isError": result.is_error,
+        });
+        if let Some(details) = &result.details {
+            value["details"] = details.clone();
+        }
+        if let Some(names) = &result.added_tool_names {
+            value["addedToolNames"] = serde_json::Value::from(names.clone());
+        }
+        return value;
+    }
+    let mut value = serde_json::json!({
+        "role": match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => unreachable!("handled above"),
+        },
+        "content": message
+            .content
+            .iter()
+            .filter_map(extension_block_json)
+            .collect::<Vec<_>>(),
+    });
+    if let Some(model) = &message.model {
+        value["model"] = serde_json::Value::from(model.as_str());
+    }
+    value
+}
+
+/// One content block in the upstream shape. Tool results are dropped here:
+/// they carry their own message role. Thinking blocks cannot be represented
+/// (`pi_protocol::Content` has no variant for them).
+fn extension_block_json(content: &Content) -> Option<serde_json::Value> {
+    match content {
+        Content::Text(text) => Some(serde_json::json!({"type": "text", "text": text.text})),
+        Content::Image(image) => Some(serde_json::json!({
+            "type": "image",
+            "data": image.data,
+            "mimeType": image.mime_type,
+        })),
+        Content::ToolCall(call) => Some(serde_json::json!({
+            "type": "toolCall",
+            "id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+        })),
+        Content::ToolResult(_) => None,
+    }
+}
+
+/// Flatten a tool-result content block into the string upstream stores on the
+/// message.
+fn content_text(content: &Content) -> String {
+    match content {
+        Content::Text(text) => text.text.clone(),
+        _ => String::new(),
+    }
+}
+
+/// One tool definition in the upstream shape (`description` is optional).
+fn extension_tool_json(tool: &pi_protocol::ToolDefinition) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.parameters,
+    });
+    if !tool.label.is_empty() {
+        value["label"] = serde_json::Value::from(tool.label.as_str());
+    }
+    if let Some(metadata) = &tool.metadata {
+        value["metadata"] = metadata.clone();
+    }
+    value
+}
+
+/// The upstream `SimpleStreamOptions` a `streamSimple` handler receives.
+///
+/// `apiKey` / `baseUrl` are added because the handler owns the HTTP request:
+/// without them it would have to re-resolve the credential the host already
+/// resolved (upstream's own `streamSimple` implementations read exactly these
+/// two fields off the options).
+fn extension_options_json(
+    options: &SimpleStreamOptions,
+    api_key: &str,
+    base_url: &str,
+) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    if let Some(temperature) = options.temperature {
+        value.insert("temperature".into(), serde_json::Value::from(temperature));
+    }
+    if let Some(max_tokens) = options.max_tokens {
+        value.insert("maxTokens".into(), serde_json::Value::from(max_tokens));
+    }
+    if !api_key.is_empty() {
+        value.insert("apiKey".into(), serde_json::Value::from(api_key));
+    }
+    if !base_url.is_empty() {
+        value.insert("baseUrl".into(), serde_json::Value::from(base_url));
+    }
+    serde_json::Value::Object(value)
 }
 
 /// Feed the extension's `models` array into the catalog under `config.name`.
@@ -540,7 +994,7 @@ fn resolve_registered_provider_api(config: &RegisteredProviderConfig) -> Option<
 /// snake_case shape. Normalising here (rather than teaching the loader both
 /// spellings) keeps the catalog parser unchanged and still lets
 /// `get_model(provider, id)` hit the extension's entries.
-fn register_extension_models(models: &mut Models, config: &RegisteredProviderConfig, api: Api) {
+fn register_extension_models(models: &mut Models, config: &RegisteredProviderConfig, api: &str) {
     let serde_json::Value::Array(entries) = &config.models else {
         return;
     };
@@ -564,7 +1018,7 @@ fn register_extension_models(models: &mut Models, config: &RegisteredProviderCon
 }
 
 /// Map one upstream `ProviderModelConfig` entry onto the Rust catalog shape.
-fn normalize_extension_model(entry: &serde_json::Value, api: Api) -> serde_json::Value {
+fn normalize_extension_model(entry: &serde_json::Value, api: &str) -> serde_json::Value {
     let Some(object) = entry.as_object() else {
         return entry.clone();
     };
@@ -596,7 +1050,7 @@ fn normalize_extension_model(entry: &serde_json::Value, api: Api) -> serde_json:
     let model_api = object
         .get("api")
         .and_then(|value| value.as_str())
-        .unwrap_or_else(|| api_wire_name(api));
+        .unwrap_or(api);
     model.insert("api".into(), model_api.into());
     serde_json::Value::Object(model)
 }
@@ -943,5 +1397,307 @@ mod tests {
         assert_eq!(providers[0].api.as_deref(), Some("openai-completions"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // `streamSimple`: the extension's own streaming call reaches the
+    // `pi-coding-agent` router, and the credential order is stored →
+    // declared → nothing.
+    // -----------------------------------------------------------------
+
+    /// Load one extension from a `tag`ged temp file and keep the runtime
+    /// alive: the host's QuickJS context has to outlive the load pass for a
+    /// `streamSimple` call to be drivable afterwards.
+    fn load_extension(tag: &str, source: &str) -> (tokio::runtime::Runtime, ExtensionLoadOutcome) {
+        let dir = std::env::temp_dir().join(format!("pi-wiring-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("extension.js");
+        std::fs::write(&file, source).expect("write extension");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut options = ExtensionLoadOptions::for_mode(None, dir.clone(), "print", false);
+        options.explicit = vec![file];
+        let outcome = load(&runtime, &options);
+        let _ = std::fs::remove_dir_all(&dir);
+        (runtime, outcome)
+    }
+
+    /// An extension registering `my-proxy` through the native `Provider`
+    /// object overload: `streamSimple` owned by the extension, an `oauth`
+    /// block, and a catalog carrying context window / max tokens / cost (a
+    /// field the Rust model has no room for).
+    fn native_stream_provider_extension(api_key: &str) -> String {
+        format!(
+            r#"
+                module.exports = function (pi) {{
+                    pi.registerProvider({{
+                        id: "my-proxy",
+                        name: "My Proxy",
+                        baseUrl: "https://proxy.example.com/v1",
+                        apiKey: "{api_key}",
+                        getModels: function () {{
+                            return [{{
+                                id: "proxy-small",
+                                name: "Proxy Small",
+                                api: "custom-wire",
+                                contextWindow: 64000,
+                                maxTokens: 2048,
+                                cost: {{ input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 }},
+                            }}];
+                        }},
+                        oauth: {{
+                            name: "My Proxy (subscription)",
+                            getApiKey: function (credentials) {{ return credentials.access; }},
+                        }},
+                        streamSimple: function (model, context, options) {{
+                            const key = (options && options.apiKey) || "";
+                            const text = "via:" + model.api + ":" + key;
+                            return (async function* () {{
+                                yield {{ type: "start", partial: {{ role: "assistant", content: [], model: model.id, provider: model.provider, api: model.api }} }};
+                                yield {{ type: "text_delta", contentIndex: 0, delta: text }};
+                                yield {{ type: "text_end", contentIndex: 0 }};
+                                yield {{
+                                    type: "done",
+                                    reason: "stop",
+                                    message: {{
+                                        role: "assistant",
+                                        content: [{{ type: "text", text: text }}],
+                                        stopReason: "stop",
+                                        usage: {{ input: 5, output: 2, total: 7 }},
+                                        model: model.id,
+                                    }},
+                                }};
+                            }})();
+                        }},
+                    }});
+                }};
+            "#
+        )
+    }
+
+    /// Drain a stream to its events, asserting nothing surfaced as a
+    /// transport error (the trait contract encodes failures in-stream).
+    async fn drain(stream_fn: &pi_ai::SharedStreamFn, model: &Model) -> Vec<AssistantMessageEvent> {
+        use futures::StreamExt as _;
+
+        let context = Context::new("be brief");
+        let mut stream = stream_fn
+            .stream_simple(model, &context, &SimpleStreamOptions::default())
+            .await
+            .expect("the extension adapter must start a stream");
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("no transport error"));
+        }
+        events
+    }
+
+    /// The delta an extension handler lets through for `key`.
+    fn delta_text(events: &[AssistantMessageEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantMessageEvent::TextDelta { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn native_provider_object_streams_through_the_router() {
+        let (runtime, outcome) = load_extension(
+            "stream-simple",
+            &native_stream_provider_extension("literal-key"),
+        );
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+
+        let providers = outcome.runtime.providers();
+        assert_eq!(providers.len(), 1, "{providers:?}");
+        let registered = &providers[0];
+        assert!(registered.native && registered.has_stream_simple);
+        assert!(registered.is_handler_owned());
+        assert!(registered
+            .oauth
+            .as_ref()
+            .is_some_and(|oauth| oauth.has_get_api_key));
+
+        let mut router = ProviderRouter::from_env_with(|_| None);
+        let mut models = Models::new();
+        let applied = apply_registered_providers(&mut router, &mut models, providers);
+        assert_eq!(applied, vec!["my-proxy".to_string()]);
+
+        // `/model` sees the provider: the catalog entry exists with the
+        // declared family and window (`cost` has no Rust field and is
+        // dropped — documented divergence).
+        let model = models
+            .get_model(&ProviderId::new("my-proxy"), "proxy-small")
+            .expect("the extension model is in the catalog");
+        assert_eq!(model.context_window, 64_000);
+        assert_eq!(model.max_output_tokens, 2_048);
+        assert_eq!(model.label.as_deref(), Some("Proxy Small"));
+        let model = model.clone();
+
+        let stream_fn = router
+            .require(&model)
+            .expect("the extension's streamSimple adapter answers for the provider");
+        let events = runtime.block_on(drain(&stream_fn, &model));
+
+        // The handler ran with the adapter's credential and the declared
+        // api family, not the catalog fallback.
+        assert_eq!(delta_text(&events), "via:custom-wire:literal-key");
+        match events.last() {
+            Some(AssistantMessageEvent::Done {
+                stop_reason, usage, ..
+            }) => {
+                assert_eq!(*stop_reason, StopReason::Stop);
+                assert_eq!(usage.output, 2);
+            }
+            other => panic!("expected a terminal Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stored_credential_wins_over_the_declared_api_key() {
+        let (runtime, outcome) = load_extension(
+            "stream-simple-stored",
+            &native_stream_provider_extension("declared-key"),
+        );
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+
+        let stored = pi_ai::Credential::ApiKey(pi_ai::ApiKeyCredential {
+            key: Some("stored-key".to_string()),
+            env: None,
+        });
+        let mut router = router_with_credential("my-proxy", stored);
+        let mut models = Models::new();
+        let applied =
+            apply_registered_providers(&mut router, &mut models, outcome.runtime.providers());
+        assert_eq!(applied, vec!["my-proxy".to_string()]);
+
+        let model = models
+            .get_model(&ProviderId::new("my-proxy"), "proxy-small")
+            .expect("catalog entry")
+            .clone();
+        let stream_fn = router.require(&model).expect("adapter");
+        let events = runtime.block_on(drain(&stream_fn, &model));
+        assert_eq!(delta_text(&events), "via:custom-wire:stored-key");
+    }
+
+    #[test]
+    fn stored_oauth_credential_supplies_the_access_token() {
+        let (runtime, outcome) = load_extension(
+            "stream-simple-oauth",
+            &native_stream_provider_extension("declared-key"),
+        );
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+
+        // A stored OAuth credential owns the provider: its access token is
+        // what upstream's `oauth.getApiKey` would return, and the declared
+        // apiKey is not consulted.
+        let stored = pi_ai::Credential::OAuth(pi_ai::OAuthCredential {
+            refresh: "refresh-token".to_string(),
+            access: "oauth-access".to_string(),
+            expires: 0,
+            extra: Default::default(),
+        });
+        let mut router = router_with_credential("my-proxy", stored);
+        let mut models = Models::new();
+        apply_registered_providers(&mut router, &mut models, outcome.runtime.providers());
+
+        let model = models
+            .get_model(&ProviderId::new("my-proxy"), "proxy-small")
+            .expect("catalog entry")
+            .clone();
+        let stream_fn = router.require(&model).expect("adapter");
+        let events = runtime.block_on(drain(&stream_fn, &model));
+        assert_eq!(delta_text(&events), "via:custom-wire:oauth-access");
+    }
+
+    #[test]
+    fn a_declarations_only_snapshot_cannot_stream_a_handler_owned_provider() {
+        // Embedding code that has no host to drive `streamSimple` gets the
+        // declarations without the handlers; a provider whose only streaming
+        // path is the handler must not be registered as a broken adapter.
+        let (_, outcome) = load_extension(
+            "stream-simple-no-host",
+            &native_stream_provider_extension("literal-key"),
+        );
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+        let declared = outcome.runtime.providers();
+        let declarations =
+            RegisteredProviders::declarations_only(declared.iter().cloned().collect::<Vec<_>>());
+
+        let mut router = ProviderRouter::from_env_with(|_| None);
+        let mut models = Models::new();
+        let applied = apply_registered_providers(&mut router, &mut models, declarations);
+        assert!(applied.is_empty(), "applied: {applied:?}");
+        assert!(!router.has_provider("my-proxy"));
+        assert!(models
+            .get_model(&ProviderId::new("my-proxy"), "proxy-small")
+            .is_none());
+    }
+
+    #[test]
+    fn a_failing_stream_simple_handler_fails_the_stream_in_band() {
+        let (runtime, outcome) = load_extension(
+            "stream-simple-failing",
+            r#"
+                module.exports = function (pi) {
+                    pi.registerProvider({
+                        id: "my-proxy",
+                        api: "custom-wire",
+                        models: [{ id: "proxy-small", name: "Proxy Small", api: "custom-wire" }],
+                        streamSimple: function () { throw new Error("upstream is down"); },
+                    });
+                };
+            "#,
+        );
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+
+        let mut router = ProviderRouter::from_env_with(|_| None);
+        let mut models = Models::new();
+        apply_registered_providers(&mut router, &mut models, outcome.runtime.providers());
+        let model = models
+            .get_model(&ProviderId::new("my-proxy"), "proxy-small")
+            .expect("catalog entry")
+            .clone();
+        let stream_fn = router.require(&model).expect("adapter");
+        let events = runtime.block_on(drain(&stream_fn, &model));
+
+        // The trait contract: request failures are encoded in-stream, never
+        // returned as an `Err`.
+        match events.as_slice() {
+            [AssistantMessageEvent::Error { message }, AssistantMessageEvent::Done { stop_reason, .. }] =>
+            {
+                assert!(message.contains("upstream is down"), "{message}");
+                assert_eq!(*stop_reason, StopReason::Error);
+            }
+            other => panic!("expected Error + Done, got {other:?}"),
+        }
+    }
+
+    /// A router whose credential store holds `credential` for `provider_id`.
+    fn router_with_credential(provider_id: &str, credential: pi_ai::Credential) -> ProviderRouter {
+        use pi_ai::CredentialStore as _;
+
+        let store = Arc::new(pi_ai::InMemoryCredentialStore::new());
+        block_on(store.modify(
+            provider_id,
+            Box::new(move |_current| {
+                let credential = credential.clone();
+                Box::pin(async move { Ok(Some(credential)) })
+            }),
+            None,
+        ))
+        .expect("seeding the in-memory store must not fail");
+        ProviderRouter::from_env_with_credentials(
+            |_| None,
+            pi_ai::ProviderRetryPolicy::default(),
+            store,
+            pi_ai::default_provider_auth_context(),
+        )
     }
 }
