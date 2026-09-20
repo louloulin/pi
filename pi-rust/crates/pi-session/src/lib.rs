@@ -1,11 +1,25 @@
 //! SQLite session backend for the Pi Rust port.
 //!
 //! The `pi-session` crate is the Rust analogue of
-//! `packages/session-backends/sqlite-node` in the TS monorepo. It writes
-//! [`SessionEntry`](pi_protocol::SessionEntry) rows to a SQLite
-//! database (one row per entry) with the payload column zstd-compressed
-//! (level 3) and JSON-encoded. The TS port reads/writes the same
-//! payload format, so files written by either side round-trip cleanly.
+//! `packages/session-backends/sqlite-node` in the TS monorepo. Two
+//! on-disk layouts exist and are **not** interchangeable:
+//!
+//! * **Rust legacy** — what [`SessionWriter`] writes today: one row per
+//!   [`SessionEntry`](pi_protocol::SessionEntry) in a narrow schema with
+//!   the payload column zstd-compressed (level 3) and JSON-encoded.
+//! * **Upstream v4** — `AgentHarness storage format 4 / storageVersion 1`,
+//!   the layout the TS `packages/session-backends/sqlite-node` writer
+//!   produces: `entries.payload` holds plain JSON, the row key is
+//!   `(session_id, id)` and the session version lives in the
+//!   `sessions.storage_version` column.
+//!
+//! [`SessionReader::open`] tells them apart from the table structure
+//! ([`SchemaLayout`]) and reads either one. Round-tripping an upstream
+//! file *through the Rust writer* is not supported yet — the write path
+//! still emits the Rust legacy layout — so a file written by the TS port
+//! can be read here, but a file written here is still read only by this
+//! crate. Aligning the write path is a later slice (see
+//! [`schema`](crate::schema) for the layout comparison table).
 //!
 //! # Quick start
 //!
@@ -58,8 +72,8 @@ pub mod writer;
 pub use error::{Result, SessionError};
 pub use export::{default_export_path, export_jsonl, export_session, render_jsonl, ExportReport};
 pub use migrate::{default_destination, migrate_jsonl, MigrationReport};
-pub use reader::{DecodedEntry, SessionReader};
-pub use schema::{EntryRow, SessionRow, SCHEMA_VERSION};
+pub use reader::{decode_upstream_entry, DecodedEntry, SessionReader};
+pub use schema::{EntryRow, SchemaLayout, SessionRow, SCHEMA_VERSION};
 pub use writer::{SessionWriter, ZSTD_LEVEL};
 
 // Re-export the protocol `SessionEntry` so downstream users don't have

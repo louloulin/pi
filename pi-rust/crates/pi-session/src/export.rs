@@ -20,8 +20,10 @@
 //!    cannot read back.
 //! 2. **Exactly one header line, always first.** The `sessions` table is
 //!    the source of truth for the header; a `header` row stored in the
-//!    `entries` table (the TS writer emits one) is folded into that line
-//!    instead of being written a second time.
+//!    `entries` table (the Rust layout allows one) is folded into that
+//!    line instead of being written a second time. The upstream TS
+//!    layout keeps the header exclusively in `sessions` and has no
+//!    header entry at all.
 //!
 //! The header does not carry `cwd`: [`SessionEntry::Header`] has no such
 //! field, so the working directory recorded in `sessions.cwd` survives in
