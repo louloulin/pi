@@ -407,3 +407,22 @@ workspace（LUM-1209 / LUM-1211 正在各自的 worktree 里编译，避免三�
 剩下的 Stage 59 尾部（`app.editor.external`、`app.session.tree`/`fork`）所需的 `branch_*` 读路径
 （Stage 56）本轮已备齐，可以接线。
 
+本轮合并树的全量门（在两个 merge commit `65676563d`、`d20361992` 上实跑）：
+
+```console
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test --workspace --offline
+  147 套件 / 2202 passed / 0 failed / 2 ignored    （上一基线 145 / 2159 / 0 / 2）
+
+$ … cargo clippy --workspace --all-targets --offline -- -D warnings
+  Finished `dev` profile … （仅依赖 crate `rquickjs-core` 自带 warning，本仓零 warning）
+
+$ cargo fmt --all -- --check
+  干净
+```
+
+合并细节：Stage 56 整条分支零冲突；Stage 62 仅 `docs/TUI_UX_AUDIT.md` 三处冲突
+（P1-4 落地说明、第五节 stage 表、落地状态块），代码文件（`app.rs` / `lib.rs` / `editor.rs`）
+均自动合并。附带修回一处文档回归：`origin/work/LUM-1223` 误把「首轮（LUM-1210）」的
+测试数从 `59/1291` 改成它自己的 `63/1343`，本轮恢复历史值并为 62 单列验证块。
+
