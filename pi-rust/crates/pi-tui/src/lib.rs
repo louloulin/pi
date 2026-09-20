@@ -25,6 +25,8 @@ pub mod input;
 pub mod keybindings;
 pub mod kill_ring;
 pub mod latex;
+pub mod loader;
+pub mod locale;
 pub mod markdown;
 pub mod message;
 pub mod mouse_region;
@@ -70,6 +72,8 @@ pub use keybindings::{
     KeybindingsManager,
 };
 pub use kill_ring::{KillDirection, KillRing};
+pub use loader::{format_elapsed, indicator_line, Spinner, SPINNER_FRAMES, SPINNER_INTERVAL_MS};
+pub use locale::{Locale, STARTUP_HINTS};
 pub use markdown::{render_markdown, render_markdown_with_links, render_markdown_with_theme};
 pub use message::{
     tool_fold_hint, MessageItem, MessageView, PendingMessageKind, Role, ToolBlock,
@@ -84,7 +88,7 @@ pub use search::{
 };
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use settings::{SettingItem, SettingsAction, SettingsList};
-pub use status::{format_tokens, StatusBar, StatusData};
+pub use status::{format_tokens, BusyIndicator, StatusBar, StatusData};
 pub use styled::{SpanStyle, StyledLine, StyledSpan};
 pub use styles::SelectListStyles;
 pub use terminal_image::{

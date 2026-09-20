@@ -5,6 +5,7 @@
 //!
 //! * [`app_default_keybindings`] — the coding-agent-only `app.*` ids
 //!   (upstream `AppKeybindings`, 43 entries), with the platform-forked
+//!   chords and the Rust-only `app.header` added on top.
 //!   defaults.
 //! * [`merged_definitions`] — upstream `KEYBINDINGS`: the `pi-tui` default
 //!   table with four `tui.*` defaults overridden, followed by the `app.*`
@@ -145,7 +146,7 @@ fn is_truthy(value: Option<&String>) -> bool {
 ///
 /// Upstream declares these as the `AppKeybindings` interface; this array is
 /// the same list and its length is asserted by the tests.
-pub const APP_KEYBINDING_IDS: [&str; 43] = [
+pub const APP_KEYBINDING_IDS: [&str; 44] = [
     "app.interrupt",
     "app.clear",
     "app.exit",
@@ -157,6 +158,11 @@ pub const APP_KEYBINDING_IDS: [&str; 43] = [
     "app.model.select",
     "app.tools.expand",
     "app.thinking.toggle",
+    // Rust-only: upstream expands the startup header from `app.tools.expand`
+    // (`setToolsExpanded` → `builtInHeader.setExpanded`), so it has no header
+    // id of its own. This port keeps the two folds separate and gives the
+    // header toggle its own id so it is overridable and listed by `/hotkeys`.
+    "app.header",
     "app.session.toggleNamedFilter",
     "app.editor.external",
     "app.message.copy",
@@ -244,6 +250,10 @@ pub fn app_default_keybindings(
         entry("app.model.select", ["ctrl+l"], "Open model selector"),
         entry("app.tools.expand", ["ctrl+o"], "Toggle tool output"),
         entry("app.thinking.toggle", ["ctrl+t"], "Toggle thinking blocks"),
+        // Rust-only addition: the startup header's fold chord. `alt+h` is free
+        // across every platform table this port installs, and the id exists so
+        // `keybindings.json` can move it and `/hotkeys` can list it.
+        entry("app.header", ["alt+h"], "Toggle startup header"),
         entry(
             "app.session.toggleNamedFilter",
             ["ctrl+n"],
@@ -382,7 +392,7 @@ pub fn app_default_keybindings(
 /// Upstream `KEYBINDINGS`: the full coding-agent default table.
 ///
 /// The `pi-tui` defaults come first — with four `tui.*` entries overridden in
-/// place — followed by the 43 `app.*` entries. The definitions carry the
+/// place — followed by the 44 `app.*` entries. The definitions carry the
 /// platform forks, so this is the table to hand to the manager and to use for
 /// [`order_keybindings_config`].
 pub fn merged_definitions(platform: &Platform, env: &Env) -> Vec<(String, KeybindingDefinition)> {

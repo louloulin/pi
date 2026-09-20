@@ -239,6 +239,10 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
             "app.tools.expand",
             "expand or collapse tool output (Ctrl+O by default)",
         ),
+        (
+            "app.header",
+            "expand or collapse the startup header (Alt+H by default)",
+        ),
         ("app.model.select", "open the model selector"),
         ("app.session.new", "start a new session"),
     ];
@@ -438,6 +442,25 @@ mod tests {
         let text = hotkeys_text_with(&manager);
         assert!(text.contains("Ctrl+O"), "{text}");
         assert!(text.contains("expand or collapse tool output"), "{text}");
+    }
+
+    #[test]
+    fn hotkeys_text_lists_the_startup_header_chord() {
+        // Stage 66 (LUM-1228) gave `app.header` a consumer and a default
+        // chord, so the app group has to list it.
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        let text = hotkeys_text_with(&manager);
+        assert!(text.contains("Alt+H"), "{text}");
+        assert!(
+            text.contains("expand or collapse the startup header"),
+            "{text}"
+        );
     }
 
     #[test]

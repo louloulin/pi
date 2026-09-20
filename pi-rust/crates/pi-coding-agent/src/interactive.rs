@@ -133,6 +133,14 @@ pub struct InteractiveOptions {
     /// `settings.json` by the caller (`config::load_agent_retry_policy`).
     /// Applied to the agent the TUI drives.
     pub retry: RetryPolicy,
+    /// Suppress the built-in startup header (the key-hint screen above the
+    /// transcript).
+    ///
+    /// Upstream's switch is the `quietStartup` setting, plus its
+    /// `options.verbose` override (`interactive-mode.ts:910`); the Rust CLI
+    /// exposes the same thing as `--no-header`. The App still honours the
+    /// runtime `app.header` chord either way.
+    pub quiet_startup: bool,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -154,6 +162,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("extensions", &self.extensions.is_some())
             .field("extension_ui", &self.extension_ui.is_some())
             .field("retry", &self.retry)
+            .field("quiet_startup", &self.quiet_startup)
             .finish()
     }
 }
@@ -177,8 +186,46 @@ impl Default for InteractiveOptions {
             extensions: None,
             extension_ui: None,
             retry: RetryPolicy::default(),
+            quiet_startup: false,
         }
     }
+}
+
+/// The App configuration the interactive driver runs with.
+///
+/// Split out of [`run_interactive`] so the launch surface (header on or off,
+/// locale, poll interval) is a pure function of the options and can be
+/// asserted without a terminal — `tests/startup_header.rs` drives it against
+/// the installed keybinding table.
+pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
+    AppConfig {
+        prompt_placeholder: "type a prompt — /help for commands".into(),
+        session_id: options.session_id.clone(),
+        event_poll_interval: Duration::from_millis(50),
+        markdown: true,
+        // Upstream default: `copyOnSelect ?? true`.
+        copy_on_select: true,
+        // Let the App detect the terminal's OSC 8 support from the
+        // environment (`Hyperlinks: None` = auto).
+        hyperlinks: None,
+        // Collapsed tool blocks preview this many tail lines before the
+        // `… (+M lines, Ctrl+O to expand)` hint. `pi_tui::TOOL_PREVIEW_LINES`
+        // is the 4-line default; a user setting can override it here.
+        tool_preview_lines: pi_tui::TOOL_PREVIEW_LINES,
+        // Upstream shows its header unless the user asked for a quiet
+        // startup (`quietStartup`; the CLI spelling here is `--no-header`).
+        startup_header: !options.quiet_startup,
+        // First run teaches the chords it just shipped; `app.header` folds it
+        // and a folded header costs no rows.
+        startup_header_expanded: true,
+        locale: locale_from_env(std::env::var("PI_LANG").ok().as_deref()),
+    }
+}
+
+/// The startup header's copy table: `PI_LANG` (`en` / `zh`, a region suffix is
+/// tolerated) wins, anything else keeps the default (English).
+pub(crate) fn locale_from_env(value: Option<&str>) -> pi_tui::Locale {
+    value.and_then(pi_tui::Locale::parse).unwrap_or_default()
 }
 
 /// Entry point invoked from `main`.
@@ -206,21 +253,7 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     );
     let agent = Arc::new(AsyncMutex::new(agent));
 
-    let config = AppConfig {
-        prompt_placeholder: "type a prompt — /help for commands".into(),
-        session_id: options.session_id.clone(),
-        event_poll_interval: Duration::from_millis(50),
-        markdown: true,
-        // Upstream default: `copyOnSelect ?? true`.
-        copy_on_select: true,
-        // Let the App detect the terminal's OSC 8 support from the
-        // environment (`Hyperlinks: None` = auto).
-        hyperlinks: None,
-        // Collapsed tool blocks preview this many tail lines before the
-        // `… (+M lines, Ctrl+O to expand)` hint. `pi_tui::TOOL_PREVIEW_LINES`
-        // is the 4-line default; a user setting can override it here.
-        tool_preview_lines: pi_tui::TOOL_PREVIEW_LINES,
-    };
+    let config = interactive_app_config(&options);
 
     let mut terminal = match setup_terminal() {
         Ok(terminal) => terminal,
@@ -2089,6 +2122,32 @@ mod tests {
             message_preview(&serde_json::json!({"other": 1})),
             "{\"other\":1}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Startup header (Stage 66)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_launch_surface_shows_the_header_unless_the_startup_is_quiet() {
+        let options = InteractiveOptions::default();
+        let config = interactive_app_config(&options);
+        assert!(config.startup_header, "interactive mode shows the header");
+        assert!(config.startup_header_expanded, "and expands it on entry");
+
+        let quiet = InteractiveOptions {
+            quiet_startup: true,
+            ..InteractiveOptions::default()
+        };
+        assert!(!interactive_app_config(&quiet).startup_header);
+    }
+
+    #[test]
+    fn the_locale_comes_from_the_environment_and_defaults_to_english() {
+        assert_eq!(locale_from_env(Some("en")), pi_tui::Locale::En);
+        assert_eq!(locale_from_env(Some("zh-CN")), pi_tui::Locale::Zh);
+        assert_eq!(locale_from_env(Some("fr")), pi_tui::Locale::En);
+        assert_eq!(locale_from_env(None), pi_tui::Locale::En);
     }
 
     // -----------------------------------------------------------------------
