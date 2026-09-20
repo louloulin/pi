@@ -57,7 +57,7 @@ fn main() -> ExitCode {
         return run_export_cli(input, output);
     }
 
-    let models = build_default_models();
+    let mut models = build_default_models();
     let model_override = cli
         .model
         .as_deref()
@@ -75,13 +75,12 @@ fn main() -> ExitCode {
     // `settings.retry.provider` wraps every adapter in the provider-request
     // retry loop (429/5xx/transport failures, `Retry-After` aware). The
     // default policy retries nothing, matching upstream.
-    let router =
+    let mut router =
         ProviderRouter::from_env().with_provider_retry(load_provider_retry_policy_default());
     if let Err(err) = router.require(&resolved_model) {
         eprintln!("pi: {err}");
         return ExitCode::from(err.exit_code());
     }
-    let stream_fn: SharedStreamFn = Arc::new(router);
 
     let session_dir = cli.session_dir.clone().unwrap_or_else(default_session_dir);
     let session_id = cli.resume.clone().unwrap_or_else(new_session_id);
@@ -143,6 +142,18 @@ fn main() -> ExitCode {
             let ui_bridge = extension_ui.as_ref().map(|ui| ui.bridge().clone());
             let has_ui = ui_bridge.is_some();
             let loaded_extensions = load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge);
+            // Fold `pi.registerProvider` registrations into the router +
+            // catalog before any turn streams. Extension providers are
+            // additive: a bad key or unknown family warns and is skipped.
+            let applied = wiring::apply_registered_providers(
+                &mut router,
+                &mut models,
+                loaded_extensions.runtime.providers(),
+            );
+            if !applied.is_empty() {
+                tracing::debug!(providers = ?applied, "registered extension providers");
+            }
+            let stream_fn: SharedStreamFn = Arc::new(router.clone());
             let extension_resources = loaded_extensions.runtime.resource_paths().clone();
             let system_prompt = build_system_prompt_for(
                 &cli,
@@ -234,6 +245,15 @@ fn main() -> ExitCode {
                 }
             };
             let loaded_extensions = load_extensions(&runtime, &cli, "print", false, None);
+            let applied = wiring::apply_registered_providers(
+                &mut router,
+                &mut models,
+                loaded_extensions.runtime.providers(),
+            );
+            if !applied.is_empty() {
+                tracing::debug!(providers = ?applied, "registered extension providers");
+            }
+            let stream_fn: SharedStreamFn = Arc::new(router.clone());
             let extension_resources = loaded_extensions.runtime.resource_paths().clone();
             let system_prompt = build_system_prompt_for(
                 &cli,
@@ -279,6 +299,15 @@ fn main() -> ExitCode {
                 }
             };
             let loaded_extensions = load_extensions(&runtime, &cli, "rpc", false, None);
+            let applied = wiring::apply_registered_providers(
+                &mut router,
+                &mut models,
+                loaded_extensions.runtime.providers(),
+            );
+            if !applied.is_empty() {
+                tracing::debug!(providers = ?applied, "registered extension providers");
+            }
+            let stream_fn: SharedStreamFn = Arc::new(router.clone());
             let extension_resources = loaded_extensions.runtime.resource_paths().clone();
             let system_prompt = build_system_prompt_for(
                 &cli,

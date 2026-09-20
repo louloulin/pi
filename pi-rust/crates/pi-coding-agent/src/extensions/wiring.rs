@@ -16,16 +16,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pi_agent_core::tools::ToolExecutor;
+use pi_ai::models::Models;
+use pi_ai::providers::registry::BUILTIN_PROVIDERS;
 use pi_extensions::{
     CommandExecutionOutcome, DiscoveredResources, ExtensionBridge, ExtensionError,
-    ExtensionSideEffects, HostOptions, JsExtensionHost, RegisteredCommand, RegisteredToolPrompt,
-    ToolContext, UiHandler,
+    ExtensionSideEffects, HostOptions, JsExtensionHost, RegisteredCommand,
+    RegisteredProviderConfig, RegisteredToolPrompt, ToolContext, UiHandler,
 };
-use pi_protocol::{ExtensionEvent, ResourcesDiscoverReason, UiLevel};
+use pi_protocol::{Api, ExtensionEvent, ProviderId, ResourcesDiscoverReason, UiLevel};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
 use crate::extensions::pi_ai_runner::BuiltinPiAiStreamRunner;
 use crate::extensions::ui_bridge::TuiUiBridge;
+use crate::provider::{api_wire_name, resolve_extension_api_key, ProviderRouter};
 use crate::tool_executor::{BuiltinToolBridge, BuiltinToolExecutor, ExtensionToolExecutor};
 
 /// Timeout used for interactive extension calls.
@@ -154,6 +157,12 @@ pub struct ExtensionRuntime {
     commands: Vec<RegisteredCommand>,
     tool_prompts: Vec<RegisteredToolPrompt>,
     resources: DiscoveredResources,
+    /// Snapshot of `pi.registerProvider` registrations taken right after the
+    /// load pass. The application layer resolves these into `ProviderRouter`
+    /// adapters and model-catalog entries (see
+    /// [`apply_registered_providers`]); a later `pi.unregisterProvider` from
+    /// an event handler updates the host registry, not this snapshot.
+    providers: Vec<RegisteredProviderConfig>,
     mode: String,
     has_ui: bool,
     cwd: String,
@@ -165,6 +174,7 @@ impl std::fmt::Debug for ExtensionRuntime {
             .field("host", &self.host.is_some())
             .field("commands", &self.commands.len())
             .field("tool_prompts", &self.tool_prompts.len())
+            .field("providers", &self.providers.len())
             .field("resources", &self.resources)
             .field("mode", &self.mode)
             .field("has_ui", &self.has_ui)
@@ -194,6 +204,12 @@ impl ExtensionRuntime {
     /// from a `resources_discover` handler at startup.
     pub fn resource_paths(&self) -> &DiscoveredResources {
         &self.resources
+    }
+
+    /// Providers registered via `pi.registerProvider`, in registration order.
+    /// Empty when no extension registered one or extensions are disabled.
+    pub fn providers(&self) -> &[RegisteredProviderConfig] {
+        &self.providers
     }
 
     /// True when `name` (without the leading `/`) is an extension
@@ -356,6 +372,7 @@ pub fn load(
                 .map(|(p, e)| (p.clone(), e.to_string()))
                 .collect();
             let registered = host.registered_tools();
+            let providers = host.registered_providers();
             let executor =
                 ExtensionToolExecutor::new(builtin.clone(), host.clone(), registered.clone());
             let shadowed: Vec<String> = registered
@@ -375,6 +392,7 @@ pub fn load(
                     host: Some(host),
                     commands,
                     tool_prompts,
+                    providers,
                     resources,
                     mode,
                     has_ui,
@@ -410,6 +428,162 @@ pub fn explicit_paths(extension: &[PathBuf], extensions_dir: &[PathBuf]) -> Vec<
     paths.extend(extension.iter().cloned());
     paths.extend(extensions_dir.iter().cloned());
     paths
+}
+
+/// Apply the providers extensions registered via `pi.registerProvider` to
+/// [`ProviderRouter`] and the process model catalog.
+///
+/// This is the application-layer half of the bridge: the JS host stores the
+/// raw config (string `apiKey` included), and this function turns each entry
+/// into a streaming adapter plus `pi_ai::Models` entries so `require(&model)`
+/// can resolve a model that only an extension knows about.
+///
+/// `apiKey` is resolved with [`resolve_extension_api_key`]: a literal is used
+/// verbatim, `$VAR` / `${VAR}` reads the process environment, and the
+/// `!command` form is never executed. A config whose key does not resolve (or
+/// whose `api` this build cannot stream) is **skipped with a warning**, the
+/// same "unconfigured provider is absent, not broken" policy the built-in
+/// router uses.
+///
+/// Returns the provider ids that were applied, in registration order.
+pub fn apply_registered_providers(
+    router: &mut ProviderRouter,
+    models: &mut Models,
+    providers: &[RegisteredProviderConfig],
+) -> Vec<String> {
+    apply_registered_providers_with_env(router, models, providers, &|name| std::env::var(name).ok())
+}
+
+/// [`apply_registered_providers`] with an injectable environment, so tests
+/// exercise the `$VAR` branches without mutating process state.
+pub fn apply_registered_providers_with_env(
+    router: &mut ProviderRouter,
+    models: &mut Models,
+    providers: &[RegisteredProviderConfig],
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut applied = Vec::new();
+    for config in providers {
+        let Some(api) = resolve_registered_provider_api(config) else {
+            tracing::warn!(
+                provider = %config.name,
+                "extension-registered provider has no `api` and does not override a built-in provider; skipping"
+            );
+            continue;
+        };
+        let api_key = match resolve_extension_api_key(config.api_key.as_deref(), get_env) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(
+                    provider = %config.name,
+                    %error,
+                    "extension-registered provider apiKey could not be resolved; skipping"
+                );
+                continue;
+            }
+        };
+        match router.register_provider(&config.name, api, config.base_url.clone(), api_key) {
+            Ok(()) => {
+                register_extension_models(models, config, api);
+                applied.push(config.name.clone());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    provider = %config.name,
+                    %error,
+                    "extension-registered provider could not be registered; skipping"
+                );
+            }
+        }
+    }
+    applied
+}
+
+/// Pick the [`Api`] for a registration: the declared `api` when present,
+/// otherwise the built-in provider's family (a `baseUrl`-only override, which
+/// the host accepts). `None` when neither is available.
+fn resolve_registered_provider_api(config: &RegisteredProviderConfig) -> Option<Api> {
+    if let Some(raw) = config.api.as_deref() {
+        return match raw {
+            "anthropic-messages" => Some(Api::AnthropicMessages),
+            "openai-responses" => Some(Api::OpenAiResponses),
+            "openai-completions" | "openai-chat-completions" => Some(Api::OpenAiChatCompletions),
+            "google-generative-ai" => Some(Api::GoogleGenerativeAi),
+            _ => None,
+        };
+    }
+    BUILTIN_PROVIDERS
+        .iter()
+        .find(|spec| spec.id == config.name)
+        .map(|spec| spec.api)
+}
+
+/// Feed the extension's `models` array into the catalog under `config.name`.
+///
+/// Upstream's `ProviderModelConfig` uses camelCase (`name`, `contextWindow`,
+/// `maxTokens`); `pi_ai::Models::register_provider_json` reads the Rust-port
+/// snake_case shape. Normalising here (rather than teaching the loader both
+/// spellings) keeps the catalog parser unchanged and still lets
+/// `get_model(provider, id)` hit the extension's entries.
+fn register_extension_models(models: &mut Models, config: &RegisteredProviderConfig, api: Api) {
+    let serde_json::Value::Array(entries) = &config.models else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let normalized: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| normalize_extension_model(entry, api))
+        .collect();
+    let envelope = serde_json::json!({ "provider": config.name, "models": normalized });
+    if let Err(error) =
+        models.register_provider_json(&ProviderId::new(config.name.clone()), &envelope.to_string())
+    {
+        tracing::warn!(
+            provider = %config.name,
+            %error,
+            "extension-registered provider models could not be parsed; catalog entry skipped"
+        );
+    }
+}
+
+/// Map one upstream `ProviderModelConfig` entry onto the Rust catalog shape.
+fn normalize_extension_model(entry: &serde_json::Value, api: Api) -> serde_json::Value {
+    let Some(object) = entry.as_object() else {
+        return entry.clone();
+    };
+    let mut model = serde_json::Map::new();
+    if let Some(id) = object.get("id").and_then(|value| value.as_str()) {
+        model.insert("id".into(), id.into());
+    }
+    if let Some(label) = object
+        .get("name")
+        .or_else(|| object.get("label"))
+        .and_then(|value| value.as_str())
+    {
+        model.insert("label".into(), label.into());
+    }
+    if let Some(window) = object
+        .get("contextWindow")
+        .or_else(|| object.get("context_window"))
+        .and_then(|value| value.as_u64())
+    {
+        model.insert("context_window".into(), window.into());
+    }
+    if let Some(max) = object
+        .get("maxTokens")
+        .or_else(|| object.get("max_output_tokens"))
+        .and_then(|value| value.as_u64())
+    {
+        model.insert("max_output_tokens".into(), max.into());
+    }
+    let model_api = object
+        .get("api")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| api_wire_name(api));
+    model.insert("api".into(), model_api.into());
+    serde_json::Value::Object(model)
 }
 
 #[cfg(test)]
@@ -716,5 +890,43 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn loads_an_explicit_provider_extension_onto_the_runtime() {
+        let dir = std::env::temp_dir().join(format!("pi-wiring-provider-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("provider.js");
+        std::fs::write(
+            &file,
+            r#"
+                module.exports = function (pi) {
+                    pi.registerProvider("my-proxy", {
+                        baseUrl: "https://proxy.example.com/v1",
+                        apiKey: "$PROXY_KEY",
+                        api: "openai-completions",
+                        models: [{ id: "proxy-model", name: "Proxy" }],
+                    });
+                };
+            "#,
+        )
+        .expect("write extension");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut options = ExtensionLoadOptions::for_mode(None, dir.clone(), "print", false);
+        options.explicit = vec![file];
+        let outcome = load(&runtime, &options);
+
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+        let providers = outcome.runtime.providers();
+        assert_eq!(providers.len(), 1, "{providers:?}");
+        assert_eq!(providers[0].name, "my-proxy");
+        assert_eq!(providers[0].api.as_deref(), Some("openai-completions"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

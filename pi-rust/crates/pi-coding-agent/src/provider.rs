@@ -101,8 +101,8 @@ pub fn base_url_env_vars(provider: &str) -> &'static [&'static str] {
 /// adapter for; every family currently in
 /// [`BUILTIN_PROVIDERS`](pi_ai::providers::registry::BUILTIN_PROVIDERS)
 /// is implemented, so this is a forward-compatibility guard.
-fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Option<SharedStreamFn> {
-    let adapter: SharedStreamFn = match spec.api {
+fn build_adapter(api: Api, api_key: String, base_url: String) -> Option<SharedStreamFn> {
+    let adapter: SharedStreamFn = match api {
         Api::Faux => Arc::new(FauxProvider::default()),
         Api::OpenAiChatCompletions => Arc::new(OpenAiProvider::with_base_url(api_key, base_url)),
         Api::OpenAiResponses => Arc::new(OpenAiResponsesProvider::with_base_url(api_key, base_url)),
@@ -113,6 +113,84 @@ fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Opti
         Api::BedrockConverse | Api::CohereV2 => return None,
     };
     Some(adapter)
+}
+
+/// Default base URL for an API family, taken from the first registry
+/// entry that speaks it. Used when an extension registers a provider
+/// without a `baseUrl`: the adapter still needs a host, and "the same
+/// host the first built-in provider of this family uses" is the least
+/// surprising default. `None` for families with no built-in provider
+/// (and for the keyless faux provider).
+fn default_base_url_for_api(api: Api) -> Option<&'static str> {
+    BUILTIN_PROVIDERS
+        .iter()
+        .find(|spec| spec.api == api && !spec.default_base_url.is_empty())
+        .map(|spec| spec.default_base_url)
+}
+
+/// Wire name for an [`Api`], matching the extension-facing ids in
+/// `pi_extensions::SUPPORTED_PROVIDER_APIS` where one exists. Used to
+/// stamp a per-model `api` hint into the catalog and to phrase errors.
+pub fn api_wire_name(api: Api) -> &'static str {
+    match api {
+        Api::AnthropicMessages => "anthropic-messages",
+        Api::OpenAiResponses => "openai-responses",
+        Api::OpenAiChatCompletions => "openai-completions",
+        Api::GoogleGenerativeAi => "google-generative-ai",
+        Api::AzureOpenAiResponses => "azure-openai-responses",
+        Api::BedrockConverse => "bedrock-converse",
+        Api::CohereV2 => "cohere-v2",
+        Api::MistralConversations => "mistral-conversations",
+        Api::Faux => "faux",
+    }
+}
+
+/// Resolve the `apiKey` string an extension handed to `pi.registerProvider`.
+///
+/// Three forms are recognized, mirroring upstream's `ProviderConfig.apiKey`:
+/// a literal is used verbatim, `$VAR` / `${VAR}` is read from `get_env`, and
+/// the leading-`!command` form is **rejected** — this build never executes a
+/// shell command to produce a credential. `Ok(None)` means "no key" (the
+/// field was absent or blank); `Err` carries a human-readable reason the
+/// caller logs before skipping the provider.
+///
+/// `get_env` is injectable so tests stay hermetic (the same reason
+/// [`ProviderRouter::from_env_with`] takes one).
+pub fn resolve_extension_api_key(
+    raw: Option<&str>,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.starts_with('!') {
+        return Err(
+            "apiKey `!command` form is not supported: the extension host never executes a \
+             command to obtain a credential; use a literal or $VAR instead"
+                .into(),
+        );
+    }
+    let var = if let Some(inner) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        Some(inner)
+    } else {
+        raw.strip_prefix('$')
+    };
+    let Some(var) = var else {
+        return Ok(Some(raw.to_string()));
+    };
+    if var.is_empty() {
+        return Err("apiKey references an empty environment variable name".into());
+    }
+    match get_env(var).map(|value| value.trim().to_string()) {
+        Some(value) if !value.is_empty() => Ok(Some(value)),
+        _ => Err(format!(
+            "apiKey references unset environment variable `{var}`"
+        )),
+    }
 }
 
 /// Wrap `adapter` in [`RetryStreamFn`] when `policy` retries at all,
@@ -143,6 +221,13 @@ pub enum ProviderError {
         provider: String,
         /// Model id, echoed to make the failing selection obvious.
         model: String,
+    },
+    /// An extension registered a provider for an API family this build
+    /// cannot stream (native `streamSimple` APIs, Bedrock, …).
+    #[error("no streaming adapter for api `{api}`")]
+    UnsupportedApi {
+        /// API family name the registration named.
+        api: String,
     },
 }
 
@@ -355,7 +440,7 @@ impl ProviderRouter {
                 // Keyless providers (faux) are always registered.
                 String::new()
             };
-            if let Some(adapter) = build_adapter(spec, api_key, base_url) {
+            if let Some(adapter) = build_adapter(spec.api, api_key, base_url) {
                 adapters.insert(spec.id.to_string(), adapt_retry(adapter, retry_policy));
             }
         }
@@ -380,6 +465,46 @@ impl ProviderRouter {
             *adapter = adapt_retry(adapter.clone(), policy);
         }
         self
+    }
+
+    /// Register (or replace) the adapter for one extension-declared provider.
+    ///
+    /// This is the application-layer half of `pi.registerProvider`:
+    /// [`crate::extensions::wiring`] resolves the extension's `apiKey` and
+    /// passes the config here. `base_url` defaults to the API family's
+    /// built-in host when absent or blank (see [`default_base_url_for_api`]),
+    /// so a `registerProvider("my-proxy", { api, apiKey, models })` with no
+    /// explicit URL still reaches a real endpoint.
+    ///
+    /// Re-registering a name replaces the adapter in place; an existing
+    /// built-in entry (`anthropic`, `openai`, …) is overridden exactly as
+    /// upstream's `registerProvider` overrides builtin providers.
+    pub fn register_provider(
+        &mut self,
+        provider_id: &str,
+        api: Api,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) -> Result<(), ProviderError> {
+        let base_url = base_url
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .or_else(|| default_base_url_for_api(api).map(str::to_string))
+            .unwrap_or_default();
+        let adapter =
+            build_adapter(api, api_key.unwrap_or_default(), base_url).ok_or_else(|| {
+                ProviderError::UnsupportedApi {
+                    api: api_wire_name(api).to_string(),
+                }
+            })?;
+        self.adapters.insert(provider_id.to_string(), adapter);
+        Ok(())
+    }
+
+    /// Remove the adapter registered for `provider_id` (the router half of
+    /// `pi.unregisterProvider`). Returns `true` when an entry was removed.
+    pub fn unregister_provider(&mut self, provider_id: &str) -> bool {
+        self.adapters.remove(provider_id).is_some()
     }
 
     /// Replace the adapter registered for `provider_id`.
