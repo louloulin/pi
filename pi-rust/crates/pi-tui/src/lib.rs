@@ -81,15 +81,18 @@ pub use status::{StatusBar, StatusData};
 pub use styled::{SpanStyle, StyledLine, StyledSpan};
 pub use styles::SelectListStyles;
 pub use terminal_image::{
-    allocate_image_id, apply_env_overrides, capability_inputs_from_env, crop_kitty_image_line,
-    decoded_base64_len, delete_all_kitty_images, delete_all_kitty_placements, delete_kitty_image,
-    detect_capabilities_from_env, detect_capabilities_with, encode_iterm2, encode_kitty,
-    get_capabilities, get_cell_dimensions, get_kitty_image_metadata, get_kitty_image_placement,
-    is_image_line, register_kitty_image_metadata, reset_capabilities_cache, set_capabilities,
-    set_capability_overrides, set_cell_dimensions, CapabilityInputs, CapabilityOverrides,
-    CellDimensions, ImageCellSize, ImageDimensions, ImageProtocol, ImageRenderOptions,
-    Iterm2EncodeOptions, KittyEncodeOptions, KittyImageMetadata, KittyImagePlacement, Override,
-    TerminalCapabilities, ITERM2_PREFIX, KITTY_CHUNK_SIZE, KITTY_PREFIX,
+    allocate_image_id, apply_env_overrides, calculate_image_cell_size, calculate_image_rows,
+    capability_inputs_from_env, crop_kitty_image_line, decoded_base64_len, delete_all_kitty_images,
+    delete_all_kitty_placements, delete_kitty_image, detect_capabilities_from_env,
+    detect_capabilities_with, encode_iterm2, encode_kitty, get_capabilities, get_cell_dimensions,
+    get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions, get_kitty_image_metadata,
+    get_kitty_image_placement, get_png_dimensions, get_webp_dimensions, image_fallback,
+    is_image_line, register_kitty_image_metadata, render_image, reset_capabilities_cache,
+    set_capabilities, set_capability_overrides, set_cell_dimensions, shorten_image_path,
+    CapabilityInputs, CapabilityOverrides, CellDimensions, ImageCellSize, ImageDimensions,
+    ImageProtocol, ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions, KittyImageMetadata,
+    KittyImagePlacement, Override, RenderImageResult, TerminalCapabilities, ITERM2_PREFIX,
+    KITTY_CHUNK_SIZE, KITTY_PREFIX,
 };
 pub use theme::{
     available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,
