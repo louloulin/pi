@@ -270,6 +270,10 @@ use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
 };
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
+use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
+use crate::locale::{
+    format_chord, Locale, HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
+};
 use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
 use crate::prompt::{Prompt, PromptAction};
@@ -430,6 +434,27 @@ pub struct AppConfig {
     /// setting onto it, and tests pin it to make a fold assertion exact. It
     /// only seeds the view — [`App::messages_mut`] exposes the live value.
     pub tool_preview_lines: usize,
+    /// Show the built-in startup header (the key-hint screen) above the
+    /// message view.
+    ///
+    /// Upstream gates its header on `options.verbose ||
+    /// !settingsManager.getQuietStartup()` (`interactive-mode.ts:910`); this
+    /// is the same switch at the App level, so a host that wants a quiet
+    /// startup (or a test that wants a fixed transcript) starts here.
+    /// `false` in [`AppConfig::default`] keeps the headless/default surface
+    /// byte-identical to the pre-header port; the interactive driver turns it
+    /// on unless the user asked for `--no-header` / `quietStartup`.
+    pub startup_header: bool,
+    /// Whether the startup header starts expanded (the full hint list) or
+    /// folded away.
+    ///
+    /// Upstream seeds this from `getStartupExpansionState()` (`--verbose ||
+    /// toolOutputExpanded`); the Rust port defaults to expanded so a first
+    /// run teaches the chords it just shipped. Folded means *no rows* — the
+    /// message view takes the space back (see [`App::toggle_header`]).
+    pub startup_header_expanded: bool,
+    /// Copy table the built-in startup header reads (see [`crate::locale`]).
+    pub locale: Locale,
 }
 
 impl Default for AppConfig {
@@ -442,6 +467,9 @@ impl Default for AppConfig {
             copy_on_select: true,
             hyperlinks: None,
             tool_preview_lines: crate::message::TOOL_PREVIEW_LINES,
+            startup_header: false,
+            startup_header_expanded: true,
+            locale: Locale::default(),
         }
     }
 }
@@ -715,6 +743,55 @@ enum SearchKeyOutcome {
     PassThrough,
 }
 
+/// A submitted composer draft: the user-visible text plus the image chips
+/// attached to it, in buffer order.
+///
+/// The App produces one from the prompt on Enter (or a follow-up chord) and
+/// the driver feeds it to the agent. [`Submission::content_blocks`] is the
+/// bridge between the composer's chip model and the protocol's
+/// `UserMessage` shape: the text block comes first, then one
+/// [`pi_protocol::Content::Image`] per attachment
+/// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts`, where
+/// the pasted path becomes an image part).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Submission {
+    /// The draft's visible text (chip labels expanded).
+    pub text: String,
+    /// Pasted images attached to the draft, in buffer order.
+    pub images: Vec<pi_protocol::ImageContent>,
+}
+
+impl Submission {
+    /// A text-only submission.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// The `UserMessage` content blocks for this draft: the text first,
+    /// then one image block per attachment. A draft with no chips yields
+    /// the single text block that `Agent::prompt` would have built.
+    pub fn content_blocks(&self) -> Vec<pi_protocol::Content> {
+        let mut blocks = vec![pi_protocol::Content::text(self.text.clone())];
+        blocks.extend(self.images.iter().cloned().map(pi_protocol::Content::Image));
+        blocks
+    }
+}
+
+impl From<String> for Submission {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for Submission {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
 /// Outcome returned by [`App::step`] after each key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -723,8 +800,8 @@ pub enum StepOutcome {
     /// Step mutated the rendered state.
     Redraw,
     /// User submitted a prompt. The caller is responsible for handing
-    /// the text to the agent.
-    Submitted(String),
+    /// it to the agent (see [`Submission`]).
+    Submitted(Submission),
     /// User pressed Ctrl+C / Ctrl+D — the caller should shut the App
     /// down and (optionally) fall back to print mode.
     Exit,
@@ -736,12 +813,16 @@ pub enum FollowUpOutcome {
     /// The editor was empty — nothing to submit or queue.
     Empty,
     /// The App was idle, so the chord behaves exactly like Enter. The
-    /// caller runs its normal submit path on the returned text (slash
+    /// caller runs its normal submit path on the returned draft (slash
     /// commands included); the App has already cleared the buffer.
-    Submitted(String),
+    Submitted(Submission),
     /// A turn was in flight, so the text was queued behind it
     /// (upstream's `streamingBehavior: "followUp"`). The buffer is clear.
     Queued,
+    /// A turn was in flight and the draft carried images. The pending queue
+    /// is text-only, so instead of dropping the attachments the App left
+    /// the draft in the editor and the driver should say why.
+    RefusedImages,
 }
 
 /// Geometry of the chat-log scrollbar, in absolute terminal cells.
@@ -922,6 +1003,12 @@ pub struct App {
     /// Text waiting to be copied by the driver. Filled by copy-on-select;
     /// consumed with [`App::take_clipboard_request`].
     pending_clipboard: Option<String>,
+    /// True when `app.clipboard.pasteImage` (`Alt+V`) fired and the driver
+    /// still has to answer it. The App owns no terminal / clipboard handle,
+    /// so it records the request and the driver reads the system clipboard
+    /// and calls [`App::paste_image`] or [`App::paste_text`] — the same
+    /// seam as [`App::pending_clipboard`].
+    pending_image_paste: bool,
     /// True while the pointer is over the chat-log scrollbar's column and
     /// rows (upstream's `scrollbarHover`,
     /// `packages/tui/src/tui-alt-screen.ts:221`); drives the bar's active
@@ -962,6 +1049,21 @@ pub struct App {
     /// release: a click that starts and ends on the same tool block toggles
     /// that block's expansion instead of starting a text selection.
     tool_press: Option<(u16, u16, usize)>,
+    /// Cursor into [`crate::loader::SPINNER_FRAMES`] for the footer's busy
+    /// indicator. Advanced by [`App::tick_busy_feedback`] from the render
+    /// loop's existing beat — there is no timer of its own.
+    spinner: Spinner,
+    /// When the in-flight turn was submitted; the busy indicator's elapsed
+    /// time is measured from here. `None` while idle.
+    turn_started: Option<Instant>,
+    /// When the spinner last advanced. Gates [`Spinner::advance`] to one step
+    /// per [`SPINNER_INTERVAL_MS`], so a driver that polls faster than the
+    /// upstream 80 ms frame rate still animates at that rate.
+    spinner_advanced_at: Instant,
+    /// Whether the built-in startup header is currently expanded. Distinct
+    /// from [`AppConfig::startup_header`] (visible at all) and from an
+    /// extension's `ctx.ui.setHeader`, which replaces the built-in lines.
+    header_expanded: bool,
 }
 
 impl App {
@@ -982,6 +1084,7 @@ impl App {
         let event_rx = agent.subscribe();
         let markdown = config.markdown;
         let tool_preview_lines = config.tool_preview_lines;
+        let header_expanded = config.startup_header_expanded;
         let hyperlinks = config
             .hyperlinks
             .unwrap_or_else(crate::hyperlink::supports_hyperlinks);
@@ -1019,6 +1122,7 @@ impl App {
             selection_autoscroll_direction: 0,
             selection_autoscroll_pointer: None,
             pending_clipboard: None,
+            pending_image_paste: false,
             scrollbar_hover: false,
             scrollbar_drag: None,
             tool_call_ids: HashMap::new(),
@@ -1027,6 +1131,10 @@ impl App {
             status_flash: None,
             tool_block_renderer: None,
             tool_press: None,
+            spinner: Spinner::new(),
+            turn_started: None,
+            spinner_advanced_at: Instant::now(),
+            header_expanded,
         }
     }
 
@@ -1094,6 +1202,176 @@ impl App {
     /// upstream's `showStatus` does.
     pub fn toggle_tools_expanded(&mut self) -> bool {
         self.messages.toggle_tools_expanded()
+    }
+
+    /// Whether the built-in startup header is configured to render at all
+    /// (see [`AppConfig::startup_header`]).
+    pub fn header_visible(&self) -> bool {
+        self.config.startup_header
+    }
+
+    /// Show or hide the built-in startup header for this session.
+    ///
+    /// Hiding it takes no rows, so the message view takes the space back on
+    /// the next render.
+    pub fn set_header_visible(&mut self, visible: bool) {
+        self.config.startup_header = visible;
+    }
+
+    /// Whether the startup header is currently expanded.
+    pub fn header_expanded(&self) -> bool {
+        self.header_expanded
+    }
+
+    /// Expand or fold the startup header. Folding renders *no* rows (not a
+    /// collapsed one-liner), matching this port's requirement that a folded
+    /// header "not occupy a line" — the message view gets the rows back.
+    pub fn set_header_expanded(&mut self, expanded: bool) {
+        self.header_expanded = expanded;
+    }
+
+    /// Flip the startup header's expansion, returning the new state.
+    ///
+    /// Backs the `app.header` chord. Upstream has no such binding — it drives
+    /// the header's `setExpanded` from `setToolsExpanded` together with the
+    /// tool blocks — so this port separates the two: `Ctrl+O` keeps folding
+    /// tool output, and `app.header` folds the hint screen.
+    pub fn toggle_header(&mut self) -> bool {
+        let expanded = !self.header_expanded;
+        self.header_expanded = expanded;
+        expanded
+    }
+
+    /// The locale copy table the startup header reads.
+    pub fn locale(&self) -> Locale {
+        self.config.locale
+    }
+
+    /// Switch the startup header's copy table (`/lang`-style switches, or a
+    /// host that resolved `--lang` at startup). Takes effect on the next
+    /// render.
+    pub fn set_locale(&mut self, locale: Locale) {
+        self.config.locale = locale;
+    }
+
+    /// The frame cursor behind the busy indicator (read-only; tests assert
+    /// the animation, [`App::tick_busy_feedback`] drives it).
+    pub fn spinner(&self) -> &Spinner {
+        &self.spinner
+    }
+
+    /// How long the in-flight turn has been running, or `None` when idle.
+    pub fn busy_elapsed(&self) -> Option<Duration> {
+        self.turn_started.map(|started| started.elapsed())
+    }
+
+    /// Advance the busy feedback for this tick and return whether the footer
+    /// changed.
+    ///
+    /// Called from [`App::render_to_buffer`], i.e. from the render loop's
+    /// existing 50 ms beat — no second timer, matching the port's "one clock"
+    /// rule. `now` is a parameter so a test can drive the animation
+    /// deterministically (the driver passes `Instant::now()`).
+    ///
+    /// While a turn is in flight the spinner advances at most once per
+    /// [`SPINNER_INTERVAL_MS`] and the status bar carries
+    /// `"<frame> <elapsed>"`; once `turn_busy` clears, the segment is removed
+    /// and the cursor resets, so a finished turn never leaves a stray glyph
+    /// or a stale time on screen.
+    pub fn tick_busy_feedback(&mut self, now: Instant) -> bool {
+        if self.is_busy() {
+            let started = *self.turn_started.get_or_insert(now);
+            if now.saturating_duration_since(self.spinner_advanced_at)
+                >= Duration::from_millis(SPINNER_INTERVAL_MS)
+            {
+                self.spinner.advance();
+                self.spinner_advanced_at = now;
+            }
+            let elapsed = now.saturating_duration_since(started);
+            let frame = self.spinner.frame();
+            // At the resolution the footer actually prints: a new frame, or a
+            // new whole second on the clock. Sub-second jitter is not a change.
+            let changed = match self.status_data.busy {
+                Some(previous) => {
+                    previous.frame != frame
+                        || format_elapsed(previous.elapsed) != format_elapsed(elapsed)
+                }
+                None => true,
+            };
+            self.status_data.set_busy(frame, elapsed);
+            return changed;
+        }
+        if self.status_data.busy.is_some() {
+            self.status_data.clear_busy();
+            self.spinner.reset();
+            self.turn_started = None;
+            return true;
+        }
+        false
+    }
+
+    /// The extension frame with the built-in startup header merged in when no
+    /// extension header is set.
+    ///
+    /// Upstream renders `customHeader ?? builtInHeader`
+    /// (`interactive-mode.ts:958`), so a `ctx.ui.setHeader` from an extension
+    /// still wins. Composing here (rather than only at paint time) matters:
+    /// [`plan_chrome`] has to budget the header's rows before the message
+    /// viewport is sized, otherwise the built-in lines would be painted into a
+    /// zero-height region.
+    fn composed_frame(&self, width: u16) -> ExtensionFrame {
+        let mut frame = self.extension.frame(width);
+        if frame.header.is_empty() {
+            frame.header = self.builtin_header_lines();
+        }
+        frame
+    }
+
+    /// The built-in startup header: title, key hints, onboarding line.
+    ///
+    /// Empty when the header is disabled or folded, so "folded" costs zero
+    /// rows. The hint rows come from [`STARTUP_HINTS`] resolved against the
+    /// live keybinding table, so an override in `keybindings.json` shows up
+    /// here exactly as it does in `/hotkeys`.
+    fn builtin_header_lines(&self) -> Vec<StyledLine> {
+        if !self.config.startup_header || !self.header_expanded {
+            return Vec::new();
+        }
+        let kb = get_keybindings();
+        let locale = self.config.locale;
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 3);
+        // Logo, upstream `interactive-mode.ts:913`.
+        lines.push(vec![
+            StyledSpan::new(
+                format!("{HEADER_TITLE} "),
+                SpanStyle::fg(ThemeColor::Accent).bold(),
+            ),
+            StyledSpan::new(
+                format!("v{}", crate::VERSION),
+                SpanStyle::fg(ThemeColor::Dim),
+            ),
+        ]);
+        for hint in STARTUP_HINTS {
+            let Some(keys) = hint.key.label(|id| kb.get_keys(id)) else {
+                // Unbound in this table: an unbound action is not a hint.
+                continue;
+            };
+            lines.push(vec![
+                StyledSpan::new(format!("  {keys} "), SpanStyle::fg(ThemeColor::Accent)),
+                StyledSpan::new(
+                    hint.description(locale).to_string(),
+                    SpanStyle::fg(ThemeColor::Muted),
+                ),
+            ]);
+        }
+        lines.push(Vec::new());
+        lines.push(vec![StyledSpan::new(
+            locale
+                .tr(HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH)
+                .to_string(),
+            SpanStyle::fg(ThemeColor::Dim),
+        )]);
+        lines
     }
 
     /// Whether markdown links render as OSC 8 hyperlinks.
@@ -1414,16 +1692,32 @@ impl App {
     }
 
     /// Begin an agent turn asynchronously. The App spawns a tokio
-    /// task that calls `Agent::prompt`; events flow through the
+    /// task that calls `Agent::prompt_content`; events flow through the
     /// subscriber channel established in [`App::new`] and are drained
     /// by [`App::drain_agent_events`].
-    pub fn submit(&mut self, agent: Arc<AsyncMutex<Agent>>, text: String) {
+    ///
+    /// Accepts anything convertible to a [`Submission`], so the text-only
+    /// call sites keep passing a `String` while the composer hands over a
+    /// draft that carries pasted images.
+    pub fn submit<M: Into<Submission>>(&mut self, agent: Arc<AsyncMutex<Agent>>, message: M) {
+        let submission = message.into();
+        let text = submission.text.clone();
         if self.turn_busy.load(Ordering::SeqCst) {
             // A turn is in flight: never drop the input. Upstream submits
             // this with `streamingBehavior: "steer"` so it joins the turn;
             // the port has no window into the locked `Agent`, so it queues
             // the text and the driver delivers it at the next turn
             // boundary. See `App::pending_len` / `App::take_next_pending`.
+            //
+            // The queue is text-only, so a draft that carries images cannot
+            // ride it without losing the attachments. This is a defensive
+            // backstop: drafts the App owns are refused *before* they are
+            // cleared (see `step_key`'s `PromptAction::Submit` arm and
+            // `follow_up_from_editor`), so nothing typed is lost here.
+            if !submission.images.is_empty() {
+                self.flash_status("Cannot attach images while a turn is running");
+                return;
+            }
             self.messages
                 .push_pending(PendingMessageKind::Steer, text.clone());
             self.prompt.push_history(&text);
@@ -1440,14 +1734,23 @@ impl App {
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
         self.turn_busy.store(true, Ordering::SeqCst);
+        // Start the busy feedback in the same breath as the turn: the footer
+        // shows the spinner + `0s` on the very next frame, so a slow model is
+        // distinguishable from a frozen UI before the first token arrives.
+        self.spinner.reset();
+        let started = Instant::now();
+        self.turn_started = Some(started);
+        self.spinner_advanced_at = started;
+        self.status_data
+            .set_busy(self.spinner.frame(), Duration::ZERO);
 
         let busy = self.turn_busy.clone();
         let cancel_for_task = cancel.clone();
         let agent_clone = agent.clone();
-        let text_clone = text.clone();
+        let content = submission.content_blocks();
         tokio::spawn(async move {
             let mut guard = agent_clone.lock().await;
-            let result = guard.prompt(&text_clone).await;
+            let result = guard.prompt_content(content).await;
             drop(guard);
             if let Err(err) = result {
                 let _ = cancel_for_task; // keep the cancellation alive until drop
@@ -1464,21 +1767,31 @@ impl App {
     ///
     /// While a turn is in flight the text is queued and delivered after it
     /// ends; when the App is idle the chord behaves exactly like Enter, so
-    /// the caller runs its normal submit path on the returned text. Either
-    /// way the editor buffer ends up empty — the text is never dropped.
+    /// the caller runs its normal submit path on the returned draft. Either
+    /// way the editor buffer ends up empty — the text is never dropped. A
+    /// draft with image chips cannot be queued (the queue is text-only), so
+    /// the App reports [`FollowUpOutcome::RefusedImages`] and *keeps* the
+    /// draft in the editor.
     pub fn follow_up_from_editor(&mut self) -> FollowUpOutcome {
         if self.prompt.text().trim().is_empty() {
             return FollowUpOutcome::Empty;
         }
-        let text = self.prompt.text().to_string();
+        let busy = self.turn_busy.load(Ordering::SeqCst);
+        if busy && !self.prompt.images().is_empty() {
+            return FollowUpOutcome::RefusedImages;
+        }
+        let submission = Submission {
+            text: self.prompt.text(),
+            images: self.prompt.images().to_vec(),
+        };
         self.prompt.clear();
-        if self.turn_busy.load(Ordering::SeqCst) {
+        if busy {
             self.messages
-                .push_pending(PendingMessageKind::FollowUp, text.clone());
-            self.prompt.push_history(&text);
+                .push_pending(PendingMessageKind::FollowUp, submission.text.clone());
+            self.prompt.push_history(&submission.text);
             FollowUpOutcome::Queued
         } else {
-            FollowUpOutcome::Submitted(text)
+            FollowUpOutcome::Submitted(submission)
         }
     }
 
@@ -1821,9 +2134,10 @@ impl App {
         self.prompt.editor_mut().set_text(text);
     }
 
-    /// The current text of the core input editor (upstream
-    /// `ctx.ui.getEditorText`).
-    pub fn editor_text(&self) -> &str {
+    /// The current visible text of the core input editor (upstream
+    /// `ctx.ui.getEditorText`). Pasted chips render as their `[Image #N]`
+    /// labels.
+    pub fn editor_text(&self) -> String {
         self.prompt.text()
     }
 
@@ -2070,6 +2384,39 @@ impl App {
             ));
             return StepOutcome::Redraw;
         }
+        // `app.clipboard.pasteImage` (`Alt+V`): attach a clipboard image to
+        // the draft. The App cannot read the system clipboard, so it records
+        // the request and the driver answers it with [`App::paste_image`]
+        // (or the text fallback, [`App::paste_text`]) — the same seam as
+        // copy-on-select. A key press always redraws so the "reading…" frame
+        // and the restored status hint stay honest.
+        if Self::matches_app_key(&kb, &event, "app.clipboard.pasteImage", &["alt+v"]) {
+            self.pending_image_paste = true;
+            return StepOutcome::Redraw;
+        }
+        // `app.header` (`Alt+H`): fold / unfold the built-in startup header.
+        // A Rust-port addition — upstream ties the header's expansion to
+        // `app.tools.expand` — so it is resolved with the same
+        // registry-first / builtin-fallback rule as every other `app.*` chord
+        // and reported through `showStatus` (`flash_status`).
+        if Self::matches_app_key(&kb, &event, "app.header", &["alt+h"]) {
+            let expanded = self.toggle_header();
+            let chord = kb
+                .get_keys("app.header")
+                .first()
+                .map(|chord| format_chord(chord))
+                .unwrap_or_else(|| format_chord("alt+h"));
+            self.flash_status(format!(
+                "Startup header: {}{}",
+                if expanded { "expanded" } else { "collapsed" },
+                if expanded {
+                    String::new()
+                } else {
+                    format!(" ({chord} to show)")
+                }
+            ));
+            return StepOutcome::Redraw;
+        }
         // Fullscreen chat-log scrolling. Upstream deliberately shadows
         // the bare editor bindings for these chords in fullscreen mode
         // (`packages/tui/src/keybindings.ts:159-165,208-209`: "These
@@ -2121,9 +2468,20 @@ impl App {
             PromptAction::Changed => StepOutcome::Redraw,
             PromptAction::Submit(text) => {
                 // Caller is responsible for invoking `submit` with an
-                // `Arc<AsyncMutex<Agent>>` — we just announce the
-                // submitted text and clear the buffer.
-                let submitted = text.clone();
+                // `Arc<AsyncMutex<Agent>>` — we just announce the submitted
+                // draft (text plus any pasted image chips) and clear the
+                // buffer. The images are captured before `clear()` wipes
+                // them.
+                let images = self.prompt.images().to_vec();
+                if self.turn_busy.load(Ordering::SeqCst) && !images.is_empty() {
+                    // Refuse *before* clearing: the Stage 61 pending queue is
+                    // text-only, so accepting would silently drop the chips.
+                    // Nothing is consumed — the draft (text and chips) stays
+                    // in the editor for the next attempt.
+                    self.flash_status("Cannot attach images while a turn is running");
+                    return StepOutcome::Redraw;
+                }
+                let submitted = Submission { text, images };
                 self.prompt.clear();
                 StepOutcome::Submitted(submitted)
             }
@@ -3496,6 +3854,55 @@ impl App {
         self.pending_clipboard = Some(text.into());
     }
 
+    /// Take the pending `app.clipboard.pasteImage` request, if any.
+    ///
+    /// `true` means the user pressed the chord and the driver should read the
+    /// system clipboard and call [`App::paste_image`] (image found) or
+    /// [`App::paste_text`] (text fallback). The App never reads the
+    /// clipboard itself, so headless tests drive the two paths directly.
+    pub fn take_image_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_image_paste)
+    }
+
+    /// Attach a clipboard image to the draft as a chip at the cursor
+    /// (upstream `handleClipboardPaste`'s image branch,
+    /// `interactive-mode.ts:2933`, which inserts the saved file path).
+    ///
+    /// Returns `false` when [`MAX_IMAGE_ATTACHMENTS`](crate::editor::MAX_IMAGE_ATTACHMENTS)
+    /// chips are already attached; the caller surfaces the refusal. The
+    /// draft text is left untouched either way.
+    pub fn paste_image(&mut self, image: pi_protocol::ImageContent) -> bool {
+        match self.prompt.editor_mut().insert_image(image) {
+            crate::editor::ImageInsertOutcome::Inserted => true,
+            crate::editor::ImageInsertOutcome::AtCapacity => {
+                self.flash_status(format!(
+                    "At most {} images can be attached to a prompt",
+                    crate::editor::MAX_IMAGE_ATTACHMENTS
+                ));
+                false
+            }
+        }
+    }
+
+    /// Insert clipboard *text* at the cursor — the fallback
+    /// `app.clipboard.pasteImage` takes when the clipboard holds no image
+    /// (upstream `handleClipboardPaste`'s else branch).
+    pub fn paste_text(&mut self, text: &str) {
+        self.prompt.editor_mut().insert_str(text);
+    }
+
+    /// Clear the composer: buffer text, pasted chips and the history
+    /// browsing / undo state, but keep the prompt history. `/new` and
+    /// `app.session.new` call this so a new session never inherits a draft.
+    pub fn clear_composer(&mut self) {
+        self.prompt.clear();
+    }
+
+    /// Number of image chips currently attached to the draft.
+    pub fn image_count(&self) -> usize {
+        self.prompt.image_count()
+    }
+
     /// Paint the active selection into the already-rendered message area by
     /// adding the reversed-video modifier to the selected cells.
     fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {
@@ -3636,10 +4043,13 @@ impl App {
     /// not tick.
     pub fn render_to_buffer(&mut self, area: Rect, buf: &mut Buffer) {
         let _ = self.advance_selection_autoscroll();
+        // Same beat, second animation: the busy spinner reuses this 50 ms
+        // tick instead of owning a timer (see [`App::tick_busy_feedback`]).
+        let _ = self.tick_busy_feedback(Instant::now());
         // Render the extension regions and budget the chrome before anything
         // else: the message viewport this frame paints is what the scroll,
         // selection and search paths must index.
-        let frame = self.extension.frame(area.width);
+        let frame = self.composed_frame(area.width);
         let layout = plan_chrome(area.height, &frame);
         // Record the geometry first so the refresh below indexes the exact
         // viewport this frame is about to paint.
@@ -3777,13 +4187,33 @@ impl App {
 
         // Selector overlay — when open, draw on top of everything
         // except the prompt and status.
+        //
+        // Anchored to the **message viewport**, one row below its top, and
+        // clipped to it: the startup header above and the prompt / status rows
+        // below are not the selector's to overwrite. Anchoring to `area`
+        // instead painted the picker over the header — with the 20-row startup
+        // header the `/model` list covered the key hints while the transcript
+        // underneath was left untouched, and the clip compared an absolute row
+        // against a height (LUM-1235 PTY capture).
         if let Some(selector) = &self.selector {
             let lines = selector.render_styled_lines(area.width);
-            let start_row = area.y + 1;
+            let start_row = message_area.y + 1;
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
-                if y >= area.y + message_height {
+                if y >= message_area.y + message_area.height {
                     break;
+                }
+                // Blank the row first: a picker line is shorter than the
+                // transcript line it covers, and ratatui only emits the cells
+                // this buffer changed — an unblanked row left the old text
+                // bleeding through the picker (`Pick a model` + `errupt` from
+                // the header hint underneath). `reset` also drops the covered
+                // cell's colours so a picked-over selection highlight cannot
+                // tint the modal.
+                for col in 0..area.width {
+                    if let Some(cell) = buf.cell_mut((area.x + col, y)) {
+                        cell.reset();
+                    }
                 }
                 write_styled_line(buf, area.x, y, area.width, line, &self.theme);
             }
@@ -3909,7 +4339,7 @@ impl App {
         // a `!` submission (`updateEditorBorderColor`,
         // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
         // the label carries the colour instead.
-        let bash_style = crate::editor::is_bash_mode(self.prompt.text())
+        let bash_style = crate::editor::is_bash_mode(&self.prompt.text())
             .then(|| SpanStyle::fg(ThemeColor::BashMode).to_style(&self.theme));
         let label_width = self.prompt.label().chars().count() as u16;
         for (col, ch) in line.chars().enumerate() {
@@ -4000,7 +4430,7 @@ impl App {
         // `/transcript` (and the snapshot tests) want plain text, never
         // OSC 8 escapes, so links fall back to the inline `(url)` form
         // regardless of the live capability.
-        let frame = self.extension.frame(width);
+        let frame = self.composed_frame(width);
         let layout = plan_chrome(height, &frame);
         self.render_to_buffer_impl(area, &mut buf, false, false, &frame, &layout);
         let lines = buf

@@ -47,6 +47,7 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod clipboard;
 pub mod commands;
 pub mod compaction;
 pub mod config;

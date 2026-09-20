@@ -612,9 +612,10 @@ fn dropdown_rows_are_opaque_over_the_transcript() {
     // the right of the candidate. Six full-width rows guarantee the
     // dropdown lands on top of text.
     for _ in 0..6 {
-        app.messages_mut().push(pi_tui::message::MessageItem::assistant(
-            "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-        ));
+        app.messages_mut()
+            .push(pi_tui::message::MessageItem::assistant(
+                "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            ));
     }
 
     type_into(&mut app, "/h");

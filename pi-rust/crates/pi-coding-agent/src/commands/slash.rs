@@ -197,7 +197,11 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     ),
     ("resume", "Resume a different session", None),
     ("tree", "Navigate session tree (switch branches)", None),
-    ("fork", "Create a new fork from a previous user message", None),
+    (
+        "fork",
+        "Create a new fork from a previous user message",
+        None,
+    ),
     (
         "clone",
         "Duplicate the current session at the current position",
@@ -318,11 +322,19 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
             "app.tools.expand",
             "expand or collapse tool output (Ctrl+O by default)",
         ),
+        (
+            "app.header",
+            "expand or collapse the startup header (Alt+H by default)",
+        ),
         ("app.model.select", "open the model selector"),
         ("app.session.new", "start a new session"),
         ("app.session.tree", "open the session tree"),
         ("app.session.fork", "fork a session from a message"),
         ("app.session.resume", "resume a session"),
+        (
+            "app.clipboard.pasteImage",
+            "attach a clipboard image (falls back to pasting text)",
+        ),
     ];
     const SELECTORS: &[(&str, &str)] = &[
         ("tui.select.up", "move the selection up"),
@@ -550,6 +562,25 @@ mod tests {
     }
 
     #[test]
+    fn hotkeys_text_lists_the_startup_header_chord() {
+        // Stage 66 (LUM-1228) gave `app.header` a consumer and a default
+        // chord, so the app group has to list it.
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        let text = hotkeys_text_with(&manager);
+        assert!(text.contains("Alt+H"), "{text}");
+        assert!(
+            text.contains("expand or collapse the startup header"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn help_text_documents_scroll_keys() {
         // The fullscreen App owns the scrollback (alternate screen), so the
         // legend has to name the scroll bindings
@@ -627,8 +658,8 @@ mod tests {
     #[test]
     fn autocomplete_commands_match_the_parser_exactly() {
         const IMPLEMENTED: &[&str] = &[
-            "help", "clear", "new", "copy", "name", "model", "session", "export", "resume",
-            "tree", "fork", "clone", "settings", "trust", "compact", "hotkeys", "exit",
+            "help", "clear", "new", "copy", "name", "model", "session", "export", "resume", "tree",
+            "fork", "clone", "settings", "trust", "compact", "hotkeys", "exit",
         ];
         let names: Vec<String> = autocomplete_commands()
             .into_iter()

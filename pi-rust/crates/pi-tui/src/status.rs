@@ -3,15 +3,30 @@
 //!
 //! Mirrors `packages/coding-agent/src/modes/interactive/components/footer.ts`.
 
-use std::fmt::Write as _;
+use std::time::Duration;
 
 use pi_protocol::Usage;
 
+use crate::loader::format_elapsed;
 use crate::styled::{
     plain_text, themed_text, write_styled_line, SpanStyle, StyledLine, StyledSpan,
 };
 use crate::styles::SelectListStyles;
 use crate::theme::{Theme, ThemeColor};
+
+/// The spinner frame plus the wall-clock time the current turn has been
+/// running, drawn at the head of the status bar while a turn is in flight.
+///
+/// The App owns the clock (one `Instant` per turn) and the frame cursor
+/// ([`crate::loader::Spinner`]); this struct is the immutable snapshot the
+/// render path consumes, so the status bar itself stays stateless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusyIndicator {
+    /// The spinner glyph to draw (see [`crate::loader::SPINNER_FRAMES`]).
+    pub frame: char,
+    /// Time since the turn was submitted.
+    pub elapsed: Duration,
+}
 
 /// Snapshot of the data the status bar renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +54,10 @@ pub struct StatusData {
     pub context_window: u32,
     /// Free-form trailing hint (e.g. `?` for help).
     pub hint: Option<String>,
+    /// Busy feedback — `Some` exactly while a turn is in flight, so a frozen
+    /// screen is distinguishable from a slow model at a glance. `None` hides
+    /// the segment entirely (no placeholder, no stray space).
+    pub busy: Option<BusyIndicator>,
 }
 
 impl StatusData {
@@ -55,7 +74,19 @@ impl StatusData {
             context_used: 0,
             context_window: 0,
             hint: None,
+            busy: None,
         }
+    }
+
+    /// Start (or refresh) the busy segment.
+    pub fn set_busy(&mut self, frame: char, elapsed: Duration) {
+        self.busy = Some(BusyIndicator { frame, elapsed });
+    }
+
+    /// Clear the busy segment — called when the turn ends so the footer is
+    /// idle again.
+    pub fn clear_busy(&mut self) {
+        self.busy = None;
     }
 
     /// Set the session display name (`/name`).
@@ -136,14 +167,33 @@ impl StatusBar {
     /// text), [`render_themed`] (ANSI strings) and the App's themed buffer
     /// path. Each segment is clipped against the remaining budget in visual
     /// order, so the concatenated text is exactly the leading `width`
-    /// characters of the full `<model><session><padding><stats>` line.
+    /// characters of the full `<busy><model><session><padding><stats>` line.
+    /// The busy segment is empty unless [`StatusData::busy`] is `Some`, so an
+    /// idle footer is byte-identical to the pre-spinner layout.
     ///
     /// [`render`]: StatusBar::render
     /// [`render_themed`]: StatusBar::render_themed
     pub fn render_styled_line(&self, data: &StatusData, width: u16) -> StyledLine {
         let width = width as usize;
-        let mut left = String::new();
-        let _ = write!(&mut left, "{}", data.model);
+        // Left cluster, built as spans (outermost first): the busy spinner +
+        // elapsed while a turn is in flight, then the model. The spinner is
+        // `accent` and the elapsed time `muted`, so the animated glyph stands
+        // out from the model name next to it.
+        let mut left: StyledLine = Vec::new();
+        if let Some(busy) = &data.busy {
+            left.push(StyledSpan::new(
+                format!("{} ", busy.frame),
+                SpanStyle::fg(ThemeColor::Accent),
+            ));
+            left.push(StyledSpan::new(
+                format!("{}  ", format_elapsed(busy.elapsed)),
+                SpanStyle::fg(ThemeColor::Muted),
+            ));
+        }
+        left.push(StyledSpan::new(
+            data.model.clone(),
+            SpanStyle::fg(ThemeColor::Accent),
+        ));
 
         // Right-hand side, built as spans (outermost first): cumulative
         // usage, cache totals, the context gauge, then the transient hint.
@@ -188,7 +238,7 @@ impl StatusBar {
         };
 
         // Layout: `<left><session><padding><right>` padded to width.
-        let left_len = left.chars().count();
+        let left_len = plain_text(&left).chars().count();
         let session_len = session.chars().count();
         let pad_count = if left_len + session_len + right_len < width {
             width - right_len - left_len - session_len
@@ -199,10 +249,7 @@ impl StatusBar {
 
         let mut spans: StyledLine = Vec::new();
         let mut remaining = width;
-        let model = clip(&left, &mut remaining);
-        if !model.is_empty() {
-            spans.push(StyledSpan::new(model, SpanStyle::fg(ThemeColor::Accent)));
-        }
+        spans.extend(clip_line(&left, &mut remaining));
         let session = clip(&session, &mut remaining);
         if !session.is_empty() {
             spans.push(StyledSpan::new(session, SpanStyle::fg(ThemeColor::Muted)));
@@ -335,6 +382,7 @@ fn clip<'t>(text: &'t str, remaining: &mut usize) -> &'t str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::SPINNER_FRAMES;
 
     #[test]
     fn renders_model_and_session() {
@@ -455,5 +503,67 @@ mod tests {
         data.input_tokens = 12_000;
         let line = bar.render(&data, 12);
         assert_eq!(line.chars().count(), 12);
+    }
+
+    #[test]
+    fn the_busy_segment_leads_the_bar_with_a_frame_and_elapsed_time() {
+        let bar = StatusBar::new();
+        let mut data = StatusData::new("gpt-4o", "abc-123").with_context_window(128_000);
+        data.input_tokens = 1_500;
+        data.output_tokens = 250;
+        data.set_busy('⠹', Duration::from_secs(12));
+        let line = bar.render(&data, 90);
+        // Spinner first, on the same row as the Stage 64 usage numbers.
+        assert!(line.starts_with("⠹ 12s  gpt-4o"), "{line}");
+        assert!(line.contains("in 1.5k out 250"), "{line}");
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
+
+    #[test]
+    fn the_busy_segment_is_absent_when_idle() {
+        let bar = StatusBar::new();
+        let idle = StatusData::new("gpt-4o", "abc-123");
+        let line = bar.render(&idle, 60);
+        assert!(line.starts_with("gpt-4o"), "{line}");
+        // No placeholder glyph and no extra leading space.
+        assert!(!SPINNER_FRAMES.iter().any(|frame| line.contains(*frame)));
+        assert_eq!(line, bar.render(&StatusData::new("gpt-4o", "abc-123"), 60));
+    }
+
+    #[test]
+    fn clearing_the_busy_segment_restores_the_idle_bar() {
+        let bar = StatusBar::new();
+        let mut data = StatusData::new("gpt-4o", "abc-123");
+        let idle = bar.render(&data, 60);
+        data.set_busy('⠋', Duration::from_secs(3));
+        assert_ne!(bar.render(&data, 60), idle);
+        data.clear_busy();
+        assert_eq!(bar.render(&data, 60), idle);
+        assert_eq!(data.busy, None);
+    }
+
+    #[test]
+    fn the_busy_segment_advances_through_the_frame_table() {
+        let bar = StatusBar::new();
+        let mut spinner = crate::loader::Spinner::new();
+        let mut data = StatusData::new("m", "s");
+        for _ in 0..SPINNER_FRAMES.len() {
+            data.set_busy(spinner.frame(), Duration::ZERO);
+            let line = bar.render(&data, 20);
+            assert!(line.starts_with(spinner.frame()), "{line}");
+            spinner.advance();
+        }
+        // A full cycle returns to the first frame.
+        assert_eq!(spinner.frame(), SPINNER_FRAMES[0]);
+    }
+
+    #[test]
+    fn a_narrow_bar_clips_the_busy_segment_like_any_other() {
+        let bar = StatusBar::new();
+        let mut data = StatusData::new("gpt-4o", "session-id");
+        data.set_busy('⠋', Duration::from_secs(125));
+        let line = bar.render(&data, 7);
+        assert_eq!(line.chars().count(), 7);
+        assert_eq!(line, "⠋ 2m05s");
     }
 }
