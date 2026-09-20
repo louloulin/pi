@@ -1520,3 +1520,97 @@ wired 判定路径，那比原来的缺陷更难维护。
 4. `Ctrl+C` 的「先清空、二次退出」双击语义（LUM-1238 在飞）与本轮无关，仍未闭合。
 5. 工具卡片 / 思考块 / 耗时统计的 `/resume` 回放仍缺（第六、七轮记录），
    `faux` 提供商不产生工具调用，本轮截图依旧无法覆盖该面。
+
+## 十八、第十二轮（LUM-1257）：jump-to-latest 指示器落地 —— §12.4 第二项闭合
+
+### 18.1 为什么挑这一项
+
+本轮槽位已满（三个 run 同时在写 `app.rs` / `interactive.rs` / `slash.rs`），磁盘一度被
+并发构建吃到 97%，因此只挑**单 crate（`pi-tui`）**、**与在飞分支零文件重叠**、且
+**用户一眼可感知**的缺口：§12.4 第二项「脱离底部没有任何提示」。滚上去读历史之后，
+屏幕上不告诉读者怎么回到最新消息 —— 这是 codex / 上游 pi 里最容易看出的交互差，
+而上游的参考实现是一段不到 20 行的合成逻辑。
+
+### 18.2 行为对齐点（逐项对照上游）
+
+| 维度 | 上游 | 本 port |
+| --- | --- | --- |
+| 触发条件 | `!scrollView.isFollowingEnd`（`tui-alt-screen.ts:1620`） | `!MessageView::is_following()`（`app.rs` `paint_scroll_to_end`） |
+| 合成行 | `clip.y + clip.height - 1`（`:1626`） | `message_area.y + message_area.height - 1` |
+| 水平位置 | `clip.x + (available - w) / 2`（`:1630`） | 同式 |
+| 宽度上限 | 到滚动条列为止（`:1628`） | `scrollbar_geometry().column` |
+| 文案 | `" ↓ Jump to latest message · <shortcut> "`（`tui-renderer.ts:29-33`） | `SCROLL_TO_END_LABEL` + `format_chord("tui.altScreen.bottom")` |
+| 配色 | `bg("selectedBg", fg("text", label))` | `SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg)` |
+| 点击 | `handleScrollToEndIndicatorMouseEvent`（`:1017-1024`） | `App::step_mouse_gesture` 里最先命中 → `set_following(true)` |
+| 记录矩形 | `scrollToEndIndicatorRect`（`:222,1618,1634`） | `App::scroll_to_end_rect()`（三个 `AtomicU16`，`width == 0` 即「没画」） |
+| 与导出面的关系 | 指示器属 alt-screen 合成层 | 只画在 `render_to_buffer`（活帧）；`render_snapshot`（`/transcript`）不画，与滚动条同规则 |
+
+已知偏差（两条，都写在代码注释里）：
+
+1. 未绑定时上游只丢 shortcut，本 port 连 ` · <shortcut>` 半句一起丢（与 `/hotkeys` 同一规则）。
+2. 上游在「图片行」上不合成指示器；本 port 的消息视口不承载图片行（图片走独立 span 层），
+   因此没有这条判断。
+
+改动落点：`crates/pi-tui/src/app.rs`（`SCROLL_TO_END_LABEL` 常量、
+`paint_scroll_to_end` / `scroll_to_end_label` / `scroll_to_end_rect`、
+`render_to_buffer_impl` 的合成调用、`step_mouse_gesture` 的命中分支）。
+
+### 18.3 测试（新增 8 条：`crates/pi-tui/tests/scroll_to_end.rs`）
+
+1. 脱离底部才出现、`End` 回到底部即消失；
+2. 文案带绑定 chord（`· End`，默认表 `tui.altScreen.bottom = ["end"]`）；
+3. 配色取 `selectedBg` + `text`，且邻格不被污染；
+4. 内容不足一屏（`max_scroll == 0`）不出现；
+5. 宽度不越过滚动条列，且滚动条字形仍在；
+6. 点击指示器回到底部，并清掉记录（不能对着已消失的矩形重复命中）；
+7. 指示器之外的点击**不**触发跳转（仍是普通选择路径）；
+8. `render_snapshot`（`/transcript`）不含指示器，且记录为空。
+
+结果：`8 passed; 0 failed`。
+
+### 18.4 真实 PTY 证据
+
+场景 `scripts/pty_scenarios/lum1257-jump-to-latest.json`（120×34，`--model faux/faux-model`），
+8 帧同一进程的累积画面；截图与字符网格 dump：
+`docs/screenshots/lum1257-jump-to-latest.png` / `.png.txt`。
+
+| 帧 | 内容 | grid dump 行 |
+| --- | --- | --- |
+| 1 | 启动帧：视口贴着尾部 → 无指示器 | 检查 |
+| 2–3 | `/help` + `/hotkeys` 把日志灌到超过一屏 | — |
+| 5–6 | `PgUp` 脱离底部 → 视口最后一行出现 `↓ Jump to latest message · End` | 143 / 179 |
+| 7 | 原始 SGR 左键点击（col 60, row 32）→ 回到底部，指示器消失，画面是 `/hotkeys` 尾部 | 无 `Jump to latest` |
+| 8 | 再 `PgUp` → 指示器回来（证明不是一次性状态） | 251 |
+
+### 18.5 本轮门禁（实跑结果）
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test -p pi-tui` | ✅ **769 passed / 0 failed**，43 个 target（含新增 8 条） |
+| `cargo clippy -p pi-tui --all-targets` | ✅ 本 crate 零告警（输出只剩 vendored `rquickjs-core` 的既有告警） |
+| `cargo fmt --all -- --check` | ✅ exit 0 |
+| `cargo build --bin pi` | ✅ exit 0（3m 28s，二进制 215,750,424 B，PTY 用的就是它） |
+| PTY 实机 | ✅ 8 帧真终端录制（§18.4） |
+
+**未跑**：`cargo test -p pi-coding-agent`。原因是磁盘：本轮开始时 90%、结束时 97%（并发轮同时在构建），
+链接该 crate 的测试二进制有把并发轮的构建写爆的真实风险。接触面很小且已被覆盖：
+`pi-coding-agent` 对本改动的唯一接触点是 `interactive.rs:458` 的活帧渲染（PTY 真机路径已跑），
+其断言类测试走 `render_snapshot`，而该路径本轮明确不画指示器（§18.3 第 8 条）。
+
+### 18.6 完成度变化（真实值）
+
+- 键位**声明/消费**面数字**不变**：本项复用已消费的 `tui.altScreen.bottom` 槽位，未新增绑定，
+  所以 `app.* 19/44 = 43%`、`tui.* 38/47 = 81%`、整体 **~75%** 的机械量法结果与 §17.6 相同。
+- 本轮把 §12.4 第二项（也是 §17.7 同类列表里唯一的纯渲染缺口）**移出缺口清单**，
+  并补上了它此前缺失的回归测试与真机证据。
+
+### 18.7 仍然缺口（按用户可感知程度，更新后）
+
+1. `app.clear` 的 500ms 双击窗口（§12.4 第一项，LUM-1238 在飞）——空 composer 一次 `Ctrl+C`
+   直接退出、草稿丢失的问题仍在。
+2. `/help` 正文与用户输入共用 `> ` 前缀（§12.4 第三项）。
+3. `app.suspend` / `app.editor.external` 仍未实现（§17.7.1）。
+4. `app.*` 里 23 条无消费者的 id（§17.7.2）。
+5. `powershell` 与 7 条 `/` 命令（§17.7.3）。
+6. 环境风险：`/` 分区长期在 90–97%，本轮清理了 `lum-1243` 目录下 5.6G 的陈旧 `target/`
+   （该 run 停在 `todo`、无进程占用）才腾出构建空间；并发轮再多会重新撞上这个上限。

@@ -294,7 +294,8 @@ use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::{
-    builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeColor, ThemeError,
+    builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
+    ThemeError,
 };
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
@@ -396,6 +397,12 @@ const TERMINAL_WORD_SELECTION_JOINERS: [&str; 2] = ["/", "-"];
 /// Lines a single autoscroll beat moves the viewport. Upstream scrolls one
 /// line per 50 ms `setInterval` tick (`tui-alt-screen.ts:1264-1297`).
 const SELECTION_AUTOSCROLL_LINES: usize = 1;
+
+/// Leading half of the "jump to latest" pill's label. Kept as one string so the
+/// shortcut half can be appended (` · <shortcut> `) or dropped when the
+/// action is unbound — upstream builds the same label inline
+/// (`packages/coding-agent/src/modes/interactive/tui-renderer.ts:29-33`).
+const SCROLL_TO_END_LABEL: &str = " ↓ Jump to latest message ";
 
 /// Configuration knobs for the App.
 #[derive(Debug, Clone)]
@@ -986,6 +993,13 @@ pub struct App {
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
     viewport_origin: (AtomicU16, AtomicU16),
+    /// Rectangle of the "jump to latest" pill as of the last render:
+    /// `(row, column, width)`. `width == 0` means it was not painted (the
+    /// viewport is following the tail), which is also how the pointer
+    /// hit-test knows there is nothing to hit. Upstream keeps the same
+    /// record in `scrollToEndIndicatorRect`
+    /// (`packages/tui/src/tui-alt-screen.ts:222,1618-1634`).
+    scroll_to_end: (AtomicU16, AtomicU16, AtomicU16),
     /// Active chat-log text selection, if any.
     selection: Option<Selection>,
     /// Region-local cell of a left press that landed inside a modal overlay,
@@ -1145,6 +1159,7 @@ impl App {
             viewport_width: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
+            scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             selection: None,
             search: None,
             modal_mouse_press: None,
@@ -3080,6 +3095,95 @@ impl App {
         )
     }
 
+    /// Rectangle of the "jump to latest" pill as of the last render, or
+    /// `None` when the viewport was following the tail and no pill was
+    /// painted.
+    pub fn scroll_to_end_rect(&self) -> Option<Rect> {
+        let width = self.scroll_to_end.2.load(Ordering::Relaxed);
+        (width > 0).then(|| Rect {
+            x: self.scroll_to_end.1.load(Ordering::Relaxed),
+            y: self.scroll_to_end.0.load(Ordering::Relaxed),
+            width,
+            height: 1,
+        })
+    }
+
+    /// The pill's label: ` ↓ Jump to latest message · <shortcut> `, exactly
+    /// upstream's string (down to the leading space) with the shortcut
+    /// resolved from `tui.altScreen.bottom`
+    /// (`packages/coding-agent/src/modes/interactive/tui-renderer.ts:29-33`).
+    ///
+    /// An unbound action drops the ` · <shortcut>` half rather than
+    /// rendering an empty shortcut, which is the same rule `/hotkeys`
+    /// follows.
+    fn scroll_to_end_label(&self) -> StyledSpan {
+        let shortcut = get_keybindings()
+            .get_keys("tui.altScreen.bottom")
+            .iter()
+            .map(|chord| format_chord(chord))
+            .collect::<Vec<_>>()
+            .join("/");
+        let text = if shortcut.is_empty() {
+            SCROLL_TO_END_LABEL.to_string()
+        } else {
+            format!("{SCROLL_TO_END_LABEL}· {shortcut} ")
+        };
+        StyledSpan {
+            text,
+            style: SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg),
+            link: None,
+        }
+    }
+
+    /// Composite the pill onto the bottom row of the message viewport when
+    /// the reader has scrolled away from the tail, and record where it
+    /// landed for the pointer.
+    ///
+    /// Upstream's `compositeScrollToEndIndicator`
+    /// (`packages/tui/src/tui-alt-screen.ts:1617-1637`): only when the scroll
+    /// view follows the end but is not at it, drawn on the viewport's last
+    /// row, horizontally centred, truncated at — and never wider than — the
+    /// space left of the scrollbar column.
+    fn paint_scroll_to_end(&self, message_area: Rect, buf: &mut Buffer) {
+        // Every path out of here clears the record, so a stale rectangle can
+        // never keep swallowing clicks after the pill is gone.
+        self.scroll_to_end.2.store(0, Ordering::Relaxed);
+        if message_area.width == 0 || message_area.height == 0 {
+            return;
+        }
+        // Nothing to jump to when the transcript already fits, and no pill
+        // while the viewport is pinned to the tail.
+        if self.messages.is_following() || self.max_scroll() == 0 {
+            return;
+        }
+        let available = match self.scrollbar_geometry() {
+            Some(geometry) if geometry.column > message_area.x => geometry.column - message_area.x,
+            _ => message_area.width,
+        };
+        let label = self.scroll_to_end_label();
+        let label_width = crate::hyperlink::visible_width(&label.text) as u16;
+        if label_width == 0 || available == 0 {
+            return;
+        }
+        let width = label_width.min(available);
+        let column = message_area.x + (available - width) / 2;
+        let row = message_area.y + message_area.height - 1;
+        // Blank the covered cells first: the pill is shorter than the
+        // transcript line underneath it, and ratatui only emits the cells
+        // this buffer changed, so an unblanked row left the old text bleeding
+        // through (`reset` also drops the covered cells' colours).
+        for offset in 0..width {
+            if let Some(cell) = buf.cell_mut((column + offset, row)) {
+                cell.reset();
+            }
+        }
+        let line = [label];
+        write_styled_line(buf, column, row, width, &line, &self.theme);
+        self.scroll_to_end.0.store(row, Ordering::Relaxed);
+        self.scroll_to_end.1.store(column, Ordering::Relaxed);
+        self.scroll_to_end.2.store(width, Ordering::Relaxed);
+    }
+
     /// Whether the pointer currently rests on the chat-log scrollbar.
     ///
     /// Upstream's `scrollbarHover`
@@ -3322,6 +3426,25 @@ impl App {
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
+        // The pill is the first thing on the transcript to get the pointer
+        // (upstream `handleScrollToEndIndicatorMouseEvent`, tested before the
+        // scrollbar and the selection, `packages/tui/src/tui-alt-screen.ts:1017-1024`):
+        // a left press on it jumps to the tail instead of starting a
+        // selection of the pill's own text.
+        if let Some(rect) = self.scroll_to_end_rect() {
+            let on_pill = gesture.y == rect.y
+                && gesture.x >= rect.x
+                && gesture.x < rect.x.saturating_add(rect.width);
+            if on_pill && matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)) {
+                self.stop_selection_autoscroll();
+                self.selection = None;
+                self.selection_dragging = false;
+                self.scrollbar_hover = false;
+                self.scrollbar_drag = None;
+                self.messages.set_following(true);
+                return StepOutcome::Redraw;
+            }
+        }
         // The scrollbar is hit-tested before the selection path, exactly
         // like upstream (`handleScrollbarMouseEvent` runs before
         // `handleSelectionMouseEvent`). While a drag owns the pointer the
@@ -4244,6 +4367,15 @@ impl App {
         // (upstream paints it from the scroll view, before the overlays).
         if scrollbar {
             self.apply_scrollbar(message_area, buf);
+        }
+        // The "jump to latest" pill is composited over the bottom of the
+        // transcript, after the scrollbar so its own width budget can stop
+        // left of the bar. `render_snapshot` passes `scrollbar == false`,
+        // which is also what keeps `/transcript` free of screen furniture.
+        if scrollbar {
+            self.paint_scroll_to_end(message_area, buf);
+        } else {
+            self.scroll_to_end.2.store(0, Ordering::Relaxed);
         }
 
         // The editor region: a custom component (a non-overlay `custom`

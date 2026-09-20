@@ -1,0 +1,50 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1257 pi-tui jump-to-latest pill",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs", "README.md"],
+  "panels": [
+    {
+      "label": "1. idle startup frame: viewport is pinned to the tail, so no pill is painted",
+      "send": "",
+      "wait": 2.5
+    },
+    {
+      "label": "2. /help fills the transcript well past one viewport",
+      "send": "/help<Enter>",
+      "wait": 1.5
+    },
+    {
+      "label": "3. /hotkeys adds the keybinding table, so the log has real scrollback",
+      "send": "/hotkeys<Enter>",
+      "wait": 1.5
+    },
+    {
+      "label": "4. Ctrl+U clears the composer",
+      "send": "<C-u>",
+      "wait": 0.5,
+      "skip_capture": true
+    },
+    {
+      "label": "5. PgUp detaches the viewport -> the pill appears on the viewport's last row",
+      "send": "<PgUp>",
+      "wait": 1.0
+    },
+    {
+      "label": "6. a second PgUp keeps the pill anchored to the bottom of the viewport",
+      "send": "<PgUp>",
+      "wait": 1.0
+    },
+    {
+      "label": "7. raw SGR left click on the pill (col 60, row 32) jumps back to the tail; the pill disappears",
+      "send": "\u001b[<0;60;32M\u001b[<0;60;32m",
+      "wait": 1.2
+    },
+    {
+      "label": "8. PgUp detaches again, so the pill comes back",
+      "send": "<PgUp>",
+      "wait": 1.0
+    }
+  ]
+}
