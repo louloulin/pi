@@ -737,7 +737,11 @@ variant 已穷尽），或直接删掉。回归测试建议二选一：(a) PTY �
 
 docs-only：新增本节 + 第五节表新增一行 P0 修复切片，并给出「按键即死」的可复现证据链。
 **零派发**：开工时 3 个 stage 在飞（Stage 63 = LUM-1224、Stage 65 = LUM-1227、Stage 66 =
-LUM-1228，均有活跃 workdir 与在跑的 `cargo test`），按「最多 3 个并发」不再新增。
+LUM-1228）；本轮进行中 Stage 65（LUM-1227）转 `in_review`，收工时在飞 2 个 run
+（`multica issue runs 01a0b4d6-… --siblings`：LUM-1224 与 LUM-1228 均为 `running`）。
+即便按「最多 3 个并发」还空着一格，本轮仍**主动不派发**：(a) 磁盘只剩 1.6G / 97% 已用，
+两个 worker 正在 `cargo test`，再起一个 shell 会同时争磁盘与 CPU；(b) 10.5 的 P0 补丁与
+尚未合并的 Stage 65 改的是同一个 `interactive.rs`，应当先合 65 再切 P0，否则必冲突。
 **未跑全量门**，也**未编译 10.5 的补丁**：当时磁盘只剩 2.0G / 96% 已用、两个 worker 正在
 `cargo test -j 4 --workspace` 与 `cargo test -p pi-coding-agent -p pi-tui`，第三方构建会同时
 争磁盘与 CPU（并且会让补丁与其他 worker 的 `interactive.rs` 改动混在一起）。tip 的门沿用
