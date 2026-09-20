@@ -47,6 +47,51 @@ pub enum Api {
     Faux,
 }
 
+impl Api {
+    /// Extension-facing wire id for this family.
+    ///
+    /// These strings are the ids upstream's TS `Api` union uses and that the
+    /// `@earendil-works/pi-ai/compat` registry hands across the QuickJS
+    /// boundary — **not** the `snake_case` spelling the `Serialize` impl
+    /// produces. [`Api::from_api_id`] is the inverse; the two are the single
+    /// source of truth for the mapping (host runners and the extension bridge
+    /// both go through them, so they cannot drift apart).
+    pub const fn api_id(self) -> &'static str {
+        match self {
+            Api::AnthropicMessages => "anthropic-messages",
+            Api::OpenAiResponses => "openai-responses",
+            Api::OpenAiChatCompletions => "openai-completions",
+            Api::GoogleGenerativeAi => "google-generative-ai",
+            Api::AzureOpenAiResponses => "azure-openai-responses",
+            Api::BedrockConverse => "bedrock-converse",
+            Api::CohereV2 => "cohere-v2",
+            Api::MistralConversations => "mistral-conversations",
+            Api::Faux => "faux",
+        }
+    }
+
+    /// Parse an extension-facing wire id back into an [`Api`].
+    ///
+    /// Inverse of [`Api::api_id`]. Returns `None` for an unknown id so the
+    /// caller can decide whether the family is merely unbridged or genuinely
+    /// unknown; callers that only accept a subset (the shim bridge) filter
+    /// with their own allow-list on top.
+    pub fn from_api_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "anthropic-messages" => Api::AnthropicMessages,
+            "openai-responses" => Api::OpenAiResponses,
+            "openai-completions" => Api::OpenAiChatCompletions,
+            "google-generative-ai" => Api::GoogleGenerativeAi,
+            "azure-openai-responses" => Api::AzureOpenAiResponses,
+            "bedrock-converse" => Api::BedrockConverse,
+            "cohere-v2" => Api::CohereV2,
+            "mistral-conversations" => Api::MistralConversations,
+            "faux" => Api::Faux,
+            _ => return None,
+        })
+    }
+}
+
 /// A registered model entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
@@ -83,4 +128,38 @@ pub struct Usage {
     /// Total tokens (input + output) when the provider reports it.
     #[serde(default)]
     pub total: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Api;
+    use std::collections::HashSet;
+
+    /// Every variant, so the round-trip check cannot silently skip one as the
+    /// enum grows.
+    const ALL: &[Api] = &[
+        Api::OpenAiChatCompletions,
+        Api::OpenAiResponses,
+        Api::AzureOpenAiResponses,
+        Api::AnthropicMessages,
+        Api::GoogleGenerativeAi,
+        Api::BedrockConverse,
+        Api::CohereV2,
+        Api::MistralConversations,
+        Api::Faux,
+    ];
+
+    /// [`Api::api_id`] and [`Api::from_api_id`] are the two directions of one
+    /// table. Round-tripping every variant and rejecting duplicate ids keeps
+    /// them from drifting apart as variants are added.
+    #[test]
+    fn api_ids_round_trip_and_stay_unique() {
+        let mut seen = HashSet::new();
+        for api in ALL {
+            let id = api.api_id();
+            assert!(seen.insert(id), "duplicate api id `{id}`");
+            assert_eq!(Api::from_api_id(id), Some(*api), "round trip for `{id}`");
+        }
+        assert_eq!(Api::from_api_id("not-a-real-api"), None);
+    }
 }

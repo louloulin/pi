@@ -101,7 +101,7 @@ pub fn base_url_env_vars(provider: &str) -> &'static [&'static str] {
 /// adapter for; every family currently in
 /// [`BUILTIN_PROVIDERS`](pi_ai::providers::registry::BUILTIN_PROVIDERS)
 /// is implemented, so this is a forward-compatibility guard.
-fn build_adapter(api: Api, api_key: String, base_url: String) -> Option<SharedStreamFn> {
+pub(crate) fn build_adapter(api: Api, api_key: String, base_url: String) -> Option<SharedStreamFn> {
     let adapter: SharedStreamFn = match api {
         Api::Faux => Arc::new(FauxProvider::default()),
         Api::OpenAiChatCompletions => Arc::new(OpenAiProvider::with_base_url(api_key, base_url)),
@@ -131,18 +131,12 @@ fn default_base_url_for_api(api: Api) -> Option<&'static str> {
 /// Wire name for an [`Api`], matching the extension-facing ids in
 /// `pi_extensions::SUPPORTED_PROVIDER_APIS` where one exists. Used to
 /// stamp a per-model `api` hint into the catalog and to phrase errors.
+///
+/// Thin wrapper over [`Api::api_id`] — the extension bridge
+/// (`pi_ai::ext_bridge::model_from_js`) parses the same table backwards with
+/// [`Api::from_api_id`], so there is exactly one match per direction.
 pub fn api_wire_name(api: Api) -> &'static str {
-    match api {
-        Api::AnthropicMessages => "anthropic-messages",
-        Api::OpenAiResponses => "openai-responses",
-        Api::OpenAiChatCompletions => "openai-completions",
-        Api::GoogleGenerativeAi => "google-generative-ai",
-        Api::AzureOpenAiResponses => "azure-openai-responses",
-        Api::BedrockConverse => "bedrock-converse",
-        Api::CohereV2 => "cohere-v2",
-        Api::MistralConversations => "mistral-conversations",
-        Api::Faux => "faux",
-    }
+    api.api_id()
 }
 
 /// Resolve the `apiKey` string an extension handed to `pi.registerProvider`.

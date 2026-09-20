@@ -1,10 +1,12 @@
 //! Built-in pi-ai provider runner for the extension host (LUM-1180).
 //!
 //! `pi-extensions` serves the shim's `@earendil-works/pi-ai/compat` provider
-//! factories (`anthropicMessagesApi` / `openAIResponsesApi`) through an
-//! injected [`PiAiStreamRunner`], because it cannot depend on `pi-ai` — the
-//! crate that owns the concrete providers. This module is that runner: it
-//! turns the upstream-shaped request the shim sends into a
+//! factories (`anthropicMessagesApi` / `openAIResponsesApi`, plus
+//! `openAICompletionsApi` / `googleGenerativeAIApi` /
+//! `azureOpenAIResponsesApi` since LUM-1211) through an injected
+//! [`PiAiStreamRunner`], because it cannot depend on `pi-ai` — the crate that
+//! owns the concrete providers. This module is that runner: it turns the
+//! upstream-shaped request the shim sends into a
 //! [`Model`]/[`Context`]/[`SimpleStreamOptions`] triple, picks the provider
 //! adapter and adapts the Rust event stream back into the
 //! upstream-shaped JS events.
@@ -25,15 +27,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pi_ai::ext_bridge::{api_key_from_js, base_url_from_js, context_from_js, model_from_js};
-use pi_ai::ext_bridge::{stream_options_from_js, JsAssistantEventStream, JsEventEncoder};
-use pi_ai::providers::anthropic::AnthropicProvider;
-use pi_ai::providers::openai_responses::OpenAiResponsesProvider;
+use pi_ai::ext_bridge::{
+    api_key_from_js, base_url_from_js, context_from_js, model_from_js, stream_options_from_js,
+    unbridged_api_error, JsAssistantEventStream, JsEventEncoder,
+};
 use pi_ai::providers::registry;
-use pi_ai::SharedStreamFn;
 use pi_extensions::{PiAiEventStream, PiAiStreamRequest, PiAiStreamRunner};
-use pi_protocol::Api;
 use tokio_util::sync::CancellationToken;
+
+use crate::provider::{api_wire_name, build_adapter};
 
 /// Env lookup used to resolve credentials and base-URL overrides.
 ///
@@ -41,7 +43,10 @@ use tokio_util::sync::CancellationToken;
 /// environment.
 type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// Runner behind the JS `anthropicMessagesApi` / `openAIResponsesApi`.
+/// Runner behind the five bridged JS provider factories:
+/// `anthropicMessagesApi` / `openAIResponsesApi` /
+/// `openAICompletionsApi` / `googleGenerativeAIApi` /
+/// `azureOpenAIResponsesApi`.
 pub struct BuiltinPiAiStreamRunner {
     get_env: EnvLookup,
 }
@@ -114,19 +119,15 @@ impl PiAiStreamRunner for BuiltinPiAiStreamRunner {
                 .or_else(|| registry::default_base_url(provider_id).map(str::to_string))
                 .unwrap_or_default();
 
-            let adapter: SharedStreamFn = match model.api {
-                Api::AnthropicMessages => {
-                    Arc::new(AnthropicProvider::with_base_url(api_key, base_url))
-                }
-                Api::OpenAiResponses => {
-                    Arc::new(OpenAiResponsesProvider::with_base_url(api_key, base_url))
-                }
-                other => {
-                    return Err(format!(
-                        "the built-in pi-ai provider bridge has no adapter for `{other:?}`"
-                    ))
-                }
-            };
+            // Pick the adapter through the same table `ProviderRouter`
+            // uses, so the bridge and the CLI cannot disagree on which
+            // provider an api family gets — the three families LUM-1211
+            // added (`openai-completions` / `google-generative-ai` /
+            // `azure-openai-responses`) come for free that way. `None` is
+            // the forward-compat guard for a family this build has no
+            // adapter for; the message shares `model_from_js`'s gap list.
+            let adapter = build_adapter(model.api, api_key, base_url)
+                .ok_or_else(|| unbridged_api_error(api_wire_name(model.api)))?;
 
             // The provider is what actually stops the HTTP request; the host
             // additionally drops this stream when the shim cancels, so a

@@ -270,7 +270,7 @@ have, and accessing the factory throws `ERR_PI_SDK_UNIMPLEMENTED` with a
 |---|---|
 | `bedrockConverseStreamApi` | No `bedrock-converse-stream` adapter: Bedrock authenticates with AWS SigV4 credentials and a region, which the Rust credential path does not carry. |
 | `googleVertexApi` | No `google-vertex` adapter: Vertex needs a GCP project plus location and ADC/access-token credentials; use `googleGenerativeAIApi` (Gemini API key) instead. |
-| `mistralConversationsApi` | The adapter **does** exist (`pi_ai::providers::MistralProvider`, api `mistral-conversations`), but the extension bridge does not route to it yet — wiring it is a follow-up slice. |
+| `mistralConversationsApi` | The adapter **does** exist (`pi_ai::providers::MistralProvider`, api `mistral-conversations`), but the extension bridge does not route to it yet — `model_from_js` rejects the id before the runner is reached, so wiring it is a follow-up slice. |
 | `openAICodexResponsesApi` | No `openai-codex-responses` adapter: the Codex Responses dialect is authenticated with a ChatGPT account token rather than an API key, and the Rust port has neither that auth path nor the dialect. |
 | `piMessagesApi` | No `pi-messages` adapter: first-party pi gateway protocol, and this build has no endpoint or credential for it. |
 
@@ -287,18 +287,20 @@ Divergences:
   exception: `registerBuiltInApiProviders()` runs at module init, so
   `stream` / `complete` reach them even when the extension imports nothing
   but those.
-* **The bundled runner dispatches two of the five bridged apis.** The shim
-  side of LUM-1204 is complete — all five factories drive
-  `host_pi_ai_stream_*` — but `pi-ai`'s `ext_bridge::model_from_js` still
-  parses only `anthropic-messages` / `openai-responses`, and
-  `BuiltinPiAiStreamRunner` matches the same two, so in a
-  `pi-coding-agent` host an `openai-completions` /
-  `google-generative-ai` / `azure-openai-responses` turn terminates with an
-  `error` event naming the unbridged api. The Rust adapters for all three
-  exist (`OpenAiProvider` / `GoogleProvider` /
-  `AzureOpenAiResponsesProvider`, all reachable from the `ProviderRouter`);
-  the runner needs the api whitelist widened plus three match arms. Tracked
-  for the coordination round, not silently claimed as working.
+* **The bundled runner dispatches all five bridged apis.** The shim side of
+  LUM-1204 and the host side of LUM-1211 together close the loop: all five
+  factories drive `host_pi_ai_stream_*`, and `pi-ai`'s
+  `ext_bridge::model_from_js` accepts all five ids
+  (`anthropic-messages` / `openai-responses` / `openai-completions` /
+  `google-generative-ai` / `azure-openai-responses`) while
+  `BuiltinPiAiStreamRunner` dispatches each through the same
+  `provider::build_adapter` table the CLI's `ProviderRouter` uses, so an
+  extension turn on any of the five streams for real (each family has a
+  loopback-SSE integration test). An api outside that set is rejected before
+  any HTTP request with one shared message that lists the bridged set and the
+  capability each remaining gap is missing (`google-vertex` /
+  `bedrock-converse-stream` / `openai-codex-responses` / `pi-messages` /
+  `mistral-conversations`).
 * **No env API-key injection.** Upstream's `withEnvApiKey` fills in
   `options.apiKey` from the provider environment; the shim has no
   `getEnvApiKey` bridge, so the caller must pass `apiKey` explicitly. The
