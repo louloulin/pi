@@ -13720,3 +13720,36 @@ pi-rust/docs/FEATURE_PI_RS_STATUS.md          # 唯一差异（+83），且只�
 
 * 本轮自建 `CARGO_TARGET_DIR=/tmp/pi-target-1191`：全量 workspace 构建后 **2.5G**（印证 LUM-1186 的 frugal 结论：`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0` 下 2–3G 足够）。
 * 结束时根分区 `30G / 50G`（64%），余 **18G**；`/tmp/pi-target` 5.4G（在飞 LUM-1190 的）、`/tmp/cargo-home` 546M、`/tmp/rustup-home` 718M。**未做清理**（无「owner 已 `in_review` 且无进程持有」的目录）。
+
+### 十二、LUM-1193 协调轮 — 合并 LUM-1188 切片 2（编码器 / kitty 元数据 / crop）+ 全量门 **132 / 2023**（私有 target dir 实跑）；发现「共享 CARGO_TARGET_DIR」会伪造失败
+
+**交付**
+
+| 项 | 值 |
+| --- | --- |
+| work 分支 | `work/LUM-1188` @ `7a30743d7`（2 提交：`e20e36337` 编码器 + kitty 元数据/crop、`7a30743d7` 离线用例 + fmt） |
+| 合并 | `--no-ff` → **`343ab6978`**，无冲突；3 文件 `+772/-5`（`terminal_image.rs` +443、新 `tests/terminal_image_encoder.rs` +320、`lib.rs` +14/-5） |
+| `feature/pi.rs` | `2619a767f` → **`343ab6978`**（已推 `origin` + `mirror`） |
+| 质量门（本轮**实跑**，`CARGO_TARGET_DIR=/tmp/pi-target-1193`） | `cargo fmt --all -- --check` OK / `cargo clippy --workspace --all-targets -- -D warnings` OK / `cargo test --workspace --offline` = **132 套件 / 2023 passed / 0 failed / 2 ignored**（基线 131 / 2013 / 0 / 2 → **+1 套件（`terminal_image_encoder` 10 用例）/ +10 passed**，零倒退） |
+| 单 crate | `cargo test -p pi-tui` OK |
+
+**可合并性扫描（双向 `origin` + `mirror`，两种大小写）**：只命中 `work/LUM-1188`（本轮合并）。残余非祖先分支 **无独有产物**：`origin|mirror/work/lum-1173`（11 提交，其中 10 条 rustfmt 基线的补丁已被 tip 以等价补丁吸收，`git cherry` 只余 `b6656384` 一条 pi-coding-agent 格式化，其内容已被后续 rustfmt 基线覆盖）、`mirror/work/lum-1177`（URL 全局 + 文档两条补丁 `git cherry` 全为 `-`，已在 tip 内）。
+
+**本轮核心发现：并发 run 共用 `CARGO_TARGET_DIR` 会伪造失败，质量门必须用私有 target dir**
+
+| 现象 | 证据 | 结论 |
+| --- | --- | --- |
+| 同一份 tip（`3922deb8b`）用 `/tmp/pi-target`（LUM-1190 的在飞 build dir）跑全量 → `suites=122 / passed=1998 / failed=0`，`exit=1` | `error[E0463]: can't find crate for \`pi_tui\`` ← `crates/pi-coding-agent/src/export/theme.rs:17`，`Doc-tests pi_coding_agent` 挂掉 | 在飞 run 重建/替换 `pi-tui` artifact，令**无关 crate 的 doctest** 编译失败 |
+| 同一份 tip 用私有 `/tmp/pi-target-1193`（冷启动 5 分钟、1.7G）→ `suites=131 / passed=2013 / failed=0 / ignored=2`，`exit=0` | — | 私有 dir 下与 LUM-1191 的 `131 / 2013` 逐字一致 |
+| 合并树（`343ab6978`）首次全量 → 1 失败：`pi-extensions/tests/pi_ai_provider.rs::a_live_stream_extends_the_host_call_deadline` | `Load("provider_probe: runtime error: Error: interrupted at __pi_tokenize …")` | 该用例是**时限型**用例，在「两个 run 同时编译/跑测试」的负载下被宿主 deadline 中断；`--no-fail-fast` 立即重跑同一 target dir → **132 / 2023 / 0 / 2**，零失败 |
+
+**处置（并入开工例程）**：验证类命令一律 `CARGO_TARGET_DIR=/tmp/<task>-target`（私有），**不要**复用别的 run 的 target dir；`--offline`；frugal 配置（`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0`）下 1.7–2.5G 足够。全量跑失败时先看**失败是否落在本轮 diff 的 crate**，不在就换私有 dir 复跑，避免把并发 artifact 竞态误报成回归。
+
+**派发（本轮 3/3 满槽，零派发）**：在飞 = LUM-1190（`ctx.ui.*` 端到端接线）+ LUM-1195（06:40 整点协调轮）+ 本 run。**LUM-1194（切片 3：几何 + 四种像素尺寸解析 + `renderImage` + `imageFallback`，上游 435-696）已满足晋升条件**（切片 2 已合入），但无空槽，留给下一轮：`multica issue status LUM-1194 todo`。LUM-1192（`Image` 组件）继续等切片 3 的 `renderImage` 接口。
+
+**frontier（本轮后）**
+
+1. 质量门基线 = **132 套件 / 2023 passed / 0 failed / 2 ignored（`343ab6978`）**；下一欠账点 = LUM-1190 合入时。
+2. pi-tui 终端图片：切片 1（能力层）+ 切片 2（编码器/元数据/crop）已合入；**切片 3 = LUM-1194 待晋升**；组件片 = LUM-1192 更后。
+3. `pi-ai` 请求级 telemetry span：仍是最容易派发的独立切片（文件面 `pi-ai/**`，与在飞各线零重叠）。
+4. run 可靠性：`deepseek-v4.1-flash` 单次输出上限 16384 仍是硬约束；**协调轮亲自实现最小切片**已被 LUM-1191（切片 1）与本轮（合并+门）证明可行。
