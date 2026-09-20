@@ -801,3 +801,116 @@ $ … cargo test -p pi-coding-agent --offline # 431 lib + 24 套集成
 的 `/clone`（逐条相等 + 源不变 + stats）、`/fork`（选择器内容、含选中条、源保留 6 条 + stats）、
 空转录 `/fork`（提示且不建 `.sqlite`）、`/tree`（覆盖层只读、展平顺序、选中后 `session_leaf`、
 转录重载、后续 append 的 `parent_entry_id`）、三个键位各自打开对应选择器且 `/resume` 键位复用它。
+
+## 十二、第八轮协调（LUM-1234）：Stage 65 合并进 `feature/pi.rs` + P0「首键之后不再出帧」修复（真实 PTY A/B）
+
+本轮是协调轮：把已转 `in_review` 的 Stage 65 合进 `feature/pi.rs`，把 LUM-1233 只写了补丁、
+因磁盘不足没编译的 P0 真正改掉并用真实二进制做 A/B，然后把输入面复核推进到「命令 / 文件补全」这一层
+（顺带得到一个新 P1）。
+
+### 12.1 合并 Stage 65（LUM-1227）
+
+- `work/LUM-1227`（`9b544ed11`，Stage 65 会话树 `/tree` `/fork` `/clone` + `app.session.*`）合进
+  `feature/pi.rs`，merge commit `60b2224a1`；随后 LUM-1233 的文档提交 `0d1b8884c` 也并入（`bef18e530`）。
+- 唯一冲突在 `docs/TUI_UX_AUDIT.md`（并发两个 round 各自新增一节），按「两节并序」保留全文，并把
+  Stage 65 那一节编号为十一：九 = 第七轮（LUM-1229）、十 = 第八轮（LUM-1233）、十一 = Stage 65 交付（LUM-1227）。
+- **未跑全量门**：磁盘 1.1–1.2G / 98%，且 LUM-1224 / LUM-1228 两个 worker 正在 `cargo test`；合并树的门
+  沿用 LUM-1225 在 tip 上的实跑（147 / 2202 / 0 / 2）。合并本身以 `git diff` 复核（14 文件 / +2184 / -78）+
+  `cargo fmt --all -- --check` 干净。
+- 顺序遵循 LUM-1233 在 10.5 里自己写下的要求（「P0 补丁与未合并的 Stage 65 改的是同一个
+  `interactive.rs`，应当先合 65 再切 P0，否则必冲突」）：先合 65，再动 `interactive.rs`。
+
+### 12.2 P0：第一次按键之后 TUI 再也不出帧 —— 根因 / 修复 / 真实 A/B
+
+**根因（源码级）**：`crates/pi-coding-agent/src/interactive.rs`
+
+```rust
+if ct_event::poll(config.event_poll_interval)? {
+    while let Some(event) = read_event()? {   // ← 永远等不到 None
+```
+
+`read_event()`（`interactive.rs:2017-2026`）对 `crossterm::event::read()` 的 `match` 只有一个分支，
+覆盖 `Key` / `Mouse` / `Resize` / `FocusGained` / `FocusLost` / `Paste` 全部变体，因此恒为 `Ok(Some(_))`：
+`while let Some(..)` 的退出条件不可达，每次迭代都阻塞在**下一个**事件上。外层 `loop` 再也回不到顶部 ——
+`terminal.draw`、`drain_agent_events`、`bash.poll`、`deliver_pending`、`poll_ui_dialogs` 全部停摆。
+用户按下第一个键之后，界面就冻在按键前那一帧；之后的每个键仍被消费（所以 Ctrl+C 还能退出、非空草稿
+仍能挡住 Ctrl+D、选择器仍然能打开），但屏幕上什么都不会变 —— 「按键即死」的表象由此而来。
+
+**补丁**（`fix(pi-coding-agent)`，commit `9c68ce01c`）：只抽干此刻已就绪的事件，然后回到渲染。
+
+```rust
+if ct_event::poll(config.event_poll_interval)? {
+    while ct_event::poll(Duration::ZERO)? {
+        let Some(event) = read_event()? else { break };
+        ...
+    }
+}
+```
+
+**真实 A/B**（同一棵合并树、同一个 harness：PTY + VT 单元格回放；BEFORE = `feature/pi.rs bef18e530`
+未打补丁的 `target/debug/pi`，AFTER = 只加这个补丁后重新构建的同一个二进制；两边都是全新 `HOME`、
+120x36、`--approve`，注入键完全一致）：
+
+| 步骤 | BEFORE 字节 | AFTER 字节 |
+| --- | --- | --- |
+| 启动后空闲 3s | 1714 | 3460 |
+| 敲 `h` | 50 | 309 |
+| 敲 `e` / `l` / `l` / `o` | 0 / 0 / 0 / 0 | 186 / 186 / 186 / 186 |
+| Backspace x5 | 0 | 353 |
+| `/` | 0 | 509 |
+| `help` | 0 | 439 |
+| `Enter`（执行 `/help`） | 0 | 2458 |
+| `Esc`（关掉 /help） | 0 | 450 |
+| `Ctrl+T` / `Ctrl+O` / `Ctrl+L` | 0 / 0 / 0 | 529 / 550 / 1710 |
+| `Ctrl+C` | 54（退出） | 129（退出） |
+| **首个按键之后累计** | **0** | **1183** |
+| 全程累计 | 1818 | 11640 |
+
+BEFORE 侧 11 张截图**逐像素相同**（每张 PNG 都是 29864 字节）—— 屏幕在首键之后再没有变化；
+AFTER 侧每一步都变：`> hello▍`（含 CJK 输入）、退格清空、`> /▍`、`> /help▍`、`/help` 正文进入
+transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后 `Tool output: expanded`、
+`Ctrl+L` 清屏。截图（本轮 workdir 产物，随 LUM-1234 的评论以附件交付，不入库）：`compare-typing.png`
+（键入 hello 的 before/after）、`compare-help.png`（`/help` 之后，0.62 缩放）。
+
+**验证口径（重要）**：LUM-1233 已经证明「PTY 回显」不能当证据 —— 进程退出后 tty 仍会回显你敲的字。
+本节所有数字都是 master 端 `read()` 到的**真实字节**加上 VT 模拟出的**单元格内容**（`/proc/<pid>/wchan`
+与 `ep_poll` 亦只作旁证），因此 BEFORE 的 0 字节是「TUI 没画」，不是「没读到」。这也意味着
+**第十二节之前的、基于回显的交互结论一律作废**（`first key freezes the TUI` 会把它们全部推翻）。
+
+**门禁**：`cargo build -p pi-coding-agent --bin pi` 干净（1m53s），`cargo check -p pi-coding-agent
+--all-targets` 干净（测试 cfg 一起编译），`cargo fmt --all -- --check` 干净。**全量 `cargo test --workspace`
+未跑**（磁盘 98% + 两个 worker 在编译），本轮的验证强度实际高于单测：这个缺陷只在「真实终端 + 真实按键序列」
+下暴露，`pi-tui` / `pi-coding-agent` 的既有测试全都直接调用 `App::step*`，绕过事件循环，因此不可能捕获它。
+回归测试要真覆盖，需要一个可注入的 `EventSource`（把 `ct_event::poll/read` 提到 trait 后面），
+这是下一轮该补的债，不是本轮的取舍。
+
+### 12.3 P1（本轮新发现）：命令 / 文件补全「实现完整，零接线」
+
+补全引擎在 `crates/pi-tui/src/autocomplete.rs`（命令 `/` 与文件 `@` 两个 provider，7 个单测）+
+`Editor` 侧的完整下拉层（`autocomplete_items` / `is_showing_autocomplete` / `handle_autocomplete_key` /
+`set_autocomplete_provider`，`crates/pi-tui/tests/autocomplete.rs` 另有集成测试），键盘映射也在
+（`tui.input.tab` = `Tab / autocomplete`，`/hotkeys` 里印着 `Ctrl+K`、`Tab / autocomplete`）。
+但 `set_autocomplete_provider` 在**生产代码里没有任何调用点**（`grep -rn` 只命中它自己的定义与测试），
+`App` 与 `interactive.rs` 一次都没有设置 provider，而 provider 是 opt-in 的 ——
+`editor.rs:101-103` 自己写着「a caller that never [sets one keeps] the pre-autocomplete behaviour」。
+
+真实二进制上的后果（P0 修好后才测得出来）：键入 `/`、`/he`、`/help` 全程**没有任何候选框**，
+用户只能凭记忆手打命令名。这是 Stage 66（命令面）里最便宜也最值钱的一格：把
+`CommandAutocompleteProvider`（`crates/pi-coding-agent/src/commands/slash.rs` 已有命令表 +
+`argument_completions`）挂到 composer 的 Editor 上即可，不需要新协议、新渲染。
+
+### 12.4 本轮不动、留给后续轮次的输入面缺口
+
+- **`app.clear` 三处不一致**（与 P0 同源、但没有被 P0 修掉）：`/hotkeys` 印的是
+  `Ctrl+C to clear` + `Ctrl+C twice to exit`，`keybindings.rs:225` 的描述是 `Clear editor`，
+  而实现是「idle 时一次 Ctrl+C 直接 `exit_requested = true`」。真实二进制实测：空 composer 一次 Ctrl+C
+  → 退出；**草稿 `hello` + 一次 Ctrl+C → 直接退出且草稿丢失**；两次 Ctrl+C 与一次无区别。
+  上游 `interactive-mode.ts:3931-3939` 是 500ms 窗口（第一次清编辑器、第二次才退出），
+  Rust 侧没有双击状态。修法：`app.rs` 的 `app.clear` 分支加 500ms 窗口状态，并同步 `keybindings.rs`
+  的描述与 `/hotkeys` 文案。
+- **jump-to-latest 指示器缺失**：`MessageView::detached` / `set_following` / `repin_if_following`
+  已把视口漂移补掉了，但「脱离底部」这件事屏幕上没有任何提示（上游是
+  `scrollToEndIndicator`，`tui-renderer.ts:29-33` 的 `" ↓ Jump to latest message · <shortcut> "`）。
+  建议挂在既有的 `tui.altScreen.bottom = ["end"]` 槽位上。
+- **`/help` 正文与用户输入共用 `> ` 前缀**：截图里 `/help` 的输出块和 composer 一样以 `> ` 开头，
+  与用户消息难以区分（上游用 info 块）。低风险、纯渲染层的收尾项。
