@@ -12711,3 +12711,108 @@ HEAD: registry.rs MistralConversations=2，pi-protocol enum=1，pi-evals/suites/
 - 本人全程 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1160`
   （复用外部依赖，只有本地 crate 重编）+ `--offline -j 2`；测试阶段 `CARGO_INCREMENTAL=0`。
 - Git 身份沿用 worktree 级设置；本轮本人提交 `Azure` provider 与 `Api` 变体接线 + 本文档。
+
+## LUM-1170 round — `pi-ai` 单协议 provider 家族补全（MiniMax / Qwen Token Plan ×3 / Xiaomi Token Plan ×3 / Vercel AI Gateway）+ 合并 LUM-1169（utils 运行时）+ 派发 LUM-1171（auth 接线）+ 合并推送 feature/pi.rs
+
+### 一、本轮切片：只加 registry 数据，复用已实现适配器
+
+挑选标准：**wire protocol 已有适配器、只需 base URL + 凭据 + 模型目录**的 provider，
+与前面几轮「provider 家族补全」同型（纯数据，零新代码路径、零新依赖）。`BUILTIN_PROVIDERS`
+从 **23 → 32** 个条目，新增 9 个：
+
+| provider | api | base URL | 凭据 env |
+| --- | --- | --- | --- |
+| `minimax` | `AnthropicMessages` | `https://api.minimax.io/anthropic` | `MINIMAX_API_KEY` |
+| `minimax-cn` | `AnthropicMessages` | `https://api.minimaxi.com/anthropic` | `MINIMAX_CN_API_KEY` |
+| `vercel-ai-gateway` | `AnthropicMessages` | `https://ai-gateway.vercel.sh` | `AI_GATEWAY_API_KEY` |
+| `qwen-token-plan` | `OpenAiChatCompletions` | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` | `QWEN_TOKEN_PLAN_API_KEY` |
+| `qwen-token-plan-cn` | `OpenAiChatCompletions` | `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` | `QWEN_TOKEN_PLAN_CN_API_KEY` |
+| `qwen-token-plan-individual` | `OpenAiChatCompletions` | 同 `qwen-token-plan` | `QWEN_TOKEN_PLAN_API_KEY` |
+| `xiaomi-token-plan-ams` | `OpenAiChatCompletions` | `https://token-plan-ams.xiaomimimo.com/v1` | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` |
+| `xiaomi-token-plan-cn` | `OpenAiChatCompletions` | `https://token-plan-cn.xiaomimimo.com/v1` | `XIAOMI_TOKEN_PLAN_CN_API_KEY` |
+| `xiaomi-token-plan-sgp` | `OpenAiChatCompletions` | `https://token-plan-sgp.xiaomimimo.com/v1` | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` |
+
+- `minimax` / `minimax-cn` / `vercel-ai-gateway` 是**非 Anthropic 主机上的 Anthropic
+  Messages 协议**，直接复用 `AnthropicProvider`（与 `xai` 复用 Responses 适配器同构），
+  registry 只描述 host/凭据/目录，`build_adapter` 无需新增分支。
+- 模型目录取自**版本匹配**的上游数据快照
+  `@earendil-works/pi-ai@0.85.1 → dist/providers/data/*.json`（与 LUM-1163 Mistral 同一来源）：
+  minimax(3)、minimax-cn(3)、qwen-token-plan(18)、qwen-token-plan-cn(18)、
+  qwen-token-plan-individual(9)、xiaomi-token-plan-*(2×3) 全量收录；
+  `vercel-ai-gateway` 上游有 **237** 条，按既有 NVIDIA / Hugging Face 的做法**精选**每厂商一个旗舰
+  （14 条），注释里写明 `pricing_for` 对长尾返回 `None`。
+- 目录常量复用：`MINIMAX_CN_MODELS = MINIMAX_MODELS`、`QWEN_TOKEN_PLAN_CN_MODELS =
+  QWEN_TOKEN_PLAN_MODELS`、`XIAOMI_TOKEN_PLAN_MODELS` 三主机共用；`qwen-token-plan-individual`
+  是独立的 9 条目录（free 的 `MiniMax-M2.5` 不在其内），因此单列。
+
+### 二、测试
+
+- registry 新增 2 个测试：
+  - `anthropic_protocol_gateways_reuse_the_messages_adapter`：三个 Anthropic-协议主机
+    `api == AnthropicMessages`、host/env 精确匹配、**不得**回落 Anthropic 自己的凭据，
+    并锁住 `minimax-cn` 与 `minimax` 目录相等、gateway 目录 ≥10 且 `claude-sonnet-4.5` 有价；
+  - `token_plan_providers_share_one_catalog_per_vendor`：Qwen 三档的目录/凭据关系、
+    Xiaomi 三主机目录一致。
+- `openai_compatible_family_is_present` 的 id 清单同步补 5 个新 Chat Completions provider。
+- 实测：
+
+```
+cargo test --offline -p pi-ai --lib registry     → 18 passed / 0 failed
+cargo test --offline -p pi-ai                    → 269 passed / 0 failed（含 LUM-1169 utils_runtime 26）
+cargo test --offline -p pi-coding-agent -p pi-evals → 全绿（offline_suites_are_green 覆盖 registry 不变式）
+cargo check --offline --workspace --all-targets   → Finished（唯一告警来自既有 vendor/rquickjs-core）
+```
+
+- 功能冒烟：`pi list-models` 输出由 ~127 行增至 **192** 行，9 个新 provider 全部可 `--model
+  <provider>/<id>` 选中（例：`minimax/MiniMax-M3`、`qwen-token-plan/kimi-k2.6`、
+  `vercel-ai-gateway/openai/gpt-5.5`）。
+
+### 三、合并 LUM-1169（utils 运行时五件套）进 feature/pi.rs
+
+LUM-1169 已在 `in_review` 且分支 `agent/pi-ai-utils-runtime`（`f608631cf`，基线同为 `3009000d3`）
+推送完毕、工作区干净。本轮回合：`feature/pi.rs` 上分别 `--no-ff` 合并
+`agent/devbox1/98dbc4a670d1`（本轮 registry 提交 `488c39b8e`）与 `agent/pi-ai-utils-runtime`，
+两者文件范围不重叠（`providers/registry.rs` vs `utils/**`），合并零冲突。合并后重跑
+workspace check + pi-ai 全量测试通过，`feature/pi.rs` 推送为 **`355686f20`**
+（`origin/feature/pi.rs` 已确认同 sha）。
+
+### 四、LUM-1168 状态（未合并）
+
+LUM-1168（`pi-ai` 图像 provider 运行时 `images-models.ts`）仍为 `in_progress`，**无完成评论、
+无分支 sha 可合并**；本回合不臆造其成果，留待其自己推分支或下一协调轮确认。其文件范围
+（`pi-ai/src/images/**`）与本轮及 LUM-1171 均不重叠。
+
+### 五、frontier（本轮后）
+
+1. **provider 家族**：OpenAI Chat Completions 兼容族已 19 个；Anthropic 协议族新增
+   `minimax`/`minimax-cn`/`vercel-ai-gateway`。`Api` 枚举中仍无适配器的仍是
+   **bedrock-converse / cohere-v2 / google-vertex**（均需本环境拿不到的云凭据/签名）。
+   OAuth/subscription 首登族（`github-copilot` / `openai-codex` / `kimi-coding`）与
+   多协议网关（`opencode*` / `cloudflare-*`，单 `api` 字段放不下）继续 parked。
+2. **`pi-ai/utils/` 缺口**：LUM-1169 收口（**已并入 feature/pi.rs**）。
+3. **图像 provider 运行时**（`images-models.ts`）：LUM-1168，仍在飞。
+4. **auth 接线**：本轮派发 **LUM-1171**（见下），消费 LUM-1160 的 `auth/**` 与 LUM-1169 的
+   `utils`。这是 auth 子系统**首个生产调用方**，也是 provider.rs 从「直接读 env」升级为
+   「stored credential 优先 + env 兜底」的关键一步。
+5. **`assistant-message-frame` / 事件枚举扩宽**：仍因 `AssistantMessageEvent` 是有损简化枚举、
+   移植会横切所有 provider 适配器而继续延后（与多路并行冲突）。
+
+### 六、派发与并发（本轮派发 1 路）
+
+| issue | 内容 | 文件范围（与在飞任务互不重叠） |
+| --- | --- | --- |
+| **LUM-1171** | auth 接线：provider-auth 注册表 + `ProviderRouter` 经 `resolve_provider_auth` 取 key | `pi-ai/src/auth/**`、`pi-coding-agent/src/provider.rs`、可选 `pi-ai/src/models.rs` |
+
+- 开工时 `active_task_count=1`（LUM-1169 已收口；LUM-1168 状态为 `in_progress` 但无运行时占用）。
+  按「最多 3 并发」只派发 **1** 路，总占用 ≤3。
+- LUM-1171 明确禁止改 `pi-ai/src/providers/**`（本轮 registry）、`pi-ai/src/images/**`
+  （LUM-1168）、`pi-ai/src/utils/**`（已合并，只读）与 STATUS 文档，并要求只推自己的分支。
+
+### 七、磁盘与环境
+
+- 本轮复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1160`，
+  全程 `--offline`；合并后 workspace check + pi-ai 全量测试冷启动约 24s/增量。
+- 该 target 由 5.9G 增至 **11G**（本轮 + LUM-1169 的 utils 目标产物），根分区由开工 21G
+  可用降至 **16G** 可用。已为 1 路新任务留出余量；若 LUM-1168 继续长，下一轮需先评估清理
+  已完成任务的闲置 target。
+- Git 身份沿用 `multica-agent <agent@multica.local>`；本轮提交 registry 数据 + 本文档。
