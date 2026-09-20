@@ -45,6 +45,9 @@
 //     / `promptGuidelines` contribution for the system prompt.
 //   - `_pi_registered_commands()` — list slash commands registered so far.
 //   - `_pi_execute_command(name, args, ctxJson)` — run a command handler.
+//   - `_pi_provider_stream_simple(name, modelJson, contextJson,
+//     optionsJson)` — run a provider's registered `streamSimple` handler and
+//     collect its events; resolves to `{ ok, events }` / `{ ok:false, error }`.
 //   - `_pi_known_event_names()`   — list event names with at least one
 //     subscriber.
 //   - `_pi_load_extension(source, path)` — evaluate an extension source
@@ -191,8 +194,64 @@ const _pi = {
   tools: new Map(),
   /** @type {Map<string, {name:string,description?:string}>} */
   commands: new Map(),
+  /**
+   * Providers registered with `pi.registerProvider`, keyed by provider id.
+   * Holds the parts of a registration that cannot cross the host ABI:
+   * `streamSimple` (and, once a login flow is wired, the `oauth` callbacks).
+   * @type {Map<string, {name:string, streamSimple:Function|null, oauth:any}>}
+   */
+  providers: new Map(),
   loadedCount: 0,
 };
+
+/**
+ * Normalise an extension `oauth` block (or a native provider's
+ * `auth.oauth`) into the flag form the host ABI carries: functions stay in
+ * the shim, the host only learns what the block can do.
+ *
+ * Upstream OAuth blocks are `{ name, isSubscription, usesCallbackServer,
+ * login, refreshToken, getApiKey, modifyModels }` for provider configs and
+ * `{ name, login, refresh, toAuth }` on the native `Provider` auth object;
+ * both spellings are accepted.
+ *
+ * @returns {object|null}
+ */
+function normalizeOAuthBlock(oauth) {
+  if (!oauth || typeof oauth !== "object") return null;
+  return {
+    name: typeof oauth.name === "string" ? oauth.name : "",
+    isSubscription: oauth.isSubscription === true,
+    usesCallbackServer: oauth.usesCallbackServer === true,
+    hasLogin: typeof oauth.login === "function",
+    hasRefreshToken:
+      typeof oauth.refreshToken === "function" || typeof oauth.refresh === "function",
+    hasGetApiKey:
+      typeof oauth.getApiKey === "function" || typeof oauth.toAuth === "function",
+    hasModifyModels: typeof oauth.modifyModels === "function",
+  };
+}
+
+/**
+ * Collect an `AssistantMessageEventStream` (or any async iterable, array or
+ * promise of one) into a plain array of upstream-shaped events.
+ */
+async function collectProviderEvents(stream) {
+  if (stream == null) return [];
+  if (typeof stream.then === "function") return collectProviderEvents(await stream);
+  if (Array.isArray(stream)) return stream;
+  if (typeof stream[Symbol.asyncIterator] === "function") {
+    const events = [];
+    for await (const event of stream) events.push(event);
+    return events;
+  }
+  if (typeof stream.collect === "function") {
+    const collected = await stream.collect();
+    return Array.isArray(collected) ? collected : [];
+  }
+  throw new TypeError(
+    "streamSimple must return an AssistantMessageEventStream (async iterable)",
+  );
+}
 
 /**
  * Build the ctx object passed to event handlers. Mirrors
@@ -773,25 +832,38 @@ const pi = Object.freeze({
   /**
    * Register a custom / proxy provider the agent can stream from.
    *
-   * Slice 1 backs the string overload only:
-   * `pi.registerProvider(name, { baseUrl, apiKey, api, models, name })`.
-   * The native `Provider` object overload (and its `streamSimple` /
-   * `oauth` fields) is not implemented — calling it throws
-   * `ERR_PI_SDK_UNIMPLEMENTED` instead of registering a broken provider.
+   * Both upstream overloads are backed:
+   *
+   * * `pi.registerProvider(name, { baseUrl, apiKey, api, models,
+   *   streamSimple?, oauth? })` — the declarative string overload.
+   *   `streamSimple(model, context, options)` makes the provider stream
+   *   through the extension's own code instead of a host adapter; `api` is
+   *   required alongside it (upstream's `provider-composer` enforces the
+   *   same rule) and is what the host routes the provider's models to.
+   * * `pi.registerProvider(provider)` — the native `Provider` object
+   *   overload. The id (`provider.id`, falling back to `provider.name`),
+   *   `name`, `baseUrl`, `api` and `provider.getModels()` (or
+   *   `provider.models`) are forwarded, as are `streamSimple` and
+   *   `provider.oauth` / `provider.auth.oauth`.
    *
    * Validation happens host-side, so an unknown `api` or a `models`
    * array without `api` rejects with a readable `Error` that names the
-   * supported set. `apiKey` is stored verbatim: `$VAR` / `${VAR}` is
-   * resolved by the application layer, and a leading `!command` is
-   * documented as unsupported (never executed).
+   * supported set — unless the registration brings its own `streamSimple`
+   * handler, which owns its wire protocol. `apiKey` is stored verbatim:
+   * `$VAR` / `${VAR}` is resolved by the application layer, and a leading
+   * `!command` is documented as unsupported (never executed).
+   *
+   * The `streamSimple` and `oauth` callbacks never leave the shim; the host
+   * records that they exist and calls back by provider name.
    */
   registerProvider(nameOrProvider, config) {
+    if (nameOrProvider !== null && typeof nameOrProvider === "object") {
+      return registerNativeProvider(nameOrProvider);
+    }
     if (typeof nameOrProvider !== "string") {
-      const error = new Error(
-        "pi.registerProvider: the native Provider object overload is not implemented by this host; call pi.registerProvider(name, { baseUrl, apiKey, api, models })",
+      throw new TypeError(
+        "pi.registerProvider: first argument must be a provider name or a native Provider object",
       );
-      error.code = "ERR_PI_SDK_UNIMPLEMENTED";
-      throw error;
     }
     const name = nameOrProvider;
     if (!name) {
@@ -808,13 +880,15 @@ const pi = Object.freeze({
     if (typeof source.name === "string") payload.displayName = source.name;
     else if (typeof source.displayName === "string") payload.displayName = source.displayName;
     if (Array.isArray(source.models)) payload.models = source.models;
-    if (typeof globalThis.host_register_provider !== "function") {
-      throw new Error(
-        "pi.registerProvider is not available in this host build",
-      );
-    }
-    // The host validates and throws on a bad registration; let it propagate.
-    globalThis.host_register_provider(JSON.stringify(payload));
+    const streamSimple = typeof source.streamSimple === "function" ? source.streamSimple : null;
+    if (streamSimple) payload.hasStreamSimple = true;
+    const oauthFlags = normalizeOAuthBlock(source.oauth);
+    if (oauthFlags) payload.oauth = oauthFlags;
+    sendProviderRegistration(payload, {
+      name,
+      streamSimple,
+      oauth: source.oauth || null,
+    });
   },
 
   /**
@@ -1128,6 +1202,111 @@ globalThis._pi_execute_command = function _pi_execute_command(name, args, ctxJso
       .catch((e) => stringify(true, null, e && e.message ? e.message : String(e)));
   }
   return finalize(result);
+};
+
+/**
+ * Send one provider registration to the host and remember the callbacks that
+ * cannot cross the ABI.
+ *
+ * @param {object} payload host-facing wire shape
+ * @param {{name:string, streamSimple:Function|null, oauth:any}} callbacks
+ */
+function sendProviderRegistration(payload, callbacks) {
+  if (typeof globalThis.host_register_provider !== "function") {
+    throw new Error("pi.registerProvider is not available in this host build");
+  }
+  // The host validates and throws on a bad registration; let it propagate —
+  // but only remember the handler once it was accepted, so a rejected
+  // registration cannot leave a callable `streamSimple` behind.
+  globalThis.host_register_provider(JSON.stringify(payload));
+  _pi.providers.set(callbacks.name, callbacks);
+}
+
+/**
+ * Back the native `Provider` object overload of `pi.registerProvider`.
+ *
+ * @param {any} provider upstream `Provider` shape
+ */
+function registerNativeProvider(provider) {
+  const id =
+    typeof provider.id === "string" && provider.id
+      ? provider.id
+      : typeof provider.name === "string"
+        ? provider.name
+        : "";
+  if (!id) {
+    throw new TypeError("pi.registerProvider: native provider must have a non-empty `id`");
+  }
+  let models = [];
+  if (typeof provider.getModels === "function") {
+    const listed = provider.getModels();
+    if (Array.isArray(listed)) models = listed;
+  } else if (Array.isArray(provider.models)) {
+    models = provider.models;
+  }
+  const payload = { name: id, native: true };
+  if (typeof provider.name === "string") payload.displayName = provider.name;
+  if (typeof provider.baseUrl === "string") payload.baseUrl = provider.baseUrl;
+  if (typeof provider.apiKey === "string") payload.apiKey = provider.apiKey;
+  if (typeof provider.api === "string" && provider.api) {
+    payload.api = provider.api;
+  } else if (models[0] && typeof models[0].api === "string" && models[0].api) {
+    // A native provider may only declare its api family per model; the host
+    // routes the provider as a whole, so the first model's family is used.
+    payload.api = models[0].api;
+  }
+  if (models.length > 0) payload.models = models;
+  const streamSimple = typeof provider.streamSimple === "function" ? provider.streamSimple : null;
+  if (streamSimple) payload.hasStreamSimple = true;
+  const rawOauth =
+    provider.oauth ||
+    (provider.auth && typeof provider.auth === "object" ? provider.auth.oauth : null);
+  const oauthFlags = normalizeOAuthBlock(rawOauth);
+  if (oauthFlags) payload.oauth = oauthFlags;
+  sendProviderRegistration(payload, { name: id, streamSimple, oauth: rawOauth || null });
+}
+
+/**
+ * Run one `streamSimple` handler registered via `pi.registerProvider`.
+ *
+ * The host calls this with the upstream `Model` / `Context` /
+ * `SimpleStreamOptions` JSON it built and receives
+ * `{ ok: true, events: [...] }` or `{ ok: false, error }`. Events are
+ * collected by draining the handler's `AssistantMessageEventStream` — the
+ * host delivers them in order, but only after the handler finished.
+ *
+ * @param {string} name
+ * @param {string} modelJson
+ * @param {string} contextJson
+ * @param {string} optionsJson
+ */
+globalThis._pi_provider_stream_simple = async function _pi_provider_stream_simple(
+  name,
+  modelJson,
+  contextJson,
+  optionsJson,
+) {
+  const fail = (message) => JSON.stringify({ ok: false, error: message });
+  const entry = _pi.providers.get(String(name));
+  if (!entry || typeof entry.streamSimple !== "function") {
+    return fail("provider `" + String(name) + "` has no streamSimple handler");
+  }
+  let model;
+  let context;
+  let options;
+  try {
+    model = modelJson ? JSON.parse(String(modelJson)) : {};
+    context = contextJson ? JSON.parse(String(contextJson)) : {};
+    options = optionsJson ? JSON.parse(String(optionsJson)) : {};
+  } catch (e) {
+    return fail("invalid streamSimple arguments: " + (e && e.message ? e.message : String(e)));
+  }
+  try {
+    const stream = entry.streamSimple(model, context, options);
+    return JSON.stringify({ ok: true, events: await collectProviderEvents(stream) });
+  } catch (e) {
+    return fail(e && e.message ? e.message : String(e));
+  }
 };
 
 /**
