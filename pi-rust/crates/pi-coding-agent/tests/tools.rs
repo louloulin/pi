@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use pi_coding_agent::tools::{
     standard_tools, AbortLike, AgentTool, BashTool, EditTool, EditToolDetails, ReadTool, WriteTool,
 };
+use pi_protocol::Content;
 use serde_json::json;
 
 fn fresh_tmp(label: &str) -> PathBuf {
@@ -23,7 +24,6 @@ fn fresh_tmp(label: &str) -> PathBuf {
 }
 
 fn first_text(out: &pi_coding_agent::tools::ToolOutput) -> String {
-    use pi_protocol::Content;
     match out.content.first().expect("content block") {
         Content::Text(t) => t.text.clone(),
         other => panic!("expected text content, got {:?}", other),
@@ -126,6 +126,68 @@ async fn write_and_read_roundtrip() {
         .expect("read");
 
     assert_eq!(first_text(&read_back), body);
+}
+
+/// The 24-byte PNG header the `pi-tui` fixtures use (320x240).
+const PNG_HEADER: [u8; 24] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0x00, 0xf0,
+];
+
+#[tokio::test]
+async fn read_image_file_returns_a_text_note_and_an_image_block() {
+    let dir = fresh_tmp("read-image");
+    let path = dir.join("shot.png");
+    std::fs::write(&path, PNG_HEADER).unwrap();
+
+    let output = ReadTool
+        .execute(
+            json!({ "path": path.display().to_string() }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("read image");
+
+    // Upstream order: the note first, the image second.
+    assert_eq!(output.content.len(), 2, "{:?}", output.content);
+    assert_eq!(first_text(&output), "Read image file [image/png]");
+    match &output.content[1] {
+        Content::Image(image) => {
+            assert_eq!(image.mime_type, "image/png");
+            assert_eq!(image.data, "iVBORw0KGgoAAAANSUhEUgAAAUAAAADw");
+        }
+        other => panic!("expected an image block, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_bmp_without_a_converter_is_reported_as_omitted() {
+    let dir = fresh_tmp("read-bmp");
+    let path = dir.join("shot.bmp");
+    // A minimal 1x1 single-plane 24-bit BMP header (upstream `isBmp`).
+    let mut bmp = vec![0u8; 58];
+    bmp[0] = b'B';
+    bmp[1] = b'M';
+    bmp[2..6].copy_from_slice(&58u32.to_le_bytes()); // declared file size
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes()); // pixel data offset
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes()); // DIB header size
+    bmp[26..28].copy_from_slice(&1u16.to_le_bytes()); // colour planes
+    bmp[28..30].copy_from_slice(&24u16.to_le_bytes()); // bits per pixel
+    std::fs::write(&path, bmp).unwrap();
+
+    let output = ReadTool
+        .execute(
+            json!({ "path": path.display().to_string() }),
+            AbortLike::none(),
+        )
+        .await
+        .expect("read bmp");
+
+    assert_eq!(output.content.len(), 1, "no image block without a converter");
+    assert_eq!(
+        first_text(&output),
+        "Read image file [image/bmp]\n[Image omitted: could not be converted to a supported inline image format.]"
+    );
 }
 
 #[tokio::test]

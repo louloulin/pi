@@ -9,7 +9,9 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use pi_coding_agent::tools::render::{image_lines, image_fallback_text, ToolRenderContext};
+use pi_agent_core::tools::ToolExecutor;
+use pi_coding_agent::tool_executor::BuiltinToolExecutor;
+use pi_coding_agent::tools::render::{image_fallback_text, image_lines, ToolRenderContext};
 use pi_coding_agent::tools::{get_text_output, render_lines_plain, ToolOutput, ToolRenderSession};
 use pi_protocol::{Content, ImageContent, ToolCall, ToolResult};
 use pi_tui::{
@@ -83,6 +85,12 @@ fn result() -> ToolResult {
         added_tool_names: None,
     }
 }
+
+/// A PNG header on disk for the real `read` tool to pick up.
+const PNG_HEADER: [u8; 24] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0x00, 0xf0,
+];
 
 #[test]
 fn image_block_renders_kitty_escapes() {
@@ -179,4 +187,58 @@ fn render_session_draws_images_only_when_enabled() {
         !rendered.contains('\u{1b}'),
         "the text path must stay escape-free: {rendered:?}"
     );
+}
+
+/// The `read` tool's image output, end to end: tool → executor fold → render.
+#[tokio::test]
+async fn read_tool_image_result_renders_through_the_executor() {
+    let _guard = capabilities();
+    set_capabilities(caps(Some(ImageProtocol::Kitty)));
+    set_cell_dimensions(CELLS);
+
+    let dir = std::env::temp_dir().join(format!("pi-image-read-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("shot.png");
+    std::fs::write(&path, PNG_HEADER).expect("write png");
+
+    let executor = BuiltinToolExecutor::with_default_tools();
+    let tool_call = ToolCall {
+        id: "call_read_image".to_string(),
+        name: "read".to_string(),
+        arguments: serde_json::json!({ "path": path.display().to_string() }),
+    };
+    let result = executor
+        .execute(&tool_call, tokio_util::sync::CancellationToken::new())
+        .await
+        .expect("read image");
+
+    // The fold keeps the image as `content` and parks the caption.
+    assert!(
+        matches!(result.content.as_ref(), Content::Image(_)),
+        "image must win the single content slot: {:?}",
+        result.content
+    );
+    assert_eq!(
+        result.details.as_ref().and_then(|d| d["image_text"].as_str()),
+        Some("Read image file [image/png]")
+    );
+
+    let mut with_images = session(&dir, true);
+    with_images.call(&tool_call, false);
+    let rendered = render_lines_plain(&with_images.result(&result));
+    assert!(
+        rendered.contains(KITTY_PREFIX),
+        "read-image TUI path must emit kitty rows: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Read image file [image/png]"),
+        "the caption stays visible next to the image: {rendered:?}"
+    );
+
+    // Same result on a terminal without image support (and `--print`): text only.
+    let mut plain = session(&dir, false);
+    plain.call(&tool_call, false);
+    let rendered = render_lines_plain(&plain.result(&result));
+    assert!(rendered.contains("[Image: [image/png] 320x240]"), "{rendered:?}");
+    assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
 }
