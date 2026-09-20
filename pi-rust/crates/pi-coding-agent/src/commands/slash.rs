@@ -43,6 +43,9 @@ pub enum SlashCommand {
         /// Optional custom focus appended to the summarization prompt.
         instructions: Option<String>,
     },
+    /// `/hotkeys` — list the effective keyboard shortcuts. Mirrors upstream
+    /// `handleHotkeysCommand` (`interactive-mode.ts:6315`).
+    Hotkeys,
     /// Anything else, captured as the command name (without the slash).
     Unknown(String),
 }
@@ -74,6 +77,7 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         },
         "exit" | "quit" => SlashCommand::Exit,
         "trust" => SlashCommand::Trust(parse_trust_decision(args)),
+        "hotkeys" => SlashCommand::Hotkeys,
         other => SlashCommand::Unknown(other.to_string()),
     };
     Ok(cmd)
@@ -118,6 +122,7 @@ pub fn help_text() -> String {
     out.push_str("  /settings show or change interface settings\n");
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
+    out.push_str("  /hotkeys  list the keyboard shortcuts\n");
     out.push_str("  /exit     quit the interactive session\n");
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
@@ -132,6 +137,157 @@ pub fn help_text() -> String {
     out
 }
 
+/// The `/hotkeys` overview for the process-wide (installed) keybindings.
+///
+/// The interactive TTY path installs the merged coding-agent table
+/// (`crate::keybindings::install_keybindings_from`), so this resolves the
+/// same chords the components do — including any `keybindings.json`
+/// override.
+pub fn hotkeys_text() -> String {
+    hotkeys_text_with(&pi_tui::keybindings::get_keybindings())
+}
+
+/// [`hotkeys_text`] against an explicit table (the injectable form used by
+/// tests).
+pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) -> String {
+    // Upstream groups the same way: navigation, editing, the transcript
+    // viewport, the app actions and the selection lists
+    // (`interactive-mode.ts:6315-6419`). A row whose id has no chord is
+    // dropped — an unbound action is not a shortcut.
+    const NAVIGATION: &[(&str, &str)] = &[
+        ("tui.editor.cursorUp", "previous line / prompt history"),
+        ("tui.editor.cursorDown", "next line / prompt history"),
+        ("tui.editor.cursorLeft", "move cursor left"),
+        ("tui.editor.cursorRight", "move cursor right"),
+        ("tui.editor.cursorWordLeft", "move by word (left)"),
+        ("tui.editor.cursorWordRight", "move by word (right)"),
+        ("tui.editor.cursorLineStart", "start of line"),
+        ("tui.editor.cursorLineEnd", "end of line"),
+        ("tui.editor.jumpForward", "jump forward to character"),
+        ("tui.editor.jumpBackward", "jump backward to character"),
+        ("tui.editor.pageUp", "prompt page up"),
+        ("tui.editor.pageDown", "prompt page down"),
+    ];
+    const EDITING: &[(&str, &str)] = &[
+        ("tui.input.submit", "send message"),
+        ("tui.input.newLine", "insert a newline"),
+        (
+            "tui.editor.deleteCharBackward",
+            "delete character backwards",
+        ),
+        ("tui.editor.deleteCharForward", "delete character forwards"),
+        ("tui.editor.deleteWordBackward", "delete word backwards"),
+        ("tui.editor.deleteWordForward", "delete word forwards"),
+        ("tui.editor.deleteToLineStart", "delete to start of line"),
+        ("tui.editor.deleteToLineEnd", "delete to end of line"),
+        ("tui.editor.yank", "paste the most-recently-deleted text"),
+        ("tui.editor.yankPop", "cycle through pasted deleted text"),
+        ("tui.editor.undo", "undo"),
+    ];
+    const TRANSCRIPT: &[(&str, &str)] = &[
+        ("tui.altScreen.lineUp", "scroll up one line"),
+        ("tui.altScreen.lineDown", "scroll down one line"),
+        ("tui.altScreen.halfPageUp", "scroll up half a page"),
+        ("tui.altScreen.halfPageDown", "scroll down half a page"),
+        ("tui.altScreen.pageUp", "scroll up one page"),
+        ("tui.altScreen.pageDown", "scroll down one page"),
+        ("tui.altScreen.top", "jump to the start of the chat log"),
+        ("tui.altScreen.bottom", "jump to the end of the chat log"),
+        (
+            "tui.altScreen.previousPrompt",
+            "jump to the previous prompt",
+        ),
+        ("tui.altScreen.nextPrompt", "jump to the next prompt"),
+        ("tui.altScreen.search", "search the chat log"),
+        ("tui.altScreen.searchNext", "next search hit"),
+        ("tui.altScreen.searchPrevious", "previous search hit"),
+        ("tui.altScreen.searchClose", "close the search bar"),
+    ];
+    const APP: &[(&str, &str)] = &[
+        ("app.interrupt", "cancel autocomplete / abort streaming"),
+        ("app.clear", "clear the prompt (twice: exit)"),
+        ("app.exit", "exit when the prompt is empty"),
+        ("app.suspend", "suspend to the background"),
+        ("app.model.cycleForward", "cycle to the next model"),
+        ("app.model.cycleBackward", "cycle to the previous model"),
+        ("app.message.copy", "copy the last assistant message"),
+        ("app.model.select", "open the model selector"),
+    ];
+    const SELECTORS: &[(&str, &str)] = &[
+        ("tui.select.up", "move the selection up"),
+        ("tui.select.down", "move the selection down"),
+        ("tui.select.pageUp", "selection page up"),
+        ("tui.select.pageDown", "selection page down"),
+        ("tui.select.confirm", "confirm the selection"),
+        ("tui.select.cancel", "close the selection list"),
+        ("tui.input.tab", "path completion / accept autocomplete"),
+    ];
+
+    let mut out = String::from("keyboard shortcuts:\n");
+    for (heading, rows) in [
+        ("navigation", NAVIGATION),
+        ("editing", EDITING),
+        ("chat log", TRANSCRIPT),
+        ("app", APP),
+        ("selectors and completion", SELECTORS),
+    ] {
+        let mut section = String::new();
+        for (id, label) in rows {
+            let chords = keybindings
+                .get_keys(id)
+                .iter()
+                .map(|chord| format_chord(chord))
+                .collect::<Vec<_>>();
+            if chords.is_empty() {
+                continue;
+            }
+            section.push_str(&format!("  {:<16} {}\n", chords.join(" / "), label));
+        }
+        if !section.is_empty() {
+            out.push_str(&format!("\n{heading}:\n{section}"));
+        }
+    }
+    out.push_str("\ncommands:\n");
+    out.push_str("  /               slash commands (/help, /model, /hotkeys, …)\n");
+    out.push_str("  Esc             close the selector / overlay first\n");
+    out
+}
+
+/// Title-case a chord id for display (`ctrl+p` → `Ctrl+P`, `pageUp` →
+/// `PgUp`), matching the legend style in [`help_text`].
+fn format_chord(chord: &str) -> String {
+    chord
+        .split('+')
+        .map(|part| match part {
+            "ctrl" => "Ctrl".to_string(),
+            "alt" => "Alt".to_string(),
+            "shift" => "Shift".to_string(),
+            "super" | "meta" => "Cmd".to_string(),
+            "escape" => "Esc".to_string(),
+            "pageUp" => "PgUp".to_string(),
+            "pageDown" => "PgDn".to_string(),
+            "home" => "Home".to_string(),
+            "end" => "End".to_string(),
+            "tab" => "Tab".to_string(),
+            "enter" => "Enter".to_string(),
+            "space" => "Space".to_string(),
+            "up" => "Up".to_string(),
+            "down" => "Down".to_string(),
+            "left" => "Left".to_string(),
+            "right" => "Right".to_string(),
+            other => {
+                // Single letters are title-cased so `ctrl+p` reads `Ctrl+P`.
+                if other.chars().count() == 1 {
+                    other.to_uppercase()
+                } else {
+                    other.to_string()
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +295,7 @@ mod tests {
     #[test]
     fn parses_known_commands() {
         assert_eq!(handle_command("/help").unwrap(), SlashCommand::Help);
+        assert_eq!(handle_command("/hotkeys").unwrap(), SlashCommand::Hotkeys);
         assert_eq!(handle_command("/clear").unwrap(), SlashCommand::Clear);
         assert_eq!(handle_command("/model").unwrap(), SlashCommand::Model);
         assert_eq!(handle_command("/session").unwrap(), SlashCommand::Session);
@@ -209,6 +366,40 @@ mod tests {
         let text = help_text();
         assert!(text.contains("PgUp/PgDn"), "{text}");
         assert!(text.contains("Home / End"), "{text}");
+    }
+
+    #[test]
+    fn help_text_lists_hotkeys_command() {
+        assert!(help_text().contains("/hotkeys"), "{}", help_text());
+    }
+
+    #[test]
+    fn hotkeys_text_lists_effective_chords() {
+        // The coding-agent table binds `app.model.cycleForward` to ctrl+p and
+        // `app.message.copy` to ctrl+x; both must render title-cased.
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        let text = hotkeys_text_with(&manager);
+        assert!(text.contains("Ctrl+P"), "{text}");
+        assert!(text.contains("Ctrl+X"), "{text}");
+        assert!(text.contains("navigation:"), "{text}");
+        assert!(text.contains("chat log:"), "{text}");
+        assert!(text.contains("copy the last assistant message"), "{text}");
+    }
+
+    #[test]
+    fn hotkeys_text_skips_unbound_rows() {
+        // The plain `pi-tui` table leaves `app.*` unbound: those rows must
+        // not be advertised.
+        let manager = pi_tui::keybindings::KeybindingsManager::tui_defaults();
+        let text = hotkeys_text_with(&manager);
+        assert!(!text.contains("cycle to the next model"), "{text}");
+        assert!(text.contains("send message"), "{text}");
     }
 
     #[test]

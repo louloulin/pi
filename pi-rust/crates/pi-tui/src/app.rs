@@ -3167,6 +3167,16 @@ impl App {
         self.pending_clipboard.take()
     }
 
+    /// Queue a clipboard write for the driver, using the same channel as
+    /// copy-on-select.
+    ///
+    /// The driver resolves these requests by copying to the system
+    /// clipboard. Callers like the coding agent's `app.message.copy` handler
+    /// use this to hand over transcript text the App itself does not own.
+    pub fn request_clipboard(&mut self, text: impl Into<String>) {
+        self.pending_clipboard = Some(text.into());
+    }
+
     /// Paint the active selection into the already-rendered message area by
     /// adding the reversed-video modifier to the selected cells.
     fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {

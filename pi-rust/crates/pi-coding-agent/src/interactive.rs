@@ -51,6 +51,7 @@ use crate::tool_executor::default_executor;
 
 use pi_tui::app::{App, AppConfig};
 use pi_tui::input::{InputEvent, KeyCode};
+use pi_tui::message::Role;
 use pi_tui::selector::{Selector, SelectorItem};
 use pi_tui::settings::{SettingItem, SettingsList};
 
@@ -388,6 +389,46 @@ async fn handle_input_event(
         }
     }
 
+    // Coding-agent shortcuts. Upstream registers these on the editor
+    // (`interactive-mode.ts:2883-2903`); the Rust port has no editor action
+    // hook, so the driver claims the key before the App sees it — but only
+    // while no modal or overlay owns the keyboard.
+    if !app.selector_open()
+        && !app.dialog_open()
+        && !app.settings_open()
+        && !app.custom_open()
+        && !app.search_open()
+    {
+        let keybindings = pi_tui::keybindings::get_keybindings();
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.model.cycleForward",
+            &["ctrl+p"],
+        ) {
+            cycle_model(app, agent, options, CycleDirection::Forward).await;
+            return Ok(None);
+        }
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.model.cycleBackward",
+            &["shift+ctrl+p"],
+        ) {
+            cycle_model(app, agent, options, CycleDirection::Backward).await;
+            return Ok(None);
+        }
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.message.copy",
+            &["ctrl+x"],
+        ) {
+            copy_last_assistant_message(app);
+            return Ok(None);
+        }
+    }
+
     let step_outcome = app.step(event);
     // `/settings` hands value changes back to the driver — upstream's
     // `onChange(id, newValue)` callback. Apply what the running session
@@ -423,6 +464,91 @@ async fn handle_input_event(
         }
         pi_tui::app::StepOutcome::Exit => Ok(Some(InternalAction::Exit)),
     }
+}
+
+/// Which way `app.model.cycleForward` / `app.model.cycleBackward` move
+/// through the model catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CycleDirection {
+    /// `app.model.cycleForward` — the next model, wrapping at the end.
+    Forward,
+    /// `app.model.cycleBackward` — the previous model, wrapping at the
+    /// start.
+    Backward,
+}
+
+/// The model catalog in a stable order.
+///
+/// [`Models`] groups entries by provider in a `HashMap`, so its iteration
+/// order varies run to run. Both the `/model` selector and the cycling
+/// shortcuts need one deterministic order, so they share this helper
+/// (sorted by provider then model id).
+fn sorted_models(models: &Models) -> Vec<(ProviderId, Model)> {
+    let mut catalog = models
+        .iter()
+        .map(|(provider, model)| (provider.clone(), model.clone()))
+        .collect::<Vec<_>>();
+    catalog.sort_by(|a, b| (a.0.to_string(), &a.1.id).cmp(&(b.0.to_string(), &b.1.id)));
+    catalog
+}
+
+/// `app.model.cycleForward` / `app.model.cycleBackward` — move the live
+/// session to the next / previous catalog model.
+///
+async fn cycle_model(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &InteractiveOptions,
+    direction: CycleDirection,
+) {
+    let catalog = sorted_models(&options.models);
+    if catalog.is_empty() {
+        app.info("no models available".to_string());
+        return;
+    }
+    if catalog.len() == 1 {
+        app.info("only one model available".to_string());
+        return;
+    }
+    let mut agent_guard = agent.lock().await;
+    let current = agent_guard.model().id.clone();
+    let next = match catalog.iter().position(|(_, model)| model.id == current) {
+        Some(index) => match direction {
+            CycleDirection::Forward => (index + 1) % catalog.len(),
+            CycleDirection::Backward => (index + catalog.len() - 1) % catalog.len(),
+        },
+        // The pinned model is not part of the catalog (e.g. `--model` named
+        // an id the registered providers do not ship): start from the top.
+        None => 0,
+    };
+    let (provider, model) = catalog[next].clone();
+    let label = model.label.clone().unwrap_or_else(|| model.id.clone());
+    app.queue_model_switch(&mut agent_guard, model);
+    app.info(format!("model → {provider}/{label}"));
+}
+
+/// `app.message.copy` — hand the last assistant message to the driver's
+/// clipboard channel.
+///
+/// Upstream's `handleCopyCommand({ preferSelection: true })` copies an active
+/// selection first and falls back to the last assistant block; the selection
+/// case is already covered by copy-on-select, so this only needs the
+/// fallback.
+fn copy_last_assistant_message(app: &mut App) {
+    let Some(text) = app
+        .messages()
+        .items()
+        .iter()
+        .rev()
+        .find(|item| item.role == Role::Assistant && !item.text.trim().is_empty())
+        .map(|item| item.text.clone())
+    else {
+        app.info("nothing to copy yet".to_string());
+        return;
+    };
+    let lines = text.lines().count();
+    app.request_clipboard(text);
+    app.info(format!("copied {lines} line(s) to the clipboard"));
 }
 
 /// Apply the user's choice when the selector closes.
@@ -482,9 +608,8 @@ async fn run_slash_command(
             app.request_exit();
         }
         SlashCommand::Model => {
-            let items = options
-                .models
-                .iter()
+            let items = sorted_models(&options.models)
+                .into_iter()
                 .map(|(provider, model)| {
                     let label = model.label.clone().unwrap_or_else(|| model.id.clone());
                     SelectorItem::new(format!("model:{}", model.id), label)
@@ -501,6 +626,9 @@ async fn run_slash_command(
                     .with_max_visible(10);
                 app.open_selector(selector);
             }
+        }
+        SlashCommand::Hotkeys => {
+            app.info(crate::commands::slash::hotkeys_text());
         }
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;
@@ -1178,10 +1306,10 @@ fn list_session_files(dir: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 fn default_model(models: &Models) -> Model {
-    models
-        .iter()
+    sorted_models(models)
+        .into_iter()
         .next()
-        .map(|(_, m)| m.clone())
+        .map(|(_, m)| m)
         .unwrap_or_else(|| Model {
             provider: ProviderId::new("faux"),
             id: "faux-model".into(),
@@ -1746,5 +1874,156 @@ mod tests {
             rendered.contains("'warnings' opens a submenu"),
             "{rendered}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // `app.*` actions: model cycling + message copy (the first two handlers)
+    // -----------------------------------------------------------------------
+
+    /// A model entry with no label, so the notification text falls back to
+    /// `<provider>/<id>`.
+    fn catalog_model(provider: &str, id: &str) -> Model {
+        Model {
+            provider: ProviderId::new(provider),
+            id: id.into(),
+            api: Api::Faux,
+            label: None,
+            context_window: 1_000,
+            max_output_tokens: 100,
+        }
+    }
+
+    /// Two providers registered out of order: the sorted catalog must be
+    /// `alpha/a` then `beta/b` regardless of insertion order.
+    fn two_model_catalog() -> Models {
+        let mut models = Models::new();
+        models.set_provider(ProviderId::new("beta"), vec![catalog_model("beta", "b")]);
+        models.set_provider(ProviderId::new("alpha"), vec![catalog_model("alpha", "a")]);
+        models
+    }
+
+    async fn app_starting_at(model: Model) -> (App, Arc<AsyncMutex<Agent>>) {
+        let agent = Arc::new(AsyncMutex::new(Agent::new(AgentOptions::new(
+            model,
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ))));
+        let config = AppConfig {
+            session_id: "cycle".into(),
+            ..AppConfig::default()
+        };
+        let app = App::new(&*agent.lock().await, config);
+        (app, agent)
+    }
+
+    #[test]
+    fn default_model_is_the_first_entry_of_the_sorted_catalog() {
+        assert_eq!(default_model(&two_model_catalog()).id, "a");
+    }
+
+    #[test]
+    fn sorted_models_orders_by_provider_then_id() {
+        let ids = sorted_models(&two_model_catalog())
+            .into_iter()
+            .map(|(provider, model)| format!("{provider}/{}", model.id))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["alpha/a", "beta/b"]);
+    }
+
+    #[tokio::test]
+    async fn cycling_models_wraps_around_the_sorted_catalog() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+        assert_eq!(agent.lock().await.model().id, "b");
+
+        // Forward from the last entry wraps to the first.
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+        assert_eq!(agent.lock().await.model().id, "a");
+
+        // Backward from the first wraps to the last.
+        cycle_model(&mut app, &agent, &options, CycleDirection::Backward).await;
+        assert_eq!(agent.lock().await.model().id, "b");
+
+        let rendered = transcript(&app);
+        assert!(rendered.contains("model → beta/b"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn cycling_from_a_model_outside_the_catalog_starts_at_the_top() {
+        let (mut app, agent) = app_starting_at(catalog_model("gamma", "zz")).await;
+        let options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+        assert_eq!(agent.lock().await.model().id, "a");
+    }
+
+    #[tokio::test]
+    async fn cycling_a_single_model_reports_it_instead_of_switching() {
+        let mut models = Models::new();
+        models.set_provider(ProviderId::new("alpha"), vec![catalog_model("alpha", "a")]);
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let options = InteractiveOptions {
+            models,
+            ..InteractiveOptions::default()
+        };
+
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+
+        assert_eq!(agent.lock().await.model().id, "a");
+        let rendered = transcript(&app);
+        assert!(rendered.contains("only one model available"), "{rendered}");
+    }
+
+    #[test]
+    fn copying_the_last_assistant_message_queues_it_for_the_clipboard() {
+        let agent = Agent::new(AgentOptions::new(
+            small_window_model(1_000_000),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let mut app = App::new(&agent, AppConfig::default());
+        app.messages_mut().push(pi_tui::message::MessageItem {
+            role: pi_tui::message::Role::Assistant,
+            text: "first reply".into(),
+            streaming: false,
+        });
+        app.messages_mut().push(pi_tui::message::MessageItem {
+            role: pi_tui::message::Role::Assistant,
+            text: "second reply\nwith two lines".into(),
+            streaming: false,
+        });
+
+        copy_last_assistant_message(&mut app);
+
+        assert_eq!(
+            app.take_clipboard_request().as_deref(),
+            Some("second reply\nwith two lines")
+        );
+        let rendered = transcript(&app);
+        assert!(rendered.contains("copied 2 line(s)"), "{rendered}");
+    }
+
+    #[test]
+    fn copying_an_empty_transcript_reports_nothing_to_copy() {
+        let agent = Agent::new(AgentOptions::new(
+            small_window_model(1_000_000),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let mut app = App::new(&agent, AppConfig::default());
+
+        copy_last_assistant_message(&mut app);
+
+        assert!(app.take_clipboard_request().is_none());
+        let rendered = transcript(&app);
+        assert!(rendered.contains("nothing to copy yet"), "{rendered}");
     }
 }
