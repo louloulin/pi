@@ -29,10 +29,10 @@ use pi_ai::models::Models;
 use pi_protocol::{Content, Message, Model, ProviderId, Role, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio::task::AbortHandle;
-use thiserror::Error;
 
 use super::error::JsonRpcError;
 use super::events::agent_event_to_json;
@@ -316,7 +316,10 @@ impl Server {
             Err(err) => {
                 return self
                     .writer
-                    .write_response(&Response::error(None, JsonRpcError::parse_error(err.to_string())))
+                    .write_response(&Response::error(
+                        None,
+                        JsonRpcError::parse_error(err.to_string()),
+                    ))
                     .await;
             }
         };
@@ -326,9 +329,7 @@ impl Server {
             Err(err) => {
                 let id = value
                     .get("id")
-                    .filter(|id| {
-                        matches!(id, Value::String(_) | Value::Number(_) | Value::Null)
-                    })
+                    .filter(|id| matches!(id, Value::String(_) | Value::Number(_) | Value::Null))
                     .cloned();
                 return self.writer.write_response(&Response::error(id, err)).await;
             }
@@ -534,10 +535,7 @@ impl Server {
     }
 
     /// Handle a turn completion (or the disappearance of the turn task).
-    async fn handle_done(
-        &mut self,
-        finished: Option<TurnFinished>,
-    ) -> Result<(), RpcServerError> {
+    async fn handle_done(&mut self, finished: Option<TurnFinished>) -> Result<(), RpcServerError> {
         let Some(finished) = finished else {
             // Task vanished without reporting (panic or abort).
             self.current = None;
@@ -827,15 +825,17 @@ mod tests {
 
     #[test]
     fn resolves_bare_model_ids() {
-        let params: SetModelParams = serde_json::from_value(json!({"model": "faux-model"})).unwrap();
+        let params: SetModelParams =
+            serde_json::from_value(json!({"model": "faux-model"})).unwrap();
         assert!(resolve_model(&catalog(), &params).is_some());
     }
 
     #[test]
     fn resolves_upstream_provider_model_id_pair() {
-        let params: SetModelParams =
-            serde_json::from_value(json!({"provider": "anthropic", "modelId": "claude-sonnet-4-5"}))
-                .unwrap();
+        let params: SetModelParams = serde_json::from_value(
+            json!({"provider": "anthropic", "modelId": "claude-sonnet-4-5"}),
+        )
+        .unwrap();
         assert!(resolve_model(&catalog(), &params).is_some());
     }
 
@@ -862,10 +862,10 @@ mod tests {
             RpcServerOptions {
                 model: fake_model("faux", "faux-model"),
                 models: catalog(),
-                stream_fn: pi_ai::stream::SharedStreamFn::from(
-                    std::sync::Arc::new(pi_ai::providers::faux::FauxProvider::default())
-                        as std::sync::Arc<dyn pi_ai::stream::StreamFn>,
-                ),
+                stream_fn: pi_ai::stream::SharedStreamFn::from(std::sync::Arc::new(
+                    pi_ai::providers::faux::FauxProvider::default(),
+                )
+                    as std::sync::Arc<dyn pi_ai::stream::StreamFn>),
                 system_prompt: String::new(),
                 session_id: "session-test".into(),
                 prompt_templates: Vec::new(),

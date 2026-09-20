@@ -145,10 +145,8 @@ pub fn parse_command_args(args_string: &str) -> Vec<String> {
 fn substitution_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r"\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)",
-        )
-        .expect("valid substitution regex")
+        Regex::new(r"\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)")
+            .expect("valid substitution regex")
     })
 }
 
@@ -366,9 +364,7 @@ pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> PromptTemp
         } else if metadata.is_file()
             && resolved.extension().and_then(|ext| ext.to_str()) == Some("md")
         {
-            if let Some(template) =
-                load_template_from_file(&resolved, PromptTemplateSource::Path)
-            {
+            if let Some(template) = load_template_from_file(&resolved, PromptTemplateSource::Path) {
                 add(vec![template], &mut result);
             }
         } else {
@@ -495,7 +491,12 @@ mod tests {
 
     #[test]
     fn substitutes_slices() {
-        let args = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let args = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
         assert_eq!(substitute_args("${@:2}", &args), "b c d");
         assert_eq!(substitute_args("${@:2:2}", &args), "b c");
         assert_eq!(substitute_args("${@:1:1}", &args), "a");
@@ -560,14 +561,20 @@ mod tests {
         });
 
         let template = &result.templates[0];
-        assert_eq!(template.description.chars().count(), MAX_GENERATED_DESCRIPTION + 3);
+        assert_eq!(
+            template.description.chars().count(),
+            MAX_GENERATED_DESCRIPTION + 3
+        );
         assert!(template.description.ends_with("..."));
     }
 
     #[test]
     fn defaults_then_explicit_paths_and_first_name_wins() {
         let temp = TempDir::new("precedence");
-        temp.write("agent/prompts/shared.md", "---\ndescription: From agent.\n---\nagent\n");
+        temp.write(
+            "agent/prompts/shared.md",
+            "---\ndescription: From agent.\n---\nagent\n",
+        );
         temp.write(
             "project/.pi/prompts/shared.md",
             "---\ndescription: From project.\n---\nproject\n",
@@ -586,7 +593,10 @@ mod tests {
         assert_eq!(result.templates[0].name, "shared");
         assert_eq!(result.templates[0].description, "From agent.");
         assert_eq!(result.templates[1].name, "extra");
-        assert!(result.diagnostics.iter().any(|d| d.message.contains("collision")));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("collision")));
     }
 
     #[test]

@@ -18,12 +18,12 @@ use pi_ai::stream::SharedStreamFn;
 use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
 use pi_coding_agent::extensions::wiring::ExtensionRuntime;
 use pi_coding_agent::file_processor::expand_prompt;
-use pi_coding_agent::print_mode::{
-    run_print_mode, OutputFormat, PrintModeError, PrintModeOptions,
-};
+use pi_coding_agent::print_mode::{run_print_mode, OutputFormat, PrintModeError, PrintModeOptions};
 use pi_coding_agent::session_log::SessionLog;
 use pi_coding_agent::tool_executor::default_executor;
-use pi_protocol::{Api, AssistantMessage, Content, Message, Model, ProviderId, Role, StopReason, Usage};
+use pi_protocol::{
+    Api, AssistantMessage, Content, Message, Model, ProviderId, Role, StopReason, Usage,
+};
 use pi_session::{SessionEntry, SessionReader};
 use tempfile::TempDir;
 
@@ -102,13 +102,7 @@ async fn text_mode_handles_five_turn_session() {
     // provider-side loop, which the current AgentLoop already
     // collapses into a single outer turn.
     let scripts: Vec<String> = (0..5).map(|i| format!("reply-{i}")).collect();
-    let (_dir, options) = build_options(
-        "text-5turn",
-        "ping",
-        scripts,
-        OutputFormat::Text,
-        5,
-    );
+    let (_dir, options) = build_options("text-5turn", "ping", scripts, OutputFormat::Text, 5);
     let result = run_print_mode(options).await.expect("run");
     assert_eq!(result.turns, 1);
     assert_eq!(result.stop_reason, StopReason::Stop);
@@ -116,13 +110,7 @@ async fn text_mode_handles_five_turn_session() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn json_mode_completes_with_usage() {
-    let (_dir, options) = build_options(
-        "json",
-        "hello",
-        vec!["hi".into()],
-        OutputFormat::Json,
-        0,
-    );
+    let (_dir, options) = build_options("json", "hello", vec!["hi".into()], OutputFormat::Json, 0);
     let result = run_print_mode(options).await.expect("run");
     assert_eq!(result.turns, 1);
     assert_eq!(result.stop_reason, StopReason::Stop);
@@ -199,13 +187,7 @@ async fn max_turns_passes_through_when_under_cap() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn empty_prompt_returns_agent_setup_error() {
-    let (_dir, options) = build_options(
-        "empty",
-        "",
-        vec!["hi".into()],
-        OutputFormat::Text,
-        0,
-    );
+    let (_dir, options) = build_options("empty", "", vec!["hi".into()], OutputFormat::Text, 0);
     let err = run_print_mode(options).await.unwrap_err();
     assert!(matches!(err, PrintModeError::AgentSetup(_)));
     assert_eq!(err.exit_code(), 78);
@@ -422,7 +404,10 @@ fn sigint_or_clean_exit() {
     }
     let bin = binary_path();
     if !bin.exists() {
-        eprintln!("skipping sigint test; binary not found at {}", bin.display());
+        eprintln!(
+            "skipping sigint test; binary not found at {}",
+            bin.display()
+        );
         return;
     }
     let mut child = Command::new(&bin)
@@ -453,7 +438,10 @@ fn sigint_or_clean_exit() {
 fn binary_text_mode_emits_faux_reply() {
     let bin = binary_path();
     if !bin.exists() {
-        eprintln!("skipping binary smoke test; binary not found at {}", bin.display());
+        eprintln!(
+            "skipping binary smoke test; binary not found at {}",
+            bin.display()
+        );
         return;
     }
     let output = Command::new(&bin)
@@ -477,7 +465,10 @@ fn binary_text_mode_emits_faux_reply() {
 fn binary_json_events_mode_emits_ndjson() {
     let bin = binary_path();
     if !bin.exists() {
-        eprintln!("skipping binary smoke test; binary not found at {}", bin.display());
+        eprintln!(
+            "skipping binary smoke test; binary not found at {}",
+            bin.display()
+        );
         return;
     }
     let output = Command::new(&bin)
@@ -508,7 +499,10 @@ fn binary_at_file_expands_prompt() {
     std::fs::write(&file, b"hello from file").expect("write");
     let bin = binary_path();
     if !bin.exists() {
-        eprintln!("skipping binary smoke test; binary not found at {}", bin.display());
+        eprintln!(
+            "skipping binary smoke test; binary not found at {}",
+            bin.display()
+        );
         return;
     }
     let output = Command::new(&bin)

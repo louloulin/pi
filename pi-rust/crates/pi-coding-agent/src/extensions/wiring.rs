@@ -665,7 +665,11 @@ mod tests {
         // Untrusted: explicit + global load, the project-local file does not.
         options.project_trusted = false;
         let untrusted = load(&runtime, &options);
-        assert!(untrusted.errors.is_empty(), "errors: {:?}", untrusted.errors);
+        assert!(
+            untrusted.errors.is_empty(),
+            "errors: {:?}",
+            untrusted.errors
+        );
         let mut untrusted_tools = untrusted.tools.clone();
         untrusted_tools.sort();
         assert_eq!(
@@ -692,8 +696,16 @@ mod tests {
                 "local_tool".to_string()
             ]
         );
-        assert!(trusted.loaded.contains(&local), "loaded: {:?}", trusted.loaded);
-        assert!(trusted.loaded.contains(&global), "loaded: {:?}", trusted.loaded);
+        assert!(
+            trusted.loaded.contains(&local),
+            "loaded: {:?}",
+            trusted.loaded
+        );
+        assert!(
+            trusted.loaded.contains(&global),
+            "loaded: {:?}",
+            trusted.loaded
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

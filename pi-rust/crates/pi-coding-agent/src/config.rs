@@ -350,16 +350,15 @@ pub fn save_user_setting(
     };
     set_path(&mut root, key, value)?;
 
-    let mut text = serde_json::to_string_pretty(&Value::Object(root))
-        .context("serialize settings.json")?;
+    let mut text =
+        serde_json::to_string_pretty(&Value::Object(root)).context("serialize settings.json")?;
     // Two-space indent plus a trailing newline, the shape every other JSON
     // file this crate writes uses (`trust.rs:331`). Upstream's
     // `JSON.stringify(..., null, 2)` omits the newline.
     text.push('\n');
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let temp = temp_sibling(&path);
     std::fs::write(&temp, text).with_context(|| format!("write {}", temp.display()))?;
@@ -389,7 +388,10 @@ fn read_object_for_write(path: &Path) -> anyhow::Result<Option<Map<String, Value
             path.display(),
             json_kind(&other)
         ),
-        Err(err) => bail!("{}: invalid JSON ({err}) — refusing to overwrite it", path.display()),
+        Err(err) => bail!(
+            "{}: invalid JSON ({err}) — refusing to overwrite it",
+            path.display()
+        ),
     }
 }
 
@@ -456,23 +458,18 @@ pub fn load_compaction_settings(sources: &ConfigSources) -> CompactionSettings {
 
     CompactionSettings {
         enabled: read_auto_compact(&merged),
-        reserve_tokens: read_token(
-            &merged,
-            "reserveTokens",
-            DEFAULT_RESERVE_TOKENS,
-        ),
-        keep_recent_tokens: read_token(
-            &merged,
-            "keepRecentTokens",
-            DEFAULT_KEEP_RECENT_TOKENS,
-        ),
+        reserve_tokens: read_token(&merged, "reserveTokens", DEFAULT_RESERVE_TOKENS),
+        keep_recent_tokens: read_token(&merged, "keepRecentTokens", DEFAULT_KEEP_RECENT_TOKENS),
     }
 }
 
 /// Read one of the two `compaction` token settings, falling back to
 /// `default` when it is missing or malformed.
 fn read_token(merged: &Map<String, Value>, key: &str, default: u32) -> u32 {
-    let Some(value) = merged.get("compaction").and_then(Value::as_object).and_then(|c| c.get(key))
+    let Some(value) = merged
+        .get("compaction")
+        .and_then(Value::as_object)
+        .and_then(|c| c.get(key))
     else {
         return default;
     };
@@ -715,8 +712,16 @@ mod tests {
     #[test]
     fn project_toggle_overrides_user_toggle() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let user = write(dir.path(), "user.json", r#"{"compaction":{"enabled":false}}"#);
-        let project = write(dir.path(), "project.json", r#"{"compaction":{"enabled":true}}"#);
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"compaction":{"enabled":false}}"#,
+        );
+        let project = write(
+            dir.path(),
+            "project.json",
+            r#"{"compaction":{"enabled":true}}"#,
+        );
         assert!(settings(Some(&user), Some(&project)).enabled);
     }
 
@@ -756,7 +761,10 @@ mod tests {
             project: Some(project),
         });
         assert_eq!(settings.theme.as_deref(), Some("dark"));
-        assert!(!settings.fullscreen_copy_on_select, "the user value survives");
+        assert!(
+            !settings.fullscreen_copy_on_select,
+            "the user value survives"
+        );
 
         let user_only = load_ui_settings(&ConfigSources {
             user: Some(user),
@@ -1006,7 +1014,10 @@ mod tests {
         // The unknown top-level key is untouched...
         assert_eq!(parsed["defaultModel"], serde_json::json!("faux"));
         // ...and the untouched sibling inside the nested object too.
-        assert_eq!(parsed["compaction"]["reserveTokens"], serde_json::json!(4096));
+        assert_eq!(
+            parsed["compaction"]["reserveTokens"],
+            serde_json::json!(4096)
+        );
         assert_eq!(parsed["compaction"]["enabled"], serde_json::json!(false));
         assert!(!load_compaction_settings(&sources).enabled);
     }

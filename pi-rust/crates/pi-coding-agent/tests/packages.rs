@@ -12,9 +12,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pi_coding_agent::packages::{
-    installer, InstallError, PackageFetcher, PackageSpec, Registry,
-};
+use pi_coding_agent::packages::{installer, InstallError, PackageFetcher, PackageSpec, Registry};
 use pi_extensions::ExtensionSearchPaths;
 use tempfile::TempDir;
 
@@ -60,7 +58,11 @@ fn run_pi(args: &[&str], cwd: &Path, home: &Path, pi_home: Option<&Path>) -> Run
                 if start.elapsed() > COMMAND_TIMEOUT {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("`pi {}` hung for {:?} (interactive regression)", args.join(" "), COMMAND_TIMEOUT);
+                    panic!(
+                        "`pi {}` hung for {:?} (interactive regression)",
+                        args.join(" "),
+                        COMMAND_TIMEOUT
+                    );
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -84,7 +86,8 @@ fn write_fixture(dir: &Path, name: &str) -> PathBuf {
         format!(r#"{{"name":"{name}","keywords":["pi-package"]}}"#),
     )
     .expect("fixture package.json");
-    fs::write(package.join("extensions/hello.js"), "export default {};\n").expect("fixture extension");
+    fs::write(package.join("extensions/hello.js"), "export default {};\n")
+        .expect("fixture extension");
     package
 }
 
@@ -116,7 +119,11 @@ fn install_file_package_is_listed_and_discoverable() {
         install.stdout,
         install.stderr
     );
-    assert!(install.stdout.contains("Installed ./hello-pkg"), "{}", install.stdout);
+    assert!(
+        install.stdout.contains("Installed ./hello-pkg"),
+        "{}",
+        install.stdout
+    );
 
     // `pi list` sees the package.
     let list = run_pi(
@@ -126,7 +133,11 @@ fn install_file_package_is_listed_and_discoverable() {
         None,
     );
     assert_eq!(list.status.code(), Some(0), "stderr={:?}", list.stderr);
-    assert!(list.stdout.contains("hello-pkg"), "list output: {}", list.stdout);
+    assert!(
+        list.stdout.contains("hello-pkg"),
+        "list output: {}",
+        list.stdout
+    );
 
     // The registry is valid JSON with the documented schema.
     let registry_path = root.join("packages.json");
@@ -135,7 +146,10 @@ fn install_file_package_is_listed_and_discoverable() {
     let entry = &parsed["packages"][0];
     assert_eq!(entry["name"], "hello-pkg");
     assert_eq!(entry["spec"], "./hello-pkg");
-    assert!(entry["installedAt"].is_string(), "installedAt missing: {raw}");
+    assert!(
+        entry["installedAt"].is_string(),
+        "installedAt missing: {raw}"
+    );
     assert!(entry["resolved"].is_string());
     assert!(Path::new(entry["resolved"].as_str().unwrap()).is_dir());
 
@@ -164,9 +178,18 @@ fn install_file_package_is_listed_and_discoverable() {
         temp.path(),
         None,
     );
-    assert_eq!(reinstall.status.code(), Some(0), "stderr={:?}", reinstall.stderr);
+    assert_eq!(
+        reinstall.status.code(),
+        Some(0),
+        "stderr={:?}",
+        reinstall.stderr
+    );
     let registry = Registry::load(&root).expect("reload registry");
-    assert_eq!(registry.packages().len(), 1, "re-install appended a duplicate");
+    assert_eq!(
+        registry.packages().len(),
+        1,
+        "re-install appended a duplicate"
+    );
 }
 
 #[test]
@@ -182,7 +205,12 @@ fn remove_deletes_package_and_empties_registry() {
         temp.path(),
         None,
     );
-    assert_eq!(install.status.code(), Some(0), "stderr={:?}", install.stderr);
+    assert_eq!(
+        install.status.code(),
+        Some(0),
+        "stderr={:?}",
+        install.stderr
+    );
 
     let remove = run_pi(
         &["remove", "./hello-pkg", "--dir", root.to_str().unwrap()],
@@ -193,7 +221,10 @@ fn remove_deletes_package_and_empties_registry() {
     assert_eq!(remove.status.code(), Some(0), "stderr={:?}", remove.stderr);
     assert!(remove.stdout.contains("Removed"), "{}", remove.stdout);
 
-    assert!(!root.join("packages/hello-pkg").exists(), "install dir not deleted");
+    assert!(
+        !root.join("packages/hello-pkg").exists(),
+        "install dir not deleted"
+    );
     assert!(
         !root.join("agent/extensions/hello-pkg").exists(),
         "extension dir not deleted"
@@ -206,7 +237,11 @@ fn remove_deletes_package_and_empties_registry() {
         None,
     );
     assert_eq!(list.status.code(), Some(0), "stderr={:?}", list.stderr);
-    assert!(list.stdout.trim().is_empty(), "list not empty: {}", list.stdout);
+    assert!(
+        list.stdout.trim().is_empty(),
+        "list not empty: {}",
+        list.stdout
+    );
 
     // Removing a missing package is a non-zero, non-hanging error.
     let missing = run_pi(
@@ -227,8 +262,16 @@ fn pi_home_overrides_the_root() {
     write_fixture(cwd, "hello-pkg");
 
     let install = run_pi(&["install", "./hello-pkg"], cwd, temp.path(), Some(&root));
-    assert_eq!(install.status.code(), Some(0), "stderr={:?}", install.stderr);
-    assert!(root.join("packages.json").is_file(), "PI_HOME root not used");
+    assert_eq!(
+        install.status.code(),
+        Some(0),
+        "stderr={:?}",
+        install.stderr
+    );
+    assert!(
+        root.join("packages.json").is_file(),
+        "PI_HOME root not used"
+    );
 
     let list = run_pi(&["list"], cwd, temp.path(), Some(&root));
     assert_eq!(list.status.code(), Some(0), "stderr={:?}", list.stderr);
@@ -239,7 +282,12 @@ fn pi_home_overrides_the_root() {
 fn invalid_spec_exits_with_ex_usage() {
     let temp = temp();
     let root = temp.path().join("pi-root");
-    for spec in ["some-bare-name", "npm:", "not-a-spec", "ftp://example.com/pkg"] {
+    for spec in [
+        "some-bare-name",
+        "npm:",
+        "not-a-spec",
+        "ftp://example.com/pkg",
+    ] {
         let result = run_pi(
             &["install", spec, "--dir", root.to_str().unwrap()],
             temp.path(),
@@ -259,12 +307,22 @@ fn invalid_spec_exits_with_ex_usage() {
     // A syntactically valid local path that does not exist is a runtime
     // error, not a usage error.
     let missing = run_pi(
-        &["install", "./does-not-exist", "--dir", root.to_str().unwrap()],
+        &[
+            "install",
+            "./does-not-exist",
+            "--dir",
+            root.to_str().unwrap(),
+        ],
         temp.path(),
         temp.path(),
         None,
     );
-    assert_eq!(missing.status.code(), Some(66), "stderr={:?}", missing.stderr);
+    assert_eq!(
+        missing.status.code(),
+        Some(66),
+        "stderr={:?}",
+        missing.stderr
+    );
     assert!(!missing.stderr.is_empty());
 }
 
@@ -278,18 +336,32 @@ fn version_list_and_models_do_not_enter_interactive_mode() {
     let cwd = temp.path();
 
     let version = run_pi(&["version"], cwd, temp.path(), None);
-    assert_eq!(version.status.code(), Some(0), "stderr={:?}", version.stderr);
+    assert_eq!(
+        version.status.code(),
+        Some(0),
+        "stderr={:?}",
+        version.stderr
+    );
     assert!(version.stdout.contains("pi "), "{}", version.stdout);
     assert!(version.stdout.contains("faux"), "{}", version.stdout);
     assert!(version.elapsed < COMMAND_TIMEOUT);
 
     let models = run_pi(&["list-models"], cwd, temp.path(), None);
     assert_eq!(models.status.code(), Some(0), "stderr={:?}", models.stderr);
-    assert!(!models.stdout.trim().is_empty(), "list-models printed nothing");
+    assert!(
+        !models.stdout.trim().is_empty(),
+        "list-models printed nothing"
+    );
 
     let models_json = run_pi(&["list-models", "--output", "json"], cwd, temp.path(), None);
-    assert_eq!(models_json.status.code(), Some(0), "stderr={:?}", models_json.stderr);
-    let parsed: serde_json::Value = serde_json::from_str(models_json.stdout.trim()).expect("json output");
+    assert_eq!(
+        models_json.status.code(),
+        Some(0),
+        "stderr={:?}",
+        models_json.stderr
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(models_json.stdout.trim()).expect("json output");
     assert!(parsed["models"].as_array().is_some_and(|m| !m.is_empty()));
 
     let update = run_pi(&["update-models"], cwd, temp.path(), None);
@@ -317,7 +389,8 @@ impl PackageFetcher for MockFetcher {
                     format!(r#"{{"name":"{name}","keywords":["pi-package"]}}"#),
                 )
                 .expect("mock package.json");
-                fs::write(dest.join("extensions/mock.js"), "export default {};\n").expect("mock extension");
+                fs::write(dest.join("extensions/mock.js"), "export default {};\n")
+                    .expect("mock extension");
                 Ok(dest.to_path_buf())
             }
             other => Err(InstallError::Fetch(format!(
@@ -333,9 +406,12 @@ fn npm_install_uses_fetcher_and_stays_idempotent() {
     let root = temp.path().join("pi-root");
     let cwd = temp.path();
 
-    let first = installer::install(&root, cwd, "npm:@foo/bar@1.0.0", &MockFetcher).expect("install");
+    let first =
+        installer::install(&root, cwd, "npm:@foo/bar@1.0.0", &MockFetcher).expect("install");
     assert_eq!(first.name, "@foo/bar");
-    assert!(Path::new(&first.resolved).join("extensions/mock.js").is_file());
+    assert!(Path::new(&first.resolved)
+        .join("extensions/mock.js")
+        .is_file());
     assert_eq!(first.extensions.len(), 1);
 
     installer::install(&root, cwd, "npm:@foo/bar@1.0.0", &MockFetcher).expect("reinstall");
@@ -350,9 +426,21 @@ fn npm_install_uses_fetcher_and_stays_idempotent() {
 
 #[test]
 fn spec_parsing_covers_all_source_kinds() {
-    assert!(matches!(PackageSpec::parse("npm:pkg"), Ok(PackageSpec::Npm { .. })));
-    assert!(matches!(PackageSpec::parse("git:host/user/repo@v1"), Ok(PackageSpec::Git { .. })));
-    assert!(matches!(PackageSpec::parse("https://host/user/repo"), Ok(PackageSpec::Https { .. })));
-    assert!(matches!(PackageSpec::parse("/tmp/pkg"), Ok(PackageSpec::File { .. })));
+    assert!(matches!(
+        PackageSpec::parse("npm:pkg"),
+        Ok(PackageSpec::Npm { .. })
+    ));
+    assert!(matches!(
+        PackageSpec::parse("git:host/user/repo@v1"),
+        Ok(PackageSpec::Git { .. })
+    ));
+    assert!(matches!(
+        PackageSpec::parse("https://host/user/repo"),
+        Ok(PackageSpec::Https { .. })
+    ));
+    assert!(matches!(
+        PackageSpec::parse("/tmp/pkg"),
+        Ok(PackageSpec::File { .. })
+    ));
     assert!(PackageSpec::parse("").is_err());
 }

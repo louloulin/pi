@@ -129,10 +129,7 @@ impl ExpandedPrompt {
 /// an `@` character followed by a non-whitespace run that starts with a
 /// path separator (`/`, `./`, `../`, `~`) or an alphanumeric segment
 /// the OS recognises as a file.
-pub fn expand_prompt(
-    prompt: &str,
-    stdin: Option<&str>,
-) -> Result<ExpandedPrompt, FileError> {
+pub fn expand_prompt(prompt: &str, stdin: Option<&str>) -> Result<ExpandedPrompt, FileError> {
     let mut out = ExpandedPrompt::default();
     let mut cursor = 0usize;
     let bytes = prompt.as_bytes();
@@ -182,10 +179,8 @@ pub fn expand_prompt(
                             // image is attached we add a placeholder
                             // `<file>` block so the model sees a
                             // `<file>` reference in the text.
-                            out.text.push_str(&format!(
-                                "<file name=\"{}\"></file>\n",
-                                path.display()
-                            ));
+                            out.text
+                                .push_str(&format!("<file name=\"{}\"></file>\n", path.display()));
                             out.images.push(image);
                         }
                     }
@@ -346,9 +341,11 @@ mod base64 {
                 self.len += take;
                 src = &src[take..];
                 if self.len == 3 {
-                    let n =
-                        ((self.buf[0] as u32) << 16) | ((self.buf[1] as u32) << 8) | self.buf[2] as u32;
-                    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                    let n = ((self.buf[0] as u32) << 16)
+                        | ((self.buf[1] as u32) << 8)
+                        | self.buf[2] as u32;
+                    let alphabet =
+                        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
                     let out = [
                         alphabet[((n >> 18) & 0x3F) as usize],
                         alphabet[((n >> 12) & 0x3F) as usize],

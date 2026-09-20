@@ -56,8 +56,14 @@ pub struct JsLoadOutcome {
 /// string and entry, failure carries the loader error.
 #[allow(dead_code)]
 enum CandidateResult {
-    Ok { entry: ExtensionEntry, source: String },
-    Err { path: PathBuf, error: JsLoaderError },
+    Ok {
+        entry: ExtensionEntry,
+        source: String,
+    },
+    Err {
+        path: PathBuf,
+        error: JsLoaderError,
+    },
 }
 
 /// One extension load pass: the default search paths plus any paths the
@@ -193,7 +199,12 @@ pub fn bridge_for(
     has_ui: bool,
     cwd: &str,
 ) -> Arc<JsExtensionBridge> {
-    Arc::new(JsExtensionBridge::new(host, mode.to_string(), has_ui, cwd.to_string()))
+    Arc::new(JsExtensionBridge::new(
+        host,
+        mode.to_string(),
+        has_ui,
+        cwd.to_string(),
+    ))
 }
 
 /// Build the canonical search paths for a given home / cwd.
@@ -204,19 +215,14 @@ pub fn search_paths(home: Option<&Path>, cwd: &Path) -> ExtensionSearchPaths {
 /// Fan out a [`ExtensionEvent`] through every loaded extension via the
 /// bridge. The bridge's [`deliver`](pi_extensions::ExtensionBridge)
 /// returns `true` when at least one handler subscribed.
-pub async fn dispatch(
-    bridge: &JsExtensionBridge,
-    event: &ExtensionEvent,
-) -> bool {
+pub async fn dispatch(bridge: &JsExtensionBridge, event: &ExtensionEvent) -> bool {
     bridge.deliver(event).await
 }
 
 /// Flatten a [`JsLoadOutcome`] into the JSON-descriptor format the
 /// JSON loader path already understands. Used by callers that want
 /// to log the load results without depending on the JS host types.
-pub fn outcome_to_json(
-    outcome: &JsLoadOutcome,
-) -> Vec<serde_json::Value> {
+pub fn outcome_to_json(outcome: &JsLoadOutcome) -> Vec<serde_json::Value> {
     outcome
         .entries
         .iter()
@@ -312,14 +318,8 @@ mod tests {
 
     #[test]
     fn kind_for_known_extensions() {
-        assert_eq!(
-            js_kind_for(Path::new("/x/y.ts")),
-            Some(JsKind::TypeScript)
-        );
-        assert_eq!(
-            js_kind_for(Path::new("/x/y.js")),
-            Some(JsKind::JavaScript)
-        );
+        assert_eq!(js_kind_for(Path::new("/x/y.ts")), Some(JsKind::TypeScript));
+        assert_eq!(js_kind_for(Path::new("/x/y.js")), Some(JsKind::JavaScript));
         assert_eq!(js_kind_for(Path::new("/x/y.mjs")), Some(JsKind::JavaScript));
         assert_eq!(js_kind_for(Path::new("/x/y.json")), None);
     }
@@ -389,7 +389,8 @@ mod tests {
             project: Some(dir.clone()),
         };
         let host = JsExtensionHost::new().await.expect("host");
-        let outcome = load_extensions(host.clone(), &paths, "tui", true, dir.to_str().unwrap()).await;
+        let outcome =
+            load_extensions(host.clone(), &paths, "tui", true, dir.to_str().unwrap()).await;
         let ids: Vec<&str> = outcome.entries.iter().map(|e| e.id.as_str()).collect();
         assert!(ids.contains(&"alpha"), "alpha not loaded, got {ids:?}");
         assert!(ids.contains(&"beta"), "beta not loaded, got {ids:?}");

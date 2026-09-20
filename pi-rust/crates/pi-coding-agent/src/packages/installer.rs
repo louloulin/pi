@@ -341,12 +341,8 @@ impl PackageFetcher for RealFetcher {
     fn fetch(&self, spec: &PackageSpec, dest: &Path) -> Result<PathBuf, InstallError> {
         match spec {
             PackageSpec::Npm { spec, name, .. } => fetch_npm(spec, name, dest),
-            PackageSpec::Git {
-                url, reference, ..
-            } => fetch_git(url, reference.as_deref(), dest),
-            PackageSpec::Https {
-                url, reference, ..
-            } => {
+            PackageSpec::Git { url, reference, .. } => fetch_git(url, reference.as_deref(), dest),
+            PackageSpec::Https { url, reference, .. } => {
                 if looks_like_archive(url) {
                     return Err(InstallError::Unsupported(format!(
                         "https tarball installs are not supported yet ({url}); use `git:` or a local path"
@@ -401,7 +397,11 @@ fn fetch_npm(spec: &str, name: &str, dest: &Path) -> Result<PathBuf, InstallErro
 }
 
 fn fetch_git(url: &str, reference: Option<&str>, dest: &Path) -> Result<PathBuf, InstallError> {
-    run_command("git", &["clone", url, dest.to_string_lossy().as_ref()], None)?;
+    run_command(
+        "git",
+        &["clone", url, dest.to_string_lossy().as_ref()],
+        None,
+    )?;
     if let Some(reference) = reference {
         run_command("git", &["checkout", reference], Some(dest))?;
     }

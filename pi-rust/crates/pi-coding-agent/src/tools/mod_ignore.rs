@@ -20,14 +20,8 @@ use std::path::{Component, Path, PathBuf};
 /// port relies on `fd`'s `.gitignore` handling, but our pure-Rust
 /// implementation has no such machinery — instead it skips the usual
 /// build / VCS noise by name.
-pub const DEFAULT_IGNORE_NAMES: &[&str] = &[
-    ".git",
-    ".pi",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-];
+pub const DEFAULT_IGNORE_NAMES: &[&str] =
+    &[".git", ".pi", "node_modules", "target", "dist", "build"];
 
 /// `true` if `name` (a single path component) should be skipped during
 /// directory walks.
@@ -48,10 +42,7 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
 /// - Paths containing a `..` component are rejected for the same reason.
 /// - Otherwise the input is joined onto `cwd` and returned as an absolute
 ///   [`PathBuf`].
-pub fn relativize_for_search(
-    raw: &str,
-    cwd: &Path,
-) -> Result<(PathBuf, String), super::ToolError> {
+pub fn relativize_for_search(raw: &str, cwd: &Path) -> Result<(PathBuf, String), super::ToolError> {
     use super::ToolError;
 
     let input = raw.trim();

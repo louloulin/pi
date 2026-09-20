@@ -54,7 +54,11 @@ impl std::fmt::Debug for BuiltinToolExecutor {
         f.debug_struct("BuiltinToolExecutor")
             .field(
                 "tools",
-                &self.tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+                &self
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name())
+                    .collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -198,10 +202,7 @@ fn rebase_arguments(name: &str, args: &mut serde_json::Value, cwd: &str) {
 /// [`ExtensionToolExecutor`]: a built-in keeps its declared mode, and every
 /// other name is an extension tool — or a stale call — which is serialized
 /// out of caution.
-fn extension_execution_mode(
-    builtin: &BuiltinToolExecutor,
-    tool_name: &str,
-) -> ToolExecutionMode {
+fn extension_execution_mode(builtin: &BuiltinToolExecutor, tool_name: &str) -> ToolExecutionMode {
     if builtin.tools().iter().any(|tool| tool.name() == tool_name) {
         return builtin.execution_mode(tool_name);
     }

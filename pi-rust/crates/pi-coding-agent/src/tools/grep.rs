@@ -156,8 +156,8 @@ impl AgentTool for GrepTool {
             return Err(ToolError::Aborted);
         }
 
-        let parsed: GrepArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: GrepArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let cwd = std::env::current_dir().map_err(|e| {
             ToolError::Execution(format!("failed to resolve current directory: {}", e))

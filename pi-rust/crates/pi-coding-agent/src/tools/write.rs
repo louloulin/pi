@@ -65,8 +65,8 @@ impl AgentTool for WriteTool {
             return Err(ToolError::Aborted);
         }
 
-        let parsed: WriteArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: WriteArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         if let Some(parent) = std::path::Path::new(&parsed.path).parent() {
             if !parent.as_os_str().is_empty() {

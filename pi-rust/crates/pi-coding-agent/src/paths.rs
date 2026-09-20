@@ -110,7 +110,10 @@ mod tests {
             normalize_lexically(Path::new("/a/b/../c/./d")),
             PathBuf::from("/a/c/d")
         );
-        assert_eq!(normalize_lexically(Path::new("a/./b")), PathBuf::from("a/b"));
+        assert_eq!(
+            normalize_lexically(Path::new("a/./b")),
+            PathBuf::from("a/b")
+        );
     }
 
     #[test]

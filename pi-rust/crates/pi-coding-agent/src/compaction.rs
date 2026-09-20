@@ -422,9 +422,8 @@ pub fn estimate_context_tokens(messages: &[Message]) -> u32 {
 
 /// Provider-reported usage plus the estimate for the messages after it.
 pub fn context_tokens_with_trailing(usage: &Usage, trailing: &[Message]) -> u32 {
-    pi_ai::utils::estimate::calculate_context_tokens(usage).saturating_add(
-        pi_ai::utils::estimate::estimate_messages_tokens(trailing),
-    )
+    pi_ai::utils::estimate::calculate_context_tokens(usage)
+        .saturating_add(pi_ai::utils::estimate::estimate_messages_tokens(trailing))
 }
 
 /// `shouldCompact(contextTokens, contextWindow, settings)`.

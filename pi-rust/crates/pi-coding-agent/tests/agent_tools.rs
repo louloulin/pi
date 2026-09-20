@@ -88,7 +88,10 @@ impl ScriptedStream {
     }
 
     fn advertised_tools(&self) -> Vec<String> {
-        self.advertised_tools.lock().expect("advertised tools").clone()
+        self.advertised_tools
+            .lock()
+            .expect("advertised tools")
+            .clone()
     }
 }
 
@@ -167,7 +170,8 @@ fn tool_result_text(result: &ToolResult) -> String {
 
 fn build_agent(stream: Arc<ScriptedStream>) -> Agent {
     Agent::new(
-        AgentOptions::new(faux_model(), stream, "you are pi").with_tool_executor(default_executor()),
+        AgentOptions::new(faux_model(), stream, "you are pi")
+            .with_tool_executor(default_executor()),
     )
 }
 
@@ -246,7 +250,8 @@ async fn grep_tool_finds_matching_line_in_temp_dir() {
         .prefix("pi-tools-grep-")
         .tempdir_in(&cwd)
         .expect("tempdir in cwd");
-    std::fs::write(dir.path().join("data.txt"), "irrelevant\nneedle here\n").expect("write fixture");
+    std::fs::write(dir.path().join("data.txt"), "irrelevant\nneedle here\n")
+        .expect("write fixture");
     let relative = dir
         .path()
         .strip_prefix(&cwd)
@@ -275,7 +280,10 @@ async fn grep_tool_finds_matching_line_in_temp_dir() {
         text.contains("needle here"),
         "grep must report the matching line, got: {text:?}"
     );
-    assert!(text.contains("data.txt"), "grep output should name the file");
+    assert!(
+        text.contains("data.txt"),
+        "grep output should name the file"
+    );
 }
 
 #[tokio::test]

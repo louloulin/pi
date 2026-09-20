@@ -105,9 +105,7 @@ fn build_adapter(spec: &ProviderSpec, api_key: String, base_url: String) -> Opti
     let adapter: SharedStreamFn = match spec.api {
         Api::Faux => Arc::new(FauxProvider::default()),
         Api::OpenAiChatCompletions => Arc::new(OpenAiProvider::with_base_url(api_key, base_url)),
-        Api::OpenAiResponses => {
-            Arc::new(OpenAiResponsesProvider::with_base_url(api_key, base_url))
-        }
+        Api::OpenAiResponses => Arc::new(OpenAiResponsesProvider::with_base_url(api_key, base_url)),
         Api::AzureOpenAiResponses => Arc::new(AzureOpenAiResponsesProvider::new(api_key, base_url)),
         Api::AnthropicMessages => Arc::new(AnthropicProvider::with_base_url(api_key, base_url)),
         Api::GoogleGenerativeAi => Arc::new(GoogleProvider::with_base_url(api_key, base_url)),
@@ -588,8 +586,7 @@ mod tests {
             err,
             ProviderError::MissingApiKey {
                 provider: "anthropic".to_string(),
-                vars: "ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN"
-                    .to_string(),
+                vars: "ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_OAUTH_TOKEN".to_string(),
             }
         );
         assert!(err.to_string().contains("ANTHROPIC_API_KEY"));
@@ -635,7 +632,11 @@ mod tests {
             _ => None,
         });
         assert!(router
-            .require(&model("google", "gemini-2.5-flash", Api::GoogleGenerativeAi))
+            .require(&model(
+                "google",
+                "gemini-2.5-flash",
+                Api::GoogleGenerativeAi
+            ))
             .is_ok());
         assert_eq!(router.provider_ids(), vec!["faux", "google"]);
     }

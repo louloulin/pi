@@ -178,7 +178,10 @@ pub fn build_system_prompt(options: &SystemPromptOptions) -> String {
         .unwrap_or_default();
 
     let tools: Vec<String> = if options.selected_tools.is_empty() {
-        DEFAULT_SELECTED_TOOLS.iter().map(|tool| tool.to_string()).collect()
+        DEFAULT_SELECTED_TOOLS
+            .iter()
+            .map(|tool| tool.to_string())
+            .collect()
     } else {
         options.selected_tools.clone()
     };
@@ -291,7 +294,10 @@ fn render_guidelines(options: &SystemPromptOptions, tools: &[String]) -> String 
         if has("bash") && has("powershell") {
             push("Use bash or PowerShell for file operations like listing, searching, and finding files".to_string());
         } else if has("powershell") {
-            push("Use PowerShell for file operations like listing, searching, and finding files".to_string());
+            push(
+                "Use PowerShell for file operations like listing, searching, and finding files"
+                    .to_string(),
+            );
         } else {
             push("Use bash for file operations like ls, rg, find".to_string());
         }

@@ -15,7 +15,7 @@ pub mod spec;
 
 pub use commands::{run, CommandError, PackageCommand};
 pub use installer::{
-    install, remove, resolve_root, collect_extensions, InstallError, PackageFetcher, RealFetcher,
+    collect_extensions, install, remove, resolve_root, InstallError, PackageFetcher, RealFetcher,
     EXTENSIONS_DIR, PACKAGES_DIR,
 };
 pub use registry::{PackageEntry, Registry, RegistryError};
