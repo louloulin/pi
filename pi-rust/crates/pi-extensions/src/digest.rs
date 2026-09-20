@@ -126,7 +126,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
             a = temp1.wrapping_add(temp2);
         }
 
-        for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h].into_iter()) {
+        for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *slot = slot.wrapping_add(value);
         }
     }
@@ -178,7 +178,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
             a = temp;
         }
 
-        for (slot, value) in state.iter_mut().zip([a, b, c, d, e].into_iter()) {
+        for (slot, value) in state.iter_mut().zip([a, b, c, d, e]) {
             *slot = slot.wrapping_add(value);
         }
     }
