@@ -23,9 +23,14 @@ worker 的 stage 划分。
    的选择结果每次都不同。本轮已修（见第四节）。
 6. 第二轮审计（LUM-1215）把 P1-3 从「缺功能」升级为**确定性缺陷**：流式期间在编辑器里敲
    Enter，文本会被静默丢弃 —— 编辑器先清空，`App::submit` 再因忙直接 `return`
-   （`crates/pi-tui/src/app.rs:1849-1852` → `:1236-1239`），全程没有队列、没有提示、没有日志。
+   （`crates/pi-tui/src/app.rs:1932-1937` → `:1307-1310`），全程没有队列、没有提示、没有日志。
    这是输入丢失，严重度高于 P0-1 的「刷屏」；修复面与 P0-1 的富渲染器接线互不重叠，因此单独
    停放为 Stage 61（见第五节）。
+
+> **行号校正（LUM-1219，tip `570f6158d`）**：LUM-1215 写下的 `app.rs:1849-1852` / `:1236-1239` /
+> `:1772` / `:1778` 是 `3e7566bf2` 之前的旧坐标，被 LUM-1213（thinking 渲染）的合并往下推了约 83 行。
+> 现在请一律以 P1-3 表格里校正后的坐标为准；**代码结构未变**（同一处 `prompt.clear()` + 同一处忙时
+> `return`），只是行号漂移。
 
 ## 一、基线
 
@@ -124,16 +129,23 @@ worker 的 stage 划分。
 
 | 环节 | 位置 | 行为 |
 | --- | --- | --- |
-| 编辑器提交 | `crates/pi-tui/src/app.rs:1849-1852` | `PromptAction::Submit` → **先 `prompt.clear()`**，再抛 `StepOutcome::Submitted` |
-| 驱动转发 | `crates/pi-coding-agent/src/interactive.rs:459` | 无条件 `app.submit(agent.clone(), text)` |
-| 忙时丢弃 | `crates/pi-tui/src/app.rs:1236-1239` | `if self.turn_busy.load(..) { return; }` —— 文本到此为止 |
+| 编辑器提交 | `crates/pi-tui/src/app.rs:1932-1937`（校正后） | `PromptAction::Submit` → **先 `prompt.clear()`**，再抛 `StepOutcome::Submitted` |
+| 驱动转发 | `crates/pi-coding-agent/src/interactive.rs:461`（校正后） | 无条件 `app.submit(agent.clone(), text)` |
+| 忙时丢弃 | `crates/pi-tui/src/app.rs:1307-1310`（校正后） | `if self.turn_busy.load(..) { return; }` —— 文本到此为止 |
 
 也就是说：一个长 turn 里敲进去的每一句话，按 Enter 就永久消失，没有任何反馈。`turn_busy` 只被
-`app.interrupt`（`:1772`）、`app.clear`（`:1778`）、`/compact`（`interactive.rs:950`）读取，
+`app.interrupt`（`app.rs:1847`）、`app.clear`（`app.rs:1852`）、`/compact`（`interactive.rs:950`）读取，
 编辑器与提交路径都不看它，所以这不是「禁止输入」，而是「接受后扔掉」。
 
-同时 `app.message.followUp`、`app.message.dequeue`、`app.clipboard.pasteImage` 三个上游键位 id
-在 Rust 全仓**没有任何消费者**（只在 `keybindings.rs` 里定义，另有 `app.rs:114` 的文档注释提及）。
+对照：同是忙时拒绝，`/compact` 会明确回一句 `a turn is in flight — abort or wait for it to finish`
+（`interactive.rs:949-952`），所以「静默」只发生在普通 prompt 这条路上，不是全局行为。
+
+同时 `app.message.followUp`、`app.message.dequeue`、`app.clipboard.pasteImage`、`app.session.new`
+四个上游键位 id 在 Rust 全仓**没有任何消费者**（LUM-1219 在 tip `570f6158d` 上复核，
+`grep -rn … --include=*.rs | grep -v keybindings.rs` 零命中；只在 `keybindings.rs` 里定义，
+另有 `crates/pi-tui/src/app.rs:105-114` 的文档注释提及 —— 该注释本身也已过期：它把
+`app.model.cycleForward` / `app.thinking.toggle` 仍列为「no consumer」，而这两个 LUM-1210 / LUM-1213
+已接线，待 Stage 58/61 收工后一并订正，避免与在飞的 `app.rs` 改动面冲突）。
 
 上游语义（`packages/coding-agent/src/modes/interactive/interactive-mode.ts`）：
 

@@ -14857,3 +14857,102 @@ LUM-1209 / LUM-1213 收工后 `running_task_count` 回落到 1（本轮协调 ru
 * 本轮全程 `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` + `CARGO_INCREMENTAL=0`，收尾删除 target。
 * 提醒：三个新派发的 worker 若都开全量构建，请沿用同样的环境变量 —— LUM-1215 轮的 ENOSPC 就是
   「三个不开 debuginfo 开关的 target」叠出来的。
+
+## LUM-1219 round — 与 LUM-1217 相隔 8 分钟的**重复协调轮**：3 个 worker run 全部确认在飞（`running_task_count = 4` = Stage 61/58/60 + 本轮）→ 无可合并产物、**不重跑全量门**、**零派发**；本轮只做两件不占槽位的事：独立复核 Stage 61 证据链并**校正审计行号**、清 7.3G 陈旧 target 给在飞构建留盘
+
+### 一、开工盘点（关键是「不重复花资源」）
+
+* tip = `origin/feature/pi.rs` = `570f6158d`（LUM-1217 的文档提交，2026-09-20T10:32:14Z），**自 LUM-1217 收工后无新提交**。
+* `multica daemon status` → `status: running`、`running_task_count = 4`、`active_task_count = 4`。
+  `multica agent tasks 22e8b20d-…` 逐条对上，**没有一条是僵尸**：
+
+  | task id | issue | status | created |
+  | --- | --- | --- | --- |
+  | `01a0be66-c208-…` | LUM-1219（本轮协调） | running | 10:40:00 |
+  | `01a0be5f-645d-…` | LUM-1214（Stage 58 工具折叠） | running | 10:31:57 |
+  | `01a0be5f-61c3-…` | LUM-1216（Stage 61 输入队列） | running | 10:31:57 |
+  | `01a0be5f-507b-…` | LUM-1218（Stage 60 会话命令） | running | 10:31:52 |
+
+* 进程侧交叉验证（`ps`）：`lum-1216-ca3cb2ef6b6f/workdir/pi/pi-rust` 下正在跑
+  `cargo build -p pi-coding-agent`（含 `rustc --crate-name tokio`），四个 `pi` 进程 = 四个 run。
+  **结论：3 个工人槽位确实满，本轮无可派发余额。**
+* 开工磁盘 `30G / 50G`（64%，余 18G）。
+
+### 二、可合并性扫描（零命中）
+
+`git for-each-ref --sort=-committerdate refs/remotes/origin`：
+
+```
+2026-09-20 10:32:14 +0000 origin/feature/pi.rs   570f6158d   ← 本轮唯一新提交就是 LUM-1217 自己的文档提交
+2026-09-20 10:21:02 +0000 origin/agent/devbox1/f324f1f100e5 543845f2b  ← LUM-1209，已并入 feature/pi.rs
+2026-09-20 10:17:30 +0000 origin/work/LUM-1211   b51ee7e27  ← 已并入
+2026-09-20 10:04:33 +0000 origin/work/LUM-1213   ff7905126  ← 已并入
+```
+
+`work/LUM-1216`、`work/LUM-1214`、`work/LUM-1218` **在 origin 上都还不存在**，三个 issue 的评论线程
+也是空的 —— 三条线都还在编译阶段，**本轮没有可合并产物**。LUM-1217 里已复核过的 7 条陈旧分支不再重复扫
+（8 分钟内不会变）。
+
+### 三、为什么不重跑全量门（本轮的第二个操作结论）
+
+LUM-1217 在 **同一个 SHA `570f6158d`** 上、**8 分钟前**刚实跑过：
+
+```console
+cargo test --workspace --offline  → 143 套件 / 2131 passed / 0 failed / 2 ignored
+cargo clippy … -D warnings        → 退出 0
+cargo fmt --all -- --check        → 干净
+```
+
+tip 未变、无合并、无新提交 ⇒ 再跑一遍只会得到同一个 `570f6158d` 的结果，**信息增量为零**；
+而此刻机器上已有 3 份并发 `cargo` 在抢 CPU 与磁盘（LUM-1215 轮的 ENOSPC 就是在 3 份并发 target 下发生的）。
+所以本轮**明确不跑全量门**，把「全量门」这件事整体留给「合并三条线后」的那一轮 ——
+届时的基线应当仍是 143 / 2131 / 0 / 2 再叠加 61/58/60 的增量。
+
+### 四、本轮交付（不占槽位、不碰在飞文件）
+
+1. **独立复核 Stage 61 的缺陷前提**（worker 正在修，前提错了就白改）：在 `570f6158d` 上逐处读代码确认
+   「编辑器先清空 → 忙时 `return`」三段链成立，且**行号已漂移**（LUM-1213 的合并把 P1-3 引用的坐标整体下推约 83 行）：
+
+   | 环节 | 审计原文（旧坐标） | 校正后（`570f6158d`） |
+   | --- | --- | --- |
+   | 编辑器先清空 | `pi-tui/src/app.rs:1849-1852` | `pi-tui/src/app.rs:1932-1937` |
+   | 驱动无条件转发 | `pi-coding-agent/src/interactive.rs:459` | `pi-coding-agent/src/interactive.rs:461` |
+   | 忙时丢弃 | `pi-tui/src/app.rs:1236-1239` | `pi-tui/src/app.rs:1307-1310` |
+   | `turn_busy` 读取点 | `app.rs:1772` / `:1778` | `app.rs:1847` / `1852` |
+
+   已写进 `docs/TUI_UX_AUDIT.md`（P1-3 表格 + 顶部结论第 6 条 + 一段「行号校正」注）。
+2. **补充一条对照证据**：`/compact` 在忙时会明确回 `a turn is in flight — abort or wait for it to finish`
+   （`interactive.rs:949-952`）—— 说明「静默丢弃」只发生在普通 prompt 这条路上，不是全局设计意图，
+   这正好是 Stage 61 的验收锚点（修完后普通 prompt 必须给出与 `/compact` 同级的可见反馈）。
+3. **复核键位缺口**：`app.message.followUp`、`app.message.dequeue`、`app.clipboard.pasteImage`、
+   `app.session.new` 四个 id 全仓零消费者（`grep … --include=*.rs | grep -v keybindings.rs` 零命中）。
+4. **发现一处过期注释（记入待办，本轮不改）**：`crates/pi-tui/src/app.rs:105-114` 的模块文档仍把
+   `app.model.cycleForward` / `app.thinking.toggle` 列为「no consumer」，而 LUM-1210 / LUM-1213 已接线。
+   本轮**故意不动 `app.rs`**（Stage 58/61 的主战场），留给 61/58 收工后的那一轮一并订正。
+
+### 五、磁盘（本轮唯一的资源操作：给在飞构建留盘）
+
+开工 `30G / 50G`（64%，余 18G），三个 worker 正在建 target，而四个「已完成」run 的 target 还躺着：
+
+| run workdir | 清前 | 处置 |
+| --- | --- | --- |
+| `lum-1209-f324f1f100e5`（task 已 completed，`543845f2b` 已并入） | 3.1G | 删 `pi-rust/target` |
+| `lum-1213-86d1ca7e93cc`（已 completed，`ff7905126` 已并入） | 2.3G | 删 `pi-rust/target` |
+| `lum-1211-76da6d669e1d`（已 completed，`b51ee7e27` 已并入） | 1.8G | 删 `pi-rust/target` |
+| `lum-1189-3bcc98c399ee`（LUM-1189 轮 last commit `626e0b28a`） | 157M | 删 `pi-rust/target` |
+
+只删 `target/`（纯编译产物，源码与 git 工作树一字未动；四条线的提交都已在 origin 上），
+**回收 7.3G：`30G/50G` → `23G/50G`（49%，余 24G）**。在飞的 `lum-1216`（1.2G）/`lum-1218`（221M）/
+`lum-1214`（103M）target 与三个 run 的工作树均未触碰。本轮自身 36M（未构建，无 target）。
+
+### 六、frontier / 下一轮衔接
+
+* **下一轮第一件事**：三条线收工后按 **61 → 58 → 60** 顺序合并（正确性 → 信息密度 → 入口），
+  在合并后的 tip 上补跑全量门；61/58 都会改 `MessageItem` 与 `interactive.rs` 拦截块，冲突要逐处过。
+* **停车场（槽位释放后再开，本轮不派发）**：
+  * Stage 59 余项：`app.editor.external`、`app.session.tree|fork|resume`（`/tree`、`/fork` 仍依赖 LUM-1212 的 branch_* 读路径）；
+  * P1-4 `!cmd` / `!!cmd` 本地 shell 通道（会碰 `editor.rs` + `interactive.rs`，与在飞三条线重叠，故必须等）；
+  * P2：消息脚注 token/cache 指标、`reload_keybindings` 渲染循环触发点、多图粘贴 chip。
+* **流程提醒（第四次记录）**：autopilot 每 20 分钟一轮，LUM-1213 / 1215 / 1217 / 1219 **四轮同题**。
+  本轮的选择是「不重复花钱」——不重跑门、不重复扫分支、不动在飞文件；真正的产出留给合并轮。
+  若希望进一步省钱，建议把该 autopilot 的周期调长或暂停，由合并轮按需触发（已连续四轮在评论里提示）。
