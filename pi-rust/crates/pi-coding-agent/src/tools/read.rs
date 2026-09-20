@@ -226,12 +226,7 @@ impl AgentTool for ReadTool {
 /// MIME types the inline path forwards unchanged to the providers.
 ///
 /// Mirrors `normalizeSupportedImageMimeType` (`utils/image-process.ts:29-44`).
-const INLINE_IMAGE_MIME_TYPES: [&str; 4] = [
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-];
+const INLINE_IMAGE_MIME_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// Sniff the first bytes of a file for a supported image format.
 ///

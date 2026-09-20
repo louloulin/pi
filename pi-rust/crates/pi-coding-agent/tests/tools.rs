@@ -183,7 +183,11 @@ async fn read_bmp_without_a_converter_is_reported_as_omitted() {
         .await
         .expect("read bmp");
 
-    assert_eq!(output.content.len(), 1, "no image block without a converter");
+    assert_eq!(
+        output.content.len(),
+        1,
+        "no image block without a converter"
+    );
     assert_eq!(
         first_text(&output),
         "Read image file [image/bmp]\n[Image omitted: could not be converted to a supported inline image format.]"

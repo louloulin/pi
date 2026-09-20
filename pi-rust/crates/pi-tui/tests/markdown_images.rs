@@ -68,7 +68,10 @@ fn a_data_uri_image_renders_kitty_rows() {
 
     // Surrounding prose keeps its layout: the image sits between the two
     // paragraphs and no prose line is swallowed.
-    let lines = render_markdown(&format!("before\n\n{}\n\nafter", image_markdown("shot", PNG)), 40);
+    let lines = render_markdown(
+        &format!("before\n\n{}\n\nafter", image_markdown("shot", PNG)),
+        40,
+    );
     let rendered = texts(&lines);
     assert_eq!(rendered.first().map(String::as_str), Some("before"));
     assert_eq!(rendered.last().map(String::as_str), Some("after"));
@@ -131,7 +134,11 @@ fn a_non_data_image_renders_as_its_alt_text_link() {
         &format!("shot: {}", image_markdown("shot", PNG)),
         200,
     ));
-    assert_eq!(inline.len(), 1, "inline images do not become rows: {inline:?}");
+    assert_eq!(
+        inline.len(),
+        1,
+        "inline images do not become rows: {inline:?}"
+    );
     assert!(!inline[0].contains(KITTY_PREFIX));
     assert!(inline[0].starts_with("shot: shot"));
 }
@@ -140,15 +147,15 @@ fn a_non_data_image_renders_as_its_alt_text_link() {
 fn an_assistant_body_keeps_image_rows_verbatim() {
     let _guard = capabilities(Some(ImageProtocol::Kitty));
 
-    let body = format!("Here is the render:\n\n{}\n\nDone.", image_markdown("shot", PNG));
+    let body = format!(
+        "Here is the render:\n\n{}\n\nDone.",
+        image_markdown("shot", PNG)
+    );
     let mut view = MessageView::new().with_markdown(true);
     view.push(MessageItem::assistant(body));
 
     let lines = view.render_lines(80);
-    let image_rows: Vec<&String> = lines
-        .iter()
-        .filter(|line| is_image_line(line))
-        .collect();
+    let image_rows: Vec<&String> = lines.iter().filter(|line| is_image_line(line)).collect();
     assert_eq!(image_rows.len(), 1, "one escape row expected: {lines:?}");
     let escape = image_rows[0];
     assert!(
@@ -159,7 +166,9 @@ fn an_assistant_body_keeps_image_rows_verbatim() {
 
     // The prose keeps its role prefix.
     assert!(
-        lines.iter().any(|line| line.contains("Here is the render:")),
+        lines
+            .iter()
+            .any(|line| line.contains("Here is the render:")),
         "{lines:?}"
     );
 }

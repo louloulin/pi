@@ -355,7 +355,8 @@ impl ToolExecutor for ExtensionToolExecutor {
         let args = arguments.to_string();
         match self.host.execute_tool(&call.name, &args).await {
             Ok(outcome) => {
-                let (content, image_text) = fold_content(content_blocks_from_json(&outcome.content));
+                let (content, image_text) =
+                    fold_content(content_blocks_from_json(&outcome.content));
                 Ok(ToolResult {
                     tool_call_id: call.id.clone(),
                     content: Box::new(content),
@@ -528,11 +529,7 @@ fn fold_content(blocks: Vec<Content>) -> (Content, Option<String>) {
 
 /// Join blocks' human-readable text with newlines.
 fn fold_text(blocks: &[Content]) -> String {
-    blocks
-        .iter()
-        .map(block_text)
-        .collect::<Vec<_>>()
-        .join("\n")
+    blocks.iter().map(block_text).collect::<Vec<_>>().join("\n")
 }
 
 /// Render a single content block as text for [`fold_content`].
@@ -550,7 +547,10 @@ fn block_text(block: &Content) -> String {
 }
 
 /// Park the text that accompanied an image block under `details.image_text`.
-fn with_image_text(details: Option<serde_json::Value>, text: Option<String>) -> Option<serde_json::Value> {
+fn with_image_text(
+    details: Option<serde_json::Value>,
+    text: Option<String>,
+) -> Option<serde_json::Value> {
     let Some(text) = text else {
         return details;
     };
