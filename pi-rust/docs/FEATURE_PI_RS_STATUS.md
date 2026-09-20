@@ -13753,3 +13753,48 @@ pi-rust/docs/FEATURE_PI_RS_STATUS.md          # 唯一差异（+83），且只�
 2. pi-tui 终端图片：切片 1（能力层）+ 切片 2（编码器/元数据/crop）已合入；**切片 3 = LUM-1194 待晋升**；组件片 = LUM-1192 更后。
 3. `pi-ai` 请求级 telemetry span：仍是最容易派发的独立切片（文件面 `pi-ai/**`，与在飞各线零重叠）。
 4. run 可靠性：`deepseek-v4.1-flash` 单次输出上限 16384 仍是硬约束；**协调轮亲自实现最小切片**已被 LUM-1191（切片 1）与本轮（合并+门）证明可行。
+
+## LUM-1195 round — 与 LUM-1193 并发同刻的「去重轮」：确认切片 2 已在远端（树与本地合并逐字相同 → 质量门继承 **132 / 2023**）+ 晋升切片 3（LUM-1194）+ 3/3 满槽零派发
+
+本轮是 **LUM-981** 的推进/协调轮。开工时发现**上一轮（LUM-1193，06:20 启动）仍在飞**且正在做**完全相同**的事（合并 `work/LUM-1188` + 跑全量门），于是本轮按「**去重、不重复烧构建**」执行：不产生第二个功能等价的 merge commit，把动作收敛到「核验 + 晋升 + 记录」。
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `2619a767f`；`origin` = `mirror` 同 SHA。
+* `multica daemon status`：`running_task_count = 3`（LUM-1190 `ctx.ui.*` + LUM-1193 + 本 run）→ 满槽。
+* **磁盘告警（本轮最先处理的事）**：开工 `/` 使用率 **100%（47G/50G，仅剩 38M）**，而 LUM-1190 / LUM-1193 两个全量 `cargo test` 正在并行编译（`/tmp/pi-target` 16G、`/tmp/pi-target-1193` 2.2G）。清掉两个「owner 已出轮且无进程持有」的陈旧 target dir：
+  * `/tmp/pi-target-1191`（2.5G，LUM-1191 已出轮）
+  * `/tmp/lum1188-target`（1.3G，LUM-1188 run 已于 06:31 推分支结束）
+  * 清理后余量 → **7.1G / 85%**，是两个在飞全量门能跑完的前置条件。**未动** `/tmp/pi-target`（LUM-1190 在飞）与 `/tmp/pi-target-1193`（LUM-1193 在飞）。
+
+### 二、去重判据：本地合并树与 LUM-1193 的合并树**逐字相同**
+
+```console
+$ git merge --no-ff origin/work/LUM-1188        # 本地 916f41f66，无冲突
+$ git rev-parse 916f41f66^{tree}  -> a7e525e5620f2a17a7929b364c912f8e15e07bc2
+$ git rev-parse 343ab6978^{tree}  -> a7e525e5620f2a17a7929b364c912f8e15e07bc2   # LUM-1193 的合并
+IDENTICAL
+```
+
+即两条独立合并产出**同一棵树**。既已逐字相同，本轮**不再推第二个 merge commit**（避免非 fast-forward 互撞），改为核验远端并继承 LUM-1193 的实跑质量门 **132 套件 / 2023 passed / 0 failed / 2 ignored**（`343ab6978`）。
+
+### 三、复核了「共享 `CARGO_TARGET_DIR` 伪造失败」这一坑（与 LUM-1193 独立撞到同一现象）
+
+本轮曾尝试复用 LUM-1193 已闲置的 `/tmp/pi-target-1193` 做全量（省一次冷构建）：结果 `exit=101`，`error: extern location for tokio/pi_protocol does not exist` / `error[E0463]: can't find crate for pi_chord / pi_server` —— 该 target dir 正被其 owner 在飞 run 重建/清空，compile 到一半 artifact 消失。**与 LUM-1193 记录的结论一致：验证必须用私有的 `CARGO_TARGET_DIR`**；本轮随即放弃独立重跑（3 个全量构建并行只会把磁盘推回 100%），改用「树同一性 + 继承门」。
+
+### 四、可合并性扫描（双向 + 大小写，`origin` + `mirror`）
+
+零新命中。残余非祖先 ref 全部是**被 tip 取代的旧树**或无独有产物的分支：`agent/devbox1/142cee5d0ed9`(LUM-1160 auth，内容已随 Stage 48 落 tip)、`e3a55b14fe9d`(旧 Gemini 夹具)、`lum-1023`/`lum-1058`（Stage 3/13，已在 tip）、`9f0097e10886`（纯 merge 提交，零内容）、`agent/devbox1/lum-1020`（文档）、`work/lum-1173`（rustfmt 基线，已被 tip 等价吸收；`git cherry` 全为已应用）——维持 LUM-1173 / LUM-1187 / LUM-1191 / LUM-1193 结论。
+
+### 五、派发：3/3 满槽 → 本轮零派发；LUM-1193 出轮后**晋升切片 3**
+
+* LUM-1193 出轮（`running_task_count` 2→），头上空出 1 槽；切片 2 已在远端 → **切片 3 依赖解除**。
+* `multica issue status LUM-1194 todo` → 已晋升（切片 3：几何 + 四种像素尺寸解析 + `renderImage` + `imageFallback`，上游 `terminal-image.ts:435-696`），run 已入队（`active_task_count` 2→3）。
+* 本轮**不再**额外派发 `pi-ai` telemetry span（会到 4 路，超 3 路上限）→ 留给下一轮首个空槽。
+
+### 六、frontier（本轮后）
+
+1. 质量门基线 = **132 套件 / 2023 passed / 0 failed / 2 ignored（`343ab6978`）**；下一欠账点 = LUM-1190 或 LUM-1194 任一合入时。
+2. pi-tui 终端图片：切片 1/2 已合入；**切片 3 = LUM-1194 已晋升（todo）**；组件片 LUM-1192 仍等切片 3 的 `renderImage` 接口。
+3. `pi-ai` 请求级 telemetry span：仍是下一轮首个空槽的首选（文件面 `pi-ai/**`，与在飞各线零重叠）。
+4. **Autopilot 节奏本身进入 frontier（本轮新发现）**：`LUM-1189`(13:40) → `LUM-1191`(14:00) → `LUM-1193`(14:20) → `LUM-1195`(14:40) **每 20 分钟一个「整点协调轮」**，LUM-1193 与 LUM-1195 本轮实际重叠 20 分钟、各自独立合并同一分支。建议 owner 把该 autopilot 周期放宽到 ≥1h，或在轮内做「已有同刻轮在飞则只核验不合并」的串行化，避免重复构建（本次还叠加了磁盘 100%）。
