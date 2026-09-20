@@ -1708,23 +1708,121 @@ fn host_provider_registration_requires_api_when_models_given() {
 }
 
 #[test]
-fn host_provider_registration_rejects_native_provider_object() {
+fn host_provider_registration_captures_stream_simple_and_oauth() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            entry("provider_handler"),
+            r#"
+                module.exports = function (pi) {
+                    pi.registerProvider("handled", {
+                        api: "custom-api",
+                        streamSimple: function () { return []; },
+                        oauth: {
+                            name: "Handled (oauth)",
+                            login: async function () { return {}; },
+                            refreshToken: async function (c) { return c; },
+                            getApiKey: function (c) { return c.access; },
+                            modifyModels: function (models) { return models; },
+                        },
+                    });
+                };
+            "#,
+        )
+        .await
+        .expect("load handler provider");
+
+        let providers = host.registered_providers();
+        assert_eq!(providers.len(), 1, "{providers:?}");
+        let config = &providers[0];
+        // A handler-owned provider may name an api family this build does not
+        // implement: the handler speaks it itself.
+        assert_eq!(config.api.as_deref(), Some("custom-api"));
+        assert!(config.has_stream_simple);
+        assert!(!config.native);
+        let oauth = config.oauth.as_ref().expect("oauth flags are recorded");
+        assert_eq!(oauth.name, "Handled (oauth)");
+        assert!(oauth.has_login && oauth.has_refresh_token && oauth.has_get_api_key);
+        assert!(oauth.has_modify_models);
+        assert!(!oauth.is_subscription && !oauth.uses_callback_server);
+    });
+}
+
+#[test]
+fn host_provider_registration_rejects_stream_simple_without_api() {
     let runtime = rt();
     runtime.block_on(async {
         let host = JsExtensionHost::new().await.expect("host");
         let err = host
             .load(
-                entry("provider_native"),
+                entry("provider_handler_no_api"),
                 r#"
                     module.exports = function (pi) {
-                        pi.registerProvider({ id: "native", api: "custom", streamSimple() {} });
+                        pi.registerProvider("no-api-handler", {
+                            streamSimple: function () { return []; },
+                        });
                     };
                 "#,
             )
             .await
-            .expect_err("native Provider overload is out of scope");
-        let message = err.to_string();
-        assert!(message.contains("not implemented"), "{message}");
+            .expect_err("streamSimple without api must reject");
+        assert!(err.to_string().contains("streamSimple"), "{err}");
+        assert!(err.to_string().contains("no `api`"), "{err}");
         assert!(host.registered_providers().is_empty());
+        // A rejected registration must not leave a callable handler behind.
+        assert!(
+            host.invoke_provider_stream_simple("no-api-handler", "{}", "{}", "{}")
+                .await
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn host_provider_registration_accepts_native_provider_object() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+        host.load(
+            entry("provider_native"),
+            r#"
+                module.exports = function (pi) {
+                    pi.registerProvider({
+                        id: "native",
+                        name: "Native",
+                        baseUrl: "https://native.example.com",
+                        api: "custom",
+                        getModels: function () { return [{ id: "native-model", api: "custom" }]; },
+                        streamSimple: function () { return []; },
+                    });
+                };
+            "#,
+        )
+        .await
+        .expect("the native Provider overload is supported");
+
+        let providers = host.registered_providers();
+        assert_eq!(providers.len(), 1, "{providers:?}");
+        assert!(providers[0].native);
+        assert_eq!(providers[0].name, "native");
+        assert_eq!(providers[0].display_name.as_deref(), Some("Native"));
+        assert_eq!(providers[0].api.as_deref(), Some("custom"));
+        assert!(providers[0].has_stream_simple);
+        assert_eq!(providers[0].models[0]["id"], "native-model");
+
+        // A native provider without an id is still rejected.
+        let err = host
+            .load(
+                entry("provider_native_anonymous"),
+                r#"
+                    module.exports = function (pi) {
+                        pi.registerProvider({ name: "" });
+                    };
+                "#,
+            )
+            .await
+            .expect_err("a native provider needs an id");
+        assert!(err.to_string().contains("non-empty `id`"), "{err}");
     });
 }

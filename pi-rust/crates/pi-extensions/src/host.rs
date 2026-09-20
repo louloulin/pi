@@ -22,7 +22,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use pi_protocol::{ExtensionEvent, ToolDefinition, UiLevel, UiRequest, UiResponse};
+use pi_protocol::{
+    AssistantMessageEvent, Content, ExtensionEvent, ImageContent, StopReason, ToolCall,
+    ToolDefinition, UiLevel, UiRequest, UiResponse, Usage,
+};
 use rquickjs_core::function::{Async, Func};
 use rquickjs_core::prelude::CatchResultExt;
 use rquickjs_core::promise::MaybePromise;
@@ -228,12 +231,56 @@ pub fn canonical_provider_api(api: &str) -> Option<&'static str> {
     }
 }
 
-/// A provider registered by an extension via `pi.registerProvider(name, config)`.
+/// The `oauth` block of a native provider registration (LUM-1199).
 ///
-/// Slice 1 covers the string overload only: `name` plus the declarative
-/// `baseUrl` / `apiKey` / `api` / `models` fields. The native `Provider`
-/// object overload, the `oauth` block and `streamSimple` handlers are out of
-/// scope and stay unregistered.
+/// Function-valued fields (`login`, `refreshToken`, `getApiKey`,
+/// `modifyModels`) cannot cross the QuickJS boundary, so the host records
+/// their **presence** as flags. The shim keeps the live callbacks, which is
+/// what a future `/login` slice needs; today the flags only let the
+/// application layer treat an oauth-declared provider as authenticated and
+/// document the credential-resolution order (stored → oauth → env).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredProviderOauth {
+    /// Display name shown in the login UI (defaults to the provider name).
+    #[serde(default)]
+    pub name: String,
+    /// Whether access is backed by a provider subscription.
+    #[serde(default)]
+    pub is_subscription: bool,
+    /// Deprecated upstream; retained for source compatibility only.
+    #[serde(default)]
+    pub uses_callback_server: bool,
+    /// The extension supplied a `login(callbacks)` implementation.
+    #[serde(default)]
+    pub has_login: bool,
+    /// The extension supplied a `refreshToken(credentials, signal)` one.
+    #[serde(default)]
+    pub has_refresh_token: bool,
+    /// The extension supplied `getApiKey(credentials)`.
+    #[serde(default)]
+    pub has_get_api_key: bool,
+    /// The extension supplied the legacy `modifyModels(models, credentials)`.
+    #[serde(default)]
+    pub has_modify_models: bool,
+}
+
+/// A provider registered by an extension via `pi.registerProvider(...)`.
+///
+/// Two shapes feed this struct:
+///
+/// * the declarative `pi.registerProvider(name, { baseUrl, apiKey, api,
+///   models })` string overload; and
+/// * the native `pi.registerProvider(provider)` object overload, which sets
+///   [`native`](Self::native) and contributes the same name / `baseUrl` /
+///   `apiKey` / `models` fields plus an optional
+///   [`oauth`](Self::oauth) block.
+///
+/// `streamSimple` / `oauth` are **handlers**: the host cannot serialise a JS
+/// function, so it records [`has_stream_simple`](Self::has_stream_simple)
+/// and the oauth presence flags and leaves the callbacks with the shim. The
+/// application layer builds an adapter that calls back into the shim by
+/// provider name (see [`JsExtensionHost::invoke_provider_stream_simple`]).
 ///
 /// `apiKey` is kept as the raw string the extension supplied; resolving a
 /// `$VAR` reference is the application layer's job (it owns the environment
@@ -260,6 +307,18 @@ pub struct RegisteredProviderConfig {
     /// supplied none (a pure base-URL override).
     #[serde(default)]
     pub models: serde_json::Value,
+    /// `true` when the registration came through the native `Provider`
+    /// object overload rather than `(name, config)`.
+    #[serde(default)]
+    pub native: bool,
+    /// `true` when the extension supplied a `streamSimple(model, context,
+    /// options)` handler. The provider can then stream even when its `api`
+    /// names a family this build has no adapter for.
+    #[serde(default)]
+    pub has_stream_simple: bool,
+    /// `oauth` block metadata, when the extension declared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<RegisteredProviderOauth>,
 }
 
 /// Validate one [`RegisteredProviderConfig`] before it enters the registry.
@@ -277,9 +336,24 @@ fn validate_registered_provider(config: &RegisteredProviderConfig) -> Result<(),
         serde_json::Value::Array(items) => !items.is_empty(),
         _ => return Err("pi.registerProvider: `models` must be an array".into()),
     };
+    // A provider that brings its own `streamSimple` handler (or arrived as a
+    // native `Provider` object with one) owns its wire protocol, so the host
+    // cannot say which `api` ids are valid for it — upstream allows any
+    // string there. Only handler-less registrations must name a family this
+    // build has an adapter for.
+    let handler_owned = config.native || config.has_stream_simple;
+    if config.has_stream_simple && config.api.is_none() {
+        // Upstream's provider composer rejects this too: the host routes a
+        // provider by api family, so a `streamSimple` handler with no family
+        // attached is unreachable.
+        return Err(format!(
+            "pi.registerProvider: provider `{}` registers `streamSimple` but no `api`; set `api` to the family the handler streams",
+            config.name
+        ));
+    }
     match config.api.as_deref() {
         Some(api) => {
-            if canonical_provider_api(api).is_none() {
+            if !handler_owned && canonical_provider_api(api).is_none() {
                 return Err(format!(
                     "pi.registerProvider: unsupported api `{api}` for provider `{}`; supported: {}",
                     config.name,
@@ -287,7 +361,7 @@ fn validate_registered_provider(config: &RegisteredProviderConfig) -> Result<(),
                 ));
             }
         }
-        None if has_models => {
+        None if has_models && !handler_owned => {
             return Err(format!(
                 "pi.registerProvider: provider `{}` declares `models` but no `api`; set `api` to one of: {}",
                 config.name,
@@ -297,6 +371,195 @@ fn validate_registered_provider(config: &RegisteredProviderConfig) -> Result<(),
         None => {}
     }
     Ok(())
+}
+
+/// Decode the upstream-shaped `AssistantMessageEvent` JSON an extension's
+/// `streamSimple` handler produced into the port's [`AssistantMessageEvent`].
+///
+/// The shim's events are the *upstream* shapes (see
+/// `pi_ai::ext_bridge::JsEventEncoder`), not the port's, so the mapping is
+/// explicit:
+///
+/// * `text_delta` / `thinking_delta` / `toolcall_delta` / `toolcall_start`
+///   carry the delta and are forwarded; the `*_start` / `*_end` framing
+///   events carry no information the Rust event set can represent, and are
+///   dropped;
+/// * `done` carries `{ reason, message }` — the message is converted into the
+///   [`Done`](AssistantMessageEvent::Done) payload;
+/// * `error` is converted into [`Error`](AssistantMessageEvent::Error) using
+///   `error.errorMessage`, falling back to `reason`;
+/// * a handler that never emits a terminal event gets a synthetic
+///   `Error` + `Done { stop_reason: Error }` tail, matching the [`StreamFn`]
+///   contract in `pi-ai`.
+///
+/// Thinking blocks survive in the `thinking_delta` events but not in the
+/// `done` payload: [`Content`] has no thinking variant. The same divergence
+/// is documented for the built-in `pi-ai` bridge in `SDK_MODULES.md`.
+///
+/// [`StreamFn`]: https://docs.rs/pi-ai
+pub fn assistant_events_from_js(events: &[serde_json::Value]) -> Vec<AssistantMessageEvent> {
+    let mut decoded = Vec::new();
+    let mut terminal = false;
+    for event in events {
+        let kind = event
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match kind {
+            "start" => {
+                let model = event
+                    .pointer("/partial/model")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                decoded.push(AssistantMessageEvent::Start {
+                    model: model.to_string(),
+                });
+            }
+            "text_delta" => {
+                if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str) {
+                    decoded.push(AssistantMessageEvent::TextDelta {
+                        delta: delta.to_string(),
+                    });
+                }
+            }
+            "thinking_delta" => {
+                if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str) {
+                    decoded.push(AssistantMessageEvent::ThinkingDelta {
+                        delta: delta.to_string(),
+                    });
+                }
+            }
+            "toolcall_start" | "toolcall_delta" => {
+                let index = event
+                    .get("contentIndex")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as u32;
+                decoded.push(AssistantMessageEvent::ToolCallDelta {
+                    index,
+                    id: string_field(event, "id"),
+                    name: string_field(event, "name"),
+                    arguments_delta: string_field(event, "delta"),
+                });
+            }
+            "done" => {
+                let message = event.get("message").cloned().unwrap_or_default();
+                decoded.push(AssistantMessageEvent::Done {
+                    content: content_blocks_from_js(&message),
+                    stop_reason: stop_reason_from_js(
+                        message
+                            .get("stopReason")
+                            .or_else(|| event.get("reason"))
+                            .and_then(serde_json::Value::as_str),
+                    ),
+                    usage: usage_from_js(message.get("usage")),
+                });
+                terminal = true;
+            }
+            "error" => {
+                let message = event
+                    .pointer("/error/errorMessage")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| event.get("reason").and_then(serde_json::Value::as_str))
+                    .unwrap_or("streamSimple handler failed");
+                decoded.push(AssistantMessageEvent::Error {
+                    message: message.to_string(),
+                });
+                terminal = true;
+            }
+            _ => {}
+        }
+    }
+    if !terminal {
+        decoded.push(AssistantMessageEvent::Error {
+            message: "streamSimple handler ended without a terminal event".into(),
+        });
+        decoded.push(AssistantMessageEvent::Done {
+            content: Vec::new(),
+            stop_reason: StopReason::Error,
+            usage: Usage::default(),
+        });
+    }
+    decoded
+}
+
+fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn content_blocks_from_js(message: &serde_json::Value) -> Vec<Content> {
+    let mut blocks = Vec::new();
+    for raw in message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        match raw.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => {
+                if let Some(text) = raw.get("text").and_then(serde_json::Value::as_str) {
+                    blocks.push(Content::text(text));
+                }
+            }
+            Some("toolCall" | "tool_call") => {
+                blocks.push(Content::ToolCall(ToolCall {
+                    id: string_field(raw, "id").unwrap_or_default(),
+                    name: string_field(raw, "name").unwrap_or_default(),
+                    arguments: raw
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                }));
+            }
+            Some("image") => {
+                if let (Some(data), Some(mime_type)) = (
+                    raw.get("data").and_then(serde_json::Value::as_str),
+                    raw.get("mimeType")
+                        .or_else(|| raw.get("mime_type"))
+                        .and_then(serde_json::Value::as_str),
+                ) {
+                    blocks.push(Content::Image(ImageContent {
+                        mime_type: mime_type.to_string(),
+                        data: data.to_string(),
+                    }));
+                }
+            }
+            // Thinking blocks have no `Content` variant; they survive in the
+            // thinking_delta events only.
+            _ => {}
+        }
+    }
+    blocks
+}
+
+fn stop_reason_from_js(reason: Option<&str>) -> StopReason {
+    match reason.unwrap_or_default() {
+        "toolUse" | "tool_use" => StopReason::ToolUse,
+        "length" | "maxTokens" | "max_tokens" => StopReason::MaxTokens,
+        "aborted" => StopReason::Aborted,
+        "error" => StopReason::Error,
+        "empty" => StopReason::Empty,
+        _ => StopReason::Stop,
+    }
+}
+
+fn usage_from_js(usage: Option<&serde_json::Value>) -> Usage {
+    let number = |key: &str| {
+        usage
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default() as u32
+    };
+    Usage {
+        input: number("input"),
+        output: number("output"),
+        cache_read: number("cacheRead"),
+        cache_write: number("cacheWrite"),
+        total: number("total"),
+    }
 }
 
 /// One entry written to the host's log, either via `pi.appendEntry`
@@ -1359,6 +1622,77 @@ impl JsExtensionHost {
     /// Borrow the registered tools across every loaded extension.
     pub fn registered_tools(&self) -> Vec<ToolDefinition> {
         self.inner.state.lock().registry.tools().cloned().collect()
+    }
+
+    /// Invoke an extension-registered provider's `streamSimple` handler and
+    /// decode the events it produced.
+    ///
+    /// `model_json` / `context_json` / `options_json` are the upstream
+    /// `Model` / `Context` / `SimpleStreamOptions` shapes the application
+    /// layer serialises; the shim parses them and calls
+    /// `provider.streamSimple(model, context, options)`. The events are
+    /// **collected before returning**: the handler's async iterator is
+    /// drained in one host call, so the returned vector is ordered but not
+    /// incremental (see the divergence note in `EXTENSIONS.md`).
+    ///
+    /// Fails with [`ExtensionError::Runtime`] when no handler of that name
+    /// exists or the handler threw, and [`ExtensionError::Timeout`] when the
+    /// host deadline fired.
+    pub async fn invoke_provider_stream_simple(
+        &self,
+        name: &str,
+        model_json: &str,
+        context_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<AssistantMessageEvent>, ExtensionError> {
+        let context = self.inner.context.clone();
+        let timeout = self.inner.timeout;
+        let name = name.to_string();
+        let model_json = model_json.to_string();
+        let context_json = context_json.to_string();
+        let options_json = options_json.to_string();
+        let base_deadline = self.inner.arm_deadline();
+        let result = drive_call(
+            &self.inner,
+            base_deadline,
+            async_with!(context => |ctx| {
+                let exec: Function = ctx
+                    .globals()
+                    .get("_pi_provider_stream_simple")
+                    .map_err(ExtensionError::from)?;
+                let raw_promise: MaybePromise = exec
+                    .call::<_, MaybePromise>((name, model_json, context_json, options_json))
+                    .catch(&ctx)
+                    .map_err(|e| e.throw(&ctx))?;
+                let raw: String = raw_promise
+                    .into_future()
+                    .await
+                    .map_err(ExtensionError::from)?;
+                let envelope: serde_json::Value =
+                    serde_json::from_str(&raw).map_err(ExtensionError::from)?;
+                if envelope.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                    let message = envelope
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("streamSimple handler failed")
+                        .to_string();
+                    return Err(ExtensionError::Runtime(message));
+                }
+                let events = envelope
+                    .get("events")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok::<_, ExtensionError>(assistant_events_from_js(&events))
+            }),
+        )
+        .await;
+        self.inner.disarm_deadline();
+        match result {
+            Ok(Ok(events)) => Ok(events),
+            Ok(Err(e)) => Err(e),
+            Err(()) => Err(ExtensionError::Timeout(timeout)),
+        }
     }
 
     /// Providers registered via `pi.registerProvider(name, config)`, in
