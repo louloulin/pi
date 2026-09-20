@@ -29,6 +29,9 @@ pub struct SpanStyle {
     pub underline: bool,
     /// Whether the run is rendered struck through.
     pub strikethrough: bool,
+    /// Whether the run's foreground and background are swapped
+    /// (chalk `inverse` / ANSI `REVERSED`).
+    pub inverse: bool,
 }
 
 impl SpanStyle {
@@ -40,6 +43,7 @@ impl SpanStyle {
         italic: false,
         underline: false,
         strikethrough: false,
+        inverse: false,
     };
 
     /// A run with only a foreground slot.
@@ -83,6 +87,12 @@ impl SpanStyle {
         self
     }
 
+    /// The slots with the inverse (reversed video) modifier applied.
+    pub fn inverse(mut self) -> Self {
+        self.inverse = true;
+        self
+    }
+
     /// Render `text` as an ANSI string for this slot.
     ///
     /// A plain theme ([`ColorMode::None`]) returns `text` unchanged. The
@@ -106,6 +116,9 @@ impl SpanStyle {
         }
         if self.strikethrough {
             out = theme.strikethrough(&out);
+        }
+        if self.inverse {
+            out = theme.inverse(&out);
         }
         if let Some(fg) = self.fg {
             out = theme.fg(fg, &out);
@@ -140,6 +153,9 @@ impl SpanStyle {
         }
         if self.strikethrough {
             style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        if self.inverse {
+            style = style.add_modifier(Modifier::REVERSED);
         }
         style
     }
@@ -329,6 +345,20 @@ mod tests {
             title.ansi(&theme, "T"),
             "\u{1b}[38;2;138;190;183m\u{1b}[1mT\u{1b}[22m\u{1b}[39m"
         );
+    }
+
+    #[test]
+    fn inverse_modifier_reverses_video() {
+        let theme = builtin_theme("dark", ColorMode::TrueColor).expect("dark theme");
+        let span = SpanStyle::fg(ThemeColor::Accent).inverse();
+        assert_eq!(
+            span.ansi(&theme, "T"),
+            "\u{1b}[38;2;138;190;183m\u{1b}[7mT\u{1b}[27m\u{1b}[39m"
+        );
+        assert_eq!(span.to_style(&theme).add_modifier, Modifier::REVERSED);
+        // A plain theme never emits escapes, modifier or not.
+        let plain = builtin_theme("dark", ColorMode::None).expect("plain theme");
+        assert_eq!(span.ansi(&plain, "T"), "T");
     }
 
     #[test]

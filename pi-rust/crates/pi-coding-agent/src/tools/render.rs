@@ -25,6 +25,9 @@
 //!   listing tools: a `find <pattern> in <path>` / `grep /<pattern>/ in <path>`
 //!   / `ls <path>` call summary and a head-folded result body with the hit-limit
 //!   and truncation warnings upstream shows.
+//! * [`EditRenderer`] renders `edit <path>` and the tool's `details.diff`
+//!   through [`render_diff`], a line-numbered diff with removed/added colours
+//!   and word-level inverse-video highlighting on a one-line replacement.
 //!
 //! Renderers emit [`StyledLine`]s (theme slots, no ANSI). The caller decides
 //! how to paint them: [`render_lines_ansi`] paints for a text terminal,
@@ -54,6 +57,7 @@ use std::sync::Arc;
 use pi_protocol::{Content, ToolCall, ToolResult};
 use pi_tui::{SpanStyle, StyledLine, StyledSpan, Theme, ThemeColor};
 
+use super::text_diff::{diff_words, DiffKind};
 use super::truncate::{format_size, TruncatedBy, TruncationResult};
 use super::ToolOutput;
 
@@ -178,11 +182,12 @@ pub trait ToolRenderer: Send {
 }
 
 /// Renderer for a built-in tool name, or `None` when the tool has no
-/// presentation layer (`edit` still renders through its own path).
+/// presentation layer.
 pub fn renderer_for(name: &str) -> Option<Box<dyn ToolRenderer>> {
     match name {
         "read" => Some(Box::new(ReadRenderer::default())),
         "write" => Some(Box::new(WriteRenderer::default())),
+        "edit" => Some(Box::new(EditRenderer::default())),
         "bash" => Some(Box::new(BashRenderer)),
         "find" => Some(Box::new(FindRenderer)),
         "grep" => Some(Box::new(GrepRenderer)),
@@ -1045,6 +1050,302 @@ impl ToolRenderer for LsRenderer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// edit
+// ---------------------------------------------------------------------------
+
+/// Presentation for the `edit` tool.
+///
+/// `render_call` shows `edit <path>`; `render_result` renders the
+/// `details.diff` string through [`render_diff`], which colours removed and
+/// added lines and highlights the changed words inside a one-for-one line
+/// replacement with inverse video. Rust port of upstream
+/// `renderers/edit.ts`'s `renderCall` / `renderResult` plus
+/// `components/diff.ts`'s `renderDiff` / `renderIntraLineDiff`.
+///
+/// Deviation from upstream: the upstream renderer caches a
+/// `computeEditsDiff` preview while the call is streaming and suppresses the
+/// result diff when it equals that preview (and suppresses an error that the
+/// preview already showed); the Rust port renders a finished result only, so
+/// it always shows the `details.diff` / error body.
+#[derive(Debug, Default)]
+pub struct EditRenderer {
+    path: Option<String>,
+}
+
+impl EditRenderer {
+    /// A renderer with no remembered call state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Path recorded by the last [`ToolRenderer::render_call`].
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+}
+
+impl ToolRenderer for EditRenderer {
+    fn name(&self) -> &str {
+        "edit"
+    }
+
+    fn render_call(
+        &mut self,
+        args: &serde_json::Value,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        self.path = path_arg(args);
+
+        let mut line = tool_title("edit");
+        line.push(StyledSpan::new(" ", SpanStyle::PLAIN));
+        line.extend(render_tool_path(self.path.as_deref(), ctx));
+        vec![line]
+    }
+
+    fn render_result(
+        &mut self,
+        result: &ToolOutput,
+        _options: &ToolRenderOptions,
+        ctx: &ToolRenderContext,
+    ) -> Vec<StyledLine> {
+        if ctx.is_error {
+            let output = get_text_output(result, ctx.show_images);
+            let mut lines: Vec<StyledLine> = output
+                .split('\n')
+                .map(|line| vec![StyledSpan::new(line, SpanStyle::fg(ThemeColor::Error))])
+                .collect();
+            trim_trailing_empty_lines(&mut lines);
+            return lines;
+        }
+
+        let Some(diff) = result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("diff"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Vec::new();
+        };
+
+        let mut lines = render_diff(diff);
+        trim_trailing_empty_lines(&mut lines);
+        lines
+    }
+}
+
+/// A one-span line with `color` as its foreground slot.
+fn single_span_line(text: impl Into<String>, color: ThemeColor) -> StyledLine {
+    vec![StyledSpan::new(text, SpanStyle::fg(color))]
+}
+
+/// Parse one `generateDiffString` line into `(prefix, line_num, content)`.
+///
+/// Equivalent to upstream `renderDiff`'s
+/// `^([+-\s])(\s*\d*)\s(.*)$`: the middle group is the longest
+/// whitespace-then-digits prefix that leaves at least one whitespace as the
+/// separator, so a line-number column of any width (including the empty one
+/// on a `...` collapse marker) parses the same way.
+fn parse_diff_line(line: &str) -> Option<(char, &str, &str)> {
+    let prefix = line.chars().next()?;
+    if !matches!(prefix, '+' | '-' | ' ') {
+        return None;
+    }
+    let rest = &line[prefix.len_utf8()..];
+    let bytes = rest.as_bytes();
+
+    let ws = bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    let digits_end = ws
+        + bytes[ws..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+
+    // Longest-first candidate split points: the digits end, then every
+    // whitespace-only prefix (the regex backtracks into the `\s*` run).
+    let split = std::iter::once(digits_end)
+        .chain((0..=ws).rev())
+        .find(|&index| index < bytes.len() && bytes[index].is_ascii_whitespace())?;
+
+    Some((prefix, &rest[..split], &rest[split + 1..]))
+}
+
+/// Append a non-empty run to an intra-line diff side.
+fn push_diff_run(runs: &mut Vec<(String, bool)>, text: String, changed: bool) {
+    if !text.is_empty() {
+        runs.push((text, changed));
+    }
+}
+
+/// Word-level diff of a modified line, each side as `(text, changed)` runs.
+///
+/// Ports `renderIntraLineDiff`: the leading whitespace of the first changed
+/// run is emitted unhighlighted so indentation never gets inverse video.
+fn render_intra_line_diff(
+    old_content: &str,
+    new_content: &str,
+) -> (Vec<(String, bool)>, Vec<(String, bool)>) {
+    let mut removed_line: Vec<(String, bool)> = Vec::new();
+    let mut added_line: Vec<(String, bool)> = Vec::new();
+    let mut is_first_removed = true;
+    let mut is_first_added = true;
+
+    for part in diff_words(old_content, new_content) {
+        match part.kind {
+            DiffKind::Removed => {
+                let mut value = part.value;
+                if is_first_removed {
+                    let leading: String =
+                        value.chars().take_while(|ch| ch.is_whitespace()).collect();
+                    value = value[leading.len()..].to_string();
+                    push_diff_run(&mut removed_line, leading, false);
+                    is_first_removed = false;
+                }
+                push_diff_run(&mut removed_line, value, true);
+            }
+            DiffKind::Added => {
+                let mut value = part.value;
+                if is_first_added {
+                    let leading: String =
+                        value.chars().take_while(|ch| ch.is_whitespace()).collect();
+                    value = value[leading.len()..].to_string();
+                    push_diff_run(&mut added_line, leading, false);
+                    is_first_added = false;
+                }
+                push_diff_run(&mut added_line, value, true);
+            }
+            DiffKind::Equal => {
+                push_diff_run(&mut removed_line, part.value.clone(), false);
+                push_diff_run(&mut added_line, part.value, false);
+            }
+        }
+    }
+
+    (removed_line, added_line)
+}
+
+/// `diff_line_spans`-style line: `-<lineNum> ` / `+<lineNum> ` prefix, then
+/// the runs, inverse-video on the changed ones.
+fn intra_line_spans(
+    prefix: char,
+    line_num: &str,
+    runs: &[(String, bool)],
+    color: ThemeColor,
+) -> StyledLine {
+    let mut out = StyledLine::new();
+    out.push(StyledSpan::new(
+        format!("{prefix}{line_num} "),
+        SpanStyle::fg(color),
+    ));
+    for (text, changed) in runs {
+        if text.is_empty() {
+            continue;
+        }
+        let style = if *changed {
+            SpanStyle::fg(color).inverse()
+        } else {
+            SpanStyle::fg(color)
+        };
+        out.push(StyledSpan::new(text.clone(), style));
+    }
+    out
+}
+
+/// Render a `generateDiffString` diff with colours and intra-line highlights.
+///
+/// Ports `renderDiff`: a removed run immediately followed by an added run of
+/// exactly one line each is rendered as a word-level diff pair, any other
+/// change is rendered line by line, context lines use `toolDiffContext`, and a
+/// line that does not match the diff grammar is shown verbatim.
+///
+/// Deviation from upstream: the `filePath` option upstream accepts is unused
+/// there too, so no equivalent parameter exists here.
+pub fn render_diff(diff_text: &str) -> Vec<StyledLine> {
+    let lines: Vec<&str> = diff_text.split('\n').collect();
+    let mut result: Vec<StyledLine> = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let Some((prefix, line_num, content)) = parse_diff_line(lines[index]) else {
+            result.push(single_span_line(lines[index], ThemeColor::ToolDiffContext));
+            index += 1;
+            continue;
+        };
+
+        match prefix {
+            '-' => {
+                let mut removed: Vec<(String, String)> = Vec::new();
+                while index < lines.len() {
+                    let Some(('-', num, text)) = parse_diff_line(lines[index]) else {
+                        break;
+                    };
+                    removed.push((num.to_string(), text.to_string()));
+                    index += 1;
+                }
+                let mut added: Vec<(String, String)> = Vec::new();
+                while index < lines.len() {
+                    let Some(('+', num, text)) = parse_diff_line(lines[index]) else {
+                        break;
+                    };
+                    added.push((num.to_string(), text.to_string()));
+                    index += 1;
+                }
+
+                if removed.len() == 1 && added.len() == 1 {
+                    let (removed_runs, added_runs) = render_intra_line_diff(
+                        &replace_tabs(&removed[0].1),
+                        &replace_tabs(&added[0].1),
+                    );
+                    result.push(intra_line_spans(
+                        '-',
+                        &removed[0].0,
+                        &removed_runs,
+                        ThemeColor::ToolDiffRemoved,
+                    ));
+                    result.push(intra_line_spans(
+                        '+',
+                        &added[0].0,
+                        &added_runs,
+                        ThemeColor::ToolDiffAdded,
+                    ));
+                } else {
+                    for (num, text) in &removed {
+                        result.push(single_span_line(
+                            format!("-{num} {}", replace_tabs(text)),
+                            ThemeColor::ToolDiffRemoved,
+                        ));
+                    }
+                    for (num, text) in &added {
+                        result.push(single_span_line(
+                            format!("+{num} {}", replace_tabs(text)),
+                            ThemeColor::ToolDiffAdded,
+                        ));
+                    }
+                }
+            }
+            '+' => {
+                result.push(single_span_line(
+                    format!("+{line_num} {}", replace_tabs(content)),
+                    ThemeColor::ToolDiffAdded,
+                ));
+                index += 1;
+            }
+            _ => {
+                result.push(single_span_line(
+                    format!(" {line_num} {}", replace_tabs(content)),
+                    ThemeColor::ToolDiffContext,
+                ));
+                index += 1;
+            }
+        }
+    }
+
+    result
+}
+
 /// Head-fold a tool's text output: the first `max_lines` lines plus a muted
 /// `... (N more lines, to expand)` hint, or every line when `expanded`.
 fn folded_output_lines(output: &str, expanded: bool, max_lines: usize) -> Vec<StyledLine> {
@@ -1715,15 +2016,16 @@ mod tests {
     #[test]
     fn session_ignores_tools_without_renderers() {
         let mut session = ToolRenderSession::new("/work");
-        // `edit` has no presentation layer of its own yet.
+        // Extension tools (and any built-in added before it grows a
+        // presentation layer) have no renderer.
         let call = ToolCall {
-            id: "call-edit".into(),
-            name: "edit".into(),
-            arguments: json!({ "path": "main.rs", "old_string": "a", "new_string": "b" }),
+            id: "call-ext".into(),
+            name: "extension_tool".into(),
+            arguments: json!({ "path": "main.rs" }),
         };
         assert!(session.call(&call, false).is_empty());
         let result = ToolResult {
-            tool_call_id: "call-edit".into(),
+            tool_call_id: "call-ext".into(),
             content: Box::new(Content::text("ok")),
             is_error: false,
             details: None,
@@ -1758,6 +2060,130 @@ mod tests {
             renderer_for("bash").map(|r| r.name().to_string()),
             Some("bash".into())
         );
-        assert!(renderer_for("edit").is_none());
+        assert_eq!(
+            renderer_for("edit").map(|r| r.name().to_string()),
+            Some("edit".into())
+        );
+        assert!(renderer_for("extension_tool").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // edit
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_diff_line_matches_upstream_grammar() {
+        assert_eq!(parse_diff_line("+12 content"), Some(('+', "12", "content")));
+        assert_eq!(parse_diff_line("-3 x"), Some(('-', "3", "x")));
+        assert_eq!(parse_diff_line(" 1 foo bar"), Some((' ', "1", "foo bar")));
+        assert_eq!(parse_diff_line("  12 y"), Some((' ', " 12", "y")));
+        // A `...` collapse marker has an empty line-number column; the regex
+        // backtracks into the whitespace run, so a wider column leaves part of
+        // the padding in the content (upstream renders it the same way).
+        assert_eq!(parse_diff_line("  ..."), Some((' ', "", "...")));
+        assert_eq!(parse_diff_line("    ..."), Some((' ', "  ", "...")));
+        assert_eq!(parse_diff_line("@@ -1 +1 @@"), None);
+        assert_eq!(parse_diff_line(""), None);
+    }
+
+    #[test]
+    fn render_diff_marks_the_changed_words_within_a_modified_line() {
+        let lines = render_diff(" 1 hello\n-2 world\n+2 WORLD");
+        assert_eq!(line_text(&lines[0]), " 1 hello");
+        assert!(has_slot(&lines[0], ThemeColor::ToolDiffContext));
+
+        assert_eq!(line_text(&lines[1]), "-2 world");
+        assert!(has_slot(&lines[1], ThemeColor::ToolDiffRemoved));
+        assert!(
+            lines[1]
+                .iter()
+                .any(|span| span.text == "world" && span.style.inverse),
+            "removed word must be inverse: {lines:?}"
+        );
+
+        assert_eq!(line_text(&lines[2]), "+2 WORLD");
+        assert!(has_slot(&lines[2], ThemeColor::ToolDiffAdded));
+        assert!(
+            lines[2]
+                .iter()
+                .any(|span| span.text == "WORLD" && span.style.inverse),
+            "added word must be inverse: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn render_diff_keeps_unequal_runs_line_by_line() {
+        let lines = render_diff(" 1 a\n-2 b\n-3 c\n+2 z");
+        assert_eq!(line_text(&lines[1]), "-2 b");
+        assert_eq!(line_text(&lines[2]), "-3 c");
+        assert_eq!(line_text(&lines[3]), "+2 z");
+        assert!(
+            !lines[1..]
+                .iter()
+                .any(|line| line.iter().any(|span| span.style.inverse)),
+            "multi-line change must not be word-highlighted: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn render_diff_expands_tabs_and_passes_through_unknown_lines() {
+        let lines = render_diff("\x1b[31mnot a diff line\n 1 a\tb");
+        assert_eq!(line_text(&lines[0]), "\x1b[31mnot a diff line");
+        assert!(has_slot(&lines[0], ThemeColor::ToolDiffContext));
+        assert_eq!(line_text(&lines[1]), " 1 a   b");
+    }
+
+    #[test]
+    fn edit_renderer_renders_the_call_and_the_result_diff() {
+        let mut renderer = EditRenderer::new();
+        let call = renderer.render_call(
+            &json!({
+                "path": "src/main.rs",
+                "edits": [{ "oldText": "world", "newText": "WORLD" }],
+            }),
+            &ctx(),
+        );
+        assert_eq!(line_text(&call[0]), "edit src/main.rs");
+        assert_eq!(renderer.path(), Some("src/main.rs"));
+
+        let result = read_output(
+            "Successfully replaced 1 block(s) in src/main.rs.",
+            Some(json!({
+                "diff": " 1 hello\n-2 world\n+2 WORLD",
+                "patch": "",
+                "firstChangedLine": 2,
+            })),
+        );
+        let lines = renderer.render_result(&result, &ToolRenderOptions::collapsed(), &ctx());
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(line_text(&lines[0]), " 1 hello");
+        assert_eq!(line_text(&lines[1]), "-2 world");
+        assert_eq!(line_text(&lines[2]), "+2 WORLD");
+        assert!(lines[1].iter().any(|span| span.style.inverse));
+    }
+
+    #[test]
+    fn edit_renderer_shows_the_error_body_and_nothing_without_a_diff() {
+        let mut renderer = EditRenderer::new();
+        renderer.render_call(&json!({ "path": "src/main.rs" }), &ctx());
+        let error_ctx = ToolRenderContext::new("/work").with_is_error(true);
+        let lines = renderer.render_result(
+            &read_output("Could not find the exact text", None),
+            &ToolRenderOptions::collapsed(),
+            &error_ctx,
+        );
+        assert_eq!(line_text(&lines[0]), "Could not find the exact text");
+        assert!(has_slot(&lines[0], ThemeColor::Error));
+
+        // A successful result without `details.diff` renders nothing.
+        let mut renderer = EditRenderer::new();
+        renderer.render_call(&json!({ "path": "src/main.rs" }), &ctx());
+        assert!(renderer
+            .render_result(
+                &read_output("ok", None),
+                &ToolRenderOptions::collapsed(),
+                &ctx()
+            )
+            .is_empty());
     }
 }

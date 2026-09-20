@@ -235,13 +235,13 @@ async fn real_read_error_is_not_highlighted() {
 /// through the session's renderer registry.
 #[test]
 fn renderer_registry_covers_every_renderable_tool() {
-    for name in ["read", "write", "bash", "find", "grep", "ls"] {
+    for name in ["read", "write", "edit", "bash", "find", "grep", "ls"] {
         let renderer = pi_coding_agent::tools::renderer_for(name);
         assert!(renderer.is_some(), "no renderer registered for {name}");
         assert_eq!(renderer.unwrap().name(), name);
     }
-    // `edit` is still rendered by its own path.
-    assert!(pi_coding_agent::tools::renderer_for("edit").is_none());
+    // An extension tool has no presentation layer.
+    assert!(pi_coding_agent::tools::renderer_for("extension_tool").is_none());
 }
 
 #[tokio::test]

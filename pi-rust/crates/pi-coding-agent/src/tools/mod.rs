@@ -64,11 +64,11 @@ pub use mod_ignore::{is_ignored_dir_name, relativize_for_search, DEFAULT_IGNORE_
 pub use read::ReadTool;
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::{
-    get_text_output, render_lines_ansi, render_lines_plain, renderer_for, BashRenderer,
-    FindRenderer, GrepRenderer, LsRenderer, ReadRenderer, ToolRenderContext, ToolRenderOptions,
-    ToolRenderSession, ToolRenderer, WriteHighlightCache, WriteHighlightStats, WriteRenderer,
-    BASH_PREVIEW_LINES, FIND_FOLD_LINES, GREP_FOLD_LINES, LS_FOLD_LINES, READ_FOLD_LINES,
-    WRITE_FOLD_LINES, WRITE_PARTIAL_FULL_HIGHLIGHT_LINES,
+    get_text_output, render_diff, render_lines_ansi, render_lines_plain, renderer_for,
+    BashRenderer, EditRenderer, FindRenderer, GrepRenderer, LsRenderer, ReadRenderer,
+    ToolRenderContext, ToolRenderOptions, ToolRenderSession, ToolRenderer, WriteHighlightCache,
+    WriteHighlightStats, WriteRenderer, BASH_PREVIEW_LINES, FIND_FOLD_LINES, GREP_FOLD_LINES,
+    LS_FOLD_LINES, READ_FOLD_LINES, WRITE_FOLD_LINES, WRITE_PARTIAL_FULL_HIGHLIGHT_LINES,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use write::WriteTool;
