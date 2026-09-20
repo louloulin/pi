@@ -14426,3 +14426,110 @@ $ ... cargo test --workspace --offline --no-fail-fast                  # exit 0�
 
 * 开工 `33G / 50G`（71%），余 14G；清理两条 run 已死、无进程持有的 target dir：`/tmp/pi-target-lum1199`（**11G**）、`/tmp/pi-target-1205`（492M）→ 余 **25G**。
 * 本轮自建 `/tmp/pi-target-1207`（frugal 配置下 fmt/clippy/test 后约 2.4G），收尾清理。
+
+## LUM-1208 round — 合并 LUM-1204 + LUM-1205 两条在飞产物（全量 **138 / 2092 / 0 / 2**）+ 裁决 LUM-1204 的越界请求（拆出 Stage 57）+ 派发 Stage 55 / 57、停放 Stage 56
+
+本轮是 **LUM-981** 的推进/协调轮。开工时 `feature/pi.rs` tip = `a00fddd72`（LUM-1207 的状态文档），**本轮有两条可合并产物**：LUM-1204（Stage 53）与 LUM-1205（Stage 54）都已在上一轮派发后落盘并 push 了各自 `work/*` 分支。
+
+### 一、开工盘点
+
+```console
+$ git ls-remote origin feature/pi.rs
+a00fddd728690537b7dec38e2c6fd8831684ff79      # = LUM-1207 状态文档
+$ multica daemon status --output json | jq .running_task_count
+1                                              # 仅本 run（LUM-1204 blocked / LUM-1205 刚收尾）
+```
+
+- **LUM-1204**（Stage 53）：`blocked`，产物 `work/lum-1204` = `c28541acc`，基于 `a00fddd72`，**ahead 1**。它在评论里明确请求协调轮裁决一处越界改动（详见第四节）。
+- **LUM-1205**（Stage 54）：`in_review`，产物 `work/LUM-1205` = `435ae0317`，基于 `0a70fc4e8`（落后 tip 3 个提交），**ahead 1**。改动全在 `pi-session/**`，与 tip 自 `0a70fc4e8` 以来的改动（`pi-extensions` + 文档）零重叠。
+
+### 二、合并（两个 `--no-ff` merge commit）
+
+| merge | 来源 | 提交 | 文件面 |
+| --- | --- | --- | --- |
+| `64356d734` | `work/lum-1204` | `c28541acc` | `pi-extensions/**`（shim + 测试 + 文档），6 文件 +271/−50 |
+| `a71263a3d` | `work/LUM-1205` | `435ae0317` | `pi-session/**`，11 文件 +1745/−450 |
+
+两次合并**零冲突**（`pi-extensions` 与 `pi-session` 不相交；LUM-1205 落后的 3 个提交只碰 `pi-extensions` + 文档）。
+
+**合并暴露的一处破口（照 LUM-1207 第 6 条的例程）**：`work/lum-1204` 的 `pi-extensions/tests/pi_ai_provider.rs` **不是 `rustfmt` 干净的** —— worker 的自验门只跑了 `cargo test`，没跑 `cargo fmt --all -- --check`。已在 `fc9b429eb`（`style: rustfmt the LUM-1204 pi_ai_provider test additions`）修掉。这是本项目第 N 次印证「**worker 自报的门 ≠ 全量门**」：合并后必须自跑 fmt + clippy + 全量。
+
+### 三、质量门（合并后的树，实跑）
+
+私有 target dir `/tmp/pi-target-1208`（`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0`）：
+
+```console
+$ cargo fmt --all -- --check                                        # 干净（修掉上面那处后）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0
+$ cargo test --workspace --offline --no-fail-fast                   # exit 0
+  suites = 138, passed = 2092, failed = 0, ignored = 2
+```
+
+对账：
+
+| 基线 | 套件 | passed | 说明 |
+| --- | --- | --- | --- |
+| LUM-1207 核验的 `af9e351b7` | 138 | 2075 | 上一轮实跑 |
+| LUM-1204 自报 | 138 | 2076 | +1（三 family 桥接用例） |
+| LUM-1205 自报 | 138 | 2086 | +16（上游 v4 读路径用例） |
+| **本轮合并后实跑** | **138** | **2092** | 2076 + 16 = 2092，与两条产物自报**逐位吻合** |
+
+套件数持平（未减少），零倒退，`2 ignored` 与基线一致。
+
+### 四、裁决 LUM-1204 的越界请求（本轮唯一的设计决策）
+
+LUM-1204 的验收第 1 条要求「经 host runner 真实发出流」，但宿主的 `BuiltinPiAiStreamRunner` 只认 `anthropic-messages` / `openai-responses` 两个 api；补三个 arm 需要碰 `pi-ai/src/ext_bridge.rs` 与 `pi-coding-agent/src/extensions/pi_ai_runner.rs`，都落在 LUM-1204 写死的文件面**之外**。worker 按规则没有越界，把 issue 置 `blocked` 等裁决。
+
+**裁决：批准，但拆成独立切片（Stage 57 / LUM-1211），不在 LUM-1204 里做。** 理由：
+
+1. LUM-1204 的产物（shim 侧三 family 接线 + 逐 family 精确化的 gap 文案 + 文档/测试）**自成一片、已可合并**；把宿主 runner 的改动塞回同一个 issue 会让「已交付」与「待实现」混在一个状态里，无法诚实标记。
+2. 宿主侧改动会碰 `pi-ai`（`ext_bridge.rs` 的 `model_from_js` 白名单）——那是一个**跨 crate 的契约变更**，`pi-ai` 在 LUM-1204 的文件面里被明确排除，说明原计划的边界就是这个。
+3. 三 family 的 adapter **早就写好了**（`provider.rs:107-112`），缺的只是两处白名单 + loopback SSE 用例 ≈ 15 行 + 测试；拆出来是一个干净的、可独立验收的小片。
+
+→ LUM-1204 置 `in_review`（它自己的交付面已闭环，残余项已转 LUM-1211），并在其评论区回复裁决。
+
+### 五、派发：满槽 **3/3**（本 run + LUM-1209 + LUM-1211），第 4 片停放
+
+| issue | stage | 动作 | 内容 | 依据 |
+| --- | --- | --- | --- | --- |
+| **LUM-1209** | 55 | 新建 `todo` | `pi-session` **写**路径对齐上游 v4 + `pi session migrate` | LUM-1205 正文第 87 行预留的 Stage 55；依赖（LUM-1199 落盘）已解除 |
+| **LUM-1211** | 57 | 新建 `todo` | `pi-ai/src/ext_bridge.rs` + `pi_ai_runner.rs` 让三个 compat family 真实出流（loopback SSE 验收） | 第四节裁决；闭环 LUM-1204 验收第 1 条 |
+| **LUM-1212** | 56 | 新建 `backlog` | `usage_ledger` / `session-stats` / `branch_*` 读取 API | LUM-1205 正文第 88 行预留的 Stage 56；与 LUM-1209 同改 `pi-session/**`，**必须串行**，故停放等 Stage 55 落盘 |
+| LUM-1204 | 53 | `blocked` → `in_review`（`--no-start`） | 产物已合入，残余转 LUM-1211 | 第四节 |
+| LUM-1205 | 54 | 不动作（已是 `in_review`） | 产物已合入 | 第二节 |
+
+**文件面互斥检查**：LUM-1209 碰 `pi-session/**` + `pi-coding-agent/src/commands/session.rs`；LUM-1211 碰 `pi-ai/src/ext_bridge.rs` + `pi-coding-agent/src/extensions/pi_ai_runner.rs` + 文档 → **同 crate 不同模块、零文本重叠**，可并发。LUM-1212 与 LUM-1209 同改 `pi-session/**` → 停放串行。
+
+派发后 `running_task_count = 3`（本 run + LUM-1209 + LUM-1211），符合「最多 3 个任务同时运行」。
+
+### 六、可合并性扫描（`origin` 全量 ref）
+
+对每个 `refs/heads` 的 `work/*` / `agent/devbox1/*` 算 `rev-list --count tip..ref` 与 `git cherry tip ref | grep -c '^+'`：
+
+- **本轮已合并**：`work/lum-1204`（`c28541acc`）、`work/LUM-1205`（`435ae0317`）→ 合并后 `cherry` 全 `-`。
+- `work/LUM-1207` = `a00fddd72`（本轮的 base，零产物）。
+- 其余 `agent/devbox1/*` / 早期 `work/*` 维持 LUM-1173 / 1187 / 1191 / 1193 / 1195 / 1201 / 1202 / 1203 / 1207 的结论：behind 数百提交的旧树，唯一提交都已被更新实现覆盖，**逐个不合并**。
+- `work/LUM-1205` 采用小写 `lum-1204` / 大写 `LUM-1205` 的**混用命名**，扫描时两种大小写都要试（沿用 LUM-1207 的教训）。
+
+→ 合并后**零待合并产物**。
+
+### 七、frontier（本轮后）
+
+1. **质量门基线** = **138 套件 / 2092 passed / 0 failed / 2 ignored**（本轮实跑，合并 LUM-1204 + LUM-1205 后）；下一欠账点 = LUM-1209 或 LUM-1211 任一合入时。
+2. **Stage 53（LUM-1204）已交付并合入**：compat 三 family 接入 shim host 桥；gap 从 8 个收敛到 5 个，且逐 family 精确化。残余（宿主 runner dispatch）→ Stage 57。
+3. **Stage 54（LUM-1205）已交付并合入**：`pi-session` 上游 storage format 4 **读**路径 + 逐字上游 DDL 的真 fixture；LUM-989 的伪兼容验收被公开纠正，`lib.rs` / `schema.rs` / `README.md` 的不实声明已删。
+4. **Stage 55（LUM-1209，本轮派发）**：写路径对齐上游 v4 + `pi session migrate`。这是当前**最大的剩余兼容缺口**（TS 与 Rust 仍无法共用会话文件）。
+5. **Stage 56（LUM-1212，本轮停放）**：`usage_ledger` / `session-stats` / `branch_*` 读取；等 Stage 55 落盘后晋升。
+6. **Stage 57（LUM-1211，本轮派发）**：宿主 runner dispatch 三个 compat family；小片、闭环 LUM-1204 验收。
+7. **仍欠的引擎级残余**（维持 LUM-1185 / 1177 结论，不复活）：`fs.watch` / key-based WebCrypto / `node:test`；provider 家族 `bedrock-converse` / `cohere-v2` / `google-vertex`（无 adapter，只做准确化文档）。
+8. **Autopilot 重复轮**：本轮开工时只有本 run（LUM-1204 blocked、LUM-1205 收尾），未出现同刻重复轮 —— 上一轮的「停放 LUM-1206」起了作用。建议维持。
+
+### 八、流程教训（本轮两条，供后续协调轮沿用）
+
+1. **worker 自报门不可信，fmt 也必须自跑**：本轮 `work/lum-1204` 带着 fmt 破口进入合并。LUM-1207 第 6 条已经记过「破口全部来自合并」，本轮补充：**破口也来自 worker 少跑的那一道门**。合并后的例行门必须是 `fmt --check` + `clippy -D warnings` + 全量 `test` 三件套，缺一不可。
+2. **`blocked` 的越界请求，正确处置是「拆片」而不是「批回本片」**：worker 按文件面边界停在 `blocked` 是**正确行为**（LUM-1204 没有偷偷扩面）。协调轮要做的是判断残余是否自成一片：自成一片就新建 stage issue 并把原 issue 置 `in_review`，让两个状态各自诚实；而不是把它退回原片假装原片未完成。
+
+### 九、磁盘（本轮）
+
+* 开工 `27G / 50G`（58%），余 20G。
+* 复用 `/tmp/pi-target-1204`（LUM-1204 已死、无进程持有）作为合并前门，本轮自建 `/tmp/pi-target-1208`；收尾清理两者。`/tmp/pi-target-1205`（2.5G，LUM-1205 已 `in_review`）一并清理。
