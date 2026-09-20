@@ -1,0 +1,108 @@
+# lum1267-narrow-composer-23.png — chars, 120x23 cells
+
+===== LUM-1267 narrow viewport (120x23): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [1] 1. idle at 120x23: status line is on screen and the composer row is reachable  (cursor 120,22, frame 82497fc0308a, px 7fb8b91bb9df, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Faux test model  session-18d7273ac506d86e                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Faux test model'
+  assert PASS   expect       '? for help'
+  assert XFAIL  probe        '> type a prompt'  — LUM-1262 P0-1: before LUM-1261 the 21-row header ate the editor row at this height and the prompt never appeared
+
+===== LUM-1267 narrow viewport (120x23): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [2] 2. a draft typed at 120x23 is on screen, not typed blind  (cursor 120,22, frame 82497fc0308a, px 7fb8b91bb9df, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Faux test model  session-18d7273ac506d86e                                                  in 0 out 0 ?/8.2k  ? for help
+  assert XFAIL  probe        '> typed blind'  — LUM-1262 P0-1: the pre-fix frame has the draft nowhere on the grid (grep -c = 0)
+
+===== LUM-1267 narrow viewport (120x23): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [3] 3. Alt+H always has an escape hatch: the header folds and the status line says so  (cursor 120,22, frame 75761fb348dc, px 3090c0a2cc0b, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> typed blind▍
+Faux test model  session-18d7273ac506d86e                   in 0 out 0 ?/8.2k  Startup header: collapsed (Alt+H to show)
+  assert PASS   expect       'Startup header: collapsed'
+  assert PASS   expect       '> typed blind'
+
+===== LUM-1267 narrow viewport (120x23): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [4] 4. /help still renders its body at 120x23 (the transcript keeps at least one row)  (cursor 120,22, frame b5f19e4ff266, px de600504de2b, alive=True) =====
+· slash commands: /help show this help text /clear clear the message view /new start a new session /copy copy the last
+· assistant message to the clipboard /name [name] show or set the session display name /model pick a model (opens
+· selector) /session show the current session info /export [path] export the session (HTML, or JSONL for a .jsonl path)
+· /resume resume a previous session /tree navigate the session tree and switch branches /fork branch a new session from
+· a user message /clone copy the current session into a new session file /settings show or change interface settings
+· /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project trust
+· (/trust yes|no) /compact summarize the conversation prefix to free context /hotkeys list the keyboard shortcuts
+· /extensions list loaded extensions and what they register /exit quit the interactive session keys: Enter submit prompt
+· Up / Down navigate prompt history PgUp/PgDn scroll the chat log one page Home / End jump to the start / end of the
+· chat log Ctrl+C abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit on an empty prompt
+· Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close selector / cancel turn
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7273ac506d86e                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'slash commands:'

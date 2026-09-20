@@ -1,0 +1,53 @@
+{
+  "cols": 120,
+  "rows": 23,
+  "caption": "LUM-1267 narrow viewport (120x23): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs"],
+  "distinct_panels": false,
+  "notes": [
+    "LUM-1261 fixed the row-budget order (extension_ui::plan_chrome reserves the editor row first) and merged it into feature/pi.rs; LUM-1266 folds the built-in header on short frames. Behaviour asserted here is the merged-tip behaviour: the only post-fix PTY evidence on disk is LUM-1261's own docs/screenshots/lum1261-small-terminal-23.png.txt, whose row 22 reads `> typed blind`.",
+    "Run with the pre-fix baseline binary (artifacts/pi-tip-b5769b585) and the two composer probes report XFAIL — that is the 'before' side of the A/B, not a failure.",
+    "The 21-row header itself is not asserted: below 24 rows LUM-1266 folds it, above it stays expanded, and which of the two a given binary does is a policy question for that scenario (lum1266-tall-34.json / lum1266-short-23.json), not an interaction invariant.",
+    "`distinct_panels` is deliberately off: on the pre-fix baseline typing into the composer changes *no* cell at this height, so panels 1 and 2 are byte-identical. That equality IS P0-1 and it is what the two probes record; leaving the duplicate guard on would turn the A/B run into a hard failure and hide the XFAIL ladder. Panel 2 starts by clearing the composer so the draft is typed from a known-empty state."
+  ],
+  "panels": [
+    {
+      "label": "1. idle at 120x23: status line is on screen and the composer row is reachable",
+      "send": "<C-u>",
+      "wait": 3.0,
+      "expect": ["Faux test model", "? for help"],
+      "probe": [
+        {
+          "text": "> type a prompt",
+          "why": "LUM-1262 P0-1: before LUM-1261 the 21-row header ate the editor row at this height and the prompt never appeared"
+        }
+      ]
+    },
+    {
+      "label": "2. a draft typed at 120x23 is on screen, not typed blind",
+      "send": "typed blind",
+      "wait": 1.2,
+      "probe": [
+        {
+          "text": "> typed blind",
+          "why": "LUM-1262 P0-1: the pre-fix frame has the draft nowhere on the grid (grep -c = 0)"
+        }
+      ]
+    },
+    {
+      "label": "3. Alt+H always has an escape hatch: the header folds and the status line says so",
+      "send": "<Esc>h",
+      "wait": 1.5,
+      "wait_for": "collapsed",
+      "expect": ["Startup header: collapsed", "> typed blind"]
+    },
+    {
+      "label": "4. /help still renders its body at 120x23 (the transcript keeps at least one row)",
+      "send": "<C-u>/help<Enter>",
+      "wait": 1.5,
+      "wait_for": "slash commands:",
+      "expect": ["slash commands:"]
+    }
+  ]
+}
