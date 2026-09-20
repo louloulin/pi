@@ -105,16 +105,9 @@ fn weather_context() -> Context {
 #[tokio::test]
 async fn anthropic_faux_text_turn_round_trip() {
     let fixture = fixtures_root().join("text_response.sse");
-    let provider = Arc::new(AnthropicFixtureStreamFn::new(
-        &fixture,
-        "claude-haiku-4-5",
-    ));
+    let provider = Arc::new(AnthropicFixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
 
-    let mut agent = Agent::new(AgentOptions::new(
-        claude_model(),
-        provider,
-        "you are pi",
-    ));
+    let mut agent = Agent::new(AgentOptions::new(claude_model(), provider, "you are pi"));
     agent
         .prompt("hi")
         .await
@@ -150,10 +143,7 @@ async fn anthropic_faux_text_turn_round_trip() {
 #[tokio::test]
 async fn anthropic_faux_stream_done_event_shape() {
     let fixture = fixtures_root().join("text_response.sse");
-    let provider = Arc::new(AnthropicFixtureStreamFn::new(
-        &fixture,
-        "claude-haiku-4-5",
-    ));
+    let provider = Arc::new(AnthropicFixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
 
     let mut stream = provider
         .stream_simple(&claude_model(), &weather_context(), &Default::default())
@@ -193,10 +183,7 @@ async fn anthropic_faux_stream_done_event_shape() {
 #[tokio::test]
 async fn anthropic_faux_cache_fields_land_in_done() {
     let fixture = fixtures_root().join("cache_read_response.sse");
-    let provider = Arc::new(AnthropicFixtureStreamFn::new(
-        &fixture,
-        "claude-haiku-4-5",
-    ));
+    let provider = Arc::new(AnthropicFixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
 
     let mut stream = provider
         .stream_simple(&claude_model(), &weather_context(), &Default::default())
@@ -228,10 +215,7 @@ async fn anthropic_faux_tool_call_lands_in_assistant_message() {
     use std::sync::Arc as StdArc;
 
     let fixture = fixtures_root().join("tool_use_response.sse");
-    let provider = Arc::new(AnthropicFixtureStreamFn::new(
-        &fixture,
-        "claude-haiku-4-5",
-    ));
+    let provider = Arc::new(AnthropicFixtureStreamFn::new(&fixture, "claude-haiku-4-5"));
 
     let mut hooks = AgentHookAdapter::default();
     let stop_counter = StdArc::new(AtomicUsize::new(0));
@@ -245,11 +229,7 @@ async fn anthropic_faux_tool_call_lands_in_assistant_message() {
         })
     }));
 
-    let mut agent = Agent::new(AgentOptions::new(
-        claude_model(),
-        provider,
-        "you are pi",
-    ));
+    let mut agent = Agent::new(AgentOptions::new(claude_model(), provider, "you are pi"));
     *agent.hooks_mut() = hooks;
     agent
         .prompt("what's the weather in SF?")

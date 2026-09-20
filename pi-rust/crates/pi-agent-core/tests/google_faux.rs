@@ -200,9 +200,7 @@ async fn google_faux_thinking_and_usage() {
     let (content, usage) = events
         .iter()
         .find_map(|e| match e {
-            AssistantMessageEvent::Done { content, usage, .. } => {
-                Some((content.clone(), *usage))
-            }
+            AssistantMessageEvent::Done { content, usage, .. } => Some((content.clone(), *usage)),
             _ => None,
         })
         .expect("done event");
