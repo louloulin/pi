@@ -384,6 +384,61 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
     ]
 }
 
+/// The `app.*` action ids this port actually consumes.
+///
+/// A keybinding table can say that an action *is bound*; it cannot say that
+/// the action *does anything*. Both advertisement surfaces — the startup
+/// header ([`crate::locale::STARTUP_HINTS`]) and `/hotkeys`
+/// (`pi-coding-agent`'s `commands::slash::hotkeys_text`) — used to read a
+/// default chord as proof of a working shortcut, so a default-table entry no
+/// consumer answers was still advertised. LUM-1240 measured four such dead
+/// keys on the port's tip; `app.suspend` and `app.editor.external` are still
+/// unhonoured here.
+///
+/// This list is the missing axis. An `app.*` id appears in a hint only when
+/// it is both bound and listed here; `tui.*` ids are consumed by the `pi-tui`
+/// components themselves and need no entry (see [`app_action_is_consumed`]).
+///
+/// Keep it in step with the consumers: the driver claims its `app.*` chords in
+/// `crates/pi-coding-agent/src/interactive.rs` before the App sees the key,
+/// and `crates/pi-tui/src/{app,editor}.rs` consume the rest.
+///
+/// [# LUM-1245] `app.model.select` was added when the driver started routing
+/// `Ctrl+L` to the model selector instead of clearing the transcript.
+pub const CONSUMED_APP_ACTIONS: &[&str] = &[
+    "app.interrupt",
+    "app.clear",
+    "app.exit",
+    "app.thinking.cycle",
+    "app.thinking.save",
+    "app.thinking.toggle",
+    "app.model.cycleForward",
+    "app.model.cycleBackward",
+    "app.model.select",
+    "app.tools.expand",
+    "app.header",
+    "app.message.copy",
+    "app.message.followUp",
+    "app.message.dequeue",
+    "app.clipboard.pasteImage",
+    "app.session.new",
+    "app.session.tree",
+    "app.session.fork",
+    "app.session.resume",
+];
+
+/// True when `id` names an action with a consumer in this port.
+///
+/// Non-`app.*` ids (the `tui.*` namespace) are component-level: `pi-tui`
+/// consumes them itself, so they always count as wired. An `app.*` id counts
+/// only when it is in [`CONSUMED_APP_ACTIONS`].
+pub fn app_action_is_consumed(id: &str) -> bool {
+    if !id.starts_with("app.") {
+        return true;
+    }
+    CONSUMED_APP_ACTIONS.contains(&id)
+}
+
 /// Parse a key id (`"ctrl+shift+up"`, `"alt+backspace"`, `"pageUp"`, `"f5"`,
 /// `"a"`, `"!"`) into the [`Key`] it denotes.
 ///

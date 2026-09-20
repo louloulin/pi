@@ -378,6 +378,13 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
             if chords.is_empty() {
                 continue;
             }
+            // Bound is not the same as implemented. An `app.*` id no consumer
+            // answers is not a shortcut, so it is not advertised (LUM-1240 /
+            // LUM-1245). `tui.*` ids are consumed by the components, so the
+            // filter is a no-op for them.
+            if !pi_tui::keybindings::app_action_is_consumed(id) {
+                continue;
+            }
             section.push_str(&format!("  {:<16} {}\n", chords.join(" / "), label));
         }
         if !section.is_empty() {
@@ -628,6 +635,45 @@ mod tests {
         assert!(text.contains("chat log:"), "{text}");
         assert!(text.contains("copy the last assistant message"), "{text}");
         assert!(text.contains("show or hide thinking blocks"), "{text}");
+    }
+
+    #[test]
+    fn hotkeys_text_skips_bound_but_unimplemented_actions() {
+        // LUM-1240: four advertised chords were bound but answered by no
+        // consumer. `/hotkeys` read "has a default chord" as "is
+        // implemented". `app.suspend` (Ctrl+Z) and `app.editor.external` are
+        // still unimplemented, so they must not be advertised; `app.model.select`
+        // is implemented as of LUM-1245 and must be.
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        // Bound in the table, so the filter is what drops them.
+        assert_eq!(
+            manager.get_keys("app.suspend"),
+            ["ctrl+z"],
+            "app.suspend stays bound; only the advertisement is filtered"
+        );
+        let text = hotkeys_text_with(&manager);
+        assert!(
+            !text.contains("suspend to the background"),
+            "unimplemented app.suspend advertised:\n{text}"
+        );
+        assert!(
+            text.contains("open the model selector"),
+            "app.model.select missing:\n{text}"
+        );
+        assert!(text.contains("Ctrl+L"), "{text}");
+        // The invariant itself, not just the two known rows: every advertised
+        // `app.*` id must have a consumer.
+        for id in crate::keybindings::APP_KEYBINDING_IDS {
+            if !pi_tui::keybindings::app_action_is_consumed(id) {
+                assert!(!text.contains(id), "{id} advertised but not wired");
+            }
+        }
     }
 
     #[test]

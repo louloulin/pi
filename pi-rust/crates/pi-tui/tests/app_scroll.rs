@@ -217,13 +217,14 @@ fn scroll_keys_before_first_render_are_noops() {
 }
 
 #[test]
-fn ctrl_l_clears_the_log_and_repins() {
+fn clear_transcript_drops_the_log_and_repins() {
     let (mut app, _) = app_with_lines(40);
     app.step_key(key(KeyCode::PageUp));
     assert!(!app.messages().is_following());
 
-    let outcome = app.step_key(Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
-    assert_eq!(outcome, StepOutcome::Redraw);
+    // `/clear`'s App-side path. `Ctrl+L` no longer reaches it: upstream binds
+    // that chord to `app.model.select` and the driver claims it (LUM-1245).
+    app.clear_transcript();
     assert!(app.messages().is_empty());
     assert!(app.messages().is_following());
     assert_eq!(app.messages().scroll_offset(), 0);

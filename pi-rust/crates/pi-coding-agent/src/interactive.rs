@@ -805,6 +805,20 @@ async fn handle_input_event(
             cycle_model(app, agent, options, CycleDirection::Backward).await;
             return Ok(None);
         }
+        // `app.model.select` (`Ctrl+L`) — upstream's chord for "Open model
+        // selector" (`packages/coding-agent/src/core/keybindings.ts:116`).
+        // This port used to hardcode `Ctrl+L` in `App::step_key` to clear the
+        // transcript, which contradicted the header hint; `/clear` still does
+        // the clearing (LUM-1245).
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.model.select",
+            &["ctrl+l"],
+        ) {
+            open_model_selector(app, options);
+            return Ok(None);
+        }
         // `app.thinking.cycle` (Shift+Tab) — the same switching path
         // `/thinking` and the selector take.
         if pi_tui::keybindings::matches_with_fallback(
@@ -1208,6 +1222,36 @@ fn open_thinking_selector(app: &mut App, supports: bool) {
             selector.next();
         }
     }
+    app.open_selector(selector);
+}
+
+/// Open the `/model` selector — upstream `showModelSelector`
+/// (`interactive-mode.ts`), reusing the shared [`Selector`] the thinking
+/// picker also uses.
+///
+/// Shared by the `/model` command and the `app.model.select` chord: upstream
+/// binds that action to `Ctrl+L`
+/// (`packages/coding-agent/src/core/keybindings.ts:116`, "Open model
+/// selector"), so both entry points must land on one implementation rather
+/// than a second copy (LUM-1245).
+fn open_model_selector(app: &mut App, options: &InteractiveOptions) {
+    let items = sorted_models(&options.models)
+        .into_iter()
+        .map(|(provider, model)| {
+            let label = model.label.clone().unwrap_or_else(|| model.id.clone());
+            SelectorItem::new(format!("model:{}", model.id), label)
+                .with_description(provider.to_string())
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        app.info("no models available".to_string());
+        return;
+    }
+    // Upstream `/model` is searchable and windows at 10 rows
+    // (`model-selector.ts`: `maxVisible = 10`).
+    let selector = Selector::new("Pick a model", items)
+        .searchable(true)
+        .with_max_visible(10);
     app.open_selector(selector);
 }
 
@@ -1885,24 +1929,7 @@ async fn run_slash_command(
             app.request_exit();
         }
         SlashCommand::Model => {
-            let items = sorted_models(&options.models)
-                .into_iter()
-                .map(|(provider, model)| {
-                    let label = model.label.clone().unwrap_or_else(|| model.id.clone());
-                    SelectorItem::new(format!("model:{}", model.id), label)
-                        .with_description(provider.to_string())
-                })
-                .collect::<Vec<_>>();
-            if items.is_empty() {
-                app.info("/model: no models available".to_string());
-            } else {
-                // Upstream `/model` is searchable and windows at 10 rows
-                // (`model-selector.ts`: `maxVisible = 10`).
-                let selector = Selector::new("Pick a model", items)
-                    .searchable(true)
-                    .with_max_visible(10);
-                app.open_selector(selector);
-            }
+            open_model_selector(app, options);
         }
         SlashCommand::Hotkeys => {
             app.info(crate::commands::slash::hotkeys_text());

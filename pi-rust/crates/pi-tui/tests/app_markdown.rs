@@ -9,16 +9,15 @@
 //!   assistant message body is a `Markdown` component
 //!   (`packages/coding-agent/src/modes/interactive/components/assistant-message.ts`).
 //! * Turning it off falls back to the plain-text path.
-//! * `App::set_markdown` flips it at runtime, and `/clear` (`Ctrl+L`) does
-//!   not reset it.
+//! * `App::set_markdown` flips it at runtime, and `/clear` does not reset
+//!   it.
 
 use std::sync::Arc;
 
 use pi_agent_core::{Agent, AgentOptions};
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId};
-use pi_tui::app::{App, AppConfig, StepOutcome};
-use pi_tui::input::{InputEvent, Key, KeyCode, KeyModifiers};
+use pi_tui::app::{App, AppConfig};
 use pi_tui::MessageItem;
 
 const WIDTH: u16 = 40;
@@ -135,15 +134,16 @@ fn clear_keeps_the_markdown_switch() {
     app.messages_mut().push(MessageItem::assistant(BODY));
     assert!(app.markdown());
 
-    // Ctrl+L clears the message log (the `/clear` path) and must leave the
-    // rendering mode alone.
-    let outcome = app.step(InputEvent::Key(Key::new(
-        KeyCode::Char('l'),
-        KeyModifiers::CONTROL,
-    )));
-    assert_eq!(outcome, StepOutcome::Redraw);
-    assert!(app.messages().is_empty(), "Ctrl+L clears the log");
-    assert!(app.markdown(), "Ctrl+L must not reset the markdown switch");
+    // `/clear` clears the message log and must leave the rendering mode
+    // alone. The chord that used to reach it (`Ctrl+L`) belongs to
+    // `app.model.select` upstream and is claimed by the driver, not the App
+    // (LUM-1245).
+    app.clear_transcript();
+    assert!(app.messages().is_empty(), "clear_transcript clears the log");
+    assert!(
+        app.markdown(),
+        "clear_transcript must not reset the markdown switch"
+    );
 
     // New output still renders as markdown after the clear.
     app.messages_mut().push(MessageItem::assistant(BODY));

@@ -107,14 +107,20 @@
 //! `app.exit` (`ctrl+d`) is consumed by [`crate::Editor`], which returns
 //! [`EditorAction::Eof`] on an empty buffer and falls through to
 //! `tui.editor.deleteCharForward` otherwise (upstream `CustomEditor` does
-//! the same). The remaining `app.*` / `tui.altScreen.*` ids in the merged
-//! table have **no consumer** in this port yet and are deliberately not
-//! implemented here: `app.suspend`, `app.thinking.cycle`,
-//! `app.thinking.save`, `app.model.cycleForward` / `cycleBackward` /
-//! `select`, the `app.session.*`,
-//! `app.tree.*`, `app.models.*`, `app.message.*`, `app.clipboard.*` and
-//! `app.editor.*` families, and `tui.altScreen.halfPageUp` / `halfPageDown`
-//! / `lineUp` / `lineDown` / `previousPrompt` / `nextPrompt`.
+//! the same). The ids the coding-agent driver claims before the App sees the
+//! key (`app.model.cycleForward` / `cycleBackward` / `select`, the
+//! `app.session.*` and `app.message.*` chords) need no branch here. The
+//! remaining `app.*` / `tui.altScreen.*` ids in the merged table have **no
+//! consumer** in this port yet and are deliberately not implemented here:
+//! `app.suspend`, `app.editor.external`, the `app.tree.*` and `app.models.*`
+//! families, and `tui.altScreen.halfPageUp` / `halfPageDown` / `lineUp` /
+//! `lineDown` / `previousPrompt` / `nextPrompt`.
+//!
+//! Two filters guard the startup header and `/hotkeys`: an id must resolve to
+//! a chord **and** name an action with a consumer
+//! ([`crate::keybindings::CONSUMED_APP_ACTIONS`]). Without the second filter a
+//! default-table entry that nothing answers was still advertised as a working
+//! shortcut (LUM-1240).
 //!
 //! `app.thinking.toggle` (`ctrl+t`) **is** wired: it collapses / expands
 //! assistant thinking blocks and reports the new state through the transient
@@ -125,11 +131,13 @@
 //! hint (see [`App::toggle_tools_expanded`]). A mouse click on a single block
 //! toggles just that block.
 //!
-//! One deliberate deviation: upstream's `app.model.select` also defaults to
-//! `ctrl+l`, but there it means "open the model selector"
-//! (`packages/coding-agent/src/core/keybindings.ts:101`). This port keeps
-//! `Ctrl+L` hardcoded as "clear the transcript", so the chord is not routed
-//! through `app.model.select`.
+//! `Ctrl+L` is deliberately **not** claimed here. Upstream binds it to
+//! `app.model.select`, "Open model selector"
+//! (`packages/coding-agent/src/core/keybindings.ts:116`), and the selector
+//! lives in the coding-agent driver, which claims the chord first. Clearing
+//! the transcript is [`App::clear_transcript`]'s job, reached through
+//! `/clear`; this port used to hardcode `Ctrl+L` to clear, which shadowed the
+//! driver's chord and contradicted the header hint (LUM-1245).
 //!
 //! # Transcript search
 //!
@@ -1401,6 +1409,13 @@ impl App {
             ),
         ]);
         for hint in STARTUP_HINTS {
+            // Two filters: the id must resolve to a chord in the live table
+            // *and* name an action this port consumes. The second is what
+            // keeps a bound-but-unimplemented `app.*` id out of the header
+            // (`CONSUMED_APP_ACTIONS`, LUM-1240/LUM-1245).
+            if !hint.is_wired() {
+                continue;
+            }
             let Some(keys) = hint.key.label(|id| kb.get_keys(id)) else {
                 // Unbound in this table: an unbound action is not a hint.
                 continue;
@@ -2407,17 +2422,13 @@ impl App {
             self.exit_requested = true;
             return StepOutcome::Exit;
         }
-        // `Ctrl+L` stays hardcoded: upstream also defaults
-        // `app.model.select` to `ctrl+l`, but its meaning is "open the
-        // model selector", not "clear the transcript" (see the module
-        // docs).
-        if key == Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL) {
-            self.messages.clear();
-            // The selected line indices point into the transcript that
-            // just disappeared.
-            self.clear_selection();
-            return StepOutcome::Redraw;
-        }
+        // `app.model.select` (`Ctrl+L`) is **not** claimed here. Upstream's
+        // `app.model.select` means "open the model selector"
+        // (`packages/coding-agent/src/core/keybindings.ts:116`), and this port's
+        // selector lives in the coding-agent driver, which claims the chord
+        // before the App sees the key. Clearing the transcript is `/clear`'s
+        // job; a hardcoded `Ctrl+L` here would shadow the driver's chord (see
+        // the module docs).
         // `app.thinking.toggle` (`Ctrl+T`): collapse / expand every assistant
         // reasoning block (upstream's `toggleThinkingBlockVisibility`,
         // `interactive-mode.ts:4239`, which also reports the new state through
@@ -3890,6 +3901,20 @@ impl App {
         self.selection = None;
         self.selection_dragging = false;
         self.stop_selection_autoscroll();
+    }
+
+    /// Drop every transcript row and repin the viewport to the end.
+    ///
+    /// This is the `/clear` path (`pi-coding-agent`'s `SlashCommand::Clear`).
+    /// It used to also be reachable from `Ctrl+L`; that chord belongs to
+    /// `app.model.select` upstream, and the driver now owns it, so the App no
+    /// longer claims it. The selection is dropped because its line indices
+    /// point into the transcript that just disappeared; component state that is
+    /// not the transcript (markdown mode, thinking/tool folds, theme) is left
+    /// alone.
+    pub fn clear_transcript(&mut self) {
+        self.messages.clear();
+        self.clear_selection();
     }
 
     /// Take the text the driver must copy to the clipboard, if a

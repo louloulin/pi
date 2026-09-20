@@ -241,11 +241,14 @@ fn clear_keeps_the_thinking_switch() {
     app.step(ctrl('t'));
     assert!(!app.thinking_visible());
 
-    assert_eq!(app.step(ctrl('l')), StepOutcome::Redraw);
-    assert!(app.messages().is_empty(), "Ctrl+L clears the transcript");
+    // `/clear` drops the transcript; the chord that used to reach it (`Ctrl+L`)
+    // belongs to `app.model.select` upstream and is no longer claimed by the
+    // App (LUM-1245).
+    app.clear_transcript();
+    assert!(app.messages().is_empty(), "clear_transcript drops the log");
     assert!(
         !app.thinking_visible(),
-        "Ctrl+L must not reset the thinking switch"
+        "clearing must not reset the thinking switch"
     );
 }
 
