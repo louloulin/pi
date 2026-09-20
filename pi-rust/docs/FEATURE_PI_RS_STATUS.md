@@ -13491,3 +13491,11 @@ $ cargo fmt --all -- --check      # exit 0，0 行输出
 1. **LUM-1180 一推分支就合并它**：双向扫（`origin` + `mirror`，`work/lum-1180` 与 `work/LUM-1180` 两种写法），合并后**必须补跑一次全量 `cargo test --workspace`**（frugal 配置），核对 passed 增量与新增单测数相符；LUM-1188 与 LUM-1180 文件面不相交，先后顺序不影响后续合并（窄面优先）。
 2. **紧接着派发 `ctx.ui.*` 端到端接线**，立项时把文件面写死为 `crates/pi-extensions/src/{host.rs, pi-ext-shim.mjs}` + `crates/pi-coding-agent/src/extensions/ui_bridge.rs`，并明确禁止触碰 `crates/pi-tui/**`。
 3. **协调轮开工例程（本轮补充第 4 步）**：`git fetch --all` → 双向 + 大小写扫 `work/*` → **全 workdir HEAD 对账**（找「完成了但没推分支」的树）→ `multica daemon status --output json` 核对 `running_task_count` → `df -h /`（余量 < 5G 先清陈旧 target dir）→ 再决定派发。**满槽时不要为了「有事做」制造同文件并发**，但要主动去找**文件面零重叠**的切片，别把空槽白白饿着；合并已完成的分支是本轮硬职责，不算派发。
+
+### 六、本轮教训：`--assignee pi` 会模糊命中**另一台机器**的 agent（派发时务必用 `--to-id`）
+
+LUM-1188 用 `--assignee pi` 创建时，fuzzy match 命中的是 **`编程助手-winpi`（`dbe772db-f96c-4957-9c0f-e2aa5cbb7749`，绑定 runtime `041bf509-…` = `Pi (MS-AJRFTMRSXMHB)`）**，不是本仓库历来承接 pi-rust 任务的 **`编程助手-devbox1`（`22e8b20d-84ea-43e9-b535-2f76e4aee397`，runtime `0d113b34-…` = `Pi (devbox1)`）**。名称里都含 "pi"，fuzzy 匹配把它路由到了另一台机器（Windows），而任务描述里的 `/tmp/cargo-home`、`df -h /`、`CARGO_TARGET_DIR` 全是本机约定。
+
+处理：`multica issue cancel-task 01a0bd4a-d482 --issue LUM-1188`（run `dispatched 05:29:53` → `cancelled`），再 `multica issue assign LUM-1188 --to-id 22e8b20d-84ea-43e9-b535-2f76e4aee397` 重派（新 run `01a0bd4f-1848`，`05:34:32`）。取消前先 `git ls-remote origin|mirror refs/heads/work/lum-1188` 确认为空 —— 被取消的那路**没有**推任何分支，不会和重派后的同名分支撞车。
+
+**后续轮次照做**：派发一律 `--assignee-id 22e8b20d-84ea-43e9-b535-2f76e4aee397`（或 `--assignee 编程助手-devbox1` 的全名），**不要**写 `--assignee pi`；创建后立刻用 `multica issue get <新号> --output json` 核对 `assignee_id` 与 `multica issue runs <新号> --active` 的 `agent_id`/`dispatched_at`（后者的 `attribution.delegated_from_task_id` 就是本轮 run 的 id）。派发前 `multica daemon status` 的 `running_task_count` 是**本机**的计数，不含其它 runtime 上的任务——所以「本机 3 路」与「全工作区 3 路」并不等价。
