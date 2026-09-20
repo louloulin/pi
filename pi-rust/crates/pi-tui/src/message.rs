@@ -114,6 +114,18 @@ struct ToolStream {
     running: bool,
 }
 
+/// Which queue a not-yet-delivered prompt belongs to. Mirrors the
+/// `streamingBehavior` upstream passes to `session.prompt` — `"steer"`
+/// for input submitted with Enter while a turn streams, `"followUp"`
+/// for the explicit `app.message.followUp` chord.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingMessageKind {
+    /// Injected ahead of a follow-up (upstream `"steer"`).
+    Steer,
+    /// Delivered after every steering message (upstream `"followUp"`).
+    FollowUp,
+}
+
 /// Conversation log rendered by the TUI. Holds an ordered list of
 /// [`MessageItem`] entries and supports incremental updates so the
 /// TUI redraws only the tail while the assistant streams.
@@ -154,6 +166,14 @@ pub struct MessageView {
     /// (`packages/coding-agent/src/core/settings-manager.ts:962`), so reasoning
     /// is visible unless the reader hides it with `app.thinking.toggle`.
     hide_thinking: bool,
+    /// Prompts the user submitted while a turn was in flight, waiting to be
+    /// delivered once it ends. Upstream keeps two queues
+    /// (`session.getSteeringMessages()` / `getFollowUpMessages()`) and shows
+    /// them above the editor; the port renders them as dim
+    /// `Steering:` / `Follow-up:` lines at the tail of the log.
+    pending_steering: Vec<String>,
+    /// See [`MessageView::pending_steering`].
+    pending_follow_up: Vec<String>,
 }
 
 impl Clone for MessageView {
@@ -168,6 +188,8 @@ impl Clone for MessageView {
             markdown: self.markdown,
             hyperlinks: self.hyperlinks,
             hide_thinking: self.hide_thinking,
+            pending_steering: self.pending_steering.clone(),
+            pending_follow_up: self.pending_follow_up.clone(),
         }
     }
 }
@@ -267,6 +289,89 @@ impl MessageView {
         self.tool_streams.clear();
         self.scroll_from_bottom = 0;
         self.detached = false;
+        self.pending_steering.clear();
+        self.pending_follow_up.clear();
+    }
+
+    /// Queue a prompt the user submitted while a turn was in flight.
+    /// Nothing is ever dropped: the text is rendered as a dim
+    /// `Steering:` / `Follow-up:` line until the driver delivers it.
+    pub fn push_pending(&mut self, kind: PendingMessageKind, text: impl Into<String>) {
+        match kind {
+            PendingMessageKind::Steer => self.pending_steering.push(text.into()),
+            PendingMessageKind::FollowUp => self.pending_follow_up.push(text.into()),
+        }
+        self.repin_if_following();
+    }
+
+    /// Number of queued (not yet delivered) prompts.
+    pub fn pending_len(&self) -> usize {
+        self.pending_steering.len() + self.pending_follow_up.len()
+    }
+
+    /// True when no prompt is queued.
+    pub fn pending_is_empty(&self) -> bool {
+        self.pending_len() == 0
+    }
+
+    /// Queued prompts in delivery order: every steering message first
+    /// (FIFO), then every follow-up (FIFO). Upstream builds the same order
+    /// when it restores the queues to the editor
+    /// (`[...steering, ...followUp]`).
+    pub fn pending(&self) -> Vec<(PendingMessageKind, &str)> {
+        self.pending_steering
+            .iter()
+            .map(|text| (PendingMessageKind::Steer, text.as_str()))
+            .chain(
+                self.pending_follow_up
+                    .iter()
+                    .map(|text| (PendingMessageKind::FollowUp, text.as_str())),
+            )
+            .collect()
+    }
+
+    /// Remove and return the next queued prompt, steering before follow-up.
+    pub fn take_next_pending(&mut self) -> Option<String> {
+        let next = if !self.pending_steering.is_empty() {
+            Some(self.pending_steering.remove(0))
+        } else if !self.pending_follow_up.is_empty() {
+            Some(self.pending_follow_up.remove(0))
+        } else {
+            None
+        };
+        if next.is_some() {
+            self.repin_if_following();
+        }
+        next
+    }
+
+    /// Remove and return every queued prompt in delivery order (steering
+    /// then follow-up).
+    pub fn take_all_pending(&mut self) -> Vec<(PendingMessageKind, String)> {
+        let mut out: Vec<(PendingMessageKind, String)> = self
+            .pending_steering
+            .drain(..)
+            .map(|text| (PendingMessageKind::Steer, text))
+            .collect();
+        out.extend(
+            self.pending_follow_up
+                .drain(..)
+                .map(|text| (PendingMessageKind::FollowUp, text)),
+        );
+        if !out.is_empty() {
+            self.repin_if_following();
+        }
+        out
+    }
+
+    /// Drop every queued prompt without delivering it.
+    pub fn clear_pending(&mut self) {
+        if self.pending_is_empty() {
+            return;
+        }
+        self.pending_steering.clear();
+        self.pending_follow_up.clear();
+        self.repin_if_following();
     }
 
     /// Re-pin to the tail unless the reader scrolled away.
@@ -674,6 +779,23 @@ impl MessageView {
                 }
             }
             out.extend(lines);
+        }
+
+        if !self.pending_is_empty() {
+            let dim = SpanStyle::fg(ThemeColor::Dim);
+            for (label, text) in [
+                ("Steering: ", &self.pending_steering),
+                ("Follow-up: ", &self.pending_follow_up),
+            ] {
+                for entry in text {
+                    let body = format!("{label}{entry}");
+                    out.extend(
+                        wrap_text(&body, width as usize)
+                            .into_iter()
+                            .map(|line| vec![StyledSpan::new(line, dim)]),
+                    );
+                }
+            }
         }
 
         if out.is_empty() {

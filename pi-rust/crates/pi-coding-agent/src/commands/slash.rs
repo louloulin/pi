@@ -211,6 +211,11 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ("app.model.cycleForward", "cycle to the next model"),
         ("app.model.cycleBackward", "cycle to the previous model"),
         ("app.message.copy", "copy the last assistant message"),
+        ("app.message.followUp", "queue a follow-up message"),
+        (
+            "app.message.dequeue",
+            "restore queued messages to the editor",
+        ),
         ("app.thinking.toggle", "show or hide thinking blocks"),
         ("app.model.select", "open the model selector"),
     ];

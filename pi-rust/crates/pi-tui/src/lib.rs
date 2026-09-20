@@ -40,7 +40,7 @@ pub mod theme;
 pub mod undo_stack;
 pub mod word_navigation;
 
-pub use app::{App, AppConfig, RenderSnapshot, ScrollbarGeometry};
+pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot, ScrollbarGeometry};
 pub use autocomplete::{
     ArgumentCompletions, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
     CombinedAutocompleteProvider, CompletionResult, SlashCommand,
@@ -69,7 +69,7 @@ pub use keybindings::{
 };
 pub use kill_ring::{KillDirection, KillRing};
 pub use markdown::{render_markdown, render_markdown_with_links, render_markdown_with_theme};
-pub use message::{MessageItem, MessageView};
+pub use message::{MessageItem, MessageView, PendingMessageKind};
 pub use mouse_region::{MouseRegion, MouseRegionPoint};
 pub use prompt::{Prompt, PromptAction};
 pub use search::{

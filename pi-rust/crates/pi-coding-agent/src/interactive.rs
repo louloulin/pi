@@ -49,7 +49,7 @@ use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
 
-use pi_tui::app::{App, AppConfig};
+use pi_tui::app::{App, AppConfig, FollowUpOutcome};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
 use pi_tui::selector::{Selector, SelectorItem};
@@ -293,6 +293,9 @@ async fn run_loop(
         // Stage 27: once a prompt finishes, check whether the turn that
         // just ended pushed the context past the compaction threshold.
         maybe_auto_compact(&mut app, &agent, &options).await;
+        // A finished turn releases anything the user queued while it ran;
+        // each queued prompt becomes its own turn so none is dropped.
+        deliver_pending(&mut app, &agent, &mut options).await?;
 
         if app.is_exit_requested() {
             break;
@@ -427,6 +430,28 @@ async fn handle_input_event(
             copy_last_assistant_message(app);
             return Ok(None);
         }
+        // `app.message.followUp`: queue the editor buffer behind the
+        // in-flight turn (idle: behaves like Enter).
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.message.followUp",
+            &["alt+enter"],
+        ) {
+            handle_follow_up(app, agent, options).await?;
+            return Ok(None);
+        }
+        // `app.message.dequeue`: pull the queued prompts back into the
+        // editor so they can be edited instead of waiting for the turn.
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.message.dequeue",
+            &["alt+up"],
+        ) {
+            handle_dequeue(app);
+            return Ok(None);
+        }
     }
 
     let step_outcome = app.step(event);
@@ -439,31 +464,92 @@ async fn handle_input_event(
         pi_tui::app::StepOutcome::Idle => Ok(None),
         pi_tui::app::StepOutcome::Redraw => Ok(None),
         pi_tui::app::StepOutcome::Submitted(text) => {
-            if text.starts_with('/') {
-                // Prompt templates take precedence over built-in slash
-                // commands, mirroring the TS CLI: `/<name>` expands to
-                // the template body when a template with that name was
-                // loaded, otherwise the text falls through to the
-                // built-in / extension command dispatch.
-                if let Some((template, args)) =
-                    crate::prompt_templates::find_prompt_template(&text, &options.prompt_templates)
-                {
-                    let parsed = crate::prompt_templates::parse_command_args(&args);
-                    let expanded =
-                        crate::prompt_templates::substitute_args(&template.content, &parsed);
-                    app.submit(agent.clone(), expanded);
-                    Ok(None)
-                } else {
-                    run_slash_command(app, agent, options, &text).await?;
-                    Ok(None)
-                }
-            } else {
-                app.submit(agent.clone(), text);
-                Ok(None)
-            }
+            handle_submitted(app, agent, options, text).await?;
+            Ok(None)
         }
         pi_tui::app::StepOutcome::Exit => Ok(Some(InternalAction::Exit)),
     }
+}
+
+/// Route submitted editor text the same way Enter does: prompt templates
+/// and slash commands short-circuit before the agent, everything else
+/// becomes a prompt. Shared by Enter and by an idle `app.message.followUp`
+/// (upstream's `handleFollowUp` calls `editor.onSubmit` when no turn is
+/// running, so both chords converge on the same handler).
+async fn handle_submitted(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+    text: String,
+) -> anyhow::Result<()> {
+    if text.starts_with('/') {
+        // Prompt templates take precedence over built-in slash
+        // commands, mirroring the TS CLI: `/<name>` expands to
+        // the template body when a template with that name was
+        // loaded, otherwise the text falls through to the
+        // built-in / extension command dispatch.
+        if let Some((template, args)) =
+            crate::prompt_templates::find_prompt_template(&text, &options.prompt_templates)
+        {
+            let parsed = crate::prompt_templates::parse_command_args(&args);
+            let expanded = crate::prompt_templates::substitute_args(&template.content, &parsed);
+            app.submit(agent.clone(), expanded);
+        } else {
+            run_slash_command(app, agent, options, &text).await?;
+        }
+    } else {
+        app.submit(agent.clone(), text);
+    }
+    Ok(())
+}
+
+/// Handle `app.message.followUp` (upstream `handleFollowUp`). While a turn
+/// is in flight the editor buffer is queued; when the App is idle the chord
+/// is exactly Enter, so the text goes through [`handle_submitted`].
+async fn handle_follow_up(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+) -> anyhow::Result<()> {
+    match app.follow_up_from_editor() {
+        FollowUpOutcome::Empty | FollowUpOutcome::Queued => Ok(()),
+        FollowUpOutcome::Submitted(text) => handle_submitted(app, agent, options, text).await,
+    }
+}
+
+/// Handle `app.message.dequeue` (upstream `restoreQueuedMessagesToEditor`).
+/// The restored prompts land in the editor, in delivery order, with any
+/// text already there kept at the end. The status line matches upstream's
+/// wording verbatim.
+fn handle_dequeue(app: &mut App) {
+    let restored = app.restore_pending_to_editor();
+    if restored == 0 {
+        app.flash_status("No queued messages to restore");
+    } else {
+        app.flash_status(format!(
+            "Restored {restored} queued message{} to editor",
+            if restored > 1 { "s" } else { "" }
+        ));
+    }
+}
+
+/// Deliver one queued prompt once the in-flight turn has finished
+/// (upstream's `getSteeringMessages` / `getFollowUpMessages` drain at the
+/// inner-loop boundary). Delivery is serial: each queued prompt becomes its
+/// own turn, so the order the user typed them in is preserved and nothing
+/// is dropped.
+async fn deliver_pending(
+    app: &mut App,
+    agent: &Arc<AsyncMutex<Agent>>,
+    options: &mut InteractiveOptions,
+) -> anyhow::Result<()> {
+    if app.is_busy() || app.pending_len() == 0 {
+        return Ok(());
+    }
+    let Some(text) = app.take_next_pending() else {
+        return Ok(());
+    };
+    handle_submitted(app, agent, options, text).await
 }
 
 /// Which way `app.model.cycleForward` / `app.model.cycleBackward` move
@@ -2027,5 +2113,150 @@ mod tests {
         assert!(app.take_clipboard_request().is_none());
         let rendered = transcript(&app);
         assert!(rendered.contains("nothing to copy yet"), "{rendered}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Queued input while streaming (LUM-1216)
+    // -----------------------------------------------------------------------
+
+    fn alt_enter() -> InputEvent {
+        InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::ALT))
+    }
+
+    fn alt_up() -> InputEvent {
+        InputEvent::Key(Key::new(KeyCode::Up, KeyModifiers::ALT))
+    }
+
+    #[tokio::test]
+    async fn follow_up_queues_while_busy_and_dequeue_restores_it() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+
+        // A turn is in flight; `submit` marks the App busy synchronously and
+        // this single-threaded runtime does not run the spawned task yet.
+        app.submit(agent.clone(), "first".to_string());
+        assert!(app.is_busy());
+
+        app.set_editor_text("queued follow-up");
+        handle_input_event(&mut app, &agent, &mut options, alt_enter())
+            .await
+            .expect("follow-up chord");
+        assert_eq!(app.pending_len(), 1);
+        assert_eq!(app.editor_text(), "", "the queue took the buffer");
+
+        // Dequeue pulls it back into the editor and reports upstream's tally.
+        handle_input_event(&mut app, &agent, &mut options, alt_up())
+            .await
+            .expect("dequeue chord");
+        assert_eq!(app.pending_len(), 0);
+        assert_eq!(app.editor_text(), "queued follow-up");
+        assert_eq!(
+            app.status_flash(),
+            Some("Restored 1 queued message to editor")
+        );
+    }
+
+    #[tokio::test]
+    async fn dequeue_status_matches_upstream_for_every_count() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+
+        app.submit(agent.clone(), "first".to_string());
+        app.submit(agent.clone(), "second".to_string());
+        app.submit(agent.clone(), "third".to_string());
+        assert_eq!(app.pending_len(), 2);
+
+        handle_input_event(&mut app, &agent, &mut options, alt_up())
+            .await
+            .expect("dequeue");
+        assert_eq!(
+            app.status_flash(),
+            Some("Restored 2 queued messages to editor")
+        );
+
+        // Nothing left to restore: the editor is left alone.
+        app.set_editor_text("");
+        handle_input_event(&mut app, &agent, &mut options, alt_up())
+            .await
+            .expect("dequeue empty");
+        assert_eq!(app.status_flash(), Some("No queued messages to restore"));
+        assert_eq!(app.editor_text(), "");
+    }
+
+    #[tokio::test]
+    async fn queued_chords_are_not_stolen_while_an_overlay_is_open() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+
+        app.submit(agent.clone(), "first".to_string());
+        app.set_editor_text("queued");
+        handle_input_event(&mut app, &agent, &mut options, alt_enter())
+            .await
+            .expect("follow-up");
+        assert_eq!(app.pending_len(), 1);
+
+        // With the search overlay focused the chords belong to the overlay:
+        // alt+enter must not queue a second message and alt+up must not
+        // dequeue the first.
+        assert!(app.open_search());
+        app.set_editor_text("must not queue");
+        handle_input_event(&mut app, &agent, &mut options, alt_enter())
+            .await
+            .expect("overlay alt+enter");
+        assert_eq!(app.pending_len(), 1, "overlay owns app.message.followUp");
+
+        handle_input_event(&mut app, &agent, &mut options, alt_up())
+            .await
+            .expect("overlay alt+up");
+        assert_eq!(app.pending_len(), 1, "overlay owns app.message.dequeue");
+        assert_eq!(app.status_flash(), None, "dequeue did not run");
+    }
+
+    #[tokio::test]
+    async fn queued_prompts_are_delivered_in_order_after_the_turn_ends() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+
+        app.submit(agent.clone(), "first".to_string());
+        assert!(app.is_busy());
+        // Type the next three prompts while the turn streams; each Enter goes
+        // through the driver and is queued instead of being dropped.
+        for text in ["second", "third", "fourth"] {
+            for ch in text.chars() {
+                app.step(InputEvent::Key(Key::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                )));
+            }
+            handle_input_event(
+                &mut app,
+                &agent,
+                &mut options,
+                InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            )
+            .await
+            .expect("enter while busy");
+        }
+        assert_eq!(app.pending_len(), 3);
+
+        // Let the in-flight turn finish, then drain the queue one message at
+        // a time, the way the render loop does.
+        drain_until_idle(&mut app).await;
+        for _ in 0..3 {
+            deliver_pending(&mut app, &agent, &mut options)
+                .await
+                .expect("deliver pending");
+            drain_until_idle(&mut app).await;
+        }
+        assert_eq!(app.pending_len(), 0, "the queue drained completely");
+
+        let user_texts: Vec<String> = app
+            .messages()
+            .items()
+            .iter()
+            .filter(|item| item.role == pi_tui::message::Role::User)
+            .map(|item| item.text.clone())
+            .collect();
+        assert_eq!(user_texts, vec!["first", "second", "third", "fourth"]);
     }
 }
