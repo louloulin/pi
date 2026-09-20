@@ -22,6 +22,18 @@
 //   * payload is plain JSON text, not zstd
 //   * `PRAGMA user_version` is left at 0 — upstream does not write it
 //
+// The `usage_ledger` rows follow `session/usage-ledger.ts` +
+// `session-stats.ts`: `entry_id` is set when the usage is attributable to
+// an entry, `adjustment` marks a harness-recorded correction (and still
+// counts into `sessions.usage_payload`, because `applyCommit` calls
+// `addUsageToSessionStats` for every ledger row). The `branch_*` rows
+// follow the branch index `branch-entries.ts` maintains: a root branch
+// named after the first entry, plus one divergent branch that forks at
+// the newest compaction boundary and therefore re-owns the post-
+// compaction tail (`branch_entries` rows for the shared entries exist
+// once per branch). `seq` is handed out from the *shared* entry/usage
+// counter, so the fork entry reuses no sequence number.
+//
 // The entry payloads are copied by hand from the upstream `Entry` union
 // (`packages/agent/src/harness/session/types.ts`): `message` wraps an
 // `AgentMessage`, `compaction` / `branch_summary` carry a summary and an
@@ -79,14 +91,23 @@ const entryInsert = db.prepare(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 );
 
-const zeroUsage = {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
+const usageInsert = db.prepare(
+    `INSERT INTO usage_ledger
+        (session_id, id, seq, entry_id, adjustment, usage, details)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+);
+
+const branchEntryInsert = db.prepare(
+    `INSERT INTO branch_entries
+        (session_id, branch_id, entry_id, entry_seq, entry_type)
+     VALUES (?, ?, ?, ?, ?)`,
+);
+
+const branchMetaInsert = db.prepare(
+    `INSERT INTO branch_meta
+        (session_id, branch_id, tip_entry_id, tip_seq, base_branch_id, base_seq)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+);
 
 /** One upstream `Entry` written as a plain-JSON `entries` row. */
 function entry({ id, parentId, seq, type, customType = null, timestamp, payload }) {
@@ -102,16 +123,117 @@ function entry({ id, parentId, seq, type, customType = null, timestamp, payload 
     );
 }
 
+/**
+ * One upstream `UsageRow` written as a `usage_ledger` row. `adjustment`
+ * is stored as the upstream 0/1 integer; `entry_id` and `details` are
+ * NULL when the caller passes null.
+ */
+function usageRow({ id, seq, entryId = null, adjustment, usage: counters, details = null }) {
+    usageInsert.run(
+        sessionId,
+        id,
+        seq,
+        entryId,
+        adjustment ? 1 : 0,
+        JSON.stringify(counters),
+        details === null ? null : JSON.stringify(details),
+    );
+}
+
+/** Upstream `addUsage`, including the `cost` sub-object. */
+function sumUsage(rows) {
+    const total = {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    for (const row of rows) {
+        total.input += row.input;
+        total.output += row.output;
+        total.cacheRead += row.cacheRead;
+        total.cacheWrite += row.cacheWrite;
+        total.totalTokens += row.totalTokens;
+        for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"]) {
+            total.cost[key] += row.cost?.[key] ?? 0;
+        }
+    }
+    return total;
+}
+
+// Usage-ledger rows. `seq` comes from the same counter as `entries.seq`
+// (`prepareStorageCommit` allocates one sequence per write), which is why
+// they sit at 7..9 between the six entries and the fork entry at 10.
+//
+// u1/u2 mirror the usage the assistant message and the compaction entry
+// already carry — upstream records both the entry and its ledger row.
+// u3 is a harness-recorded adjustment (`adjustment: true`, no `entry_id`)
+// and is deliberately *not* excluded from the cached total: `applyCommit`
+// feeds every ledger row to `addUsageToSessionStats`.
+const usageLedgerRows = [
+    {
+        id: "u1-assistant",
+        seq: 7,
+        entryId: "e2-assistant",
+        adjustment: false,
+        usage: {
+            input: 120,
+            output: 8,
+            cacheRead: 4,
+            cacheWrite: 0,
+            totalTokens: 128,
+            cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+        },
+        details: null,
+    },
+    {
+        id: "u2-compaction",
+        seq: 8,
+        entryId: "e4-compaction",
+        adjustment: false,
+        usage: {
+            input: 100,
+            output: 20,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 120,
+            cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+        },
+        details: null,
+    },
+    {
+        id: "u3-hook-adjustment",
+        seq: 9,
+        entryId: null,
+        adjustment: true,
+        usage: {
+            input: 5,
+            output: 5,
+            cacheRead: 1,
+            cacheWrite: 2,
+            totalTokens: 13,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        details: { reason: "hook", source: "fixture", note: "counts into the cached total" },
+    },
+];
+
 // The session row. Upstream stores the pi version (if any) in `metadata`;
 // the Rust reader reads `metadata.version` because upstream has no
-// `sessions.version` column.
+// `sessions.version` column. `message_count` / `usage_payload` are the
+// projections upstream maintains: four `type = "message"` entries
+// (e1..e3 + the fork entry) and the sum of *all* ledger rows, adjustment
+// included.
+// `next_seq` is 11: six entries + three ledger rows + one fork entry.
 sessionInsert.run(
     sessionId,
     T0,
     JSON.stringify({ version: "0.85.1-fixture", source: "sqlite-node" }),
-    3,
-    JSON.stringify(zeroUsage),
-    7,
+    4,
+    JSON.stringify(sumUsage(usageLedgerRows.map((row) => row.usage))),
+    11,
 );
 
 // 1. User message.
@@ -243,6 +365,60 @@ entry({
         fromHook: true,
     },
 });
+
+// 7. Fork entry: a user message whose parent is the *tool result* (seq
+//    3), not the branch tip. Upstream gives it a fresh branch that forks
+//    at the newest compaction boundary (e4-compaction, seq 4) and copies
+//    the post-compaction tail (e5, e6) into the new branch, so the fork
+//    keeps the compacted context. Its `seq` is 10 because the shared
+//    counter already spent 7..9 on the ledger rows above.
+entry({
+    id: "e7-fork",
+    parentId: "e3-toolresult",
+    seq: 10,
+    type: "message",
+    timestamp: T0 + 600,
+    payload: {
+        message: {
+            role: "user",
+            content: [{ type: "text", text: "try the other approach instead" }],
+            timestamp: T0 + 600,
+        },
+    },
+});
+
+for (const row of usageLedgerRows) {
+    usageRow(row);
+}
+
+// The branch index. `e1-user` is the linear root branch (every entry
+// hangs off the previous tip); `e7-fork` is the divergent one described
+// above — its `base_seq` is the compaction boundary, and entries 5 and 6
+// appear in *both* branches because the tail is copied, not moved.
+const branchEntriesByBranch = {
+    "e1-user": [
+        ["e1-user", 1, "message"],
+        ["e2-assistant", 2, "message"],
+        ["e3-toolresult", 3, "message"],
+        ["e4-compaction", 4, "compaction"],
+        ["e5-custom", 5, "custom"],
+        ["e6-branch-summary", 6, "branch_summary"],
+    ],
+    "e7-fork": [
+        ["e5-custom", 5, "custom"],
+        ["e6-branch-summary", 6, "branch_summary"],
+        ["e7-fork", 10, "message"],
+    ],
+};
+
+for (const [branchId, rows] of Object.entries(branchEntriesByBranch)) {
+    for (const [entryId, entrySeq, entryType] of rows) {
+        branchEntryInsert.run(sessionId, branchId, entryId, entrySeq, entryType);
+    }
+}
+
+branchMetaInsert.run(sessionId, "e1-user", "e6-branch-summary", 6, null, null);
+branchMetaInsert.run(sessionId, "e7-fork", "e7-fork", 10, "e1-user", 4);
 
 db.close();
 

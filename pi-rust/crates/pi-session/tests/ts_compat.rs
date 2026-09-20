@@ -190,7 +190,7 @@ fn fixture_sessions_row_maps_to_a_session_header() {
 fn fixture_entries_decode_to_the_expected_session_entries() {
     let reader = open_fixture();
     let entries = reader.iter_entries(SESSION_ID).expect("iter_entries");
-    assert_eq!(entries.len(), 6, "fixture holds six upstream entries");
+    assert_eq!(entries.len(), 7, "fixture holds seven upstream entries");
 
     // Upstream rows keep their id / parent id / timestamp verbatim.
     assert_eq!(entries[0].seq, 1);
@@ -205,6 +205,18 @@ fn fixture_entries_decode_to_the_expected_session_entries() {
     assert_eq!(entries[3].type_, "compaction");
     assert_eq!(entries[4].type_, "custom");
     assert_eq!(entries[5].type_, "branch_summary");
+    // The fork entry is the newest entry by seq: the shared entry/usage
+    // counter handed 7..9 to the `usage_ledger` rows.
+    assert_eq!(entries[6].seq, 10);
+    assert_eq!(entries[6].entry_id.as_deref(), Some("e7-fork"));
+    assert_eq!(entries[6].parent_entry_id.as_deref(), Some("e3-toolresult"));
+    match &entries[6].entry {
+        SessionEntry::UserMessage(Message { content, .. }) => match &content[0] {
+            Content::Text(text) => assert_eq!(text.text, "try the other approach instead"),
+            other => panic!("expected text content, got {other:?}"),
+        },
+        other => panic!("expected the fork user message, got {other:?}"),
+    }
 
     // 1. User message.
     match &entries[0].entry {
@@ -341,7 +353,7 @@ fn fixture_entries_decode_to_the_expected_session_entries() {
 #[test]
 fn fixture_lookups_use_upstream_keys() {
     let reader = open_fixture();
-    assert_eq!(reader.count_entries(SESSION_ID).unwrap(), 6);
+    assert_eq!(reader.count_entries(SESSION_ID).unwrap(), 7);
 
     // `get_entry` still works by seq.
     let entry = reader
@@ -421,7 +433,7 @@ fn fixture_rows_are_self_consistent() {
 
     let entries = reader.iter_entries(SESSION_ID).unwrap();
     let seqs: Vec<i64> = entries.iter().map(|entry| entry.seq).collect();
-    assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6, 10]);
     for entry in &entries {
         assert!(
             entry.entry_id.is_some(),

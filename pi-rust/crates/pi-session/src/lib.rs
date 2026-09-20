@@ -65,13 +65,17 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod branch;
 pub mod error;
 pub mod export;
 pub mod migrate;
 pub mod reader;
 pub mod schema;
+pub mod stats;
+pub mod usage;
 pub mod writer;
 
+pub use branch::{BranchEntry, BranchMeta, BranchOrder, BranchScan};
 pub use error::{Result, SessionError};
 pub use export::{default_export_path, export_jsonl, export_session, render_jsonl, ExportReport};
 pub use migrate::{
@@ -81,6 +85,8 @@ pub use migrate::{
 pub use reader::{decode_upstream_entry, DecodedEntry, SessionReader};
 pub use schema::session_name_from_metadata;
 pub use schema::{EntryRow, SchemaLayout, SessionRow, SCHEMA_VERSION, UPSTREAM_INITIAL_SQL};
+pub use stats::{SessionStats, StatsCheck};
+pub use usage::{add_usage, sum_usage, UsageLedgerRow, UsageOrder, UsageScan};
 pub use writer::{SessionWriter, ZSTD_LEVEL};
 
 // Re-export the protocol `SessionEntry` so downstream users don't have
