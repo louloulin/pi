@@ -1,22 +1,26 @@
 //! Offline integration tests for [`BuiltinPiAiStreamRunner`] — LUM-1180.
 //!
 //! The runner is what backs `@earendil-works/pi-ai/compat`'s
-//! `anthropicMessagesApi` / `openAIResponsesApi` factories in the
+//! `anthropicMessagesApi` / `openAIResponsesApi` / `openAICompletionsApi` /
+//! `googleGenerativeAIApi` / `azureOpenAIResponsesApi` factories in the
 //! extension host. `crates/pi-extensions/tests/pi_ai_provider.rs` covers the
 //! host bridge with a fake runner; these tests cover the *real* provider
 //! path, driven end to end against a one-shot loopback HTTP server that
-//! replays a recorded Anthropic SSE stream — no network, no API key.
+//! replays a recorded SSE stream — no network, no API key.
 //!
 //! The checked contract is the one the shim depends on:
 //!
 //! * the runner resolves the credential / base URL from the request and
-//!   POSTs to `{baseUrl}/v1/messages` with `x-api-key`;
+//!   POSTs to the api family's own endpoint;
 //! * the returned stream yields the **upstream-shaped** JS events in order
 //!   (`text_delta` … then a terminal `done` carrying a whole
 //!   `AssistantMessage`), which is exactly what the shim's
 //!   `AssistantMessageEventStream` collects;
 //! * a transport failure is reported as an `Err` from `start`, which the
-//!   shim turns into a terminal `error` event (never a thrown exception).
+//!   shim turns into a terminal `error` event (never a thrown exception);
+//! * an api family the bridge does not route is rejected before any request
+//!   is dialled, with one shared message naming the bridged set and the
+//!   remaining gaps.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -334,20 +338,251 @@ async fn the_openai_responses_factory_streams_from_its_own_adapter() {
     assert_eq!(done["message"]["usage"]["output"], 1);
 }
 
+/// A minimal OpenAI Chat Completions SSE stream: two text chunks, a
+/// `finish_reason`, then the usage chunk and `[DONE]`.
+const CHAT_COMPLETIONS_SSE_BODY: &str = concat!(
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",",
+    "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",",
+    "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",",
+    "\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",",
+    "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o-mini\",",
+    "\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":4,\"total_tokens\":21}}\n\n",
+    "data: [DONE]\n\n",
+);
+
+/// A minimal Google Generative Language SSE stream: two text parts, then a
+/// `finishReason` + usage frame.
+const GOOGLE_SSE_BODY: &str = concat!(
+    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}],\"role\":\"model\"}}],",
+    "\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":1}}\n\n",
+    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}],\"role\":\"model\"},",
+    "\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":3,",
+    "\"totalTokenCount\":15}}\n\n",
+);
+
+/// The `openAICompletionsApi` half of the bridge: the Chat Completions wire
+/// shape (POST to `/chat/completions`, `Authorization: Bearer`).
+#[tokio::test]
+async fn the_openai_completions_factory_streams_from_its_own_adapter() {
+    let (base_url, server) = spawn_server(
+        "HTTP/1.1 200 OK",
+        "text/event-stream",
+        CHAT_COMPLETIONS_SSE_BODY.to_string(),
+    );
+    let runner = BuiltinPiAiStreamRunner::with_env(|_name| None);
+
+    let mut request = anthropic_request(&base_url);
+    request.api = "openai-completions".to_string();
+    request.model = json!({
+        "id": "gpt-4o-mini",
+        "provider": "openai",
+        "api": "openai-completions",
+        "contextWindow": 128_000,
+        "maxTokens": 4096,
+    });
+    request.options = json!({ "apiKey": "test-key", "baseUrl": base_url });
+
+    let stream = runner
+        .start(request, CancellationToken::new())
+        .await
+        .expect("the provider stream starts");
+    let events: Vec<Value> = stream.collect().await;
+
+    let head = server.join().expect("server thread");
+    assert!(
+        head.starts_with("POST /chat/completions HTTP/1.1"),
+        "posts to the Chat Completions endpoint: {head}"
+    );
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("authorization: bearer test-key"),
+        "sends the bearer credential: {head}"
+    );
+
+    assert_eq!(
+        kinds(&events),
+        vec![
+            "start",
+            "text_start",
+            "text_delta",
+            "text_delta",
+            "text_end",
+            "done"
+        ],
+        "{events:?}"
+    );
+    assert_eq!(events[2]["delta"], "hello");
+    assert_eq!(events[3]["delta"], " world");
+    let done = events.last().expect("terminal event");
+    assert_eq!(done["reason"], "stop");
+    assert_eq!(done["message"]["provider"], "openai");
+    assert_eq!(done["message"]["model"], "gpt-4o-mini");
+    assert_eq!(done["message"]["content"][0]["text"], "hello world");
+    assert_eq!(done["message"]["usage"]["input"], 17);
+    assert_eq!(done["message"]["usage"]["output"], 4);
+}
+
+/// The `googleGenerativeAIApi` half of the bridge: POST to
+/// `/models/{id}:streamGenerateContent?alt=sse` with `x-goog-api-key`.
+#[tokio::test]
+async fn the_google_generative_ai_factory_streams_from_its_own_adapter() {
+    let (base_url, server) = spawn_server(
+        "HTTP/1.1 200 OK",
+        "text/event-stream",
+        GOOGLE_SSE_BODY.to_string(),
+    );
+    let runner = BuiltinPiAiStreamRunner::with_env(|_name| None);
+
+    let mut request = anthropic_request(&base_url);
+    request.api = "google-generative-ai".to_string();
+    request.model = json!({
+        "id": "gemini-2.0-flash",
+        "provider": "google",
+        "api": "google-generative-ai",
+        "contextWindow": 1_000_000,
+        "maxTokens": 8192,
+    });
+    request.options = json!({ "apiKey": "test-key", "baseUrl": base_url });
+
+    let stream = runner
+        .start(request, CancellationToken::new())
+        .await
+        .expect("the provider stream starts");
+    let events: Vec<Value> = stream.collect().await;
+
+    let head = server.join().expect("server thread");
+    assert!(
+        head.starts_with("POST /models/gemini-2.0-flash:streamGenerateContent?alt=sse HTTP/1.1"),
+        "posts to the Gemini streaming endpoint: {head}"
+    );
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("x-goog-api-key: test-key"),
+        "sends the Gemini credential header: {head}"
+    );
+
+    assert_eq!(
+        kinds(&events),
+        vec![
+            "start",
+            "text_start",
+            "text_delta",
+            "text_delta",
+            "text_end",
+            "done"
+        ],
+        "{events:?}"
+    );
+    assert_eq!(events[2]["delta"], "Hello");
+    assert_eq!(events[3]["delta"], " there");
+    let done = events.last().expect("terminal event");
+    assert_eq!(done["reason"], "stop");
+    assert_eq!(done["message"]["provider"], "google");
+    assert_eq!(done["message"]["model"], "gemini-2.0-flash");
+    assert_eq!(done["message"]["content"][0]["text"], "Hello there");
+    assert_eq!(done["message"]["usage"]["input"], 12);
+    assert_eq!(done["message"]["usage"]["output"], 3);
+    assert_eq!(done["message"]["usage"]["totalTokens"], 15);
+}
+
+/// The `azureOpenAIResponsesApi` half of the bridge: the same Responses wire
+/// shape as `openai-responses`, but the deployment-scoped Azure URL and the
+/// `api-key` header. The runner must only pick the adapter — the base URL /
+/// deployment / api-version parsing belongs to
+/// `pi_ai::providers::AzureOpenAiResponsesProvider`.
+#[tokio::test]
+async fn the_azure_openai_responses_factory_streams_from_its_own_adapter() {
+    let (base_url, server) = spawn_server(
+        "HTTP/1.1 200 OK",
+        "text/event-stream",
+        RESPONSES_SSE_BODY.to_string(),
+    );
+    let runner = BuiltinPiAiStreamRunner::with_env(|_name| None);
+
+    let mut request = anthropic_request(&base_url);
+    request.api = "azure-openai-responses".to_string();
+    request.model = json!({
+        "id": "prod-gpt4o",
+        "provider": "azure",
+        "api": "azure-openai-responses",
+        "contextWindow": 128_000,
+        "maxTokens": 4096,
+    });
+    request.options = json!({ "apiKey": "test-key", "baseUrl": base_url });
+
+    let stream = runner
+        .start(request, CancellationToken::new())
+        .await
+        .expect("the provider stream starts");
+    let events: Vec<Value> = stream.collect().await;
+
+    let head = server.join().expect("server thread");
+    assert!(
+        head.starts_with("POST /deployments/prod-gpt4o/responses?api-version="),
+        "posts to the deployment-scoped Azure endpoint: {head}"
+    );
+    assert!(
+        head.to_ascii_lowercase().contains("api-key: test-key"),
+        "sends the Azure `api-key` header, not a bearer token: {head}"
+    );
+
+    assert_eq!(
+        kinds(&events),
+        vec!["start", "text_start", "text_delta", "text_end", "done"],
+        "{events:?}"
+    );
+    let done = events.last().expect("terminal event");
+    assert_eq!(done["reason"], "stop");
+    assert_eq!(done["message"]["provider"], "azure");
+    assert_eq!(done["message"]["model"], "prod-gpt4o");
+    assert_eq!(done["message"]["content"][0]["text"], "Hi");
+}
+
 /// The runner refuses an api family it has no adapter for instead of
-/// silently streaming from the wrong provider.
+/// silently streaming from the wrong provider, and the message names every
+/// bridged family plus the capability each remaining gap is missing.
 #[tokio::test]
 async fn an_unbridged_api_is_rejected() {
     let runner = BuiltinPiAiStreamRunner::with_env(|_name| None);
     let mut request = anthropic_request("http://127.0.0.1:1");
-    request.model = json!({ "id": "gpt-4o", "provider": "openai", "api": "openai-completions" });
+    // `mistral-conversations` has a Rust adapter but is not routed through the
+    // bridge, so it is the sharpest negative case.
+    request.model =
+        json!({ "id": "mistral-large", "provider": "mistral", "api": "mistral-conversations" });
 
     let error = match runner.start(request, CancellationToken::new()).await {
-        Ok(_) => panic!("openai-completions must not produce a stream"),
+        Ok(_) => panic!("mistral-conversations must not produce a stream"),
         Err(error) => error,
     };
+    for bridged in [
+        "anthropic-messages",
+        "openai-responses",
+        "openai-completions",
+        "google-generative-ai",
+        "azure-openai-responses",
+    ] {
+        assert!(
+            error.contains(&format!("`{bridged}`")),
+            "the message lists every bridged family ({bridged}): {error}"
+        );
+    }
+    assert!(error.contains("`mistral-conversations`"), "{error}");
+    // The gap list names the missing capability family by family, not a flat
+    // "unsupported".
+    assert!(error.contains("`google-vertex`"), "{error}");
+    assert!(error.contains("`bedrock-converse-stream`"), "{error}");
+    assert!(error.contains("`openai-codex-responses`"), "{error}");
+    assert!(error.contains("`pi-messages`"), "{error}");
     assert!(
-        error.contains("only serves `anthropic-messages` and `openai-responses`"),
-        "{error}"
+        error.contains("ChatGPT account token"),
+        "the Codex dialect gap is spelled out: {error}"
+    );
+    assert!(
+        error.contains("gateway"),
+        "the pi-messages gap names the gateway protocol: {error}"
     );
 }

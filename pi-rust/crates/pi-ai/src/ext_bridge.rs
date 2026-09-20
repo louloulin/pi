@@ -3,9 +3,10 @@
 //!
 //! The extension host cannot run a provider itself:
 //! `pi-extensions` does not depend on `pi-ai`, so the shim's built-in
-//! provider factories (`anthropicMessagesApi`, `openAIResponsesApi`) hand a
-//! request to an injected runner, which lives in `pi-coding-agent` where the
-//! providers do.
+//! provider factories (`anthropicMessagesApi` / `openAIResponsesApi` plus,
+//! since LUM-1204, `openAICompletionsApi` / `googleGenerativeAIApi` /
+//! `azureOpenAIResponsesApi`) hand a request to an injected runner, which
+//! lives in `pi-coding-agent` where the providers do.
 //!
 //! This module holds the parts that are pure `pi-ai`:
 //!
@@ -17,6 +18,10 @@
 //!   [`AssistantMessageEvent`] stream back into the upstream
 //!   `AssistantMessageEvent` shapes the shim's
 //!   [`AssistantMessageEventStream`] collects.
+//!
+//! [`model_from_js`] accepts the [`BRIDGED_APIS`] families; anything else is
+//! rejected with [`unbridged_api_error`], which names the remaining gaps
+//! ([`UNBRIDGED_API_GAPS`]).
 //!
 //! Divergences from upstream are recorded in
 //! `crates/pi-extensions/docs/SDK_MODULES.md`; the most visible one is that
@@ -39,10 +44,74 @@ use serde_json::{json, Value};
 use crate::types::SimpleStreamOptions;
 use crate::AssistantMessageEventStream;
 
+/// API families the `@earendil-works/pi-ai/compat` bridge routes to a Rust
+/// adapter, in the order the shim's `__pi_sdk_builtin_api_apis` lists them.
+///
+/// The shim exposes more factories than this (see [`UNBRIDGED_API_GAPS`]);
+/// an `api` outside this list is rejected by [`model_from_js`] before any
+/// HTTP request is built.
+pub const BRIDGED_APIS: &[&str] = &[
+    "anthropic-messages",
+    "openai-responses",
+    "openai-completions",
+    "google-generative-ai",
+    "azure-openai-responses",
+];
+
+/// API families the shim still reports as gaps, paired with the capability
+/// the host is missing.
+///
+/// Kept here so the two places that phrase the rejection —
+/// [`model_from_js`] and `BuiltinPiAiStreamRunner`'s adapter fallback — share
+/// one list instead of drifting. Mirrors the `__pi_sdk_stream_gaps` reasons
+/// in `pi-ext-shim.mjs`.
+pub const UNBRIDGED_API_GAPS: &[(&str, &str)] = &[
+    (
+        "google-vertex",
+        "Vertex needs a GCP project plus location and ADC/access-token credentials",
+    ),
+    (
+        "bedrock-converse-stream",
+        "Bedrock needs AWS SigV4 credentials and a region",
+    ),
+    (
+        "openai-codex-responses",
+        "the Codex Responses dialect is authenticated with a ChatGPT account token, not an API key",
+    ),
+    (
+        "pi-messages",
+        "the first-party pi gateway protocol has no endpoint or credential in this build",
+    ),
+    (
+        "mistral-conversations",
+        "the adapter exists but this bridge does not route to it yet",
+    ),
+];
+
+/// Error text for an `api` the extension bridge does not dispatch.
+///
+/// Names every family it *does* serve and the capability each remaining gap
+/// is missing, so the failure is actionable instead of a flat "unsupported".
+/// [`model_from_js`] and the runner's adapter fallback both go through this,
+/// so a caller sees the same message wherever the family is rejected.
+pub fn unbridged_api_error(api: &str) -> String {
+    let bridged = BRIDGED_APIS
+        .iter()
+        .map(|api| format!("`{api}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let gaps = UNBRIDGED_API_GAPS
+        .iter()
+        .map(|(name, reason)| format!("`{name}` ({reason})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("the built-in provider bridge serves {bridged}, not `{api}`; still a gap: {gaps}")
+}
+
 /// Parse the upstream `Model` JSON the shim sends into a [`Model`].
 ///
-/// Only the two API families the shim bridges are accepted; any other
-/// `api` / provider combination is rejected, because the runner has no
+/// Only the API families in [`BRIDGED_APIS`] are accepted; any other `api`
+/// is rejected with [`unbridged_api_error`], because the runner has no
 /// adapter for it. `contextWindow` and `maxTokens` are optional and default
 /// to `0` (the providers then leave the request uncapped where the wire
 /// protocol allows it).
@@ -59,15 +128,10 @@ pub fn model_from_js(value: &Value) -> Result<Model, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "model.id must be a string".to_string())?;
     let api = match object.get("api").and_then(Value::as_str) {
-        Some("anthropic-messages") => Api::AnthropicMessages,
-        Some("openai-responses") => Api::OpenAiResponses,
-        other => {
-            return Err(format!(
-                "the built-in provider bridge only serves `anthropic-messages` and \
-                 `openai-responses`, not `{}`",
-                other.unwrap_or("<missing api>")
-            ))
+        Some(id) if BRIDGED_APIS.contains(&id) => {
+            Api::from_api_id(id).expect("every bridged api id maps back to an `Api`")
         }
+        other => return Err(unbridged_api_error(other.unwrap_or("<missing api>"))),
     };
     Ok(Model {
         provider: ProviderId::new(provider),
@@ -835,11 +899,40 @@ mod tests {
     }
 
     #[test]
-    fn model_from_js_rejects_unbridged_apis() {
+    fn model_from_js_maps_every_bridged_api_id() {
+        for (id, api) in [
+            ("anthropic-messages", Api::AnthropicMessages),
+            ("openai-responses", Api::OpenAiResponses),
+            ("openai-completions", Api::OpenAiChatCompletions),
+            ("google-generative-ai", Api::GoogleGenerativeAi),
+            ("azure-openai-responses", Api::AzureOpenAiResponses),
+        ] {
+            let mut value = model();
+            value["api"] = json!(id);
+            let parsed = model_from_js(&value).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!(parsed.api, api, "{id}");
+        }
+    }
+
+    #[test]
+    fn model_from_js_rejects_unbridged_apis_with_the_shared_gap_list() {
+        // `mistral-conversations` has a Rust adapter but is not routed by the
+        // bridge, so it is the sharpest negative case.
         let mut value = model();
-        value["api"] = json!("google-generative-ai");
+        value["api"] = json!("mistral-conversations");
         let error = model_from_js(&value).expect_err("rejected");
-        assert!(error.contains("google-generative-ai"), "{error}");
+        assert!(error.contains("`mistral-conversations`"), "{error}");
+        for bridged in BRIDGED_APIS {
+            assert!(error.contains(&format!("`{bridged}`")), "{error}");
+        }
+        for (gap, _) in UNBRIDGED_API_GAPS {
+            assert!(error.contains(&format!("`{gap}`")), "{error}");
+        }
+
+        // An id from no family at all is rejected the same way.
+        value["api"] = json!("not-a-real-api");
+        let error = model_from_js(&value).expect_err("rejected");
+        assert!(error.contains("`not-a-real-api`"), "{error}");
     }
 
     #[test]
