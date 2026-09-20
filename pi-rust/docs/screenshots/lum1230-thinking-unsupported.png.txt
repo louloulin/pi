@@ -1,0 +1,109 @@
+# lum1230-thinking-unsupported.png — chars, 120x34 cells
+
+===== LUM-1230 Stage 67 — thinking level, non-reasoning model  |  [1] 1. idle: faux model, no thinking segment in the footer  (cursor 120,33) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d712733da6a6c3                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1230 Stage 67 — thinking level, non-reasoning model  |  [2] 2. Shift+Tab raises the level -> status line says the model cannot think (not silence)  (cursor 120,33) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d712733da6a6c3                     in 0 out 0 ?/8.2k  Current model does not support thinking
+
+===== LUM-1230 Stage 67 — thinking level, non-reasoning model  |  [3] 3. /thinking high -> reported as unavailable, current level untouched  (cursor 120,33) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> Unknown thinking level "high". Available levels: off.
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d712733da6a6c3                                                  in 0 out 0 ?/8.2k  ? for help

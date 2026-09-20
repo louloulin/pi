@@ -1322,32 +1322,43 @@ PTY harness 与 14.3 同源（`pty.fork` + 自写 VT 解析 + PIL），仍**不�
 
 ### 16.3 实机对照（PTY）
 
-harness 与第十四节同一路（`pty.fork` + `TIOCSWINSZ` + `pyte` 终端仿真 + PIL 出图，只在协调
-侧，不入库）；被测二进制是 `cargo build -p pi-coding-agent --bin pi` 的产物，`HOME` 指向
-临时目录（`PI_CODING_AGENT_DIR` 同步重定向），因此 `ctrl+s` 的落盘不会碰到真实设置。
+本轮不再自带一次性 harness：直接复用 LUM-1241（`809648412`）入仓的
+`pi-rust/scripts/pty_capture.py`，场景文件为本轮新增的
+`scripts/pty_scenarios/thinking-unsupported.json` 与 `thinking-reasoning.json`：
+
+```bash
+python3 pi-rust/scripts/pty_capture.py --bin <pi 二进制> \
+    --steps pi-rust/scripts/pty_scenarios/thinking-reasoning.json \
+    --home /tmp/lum1230-home --keep-temp \
+    --out pi-rust/docs/screenshots/lum1230-thinking-reasoning.png
+```
+
+harness 把 `HOME` 指到临时目录（加 `--keep-temp` 才保留，便于核对落盘结果），
+`ctrl+s` 因此不会碰到真实设置；推理模型那一路只注入占位 `ANTHROPIC_API_KEY`，不发网络
+请求。同时修了 harness 的一处取色 bug：`parse_color` 只认 `#rrggbb`，而 `pyte` 把 24-bit
+SGR 报成裸的 6 位 hex，于是所有 truecolor 单元格退化成默认灰、图里根本看不出级别颜色；
+补上 6 位 hex 分支后本节截图才有颜色。
 
 | 画面 | 观察 |
 | --- | --- |
-| `--model faux`（默认）+ `shift+tab` | 状态行亮出 `Current model does not support thinking`；`>` 标签为 `thinkingOff` |
-| `--model faux` + `/thinking high` | 消息区 `Unknown thinking level "high". Available levels: off.` |
-| `--model anthropic/claude-sonnet-4-5` 启动 | 状态行 `Claude Sonnet 4.5 • medium`，`>` 标签 `#81a2be`（`thinkingMedium`） |
-| 同上 + `shift+tab`、再一次 | `• high` / `• xhigh`，标签逐级变 `#b294bb` / `#d183e8` |
-| 同上 + `/thinking max` | `• max`，标签 `#ff5fff`（`thinkingMax`） |
+| `--model faux/faux-model`（非推理）启动 | 状态行无级别段（对齐 `footer.ts:182-188` 只在 `model.reasoning` 时显示） |
+| 同上 + `shift+tab` | 状态行亮出 `Current model does not support thinking`，不是静默 |
+| 同上 + `/thinking high` | 消息区 `Unknown thinking level "high". Available levels: off.`，级别保持不变 |
+| `--model anthropic/claude-sonnet-4-5` 启动 | 状态行 `Claude Sonnet 4.5 • medium` |
+| 同上 + `shift+tab`、再一次 | `• high` / `• xhigh` |
+| 同上 + `/thinking max` | `• max`（直设，不开选择器） |
 | 同上 + `/thinking` | 7 级与说明全部列出，当前级别 `✓ max` 预选中；下移两次后光标到 `minimal` |
-| 同上 + `ctrl+s` | 状态行 `Default thinking level: minimal`，`settings.json` 变为 `{"defaultThinkingLevel": "minimal"}` |
+| 同上 + `ctrl+s` | 状态行 `Default thinking level: minimal`，`~/.pi/agent/settings.json` 变为 `{"defaultThinkingLevel": "minimal"}` |
 
-每张图的 `>` 单元格都取像素核对过：命中当前级别对应的色表项（上表所列 4 个 hex 值），
-即边框色确实随级别变化，而非仅内部字段变化。
+边框色不是只看字段：把 `shift+tab` 到 `/thinking` 每一步的原始 PTY 字节流按
+`38;2;r;g;b` 抓出来，命中的正是色表项——`shift+tab` 后 `38;2;178;148;187`
+（`thinkingHigh` `#b294bb`）、再按一次 `38;2;209;131;232`（`thinkingXhigh` `#d183e8`）、
+`/thinking max` 后 `38;2;255;95;255`（`thinkingMax` `#ff5fff`）；非推理模型那一路整段
+没有任何级别色写出。每张图的文本 dump（`*.png.txt`）与图同目录入库，可 grep。
 
-![不能推理的模型：状态行回报而非静默](screenshots/thinking-unsupported.png)
+![非推理模型：`shift+tab` 回报不支持，`/thinking high` 列出可用级别](screenshots/lum1230-thinking-unsupported.png)
 
-![推理模型启动：`• medium`，标签 `#81a2be`](screenshots/thinking-border-startup.png)
-
-![`shift+tab` 后：`• high`，标签 `#b294bb`](screenshots/thinking-border-cycle.png)
-
-![`/thinking`：级别选择器，当前级别预选中](screenshots/thinking-selector.png)
-
-![`ctrl+s`：`Default thinking level: minimal` 且已落盘](screenshots/thinking-save-default.png)
+![推理模型：`• medium` → `• high` → `• xhigh` → `• max`，`/thinking` 选择器预选中 `✓ max`，`ctrl+s` 落盘 `minimal`](screenshots/lum1230-thinking-reasoning.png)
 
 ### 16.4 门禁与新增测试
 

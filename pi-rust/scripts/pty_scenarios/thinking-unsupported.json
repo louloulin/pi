@@ -1,0 +1,11 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1230 Stage 67 — thinking level, non-reasoning model",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {"label": "1. idle: faux model, no thinking segment in the footer", "send": "", "wait": 2.5},
+    {"label": "2. Shift+Tab raises the level -> status line says the model cannot think (not silence)", "send": "<BackTab>", "wait": 1.0},
+    {"label": "3. /thinking high -> reported as unavailable, current level untouched", "send": "/thinking high<Enter>", "wait": 1.0}
+  ]
+}
