@@ -12816,3 +12816,102 @@ LUM-1168（`pi-ai` 图像 provider 运行时 `images-models.ts`）仍为 `in_pro
   可用降至 **16G** 可用。已为 1 路新任务留出余量；若 LUM-1168 继续长，下一轮需先评估清理
   已完成任务的闲置 target。
 - Git 身份沿用 `multica-agent <agent@multica.local>`；本轮提交 registry 数据 + 本文档。
+
+## LUM-1172 round — pi-extensions 虚拟模块补 `fs.createReadStream`（`git-merge-and-resolve.ts` 读取路径解锁）+ 合并 LUM-1171（auth 接线）+ 重跑 LUM-1168 + 合并推送 feature/pi.rs
+
+### 一、本轮切片：`node:fs` 的 `createReadStream`（纯 JS，零新桥 op）
+
+挑选标准与此前几轮一致：**已有桥 op 可复用、无新依赖、能解锁仓库内真实消费方**。
+`NODE_BUILTINS.md` 的覆盖表把 `git-merge-and-resolve.ts` 的最后阻塞点明确写成
+`fs.createReadStream`（`packages/coding-agent/examples/extensions/git-merge-and-resolve.ts:14`
+`import { createReadStream } from "node:fs"`，`:34`
+`readline.createInterface({ input: createReadStream(join(cwd, file), "utf-8") })`），
+因此本轮只实现读侧，不动需要 `notify` crate 的 `fs.watch`，也不动目前没有扩展消费方的
+`createWriteStream`（保持 frontier 行内记录）。
+
+- **`Emitter` 上移到模块作用域**（`runtime/pi-ext-shim.mjs:1895` 附近，`node:buffer` 之前）：
+  `ReadStream` 需要继承它，而此前它定义在 `node:child_process`（原 3985 行）之后。
+  纯位置移动，`child.stdout` / `node:readline` 行为不变。
+- **`ReadStream` + `createReadStream`**（`runtime/pi-ext-shim.mjs` 的 `__pi_fs_module` 内）：
+  桥是阻塞的、没有文件描述符，所以构造时用 `fs.readFile` **一次性读入**再回放，形状与既有的
+  `child.stdout` / `child.stderr` `ReadableLike` 同构——`data` 监听器晚一 tick 挂上也不丢数据。
+  `open` / `data` / `end` / `close` 经 `__pi_schedule` 投递；`on("open"/"data"/"end"/"close"/"error")`、
+  `setEncoding`、`pause`/`resume`、`read`、`pipe`、`[Symbol.asyncIterator]`、`path`、`bytesRead`、
+  `readableEnded` 齐备。
+- **几处刻意的对齐/分歧**（已写入 `NODE_BUILTINS.md` 的 fs 表 + 分歧表）：
+  - `encoding`（字符串，或 `{encoding}`）走**一次性解码**，跨越 chunk 边界的多字节字符不会被
+    截断成替换符；字节模式按 `highWaterMark`（默认 64 KiB）切 chunk。
+  - `start` / `end` 是字节偏移，`end` **含**（与 Node 一致）。
+  - 只接受读 flag（`r` / `rs` / `r+`），否则同步抛错；`fd` 为 `null` 且 `options.fd` 被忽略
+    （没有可交还的描述符，编造一个数字只会让后续 `fs.*` 调用失败）。
+  - 文件不存在时**不抛**，走 `error` 事件（`code: "ENOENT"` / `syscall: "open"`）。
+- 导出：`fs.createReadStream` 与 `fs.ReadStream`。
+
+### 二、测试与验证
+
+- 新增 `node_builtins.rs::node_fs_create_read_stream_replays_the_file`：夹具
+  `alpha\nbeta\ngamma\n`（17 字节），断言
+  1. `createReadStream(file, "utf-8")` + `createInterface` 得到 `["alpha","beta","gamma"]`
+     ——即 `git-merge-and-resolve.ts` 的确切用法；
+  2. 字节模式事件序 `open → data → end → close`、`bytesRead === 17`、chunk 是 `Buffer`、
+     `path` / `readableEnded` 正确；
+  3. `for await` 拼回全文；
+  4. `{start: 6, end: 9}` 切出 `"beta"`；
+  5. 缺文件得到 `ENOENT` / `open`；
+  6. 写 flag 同步抛错、`setEncoding("nope")` 抛 `TypeError`、`instanceof fs.ReadStream`。
+- 实测（复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1160`，全程 `--offline`）：
+
+```
+cargo test -p pi-extensions --test node_builtins --test node_module_readline
+  → 6 passed / 0 failed（node_builtins，含本轮的 createReadStream）
+  → 7 passed / 0 failed（node_module_readline）
+cargo test -p pi-extensions                          → 全部 test 目标绿（含 child_process / e2e / fetch / host）
+cargo check --offline --workspace --all-targets       → Finished（唯一告警来自既有 vendor/rquickjs-core）
+cargo test --offline -p pi-ai -p pi-coding-agent      → 全绿（含 LUM-1171 的 auth_wiring）
+```
+
+- 文档同步：`NODE_BUILTINS.md` 增 `createReadStream` 行、新增分歧行；覆盖表里
+  `git-merge-and-resolve.ts` 从「被 `createReadStream` 阻塞」改为**读取路径已通**
+  （剩余阻塞仅 `doom-engine.ts` 的本地 `require`）；frontier 行由
+  「`fs.watch`, `fs.createReadStream/WriteStream`」收窄为「`fs.watch`, `fs.createWriteStream`」。
+
+### 三、合并 LUM-1171（auth 接线）进 feature/pi.rs
+
+LUM-1171 在 `in_review`，分支 `agent/pi-auth-wiring`（`027862051`，基线 `355686f20`）已 push，
+工作区干净。本轮回合在 `work/lum-1172` 上 `--no-ff` 合并：新增
+`pi-ai/src/auth/provider_registry.rs`（+130）、`pi-ai/tests/auth_wiring.rs`（+255），改动
+`pi-ai/src/auth/mod.rs`、`pi-ai/src/lib.rs`、`pi-coding-agent/src/provider.rs`（+361）。
+与本轮的 `pi-extensions/**` 文件范围不重叠，合并**零冲突**；合并后 workspace check 与
+`pi-ai` / `pi-coding-agent` 全量测试通过。
+
+### 四、LUM-1168（图像 provider 运行时）重跑
+
+LUM-1168 原 run（分支 `agent/devbox1/e4e41b73b232`，停在 `0745b31bc`）**无提交、无完成评论**，
+是失效槽位。开工时 `active_task_count=2`（本任务 + 在跑的 LUM-1171），按「最多 3 并发」有
+**1 个空位**；LUM-1171 收口后该空位仍在，因此用 `multica issue rerun` 重新入队 LUM-1168
+（run `01a0bca6-ea18-7639-839d-677c42233a46`），未新建 issue、未改写其描述。其文件范围
+（`pi-ai/src/images/**`）与本轮及 LUM-1171 均不重叠。
+
+### 五、frontier（本轮后）
+
+1. **provider 家族**：不变——`Api` 枚举里仍无适配器的是 **bedrock-converse / cohere-v2 /
+   google-vertex**（云凭据/签名，本环境拿不到）；OAuth/subscription 首登族与多协议网关继续 parked。
+2. **`pi-ai/utils/` 缺口**：已收口（LUM-1169 并入）。
+3. **图像 provider 运行时**（`images-models.ts`）：LUM-1168 本轮已重跑，等待其推分支。
+4. **auth 接线**：LUM-1171 已交付并**本轮并入 feature/pi.rs**；`ProviderRouter` 现以
+   stored credential 优先、env 兜底，`resolve_api_key_for_provider` 成为 auth 子系统首个生产调用点。
+5. **`node:fs` 流**：读侧 `createReadStream` 本轮收口；写侧 `createWriteStream` 与
+   `fs.watch` 仍缺（前者可照本轮的 `Readable` 形状用 `fs.writeFile`/`appendFile` 反向包装，
+   后者需要 `notify` crate）。
+6. **`assistant-message-frame` / 事件枚举扩宽**：仍延后（有损简化枚举，移植会横切所有
+   provider 适配器、与多路并行冲突）。
+
+### 六、并发与磁盘
+
+- 开工 `active_task_count=2`（本任务 + LUM-1171）→ 只重跑 1 路；LUM-1171 收口后
+  `active_task_count` 回到 2（本任务 + LUM-1168 新 run），保持 ≤3。
+- 复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1160`，全程 `--offline`；
+  增量 check 约 29s。根分区开工 7.1G 可用（LUM-1170 轮的 11G target 仍在），本轮未新增
+  大体积产物；`/tmp/pi-fresh-1167-utils`（1.9G）为闲置 target，未清理以免影响在飞任务。
+- Git 身份沿用 `multica-agent <agent@multica.local>`；本轮提交 `6e192c404`（createReadStream）
+  与合并提交 `b3c346db0`（auth 接线），随后 docs(status) 提交并推送 `feature/pi.rs`。
