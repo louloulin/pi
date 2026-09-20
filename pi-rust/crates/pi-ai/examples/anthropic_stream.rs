@@ -19,10 +19,10 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY is not set; this example requires a real Anthropic API key")?;
-    let model_id =
-        env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
+    let api_key = env::var("ANTHROPIC_API_KEY").map_err(|_| {
+        "ANTHROPIC_API_KEY is not set; this example requires a real Anthropic API key"
+    })?;
+    let model_id = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
 
     let model = Model {
         provider: ProviderId::new("anthropic"),

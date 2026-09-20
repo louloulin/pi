@@ -280,10 +280,7 @@ impl StreamFn for OpenAiResponsesProvider {
 /// emits them in block order, this port emits the text message first and
 /// the `function_call` items after it. The model sees the same content
 /// either way, and the order is stable across request rebuilds.
-fn append_message(
-    input: &mut Vec<ResponsesInputItem>,
-    msg: &Message,
-) -> Result<(), StreamError> {
+fn append_message(input: &mut Vec<ResponsesInputItem>, msg: &Message) -> Result<(), StreamError> {
     match msg.role {
         Role::System | Role::User => {
             let role = match msg.role {
@@ -343,8 +340,9 @@ fn append_message(
                         }
                         match &*result.content {
                             Content::Text(t) => output.push_str(&t.text),
-                            other => output
-                                .push_str(&serde_json::to_string(other).unwrap_or_default()),
+                            other => {
+                                output.push_str(&serde_json::to_string(other).unwrap_or_default())
+                            }
                         }
                     }
                     Content::Text(t) => output.push_str(&t.text),
@@ -666,12 +664,17 @@ impl ResponsesResponse {
         }
         let stop_reason = match self.status.as_deref() {
             Some("incomplete") => stop_reason_from_incomplete(
-                self.incomplete_details.as_ref().and_then(|d| d.reason.as_deref()),
+                self.incomplete_details
+                    .as_ref()
+                    .and_then(|d| d.reason.as_deref()),
             ),
             _ if saw_tool_call => StopReason::ToolUse,
             _ => StopReason::Stop,
         };
-        let usage = self.usage.map(ResponsesUsage::into_usage).unwrap_or_default();
+        let usage = self
+            .usage
+            .map(ResponsesUsage::into_usage)
+            .unwrap_or_default();
         Ok(AssistantMessage {
             model: if self.model.is_empty() {
                 fallback_model.to_string()
@@ -854,7 +857,8 @@ impl ResponsesSseStream {
             None => return Ok(()),
         };
         if field == b"data" {
-            self.data_lines.push(String::from_utf8_lossy(value).into_owned());
+            self.data_lines
+                .push(String::from_utf8_lossy(value).into_owned());
         }
         // `event:` / `id:` / `retry:` carry no information we need: the
         // JSON payload's `type` field is authoritative.
@@ -912,7 +916,8 @@ impl ResponsesSseStream {
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 if let Some(delta) = event.delta.as_deref().filter(|d| !d.is_empty()) {
-                    self.state.ensure_thinking(event.output_index.unwrap_or_default());
+                    self.state
+                        .ensure_thinking(event.output_index.unwrap_or_default());
                     self.pending
                         .push_back(Ok(AssistantMessageEvent::ThinkingDelta {
                             delta: delta.to_string(),
@@ -1071,13 +1076,14 @@ impl ResponsesSseStream {
     }
 
     fn finalize(&mut self) {
-        let stop_reason = self.state.stop_reason.unwrap_or(
-            if self.state.has_tool_call() {
+        let stop_reason = self
+            .state
+            .stop_reason
+            .unwrap_or(if self.state.has_tool_call() {
                 StopReason::ToolUse
             } else {
                 StopReason::Stop
-            },
-        );
+            });
         let content = self.state.content();
         let usage = self.state.usage;
         self.pending.push_back(Ok(AssistantMessageEvent::Done {
@@ -1256,7 +1262,9 @@ mod tests {
         futures::executor::block_on(s.collect::<Vec<_>>())
     }
 
-    fn done(events: &[Result<AssistantMessageEvent, StreamError>]) -> (Vec<Content>, StopReason, Usage) {
+    fn done(
+        events: &[Result<AssistantMessageEvent, StreamError>],
+    ) -> (Vec<Content>, StopReason, Usage) {
         match events.last() {
             Some(Ok(AssistantMessageEvent::Done {
                 content,
@@ -1269,9 +1277,13 @@ mod tests {
 
     #[test]
     fn request_uses_the_responses_wire_shape() {
-        let req =
-            OpenAiResponsesProvider::build_request(&model(), &ctx(), &SimpleStreamOptions::default(), true)
-                .expect("build request");
+        let req = OpenAiResponsesProvider::build_request(
+            &model(),
+            &ctx(),
+            &SimpleStreamOptions::default(),
+            true,
+        )
+        .expect("build request");
         let v = serde_json::to_value(&req).expect("serialize");
         assert_eq!(v["model"], "gpt-5");
         assert_eq!(v["stream"], true);
@@ -1333,9 +1345,13 @@ mod tests {
             })],
             model: None,
         });
-        let req =
-            OpenAiResponsesProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default(), true)
-                .expect("build request");
+        let req = OpenAiResponsesProvider::build_request(
+            &model(),
+            &ctx,
+            &SimpleStreamOptions::default(),
+            true,
+        )
+        .expect("build request");
         let v = serde_json::to_value(&req).expect("serialize");
         let items = v["input"].as_array().expect("input array");
         let call = items
@@ -1355,9 +1371,9 @@ mod tests {
             "the tool output must be serialized, not dropped"
         );
         // The assistant text still travels as its own message item.
-        assert!(items
-            .iter()
-            .any(|i| i["type"] == "message" && i["role"] == "assistant" && i["content"] == "checking"));
+        assert!(items.iter().any(|i| i["type"] == "message"
+            && i["role"] == "assistant"
+            && i["content"] == "checking"));
     }
 
     #[test]

@@ -690,10 +690,9 @@ impl GoogleSseStream {
         }
         if !self.started {
             self.started = true;
-            self.pending
-                .push_back(Ok(AssistantMessageEvent::Start {
-                    model: self.model_id.clone(),
-                }));
+            self.pending.push_back(Ok(AssistantMessageEvent::Start {
+                model: self.model_id.clone(),
+            }));
         }
         self.handle_chunk(chunk);
         Ok(())
@@ -747,10 +746,9 @@ impl GoogleSseStream {
                     if let Some(Content::Text(block)) = self.state.content.get_mut(index) {
                         block.text.push_str(text);
                     }
-                    self.pending
-                        .push_back(Ok(AssistantMessageEvent::TextDelta {
-                            delta: text.clone(),
-                        }));
+                    self.pending.push_back(Ok(AssistantMessageEvent::TextDelta {
+                        delta: text.clone(),
+                    }));
                 }
             }
         }
@@ -768,13 +766,11 @@ impl GoogleSseStream {
             } else {
                 call.args.clone()
             };
-            self.state
-                .content
-                .push(Content::ToolCall(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                }));
+            self.state.content.push(Content::ToolCall(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }));
             self.state.saw_tool_use = true;
             self.pending
                 .push_back(Ok(AssistantMessageEvent::ToolCallDelta {
@@ -803,12 +799,11 @@ impl GoogleSseStream {
             usage,
             error_message: None,
         };
-        self.pending
-            .push_back(Ok(AssistantMessageEvent::Done {
-                content: message.content,
-                stop_reason: message.stop_reason,
-                usage: message.usage,
-            }));
+        self.pending.push_back(Ok(AssistantMessageEvent::Done {
+            content: message.content,
+            stop_reason: message.stop_reason,
+            usage: message.usage,
+        }));
     }
 }
 
@@ -884,9 +879,20 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "MAX_TOKENS" => StopReason::MaxTokens,
         // Safety / blocked / malformed completions all surface as
         // errors, matching `mapStopReason` in `google-shared.ts`.
-        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY"
-        | "IMAGE_PROHIBITED_CONTENT" | "IMAGE_RECITATION" | "IMAGE_OTHER" | "LANGUAGE"
-        | "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "NO_IMAGE" | "OTHER"
+        "SAFETY"
+        | "RECITATION"
+        | "BLOCKLIST"
+        | "PROHIBITED_CONTENT"
+        | "SPII"
+        | "IMAGE_SAFETY"
+        | "IMAGE_PROHIBITED_CONTENT"
+        | "IMAGE_RECITATION"
+        | "IMAGE_OTHER"
+        | "LANGUAGE"
+        | "MALFORMED_FUNCTION_CALL"
+        | "UNEXPECTED_TOOL_CALL"
+        | "NO_IMAGE"
+        | "OTHER"
         | "FINISH_REASON_UNSPECIFIED" => StopReason::Error,
         other => {
             tracing::debug!(reason = %other, "Google returned unknown finishReason");
@@ -1090,7 +1096,10 @@ mod tests {
 
         assert_eq!(v["systemInstruction"]["parts"][0]["text"], "you are pi");
         assert_eq!(v["contents"][0]["role"], "user");
-        assert_eq!(v["contents"][0]["parts"][0]["text"], "what's the weather in SF?");
+        assert_eq!(
+            v["contents"][0]["parts"][0]["text"],
+            "what's the weather in SF?"
+        );
         assert_eq!(v["generationConfig"]["maxOutputTokens"], 512);
 
         let decls = v["tools"][0]["functionDeclarations"]
@@ -1113,8 +1122,8 @@ mod tests {
         });
         let mut m = model();
         m.max_output_tokens = 0;
-        let req =
-            GoogleProvider::build_request(&m, &ctx, &SimpleStreamOptions::default()).expect("build");
+        let req = GoogleProvider::build_request(&m, &ctx, &SimpleStreamOptions::default())
+            .expect("build");
         let v = serde_json::to_value(&req).expect("serialize");
         assert!(v.get("systemInstruction").is_none());
         assert!(v.get("generationConfig").is_none());
@@ -1141,12 +1150,18 @@ mod tests {
         let v = serde_json::to_value(&req).expect("serialize");
         assert_eq!(v["contents"][0]["role"], "model");
         assert_eq!(v["contents"][0]["parts"][0]["text"], "Looking it up.");
-        assert_eq!(v["contents"][0]["parts"][1]["functionCall"]["name"], "get_weather");
+        assert_eq!(
+            v["contents"][0]["parts"][1]["functionCall"]["name"],
+            "get_weather"
+        );
         assert_eq!(
             v["contents"][0]["parts"][1]["functionCall"]["args"]["city"],
             "Berlin"
         );
-        assert_eq!(v["contents"][0]["parts"][1]["functionCall"]["id"], "call_abc");
+        assert_eq!(
+            v["contents"][0]["parts"][1]["functionCall"]["id"],
+            "call_abc"
+        );
     }
 
     #[test]
@@ -1191,7 +1206,10 @@ mod tests {
         let parts = contents[1]["parts"].as_array().expect("parts");
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["functionResponse"]["name"], "get_weather");
-        assert_eq!(parts[0]["functionResponse"]["response"]["output"], "72F and sunny");
+        assert_eq!(
+            parts[0]["functionResponse"]["response"]["output"],
+            "72F and sunny"
+        );
         assert_eq!(parts[0]["functionResponse"]["id"], "call_a");
         assert_eq!(parts[1]["functionResponse"]["name"], "get_time");
         assert_eq!(parts[1]["functionResponse"]["response"]["output"], "09:00");
@@ -1237,7 +1255,10 @@ mod tests {
         let req = GoogleProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
             .expect("build");
         let v = serde_json::to_value(&req).expect("serialize");
-        assert_eq!(v["contents"][0]["parts"][1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(
+            v["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+            "image/png"
+        );
     }
 
     #[test]

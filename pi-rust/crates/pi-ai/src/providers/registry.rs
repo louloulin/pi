@@ -314,8 +314,7 @@ const QWEN_TOKEN_PLAN_MODELS: &[ModelSpec] = &[
     ModelSpec::new("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731")
         .with_limits(1_000_000, 384_000),
     ModelSpec::new("deepseek-v4-pro", "DeepSeek V4 Pro").with_limits(1_000_000, 384_000),
-    ModelSpec::new("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813")
-        .with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813").with_limits(1_000_000, 384_000),
     ModelSpec::new("glm-5", "GLM-5").with_limits(202_752, 16_384),
     ModelSpec::new("glm-5.1", "GLM-5.1").with_limits(202_752, 128_000),
     ModelSpec::new("glm-5.2", "GLM-5.2").with_limits(1_000_000, 131_072),
@@ -343,8 +342,7 @@ const QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS: &[ModelSpec] = &[
     ModelSpec::new("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731")
         .with_limits(1_000_000, 384_000),
     ModelSpec::new("deepseek-v4-pro", "DeepSeek V4 Pro").with_limits(1_000_000, 384_000),
-    ModelSpec::new("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813")
-        .with_limits(1_000_000, 384_000),
+    ModelSpec::new("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813").with_limits(1_000_000, 384_000),
     ModelSpec::new("glm-5.2", "GLM-5.2").with_limits(1_000_000, 131_072),
     ModelSpec::new("qwen3.6-flash", "Qwen3.6 Flash").with_limits(1_000_000, 65_536),
     ModelSpec::new("qwen3.7-max", "Qwen3.7 Max").with_limits(1_000_000, 131_072),
@@ -373,10 +371,14 @@ const XIAOMI_TOKEN_PLAN_MODELS: &[ModelSpec] = &[
 const VERCEL_AI_GATEWAY_MODELS: &[ModelSpec] = &[
     ModelSpec::new("anthropic/claude-sonnet-4.5", "Claude Sonnet 4.5")
         .with_limits(1_000_000, 64_000)
-        .with_pricing(Pricing::micro_usd(3_000_000, 15_000_000, 300_000, 3_750_000)),
+        .with_pricing(Pricing::micro_usd(
+            3_000_000, 15_000_000, 300_000, 3_750_000,
+        )),
     ModelSpec::new("anthropic/claude-opus-4.5", "Claude Opus 4.5")
         .with_limits(200_000, 64_000)
-        .with_pricing(Pricing::micro_usd(5_000_000, 25_000_000, 500_000, 6_250_000)),
+        .with_pricing(Pricing::micro_usd(
+            5_000_000, 25_000_000, 500_000, 6_250_000,
+        )),
     ModelSpec::new("openai/gpt-5.2", "GPT 5.2")
         .with_limits(400_000, 128_000)
         .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
@@ -1231,8 +1233,16 @@ mod tests {
         // wire protocol from their own host with their own credential, so
         // they map to `AnthropicMessages` without a dedicated adapter.
         for (id, base_url, key_env) in [
-            ("minimax", "https://api.minimax.io/anthropic", "MINIMAX_API_KEY"),
-            ("minimax-cn", "https://api.minimaxi.com/anthropic", "MINIMAX_CN_API_KEY"),
+            (
+                "minimax",
+                "https://api.minimax.io/anthropic",
+                "MINIMAX_API_KEY",
+            ),
+            (
+                "minimax-cn",
+                "https://api.minimaxi.com/anthropic",
+                "MINIMAX_CN_API_KEY",
+            ),
             (
                 "vercel-ai-gateway",
                 "https://ai-gateway.vercel.sh",
