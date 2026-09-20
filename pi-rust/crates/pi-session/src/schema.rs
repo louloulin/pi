@@ -488,6 +488,22 @@ pub fn session_name_from_metadata(metadata: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The active-leaf entry id stored under `metadata.leaf`, when present.
+///
+/// Upstream keeps the tree cursor (`leafId`) in memory only, losing it on
+/// restart. The Rust port records `/tree`'s cursor move in the same
+/// metadata JSON blob `/name` uses (`{"version": …, "leaf": "e7"}`) so
+/// the branch survives `pi --resume`; the TS reader ignores the unknown
+/// key, and a session without it falls back to the tip.
+pub fn session_leaf_from_metadata(metadata: Option<&str>) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(metadata?).ok()?;
+    parsed
+        .get("leaf")
+        .and_then(serde_json::Value::as_str)
+        .filter(|leaf| !leaf.is_empty())
+        .map(str::to_string)
+}
+
 /// Bind the current time on a row insert.
 pub fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()

@@ -106,25 +106,28 @@ worker 的 stage 划分。
 - 上游：43 个动作全部通过 `defaultEditor.onAction(...)` 注册（`interactive-mode.ts:2883-2903`）。
 - 修复方向：在 `crates/pi-coding-agent/src/interactive.rs:395-430` 的拦截块里逐个补
   （模式已就位：`matches_with_fallback` + 覆盖层守卫 + 处理完 `return Ok(None)`）。
-  待接：`app.thinking.toggle`/`cycle`、`app.editor.external`、`app.message.followUp`/`dequeue`、
-  `app.session.new`/`tree`/`fork`/`resume`、`app.clipboard.pasteImage`、`app.suspend`。
+  待接：`app.thinking.cycle`、`app.editor.external`、`app.clipboard.pasteImage`（Stage 63）、
+  `app.suspend`。已接：`app.thinking.toggle`、`app.message.copy`、`app.model.cycle*`、
+  `app.message.followUp`/`dequeue`、`app.tools.expand`、`app.session.new`，以及 Stage 65 的
+  `app.session.tree`/`fork`/`resume`。
 - 风险：低（每个动作独立，可增量提交）。注意 `app.suspend` 要把终端交还父 shell，属于
   `run_interactive` 级别，需要先 teardown 再 restore。
 - 建议：Stage 59（拆成 2 批：thinking/external-editor/session 一批，queue/steer 一批）。
 
-### P0-3 斜杠命令缺口（23 → 12）
+### P0-3 斜杠命令缺口（23 → 7）
 
-未实现：`/tree`、`/thinking`、`/scoped-models`、`/import`、`/share`、`/copy`、`/name`、
-`/changelog`、`/fork`、`/clone`、`/login`、`/logout`、`/new`、`/reload`。
+已落地：`/new`、`/copy`、`/name`（Stage 60 = LUM-1218）、`/tree`、`/fork`、`/clone`（Stage 65 =
+LUM-1227）。未实现：`/thinking`、`/scoped-models`、`/import`、`/share`、`/changelog`、
+`/login`、`/logout`、`/reload`。
 
-- 影响：会话管理（`/new`、`/tree`、`/fork`）和登录（`/login`）是日常入口；`/new` 缺失时
-  用户只能重启进程。
-- 修复方向：按「先会话再账户」排序 —— `/new`（清空 + 落新 session 文件）→ `/tree`、`/fork`
-  （需要 session 分支树，依赖 `pi-session` + Stage 55 的写路径）→ `/copy`（本轮 `app.message.copy`
-  已有底层通道，只差命令入口）→ `/login`/`/logout`（凭据读写需单独设计，涉及密钥，最后做）。
-- 风险：`/tree`、`/fork` 与 LUM-1209（Stage 55 `pi-session` 写路径对齐 v4）强耦合，必须等
-  写路径落地后再做，否则会造第二个「假兼容 fixture」。
-- 建议：Stage 60，且 `/tree`、`/fork` 排在 LUM-1209 之后。
+- 影响：会话管理入口已补齐（`/new` 开新会话、`/tree` 导航分支、`/fork`/`/clone` 分叉）；
+  剩下的缺口集中在账户（`/login`/`/logout`）与杂项（`/import`、`/share`、`/reload`）。
+- 修复方向：按「先会话再账户」排序 —— 会话侧（`/new`、`/tree`、`/fork`、`/clone`）已完成 →
+  `/copy`（`app.message.copy` 已有底层通道，只差命令入口）→ `/login`/`/logout`（凭据读写需单独
+  设计，涉及密钥，最后做）。
+- 风险：`/tree`、`/fork` 已按 `DecodedEntry.parent_entry_id` 拼树，并在写侧新增
+  `SessionWriter::copy_entries_from`（对齐上游 `SessionManager.forkFrom` / `cloneSession`），
+  没有改 `pi-protocol` 的枚举，也没有造「假兼容 fixture」。
 
 ### P1-1 模型目录顺序不确定（本轮已修）
 
@@ -299,12 +302,12 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | Stage | 内容 | 验收 | 依赖 / 风险 |
 | --- | --- | --- | --- |
 | 58（LUM-1214，已合入） | 工具输出折叠 + `app.tools.expand` + 点击工具块展开 | 已交付 `6d4f64e62`，LUM-1221 轮合入（`76d1d634e`）；折叠提示 + N 可注入 + 键位可覆盖 + 单击单块，测试 `tests/tool_blocks.rs` 与 `tools_render.rs` 快照 | 无（选词/搜索快照未受影响，因折叠只在装了渲染器的交互路径生效） |
-| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）。剩余：`app.editor.external`、`app.session.tree`/`fork`/`resume` | `/tree`、`/fork` 的读路径已由 Stage 56（LUM-1212）备齐；外部编辑器需要 teardown/restore 终端 |
+| 59（部分完成） | 补齐 `app.*` 动作第 1 批 | 已完成：`app.thinking.toggle`（LUM-1213）、`app.message.copy`（LUM-1210）、`app.model.cycle*`（LUM-1210）、`app.message.followUp`/`dequeue`（Stage 61）、`app.session.new`（Stage 60）、`app.tools.expand`（Stage 58）、`app.session.tree`/`fork`/`resume`（Stage 65）。剩余：`app.editor.external`、`app.thinking.cycle` | 会话三键位已随 Stage 65 接线；外部编辑器需要 teardown/restore 终端，`app.thinking.cycle` 需 `Model.reasoning` 语义 |
 | 60（LUM-1218，已合入） | 会话命令补齐：`/new`、`/copy`、`/name` | 已交付 `86f46dea0`，LUM-1220 轮合入 `feature/pi.rs`（3 个命令 + `app.session.new` 键位 + 6 个新测试） | `/tree`、`/fork` 仍待接线 |
 | 61（LUM-1216，已合入） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 已交付 `8cab3a136`，LUM-1220 轮合入 `feature/pi.rs` | 无；mid-turn steer 需 core 暴露共享队列，留作后续切片 |
 | 62（LUM-1223，已交付） | `!cmd` / `!!cmd` 本地 bash 通道 + 忙时拒绝语义 | 已交付 `b2f673922`（LUM-1225 轮合入）：前缀识别 + 执行 + 结果折叠块 + `Esc` 取消；`!!` 因协议层缺 `bashExecution` role 暂以「不入 log」实现；忙时拒回编辑器而不入 Stage 61 队列 | 提交分支与 Stage 61 的队列相邻，需先判 bash 再判队列（已按此顺序实现） |
 | 63（LUM-1224，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧；62 已落地，可开工 |
-| 65（LUM-1226，已派发 `todo`） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼；`/fork` 选 user message 建新会话；`/clone` 原位复制；源会话零改写（`verify_stats` 断言） | 读路径已由 Stage 56 备齐（`branch_meta`/`branch_entries`/`scan_branch`）；写路径需新增「拷前 N 条到新会话」（上游 `SessionManager.forkFrom`，`session-manager.ts:1611`）；与 Stage 62 共用 `interactive.rs` 的命令分支，按现有顺序追加 |
+| 65（LUM-1227，已交付） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼（`pi-session` 树 + `pi-tui` 预序展平/gutter/活动分支优先）；`/fork` 选 user message 建新会话（含该条，空转录提示）；`/clone` 逐条复制整个会话为新文件，源文件零改写（`verify_stats` 断言）；`app.session.resume` 与 `/resume` 同一 `open_resume_selector` | 读路径来自 Stage 56（`branch_*`）；写路径新增 `SessionWriter::copy_entries_from` + `set_leaf`（对齐上游 `SessionManager.forkFrom`/`createBranchedSession`）；未改 `pi-protocol` 枚举 |
 | 66（LUM-1226，停放 `backlog`） | 流式反馈与可发现性：spinner + 轮耗时 + 启动头 key hints + `app.header` | `spinner` 全仓命中从 0 到有；耗时与 Stage 64 同 footer 行；启动头可折叠且不占行 | 对照 Martty `src/app.rs` 的 `SPINNER`/`spinner_idx`/`spinner()` 与测试 `a_running_subagent_keeps_the_spinner_advancing`；文案对照 Martty `src/locale.rs`，用常量表不引 i18n 框架 |
 
 并发约束：LUM-1219 轮是 3 worker 在飞的重复轮（零派发）；LUM-1221 开工时在飞 2 个
@@ -481,3 +484,53 @@ Stage 66 用常量表即可，不引入 i18n 框架。
 **本轮派发**：Stage 63（`backlog` → `todo`）与 Stage 65（新建 `todo`），Stage 66 停放 `backlog`；
 LUM-1225 收工后同时在跑 2 个 stage，符合「最多 3 个并发」。
 
+## 九、第七轮（LUM-1227）：会话树导航与分叉（Stage 65）
+
+Stage 65 是 Stage 59 停车场里最大的一块：会话树导航与从历史节点分叉。上游的 `/tree`、`/fork`、
+`/clone` 三个命令 + `app.session.tree`/`fork`/`resume` 三个键位此前在 Rust 侧零实现，`/resume`
+也只有一个死键位。读路径 Stage 56（`branch_*`）已备齐，本轮补齐写侧与入口。
+
+| 改动 | 位置 | 说明 |
+| --- | --- | --- |
+| 会话树拼装 | `crates/pi-session/src/tree.rs`（新） | `SessionReader::session_tree`（`parent_entry_id` 父链 → `SessionTreeNode`，根优先、子节点按存储序）、`entry_ancestry`（root→entry 路径，含自身）。迭代实现，长单链不递归 |
+| 逐条拷贝写入口 | `crates/pi-session/src/writer.rs` | `copy_entries_from(source, source_session_id, entry_ids)`：原样搬运 `id`/`parent_id`/`seq`/`type`/`custom_type`/`timestamp`/`payload`（`/clone` = 全部；`/fork` = 一条祖先路径），同事务更新 `message_count`/`next_seq`；要求目标为空且源为上游 v4（旧 Rust zstd 布局报错，先 migrate） |
+| `/tree` 光标下移 | `crates/pi-session/src/writer.rs` + `schema.rs` | `set_leaf(session_id, entry_id)` 把光标写进 `sessions.metadata` 的 `leaf` 键；`resume` 优先读它，因此退出后 `pi --resume` 继续 append 仍挂在该分支下（上游只在内存里存 `leafId`） |
+| TUI 树展平 | `crates/pi-tui/src/tree.rs`（新） | `TreeItem`/`TreeRow`/`flatten_tree`/`tree_selector_items`：上游 `tree-selector.ts` 的预序展平、子节点优先活动分支、缩进 + `│ ├─ └─` gutter 对齐；数据驱动，`pi-tui` 不依赖 `pi-session` |
+| `/tree` `/fork` `/clone` + 键位 | `crates/pi-coding-agent/src/commands/tree.rs`（新）、`commands/slash.rs`、`interactive.rs`、`keybindings.rs` | 选择器值用 `tree:`/`fork:` 前缀；`app.session.tree`/`fork`/`resume` 在既有拦截块内各有一个消费者（`matches_with_fallback` + 覆盖层守卫 + `return Ok(None)`）；`app.session.resume` 与 `/resume` 共用 `open_resume_selector`；新增默认键 `alt+t`/`alt+f`/`alt+r` 并进 `/hotkeys` app 分组 |
+
+关键语义（按 LUM-1227 交付物，与上游差异处以上游为准并在此标注）：
+
+- `/fork` 是**闭区间**：新会话内容 = 从头到被选中的那条 user message（含），首行是 `sessions` 头；
+  空转录提示 `No messages to fork from` 且**不建文件**。上游 `forkFrom(..., {position:"before"})`
+  会把选中消息之前的路径切成独立会话，本切片按 issue 的交付措辞取「含选中条」。
+- `/clone` 复制**整个**会话，新文件与原文件逐行相等（`raw_rows` 断言），源文件 mtime/内容不变
+  （`SessionReader::open` 是只读的）。
+- `/tree` Enter 把活动叶子切到选中节点（`set_leaf`），并把转录重载到该节点的祖先路径；
+  Esc 只关覆盖层，不落任何写入（打开覆盖层前后源文件字节相等）。
+- 两者产出的新文件都过 `verify_stats`（缓存 `message_count` 与重算一致）。
+- 明确不移植：折叠（`⊞`/`⊟`）、树标签编辑器、过滤模式、横向视口滚动。过滤命中不再重新缩进
+  （上游 `recomputeVisualStructure`），保留原始 gutter —— 是简化而非回归。
+
+验证：
+
+```console
+$ cargo fmt --all -- --check
+  干净
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo clippy -p pi-tui -p pi-coding-agent -p pi-session --all-targets --offline -- -D warnings
+  Finished（仅依赖 crate rquickjs-core 自带 warning，本仓零 warning）
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -p pi-session --offline        # 含 tests/session_tree.rs 7 条
+  ok
+$ … cargo test -p pi-tui --offline          # 含 pi-tui 树展平 5 条
+  ok
+$ … cargo test -p pi-coding-agent --offline # 431 lib + 24 套集成
+  ok
+```
+
+新增测试：`pi-session/tests/session_tree.rs`（树嵌套/预序、祖先路径、逐条 clone、fork 截断、
+`set_leaf` 后续 append 挂新叶、空源、旧布局拒绝、`verify_stats`）；`pi-tui/src/tree.rs` 内联单测
+（平铺链、分支 connective/gutter、多根虚拟根、活动分支优先、选择器标签）；`pi-coding-agent`
+的 `/clone`（逐条相等 + 源不变 + stats）、`/fork`（选择器内容、含选中条、源保留 6 条 + stats）、
+空转录 `/fork`（提示且不建 `.sqlite`）、`/tree`（覆盖层只读、展平顺序、选中后 `session_leaf`、
+转录重载、后续 append 的 `parent_entry_id`）、三个键位各自打开对应选择器且 `/resume` 键位复用它。

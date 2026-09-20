@@ -40,6 +40,16 @@ pub enum SlashCommand {
     Exit,
     /// `/resume` — list and pick a previous session file.
     Resume,
+    /// `/tree` — open the session tree overlay (navigate branches and
+    /// move the active leaf). Mirrors upstream `handleTreeCommand`.
+    Tree,
+    /// `/fork` — open the user-message picker and branch a new session
+    /// from the selected message. Mirrors upstream
+    /// `showUserMessageSelector`.
+    Fork,
+    /// `/clone` — copy the current session into a new session file
+    /// (upstream `handleCloneCommand`).
+    Clone,
     /// `/settings` — open the settings modal (upstream
     /// `SettingsSelectorComponent`).
     Settings,
@@ -86,6 +96,9 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
             path: (!args.is_empty()).then(|| strip_quotes(args)),
         },
         "resume" => SlashCommand::Resume,
+        "tree" => SlashCommand::Tree,
+        "fork" => SlashCommand::Fork,
+        "clone" => SlashCommand::Clone,
         "settings" => SlashCommand::Settings,
         "compact" => SlashCommand::Compact {
             instructions: (!args.is_empty()).then(|| args.to_string()),
@@ -137,6 +150,9 @@ pub fn help_text() -> String {
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /export [path] export the session (HTML, or JSONL for a .jsonl path)\n");
     out.push_str("  /resume   resume a previous session\n");
+    out.push_str("  /tree     navigate the session tree and switch branches\n");
+    out.push_str("  /fork     branch a new session from a user message\n");
+    out.push_str("  /clone    copy the current session into a new session file\n");
     out.push_str("  /settings show or change interface settings\n");
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
@@ -241,6 +257,9 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ),
         ("app.model.select", "open the model selector"),
         ("app.session.new", "start a new session"),
+        ("app.session.tree", "open the session tree"),
+        ("app.session.fork", "fork a session from a message"),
+        ("app.session.resume", "resume a session"),
     ];
     const SELECTORS: &[(&str, &str)] = &[
         ("tui.select.up", "move the selection up"),
@@ -365,6 +384,9 @@ mod tests {
             }
         );
         assert_eq!(handle_command("/resume").unwrap(), SlashCommand::Resume);
+        assert_eq!(handle_command("/tree").unwrap(), SlashCommand::Tree);
+        assert_eq!(handle_command("/fork").unwrap(), SlashCommand::Fork);
+        assert_eq!(handle_command("/clone").unwrap(), SlashCommand::Clone);
         assert_eq!(handle_command("/settings").unwrap(), SlashCommand::Settings);
         assert_eq!(handle_command("/trust").unwrap(), SlashCommand::Trust(None));
         assert_eq!(
@@ -402,8 +424,32 @@ mod tests {
     #[test]
     fn help_text_documents_the_session_commands() {
         let text = help_text();
-        for command in ["/new", "/copy", "/name"] {
+        for command in ["/new", "/copy", "/name", "/tree", "/fork", "/clone"] {
             assert!(text.contains(command), "{command} missing from:\n{text}");
+        }
+    }
+
+    #[test]
+    fn hotkeys_text_lists_the_session_branch_chords() {
+        // Stage 65 wires `app.session.tree` / `fork` / `resume`; the app
+        // group has to advertise them once the actions have consumers.
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        let text = hotkeys_text_with(&manager);
+        for label in [
+            "open the session tree",
+            "fork a session from a message",
+            "resume a session",
+        ] {
+            assert!(text.contains(label), "{label} missing from:\n{text}");
+        }
+        for chord in ["Alt+T", "Alt+F", "Alt+R"] {
+            assert!(text.contains(chord), "{chord} missing from:\n{text}");
         }
     }
 
