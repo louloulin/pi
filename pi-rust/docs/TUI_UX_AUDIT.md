@@ -306,6 +306,9 @@ LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时
 | 63（LUM-1224，停放） | `app.clipboard.pasteImage` + composer 图片 chip（≤8，退格整块删） | alt+v 挂图 / 无图退化纯文本；chip 可整块删除 | `image.rs` / `terminal_image.rs` 渲染已就绪，只缺 composer 侧；62 已落地，可开工 |
 | 65（LUM-1226，已派发 `todo`） | 会话树导航：`/tree`、`/fork`、`/clone` + `app.session.tree`/`fork`/`resume` 接线 | 树覆盖层由 `DecodedEntry.entry_id`/`parent_entry_id` 拼；`/fork` 选 user message 建新会话；`/clone` 原位复制；源会话零改写（`verify_stats` 断言） | 读路径已由 Stage 56 备齐（`branch_meta`/`branch_entries`/`scan_branch`）；写路径需新增「拷前 N 条到新会话」（上游 `SessionManager.forkFrom`，`session-manager.ts:1611`）；与 Stage 62 共用 `interactive.rs` 的命令分支，按现有顺序追加 |
 | 66（LUM-1226，停放 `backlog`） | 流式反馈与可发现性：spinner + 轮耗时 + 启动头 key hints + `app.header` | `spinner` 全仓命中从 0 到有；耗时与 Stage 64 同 footer 行；启动头可折叠且不占行 | 对照 Martty `src/app.rs` 的 `SPINNER`/`spinner_idx`/`spinner()` 与测试 `a_running_subagent_keeps_the_spinner_advancing`；文案对照 Martty `src/locale.rs`，用常量表不引 i18n 框架 |
+| 67（LUM-1229，停放 `backlog`） | 思考级别：`/thinking [level]` + `app.thinking.cycle`（`shift+tab`）/ `app.thinking.save`（`ctrl+s`）+ 编辑器边框随级别着色 +「当前模型不支持思考」提示 | 4 个入口全部接线；`/thinking` 与键位走同一段切换代码；边框色用 `Theme::thinking_border`；不支持时给状态行而非静默 | 上游 `interactive-mode.ts:2884`（cycle）、`:2986`（`/thinking` 选择器）、`:2139`（边框色）、`:4170`（不支持提示）；`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`）与 `Theme::thinking_border`（`pi-tui/src/theme.rs:1108`）已在位，缺的是 App/session 之间的级别贯通；`slash.rs` / `interactive.rs` 与 Stage 65 同文件，须排在 65 之后 |
+| 68（LUM-1229，停放 `backlog`） | 斜杠命令第二批：`/reload`、`/changelog`、`/import`、`/login`、`/logout`、`/scoped-models` | 解析分支 + 实际行为 + `/help` 文案；`/reload` 重载 keybindings/extensions/skills/prompts/themes/context 至少覆盖已实现的子集 | 上游 `slash-commands.ts:24-42`；auth 子系统（LUM-1171 / LUM-1180）与 session 导入导出（LUM-1174）已在位；`/share` 需 GitHub gist + 凭据，单独停放；与 Stage 67 同文件，串联在 67 之后 |
+| 69（LUM-1229，停放 `backlog`） | Martty 风格会话级持久 shell：`!` 命令之间保留 `cd` / 环境变量，退出 TUI 时回收 | 连续 `!cd sub` + `!pwd` 看到目录延续；一个 `!export X=1` 在下一个 `!` 可见；`Esc` 仍可中断；进程随 TUI 退出而终止；`!!` 语义不变 | **非上游对齐**（上游 `bash-executor.ts:50` 每条命令新起进程），属「最佳体验」增强，需先决定默认开/关；实现对标 Martty `src/app.rs:718-835`（`PersistentShell` + 控制 fd 9 + `shell_quote`）；与 Stage 62 的 `BashRunner` 同文件 |
 
 并发约束：LUM-1219 轮是 3 worker 在飞的重复轮（零派发）；LUM-1221 开工时在飞 2 个
 （LUM-1214 Stage 58、LUM-1220 协调轮），LUM-1214 与 LUM-1220 均在本轮内收工（且 LUM-1214 的
@@ -481,3 +484,93 @@ Stage 66 用常量表即可，不引入 i18n 框架。
 **本轮派发**：Stage 63（`backlog` → `todo`）与 Stage 65（新建 `todo`），Stage 66 停放 `backlog`；
 LUM-1225 收工后同时在跑 2 个 stage，符合「最多 3 个并发」。
 
+
+## 九、第七轮（LUM-1229）：满槽并发轮 —— 对照 Martty 源码复核「输入通道 / 思考级别 / 命令面」
+
+本轮开工时 `multica issue runs <LUM-981> --siblings --active` 有 3 个 stage 在跑（Stage 63 =
+LUM-1224、Stage 65 = LUM-1227、Stage 66 = LUM-1228，三者都有活跃 workdir），按「最多 3 个并发」
+**零派发**，只做复核与停放；`feature/pi.rs` 的 tip 仍是 `7e340c841`，无待合并分支（`origin` 上
+`work/LUM-1224`、`work/LUM-1227`、`work/LUM-1228` 尚不存在）。
+
+### 9.1 在飞产物的文件面（合并冲突预判）
+
+三个 worker 的 `git status --short`：
+
+```console
+$ git -C <LUM-1227 workdir> status --short
+ M pi-rust/crates/pi-coding-agent/src/commands/mod.rs
+ M pi-rust/crates/pi-coding-agent/src/commands/slash.rs
+ M pi-rust/crates/pi-coding-agent/src/interactive.rs
+ M pi-rust/crates/pi-coding-agent/src/keybindings.rs
+ M pi-rust/crates/pi-session/src/lib.rs
+ M pi-rust/crates/pi-session/src/writer.rs
+ M pi-rust/crates/pi-tui/src/lib.rs
+?? pi-rust/crates/pi-coding-agent/src/commands/tree.rs
+?? pi-rust/crates/pi-session/src/tree.rs
+?? pi-rust/crates/pi-tui/src/tree.rs
+$ git -C <LUM-1228 workdir> status --short
+ M pi-rust/crates/pi-tui/src/status.rs
+?? pi-rust/crates/pi-tui/src/loader.rs
+?? pi-rust/crates/pi-tui/src/locale.rs
+$ git -C <LUM-1224 workdir> status --short
+ M pi-rust/crates/pi-agent-core/src/agent.rs
+ M pi-rust/crates/pi-tui/src/editor.rs
+ M pi-rust/crates/pi-tui/src/prompt.rs
+```
+
+三条线目前**互不重叠**：65 在 `commands/` + `pi-session` + `pi-tui/lib.rs`，66 在
+`pi-tui/status.rs` + 两个新模块，63 在 `pi-agent-core` + `editor.rs` + `prompt.rs`。
+唯一要盯的是 **Stage 66 的接线**：spinner / 启动头要进 App，`app.header` 需要一个消费点，
+如果它后续改 `pi-tui/src/lib.rs` 或 `interactive.rs`，就会和 65 撞同一文件（`lib.rs` 同文件、
+`interactive.rs` 同文件）。下一轮收 66 时先看它的最终 diff，再决定谁先合。
+
+### 9.2 Martty 对照复核：三条还没切的轴
+
+前六轮对照的是「会话内容呈现」「输入通道」「信息密度」，本轮补三条轴。
+
+**(1) `!` 本地 shell 是每条命令新起进程，Martty 是会话级持久 shell。**
+Rust 侧 `interactive.rs:450` 的 `BashRunner::start` 直接调 `crate::tools::BashTool`
+（`interactive.rs:458`），而 `BashTool` 每次 `Command::new("sh")`（`tools/bash.rs:125`，
+Windows 走 `:478` 的 `cmd`），没有 `cd` / 环境变量延续。上游也是这个语义 ——
+`executeBashWithOperations`（`packages/coding-agent/src/core/bash-executor.ts:50`）每条命令走一次
+`BashOperations`。Martty 不同：`src/app.rs:718` 起维护 `PersistentShell`，用 fd 9 当控制通道
+（`src/app.rs:793` 写 `eval <quoted>` + 状态标记，`:835` `shell_quote`），README 明确写
+「shell 从 workspace 启动，`cd`、环境变量等状态会在后续 `!` 命令中保留，退出 TUI 后结束」。
+这是**增强项而非上游对齐**，因此排在两个上游对齐切片之后（Stage 69）。
+
+**(2) 思考级别（thinking level）零 UI —— 上游对齐里最后一块大的。**
+`app.thinking.cycle` / `app.thinking.save` 在 `keybindings.rs:232-233` 只有定义、全仓零消费者，
+`/thinking` 在 `slash.rs:76-95` 的 14 个解析分支里没有。上游却把这套做全了：
+`app.thinking.cycle` → `cycleThinkingLevel()`（`interactive-mode.ts:2884`）、`/thinking` 打开
+`ThinkingSelectorComponent`（`:2986`）、编辑器边框按级别取色（`:2139`）、当前模型不支持时给
+`Current model does not support thinking` 状态（`:4170`）。Rust 侧的零件已经在位：
+`ThinkingLevel`（`pi-agent-core/src/hooks.rs:87`，含 `is_reasoning()` `:106`）与
+`Theme::thinking_border(level, text)`（`pi-tui/src/theme.rs:1108`），缺的是「App ↔ session 之间
+把级别贯通」。因此这是 Stage 67。
+
+**(3) 斜杠命令面 23 → 14（Stage 65 落定后 17），仍缺 6 条。**
+Stage 65 补齐 `tree` / `fork` / `clone` 后，上游 23 条里还缺 `thinking`（并入 Stage 67）、
+`reload`、`changelog`、`import`、`login`、`logout`、`scoped-models`、`share`
+（`packages/coding-agent/src/core/slash-commands.ts:24-42`）。前 6 条依赖已经具备（auth 在
+LUM-1171 / LUM-1180，导入导出在 LUM-1174），合并为 Stage 68；`/share` 要 GitHub gist 与凭据，
+单独停放不动。因此 Stage 68。
+
+### 9.3 已覆盖、不要重复投资的轴（本轮复核结论）
+
+- **鼠标**：`pi-tui` 已有 cell / word / line 三档选词（`app.rs:472-479`）、拖拽边缘自动滚动
+  （`app.rs:534-538`、`:915`），与 Martty 的「单击工具展开、双击选词、滚轮滚对话」等价，
+  不需要再切。
+- **流式输入**：排队 / steer / dequeue（Stage 61）、工具折叠 + 点击展开（Stage 58）、
+  usage 脚注（Stage 64）均已落地，Martty README 对应行已有等价物。
+- **不切**：`/liang` 像素宠物、UI Preset、ACP elicitation、`chrome.right` 右栏 —— 前两者是
+  Martty 壳层的趣味/组合能力，与本仓「上游 pi 兼容」的目标无关；elicitation 与右栏依赖
+  `ctx.ui` 扩展宿主（LUM-1184 已开面），等有真实消费者再排。
+
+### 9.4 本轮动作
+
+docs-only：新增本节 + 第五节 3 行 stage 表（67 / 68 / 69）。**未跑全量门** —— 两个 worker 正在
+编译（1227 的 `target` 502M、1228 的 845M，均 12:37 仍在写入），第三方构建会争磁盘与 CPU；
+tip 的门已由 LUM-1225 实跑（147 / 2202 / 0 / 2）。磁盘剩 25G，无陈旧 target 可回收
+（只有这两个活跃 workdir 带 `target`，无其它任务残留）。校验：
+`cargo fmt --all -- --check` 干净；本文件 fence 计数为偶数、新增段落零相对链接
+（满足 `pi-evals/src/suites/docs.rs:123` 与 `:130` 两个 case）。
