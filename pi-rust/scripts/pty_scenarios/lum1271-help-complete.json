@@ -1,0 +1,99 @@
+{
+  "cols": 120,
+  "rows": 70,
+  "caption": "LUM-1271 reference completeness (120x70): the /help and /hotkeys bodies must render in full, with no row hard-clipped at the right margin. This scenario removes the scroll window from the question, so it asserts the content invariant; lum1267-interaction-assertions.json asserts the 34-row scroll/tail interaction.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "src/main.rs",
+    "README.md"
+  ],
+  "distinct_panels": true,
+  "notes": [
+    "Why 70 rows: the expanded startup header plus composer/status take ~22 rows, so the transcript window is ~48 rows; the wrapped /help body is ~34 rows and fits, so every command row and the whole key table are in one frame. The pre-fix renderer (b5769b585) could not produce this frame at any height: it emitted 11 hard-clipped rows whose text was truncated mid-word, which is what the `reject` needles pin.",
+    "Panel 2 asserts /clear actually clears the message view, which keeps panel 3's /hotkeys block inside the window and covers the /clear command as a side effect.",
+    "The reject needles 'keys: Enter submit promp', 'accept autocomplete commands:' and 'abort streamin' are the exact cuts the pre-LUM-1261 renderer produced (see docs/TUI_LUM1271_*.md); they cannot appear once each source line is wrapped instead of clipped."
+  ],
+  "panels": [
+    {
+      "label": "1. /help -> the whole slash-command reference and the key table in one frame",
+      "send": "<C-u>/help<Enter>",
+      "wait": 2,
+      "wait_for": "keys:",
+      "expect": [
+        "slash commands:",
+        "/help     show this help text",
+        "/clear    clear the message view",
+        "/new      start a new session",
+        "/copy     copy the last assistant message to the clipboard",
+        "/model    pick a model (opens selector)",
+        "/session  show the current session info",
+        "/export [path] export the session",
+        "/resume   resume a previous session",
+        "/tree     navigate the session tree and switch branches",
+        "/fork     branch a new session from a user message",
+        "/clone    copy the current session into a new session file",
+        "/settings show or change interface settings",
+        "/thinking set the reasoning level",
+        "/trust    show or set project trust",
+        "/compact  summarize the conversation prefix to free context",
+        "/hotkeys  list the keyboard shortcuts",
+        "/extensions list loaded extensions and what they register",
+        "/exit     quit the interactive session",
+        "keys:",
+        "Enter       submit prompt",
+        "Home / End  jump to the start / end of the chat log",
+        "Ctrl+U      clear the prompt buffer"
+      ],
+      "reject": [
+        {
+          "text": "Jump to latest",
+          "why": "the whole reference fits in the ~48-row window, so the log stays at the bottom and the jump-to-latest pill must not be rendered"
+        },
+        {
+          "text": "keys: Enter submit promp",
+          "why": "pre-fix the reference was clipped into hard-cut rows and this merges what are now the separate 'keys:' heading and 'Enter submit prompt' rows"
+        }
+      ]
+    },
+    {
+      "label": "2. /clear -> the message view is emptied",
+      "send": "/clear<Enter>",
+      "wait": 1.5,
+      "expect": [
+        "? for help"
+      ],
+      "reject": [
+        "slash commands:",
+        "keys:"
+      ]
+    },
+    {
+      "label": "3. /hotkeys -> the whole chord table in one frame",
+      "send": "/hotkeys<Enter>",
+      "wait": 2,
+      "wait_for": "· commands:",
+      "expect": [
+        "app:",
+        "Ctrl+C           clear the prompt (twice: exit)",
+        "Shift+Tab        cycle the thinking level",
+        "Ctrl+L           open the model selector",
+        "Ctrl+O           expand or collapse tool output",
+        "Alt+H            expand or collapse the startup header",
+        "selectors and completion:",
+        "Tab              path completion / accept autocomplete",
+        "commands:",
+        "slash commands (/help, /model, /hotkeys, …)",
+        "close the selector / overlay first"
+      ],
+      "reject": [
+        {
+          "text": "accept autocomplete commands:",
+          "why": "pre-fix the clip landed here: the truncated rendering joined the chord row 'Tab ... path completion / accept autocomplete' with the section heading 'commands:', which only exists in that clipped rendering"
+        }
+      ]
+    }
+  ]
+}
