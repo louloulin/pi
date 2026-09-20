@@ -1345,6 +1345,7 @@ mod tests {
                 content: Box::new(Content::text("file body")),
                 is_error: false,
                 details: None,
+                added_tool_names: None,
             })],
             model: None,
         });
@@ -1410,6 +1411,7 @@ mod tests {
                 content: Box::new(Content::text("boom")),
                 is_error: true,
                 details: None,
+                added_tool_names: None,
             })],
             model: None,
         });
