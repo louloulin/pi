@@ -193,6 +193,14 @@ row 21 len= 36 …'p for commands'    ← 输入框行不参与（它本来就�
 | `docs/screenshots/lum1266-tall-34.png(.txt)` | 本轮 | 退出 0；与 before-tall 逐行只差 session id |
 | `docs/screenshots/lum1266-longline.png(.txt)` | 本轮 | 退出 0；3 帧全不同（`3a1916d0e95d` / `a2ab6b43ffb1` / `f84b7887ec21`）；面板 2 = 不画滚动条时 130 列消息占满整 120 列，面板 3 = 画滚动条时折成 119 列 + 第 120 列滚动条，字符一个不少 |
 
+> 表里的 `frame …` 是**单次采集的帧指纹**，用来证明"同一张拼图里相邻面板确实不同"。状态栏带随机 session id，
+> 所以**重跑必然得到不同的哈希**：并排的三张 `before-*` 帧同理（它们各自是一次独立采集）。
+> 重跑只需看"退出码 0 + 5 个哈希互不相同 + 每行 119 列文本 + 第 120 列是 `│`/`┃`"。
+>
+> 本轮在写完后用**合并后的 harness**（LUM-1267 给 `pty_capture.py` 加了 241 行）重跑过 `lum1266-short-23`：
+> 退出码 0、5 帧全不同、面板形态与本文一致（折叠头 + 23 行非空内容），说明场景与命令仍然可复现；
+> 哈希不同只是因为 session id 随机。
+
 场景文件：`scripts/pty_scenarios/lum1266-{short-22,short-23,tall-34,longline}.json`（120×22 / 120×23 / 120×34 / 120×23，
 `distinct_panels: true`，`--model faux/faux-model`）。采命令（在 `pi-rust/` 下）：
 
