@@ -71,6 +71,13 @@ pub struct Cli {
     #[arg(long = "no-context-files")]
     pub no_context_files: bool,
 
+    /// Suppress the built-in startup header (the key-hint screen printed
+    /// above the transcript on entry). The header is also the `app.header`
+    /// toggle at runtime, and is only shown by interactive mode. The TS CLI
+    /// spells this as the `quietStartup` setting instead.
+    #[arg(long = "no-header")]
+    pub no_header: bool,
+
     /// Export a session file to HTML and exit.
     ///
     /// Usage: `pi --export <session.jsonl> [output.html]`. Without an

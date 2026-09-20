@@ -44,12 +44,18 @@ fn installed_overrides_win_over_the_builtin_chords() {
     config.set("tui.editor.cursorUp", ["ctrl+p"]);
     config.set("tui.altScreen.pageUp", ["ctrl+y"]);
     config.set("app.tools.expand", ["ctrl+g"]);
+    config.set("app.header", ["alt+j"]);
     // `pi-tui`'s own table has no `app.*` entries (the coding-agent driver
-    // installs those), so add the one the App consumes before overriding it.
+    // installs those), so add the ones the App consumes before overriding
+    // them.
     let mut definitions = tui_default_keybindings();
     definitions.push((
         "app.tools.expand".to_string(),
         KeybindingDefinition::new(["ctrl+o"]),
+    ));
+    definitions.push((
+        "app.header".to_string(),
+        KeybindingDefinition::new(["alt+h"]),
     ));
     let mut manager = KeybindingsManager::new(definitions, KeybindingsConfig::new());
     manager.set_user_bindings(config);
@@ -117,6 +123,24 @@ fn installed_overrides_win_over_the_builtin_chords() {
         StepOutcome::Redraw
     );
     assert!(app.tools_expanded());
+
+    // --- Startup header -------------------------------------------------
+    // `app.header` is a Rust-only id whose built-in fallback is `Alt+H`
+    // (upstream folds the header together with the tool blocks). Once the id
+    // is in the table the registry wins, so `Alt+H` is released and `Alt+J`
+    // drives it instead. `busy_feedback.rs` covers the no-registry branch,
+    // where `matches_with_fallback` falls back to the built-in chord.
+    assert!(app.header_expanded());
+    assert_eq!(
+        app.step_key(key(KeyCode::Char('h'), KeyModifiers::ALT)),
+        StepOutcome::Idle
+    );
+    assert!(app.header_expanded());
+    assert_eq!(
+        app.step_key(key(KeyCode::Char('j'), KeyModifiers::ALT)),
+        StepOutcome::Redraw
+    );
+    assert!(!app.header_expanded());
 
     reset_keybindings();
 }

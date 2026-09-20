@@ -211,6 +211,9 @@ fn main() -> ExitCode {
                 // `app.clipboard.pasteImage` reads the real system clipboard
                 // (`wl-paste` / `xclip` / `pngpaste` / PowerShell).
                 clipboard: None,
+                // `--no-header`: the startup key-hint screen. Upstream's
+                // equivalent is the `quietStartup` setting.
+                quiet_startup: cli.no_header,
             };
             match runtime.block_on(run_interactive(options)) {
                 Ok(_) => ExitCode::SUCCESS,
