@@ -91,6 +91,31 @@ silent:      7/44 (15.9%)  app.models.{clearAll,enableAll,reorderDown,reorderUp,
 
 > 教训（写进流程）：**百分比必须附「怎么量的」与「量它的脚本」**。我 §0.1 那张表里只有这一格是自己撮合出来的扫描器，也恰好是错得最厉害的一格；LUM-1260 的工具之所以可信，是因为它能被 `--check-consumed` 反测试（伪造清单会报 `FALSE AD` 并 exit 1）。后续这类数字一律走可复核脚本。
 
+### 0.3 LUM-1261 复测：§0.2「性价比序列」的第 1、3 条已关闭（tip `c8bc6785a` + 本轮提交）
+
+本轮**不改任何计数口径**，所以加权总分仍是 §0.2 的 **81.4%**（`app.*` 接线 79.5%；TUI 交互+视觉轴
+用同一条公式 `(14×0.795 + 8×0.91) / 22` = **83.7%**，即 §0.1 表格里那格 73.8% 在口径更正后的值）。
+改的是**证据**，而且是 §0.2 自己列出的性价比序列：
+
+| §0.2 的序列 | 本轮 | 证据 |
+| --- | --- | --- |
+| 1. ≤23 行终端里输入框整个不在屏上（盲打） | **关闭** | `pi-tui/src/extension_ui.rs:415` 的 `plan_chrome` 改为**先预留提示行**（启动头可折叠、输入框不可）；120×23 前后对照 `docs/screenshots/lum1260-small-terminal-23.png.txt`（草稿不可见）→ `lum1261-small-terminal-23.png.txt`（行 22 `> typed blind▍`）；回归测试 `extension_ui.rs:758`；细节见 `docs/TUI_INPUT_AND_LAYOUT_VERIFICATION.md` §7.2 |
+| 2. 扩展事件缺 15 个 | 未动 | 不是本 issue 的面，仍待专门一轮 |
+| 3. `/help` 预排版被 `wrap_text` 重排成一整段 | **关闭** | `pi-tui/src/message.rs:1533/1570/1591` 换行感知包装 + 原样快路径；`pi-coding-agent/tests/help_text_layout.rs`（真实 `help_text()`）；120×50 前后对照 `lum1259-tip-interaction.png.txt:205` → `lum1261-help-layout.png.txt:129`；细节见 `docs/TUI_INPUT_AND_LAYOUT_VERIFICATION.md` §7.1 |
+
+门禁（本轮独立运行，全部 `--offline`）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --offline -p pi-tui` | **798 passed / 0 failed**，45 个 target 全部有结果（含 lib 358） |
+| `cargo test --offline -p pi-coding-agent --test startup_header --test help_text_layout --test keybindings --test print_mode --test tools_render --test builtin_tool_factories` | **66 passed / 0 failed** |
+| `cargo test --offline --workspace` | 未完成：`error: couldn't create a temp dir: No space left on device (os error 28)` → `could not compile \`pi-coding-agent\` (test "tools_render")`。50G 共享卷同时 4–5 条 run 在构建，与代码无关 |
+
+已知 flaky（**早于本轮**，记在这里以免下一轮误判）：`pi-coding-agent --test extension_ui` 的
+`interactive_regions_render_into_the_app` 实测 20 次失败 1 次（`EDITOR missing from [...]`），
+该用例自 `d02fb0ace`（LUM-1190）就在，是 `pump()` 投递与渲染之间的竞态；40×12 下新旧 `plan_chrome`
+分配完全相同，**与本轮布局改动无关**。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

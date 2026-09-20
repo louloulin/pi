@@ -1,6 +1,6 @@
 # lum1261-interaction.png — chars, 120x34 cells
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [1] 1. Ctrl+U, /model + Enter -> model selector overlay (faux + builtin providers)  (cursor 56,31) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [1] 1. Ctrl+U, /model + Enter -> model selector overlay (faux + builtin providers)  (cursor 56,31, frame 16554a5c6fb4, px 3935ea3a71ff, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -34,9 +34,9 @@ Pick a model
   GPT-4                           azure-openai-responses
   GPT-4 Turbo                     azure-openai-responses
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [2] 2. Esc closes the selector, composer is restored  (cursor 56,31) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [2] 2. Esc closes the selector, composer is restored  (cursor 56,31, frame 4eb607f26a54, px 9ab38f427991, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -70,9 +70,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [3] 3. a real turn through the faux provider streams into the transcript  (cursor 25,22) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [3] 3. a real turn through the faux provider streams into the transcript  (cursor 25,22, frame 1e938d84d5c6, px f9ffd208b507, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -106,9 +106,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [4] 4. !local bash runs in-process and its output lands in the transcript  (cursor 11,26) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [4] 4. !local bash runs in-process and its output lands in the transcript  (cursor 11,26, frame e7f010ac16d5, px d77a7190098c, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -134,7 +134,7 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
   faux-model (faux) hello
 * bash echo pty-harness-ok && pwd
 * pty-harness-ok
-* /tmp/pi-pty-cwd-9787
+* /tmp/pi-pty-cwd-15265
 * Took 0.1s
 
 
@@ -142,9 +142,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [5] 5. /help renders the implemented command surface + key list  (cursor 120,31) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [5] 5. /help renders the implemented command surface + key list  (cursor 120,31, frame 4322417538dc, px b73fbe93e680, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -178,9 +178,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 ·   Esc         close selector / cancel turn                                                                           ┃
 ·                                                                                                                      ┃
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [6] 6. /hotkeys renders the keybinding table  (cursor 54,30) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [6] 6. /hotkeys renders the keybinding table  (cursor 54,30, frame 88a5fead5e70, px c21d1992fb4a, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -214,9 +214,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 ·   Esc             close the selector / overlay first                                                                 ┃
 ·                                                                                                                      ┃
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [7] 7. PgUp scrolls the transcript back to the head of the /hotkeys message  (cursor 120,31) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [7] 7. PgUp scrolls the transcript back to the head of the /hotkeys message  (cursor 120,31, frame f5b4f114217a, px 07e135ac73d6, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -250,9 +250,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 ·   Alt+Up           restore queued messages to the editor                                                             │
 ·   Ctrl+T           show or hide thinking  ↓ Jump to latest message · End                                             │
 > type a prompt — /help for commands
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [8] 8. known gap: # has no provider behind it, so no candidates appear  (cursor 36,32) =====
+===== LUM-1261 tip — interaction surface: faux turn, in-process bash, /help, /hotkeys  |  [8] 8. known gap: # has no provider behind it, so no candidates appear  (cursor 36,32, frame 557efe4a6c50, px 9986ec66d9e0, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -286,4 +286,4 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 ·   Alt+Up           restore queued messages to the editor                                                             │
 ·   Ctrl+T           show or hide thinking  ↓ Jump to latest message · End                                             │
 > #▍
-Faux test model  session-18d7232420610200                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d7235b99e5ac68                                                  in 0 out 0 ?/8.2k  ? for help

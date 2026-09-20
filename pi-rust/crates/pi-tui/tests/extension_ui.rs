@@ -261,16 +261,23 @@ fn an_over_tall_region_is_truncated_and_the_message_view_survives() {
         "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10",
     ]))));
 
-    // height 5 → status 1 + one reserved message row leave 3 for the header,
-    // and the tail of the header is dropped. The later chrome regions (the
-    // prompt included) get nothing.
+    // height 5 → status 1 + one reserved message row leave 3 rows for the
+    // chrome. The prompt takes its own row first (LUM-1261: it is the one
+    // region the user cannot work without, and the header can be folded away),
+    // so the header is truncated to its first 2 rows and the later chrome
+    // regions get nothing.
     let snapshot = app.render_snapshot(30, 5);
     assert_eq!(snapshot.lines[0], "h1");
-    assert_eq!(snapshot.lines[2], "h3");
-    assert_eq!(snapshot.lines[3].trim(), "> hello", "message row survives");
+    assert_eq!(snapshot.lines[1], "h2");
+    assert_eq!(snapshot.lines[2].trim(), "> hello", "message row survives");
+    assert!(
+        snapshot.lines[3].contains('>'),
+        "the prompt keeps a row instead of being starved: {:?}",
+        snapshot.lines
+    );
     assert!(snapshot.lines[4].contains("Faux"));
     assert!(
-        !snapshot.lines.iter().any(|line| line.contains("h4")),
+        !snapshot.lines.iter().any(|line| line.contains("h3")),
         "the header tail must be dropped: {:?}",
         snapshot.lines
     );
