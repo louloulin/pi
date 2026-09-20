@@ -13984,8 +13984,8 @@ mirror/work/lum-1177                         # cherry: 2/2 全 `-`（URL 全局 
 ### 六、frontier（本轮后）
 
 1. **质量门基线** = **133 套件 / 2032 passed / 0 failed / 2 ignored（`c10d1ce39`）**；下一欠账点 = LUM-1197 或 LUM-1192 任一合入时。
-2. **pi-tui 终端图片**：切片 1/2/3 全部合入 → **内核完成**；组件片 LUM-1192 **本轮已晋升**（`Image` + `truncate_to_width`）；再后续 = `pi-coding-agent` 三个消费点接线（`tool-execution.ts` / `markdown.ts` / `read.ts` 的图片块）。
-3. **插件生态 provider 面**：`pi.registerProvider` host 桥 = LUM-1197（在飞）；后续 slice = native `Provider` 对象 + `oauth` + `streamSimple` handler 注册。
+2. **pi-tui 终端图片**：切片 1/2/3 全部合入 → **内核完成**；组件片 LUM-1192 **本轮已晋升**（`Image` + `truncate_to_width`）；再后续 = `pi-coding-agent` 三个消费点接线（`tool-execution.ts` / `markdown.ts` / `read.ts` 的图片块）→ **已停放为 LUM-1200**（`backlog` + Stage 52，parent LUM-1198，等 LUM-1192 合入后晋升）。
+3. **插件生态 provider 面**：`pi.registerProvider` host 桥 = LUM-1197（在飞）；后续 slice = native `Provider` 对象 + `oauth` + `streamSimple` handler 注册 → **已停放为 LUM-1199**（`backlog` + Stage 51，parent LUM-1198，等 LUM-1197 合入后晋升）。
 4. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert`）与 provider 家族（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1185 / 1177 结论（环境做不了 / 无凭据无消费方）。
 5. **~~`pi-ai` telemetry span~~**：LUM-1196 轮已证伪并移除，不复活。
 6. **run 可靠性**：本轮两个在飞 run 都**正常活着**（无 EOF），且 LUM-1194 作为「上一轮重派的 run」自愈完成 —— 说明重派后的 run 会重新落盘，**不是**只能靠协调轮手工救回。
