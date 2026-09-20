@@ -13366,3 +13366,68 @@ LUM-1183 轮留下的 `/tmp/pi-fresh-1179` 实测 **19G**：`debug/deps` 16G（�
 2. LUM-1180 / LUM-1184 推送后按「文件面窄的先合」排序：先 `work/lum-1180`（`pi-extensions` + `pi-ai` + `pi-coding-agent`），再 `work/lum-1184`（只碰 `pi-tui`）；冲突大概率只在 `crates/pi-extensions/docs/NODE_BUILTINS.md` 的 frontier 表。
 3. **合并后必须补跑全量 `cargo test --workspace`**（本轮欠账），并确认套件数 / passed 相对 `127 / 1941` 的增量与两路新单测数量相符。
 4. 磁盘：开工先看 `df -h /`，余量 < 15G 时先清陈旧 target dir，再动构建。
+
+## LUM-1186 round — 合并 LUM-1184（pi-tui 扩展 UI 宿主面）+ 全量 `cargo test --workspace` 实跑 128/1981（清 ENOSPC 欠账）+ frugal 配置实测；本轮零派发
+
+### 一、开工盘点与并发
+
+* 开工 `feature/pi.rs` tip = `fb189e466`（与 LUM-1185 的基线一致）。**本 run 运行期间** LUM-1185 把 `8b187f222`（仅本文档 +68）直接推到了 `origin/feature/pi.rs`，基线随之前进；本地 `git merge --ff-only origin/work/lum-1185` 接上，无冲突、无额外 commit。
+* 并发实测从 **4 路**收敛到 **2 路**：开工时 LUM-1180 / LUM-1184 / LUM-1185 / 本 run 同时在跑——**两个整点协调轮并行**（autopilot 每小时建一个 issue，且上一轮尚未结束）。05:05 LUM-1185 完成（`in_review`）、05:09 LUM-1184 完成（`in_review`），收盘时只剩 LUM-1180（在飞）+ 本 run。
+  → 即便逼近「最多 3 个并发」，本轮仍**零派发**：唯一候选的新任务与在飞的 LUM-1180 同文件面（见第四节第 2 条）。
+* **本轮新增教训（重要）**：LUM-1184 的分支只推到了**工作区 mirror**，`origin` 上根本不存在 `work/LUM-1184`：
+
+  ```console
+  $ git ls-remote mirror refs/heads/work/LUM-1184   # bda669ef9  ← 有
+  $ git ls-remote origin refs/heads/work/LUM-1184   # （空）     ← 无
+  ```
+
+  两条差异同时存在：**目标 remote**（mirror vs origin）与**分支大小写**（`work/LUM-1184` vs `work/lum-1184`）。**下一轮的可合并性扫描必须双向扫**（`git ls-remote --heads mirror` + `--heads origin`），否则会把已完成、只是没推到 `origin` 的任务误判成「未推送 / 仍在飞」，从而漏合并。
+
+### 二、合并：`work/LUM-1184` → `feature/pi.rs`
+
+| 合并 | 提交 | 改动量 | 文件面 |
+| --- | --- | --- | --- |
+| `work/LUM-1184` | `bda669ef9`（merge commit `f807e74b3`） | +2410 / −44 | **6 个文件全部在 `crates/pi-tui/**`** |
+
+内容：新增 `pi-tui/src/component.rs`（`Component` trait + `OverlayAnchor`/`CustomOptions`/`CustomHandle`/`TextComponent`）、新增 `pi-tui/src/extension_ui.rs`（`ExtensionUi` chrome 高度预算、dispose 恰好一次）、`pi-tui/src/app.rs`（`set_header`/`set_footer`/`set_editor_component`/`set_widget`/`open_custom` + overlay 键盘优先级 + `render_to_buffer` 分区绘制 + `overlay_rect` 锚定/clamp）、新增 `pi-tui/tests/extension_ui.rs`（16 项）。
+
+与 `8b187f222`（LUM-1185 文档提交）**无冲突**（文件面不相交）。`origin` 上 `work/lum-1180` 尚未推送（仍在飞），因此按 LUM-1185 定下的「文件面窄的先合」原则，本轮先合 1184；两者文件面（`pi-tui` vs `pi-extensions` + `pi-ai`）不重叠，先后顺序不影响后续合并。
+
+### 三、验证：全量 `cargo test --workspace` 在合并树上实跑（清 LUM-1185 的 ENOSPC 欠账）
+
+配置：`CARGO_HOME=/tmp/cargo-home`、`CARGO_TARGET_DIR=/tmp/pi-lum-1186`、`CARGO_INCREMENTAL=0`、`CARGO_PROFILE_TEST_DEBUG=0`、`-j 16`、全部 `--offline`。
+
+| 树 | 套件 | passed | failed | ignored |
+| --- | --- | --- | --- | --- |
+| `fb189e466`（合并前，本轮实跑） | 127 | 1941 | 0 | 2 |
+| **`f807e74b3`（合并 LUM-1184 后）** | **128** | **1981** | **0** | **2** |
+
+增量全部落在 pi-tui，符合预期：新增 target `tests/extension_ui.rs` **+16**；`pi_tui` 既有 target `276 → 300`（**+24**，含 `overlay_rect` 7 项与 `app_theme` 行序断言调整）。**其余每个 crate 的逐 target passed 数逐字不变**——即 LUM-1184 记的第 4 条 divergence（status 行由 `height-2` 移到最后一行、prompt 随之上移）经全量回归确认**没有破坏下游断言**（`pi-coding-agent` 侧确实只用 `contains`）。
+
+命令（`--offline`）：
+
+```console
+$ cargo fmt --all -- --check                            # exit 0，0 行输出
+$ cargo check  --workspace --all-targets                # exit 0
+$ cargo clippy --workspace --all-targets -- -D warnings # exit 0（仅 vendor/rquickjs-core 的上游提示）
+$ cargo test   --workspace -j 16                        # exit 0（1m35s，128 套件 / 1981 passed）
+```
+
+**frugal 配置实测（回答 LUM-1185 第三节的建议）**：`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0` 下整个 target dir 只有 **2.1G**（对比 `pi-fresh-1179` 的 19G），全量 test 期间根分区余量稳定在 **18–19G**（开工 21G），**链接阶段不再需要 15G 余量**，也没有挤掉并发中的 LUM-1180。代价只是测试二进制的调试符号（栈回溯会退化）与 1m35s 的编译时间。**建议后续所有轮次（含并发轮）默认使用该组合**，把「全量 test 需要 15G 余量」这条磁盘硬约束降为 2–3G。
+
+### 四、frontier（本轮后）
+
+1. **质量门**：fmt / check / clippy `-D warnings` / **全量 test 全部实跑**于合并树 `f807e74b3`，`128 / 1981 / 0 / 2`。LUM-1185 遗留的「全量 test 欠账」**已清零**；下一次欠账点是 LUM-1180 合入时。
+2. **`ctx.ui.*` 端到端接线 —— 下一项应当派发的任务（本轮被 LUM-1180 的文件面阻塞）**：
+   * 已就位：pi-tui 宿主面（LUM-1184 已合入）；`pi-coding-agent/src/extensions/ui_bridge.rs`（284 行，`confirm`/`input`/`select` 一类对话框桥）已存在。
+   * 仍缺：`pi-extensions/src/host.rs`（3575 行）的 ui op handler 与 `pi-extensions/src/pi-ext-shim.mjs` 的 JS 侧 `ctx.ui.*`（当前仍返回 `ERR_PI_UI_UNSUPPORTED`）。
+   * **唯一阻塞**：这两个文件正是在飞的 LUM-1180 的改动面 → 同文件并发，故本轮不派发。LUM-1180 一合入即可直接派发，文件面是确定的、无需再调研。
+3. **`@earendil-works/pi-ai/compat` 内建 provider 工厂 + host 流式事件桥 / `pi.registerProvider(...)` host 桥**：**LUM-1180 在飞**，等其合入后再评估后一半。
+4. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert` 全局）：维持 LUM-1185 的四条判断（环境做不了 / 会改语义需专轮决策 / 无消费方）。
+5. **provider 家族**（`bedrock-converse` / `cohere-v2` / `google-vertex`）、**图像侧**、**`assistant-message-frame` / 事件枚举扩宽**：维持 LUM-1177 / LUM-1183 / LUM-1185 结论不变。
+
+### 五、下一轮动作（按优先级）
+
+1. **LUM-1180 一推分支就合并它**——双向扫分支（`git fetch` 后 `git ls-remote --heads mirror` 与 `--heads origin`，注意 `work/lum-1180` 与 `work/LUM-1180` 两种写法），合并后**必须补跑一次全量 `cargo test --workspace`**（用本轮的 frugal 配置），核对 passed 增量与新增单测数量是否相符。
+2. **紧接着派发 `ctx.ui.*` 端到端接线**（第四节第 2 条），立项时把文件面写死为 `crates/pi-extensions/src/{host.rs, pi-ext-shim.mjs}` + `crates/pi-coding-agent/src/extensions/ui_bridge.rs`，并明确禁止触碰 `crates/pi-tui/**`（已合入，属消费方）。
+3. **协调轮开工例程**：`git fetch` → 双向扫 `work/*` 的可合并性 → `multica daemon status --output json` 核对 `running_task_count` → `df -h /`（余量 < 5G 先清陈旧 target dir）→ 再决定派发。满槽时不要为了「有事做」制造同文件并发，但**合并已完成的分支是本轮硬职责**，不算派发。
