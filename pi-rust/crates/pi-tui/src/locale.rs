@@ -92,6 +92,24 @@ impl HeaderHint {
     pub fn description(&self, locale: Locale) -> &'static str {
         locale.tr(self.en, self.zh)
     }
+
+    /// True when every `app.*` id this row names has a real consumer.
+    ///
+    /// A row is dropped when its action is bound but unimplemented, so the
+    /// header can never advertise a key that does nothing (LUM-1240). The
+    /// [`HeaderKey::Literal`] rows are raw key text, not action ids, and a
+    /// [`HeaderKey::ChordPair`] stays while either half works — the pair's
+    /// label already drops the dead half.
+    pub fn is_wired(&self) -> bool {
+        use crate::keybindings::app_action_is_consumed;
+        match self.key {
+            HeaderKey::Chord(id) | HeaderKey::ChordTwice(id) => app_action_is_consumed(id),
+            HeaderKey::ChordPair(first, second) => {
+                app_action_is_consumed(first) || app_action_is_consumed(second)
+            }
+            HeaderKey::Literal(_) => true,
+        }
+    }
 }
 
 /// The startup-header hint rows, in upstream order

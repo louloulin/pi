@@ -108,7 +108,10 @@ fn the_header_resolves_the_live_chords() {
     assert!(text.contains("Ctrl+C to clear"), "{text}");
     assert!(text.contains("Ctrl+C twice to exit"), "{text}");
     assert!(text.contains("Ctrl+D to exit (empty)"), "{text}");
-    assert!(text.contains("Ctrl+Z to suspend"), "{text}");
+    // `app.suspend` and `app.editor.external` are bound but not implemented,
+    // so the header must not advertise them (LUM-1240 / LUM-1245).
+    assert!(!text.contains("to suspend"), "{text}");
+    assert!(!text.contains("for external editor"), "{text}");
     assert!(text.contains("Shift+Tab to cycle thinking level"), "{text}");
     assert!(
         text.contains("Ctrl+P/Shift+Ctrl+P to cycle models"),
@@ -118,7 +121,6 @@ fn the_header_resolves_the_live_chords() {
     assert!(text.contains("Ctrl+O to expand tools"), "{text}");
     assert!(text.contains("Alt+H to hide this header"), "{text}");
     assert!(text.contains("Ctrl+T to expand thinking"), "{text}");
-    assert!(text.contains("Ctrl+E for external editor"), "{text}");
     assert!(text.contains("/ for commands"), "{text}");
     assert!(text.contains("! to run bash"), "{text}");
     assert!(text.contains("!! to run bash (no context)"), "{text}");
