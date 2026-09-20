@@ -1,0 +1,79 @@
+# lum1261-help-80x24.png — chars, 80x24 cells
+
+===== LUM-1261 /help on a standard 80x24 terminal — the legend wraps in place  |  [1] 1. startup on 80x24  (cursor 80,23, frame 0343957baf5e, px 42a79f41194f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or exten
+
+> type a prompt — /help for commands
+Faux test model  session-18d723582340a6e6          in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1261 /help on a standard 80x24 terminal — the legend wraps in place  |  [2] 2. /help on 80x24 — headings own a row, over-long rows wrap instead of being glued together  (cursor 80,21, frame 983c59d328ec, px 4d6897bee813, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or exten
+·                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d723582340a6e6          in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1261 /help on a standard 80x24 terminal — the legend wraps in place  |  [3] 3. Alt+H hides the header; the true 80x24 transcript area  (cursor 80,23, frame 549e0c59de86, px 65b0dfc1b91b, alive=True) =====
+·   /fork     branch a new session from a user message                         │
+·   /clone    copy the current session into a new session file                 │
+·   /settings show or change interface settings                                │
+·   /thinking set the reasoning level (/thinking                               │
+· off|minimal|low|medium|high|xhigh|max)                                       │
+·   /trust    show or set project trust (/trust yes|no)                        │
+·   /compact  summarize the conversation prefix to free context                │
+·   /hotkeys  list the keyboard shortcuts                                      ┃
+·   /extensions list loaded extensions and what they register                  ┃
+·   /exit     quit the interactive session                                     ┃
+·                                                                              ┃
+· keys:                                                                        ┃
+·   Enter       submit prompt                                                  ┃
+·   Up / Down   navigate prompt history                                        ┃
+·   PgUp/PgDn   scroll the chat log one page                                   ┃
+·   Home / End  jump to the start / end of the chat log                        ┃
+·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits)   ┃
+·   Ctrl+D      exit on an empty prompt                                        ┃
+·   Ctrl+L      open the model selector                                        ┃
+·   Ctrl+U      clear the prompt buffer                                        ┃
+·   Esc         close selector / cancel turn                                   ┃
+·                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d723582340a6e6  in 0 out 0 ?/8.2k  Startup header: co

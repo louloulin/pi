@@ -28,23 +28,52 @@
 //!
 //! Height budgeting (`plan_chrome`):
 //!
-//! * Three regions are reserved before any extension region gets a say: the
-//!   status row (1 row), the editor region's own row and at least one message
-//!   row. The composer — the row the user types into — and the transcript
-//!   therefore never disappear, however tall the extension regions are
-//!   (LUM-1266: a 22-row built-in startup header used to take the editor's
-//!   row on a 23-row terminal and the prompt was never painted). Below three
-//!   rows there is no room for both, and the leftover row stays with the
-//!   message view.
-//! * The remaining rows are handed to the chrome regions in render order —
-//!   header, Above widgets, editor, Below widgets, footer — each taking at
-//!   most what its component asked for. The editor's request is met from its
-//!   reservation first, so a region above it cannot starve it.
+//! * The status row (1 row) and at least one message row are reserved first;
+//!   the message view therefore never disappears, however tall the extension
+//!   regions are.
+//! * The editor region is reserved **next**, before the header. The prompt is
+//!   the one region the user cannot do anything without, and the header is the
+//!   region that can be folded away (`Alt+H`) — on a default startup frame the
+//!   built-in header is 21 rows, so letting it take the budget first left the
+//!   editor with zero rows and the user typed blind on a 22/23-row terminal
+//!   (`docs/PARITY_AND_TUI_AUDIT_LUM1260.md` §3.1, re-measured in
+//!   `docs/TUI_INPUT_AND_LAYOUT_VERIFICATION.md` §3). Upstream's flex layout
+//!   shrinks the flexible message area, never the fixed editor region.
+//! * The remaining rows are handed to the rest of the chrome in render order —
+//!   header, Above widgets, Below widgets, footer — each taking at most what
+//!   its component asked for.
+//! * Truncation is not the only answer for the *built-in* startup header:
+//!   [`App`](crate::App) folds its hint list on a terminal that cannot hold the
+//!   list, the composer and three transcript rows, and says so on one dim row
+//!   (LUM-1266). The tail-dropping rule below still governs an extension header
+//!   installed with `ctx.ui.setHeader`.
+//! * The status row (1 row) and at least one message row are reserved first;
+//!   the message view therefore never disappears, however tall the extension
+//!   regions are.
+//! * The editor region is reserved **next**, before the header. The prompt is
+//!   the one region the user cannot do anything without, and the header is the
+//!   region that can be folded away (`Alt+H`) — on a default startup frame the
+//!   built-in header is 21 rows, so letting it take the budget first left the
+//!   editor with zero rows and the user typed blind on a 22/23-row terminal
+//!   (`docs/PARITY_AND_TUI_AUDIT_LUM1260.md` §3.1, re-measured in
+//!   `docs/TUI_INPUT_AND_LAYOUT_VERIFICATION.md` §3). Upstream's flex layout
+//!   shrinks the flexible message area, never the fixed editor region.
+//! * The remaining rows are handed to the rest of the chrome in render order —
+//!   header, Above widgets, Below widgets, footer — each taking at most what
+//!   its component asked for.
+//! * Truncation is not the only answer for the *built-in* startup header:
+//!   [`App`](crate::App) folds its hint list on a terminal that cannot hold the
+//!   list, the composer and three transcript rows, and says so on one dim row
+//!   (LUM-1266, `docs/TUI_SHORT_VIEWPORT_AND_SCROLLBAR_LUM1266.md`). The
+//!   tail-dropping rule below still governs an extension header installed with
+//!   `ctx.ui.setHeader`.
 //! * A region that does not fit in what is left is **truncated to the
 //!   remaining rows (its tail is dropped)** and every later region renders
 //!   nothing. This is the "truncate the tail" policy: upstream's `Container`
 //!   renders every child and lets the terminal clip, which is the same
-//!   observable result as long as the reserved rows survive.
+//!   observable result as long as the message view keeps its reserved row.
+//!   The header keeps its first rows, so a squeezed header loses its
+//!   onboarding line and then its last hints — not its title and first hints.
 //!
 //! # Widget ordering
 //!
@@ -406,36 +435,35 @@ pub(crate) struct ChromeLayout {
 /// extension regions.
 ///
 /// See the module docs for the policy; the short version is "reserve the
-/// status row, the composer's row and one message row, then hand out the rest
-/// in render order, truncating the tail".
+/// status row, the prompt and one message row, then hand out the rest in
+/// render order, truncating the tail".
 pub(crate) fn plan_chrome(total: u16, frame: &ExtensionFrame) -> ChromeLayout {
     let status = 1u16.min(total);
-    let mut budget = total.saturating_sub(status);
-    // The prompt always needs a row, and a component that renders nothing
-    // would otherwise make the editor region disappear entirely. Reserve it
-    // (plus one message row) *before* the extension regions: an expanded
-    // startup header taller than the terminal used to swallow both and leave
-    // the user typing into an invisible composer.
-    let editor_want = frame
-        .editor
-        .as_ref()
-        .map_or(1, |lines| lines_height(lines).max(1));
-    let editor_reserved = editor_want.min(budget.saturating_sub(1));
-    budget -= editor_reserved;
     // One row stays with the message view so it never vanishes.
-    let message_reserved = 1u16.min(budget);
-    budget -= message_reserved;
+    let mut budget = total.saturating_sub(status).saturating_sub(1);
     let mut take = |want: u16| {
         let got = want.min(budget);
         budget -= got;
         got
     };
 
+    // The prompt is reserved before the header, not after it (LUM-1261).
+    // Handing the budget to the header first let the 21-row startup legend
+    // consume every row on a 22/23-row terminal, leaving `editor == 0`: the
+    // composer was painted into a zero-height region and the user typed into
+    // an invisible input (`docs/PARITY_AND_TUI_AUDIT_LUM1260.md` §3.1). The
+    // header is foldable and the prompt is not, so the header is what gives
+    // way — it is truncated (its tail dropped) instead of starving the
+    // editor. The prompt always needs a row, and a component that renders
+    // nothing would otherwise make the editor region disappear entirely.
+    let editor = take(
+        frame
+            .editor
+            .as_ref()
+            .map_or(1, |lines| lines_height(lines).max(1)),
+    );
     let header = take(lines_height(&frame.header));
     let above = take(lines_height(&frame.above));
-    // The editor already owns `editor_reserved` rows; the rest of its request
-    // competes with the regions below it, as before.
-    let editor = editor_reserved + take(editor_want - editor_reserved);
     let below = take(lines_height(&frame.below));
     let footer = take(lines_height(&frame.footer));
     let used = header + above + editor + below + footer;
@@ -734,15 +762,44 @@ mod tests {
 
     #[test]
     fn plan_chrome_truncates_the_tail_when_the_chrome_overflows() {
-        // 5 rows total: 1 status + 1 message + 1 prompt are reserved, so the
-        // header gets 2 of the 10 rows it wants and the footer none. The
-        // header still loses its tail first (it is above the composer), but
-        // the composer itself survives (LUM-1266).
+        // 5 rows total: 1 status + 1 message leave 3 for chrome. The prompt
+        // takes its reserved row first (it is the region the user cannot work
+        // without), then the header takes the remaining 2 and the tail — the
+        // Above/Below widgets and the footer — renders nothing.
         let layout = plan_chrome(5, &frame_with(10, 2, None, 2, 4));
-        assert_eq!(layout.header, 2);
-        assert_eq!((layout.above, layout.editor, layout.below), (0, 1, 0));
+        assert_eq!((layout.editor, layout.header), (1, 2));
+        assert_eq!((layout.above, layout.below), (0, 0));
         assert_eq!((layout.status, layout.footer), (1, 0));
         assert_eq!(layout.message, 1);
+    }
+
+    /// LUM-1261: the 21-row startup header must not push the composer off the
+    /// screen. Measured defect (LUM-1260 §3.1 and re-measured in
+    /// `docs/TUI_INPUT_AND_LAYOUT_VERIFICATION.md` §3): at 120×22 and 120×23 a
+    /// typed draft never appeared in the PTY grid, because the header claimed
+    /// all 21 budget rows and left `editor == 0`. At 24 rows the frame fits, so
+    /// the header keeps every row there.
+    #[test]
+    fn the_startup_header_cannot_starve_the_prompt() {
+        let header = 21u16;
+        // 24 rows: everything fits — header intact, prompt, one message row.
+        let layout = plan_chrome(24, &frame_with(header as usize, 0, None, 0, 0));
+        assert_eq!(
+            (layout.header, layout.editor, layout.message, layout.status),
+            (21, 1, 1, 1)
+        );
+        // 23 and 22 rows: the prompt and the message row survive; the header
+        // is truncated by exactly the rows they needed.
+        for total in [23u16, 22] {
+            let layout = plan_chrome(total, &frame_with(header as usize, 0, None, 0, 0));
+            assert_eq!(
+                (layout.header, layout.editor, layout.message, layout.status),
+                (header - (24 - total), 1, 1, 1),
+                "at {total} rows the prompt must stay on screen"
+            );
+            assert!(layout.editor >= 1, "at {total} rows the prompt vanished");
+            assert!(layout.header >= 1, "at {total} rows the header vanished");
+        }
     }
 
     #[test]

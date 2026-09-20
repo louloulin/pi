@@ -261,3 +261,96 @@ KeyCode::PageUp => self.page_up(),
   可复用的 6.6 GB warm `target/` 挪进本轮工作区，使本轮所有构建都在 `--offline` 下完成。
 - 本轮交付物 = 本文 + 1 个进程级探针 + 3 个 PTY 场景（均重抓）+ 1 条 `#[ignore]` 验收测试 + 3 张截图，
   与正在冲突的文件**零交集**。
+---
+
+## 7. LUM-1261 收尾：§2.5 的两条验收标准达成，§3 的"输入框盲打"关闭（tip `c8bc6785a` + 本轮提交）
+
+### 7.1 `/help` 排版：`wrap_text` 改成换行感知（§2.5 两条标准均达成）
+
+改动全部在 `pi-rust/crates/pi-tui/src/message.rs`（本轮之前**没有任何在飞 run 碰过这个文件**）：
+
+| 符号 | 行 | 行为 |
+| --- | --- | --- |
+| `split_hard_lines()` | `message.rs:1533` | 只按 `\r\n` / `\r` / `\n` 切一次，得到源行 |
+| `wrap_text()` | `message.rs:1570` | 改为**逐源行**包装（空输入 → `[""]`），不再把整块正文当一段重排 |
+| `wrap_single_line()` | `message.rs:1591` | **原样快路径**：`display_width(line) <= width` 直接返回该行（缩进与列对齐原样保住）；只有超宽行才落回贪心折行；整行空白且超宽 → `[""]` |
+| `wrap_words()` | `message.rs:1620` | 旧的贪心折行算法，改名保留，供超宽行使用 |
+
+与上游契约一致：`packages/tui/src/utils.ts:843-866` 的 `wrapTextWithAnsi`（先按 `/\r\n|\r|\n/` 切、再逐行包）与
+`utils.ts:873-876` 的 `wrapSingleLine`（`visibleWidth <= width` 时原样返回）。
+
+§2.5 的两条验收标准，逐条落实：
+
+1. **§2.3 的复现转绿并去掉 `#[ignore]`** → `pi-rust/crates/pi-tui/tests/lum1259_info_block_lines.rs`
+   （`a_command_reference_block_keeps_its_line_structure`、`an_info_block_renders_one_row_per_source_row`，2 passed）。
+2. **补一条用真实 `help_text()` 的断言** → 新增 `pi-rust/crates/pi-coding-agent/tests/help_text_layout.rs`
+   （3 passed：32 行真实 `/help` 图例逐行成行、`hotkeys_text()` 逐行成行、80 列下"有界折行且不溢出"）。
+   测试读的是 `commands::slash::{help_text, hotkeys_text}` 本体（`slash.rs:404`），不是另写的 fixture。
+
+PTY 实拍（120×50，同一 `lum1259-tip-interaction` / `lum1261-help-layout` 场景）：
+
+```text
+# before（tip b5769b585）docs/screenshots/lum1259-tip-interaction.png.txt:205
+· slash commands: /help show this help text /clear clear the message view /new start a new session /copy copy the last
+# after （tip c8bc6785a+）docs/screenshots/lum1261-help-layout.png.txt:129 / :143 / :150
+· slash commands:
+·   /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)
+· keys:
+·   Enter       submit prompt
+```
+
+### 7.2 ≤23 行终端：启动头不再把输入框挤出屏幕（§3 + LUM-1260 §3.1 的第 1 条）
+
+**根因**（不是渲染器丢行，是行预算的发放顺序）：`pi-rust/crates/pi-tui/src/extension_ui.rs:415`
+的 `plan_chrome` 按渲染顺序发预算——**header 第一、editor 最后**。默认启动头是 **21 行**，
+而 `total = 23` 时预算只有 `23 - 1(状态栏) - 1(转写行) = 21`，于是 header 吃光全部预算、
+`editor == 0`：输入框被画进零高度区域，用户**盲打**（120×22 / 120×23 实测草稿一个字都不在屏上）。
+
+**修法**：`plan_chrome` **先预留 editor 那一行**（提示行是用户唯一不能没有的区域，而启动头自带
+`Alt+H` 逃生口），剩下的再按 header → Above → Below → footer 顺序发。仍然保留"截尾"策略，
+被截的是 header 的**尾行**（先丢 onboarding 行、再丢末尾几条键位，标题与前几条键位保留；
+`paint_extension_lines` 本来就只画前 `rect.height` 行）。上游是 flex 布局、被压缩的永远是
+可伸缩的转写区而不是固定高度的编辑区，这条修法与之同向。
+
+**实测**：同一场景 120×23，前=`docs/screenshots/lum1260-small-terminal-23.png.txt`（tip `b5769b585`），
+后=`docs/screenshots/lum1261-small-terminal-23.png(.txt)`（tip `c8bc6785a`，场景文件
+`scripts/pty_scenarios/lum1261-small-terminal-23.json`）：
+
+| 120×23 帧 | before（`b5769b585`） | after（`c8bc6785a`+） |
+| --- | --- | --- |
+| 行 1–19 | 标题 + 18 条键位 | 标题 + 18 条键位（同上） |
+| 行 20 / 21 / 22 | 空行 / onboarding 行 / 空行 | 空行 / 转写行 / **`> type a prompt — /help for commands`** |
+| 行 23 | 状态栏 | 状态栏 |
+| 草稿 `typed blind` | **不出现**（`grep -c` = 0） | 行 22 `> typed blind▍` |
+| `Alt+H` | 收起成功 | 收起成功，状态栏显示 `Startup header: collapsed (Alt+H to show)`，草稿仍在 |
+
+行数预算是可复核的：`total=24` 时 `(header, editor, message, status) = (21, 1, 1, 1)`（与旧策略完全一致，24 行以上零行为变化）；
+`total=23/22` 时 header 被截到 20/19 行、editor 与 message 各保住 1 行。回归测试写在
+`extension_ui.rs:758`（`the_startup_header_cannot_starve_the_prompt`：21 行启动头 + 22/23/24 三档全断言），
+`extension_ui.rs:739` 的旧用例按新策略更新（它原来断言"header 独占 3 行、prompt 什么都拿不到"）。
+
+### 7.3 本轮门禁（独立运行）
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --offline -p pi-tui` | **798 passed / 0 failed**，45 个 test target 全部有结果（含 lib 358 条） |
+| `cargo test --offline -p pi-coding-agent --test startup_header --test help_text_layout --test keybindings --test print_mode --test tools_render --test builtin_tool_factories` | **66 passed / 0 failed** |
+| `cargo test --offline -p pi-coding-agent --test extension_ui` | 7 passed（但见下条 flaky） |
+| `cargo test --offline --workspace` | **仍无法完成**（磁盘），与上轮同一原因，逐字错误：`error: linking with \`cc\` failed: exit status: 1` / `error: couldn't create a temp dir: No space left on device (os error 28)` → `could not compile \`pi-coding-agent\` (test "tools_render")`。50G 共享卷同时有 4–5 条 run 在构建，本轮两次打满到 0 字节，**不是代码问题**。 |
+
+**一条既有 flaky（不是本轮引入）**：`pi-coding-agent --test extension_ui` 的
+`interactive_regions_render_into_the_app` 实测 20 次里失败 1 次，失败信息是
+`EDITOR missing from [...]`（帧里还是默认 prompt、`FOOTER` 也没到）——它在该 target 首次提交
+`d02fb0ace`（LUM-1190）就在，是 `pump()` 投递与渲染之间的异步竞态；与布局预算无关：
+40×12 下新旧 `plan_chrome` 的分配**完全相同**（每个区域只占 1 行、预算 10 行且无截断）。
+
+### 7.4 本轮**没**做的（诚实条目）
+
+1. **低于 24 行时自动收起启动头**（§3 的建议）仍未实现。现在不是靠"收起"，而是靠"截尾 + 保住提示行"
+   让输入框可见；`total >= 24` 时启动头依旧占满 21 行，80×24 的"界面只剩一行内容"观感没变。
+   这条要动 `app.rs`（渲染前按尺寸决定 `header_expanded`），本轮 3 条在飞 run 正在改 `app.rs`，故意不碰。
+2. **80 列时超宽行的内部列对齐仍会丢**：列宽预算不够时 `Ctrl+C abort the current turn (…)` 这类行会折成两行、
+   第二行从正文列 0 起排。上游同款行为（先按空白折叠再包），保留为已知的外观偏差，不做 Rust 特有的增强。
+3. **`plan_chrome` 的新顺序改了扩展区域的观测行为**：当扩展 header/Above/Below/footer 的总需求超过终端高度时，
+   现在优先保证输入框，其次 header，其余截尾。这是**策略变更**，影响面已由 `pi-tui/tests/extension_ui.rs`
+   与 pi-tui 全量用例覆盖（798 条全绿）。

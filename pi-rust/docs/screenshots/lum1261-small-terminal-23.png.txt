@@ -1,0 +1,76 @@
+# lum1261-small-terminal-23.png — chars, 120x23 cells
+
+===== LUM-1261 tip c8bc6785a+ at 120x23 — the composer stays on screen (LUM-1260 §3.1)  |  [1] 1. idle at 120x23 — the 21-row header is truncated by the two rows the prompt and the message view need  (cursor 120,22, frame c36bfe1cf8fe, px d109612dad38, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d723d914c7fa54                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1261 tip c8bc6785a+ at 120x23 — the composer stays on screen (LUM-1260 §3.1)  |  [2] 2. a draft typed at 120x23 is visible (before the fix it was typed blind)  (cursor 36,21, frame ceeeb884cb93, px 2192e4ef5632, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+
+> typed blind▍
+Faux test model  session-18d723d914c7fa54                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1261 tip c8bc6785a+ at 120x23 — the composer stays on screen (LUM-1260 §3.1)  |  [3] 3. Alt+H still folds the header to zero rows  (cursor 120,22, frame ebf6d659d9bc, px c47159f9c876, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> typed blind▍
+Faux test model  session-18d723d914c7fa54                   in 0 out 0 ?/8.2k  Startup header: collapsed (Alt+H to show)

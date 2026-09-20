@@ -1523,13 +1523,106 @@ fn image_row_mask(lines: &[StyledLine]) -> Vec<bool> {
     verbatim
 }
 
+/// Split `text` at its hard line boundaries, losing nothing.
+///
+/// A lone `\n`, a lone `\r` and the `\r\n` pair each count as exactly one
+/// break, mirroring upstream's `text.split(/\r\n|\r|\n/)`
+/// (`packages/tui/src/utils.ts:850`). Splitting on `\n` alone would leave a
+/// stray `\r` on every CRLF row, and splitting on both characters separately
+/// would invent an empty row between the two halves of a `\r\n`.
+fn split_hard_lines(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        // Only ASCII bytes can be line breaks, and they can never appear as a
+        // UTF-8 continuation byte, so slicing here is always on a char
+        // boundary.
+        match bytes[idx] {
+            b'\r' => {
+                out.push(&text[start..idx]);
+                idx += if bytes.get(idx + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = idx;
+            }
+            b'\n' => {
+                out.push(&text[start..idx]);
+                idx += 1;
+                start = idx;
+            }
+            _ => idx += 1,
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
 /// Word-aware wrap that prefers to break at word boundaries and
 /// falls back to hard-wrapping at `width` when a single word is longer
 /// than the available space.
+///
+/// Hard line breaks survive: the body is split into source lines first and each
+/// one is wrapped on its own, so a newline the author wrote is a layout
+/// instruction instead of whitespace to collapse. Upstream does the same
+/// (`wrapTextWithAnsi`, `packages/tui/src/utils.ts:843-866`), which is why the
+/// `/help` legend — 20-odd pre-laid-out rows — no longer collapses into one
+/// paragraph (LUM-1259 §2.5).
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![text.to_string()];
+    let mut lines = Vec::new();
+    for source_line in split_hard_lines(text) {
+        lines.extend(wrap_single_line(source_line, width));
     }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Wrap one hard line.
+///
+/// A line that already fits is returned **verbatim**, keeping the indentation
+/// and column alignment its author laid out — the same early return upstream's
+/// `wrapSingleLine` makes (`packages/tui/src/utils.ts:873-876`). That early
+/// return is what keeps a command-reference row such as
+/// `"  /help     show this help text"` intact; the word-wrap below only ever
+/// runs on a row that is genuinely too wide, and then it keeps the row's own
+/// leading indent on its first output line (upstream's continuation lines are
+/// flush left as well).
+fn wrap_single_line(line: &str, width: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    if width == 0 || display_width(line) <= width {
+        return vec![line.to_string()];
+    }
+    if line.trim().is_empty() {
+        // A run of indentation wider than the row is still a blank row; the
+        // word-wrap has nothing to lay out (upstream returns `[line.trimEnd()]`
+        // here, i.e. `[""]`).
+        return vec![String::new()];
+    }
+    let indent: String = line.chars().take_while(|ch| ch.is_whitespace()).collect();
+    let lines = wrap_words(line, width);
+    match lines.split_first() {
+        Some((first, rest)) if !indent.is_empty() => {
+            let mut out = Vec::with_capacity(lines.len());
+            out.push(format!("{indent}{first}"));
+            out.extend(rest.iter().cloned());
+            out
+        }
+        _ => lines,
+    }
+}
+
+/// The word-wrap itself: greedily fill rows up to `width`, collapsing
+/// whitespace runs to a single space, with a hard break for a word that is
+/// wider than the row.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let text = text.trim_start();
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_width = 0usize;
@@ -1693,6 +1786,57 @@ mod tests {
         // body is broken across multiple lines.
         assert!(lines.iter().all(|l| l.starts_with("> ")));
         assert!(lines.len() >= 5);
+    }
+
+    #[test]
+    fn wrap_text_keeps_hard_line_breaks() {
+        // The regression LUM-1259 §2.5 pinned: a pre-laid-out block must not be
+        // re-flowed into one paragraph.
+        let lines = wrap_text("a\nb\nc", 40);
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn wrap_text_splits_crlf_and_lone_cr_once() {
+        assert_eq!(wrap_text("a\r\nb", 40), vec!["a", "b"]);
+        assert_eq!(wrap_text("a\rb", 40), vec!["a", "b"]);
+        // A trailing break is a real (empty) last row, matching upstream's
+        // `split(/\r\n|\r|\n/)`.
+        assert_eq!(wrap_text("a\n", 40), vec!["a", ""]);
+    }
+
+    #[test]
+    fn wrap_text_keeps_blank_separator_rows() {
+        let lines = wrap_text("head\n\ntail", 40);
+        assert_eq!(lines, vec!["head", "", "tail"]);
+    }
+
+    #[test]
+    fn wrap_text_passes_a_row_that_fits_through_verbatim() {
+        // Indentation and the column run between command and description are
+        // layout, not whitespace to collapse (upstream's `wrapSingleLine`
+        // early return).
+        let row = "  /help     show this help text";
+        assert_eq!(wrap_text(row, 40), vec![row]);
+    }
+
+    #[test]
+    fn wrap_text_wraps_an_over_long_row_and_keeps_its_indent() {
+        let lines = wrap_text("  alpha beta gamma delta", 12);
+        assert_eq!(lines, vec!["  alpha beta", "gamma delta"]);
+        assert!(lines.iter().all(|line| display_width(line) <= 12));
+    }
+
+    #[test]
+    fn wrap_text_of_a_whitespace_line_wider_than_the_row_is_blank() {
+        assert_eq!(wrap_text("      ", 2), vec![""]);
+        // …while one that fits is kept as-is.
+        assert_eq!(wrap_text("    ", 4), vec!["    "]);
+    }
+
+    #[test]
+    fn wrap_text_empty_input_is_one_blank_row() {
+        assert_eq!(wrap_text("", 20), vec![""]);
     }
 
     /// Build a view with one tool block whose rich body is `count` styled

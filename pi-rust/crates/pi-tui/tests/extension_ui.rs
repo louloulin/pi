@@ -261,10 +261,11 @@ fn an_over_tall_region_is_truncated_and_the_message_view_survives() {
         "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10",
     ]))));
 
-    // height 5 → status 1 + the composer's row + one reserved message row
-    // leave 2 for the header, and the tail of the header is dropped. The
-    // later chrome regions (Below widgets, the footer) still get nothing —
-    // but the prompt is never one of them (LUM-1266).
+    // height 5 → status 1 + the composer's row (reserved before the extension
+    // regions, LUM-1261/LUM-1266: the prompt is the one region the user cannot
+    // work without) + one reserved message row leave 2 rows for the chrome, so
+    // the header keeps its first 2 rows and the later chrome regions (Below
+    // widgets, the footer) still get nothing. The prompt is never one of them.
     let snapshot = app.render_snapshot(30, 5);
     assert_eq!(snapshot.lines[0], "h1");
     assert_eq!(snapshot.lines[1], "h2");
