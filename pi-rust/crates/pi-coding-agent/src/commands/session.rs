@@ -47,6 +47,10 @@ pub fn run(action: SessionCommand) -> anyhow::Result<()> {
             session_id,
             database,
         } => show(&database, &session_id),
+        SessionCommand::Stats {
+            session_id,
+            database,
+        } => stats(&database, &session_id),
         SessionCommand::Export {
             session_id,
             database,
@@ -105,6 +109,50 @@ fn show(database: &Path, session_id: &str) -> anyhow::Result<()> {
             .with_context(|| format!("serialising entry seq={}", entry.seq))?;
         writeln!(out, "{json}")?;
     }
+    Ok(())
+}
+
+/// Print one JSON object with the session's message count and aggregated
+/// usage.
+///
+/// The `sessions` cache is read and recomputed from the durable tables at
+/// the same time; a disagreement is logged by [`SessionReader::verify_stats`]
+/// and reported as `"consistent": false` plus a `recomputed` object, so a
+/// stale cache is never silently passed off as the truth.
+///
+/// The `usage` object uses the Rust `pi_protocol::Usage` shape (`input`,
+/// `output`, `cache_read`, `cache_write`, `total`); `total` is the upstream
+/// `totalTokens`, and upstream's `cost` / `cacheWrite1h` / `reasoning`
+/// counters are not tracked by the port.
+fn stats(database: &Path, session_id: &str) -> anyhow::Result<()> {
+    let reader = SessionReader::open(database)
+        .with_context(|| format!("opening session database {}", database.display()))?;
+    let check = reader
+        .verify_stats(session_id)
+        .with_context(|| {
+            format!(
+                "reading stats for session {session_id:?} in {}",
+                database.display()
+            )
+        })?
+        .with_context(|| format!("session {session_id:?} not found in {}", database.display()))?;
+
+    let mut payload = serde_json::json!({
+        "session_id": session_id,
+        "database": database.display().to_string(),
+        "message_count": check.cached.message_count,
+        "usage": check.cached.usage,
+        "consistent": check.is_consistent(),
+    });
+    if !check.is_consistent() {
+        payload["recomputed"] = serde_json::json!({
+            "message_count": check.recomputed.message_count,
+            "usage": check.recomputed.usage,
+        });
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "{payload}")?;
     Ok(())
 }
 

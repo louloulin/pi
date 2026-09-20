@@ -321,6 +321,18 @@ pub enum SessionCommand {
         #[arg(long, value_name = "PATH")]
         database: Option<std::path::PathBuf>,
     },
+    /// Print one session's message count and aggregated usage.
+    ///
+    /// The cached `sessions` projection is returned, but it is recomputed
+    /// from `entries` + `usage_ledger` first; a disagreement is reported
+    /// on stderr and as `"consistent": false` in the output.
+    Stats {
+        /// Session id to report on (matches the `id` field of the header).
+        session_id: String,
+        /// Path to the SQLite database containing the session.
+        #[arg(long, value_name = "PATH")]
+        database: std::path::PathBuf,
+    },
     /// Show the entries of a single session as JSON Lines on stdout.
     Show {
         /// Session id to show (matches the `id` field of the header).

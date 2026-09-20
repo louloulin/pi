@@ -145,6 +145,15 @@ impl SessionReader {
         &self.path
     }
 
+    /// Borrow the underlying connection.
+    ///
+    /// Crate-internal: the read modules in this crate (`usage`, `stats`,
+    /// `branch`) live next to this one and query the upstream tables the
+    /// generic entry API does not expose.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     /// On-disk layout the reader detected when the file was opened.
     pub fn layout(&self) -> SchemaLayout {
         self.layout
@@ -702,24 +711,7 @@ fn upstream_tool_result_content(value: Option<&Value>) -> Content {
 }
 
 fn upstream_usage(value: Option<&Value>) -> Usage {
-    let Some(value) = value else {
-        return Usage::default();
-    };
-    let field = |name: &str| -> u32 {
-        value
-            .get(name)
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .try_into()
-            .unwrap_or(u32::MAX)
-    };
-    Usage {
-        input: field("input"),
-        output: field("output"),
-        cache_read: field("cacheRead"),
-        cache_write: field("cacheWrite"),
-        total: field("totalTokens"),
-    }
+    value.map(crate::usage::usage_from_json).unwrap_or_default()
 }
 
 fn upstream_stop_reason(value: Option<&str>) -> StopReason {

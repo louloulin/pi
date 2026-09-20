@@ -1093,6 +1093,7 @@ dependencies = [
  "pi-tui",
  "ratatui",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
