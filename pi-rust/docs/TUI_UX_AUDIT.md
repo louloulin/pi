@@ -187,6 +187,14 @@ worker 的 stage 划分。
 - 上游 `!` 直接跑本地命令、`!!` 跑但不进上下文；这是「不问模型先看一眼」的常用动作。
 - 修复方向：编辑器前缀识别（已有 `autocomplete.rs` 的前缀逻辑可参考）+ `tool_executor` 的
   bash 通路。
+- **已落地（Stage 62 = LUM-1223）**：前缀解析放在 `editor.rs`（`parse_bash_command` /
+  `is_bash_mode`），提交分支在 `interactive.rs::handle_submitted`；命令结果复用 Stage 58 的
+  `InteractiveToolRenderer` + `MessageView::finish_tool_execution_with_lines`，折叠 / `Ctrl+O` /
+  点击展开全部生效；忙时按上游语义**拒绝并把文本放回编辑器**（不接 Stage 61 的 pending 队列）；
+  `Esc` 复用 `CancellationToken`/`AbortLike` 通道杀掉子进程。**已知差异**：`pi-protocol::Role`
+  没有 `bashExecution` 变体，所以 `!` 目前也不写入 `Agent::state().messages`（上游会写入并在
+  构造上下文时过滤 `!!`）—— 待协议层补 role 后即可对齐。编辑器边框色上游在 `bashMode` 时切换，
+  本移植的 prompt 没有边框，改为把 `> ` 标签染成 `ThemeColor::BashMode`。
 
 ### P2 其它
 
@@ -217,22 +225,25 @@ worker 的 stage 划分。
 | 59 | 补齐 `app.*` 动作第 1 批：`app.thinking.toggle`、`app.editor.external`、`app.session.new`/`tree`/`fork`/`resume` | 每个动作有独立测试 + `/hotkeys` 同步列出 | `/tree`、`/fork` 依赖 LUM-1209 写路径；外部编辑器需要 teardown/restore 终端 |
 | 60 | 会话命令补齐：`/new`、`/copy`、`/name`、`/tree`、`/fork` | 命令解析 + 行为测试 | `/login`、`/logout` 涉及凭据，单独评估后再排 |
 | 61（LUM-1216） | 流式期间输入不丢：`App` 内 pending 队列 + steer（Enter）/ followUp（alt+enter）/ dequeue（alt+up）+ 排队消息渲染 | 忙时 `App::submit` 入队而非 `return`；turn 结束后按 steer / followUp 语义投递；dequeue 取回编辑器；测试覆盖入队 / 取回 / 消费 | 与 58 的富渲染器接线不重叠；`MessageItem` 加字段会碰 58/59 也可能改的结构体，需协调；**建议优先于 58**（正确性缺陷） |
+| 62（LUM-1223）**已交付** | `!cmd` / `!!cmd` 本地 shell 通道：前缀解析 + 结果折叠块 + 忙时拒回编辑器 + `Esc` 取消 | `!echo hi` 产出工具块且不出现 user 消息；`!!` 不改 `Agent::state().messages` 长度；忙时给出警示且编辑器保留文本；空 `!` / `!!` 回落到普通 prompt | 复用 Stage 58 渲染器与 Stage 61 的队列互不干扰；`!!` 的上下文排除因协议层缺 `bashExecution` role 暂以「不入 log」实现 |
 
 并发约束：LUM-1210 轮时 LUM-1209（Stage 55）+ LUM-1211（Stage 57）+ 协调轮已占满 3 槽；
 LUM-1215 轮（第二轮 TUI 审计）仍是 3 个在飞（另加 LUM-1213 = 重复协调轮），故两轮都**不派发**，
 上面的 58/59/60/61 留给下一轮协调按槽位释放情况逐个开。
 
-> **落地状态（LUM-1220 更新）**：Stage 61（LUM-1216）已合入 `feature/pi.rs`（`c234068d1`）；
-> Stage 60（LUM-1218）已合入（`b91a3ae12`），实际落地 `/new`、`/copy`、`/name` + `app.session.new`
-> （`/tree`、`/fork` 仍缺，等 LUM-1212 的 `branch_*` 读路径）；Stage 58（LUM-1214）在飞。
-> 61+60 合并 tip 的全量门 = 144 套件 / 2149 passed / 0 failed / 2 ignored（clippy / fmt 全绿）。
+> **落地状态（LUM-1223 更新）**：Stage 58（LUM-1214）已并入 `feature/pi.rs`（基线 tip
+> `76d1d634e`）；Stage 61（LUM-1216，`c234068d1`）与 Stage 60（LUM-1218，`b91a3ae12`）在
+> `feature/pi.rs` 上，实际落地 `/new`、`/copy`、`/name` + `app.session.new`（`/tree`、`/fork`
+> 仍缺，等 LUM-1212 的 `branch_*` 读路径）。Stage 62（LUM-1223）补齐 P1-4：`!cmd` / `!!cmd`
+> 本地执行 + 结果折叠块 + 忙时拒回编辑器 + `Esc` 取消。当前 tip 的全量门 = 63 套件 /
+> 1343 passed / 0 failed / 0 ignored（clippy / fmt 全绿）。
 
 ## 六、验证
 
 ```
 $ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p pi-coding-agent -p pi-tui --offline
-  59 个 test target：1291 passed / 0 failed / 0 ignored
+  63 个 test target：1343 passed / 0 failed / 0 ignored
 
 $ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo clippy -p pi-coding-agent -p pi-tui --all-targets --offline -- -D warnings
@@ -251,6 +262,14 @@ $ cargo fmt -p pi-coding-agent -p pi-tui -- --check
 `copying_an_empty_transcript_reports_nothing_to_copy`、
 `default_model_is_the_first_entry_of_the_sorted_catalog`、
 `sorted_models_orders_by_provider_then_id`。
+
+Stage 62（LUM-1223）新增测试：`interactive::tests::bang_echo_renders_a_tool_block_without_a_user_message`、
+`double_bang_output_is_visible_but_never_enters_the_agent_log`、
+`a_busy_app_refuses_bash_and_restores_the_editor`、
+`empty_bang_commands_fall_back_to_the_normal_prompt`、
+`esc_cancels_a_running_bash_command`；`tools::bash::tests::abort_kills_a_running_command`；
+`pi_tui` 侧 `bash_mode_ignores_leading_whitespace`、`parses_bang_and_double_bang_commands`、
+`empty_bash_commands_fall_back_to_the_prompt`、`bash_mode_colours_the_prompt_label`。
 
 已知限制：`/hotkeys` 只列已实现动作（未实现的 `app.*` 不显示，避免「文档骗人」）；
 Ctrl+P 循环的是完整模型目录，上游的 `/scoped-models` 作用域还没实现；本轮未重跑全量

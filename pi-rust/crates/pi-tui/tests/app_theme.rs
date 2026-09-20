@@ -29,6 +29,9 @@ const SELECTED_BG: Color = Color::Rgb(58, 58, 74);
 /// Light palette accent (`assets/themes/light.json`).
 const LIGHT_ACCENT: Color = Color::Rgb(90, 128, 128);
 
+/// Dark palette `bashMode` (`vars.green` in `assets/themes/dark.json`).
+const BASH_MODE: Color = Color::Rgb(181, 189, 104);
+
 fn faux_model() -> Model {
     Model {
         provider: ProviderId::new("faux"),
@@ -135,6 +138,25 @@ fn set_theme_hot_swaps_the_next_render() {
     app.set_theme_by_name("dark").expect("built-in dark");
     let back = render(&mut app, 40, 4);
     assert_eq!(style_at(&back, 0, 0).fg, Some(ACCENT));
+}
+
+#[test]
+fn bash_mode_colours_the_prompt_label() {
+    let mut app = app();
+    // The editor region is the row above the status bar (`height - 2`); the
+    // prompt label occupies its first two cells.
+    app.set_editor_text("!ls");
+    let buf = render(&mut app, 40, 4);
+    assert_eq!(symbol_at(&buf, 0, 2), ">");
+    assert_eq!(style_at(&buf, 0, 2).fg, Some(BASH_MODE));
+    assert_eq!(style_at(&buf, 1, 2).fg, Some(BASH_MODE));
+    // Only the label carries the colour; the buffer itself stays plain.
+    assert!(is_unstyled(style_at(&buf, 2, 2)));
+
+    // A normal buffer restores the plain prompt chrome.
+    app.set_editor_text("ls");
+    let buf = render(&mut app, 40, 4);
+    assert!(is_unstyled(style_at(&buf, 0, 2)));
 }
 
 #[test]

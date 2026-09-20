@@ -16,6 +16,7 @@
 
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +33,7 @@ use pi_agent_core::{Agent, AgentEvent, AgentOptions, RetryPolicy};
 use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
-use pi_protocol::{Content, Message, Model, ProviderId, SessionEntry};
+use pi_protocol::{Content, Message, Model, ProviderId, SessionEntry, ToolCall, ToolResult};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::Mutex as AsyncMutex;
@@ -51,12 +52,14 @@ use crate::prompt_templates::PromptTemplate;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
+use crate::tools::AgentTool;
 
 use pi_tui::app::{App, AppConfig, FollowUpOutcome};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
 use pi_tui::selector::{Selector, SelectorItem};
 use pi_tui::settings::{SettingItem, SettingsList};
+use pi_tui::ToolBlockRenderer;
 
 /// Result of running the interactive TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +280,10 @@ async fn run_loop(
         tool_cwd,
     )));
 
+    // Local `!` / `!!` commands: one at a time, run off the render loop so
+    // `Esc` can cancel them.
+    let mut bash = BashRunner::default();
+
     // Extension dialogs: the App drains the bridge every tick, and the
     // gate only opens now that the loop is running (see `ui_bridge`).
     // Region / overlay mutations (`ctx.ui.setHeader` & friends) need the
@@ -305,6 +312,13 @@ async fn run_loop(
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
         app.drain_agent_events();
+        // A local `!` command may have finished since the last tick; fold it
+        // into the transcript (the task owns the process, the loop owns the
+        // App). A no-op when no command is running.
+        if bash.is_running() {
+            let width = terminal.size().map(|area| area.width).unwrap_or(80);
+            bash.poll(&mut app, width);
+        }
         // Apply queued `ctx.ui` region mutations and re-render the JS
         // components before the frame is drawn, so a `setHeader` that
         // just arrived shows up in this tick. The width mirrors what the
@@ -326,7 +340,7 @@ async fn run_loop(
         maybe_auto_compact(&mut app, &agent, &options).await;
         // A finished turn releases anything the user queued while it ran;
         // each queued prompt becomes its own turn so none is dropped.
-        deliver_pending(&mut app, &agent, &mut options).await?;
+        deliver_pending(&mut app, &agent, &mut options, &mut bash).await?;
 
         if app.is_exit_requested() {
             break;
@@ -349,7 +363,8 @@ async fn run_loop(
             while let Some(event) = read_event()? {
                 let translated = App::translate_event(event);
                 if let Some(action) =
-                    handle_input_event(&mut app, &agent, &mut options, translated).await?
+                    handle_input_event(&mut app, &agent, &mut options, &mut bash, translated)
+                        .await?
                 {
                     match action {
                         InternalAction::Exit => break,
@@ -385,6 +400,184 @@ enum InternalAction {
     Exit,
 }
 
+// ---------------------------------------------------------------------------
+// Local `!` / `!!` bash commands (LUM-1223, upstream `handleBashCommand`)
+// ---------------------------------------------------------------------------
+
+/// Monotonic id for a synthetic local-bash tool block, so two commands in one
+/// transcript never collide in the App's streamed-tool map.
+fn next_bash_call_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!("local-bash-{}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// State for the local `!` / `!!` command that is currently running.
+///
+/// The command runs on a background task (the `bash` tool's process wait is
+/// already bridged onto `spawn_blocking`) so the render loop keeps reading
+/// keys while it runs; `Esc` sets the shared abort flag and the tool kills the
+/// child. One command at a time, mirroring upstream's `session.isBashRunning`.
+#[derive(Default)]
+struct BashRunner {
+    run: Option<BashRun>,
+}
+
+struct BashRun {
+    /// Set to `true` by `Esc`; the tool polls it and kills the child.
+    abort: Arc<AtomicBool>,
+    /// Delivers the finished command's outcome back to the render loop.
+    rx: tokio::sync::mpsc::UnboundedReceiver<BashOutcome>,
+    /// The command text, echoed in the transcript header.
+    command: String,
+    /// `!!` — the result is kept out of the agent message log.
+    excluded: bool,
+}
+
+struct BashOutcome {
+    result: Result<crate::tools::ToolOutput, crate::tools::ToolError>,
+    elapsed_ms: u64,
+}
+
+impl BashRunner {
+    /// Whether a command is still in flight (finished-but-unpolled counts as
+    /// running, so a second submission is refused until the block is shown).
+    fn is_running(&self) -> bool {
+        self.run.is_some()
+    }
+
+    /// Start `command` on a background task. Returns immediately; the outcome
+    /// arrives on [`BashRunner::poll`] / [`BashRunner::wait`].
+    fn start(&mut self, command: String, excluded: bool) {
+        let abort = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let abort_for_task = abort.clone();
+        let command_for_task = command.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let args = serde_json::json!({ "command": command_for_task });
+            let result = crate::tools::BashTool
+                .execute(args, crate::tools::AbortLike::from_flag(abort_for_task))
+                .await;
+            let _ = tx.send(BashOutcome {
+                result,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        });
+        self.run = Some(BashRun {
+            abort,
+            rx,
+            command,
+            excluded,
+        });
+    }
+
+    /// Request cancellation of the running command (upstream
+    /// `session.abortBash()`, `interactive-mode.ts:2858`).
+    fn cancel(&mut self) {
+        if let Some(run) = &self.run {
+            run.abort.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Fold a finished command into the transcript. Returns `true` once the run
+    /// was consumed, so the render loop knows there is nothing left to poll.
+    fn poll(&mut self, app: &mut App, width: u16) -> bool {
+        let Some(run) = self.run.as_mut() else {
+            return true;
+        };
+        match run.rx.try_recv() {
+            Ok(outcome) => {
+                let run = self.run.take().expect("checked above");
+                push_bash_block(app, &run.command, run.excluded, &outcome, width);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => false,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                self.run = None;
+                true
+            }
+        }
+    }
+
+    /// Await the running command and fold it into the transcript. Used by
+    /// tests and any one-shot caller that has nothing else to poll.
+    #[cfg(test)]
+    async fn wait(&mut self, app: &mut App, width: u16) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let outcome = run.rx.recv().await;
+        let Some(run) = self.run.take() else {
+            return;
+        };
+        if let Some(outcome) = outcome {
+            push_bash_block(app, &run.command, run.excluded, &outcome, width);
+        }
+    }
+}
+
+/// Render a finished `!` / `!!` command into the transcript.
+///
+/// The block goes through the same rich renderer the model's tool calls use
+/// ([`crate::tools::InteractiveToolRenderer`]) and the same App-side
+/// finalizer (`MessageView::finish_tool_execution_with_lines`), so the
+/// collapsed preview, `Ctrl+O` and click-to-expand all apply for free.
+///
+/// Nothing is written to the agent's message log: the command is local, and
+/// `!!` must never reach the model. `excluded` is recorded on the block's
+/// details so the two forms stay distinguishable without changing the
+/// transcript text.
+fn push_bash_block(
+    app: &mut App,
+    command: &str,
+    excluded: bool,
+    outcome: &BashOutcome,
+    width: u16,
+) {
+    let (text, is_error, details) = match &outcome.result {
+        Ok(output) => (
+            crate::tools::get_text_output(output, false),
+            false,
+            output.details.clone(),
+        ),
+        Err(crate::tools::ToolError::Aborted) => ("command cancelled".to_string(), true, None),
+        Err(err) => (err.to_string(), true, None),
+    };
+
+    let exclude_flag = serde_json::json!(excluded);
+    let details = Some(match details {
+        Some(mut details) => {
+            if let Some(map) = details.as_object_mut() {
+                map.insert("exclude_from_context".into(), exclude_flag);
+            }
+            details
+        }
+        None => serde_json::json!({ "exclude_from_context": exclude_flag }),
+    });
+
+    let call = ToolCall {
+        id: next_bash_call_id(),
+        name: "bash".to_string(),
+        arguments: serde_json::json!({ "command": command }),
+    };
+    let result = ToolResult {
+        tool_call_id: call.id.clone(),
+        content: Box::new(Content::text(text.clone())),
+        is_error,
+        details,
+        added_tool_names: None,
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut renderer = crate::tools::InteractiveToolRenderer::new(cwd);
+    renderer.begin_tool(&call);
+    let block = renderer.finish_tool(&result, width);
+
+    let messages = app.messages_mut();
+    messages.start_tool_execution(&call.id, "bash", command);
+    messages.finish_tool_execution_with_lines(&call.id, outcome.elapsed_ms, &text, is_error, block);
+}
+
 /// Translate a single [`InputEvent`] into App mutations. Returns
 /// `Some(InternalAction::Exit)` when the App has exited and the
 /// render loop should unwind.
@@ -392,6 +585,7 @@ async fn handle_input_event(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
     options: &mut InteractiveOptions,
+    bash: &mut BashRunner,
     event: InputEvent,
 ) -> anyhow::Result<Option<InternalAction>> {
     // When the selector is open (and no extension dialog is on top of
@@ -469,7 +663,7 @@ async fn handle_input_event(
             "app.message.followUp",
             &["alt+enter"],
         ) {
-            handle_follow_up(app, agent, options).await?;
+            handle_follow_up(app, agent, options, bash).await?;
             return Ok(None);
         }
         // `app.message.dequeue`: pull the queued prompts back into the
@@ -496,6 +690,24 @@ async fn handle_input_event(
         }
     }
 
+    // `Esc` cancels a running local `!` command (upstream
+    // `session.abortBash()`, `interactive-mode.ts:2857`). The App's own `Esc`
+    // path only fires while an *agent turn* is in flight, and a local command
+    // does not set `turn_busy`, so claim the key here before an open overlay
+    // gets it.
+    if bash.is_running()
+        && !app.selector_open()
+        && !app.dialog_open()
+        && !app.settings_open()
+        && !app.custom_open()
+        && !app.search_open()
+        && matches!(&event, InputEvent::Key(key) if key.code == KeyCode::Esc)
+    {
+        bash.cancel();
+        app.flash_status("Cancelling bash command…");
+        return Ok(None);
+    }
+
     let step_outcome = app.step(event);
     // `/settings` hands value changes back to the driver — upstream's
     // `onChange(id, newValue)` callback. Apply what the running session
@@ -506,7 +718,7 @@ async fn handle_input_event(
         pi_tui::app::StepOutcome::Idle => Ok(None),
         pi_tui::app::StepOutcome::Redraw => Ok(None),
         pi_tui::app::StepOutcome::Submitted(text) => {
-            handle_submitted(app, agent, options, text).await?;
+            handle_submitted(app, agent, options, bash, text).await?;
             Ok(None)
         }
         pi_tui::app::StepOutcome::Exit => Ok(Some(InternalAction::Exit)),
@@ -522,8 +734,28 @@ async fn handle_submitted(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
     options: &mut InteractiveOptions,
+    bash: &mut BashRunner,
     text: String,
 ) -> anyhow::Result<()> {
+    // Local `!cmd` / `!!cmd` commands never reach the model. Upstream parses
+    // them before the slash and queue branches
+    // (`interactive-mode.ts:3106-3118`); a command with nothing after the
+    // prefix falls through to the normal prompt path.
+    if let Some(command) = pi_tui::editor::parse_bash_command(&text) {
+        if app.is_busy() || bash.is_running() {
+            // Deliberately *not* Stage 61's pending queue: a bash command
+            // cannot start while something else runs, so the text goes back
+            // to the editor and the user is told (upstream `editor.setText`
+            // + `showWarning`).
+            app.set_editor_text(&text);
+            app.flash_status("A bash command is already running. Press Esc to cancel it first.");
+            return Ok(());
+        }
+        // Upstream memoises the raw line including its prefix.
+        app.prompt_mut().push_history(text);
+        bash.start(command.command, command.excluded);
+        return Ok(());
+    }
     if text.starts_with('/') {
         // Prompt templates take precedence over built-in slash
         // commands, mirroring the TS CLI: `/<name>` expands to
@@ -552,10 +784,11 @@ async fn handle_follow_up(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
     options: &mut InteractiveOptions,
+    bash: &mut BashRunner,
 ) -> anyhow::Result<()> {
     match app.follow_up_from_editor() {
         FollowUpOutcome::Empty | FollowUpOutcome::Queued => Ok(()),
-        FollowUpOutcome::Submitted(text) => handle_submitted(app, agent, options, text).await,
+        FollowUpOutcome::Submitted(text) => handle_submitted(app, agent, options, bash, text).await,
     }
 }
 
@@ -584,6 +817,7 @@ async fn deliver_pending(
     app: &mut App,
     agent: &Arc<AsyncMutex<Agent>>,
     options: &mut InteractiveOptions,
+    bash: &mut BashRunner,
 ) -> anyhow::Result<()> {
     if app.is_busy() || app.pending_len() == 0 {
         return Ok(());
@@ -591,7 +825,7 @@ async fn deliver_pending(
     let Some(text) = app.take_next_pending() else {
         return Ok(());
     };
-    handle_submitted(app, agent, options, text).await
+    handle_submitted(app, agent, options, bash, text).await
 }
 
 /// Which way `app.model.cycleForward` / `app.model.cycleBackward` move
@@ -2484,6 +2718,7 @@ mod tests {
     async fn follow_up_queues_while_busy_and_dequeue_restores_it() {
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
 
         // A turn is in flight; `submit` marks the App busy synchronously and
         // this single-threaded runtime does not run the spawned task yet.
@@ -2491,14 +2726,14 @@ mod tests {
         assert!(app.is_busy());
 
         app.set_editor_text("queued follow-up");
-        handle_input_event(&mut app, &agent, &mut options, alt_enter())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_enter())
             .await
             .expect("follow-up chord");
         assert_eq!(app.pending_len(), 1);
         assert_eq!(app.editor_text(), "", "the queue took the buffer");
 
         // Dequeue pulls it back into the editor and reports upstream's tally.
-        handle_input_event(&mut app, &agent, &mut options, alt_up())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_up())
             .await
             .expect("dequeue chord");
         assert_eq!(app.pending_len(), 0);
@@ -2513,13 +2748,14 @@ mod tests {
     async fn dequeue_status_matches_upstream_for_every_count() {
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
 
         app.submit(agent.clone(), "first".to_string());
         app.submit(agent.clone(), "second".to_string());
         app.submit(agent.clone(), "third".to_string());
         assert_eq!(app.pending_len(), 2);
 
-        handle_input_event(&mut app, &agent, &mut options, alt_up())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_up())
             .await
             .expect("dequeue");
         assert_eq!(
@@ -2529,7 +2765,7 @@ mod tests {
 
         // Nothing left to restore: the editor is left alone.
         app.set_editor_text("");
-        handle_input_event(&mut app, &agent, &mut options, alt_up())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_up())
             .await
             .expect("dequeue empty");
         assert_eq!(app.status_flash(), Some("No queued messages to restore"));
@@ -2540,10 +2776,11 @@ mod tests {
     async fn queued_chords_are_not_stolen_while_an_overlay_is_open() {
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
 
         app.submit(agent.clone(), "first".to_string());
         app.set_editor_text("queued");
-        handle_input_event(&mut app, &agent, &mut options, alt_enter())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_enter())
             .await
             .expect("follow-up");
         assert_eq!(app.pending_len(), 1);
@@ -2553,12 +2790,12 @@ mod tests {
         // dequeue the first.
         assert!(app.open_search());
         app.set_editor_text("must not queue");
-        handle_input_event(&mut app, &agent, &mut options, alt_enter())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_enter())
             .await
             .expect("overlay alt+enter");
         assert_eq!(app.pending_len(), 1, "overlay owns app.message.followUp");
 
-        handle_input_event(&mut app, &agent, &mut options, alt_up())
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_up())
             .await
             .expect("overlay alt+up");
         assert_eq!(app.pending_len(), 1, "overlay owns app.message.dequeue");
@@ -2569,6 +2806,7 @@ mod tests {
     async fn queued_prompts_are_delivered_in_order_after_the_turn_ends() {
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
 
         app.submit(agent.clone(), "first".to_string());
         assert!(app.is_busy());
@@ -2585,6 +2823,7 @@ mod tests {
                 &mut app,
                 &agent,
                 &mut options,
+                &mut bash,
                 InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
             )
             .await
@@ -2596,7 +2835,7 @@ mod tests {
         // a time, the way the render loop does.
         drain_until_idle(&mut app).await;
         for _ in 0..3 {
-            deliver_pending(&mut app, &agent, &mut options)
+            deliver_pending(&mut app, &agent, &mut options, &mut bash)
                 .await
                 .expect("deliver pending");
             drain_until_idle(&mut app).await;
@@ -2746,6 +2985,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
         let mut options = session_options(dir.path(), "kb-old");
+        let mut bash = BashRunner::default();
 
         let event = InputEvent::Key(pi_tui::input::Key::new(
             KeyCode::Char('n'),
@@ -2754,7 +2994,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        handle_input_event(&mut app, &agent, &mut options, event)
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, event)
             .await
             .expect("handle event");
 
@@ -2784,5 +3024,181 @@ mod tests {
         assert_eq!(second.session_name.as_deref(), Some("foo"));
         assert_eq!(app.status_data().session_name.as_deref(), Some("foo"));
         assert!(transcript(&app).contains("Resumed session session-a (foo)"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Local `!` / `!!` bash commands (LUM-1223)
+    // -----------------------------------------------------------------------
+
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(Key::new(code, KeyModifiers::NONE))
+    }
+
+    /// Type `text` into the editor and press Enter, the way the render loop
+    /// does with real key events.
+    async fn submit_line(
+        app: &mut App,
+        agent: &Arc<AsyncMutex<Agent>>,
+        options: &mut InteractiveOptions,
+        bash: &mut BashRunner,
+        text: &str,
+    ) {
+        for ch in text.chars() {
+            app.step(key(KeyCode::Char(ch)));
+        }
+        handle_input_event(app, agent, options, bash, key(KeyCode::Enter))
+            .await
+            .expect("submit");
+    }
+
+    /// The tool block the transcript shows for a local command.
+    fn local_bash_block(app: &App) -> pi_tui::message::MessageItem {
+        let items = app.messages().items();
+        let blocks: Vec<_> = items
+            .iter()
+            .filter(|item| item.role == pi_tui::message::Role::Tool)
+            .cloned()
+            .collect();
+        assert_eq!(blocks.len(), 1, "expected exactly one tool block");
+        blocks.into_iter().next().expect("checked above")
+    }
+
+    #[tokio::test]
+    async fn bang_echo_renders_a_tool_block_without_a_user_message() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
+
+        submit_line(&mut app, &agent, &mut options, &mut bash, "!echo hi").await;
+        assert!(bash.is_running(), "the command runs off the render loop");
+        bash.wait(&mut app, 80).await;
+        assert!(!bash.is_running(), "the block consumed the run");
+
+        let block = local_bash_block(&app);
+        assert!(
+            block.text.contains("[tool:bash] echo hi"),
+            "header: {}",
+            block.text
+        );
+        assert!(block.text.contains("hi"), "output: {}", block.text);
+        assert!(
+            block.tool_header.is_some(),
+            "the Stage 58 renderer owns the block"
+        );
+        // Local: nothing user-authored is rendered and no agent turn started.
+        assert!(
+            !app.messages()
+                .items()
+                .iter()
+                .any(|item| item.role == pi_tui::message::Role::User),
+            "a local command must not render a user message"
+        );
+        assert!(!app.is_busy());
+        assert_eq!(agent.lock().await.state().messages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn double_bang_output_is_visible_but_never_enters_the_agent_log() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
+
+        // Seed the log so "unchanged" is a meaningful comparison.
+        agent
+            .lock()
+            .await
+            .state_mut()
+            .messages
+            .push(text_message(Role::User, "seed".into()));
+        let before = agent.lock().await.state().messages.clone();
+
+        submit_line(&mut app, &agent, &mut options, &mut bash, "!!echo hi").await;
+        bash.wait(&mut app, 80).await;
+
+        let block = local_bash_block(&app);
+        assert!(block.text.contains("hi"), "output: {}", block.text);
+
+        let after = agent.lock().await.state().messages.clone();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "excluded command touched the log"
+        );
+        assert_eq!(after[0].content, before[0].content);
+    }
+
+    #[tokio::test]
+    async fn a_busy_app_refuses_bash_and_restores_the_editor() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
+
+        // A turn is in flight: the driver must refuse the local command
+        // rather than queue it behind the turn (that is Stage 61's pending
+        // queue, a different path).
+        app.submit(agent.clone(), "first".to_string());
+        assert!(app.is_busy());
+
+        submit_line(&mut app, &agent, &mut options, &mut bash, "!sleep 5").await;
+
+        assert_eq!(
+            app.editor_text(),
+            "!sleep 5",
+            "text goes back to the editor"
+        );
+        assert_eq!(
+            app.status_flash(),
+            Some("A bash command is already running. Press Esc to cancel it first.")
+        );
+        assert_eq!(
+            app.pending_len(),
+            0,
+            "bash must not use the follow-up queue"
+        );
+        assert!(!bash.is_running(), "nothing was started");
+    }
+
+    #[tokio::test]
+    async fn empty_bang_commands_fall_back_to_the_normal_prompt() {
+        for line in ["!", "!!", "!   "] {
+            let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+            let mut options = InteractiveOptions::default();
+            let mut bash = BashRunner::default();
+
+            submit_line(&mut app, &agent, &mut options, &mut bash, line).await;
+
+            assert!(!bash.is_running(), "{line:?} must not start bash");
+            assert!(app.is_busy(), "{line:?} must be a plain prompt");
+            assert!(
+                app.messages()
+                    .items()
+                    .iter()
+                    .any(|item| item.role == pi_tui::message::Role::User && item.text == line),
+                "{line:?} must render as a user message"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn esc_cancels_a_running_bash_command() {
+        let (mut app, agent) = app_starting_at(small_window_model(1_000_000)).await;
+        let mut options = InteractiveOptions::default();
+        let mut bash = BashRunner::default();
+
+        submit_line(&mut app, &agent, &mut options, &mut bash, "!sleep 30").await;
+        assert!(bash.is_running());
+
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, key(KeyCode::Esc))
+            .await
+            .expect("esc");
+        assert_eq!(app.status_flash(), Some("Cancelling bash command…"));
+
+        bash.wait(&mut app, 80).await;
+        let block = local_bash_block(&app);
+        assert!(
+            block.text.contains("command cancelled"),
+            "output: {}",
+            block.text
+        );
     }
 }
