@@ -970,14 +970,12 @@ impl App {
     /// during [`App::drain_agent_events`] (called by the render
     /// loop).
     pub fn new(agent: &Agent, config: AppConfig) -> Self {
+        let model = agent.model();
         let mut status_data = StatusData::new(
-            agent
-                .model()
-                .label
-                .clone()
-                .unwrap_or_else(|| agent.model().id.clone()),
+            model.label.clone().unwrap_or_else(|| model.id.clone()),
             config.session_id.clone(),
-        );
+        )
+        .with_context_window(model.context_window);
         status_data.hint = Some("? for help".to_string());
         let mut prompt = Prompt::new("> ");
         prompt.set_placeholder(config.prompt_placeholder.clone());
@@ -1240,6 +1238,9 @@ impl App {
     /// `Agent::prompt` call.
     pub fn queue_model_switch(&mut self, agent: &mut Agent, model: pi_protocol::Model) {
         self.status_data.model = model.label.clone().unwrap_or_else(|| model.id.clone());
+        self.status_data.context_window = model.context_window;
+        // The next turn's context size is unknown until it reports usage.
+        self.status_data.context_used = 0;
         agent.set_model(model);
     }
 
@@ -1325,8 +1326,16 @@ impl App {
                 // Tool execution events that follow carry their own call id,
                 // so the index map has done its job and can be dropped.
                 self.tool_call_ids.clear();
-                self.status_data
-                    .add_tokens(message.usage.input, message.usage.output);
+                // Cumulative session totals plus the latest turn's context
+                // size, which drives the footer's context gauge.
+                let usage = message.usage;
+                self.status_data.add_usage(&usage);
+                let context_used = if usage.total > 0 {
+                    usage.total
+                } else {
+                    usage.input + usage.output + usage.cache_read + usage.cache_write
+                };
+                self.status_data.set_context_used(context_used);
             }
             AgentEvent::ToolExecutionStart { call } => {
                 if let Some(renderer) = self.tool_block_renderer.as_mut() {
@@ -4266,6 +4275,32 @@ mod tool_stream_tests {
             2,
             "assistant + one tool block"
         );
+    }
+
+    #[test]
+    fn message_end_feeds_the_footer_usage_and_context_gauge() {
+        let mut app = test_app();
+        // The constructor seeds the gauge window from the agent's model.
+        assert_eq!(app.status_data().context_window, 1024);
+        assert_eq!(app.status_data().context_used, 0);
+
+        let mut message = finished_message();
+        message.usage = Usage {
+            input: 300,
+            output: 40,
+            cache_read: 100,
+            cache_write: 5,
+            total: 0,
+        };
+        app.apply_event(AgentEvent::MessageEnd { message });
+
+        let status = app.status_data();
+        assert_eq!(status.input_tokens, 300);
+        assert_eq!(status.output_tokens, 40);
+        assert_eq!(status.cache_read, 100);
+        assert_eq!(status.cache_write, 5);
+        // No provider total: the context size is the sum of the four counters.
+        assert_eq!(status.context_used, 445);
     }
 
     #[test]

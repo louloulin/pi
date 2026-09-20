@@ -14,6 +14,8 @@ const MUTED: &str = "\x1b[38;2;128;128;128m";
 const DIM: &str = "\x1b[38;2;102;102;102m";
 const TEXT: &str = "\x1b[38;2;212;212;212m";
 const SELECTED_BG: &str = "\x1b[48;2;58;58;74m";
+const ERROR: &str = "\x1b[38;2;204;102;102m";
+const WARNING: &str = "\x1b[38;2;255;255;0m";
 
 fn dark() -> Theme {
     builtin_theme("dark", ColorMode::TrueColor).expect("built-in dark theme")
@@ -150,7 +152,31 @@ fn status_bar_themed_layout_matches_the_plain_render() {
     assert_eq!(strip_ansi(&themed), plain);
     assert!(themed.contains(&format!("{ACCENT}gpt-4o\x1b[39m")));
     assert!(themed.contains(&format!("{MUTED}  abc-123  \x1b[39m")));
-    assert!(themed.contains(&format!("{DIM}in 0 out 0  ? for help\x1b[39m")));
+    assert!(themed.contains(&format!("{DIM}in 0 out 0\x1b[39m")));
+    assert!(themed.contains(&format!("{DIM}  ? for help\x1b[39m")));
+}
+
+#[test]
+fn status_bar_colours_the_context_gauge_by_severity() {
+    let theme = dark();
+    let styles = SelectListStyles::new(&theme);
+    let bar = StatusBar::new();
+
+    let mut hot = StatusData::new("gpt-4o", "abc-123").with_context_window(100_000);
+    hot.context_used = 96_000;
+    let themed = bar.render_themed(&hot, 60, &styles);
+    assert!(
+        themed.contains(&format!("{ERROR}96.0%/100k\x1b[39m")),
+        "{themed:?}"
+    );
+
+    let mut warm = StatusData::new("gpt-4o", "abc-123").with_context_window(100_000);
+    warm.context_used = 80_000;
+    let themed = bar.render_themed(&warm, 60, &styles);
+    assert!(
+        themed.contains(&format!("{WARNING}80.0%/100k\x1b[39m")),
+        "{themed:?}"
+    );
 }
 
 #[test]

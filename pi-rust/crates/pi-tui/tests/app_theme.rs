@@ -108,8 +108,8 @@ fn app_buffer_cells_carry_the_theme_colours() {
     assert_eq!(style_at(&buf, 0, 3).fg, Some(ACCENT));
     assert_eq!(symbol_at(&buf, 6, 3), "t"); // "  test  " starts at column 4
     assert_eq!(style_at(&buf, 6, 3).fg, Some(MUTED));
-    assert_eq!(symbol_at(&buf, 18, 3), "i"); // "in 0 out 0 …" starts at column 18
-    assert_eq!(style_at(&buf, 18, 3).fg, Some(DIM));
+    assert_eq!(symbol_at(&buf, 12, 3), "i"); // "in 0 out 0 …" starts at column 12
+    assert_eq!(style_at(&buf, 12, 3).fg, Some(DIM));
 
     // The editor region (y = height - 2) keeps the prompt's plain style (out
     // of scope for this slice).

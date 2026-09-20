@@ -82,7 +82,7 @@ pub use search::{
 };
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use settings::{SettingItem, SettingsAction, SettingsList};
-pub use status::{StatusBar, StatusData};
+pub use status::{format_tokens, StatusBar, StatusData};
 pub use styled::{SpanStyle, StyledLine, StyledSpan};
 pub use styles::SelectListStyles;
 pub use terminal_image::{
