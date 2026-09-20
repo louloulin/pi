@@ -12992,3 +12992,91 @@ $ cargo test -p pi-ai --offline
   未清理。
 - Git 身份沿用 `multica-agent <agent@multica.local>`；本轮提交 `a0b0f59d3`（合并 LUM-1168）
   与本文档提交，推送 `work/lum-1176` 与 `feature/pi.rs`。
+
+## LUM-1173 round — 清偿 rustfmt 全量格式门（LUM-1138 收口，`-D warnings` + `fmt --check` 转绿）+ 合并 LUM-1174（会话导出）/ LUM-1175（create*Tool 工厂桥）+ 合并推送 feature/pi.rs
+
+### 一、本轮自身切片：workspace 格式门清偿（LUM-1138）
+
+LUM-1138 是 LUM-1135 派发后停放在 `backlog` 的**一次性质量门清偿**任务（不占并发槽）。本轮把它提升为自身切片：
+
+* **clippy 半边已不需要做**：LUM-1138 记录的 8 处既有 lint（`pi-telemetry` ×2、`pi-extensions` ×2、`pi-tui` ×2、`pi-server` ×1，另 `pi-ai` 的 `needless_lifetimes`）在 1138 停放之后已被各功能轮顺手修掉。本轮开工实测 `cargo clippy --workspace --all-targets --offline` 对**首方 crate 零告警**（只剩 `vendor/rquickjs-core` 这个上游依赖的 12 条既有提示，依赖走 `--cap-lints allow`，不影响 `-D warnings`）。
+* **fmt 半边是真正的欠账**：`cargo fmt --all -- --check` 实测 **128 个文件 / 556 个 hunk** 有漂移（LUM-1135 记的是 122 文件，之后各轮新增代码又涨了 6 个）。本轮 `cargo fmt --all` 后**按 crate 拆成 11 个提交**，diff 只含换行/缩进/尾逗号与 `use` 排序，无语义改动：
+
+| crate | 文件 | crate | 文件 |
+| --- | --- | --- | --- |
+| `pi-coding-agent` | 47 | `pi-protocol` | 4 |
+| `pi-chord` | 27 | `pi-agent-core` | 4 |
+| `pi-server` | 11 | `pi-tui` | 2 |
+| `pi-evals` | 10 | `pi-mono` | 1 |
+| `pi-ai` | 9 | `pi-session` | 8 |
+| `pi-extensions` | 5 | **合计** | **128** |
+
+提交序列 `89786fe5a`…`702dc36c2`（`style(<crate>): rustfmt 全量格式对齐（LUM-1138）`）。
+
+**非空白改动逐类核对**：把每个改动文件的空白全部剥掉再比对，92/128 文件仍有差异，逐一看过只有两类——rustfmt 删掉多余尾逗号、以及 `pi-mono/src/lib.rs` 一处 `pub use` 按字母序重排。两者都不是行为改动。测试条数在 fmt 前后完全一致（见第三节），这是「无语义变化」最直接的证据。
+
+生产性行为影响：零。收益是**质量门从红转绿**，后续每一轮不必再写「既有 lint 与本轮无关」的免责声明，且 `-D warnings` + `fmt --check` 可以真正当作合并门槛用了。LUM-1138 的验收口径（fmt 0 diff、clippy `-D warnings` exit 0、测试条数一致）在本轮合并后的树上全部满足，**可以关闭**。
+
+### 二、合并 LUM-1174 / LUM-1175
+
+两条分支都已完成、`in_review`、工作区干净、各自跑过全量测试。本轮在 `work/lum-1173-integrate`（基线 `origin/feature/pi.rs` = `9e50b700c`）上 `--no-ff` 合并，**两路零冲突**：
+
+| 合并 | 合并提交 | 内容 |
+| --- | --- | --- |
+| LUM-1174 | `c535dac7d` | 会话导出：`/export` + `--export` + 自包含 HTML + JSONL（6 提交 `7fedd45c8`…`62e0eece0`，19 文件 +6390/-3，6 个集成测试，新增 `docs/SESSION_EXPORT.md`） |
+| LUM-1175 | `73312c760` | `create*Tool` 七个内建工具工厂 + 双向宿主 import（1 提交 `3ab0336f4`，11 文件 +1159/-64，5 个测试） |
+
+**LUM-1174**（`/export`、`pi --export <session.jsonl> [out.html]`）：upstream `export-html/{template.html,template.css,template.js,vendor/*}` 五个资产**逐字复制**（md5 一致）后用 `include_str!` 嵌入，`pi` 仍是单文件可执行；Rust 侧只做 `SessionData` 组装 + base64 注入 + `--pi-*` 主题变量生成（颜色复用 `pi_tui::theme`），不在 Rust 里重写 marked / highlight。端到端实测：`pi --export x.jsonl out.html` 产物 269 KB，零残留占位符、零外链、67 个主题变量、`--exportPageBg` 与 `themes/dark.json` 的 `export` 段一致。已知 divergence：`preRenderCustomTools`（扩展自定义工具的 TUI→ANSI→HTML 预渲染）未移植，所有工具走 `template.js` 渲染——已写进 `docs/SESSION_EXPORT.md`，不是静默丢弃。
+
+**LUM-1175**（`SDK_MODULES.md:150` 记录的缺口）：pi-extensions 不能依赖 pi-coding-agent（成环），所以走**回调注入**——`HostOptions.builtin_tool_runner` + `BuiltinToolRunner` trait，两个宿主 import：`host_builtin_tool_definition(name)`（同步，工厂调用瞬间交 `parameters`）与 `host_builtin_tool(name, args, cwd)`（异步，照 `host_exec` 的 Async/channel 模式，返回信封、从不 panic）。`pi-coding-agent` 侧把 `BuiltinToolExecutor` 改 `Arc` 共享，**同一个实例**既喂 agent loop 又喂 bridge，于是 `createReadTool(cwd)` 跑的就是模型调的那个 `read`。upstream 三个示例（`bash-spawn-hook.ts` / `built-in-tool-renderer.ts` / `gondolin/index.ts`）从此不再 import 失败。divergence：`createBashTool` 的 `spawnHook` 参数接受但忽略（Rust `BashTool` 无 spawn hook）、跨桥不转发 tool-call id（回一个合成 id）、无 runner 时工厂对象仍可构造、仅 `execute` 抛 `ERR_PI_BUILTIN_TOOL`。
+
+### 三、验证（`work/lum-1173-integrate` @ 本轮末提交，三者全绿）
+
+```
+$ export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-fresh-1173 \
+    CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+$ cargo fmt --all -- --check                                  # exit 0，0 行输出
+$ cargo clippy --workspace --all-targets --offline -- -D warnings   # exit 0（仅 rquickjs-core 依赖既有提示）
+$ cargo test --workspace --offline                            # exit 0
+```
+
+| 树 | 套件 | passed | failed | ignored |
+| --- | --- | --- | --- | --- |
+| `03a2467d0`（开工基线） | 123 | 1863 | 0 | 2 |
+| 上述 + fmt（合并前，用于条数对照） | 123 | 1863 | 0 | 2 |
+| **本轮末**（+ LUM-1168/1174/1175） | **127** | **1914** | **0** | **2** |
+
+关键点：**fmt 前后条数逐套件完全一致**（123/1863/0/2），这是格式提交无语义改动的直接证据；末态比开工多出 4 个套件 / 51 个测试，全部来自 LUM-1168（19）、LUM-1174（6+）、LUM-1175（5）。
+
+### 四、frontier（本轮后）
+
+1. **质量门**：**已转绿**（本条从 frontier 移出）。`-D warnings` + `fmt --check` 现在可以直接作为后续合并门槛。
+2. **provider 家族**：不变——`Api` 枚举里仍无适配器的是 **bedrock-converse / cohere-v2 / google-vertex**（云凭据/签名，本环境拿不到）；OAuth/subscription 首登族与多协议网关 parked。
+3. **图像侧**：`ImagesModels` 运行时已并入（LUM-1168 → LUM-1176），但**仍无生产消费方**——`pi-coding-agent` 的 `provider.rs` / CLI 还没有 `generate_images` 入口（也没有 `pi list-images-models`）。图像侧下一条自然的接线任务。
+4. **会话导出**：**本轮收口**（LUM-1174）。剩余 divergence 仅 `preRenderCustomTools`。
+5. **SDK 工具工厂**：**本轮收口**（LUM-1175）。`@earendil-works/pi-coding-agent` 的「helpers + tool factories」现在没有任何 documented gap。
+6. **pi-extensions 引擎级缺口**（下一条 pi-extensions 切片，均已离线可验证）：
+   * `fs.createWriteStream`（照 LUM-1172 `createReadStream` 的思路，把写侧包成 `Writable`）；
+   * `fs.watch`（需要 `notify` + host→JS 异步回推，最重）；
+   * `URL`（WHATWG 解析器，QuickJS 不自带；`URLSearchParams` 已有，`URL` 仍缺）；
+   * `crypto.createHmac` / key-based WebCrypto（`importKey`/`sign`/`encrypt`）——SHA-1/SHA-256 已自研在 `pi-extensions/src/digest.rs`，HMAC 可直接在其上做 `H(K⊕opad ‖ H(K⊕ipad ‖ m))`，不需要新依赖；
+   * `node:stream` 家族、`node:test` / `node:assert` 全局。
+7. **`ctx.ui.custom()` overlay/render channel**：仍是**最大的插件生态缺口**（现在固定 `ERR_PI_UI_UNSUPPORTED`，自定义 footer/header/widgets 全部失效）。它横切 `pi-tui/src/app.rs` 的渲染循环，是本 frontier 里唯一「风险高、不可离线端到端验证」的项，需要单独一轮独占处理。
+8. **`@earendil-works/pi-ai/compat` 内建 provider factories**（`anthropicMessagesApi` / `openAIResponsesApi` / `registerBuiltInApiProviders`）仍 `ERR_PI_SDK_UNIMPLEMENTED`，需要 host streaming 桥；`@earendil-works/gondolin` 仍不桥接（第三方沙箱 VM）。
+9. **`assistant-message-frame` / 事件枚举扩宽**：仍延后（有损简化枚举，移植会横切所有 provider 适配器，与多路并行冲突）。
+
+### 五、并发与磁盘
+
+* 本轮**满 3 路**：LUM-1173（本 run，rustfmt 门）+ LUM-1174（会话导出）+ LUM-1175（create*Tool 桥）。
+  期间另有 **LUM-1176** 协调轮（合并 LUM-1168 图像运行时）并发推送 `feature/pi.rs`，一度出现 **4 路在飞**——
+  这解释了 LUM-1175 的分支基线是 `9e50b700c`（已含 LUM-1176）而 LUM-1174 仍是 `03a2467d0`。
+  合并策略据此调整：不从旧基线强推，而是**取最新 `feature/pi.rs` 作基线**再合两路，最后施加 fmt，
+  从而把 rustfmt 的 128 文件改动放在最外层、零冲突落地。
+* 两路合并**零冲突**（唯一潜在重叠是 `pi-coding-agent/src/lib.rs`，两路改的是不同 hunk，git 自动合并）。
+* 磁盘：开工时根分区 98% / 1.1G 可用，先清理已完成轮次的 `target`
+  （`lum-1171` 的 7.6G、`/tmp/pi-fresh-1167-images` 1.7G、`/tmp/pi-fresh-1167-utils` 1.9G）
+  与 `CARGO_PROFILE_DEV_DEBUG=0`（无 debuginfo，产物体积约为默认的 1/4）换出余量；收工 24G 可用。
+  复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1173`（1.8G），全程 `--offline`。
+* 教训沿用：**只用 `rustfmt --edition 2021 <leaf-file>`**，绝不跑 `cargo fmt -p <crate>`（会格式化整个 crate，
+  LUM-1133 有过 49 文件连带事故）；全量 fmt 只在协调轮的集成分支上、作为最后一层做。
+* Git 身份沿用 `multica-agent <agent@multica.local>`；推送 `work/lum-1173`、`work/lum-1173-integrate` 与 `feature/pi.rs`。
