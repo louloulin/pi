@@ -965,6 +965,51 @@ transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后
 - **`/help` 正文与用户输入共用 `> ` 前缀**：截图里 `/help` 的输出块和 composer 一样以 `> ` 开头，
   与用户消息难以区分（上游用 info 块）。低风险、纯渲染层的收尾项。
 
+### 12.5 追加：把已交付的 Stage 63（LUM-1224）与 Stage 66（LUM-1228）也合进 `feature/pi.rs`
+
+交接物只合并了一节 65，本节补上另外两个**已在 `origin` 上、且已跑过绿门**的交付分支：
+
+- `origin/work/LUM-1224` → 合并提交 `831de79ba`（图片粘贴接线）。
+- `origin/work/LUM-1228` → 合并提交 `a47df87cf`（Stage 66：spinner / 轮耗时 / 启动头 / `app.header`）。
+
+四个冲突全部是「两侧各加一处」的并集，无一处需要语义取舍：
+`interactive.rs` 的 `clipboard` 与 `quiet_startup` 字段及默认值、`main.rs` 的同两行、
+`pi-tui/src/app.rs` 的 `app.clipboard.pasteImage`（alt+v）与 `app.header`（alt+h）两个按键分支
+（原共享收尾行只覆盖后一个分支，已各自补 `return StepOutcome::Redraw`）、
+以及本文件的节序（1233 / Stage 65 / 1234 / 1228 → 十 / 十一 / 十二 / 十三）。
+合并后 `origin/work/LUM-1224`、`work/LUM-1227`、`work/LUM-1228`、`work/LUM-1233` 对
+`feature/pi.rs` 的领先量均为 0，即除停放中的 67/68/69 外无尾巴。
+
+**合并 tip（`a47df87cf`）的实机核对**（同一 PTY 脚本、同一按键序列、120x36、全新 `HOME`）：
+
+| 步骤 | BEFORE（未修） | AFTER-P0（只打一行补丁） | AFTER-MERGED（P0 + 63 + 65 + 66） |
+| --- | --- | --- | --- |
+| 空闲启动帧 | 1714B | 3460B | 3410B（多出启动头提示行） |
+| 首键 `h` 之后 | 0B | 309B | 284B |
+| 后续 `e`/`l`/`l`/`o` | 0 / 0 / 0 / 0 | 186 x4 | 186 x4 |
+| `/` → `help` → `Enter` | 0 / 0 / 0 | 509 / 439 / 2458 | 509 / 439 / 2433 |
+| Ctrl+T / Ctrl+O / Ctrl+L | 0 / 0 / 0 | 529 / 550 / 1710 | 554 / 550 / 1710 |
+| **首键之后累计** | **0B** | **1183B** | **1183B** |
+
+结论：P0 修复不因这两次合并而回退（首键之后帧字节与只打补丁时同量级），
+且 63/65/66 的新面在真实二进制里都出帧。本轮没有改动 `interactive.rs` 的修复逻辑。
+
+**合并 tip 上的新面实机证据**：启动头列出 `Alt+H to hide this header`、
+`Ctrl+V to paste image (with text fallback)`、`drop files to attach`（分别来自 Stage 66 与 63）；
+`alt+h` → 1379B 出帧、footer 变为 `Startup header: collapsed (Alt+H to show)`；再按一次 → 2301B 恢复；
+`alt+v` 在本机（无剪贴板图片）→ 563B 出帧、草稿未被写入任何内容（退化路径不污染输入）。
+
+**顺带加固 12.4 的第一条**：启动头自己写着 `Ctrl+C to clear` 与 `Ctrl+C twice to exit`，
+而实机（`probe_exit.py` 用例 B）是**草稿非空时单次 Ctrl+C 直接退出、草稿丢失**。
+界面承诺与行为不一致，`app.clear` 的双击窗口是应当优先补上的一处。
+
+**仍然欠的门**：合并 tip 的 `cargo test --workspace` 未跑（磁盘当时只剩 2.0G，且另有 run 在编译）。
+可参考的数字是各分支自带的门：LUM-1228 分支自身 `cargo test --workspace` 2238 passed / 0 failed、
+`clippy --all-targets -- -D warnings` 退出 0；LUM-1224 分支自带绿门。合并新增的代码只有两个结构体
+字段、两处默认值与两个互斥按键分支，风险面很小，但这仍是**未实跑的债**。
+本轮实跑的是：`cargo build --offline -p pi-coding-agent --bin pi`（干净，41.5s 热 target）、
+`cargo fmt --all -- --check`（干净）、以及上表的真实 PTY A/B。
+
 ## 十三、Stage 66 交付（LUM-1228）：等待反馈与启动可发现性
 
 第六轮把两块空白合并成 Stage 66 停放 `backlog`；本轮把它实现、验证并合入。详细设计、与上游
