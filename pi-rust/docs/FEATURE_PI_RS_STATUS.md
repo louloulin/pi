@@ -15281,3 +15281,50 @@ live stream 去续期 —— 建议单独开一个小切片（“扩展加载阶
   做了一次双盲验证 —— 这是单轮做不到的。仍建议把周期调长（或改成「只保留合并轮按需触发」）。
 * **给 worker 的硬约束（沿用）**：**run 结束前必须先 commit 再 push**；**文档提交也要过全量门**
   （本轮 tip 变红就是漏了这一步）。
+
+## LUM-1236 round — 与 LUM-1234 / LUM-1235 并发的第三轮协调：合并两条已推 tip 的交付（Stage 63/66 + P0 输入循环）→ 亲自落地审计 12.3 的缺口「命令/文件补全零接线」（`pi-tui` + `pi-coding-agent`，全量实跑 **0 failed**）→ 真实 PTY A/B 截图；槽位已释放
+
+### 一、本轮合并
+
+`origin/feature/pi.rs` 在本轮进行中前移了 10 个提交（`0bd13a56f` → `00bb42bec`），包括：
+
+* `831de79ba` 合并 `work/LUM-1224`（Stage 63：`app.clipboard.pasteImage` + composer 图片 chip）。
+* `a47df87cf` 合并 `work/LUM-1228`（Stage 66：spinner / 轮耗时 / 启动头 / `app.header`）。
+* `cb987348e` + `fa4d16ebf`（LUM-1235：输入循环抽干、首帧、选择器覆盖层锚点）。
+
+合并冲突只有一处、且是「两侧各自追加测试用例」：`interactive.rs` 测试模块尾部
+（LUM-1236 的补全接线用例 vs Stage 63 的 `app.clipboard.pasteImage` 用例），保留并集即可；
+`app.rs` 的 `paint_autocomplete` 调用点与 `slash.rs` 的补全表自动合并无误。
+合并提交 `0ab42b5d3`，`feature/pi.rs` 上 `00bb42bec..0ab42b5d3` 为快进。
+
+### 二、本轮交付：审计 12.3「补全实现完整、零接线」
+
+* 缺口在合并 tip 上复核仍然存在：`set_autocomplete_provider` 在 `pi-coding-agent` 全 crate
+  零调用，`app.rs` / `interactive.rs` 生产代码里 `autocomplete` 零命中。
+* 修复 4 个文件：`pi-tui/src/app.rs`（新增 `App::paint_autocomplete`，把 Editor 算好的候选行
+  底对齐画在提示符上一行、整行不清空转写、超长时保留尾部窗口）、
+  `pi-coding-agent/src/commands/slash.rs`（`AUTOCOMPLETE_COMMANDS` 17 条 + `autocomplete_commands()`）、
+  `pi-coding-agent/src/interactive.rs`（`install_composer_autocomplete`，`run_loop` 调用，base = 进程 cwd）、
+  `pi-tui/tests/autocomplete.rs`（+3 条 App 级用例）。
+* 测试：`cargo test -p pi-coding-agent` **450 lib + 24 集成 target + 6 doc，0 failed**；
+  `cargo test -p pi-tui` **344 lib + 38 集成 target，0 failed**（`autocomplete` 25 条）；
+  `clippy --all-targets -- -D warnings` 退出 0；`fmt --check` 干净。全部在**合并后的树**上跑。
+* 实机 A/B（PTY，同一棵合并树的两个构建，同按键序列）：BEFORE 键入 `/`、`/mo` 只有提示符文本变化、
+  候选区 5 行全空；AFTER `/` 出 17 条窗口（`(1/17)`）、`/mo` 模糊命中 7 条（`(1/7)`）、
+  `↓` 换选中项、`Tab` 应用为 `/copy `；`@` 出文件候选、`@src` 收窄、`Tab` 应用为 `@src/`。
+  四张拼图已入库 `docs/screenshots/lum1236-*.png`，细节见 `docs/TUI_UX_AUDIT.md` 第十五节。
+
+### 三、与审计建议的差异
+
+12.3 判断「挂上 provider 即可，不需要新渲染」**不成立**：`Editor` 会算 `autocomplete_render_lines`，
+但没有任何调用方把结果写进 buffer。因此实际交付 = 接线 + `App` 侧绘制两件事；
+另外用 `CombinedAutocompleteProvider` 顺带接通了文件 `@` 补全，并刻意不注册
+`argument_completions`（模型选择器自己弹窗，避免两套并行 UI）。
+
+### 四、槽位 / 派发
+
+* 本轮开工时 `running_task_count = 3`（LUM-1234 / LUM-1235 + 本轮的既有协调链），
+  按「最多 3 个任务同时运行」的口径**零派发**；开工后 `ps` 里已无 `pi` / `cargo` / `rustc`
+  进程，两个同伴 run 均已收工，不再新增 stage。
+* 无新 stage 停放：本轮选的是审计 12.3 这一格（既有清单内、且不与 Stage 63/66 的文件面重叠），
+  其余 P1 缺口（`app.clear` 双击窗口、jump-to-latest 指示器）依旧留在 12.4。

@@ -950,6 +950,11 @@ transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后
 `CommandAutocompleteProvider`（`crates/pi-coding-agent/src/commands/slash.rs` 已有命令表 +
 `argument_completions`）挂到 composer 的 Editor 上即可，不需要新协议、新渲染。
 
+> **已修（LUM-1236，第十轮）**：接线落地，见第十五节。实测结论比本节预期多一格：
+> 挂 provider **还不够** —— Editor 会算出 `autocomplete_render_lines`，但没有任何调用方把
+> 这些行写进 buffer，所以 `App` 侧还需要一段绘制（`App::paint_autocomplete`）。
+> 本节「不需要新渲染」的判断不成立，记录备查。
+
 ### 12.4 本轮不动、留给后续轮次的输入面缺口
 
 - **`app.clear` 三处不一致**（与 P0 同源、但没有被 P0 修掉）：`/hotkeys` 印的是
@@ -1014,7 +1019,7 @@ transcript、`Ctrl+T` 后 footer 出现 `Thinking blocks: hidden`、`Ctrl+O` 后
 > **后续（LUM-1235，见第十四节）**：本节 12.2 那版抽干保留了 `read_event()`、没有单测、
 > 也没有首帧修复；第十四节把它重写为可注入的 `drain_ready_events`（+3 条单测）并补上
 > `last_render: Option<Instant>` 首帧。行为契约不变，本节记录的实机 A/B 结论仍然成立。
-> 12.3 的「补全零接线」仍然是未动的缺口。
+> 12.3 的「补全零接线」由 LUM-1236 在第十轮补齐（第十五节）。
 
 ## 十三、Stage 66 交付（LUM-1228）：等待反馈与启动可发现性
 
@@ -1179,3 +1184,105 @@ harness 是 `pty.fork` + `TIOCSWINSZ` + 自写 VT/CSI/OSC 解析（**只在协�
 3. **`app.editor.external`（`Ctrl+G`）**：需要终端 teardown / restore 交接，仍未消费。
 4. **`/tree` 在无持久化会话时只回 `no session database`**：实机可见，但属于 Stage 65 的
    会话库范围，本轮不改。
+
+## 十五、第十轮（LUM-1236）：命令 / 文件补全接线 —— 12.3 的缺口落地
+
+### 15.1 缺口复核（在合并 tip 上重测）
+
+12.3 的结论在 `origin/feature/pi.rs` 的最新 tip（`00bb42bec`）上仍然成立：补全引擎
+（`crates/pi-tui/src/autocomplete.rs`，1172 行，命令 `/` 与文件 `@` 两个 provider）、
+Editor 侧的下拉状态机（`set_autocomplete_provider` / `is_showing_autocomplete` /
+`autocomplete_render_lines`）、键位（`tui.input.tab`）全在，但
+
+| 搜索 | tip 上的命中 |
+| --- | --- |
+| `set_autocomplete_provider`（`pi-coding-agent` 全 crate） | 0（只有定义与单测） |
+| `autocomplete`（`app.rs` / `interactive.rs` 生产代码） | 0 |
+| `autocomplete_render_lines` 的调用点 | 0 |
+
+即：`Editor` 能算出候选文本，**没有任何调用方把这段文本画到屏幕上**。这是本仓库第二例
+「零件没装机」（第一例是 `tools/render.rs` 的富渲染器）。
+
+### 15.2 实现（4 个文件）
+
+1. `crates/pi-tui/src/app.rs` — 新增 `App::paint_autocomplete(message_area, editor_area, buf)`，
+   在 `frame.editor.is_none()` 的渲染分支里紧跟 `paint_prompt` 调用。契约：
+   底对齐（`first_row = editor_area.y - rows.len()`）、按
+   `available = editor_area.y - message_area.y` 裁剪（超长时保留靠近提示符的尾部窗口）、
+   每行先用空格补齐到编辑器宽度再写（转写行被完全遮住，不透字）、选中行 `Accent`、
+   其余 `Muted`。不覆盖提示符行本身。
+2. `crates/pi-coding-agent/src/commands/slash.rs` — `AUTOCOMPLETE_COMMANDS`（17 条）+
+   `autocomplete_commands()`，与 `handle_command` 的命令名逐个对齐（新增单测双向比对）。
+3. `crates/pi-coding-agent/src/interactive.rs` — `install_composer_autocomplete(&mut app, base_path)`，
+   装在 `CombinedAutocompleteProvider` 上（`base_path = tool_cwd`，即进程 cwd），由 `run_loop` 调用。
+   之所以抽成独立函数：LUM-1236 的缺陷是**一次缺失的调用**，只有让「安装」本身可被测试驱动，
+   回归测试才有意义（只测 provider 的用例抓不到它）。
+4. 测试：`pi-tui/tests/autocomplete.rs` 三条 App 级用例（位置/不透明/关闭后归还原行）、
+   `pi-coding-agent` 的 `autocomplete_commands_match_the_parser_exactly` 等三条、
+   `interactive.rs` 两条端到端（击键 → 出候选；`Esc` → 归还行）。
+
+### 15.3 与 12.3 建议的差异（诚实记录）
+
+* 12.3 写「不需要新渲染」——**不成立**，需要 `App::paint_autocomplete`（见 15.1）。
+  上游是同名方法挂在 `Editor.renderAutocomplete` 上、由渲染器调用；Rust 侧 `App` 才是
+  buffer 的所有者，且它从 `plan_chrome` 同时拿得到 `message_area` 与 `editor_area`。
+* 12.3 建议只挂 `CommandAutocompleteProvider`；实际挂 `CombinedAutocompleteProvider`，
+  顺带把文件 `@` 补全接通（引擎同为现成件，`@` / `#` 触发键早已注册在 Editor 里）。
+* **不注册 `argument_completions`**：上游只有 `/model` 的 provider 列表用它，而 Rust 侧的
+  模型选择器（`Ctrl+L` / `/model`）自己拥有候选；两处都注册会出现「补全插入 provider 名」
+  与「选择器弹窗」两套并行 UI。
+* 只在 `frame.editor.is_none()` 时绘制：扩展编辑器（`app.editor.external`）或模态层存在时，
+  候选行会盖在别人的界面上，情况与上游一致地压制。
+
+### 15.4 门（本轮实跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --offline -p pi-coding-agent` | 450 lib + 24 个集成 target + 6 doc，**0 failed** |
+| `cargo test --offline -p pi-tui` | 344 lib + 38 个集成 target，**0 failed**（含 `autocomplete` 25） |
+| `cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets -- -D warnings` | 退出码 0 |
+| `cargo fmt --all -- --check` | 干净 |
+| `cargo build --offline -p pi-coding-agent --bin pi` | 干净（19.99s，热 target） |
+
+以上都在**合并 `origin/feature/pi.rs`（`00bb42bec`）之后的树**上跑，不是分支前的旧基线。
+`cargo test --workspace` 未跑（本轮只改这两个 crate，且另有两个 run 在用盘）。
+
+### 15.5 实机 A/B（PTY，120x34，`--model faux/faux-model`，全新 `HOME`）
+
+BEFORE = 同一棵合并树的构建（`fa4d16ebf` 代码，即 LUM-1235 的 PTY 基线产物），AFTER = 本轮合并构建。
+两侧送完全相同的按键序列：
+
+| 按键 | BEFORE | AFTER |
+| --- | --- | --- |
+| 空闲启动帧 | 启动头 + onboarding + footer | 同（除候选框外逐行一致） |
+| `/` | 只有提示符文本变成 `> /`，**候选区 5 行全空** | `❯ help  Show this help text` / `clear` / `new` / `name <name> — …` + `(1/17)` |
+| `/mo` | 仍是空的 | 模糊命中 7 条：`❯ model  <provider/model> — Select model (opens selector UI)` / `copy` / `export` / `fork` / `compact` + `(1/7)` |
+| `↓` | 无反应 | 选中行下移一格（`❯ ` 从 `model` 移到 `copy`，计数 `(2/7)`） |
+| `Tab` | 无反应 | 候选框消失，草稿变成 `/copy `（证明「应用」走的是**当前选中项**） |
+| `@` | — | 文件候选：`❯ src/` / `README.md` / `Cargo.toml` / `main.rs` / `render.rs` |
+| `@src` | — | 收窄到 `❯ src/` / `main.rs` / `render.rs` |
+| `Tab` | — | 草稿变成 `@src/` |
+
+![BEFORE：`/` 与 `/mo` 无候选；AFTER：同一按键出候选框](screenshots/lum1236-ab-slash.png)
+
+![AFTER：`/mo` 模糊过滤 → `↓` 换选中 → `Tab` 应用为 `/copy `](screenshots/lum1236-interaction.png)
+
+![AFTER：`@` 文件补全 → `@src` 收窄 → `Tab` 应用为 `@src/`](screenshots/lum1236-at-files.png)
+
+![AFTER：三种候选面总览（`/`、`/mo`、`@`）](screenshots/lum1236-overview.png)
+
+PTY harness 与 14.3 同源（`pty.fork` + 自写 VT 解析 + PIL），仍**不入库**；本轮新增的两点：
+候选框底对齐到提示符上一行、以及「选中行随 `↓` 变化」在**字符网格**上可验证（`❯` 位置移动），
+不依赖颜色。
+
+### 15.6 仍然缺的（顺延）
+
+1. 文件候选的 label/value 双列在纯文件名场景下重复（`❯ src/  src`）：这是引擎既有的
+   `label  value` 格式，上游靠两列不同颜色区分，Rust 侧两列同色 → 建议下一轮把 value 列
+   设为 `Muted`，或对文件项只留 `value`。
+2. `(n/total)` 计数行固定占一行：5 行窗口 + 计数 = 6 行，短终端里已按 `message_area` 高度
+   裁剪（保留尾部窗口），但上游「不足 3 行不显示计数」的规则没有实现。
+3. `#` 触发键在 Editor 里已注册，但没有任何 provider 提供 `#` 数据（上游是扩展 / 记忆面），
+   键入 `#` 依旧无候选。
+4. `/model` 这类「应用后还要回车」的命令仍是两次按键（`Tab` 应用 + `Enter` 提交）；
+   上游行为相同，属既有设计，未改。
