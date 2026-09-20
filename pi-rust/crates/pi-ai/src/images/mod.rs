@@ -1,6 +1,6 @@
 //! Image generation — the Rust port of `packages/ai/src/images.ts`, plus the
 //! image slice of `types.ts`, `images-api-registry.ts`, `image-models.ts`,
-//! `providers/images/register-builtins.ts` and
+//! `images-models.ts`, `providers/images/register-builtins.ts` and
 //! `api/openrouter-images.ts`.
 //!
 //! Upstream exposes a single `generateImages(model, context, options)`
@@ -36,7 +36,8 @@
 //! Ported: the request/response contract, the adapter registry (including the
 //! upstream "Mismatched api" guard), the OpenRouter adapter (params, usage
 //! math, data-URL response parsing, retry/error-body handling), the model
-//! catalog surface, and built-in registration.
+//! catalog surface, built-in registration, and the auth-aware provider
+//! runtime collection ([`ImagesProvider`] / [`ImagesModels`] / [`runtime`]).
 //!
 //! Not ported, on purpose or pending a follow-up round:
 //!
@@ -52,6 +53,7 @@ pub mod builtins;
 pub mod models;
 pub mod openrouter;
 pub mod registry;
+pub mod runtime;
 pub mod types;
 
 pub use models::ImageModels;
@@ -62,6 +64,11 @@ pub use openrouter::{
 pub use registry::{
     clear_images_api_providers, get_images_api_provider, image_api_provider_source_id,
     register_images_api_provider, registered_api_of, registered_images_api_providers,
+};
+pub use runtime::{
+    create_images_models, create_images_provider, AuthTarget, CreateImagesModelsOptions,
+    CreateImagesProviderOptions, ImagesModels, ImagesProvider, ImagesRefreshError,
+    MutableImagesModels, RefreshModelsFn,
 };
 pub use types::{
     AssistantImages, ImageModality, ImageModelCost, ImagesApi, ImagesContext, ImagesError,
