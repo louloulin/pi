@@ -174,9 +174,6 @@ Summarize the prefix to provide context for the retained suffix:
 
 Be concise. Focus on what's needed to understand the kept suffix.";
 
-/// Character budget charged for an image block when estimating tokens.
-const ESTIMATED_IMAGE_CHARS: usize = 4800;
-
 /// Maximum characters kept per tool result in the serialized conversation.
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 
@@ -391,26 +388,25 @@ pub fn extract_summary(message: &Message) -> Option<&str> {
 }
 
 /// `calculateContextTokens(usage)` — prefer the provider's total.
+///
+/// Delegates to [`pi_ai::utils::estimate::calculate_context_tokens`]; kept as
+/// a re-export so the compaction call sites and their tests keep this path.
 pub fn calculate_context_tokens(usage: &Usage) -> u32 {
-    if usage.total > 0 {
-        usage.total
-    } else {
-        usage.input + usage.output + usage.cache_read + usage.cache_write
-    }
+    pi_ai::utils::estimate::calculate_context_tokens(usage)
 }
 
 /// `estimateTokens(message)` — conservative chars/4 heuristic.
+///
+/// Delegates to [`pi_ai::utils::estimate::estimate_message_tokens`].
 pub fn estimate_tokens(message: &Message) -> u32 {
-    let chars = match message.role {
-        Role::Assistant => message.content.iter().map(block_chars).sum(),
-        Role::User | Role::System | Role::Tool => content_chars(&message.content),
-    };
-    chars.div_ceil(4) as u32
+    pi_ai::utils::estimate::estimate_message_tokens(message)
 }
 
 /// Sum [`estimate_tokens`] across the whole conversation.
+///
+/// Delegates to [`pi_ai::utils::estimate::estimate_messages_tokens`].
 pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
-    messages.iter().map(estimate_tokens).sum()
+    pi_ai::utils::estimate::estimate_messages_tokens(messages)
 }
 
 /// Estimate the context size of a message list.
@@ -419,12 +415,14 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
 /// chars/4 estimate over every message. Use
 /// [`context_tokens_with_trailing`] when the last assistant usage is known.
 pub fn estimate_context_tokens(messages: &[Message]) -> u32 {
-    estimate_message_tokens(messages)
+    pi_ai::utils::estimate::estimate_messages_tokens(messages)
 }
 
 /// Provider-reported usage plus the estimate for the messages after it.
 pub fn context_tokens_with_trailing(usage: &Usage, trailing: &[Message]) -> u32 {
-    calculate_context_tokens(usage) + estimate_message_tokens(trailing)
+    pi_ai::utils::estimate::calculate_context_tokens(usage).saturating_add(
+        pi_ai::utils::estimate::estimate_messages_tokens(trailing),
+    )
 }
 
 /// `shouldCompact(contextTokens, contextWindow, settings)`.
@@ -1059,24 +1057,6 @@ fn arguments_to_string(arguments: &serde_json::Value) -> String {
             .join(", "),
         None => arguments.to_string(),
     }
-}
-
-fn block_chars(block: &Content) -> usize {
-    match block {
-        Content::Text(text) => text.text.chars().count(),
-        Content::Image(_) => ESTIMATED_IMAGE_CHARS,
-        Content::ToolCall(call) => {
-            call.name.chars().count()
-                + serde_json::to_string(&call.arguments)
-                    .map(|json| json.chars().count())
-                    .unwrap_or(0)
-        }
-        Content::ToolResult(result) => block_chars(&result.content),
-    }
-}
-
-fn content_chars(content: &[Content]) -> usize {
-    content.iter().map(block_chars).sum()
 }
 
 #[cfg(test)]

@@ -181,7 +181,9 @@ pub enum StreamError {
     Provider {
         /// HTTP status code.
         status: u16,
-        /// Response body (truncated to 4 KiB in the helper constructors).
+        /// Response body, as read from the wire. Providers truncate it to
+        /// `MAX_PROVIDER_ERROR_BODY_CHARS` (4000 characters) with
+        /// `pi_ai::utils::error_body`.
         body: String,
         /// Retry guidance parsed from the response headers.
         hint: ProviderRetryHint,

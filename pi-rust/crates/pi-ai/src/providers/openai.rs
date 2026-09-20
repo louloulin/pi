@@ -31,6 +31,8 @@ use serde_json::Value;
 use crate::json_parse::parse_streaming_json;
 use crate::stream::AssistantMessageEventStream;
 use crate::types::{SimpleStreamOptions, StreamError};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::utils::error_body::truncate_provider_error_body;
 use crate::StreamFn;
 
 /// Default base URL for OpenAI Chat Completions.
@@ -141,7 +143,7 @@ impl OpenAiProvider {
             let body = response.text().await.unwrap_or_default();
             return Err(StreamError::provider_with_hint(
                 status.as_u16(),
-                truncate_body(&body),
+                truncate_provider_error_body(&body),
                 hint,
             ));
         }
@@ -169,7 +171,7 @@ impl OpenAiProvider {
             let body = response.text().await.unwrap_or_default();
             return Err(StreamError::provider_with_hint(
                 status.as_u16(),
-                truncate_body(&body),
+                truncate_provider_error_body(&body),
                 hint,
             ));
         }
@@ -217,20 +219,6 @@ impl StreamFn for OpenAiProvider {
                 "OpenAiProvider is not yet implemented for wasm32-unknown-unknown".into(),
             ))
         }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn truncate_body(body: &str) -> String {
-    const MAX: usize = 4096;
-    if body.len() <= MAX {
-        body.to_string()
-    } else {
-        let mut end = MAX;
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…(truncated)", &body[..end])
     }
 }
 

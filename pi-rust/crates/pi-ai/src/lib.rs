@@ -16,6 +16,7 @@ pub mod providers;
 pub mod retry;
 pub mod stream;
 pub mod types;
+pub mod utils;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;

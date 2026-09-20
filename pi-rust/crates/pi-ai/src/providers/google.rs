@@ -64,6 +64,8 @@ use serde_json::Value;
 
 use crate::stream::AssistantMessageEventStream;
 use crate::types::{SimpleStreamOptions, StreamError};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::utils::error_body::truncate_provider_error_body;
 use crate::StreamFn;
 
 /// Default base URL for the Google Generative Language API.
@@ -248,7 +250,7 @@ impl GoogleProvider {
             return Err(classify_http_status(
                 status_code,
                 hint,
-                truncate_body(&body),
+                truncate_provider_error_body(&body),
             ));
         }
         let model_id = model.id.clone();
@@ -311,20 +313,6 @@ fn classify_http_status(
     body: String,
 ) -> StreamError {
     StreamError::provider_with_hint(status, body, hint)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn truncate_body(body: &str) -> String {
-    const MAX: usize = 4096;
-    if body.len() <= MAX {
-        body.to_string()
-    } else {
-        let mut end = MAX;
-        while !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…(truncated)", &body[..end])
-    }
 }
 
 // ---------------------------------------------------------------------------
