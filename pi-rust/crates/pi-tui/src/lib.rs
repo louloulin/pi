@@ -37,6 +37,7 @@ pub mod styled;
 pub mod styles;
 pub mod terminal_image;
 pub mod theme;
+pub mod tree;
 pub mod undo_stack;
 pub mod word_navigation;
 
@@ -107,6 +108,7 @@ pub use theme::{
     resolve_theme_setting, ColorMode, ColorValue, TerminalTheme, Theme, ThemeBg, ThemeColor,
     ThemeController, ThemeError, ThemeJson,
 };
+pub use tree::{flatten_tree, tree_selector_items, TreeItem, TreeRow};
 pub use undo_stack::UndoStack;
 pub use word_navigation::{find_word_backward, find_word_forward};
 
