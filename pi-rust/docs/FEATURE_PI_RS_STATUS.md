@@ -14008,3 +14008,128 @@ CARGO_TARGET_DIR=/tmp/pi-target-<issue> CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_D
 ```
 
 * 本轮收尾已清：`/tmp/pi-target-1196`（17G，本 run 私有，产物已落盘并推送）+ `/tmp/pi-target-1194`（853M，LUM-1194 run 已 `completed`，无进程持有）。**保留** `/tmp/lum-1197-target`（LUM-1197 run 在飞）。
+
+## LUM-1201 round — 核验「worker 直推 feature/pi.rs」（LUM-1197，135/2046 复现）→ 合并 LUM-1192（`Image` 组件）→ **136 套件 / 2051 passed / 0 failed / 2 ignored**；晋升 LUM-1199（Stage 51）+ LUM-1200（Stage 52）
+
+本轮是 **LUM-981** 的推进/协调轮。与前几轮不同：**开工时 tip 已被一个 worker run 自己推进**，本轮的核验比重高于合并比重。
+
+### 一、开工盘点与并发
+
+* `git fetch --all --prune` 后发现 **`origin/feature/pi.rs` 已从 `c660d2cb1` 前进到 `6289835c7`**（= `origin/work/lum-1197`）。该推进由 **LUM-1197 的 worker run 自己 fast-forward 推送**（非 force，`c660d2cb1..6289835c7`），其结项评论里自报。
+* **这是本项目第一次出现 worker run 直接推 `feature/pi.rs`**：此前一律是「worker 只推 `work/<ISSUE>`，协调轮负责合并 + 推 tip」。结果上省了一次合并，但带来一个新的协调轮风险：**协调轮开工读到的 `mirror/feature/pi.rs` 会落后于 `origin/feature/pi.rs`**（本轮开工时两者差 `c660d2cb1` vs `6289835c7`），照旧按 mirror 建分支会把已推的提交当成「待合并」重复搬运。→ 例程修订见第七节。
+* 在飞 issue：**LUM-1197**（Stage 50）于 `07:41:20` 出轮、**LUM-1192**（Stage 48b）于 `07:42:32` 出轮 —— 两者都在本轮开工前正常完成并自报产物。
+* `multica daemon status --output json`：开工 `running_task_count = 3` / `active_task_count = 3`（含本 run）；两个 worker 出轮后降到 1（仅本 run）。
+* `df -h /`：`26G / 50G`（54%），余 22G。上一轮 LUM-1198 的清盘动作已生效。
+
+### 二、核验 LUM-1197 直推的树（`c660d2cb1..6289835c7`）
+
+先确认「worker 直推的树」== 「worker 自报的改动面」，再谈质量门：
+
+```console
+$ git diff --stat c660d2cb1 6289835c7
+ 10 files changed, 1049 insertions(+), 10 deletions(-)
+```
+
+十个文件与 LUM-1197 评论里的改动清单**逐文件一致**（`pi-extensions/src/host.rs` / `runtime/pi-ext-shim.mjs` / 两份 docs / 两个新测试文件 + `pi-coding-agent/src/{provider.rs,extensions/wiring.rs,main.rs}` + 新测试）。无夹带。
+
+全量门（私有 target dir，实跑）：
+
+```console
+$ CARGO_TARGET_DIR=/tmp/pi-target-1201 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+    cargo fmt --all -- --check                                   # OK
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings   # 干净（1m09s）
+$ ... cargo test --workspace --offline --no-fail-fast                   # exit 0
+  suites = 135, passed = 2046, failed = 0, ignored = 2
+```
+
+**与 LUM-1197 自报的 `135 / 2046 / 0 / 2` 逐位一致**，fmt / clippy 两项自报也复现。→ 直推虽然是流程偏差，但**树本身是干净的**，本轮不回溯、不改流程结果，只把该偏差写成例程修订（第七节）。
+
+### 三、合并 `work/LUM-1192`（本轮唯一待合并分支）
+
+`origin/work/LUM-1192` = `0caebf1fd`（`f8b37c4b8` 组件 + `0caebf1fd` 用例，基线 `f90698983`），2 个提交、3 个文件：
+
+```console
+$ git merge --no-ff origin/work/LUM-1192
+Merge made by the 'ort' strategy.
+ pi-rust/crates/pi-tui/src/image.rs   | 405 ++++++++++++++++++++++++++++
+ pi-rust/crates/pi-tui/src/lib.rs     |   2 +
+ pi-rust/crates/pi-tui/tests/image.rs | 222 +++++++++++++++++++++++++++
+ 3 files changed, 629 insertions(+)
+```
+
+合并提交 `d54cf7269`（第一父 `6289835c7`、第二父 `0caebf1fd`），**无冲突**。该分支基线是 `f90698983`（不含 LUM-1197），但只新增 `pi-tui/src/image.rs` + 一行 `lib.rs` 导出 + 新测试，三方合并结果里 LUM-1197 与 LUM-1194 的改动全部保留。
+
+交付面（对齐上游 `packages/tui/src/components/image.ts`）：`truncate_to_width`（ANSI CSI / OSC 8 aware，超宽时 `max_width-3` + `...`）、`ImageTheme::fallback` 样式槽、`Image` 组件（尺寸兜底 `800x600`、`render_image` 分派 kitty / iTerm2 / 回退、`Component` 缓存 + `invalidate`）。
+
+### 四、质量门：合并后全量实跑，**136 套件 / 2051 passed / 0 failed / 2 ignored**
+
+```console
+$ ... cargo fmt --all -- --check                                   # OK
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings   # 干净（8.67s，增量）
+$ ... cargo test --workspace --offline --no-fail-fast                   # exit 0
+  suites = 136, passed = 2051, failed = 0, ignored = 2
+```
+
+* 上一轮基线（`c10d1ce39`）= **133 / 2032 / 0 / 2**；LUM-1197 直推后 = **135 / 2046**（+2 套件 / +14 用例）；本轮合入 LUM-1192 后 = **136 / 2051**（**+1 套件 / +5 用例**，即 `tests/image.rs` 新增套件，零倒退）。
+* LUM-1197 提到的既有 flake（`pi-extensions --test pi_ai_provider` 时限用例）本轮两次全量跑都**未复现**。
+* 私有 target dir 结论维持：**不要跨 run 复用 `CARGO_TARGET_DIR`**。`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0` 也继续带（本轮 target dir 实测 2.2G）。
+
+### 五、可合并性扫描（`origin` + `mirror` 双向，两种大小写）
+
+除 `work/LUM-1192` 外，逐个用 `git cherry` 核实，无独有产物：
+
+```
+origin/work/lum-1173, mirror/work/lum-1173   # ahead=11/behind=64；cherry: 10 个 `-`
+                                             #   唯一 `+` b6656384「style(pi-coding-agent) rustfmt」
+                                             #   已被 tip 的 fmt 基线覆盖（fmt --all -- --check 干净）
+mirror/work/lum-1177                         # ahead=4；cherry: 4/4 全 `-`
+origin|mirror/agent/devbox1/*                # 旧树（behind 85–437），无独有产物
+```
+
+### 六、派发（本轮 2 路，加本 run = **3/3** 满槽）
+
+两个被 LUM-1198 停放的 Stage 51 / 52 **依赖同时解除**，本轮一并晋升：
+
+| issue | 动作 | 依据 |
+| --- | --- | --- |
+| **LUM-1199**（`backlog` → `todo`） | Stage 51：`pi.registerProvider` **完整语义**（native `Provider` 对象 + `oauth` 块 + `streamSimple` handler 注册） | 其依赖写死「LUM-1197 合入 `feature/pi.rs` 后由协调轮晋升」；LUM-1197 已在 `6289835c7`，本轮已核验 ✓ |
+| **LUM-1200**（`backlog` → `todo`） | Stage 52：`pi-coding-agent` 图片渲染消费点接线（工具结果 / `read` / markdown 图片块 → `pi-tui` `Image`） | 其依赖写死「LUM-1192 合入后晋升」；本轮已把 LUM-1192 合入 `d54cf7269`，`Image` 消费接口就绪 ✓ |
+| **LUM-1197** | `in_progress` → `in_review`（`--no-start`） | worker run 自报产物 + 本轮核验直推的树；协调轮已确认基线可复现，等验收 |
+| LUM-1192 | 不动作 | run 已自行置 `in_review`（`07:42:36`），本轮已完成其合并 |
+
+文件面互斥核对（两侧都写死了文件面）：
+
+* LUM-1199 只碰 `pi-extensions/**` + `pi-coding-agent/src/provider.rs` + `pi-coding-agent/src/extensions/{wiring,mod}.rs`；
+* LUM-1200 只碰 `pi-coding-agent/src/{tool_executor.rs,tools/render.rs,tools/read.rs}` + `pi-tui/src/{message.rs,markdown.rs}` + 两 crate 的测试。
+
+→ **`pi-coding-agent` 下不同文件、零重叠**；两者的「禁止触碰」清单各自显式排除了对方的文件面。**零 `pi-tui/src/image.rs` / `terminal_image.rs` 写冲突**（LUM-1200 只允许读它们的公开接口）。
+
+### 七、例程修订：worker 直推 tip 之后的开工序
+
+本轮踩到的具体坑与修订：
+
+1. **`origin` 与 `mirror` 的 `feature/pi.rs` 可能不同位**（本轮开工时 `c660d2cb1` vs `6289835c7`）。→ 开工序第 1 步改为 **`git ls-remote origin feature/pi.rs`** 直读远端，**不要**用 `mirror/feature/pi.rs` 或本地陈旧 tracking ref 当基线。
+2. **先扫 `work/*` 的 SHA，再读上一轮结论文档**（LUM-1196 / LUM-1198 已两次记录，本轮再次生效：LUM-1192 的分支是在上一轮文档写就之后才推上来的）。
+3. **worker 直推 tip 时，协调轮不做「重复合并」**：只核验 diff 面 + 复现质量门。**盲目把 `origin/feature/pi.rs` 再 merge 一次 `work/<issue>` 会产生空合并或虚假合并提交**。
+
+### 八、frontier（本轮后）
+
+1. **质量门基线** = **136 套件 / 2051 passed / 0 failed / 2 ignored（`d54cf7269`）**；下一欠账点 = LUM-1199 或 LUM-1200 任一合入时。
+2. **pi-tui 终端图片子系统**：内核（切片 1/2/3）+ `Image` 组件全部合入 → **库侧完成**；最后一环 = `pi-coding-agent` 三个消费点接线 → **LUM-1200 本轮已晋升（`todo`）**。
+3. **插件生态 provider 面**：`pi.registerProvider(name, config)` 字符串重载已合入（LUM-1197）；**LUM-1199 本轮已晋升（`todo`）**，做 native `Provider` 对象 + `oauth` + `streamSimple`。
+4. **`@earendil-works/pi-ai/compat` 其余八个 lazy api family**（`googleGenerativeAIApi` / `openAICompletionsApi` 等仍 `ERR_PI_SDK_UNIMPLEMENTED`）：尚未有 issue，等 LUM-1199 合入后按需切片。
+5. **pi-extensions 引擎级残余**（`fs.watch`、key-based WebCrypto、`node:test` / `node:assert`）与 provider 家族（`bedrock-converse` / `cohere-v2` / `google-vertex`）：维持 LUM-1185 / 1177 结论（环境做不了 / 无凭据无消费方）。
+6. **~~`pi-ai` telemetry span~~**：LUM-1196 轮已证伪并移除，不复活。
+7. **run 可靠性**：本轮两个 worker run 都正常完成并自报产物，无 EOF、无零产物 —— 与前几轮不同，**说明 provider 侧 EOF 不是稳态**；`work/LUM-1192` 是「上一轮停放、本轮开工前才推上来」的典型案例，再次印证「开工先扫分支 SHA」。
+
+### 九、下一轮动作（按优先级）
+
+1. **LUM-1199 / LUM-1200 任一推分支就合并它**：`git ls-remote origin feature/pi.rs` 读基线 → 双向扫 `work/*`（两种大小写）→ `git cherry` 核实 → 合并后补跑全量门并核对 passed 增量。
+2. **若 worker 又直推 tip**：按第七节第 3 条处理（只核验、不重复合并）。
+3. LUM-1199 合入后可切 `@earendil-works/pi-ai/compat` 的 lazy api family 剩余八项为本子系统收口。
+4. **Autopilot 节奏**：`1189→1191→1193→1195→1196→1198→1201` 仍是约 20 分钟一轮。本轮开工时前两轮 run 刚出轮、issue 状态尚未翻 `in_review`，与本 run 高度重叠；建议 owner 放宽周期到 ≥1h 或对同 issue 串行化（维持 LUM-1195 / 1196 / 1198 建议）。
+
+### 十、磁盘（本轮）
+
+* 开工 `26G / 50G`（54%），余 22G；本轮自建 `/tmp/pi-target-1201`（fmt/clippy/test 后 **2.2G**）。
+* 收尾已清本 run 私有 target dir；**保留** `/tmp/pi-target-1192`（863M，LUM-1192 run 已 `completed`，无进程持有 —— 但按例程应由下一轮清理）与 `/tmp/lum-1197-target`（2.4G，LUM-1197 run 已 `completed`）。
