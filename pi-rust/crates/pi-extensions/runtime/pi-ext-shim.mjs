@@ -1851,7 +1851,7 @@ const __pi_typebox_module = (() => {
 //   - `fs.mkdirSync(path, {recursive: true})` returns `undefined`
 //     instead of the first created directory;
 //   - `node:stream`, `node:http`, … and
-//     `crypto.createHash` are not provided: importing them fails with
+//     `crypto.createHmac` are not provided: importing them fails with
 //     the readable "unsupported import" error that lists what exists.
 // ---------------------------------------------------------------------------
 
@@ -2520,10 +2520,13 @@ const __pi_os_module = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// `node:crypto` — `randomUUID` / `randomBytes` / `randomInt`, backed by the
-// host's OS entropy bridge. `createHash` needs a digest backend the workspace
-// does not bundle, so it fails with a readable message instead of producing
-// wrong bytes.
+// `node:crypto` — `randomUUID` / `randomBytes` / `randomInt` / `createHash`,
+// plus the Web Crypto subset extensions actually use (`crypto.getRandomValues`
+// and `crypto.subtle.digest`). Entropy comes from the host's OS bridge; the
+// digests come from the host's `crypto.digest` op (`crate::digest`, which
+// implements SHA-1 / SHA-256 because the offline registry has no hashing
+// backend). Unsupported algorithms still fail with a readable message
+// instead of producing wrong bytes.
 // ---------------------------------------------------------------------------
 
 const __pi_crypto_module = (() => {
@@ -2581,17 +2584,145 @@ const __pi_crypto_module = (() => {
     return Number(min) + (value % range);
   }
 
-  function createHash() {
-    throw new Error(
-      "crypto.createHash is not implemented in the pi extension host (no hashing backend is bundled)",
+  /**
+   * One-shot digest through the host bridge, returning a `Buffer`.
+   * `algorithm` is a Node name (`sha256`) or WebCrypto name (`SHA-256`).
+   */
+  function digestBytes(algorithm, bytes) {
+    const encoded = BufferCtor.from(bytes).toString("base64");
+    const result = __pi_node_call("crypto.digest", {
+      algorithm: String(algorithm),
+      base64: encoded,
+    });
+    return BufferCtor.from(result.base64, "base64");
+  }
+
+  /**
+   * Coerce a `crypto.subtle.digest` data argument.
+   *
+   * WebCrypto takes an `ArrayBuffer` or any `ArrayBufferView` (Buffer is a
+   * `Uint8Array` subclass, so extensions can pass either).
+   */
+  function viewBytes(data) {
+    if (typeof ArrayBuffer === "undefined") {
+      throw new TypeError("ArrayBuffer is not available in this host build");
+    }
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) {
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    throw new TypeError(
+      "crypto.subtle.digest: data must be an ArrayBuffer or ArrayBufferView",
     );
   }
+
+  function digestAlgorithmName(algorithm) {
+    if (typeof algorithm === "string") return algorithm;
+    if (algorithm && typeof algorithm === "object" && algorithm.name !== undefined) {
+      return String(algorithm.name);
+    }
+    throw new TypeError("crypto.subtle.digest: algorithm must be a string or {name}");
+  }
+
+  /**
+   * `crypto.subtle` — only `digest` is bridged. Key import/export, signing,
+   * HMAC and encryption are not: the host bundles no crypto backend for them,
+   * and `crypto.createHmac` below reports the same limitation.
+   */
+  const subtle = Object.freeze({
+    async digest(algorithm, data) {
+      const bytes = viewBytes(data);
+      const result = digestBytes(digestAlgorithmName(algorithm), bytes);
+      // Copy out of the Buffer's pool so the caller gets a standalone
+      // ArrayBuffer, exactly like the WebCrypto contract promises.
+      return result.buffer.slice(
+        result.byteOffset,
+        result.byteOffset + result.byteLength,
+      );
+    },
+  });
+
+  /**
+   * `crypto.getRandomValues` — fills the view in place and returns it.
+   * Matches the WebCrypto quota (64 KiB per call) and rejects the float
+   * views, which the spec does not allow.
+   */
+  function getRandomValues(array) {
+    const isIntegerView =
+      typeof ArrayBuffer !== "undefined" &&
+      ArrayBuffer.isView(array) &&
+      !(array instanceof DataView) &&
+      !(array instanceof Float32Array) &&
+      !(array instanceof Float64Array);
+    if (!isIntegerView) {
+      throw new TypeError(
+        "crypto.getRandomValues: argument must be an integer TypedArray",
+      );
+    }
+    if (array.byteLength > 65536) {
+      throw new Error(
+        "crypto.getRandomValues: quota exceeded (65536 bytes per call)",
+      );
+    }
+    const bytes = randomBytes(array.byteLength);
+    new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(bytes);
+    return array;
+  }
+
+  /**
+   * `createHash(algorithm)` — buffering hash with Node's `update` /
+   * `digest([encoding])` shape. The host digests the whole message at once,
+   * so `update` only accumulates; that is invisible to callers and avoids
+   * reimplementing the streaming state machine on the JS side.
+   */
+  function createHash(algorithm) {
+    const name = String(algorithm);
+    const chunks = [];
+    const hash = {
+      update(data, encoding) {
+        if (typeof data === "string") {
+          chunks.push(BufferCtor.from(data, encoding || "utf8"));
+        } else if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) {
+          chunks.push(BufferCtor.from(new Uint8Array(data)));
+        } else if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(data)) {
+          chunks.push(
+            BufferCtor.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)),
+          );
+        } else {
+          throw new TypeError("createHash.update: data must be a string or BufferSource");
+        }
+        return hash;
+      },
+      digest(encoding) {
+        const message = BufferCtor.concat(chunks);
+        // `crypto.digest` rejects unknown names, so the failure carries the
+        // host's readable message for e.g. `sha512`.
+        const digest = digestBytes(name, message);
+        return encoding === undefined ? digest : digest.toString(String(encoding));
+      },
+    };
+    return hash;
+  }
+
+  const webcrypto = Object.freeze({
+    getRandomValues: getRandomValues,
+    randomUUID: randomUUID,
+    subtle: subtle,
+  });
 
   const mod = {
     randomBytes: randomBytes,
     randomUUID: randomUUID,
     randomInt: randomInt,
+    getRandomValues: getRandomValues,
     createHash: createHash,
+    subtle: subtle,
+    webcrypto: webcrypto,
+    createHmac: () => {
+      throw new Error(
+        "crypto.createHmac is not implemented in the pi extension host (only SHA-1/SHA-256 digests are bridged)",
+      );
+    },
   };
   mod.default = mod;
   return Object.freeze(mod);
@@ -6799,6 +6930,257 @@ if (typeof globalThis.Buffer === "undefined") {
 if (typeof globalThis.process === "undefined") {
   globalThis.process = __pi_process_module;
 }
+
+// ===========================================================================
+// Web platform globals — `atob` / `btoa` / `crypto` / `URLSearchParams`
+//
+// QuickJS ships none of them (its C sources have no `URLSearchParams`), but
+// upstream extensions treat them as ambient. The clearest case is the legacy
+// OAuth example in
+// `packages/coding-agent/examples/extensions/custom-provider-anthropic/`,
+// whose PKCE step calls `crypto.getRandomValues`, `btoa`, `atob` and
+// `crypto.subtle.digest("SHA-256", …)` before it can build the authorize URL
+// with `new URLSearchParams({…})`.
+//
+// `crypto` reuses `__pi_crypto_module` (Node's `node:crypto` attaches the
+// same WebCrypto objects), and the digests come from the host's
+// `crypto.digest` bridge. `URL` itself is still not bridged — see
+// `docs/NODE_BUILTINS.md` for what remains.
+// ===========================================================================
+(function () {
+  const BufferCtor = __pi_buffer_module.Buffer;
+  const decoder = new __pi_util_module.TextDecoder("utf-8");
+  const encoder = new __pi_util_module.TextEncoder();
+
+  function invalidCharacter(message) {
+    const error = new Error(message);
+    error.name = "InvalidCharacterError";
+    return error;
+  }
+
+  // -- btoa / atob ----------------------------------------------------------
+  //
+  // The binary-string contract: `btoa` consumes one Latin-1 code unit per
+  // byte and `atob` produces one. Anything above 0xFF is not representable
+  // and must throw, otherwise a caller would silently hash the wrong bytes.
+
+  function btoa(binary) {
+    const text = String(binary);
+    const bytes = new Uint8Array(text.length);
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      if (code > 0xff) {
+        throw invalidCharacter(
+          "btoa: the string to be encoded contains characters outside of the Latin1 range",
+        );
+      }
+      bytes[index] = code;
+    }
+    return BufferCtor.from(bytes).toString("base64");
+  }
+
+  function atob(encoded) {
+    // The spec strips ASCII whitespace before validating; a length that is
+    // not a multiple of four or a stray character is an error, and Node's
+    // lenient `Buffer.from(x, "base64")` must not be allowed to hide it.
+    const clean = String(encoded).replace(/[\t\n\f\r ]+/g, "");
+    if (clean.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) {
+      throw invalidCharacter("atob: the string to be decoded is not correctly encoded");
+    }
+    return BufferCtor.from(clean, "base64").toString("latin1");
+  }
+
+  if (typeof globalThis.btoa === "undefined") globalThis.btoa = btoa;
+  if (typeof globalThis.atob === "undefined") globalThis.atob = atob;
+
+  // -- crypto ---------------------------------------------------------------
+
+  if (typeof globalThis.crypto === "undefined") {
+    globalThis.crypto = __pi_crypto_module.webcrypto;
+  }
+
+  // -- URLSearchParams ------------------------------------------------------
+  //
+  // `application/x-www-form-urlencoded` encode/decode sets, straight from the
+  // URL Standard: `*`, `-`, `.`, `_` and alphanumerics survive, a space
+  // becomes `+`, everything else is percent-encoded UTF-8.
+
+  const FORM_SAFE = /^[A-Za-z0-9*\-._]$/;
+
+  function percentEncode(text) {
+    let out = "";
+    for (const byte of encoder.encode(String(text))) {
+      if (byte === 0x20) {
+        out += "+";
+      } else if (FORM_SAFE.test(String.fromCharCode(byte))) {
+        out += String.fromCharCode(byte);
+      } else {
+        out += "%" + byte.toString(16).toUpperCase().padStart(2, "0");
+      }
+    }
+    return out;
+  }
+
+  function percentDecode(text) {
+    const bytes = [];
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (character === "+") {
+        bytes.push(0x20);
+        continue;
+      }
+      if (character === "%") {
+        const hex = text.slice(index + 1, index + 3);
+        if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+          bytes.push(parseInt(hex, 16));
+          index += 2;
+          continue;
+        }
+      }
+      // Invalid escapes are kept verbatim, matching the URL parser's
+      // percent-decode step (`decodeURIComponent` would throw instead).
+      const code = character.charCodeAt(0);
+      if (code < 0x80) {
+        bytes.push(code);
+      } else {
+        // A lone surrogate cannot be represented in UTF-8; UTF-8 encode it
+        // the way the standard's UTF-8 encoder does.
+        for (const byte of encoder.encode(character)) bytes.push(byte);
+      }
+    }
+    return decoder.decode(new Uint8Array(bytes));
+  }
+
+  class URLSearchParamsPolyfill {
+    constructor(init) {
+      this._entries = [];
+      if (init === undefined || init === null) return;
+      if (typeof init === "string") {
+        this._parse(init);
+        return;
+      }
+      if (typeof init === "object") {
+        if (typeof init[Symbol.iterator] === "function") {
+          for (const entry of init) {
+            if (entry === null || typeof entry !== "object") {
+              throw new TypeError("URLSearchParams: sequence element is not an object");
+            }
+            this.append(entry[0], entry[1]);
+          }
+          return;
+        }
+        for (const key of Object.keys(init)) this.append(key, init[key]);
+      }
+    }
+
+    _parse(query) {
+      const text = String(query);
+      const body = text.startsWith("?") ? text.slice(1) : text;
+      if (body === "") return;
+      for (const part of body.split("&")) {
+        if (part === "") continue;
+        const separator = part.indexOf("=");
+        if (separator < 0) {
+          this._entries.push([percentDecode(part), ""]);
+        } else {
+          this._entries.push([
+            percentDecode(part.slice(0, separator)),
+            percentDecode(part.slice(separator + 1)),
+          ]);
+        }
+      }
+    }
+
+    append(name, value) {
+      this._entries.push([String(name), String(value)]);
+    }
+
+    delete(name, value) {
+      const key = String(name);
+      const hasValue = value !== undefined;
+      const wanted = hasValue ? String(value) : null;
+      this._entries = this._entries.filter(
+        (entry) => entry[0] !== key || (hasValue && entry[1] !== wanted),
+      );
+    }
+
+    get(name) {
+      const key = String(name);
+      const found = this._entries.find((entry) => entry[0] === key);
+      return found === undefined ? null : found[1];
+    }
+
+    getAll(name) {
+      const key = String(name);
+      return this._entries.filter((entry) => entry[0] === key).map((entry) => entry[1]);
+    }
+
+    has(name, value) {
+      const key = String(name);
+      if (value === undefined) return this._entries.some((entry) => entry[0] === key);
+      const wanted = String(value);
+      return this._entries.some((entry) => entry[0] === key && entry[1] === wanted);
+    }
+
+    set(name, value) {
+      const key = String(name);
+      const entry = [key, String(value)];
+      const index = this._entries.findIndex((candidate) => candidate[0] === key);
+      if (index < 0) {
+        this._entries.push(entry);
+        return;
+      }
+      this._entries = this._entries.filter(
+        (candidate, position) => candidate[0] !== key || position === index,
+      );
+      this._entries[index] = entry;
+    }
+
+    sort() {
+      // `Array#sort` is stable in this host, matching the standard's
+      // "sort by name, keeping relative order for equal names".
+      this._entries.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
+    }
+
+    get size() {
+      return this._entries.length;
+    }
+
+    toString() {
+      return this._entries
+        .map((entry) => percentEncode(entry[0]) + "=" + percentEncode(entry[1]))
+        .join("&");
+    }
+
+    forEach(callback, thisArg) {
+      for (const [name, value] of this._entries) callback.call(thisArg, value, name, this);
+    }
+
+    *keys() {
+      for (const entry of this._entries) yield entry[0];
+    }
+
+    *values() {
+      for (const entry of this._entries) yield entry[1];
+    }
+
+    *entries() {
+      for (const entry of this._entries) yield [entry[0], entry[1]];
+    }
+
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+  }
+  Object.defineProperty(URLSearchParamsPolyfill.prototype, Symbol.toStringTag, {
+    value: "URLSearchParams",
+    configurable: true,
+  });
+
+  if (typeof globalThis.URLSearchParams === "undefined") {
+    globalThis.URLSearchParams = URLSearchParamsPolyfill;
+  }
+})();
 
 // ===========================================================================
 // `fetch` global — WHATWG subset backed by the host HTTP bridge

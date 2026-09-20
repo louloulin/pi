@@ -110,6 +110,23 @@ iteration, `instanceof` and `Buffer.isBuffer` behave like Node.
 `randomInt([min,] max)` (rejection sampling, no modulo bias). Entropy
 comes from `/dev/urandom`; there is no fallback PRNG on purpose.
 
+Hashing is bridged for SHA-1 and SHA-256 through the `crypto.digest` op
+(`crate::digest`, hand-rolled because the offline registry has no `digest`
+backend):
+
+- `createHash(algorithm)` with `update(data[, encoding])` (chaining) and
+  `digest([encoding])` — a `Buffer` by default, a string for `hex` /
+  `base64` / …; `sha256` / `sha-256` / `SHA-256` all parse.
+- `getRandomValues(typedArray)` (fills in place, 64 KiB quota per call,
+  rejects float and `DataView` views) and `randomUUID()`.
+- `subtle.digest(name | {name}, data)` — resolves to an `ArrayBuffer`.
+- `webcrypto` — `{ getRandomValues, randomUUID, subtle }`.
+
+`createHmac` and the key-based WebCrypto operations (`importKey`,
+`sign`, `encrypt`, …) still throw, and names other than SHA-1/SHA-256
+(`md5`, `sha512`, …) surface the host's "unsupported digest algorithm"
+error rather than a wrong digest.
+
 ### `node:zlib`
 
 The whole compression surface the repo uses is bridged. zstd comes from the
@@ -258,6 +275,31 @@ non-stream `input` → `ERR_INVALID_ARG_TYPE`; `question` after `close()` →
 Not covered: `emitKeypressEvents`, `cursorTo` / `moveCursor` / `clearLine` /
 `clearScreenDown`, `getCursorPos`, and the `readline/promises` entry point.
 
+## Globals
+
+`process` and `Buffer` are installed globally (they are Node globals, not just
+module exports), plus the web-platform names below. Every install is guarded
+with `typeof globalThis.X === "undefined"`, so an engine that grows its own
+implementation keeps it, and re-evaluating the shim is idempotent.
+
+| Global | Coverage |
+|---|---|
+| `process`, `Buffer` | See the module sections above. |
+| `TextEncoder` / `TextDecoder` | From `node:util`, installed when the engine lacks them. |
+| `fetch` / `Headers` / `Request` / `Response` | Backed by `host_fetch`; see [`EXTENSIONS.md`](EXTENSIONS.md#fetch-global). |
+| `atob(string)` / `btoa(string)` | Strict Latin-1 binary-string codec: one code unit per byte, `InvalidCharacterError` above `0xFF`, and `atob` rejects a length that is not a multiple of four or a character outside the base64 alphabet (whitespace is stripped first, as the spec requires). |
+| `crypto` | `webcrypto` from `node:crypto`: `getRandomValues` (in place, 64 KiB quota, integer views only), `randomUUID`, `subtle.digest`. |
+| `URLSearchParams` | `application/x-www-form-urlencoded` codec: `append` / `delete` / `get` / `getAll` / `has` / `set` / `sort` / `toString` / `forEach` / `keys` / `values` / `entries` / `size` / iterator, constructible from a query string, a record, a sequence of pairs or another `URLSearchParams`. |
+
+`URL` itself is still missing (see the frontier table): it needs a WHATWG URL
+parser, and nothing in the repo constructs one yet. The clearest consumer of the
+globals above is the legacy OAuth extension
+`packages/coding-agent/examples/extensions/custom-provider-anthropic/index.ts`,
+whose PKCE step is `crypto.getRandomValues` → `btoa` →
+`crypto.subtle.digest("SHA-256", …)` → `new URLSearchParams({ … })`; the
+`base64_globals_…` / `crypto_globals_…` / `url_search_params_…` tests in
+`tests/web_globals.rs` replay it, including the RFC 7636 appendix B vector.
+
 ## Coverage against the repo's own extensions
 
 | Extension | Builtins it imports | Status |
@@ -317,11 +359,11 @@ plain "undefined is not a function":
 |---|---|---|
 | `node:module`'s disk resolution (`require` of a real path, `registerHooks`, `findSourceMap`) | The virtual-module sandbox deliberately stops at the bridged set; `createRequire` / `Module` / `builtinModules` themselves **are** bridged (LUM-1129). | A deliberate decision to widen the sandbox (e.g. require-from-`node_modules`-only); `doom-overlay/doom-engine.ts` would then load its local CJS blob. |
 | `node:stream` / `node:http` / `node:net` / `node:worker_threads` | No event loop integration for streams. | Substantial; probably out of scope for the QuickJS host. |
-| `crypto.createHash` / `createHmac` / `webcrypto` | No digest backend is bundled in the workspace. | Add a small SHA-256 implementation (`sha2`) or vendor a JS one. |
+| `crypto.createHmac` / key-based WebCrypto (`importKey`, `sign`, `encrypt`, …) / algorithms other than SHA-1 + SHA-256 | Only one-shot digests are bridged (`crypto.digest`); an HMAC or cipher needs a backend the workspace does not bundle, and a wrong result would be worse than a clear failure. | Add the primitive (or a crate that provides it) and a second bridge op. |
 | `fs.watch`, `fs.createReadStream/WriteStream` | Needs a filesystem watcher and stream plumbing. | `notify` crate + stream bridge. |
 | `os.cpus()`, `os.totalmem()`, `os.networkInterfaces()` | Machine topology has no consumer yet; inventing numbers would be worse than failing. | Straightforward `sysinfo`-style additions when needed. |
 | `process.argv`, `process.execPath`, `process.stdin`, `process.kill` | The host owns the process; extensions must not steer it. | Probably never. |
-| `node:test`, `node:assert` global, `atob`/`btoa`, `URL` | Engine-level globals QuickJS does not ship (`TextEncoder` / `TextDecoder` are now polyfilled from `node:util` and installed globally, and `AbortController` / `AbortSignal` by the extension shim for `pi.exec` cancellation — see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)). | Small JS polyfills; add on demand. `fetch` **is** bridged now (LUM-1135): `fetch` / `Headers` / `Request` / `Response` are backed by the `host_fetch` import over the host's `reqwest` stack, so the repo's own `.pi/extensions/import-repro.ts` runs (see [`EXTENSIONS.md`](EXTENSIONS.md#fetch-global)). |
+| `node:test`, `node:assert` global, `URL` | Engine-level globals QuickJS does not ship (`TextEncoder` / `TextDecoder` are now polyfilled from `node:util` and installed globally, `AbortController` / `AbortSignal` by the extension shim for `pi.exec` cancellation — see [`EXTENSIONS.md`](EXTENSIONS.md#host-imports-rust--js)), and `atob` / `btoa` / `crypto` / `URLSearchParams` are polyfilled by the shim now (LUM-1159) — see [Globals](#globals). | `URL` needs a WHATWG parser (QuickJS has none); add when an extension actually constructs one. `fetch` **is** bridged (LUM-1135): `fetch` / `Headers` / `Request` / `Response` are backed by the `host_fetch` import over the host's `reqwest` stack, so the repo's own `.pi/extensions/import-repro.ts` runs (see [`EXTENSIONS.md`](EXTENSIONS.md#fetch-global)). |
 
 The upstream examples are the compatibility yardstick: the test
 `upstream_node_imports_are_all_bridged_or_documented`

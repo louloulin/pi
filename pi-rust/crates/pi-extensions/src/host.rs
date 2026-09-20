@@ -3105,6 +3105,20 @@ fn node_call(op: &str, args: &serde_json::Value) -> Result<serde_json::Value, No
             Ok(serde_json::json!({ "base64": base64_encode(&bytes) }))
         }
 
+        "crypto.digest" => {
+            // `crypto.subtle.digest` / `createHash` symmetric backing: the
+            // shim buffers the message and asks for one digest. See
+            // `crate::digest` for why the algorithms are hand-rolled.
+            let argument = node_arg_str(args, "algorithm")?;
+            let algorithm = crate::digest::Algorithm::parse(&argument).ok_or_else(|| {
+                NodeError::invalid(format!("unsupported digest algorithm `{argument}`"))
+            })?;
+            let bytes = node_arg_bytes(args, "base64")?;
+            Ok(serde_json::json!({
+                "base64": base64_encode(&crate::digest::digest(algorithm, &bytes))
+            }))
+        }
+
         // -- zlib ------------------------------------------------------------
         //
         // Two compression backends: the zstd family (the workspace already

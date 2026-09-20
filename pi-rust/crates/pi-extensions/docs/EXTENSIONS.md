@@ -250,6 +250,14 @@ bridged too (`spawn` / `execFile` / `exec`, streaming stdio via
 `host_child_read` / `host_child_wait`); a live child outlives the call
 that created it, so it uses two extra async host imports.
 
+The web-platform names extensions treat as ambient are polyfilled by the
+shim when the engine lacks them: `atob` / `btoa`, `crypto` (`getRandomValues`
+/ `randomUUID` / `subtle.digest`, backed by the host `crypto.digest` op over
+SHA-1 / SHA-256) and `URLSearchParams`. `npx`-style legacy OAuth extensions
+such as `custom-provider-anthropic/index.ts` need exactly this set to build a
+PKCE challenge and an authorize URL. `URL` is still unbridged; see the
+[globals table](NODE_BUILTINS.md#globals).
+
 ### SDK virtual modules (`@earendil-works/*`)
 
 Upstream extensions also import pi's own SDK packages. The shim ships
@@ -473,7 +481,7 @@ or a Stage 4+ follow-up:
 | ESM `import` statements                 | ✅ Supported   | `import type { … }` lines are erased; value imports resolve through the virtual module map (`node:*`, `node:path`, `node:url`, `typebox`, `@earendil-works/*`, …); anything else fails with a readable error naming the specifier. |
 | `require("node:fs")` (CJS)             | ✅ Supported   | `require` resolves through the same virtual module map as the ESM rewrite. |
 | `node:fs` / `node:fs/promises`          | ✅ Subset      | Sync + promise + callback forms; see [`docs/NODE_BUILTINS.md`](NODE_BUILTINS.md) for the op list and divergences. |
-| `node:os` / `node:buffer` / `node:crypto` / `node:process` / `node:util` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals; `node:util` is pure JS (`promisify` / `inspect` / `format` / `types` / `TextEncoder` / …) and installs `TextEncoder` / `TextDecoder` globally when the engine lacks them. |
+| `node:os` / `node:buffer` / `node:crypto` / `node:process` / `node:util` | ✅ Subset | Idem. `Buffer` and `process` are also installed as globals; `node:util` is pure JS (`promisify` / `inspect` / `format` / `types` / `TextEncoder` / …) and installs `TextEncoder` / `TextDecoder` globally when the engine lacks them. `node:crypto` covers entropy (`randomBytes` / `randomUUID` / `randomInt` / `getRandomValues`) plus SHA-1 / SHA-256 digests (`createHash`, `subtle.digest`); `createHmac` and key-based WebCrypto still throw. |
 | `node:child_process`                    | ✅ Subset      | `spawn` / `execFile` / `exec` with streaming stdio; a live child outlives the creating call via `host_child_read` / `host_child_wait`. Extensions that only shell out should still prefer the documented `pi.exec` API. |
 | `fetch` / `Headers` / `Request` / `Response` | ✅ Subset | Backed by the `host_fetch` import over the same `reqwest` stack the providers use; `body` is buffered (no streams), `signal` and a non-standard `timeout` are honoured. See the [`fetch` section](#fetch-global). |
 | `@earendil-works/pi-tui`                | ✅ Subset      | Components (`Text` / `Box` / `Container` / `Markdown` / `SelectList` / `SettingsList` / `Editor` / `Input` / …) and the ANSI geometry helpers, as free-standing renderables — no live terminal. See [`docs/SDK_MODULES.md`](SDK_MODULES.md). |
