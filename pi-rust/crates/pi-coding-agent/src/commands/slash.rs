@@ -2,8 +2,9 @@
 //!
 //! Stage 4 ships the minimum command set required by the acceptance
 //! criteria: `/help`, `/clear`, `/model`, `/session`, `/exit`,
-//! `/resume`, plus `/trust` and `/settings`. Each is parsed into a
-//! [`SlashCommand`] variant and dispatched by `interactive.rs`.
+//! `/resume`, plus `/trust`, `/settings`, `/compact` and `/export`. Each is
+//! parsed into a [`SlashCommand`] variant and dispatched by
+//! `interactive.rs`.
 
 /// Slash command enum — one variant per supported slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,15 @@ pub enum SlashCommand {
     Model,
     /// `/session` — print session info.
     Session,
+    /// `/export [path]` — write the current session to a file.
+    ///
+    /// A path ending in `.jsonl` exports the session branch as JSONL;
+    /// anything else (or no path at all) writes a self-contained HTML
+    /// file. Mirrors upstream `handleExportCommand`.
+    Export {
+        /// Optional output path, with surrounding quotes removed.
+        path: Option<String>,
+    },
     /// `/exit` — quit the interactive session.
     Exit,
     /// `/resume` — list and pick a previous session file.
@@ -54,6 +64,9 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "clear" => SlashCommand::Clear,
         "model" => SlashCommand::Model,
         "session" => SlashCommand::Session,
+        "export" => SlashCommand::Export {
+            path: (!args.is_empty()).then(|| strip_quotes(args)),
+        },
         "resume" => SlashCommand::Resume,
         "settings" => SlashCommand::Settings,
         "compact" => SlashCommand::Compact {
@@ -78,6 +91,19 @@ fn parse_trust_decision(args: &str) -> Option<bool> {
     }
 }
 
+/// Strip one pair of surrounding single or double quotes from a `/export`
+/// path (upstream `getPathCommandArgument` accepts `"/tmp/my file.html"`).
+fn strip_quotes(args: &str) -> String {
+    let trimmed = args.trim();
+    let quoted = (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2);
+    if quoted {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Slash-command help text rendered by `/help` and the App's status
 /// bar hint.
 pub fn help_text() -> String {
@@ -87,6 +113,7 @@ pub fn help_text() -> String {
     out.push_str("  /clear    clear the message view\n");
     out.push_str("  /model    pick a model (opens selector)\n");
     out.push_str("  /session  show the current session info\n");
+    out.push_str("  /export [path] export the session (HTML, or JSONL for a .jsonl path)\n");
     out.push_str("  /resume   resume a previous session\n");
     out.push_str("  /settings show or change interface settings\n");
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
@@ -115,6 +142,28 @@ mod tests {
         assert_eq!(handle_command("/clear").unwrap(), SlashCommand::Clear);
         assert_eq!(handle_command("/model").unwrap(), SlashCommand::Model);
         assert_eq!(handle_command("/session").unwrap(), SlashCommand::Session);
+        assert_eq!(
+            handle_command("/export").unwrap(),
+            SlashCommand::Export { path: None }
+        );
+        assert_eq!(
+            handle_command("/export out.html").unwrap(),
+            SlashCommand::Export {
+                path: Some("out.html".into())
+            }
+        );
+        assert_eq!(
+            handle_command("/export \"/tmp/my session.html\"").unwrap(),
+            SlashCommand::Export {
+                path: Some("/tmp/my session.html".into())
+            }
+        );
+        assert_eq!(
+            handle_command("/export out.jsonl").unwrap(),
+            SlashCommand::Export {
+                path: Some("out.jsonl".into())
+            }
+        );
         assert_eq!(handle_command("/exit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Exit);
         assert_eq!(handle_command("/resume").unwrap(), SlashCommand::Resume);
