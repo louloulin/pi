@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod auth;
+pub mod env_api_keys;
 pub mod json_parse;
 pub mod models;
 pub mod overflow;
@@ -21,6 +23,17 @@ pub mod utils;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
+pub use auth::{
+    default_provider_auth_context, env_api_key_auth, lazy_oauth, resolve_provider_auth, ApiKeyAuth,
+    ApiKeyCredential, AuthCheck, AuthContext, AuthError, AuthEvent, AuthOperationOptions,
+    AuthResolutionOverrides, AuthResult, AuthType, Credential, CredentialInfo, CredentialStore,
+    InMemoryCredentialStore, LazyOAuthConfig, ModelAuth, ModelsError, ModelsErrorCode, OAuthAuth,
+    OAuthCredential, ProviderAuth, ProviderEnv, ProviderHeaders,
+};
+pub use env_api_keys::{
+    find_env_keys, get_env_api_key, ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV,
+    ANTHROPIC_OAUTH_TOKEN_ENV,
+};
 pub use json_parse::{
     close_partial_json, parse_json_with_repair, parse_streaming_json, parse_value_with_repair,
     repair_json,
