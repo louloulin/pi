@@ -14336,3 +14336,93 @@ $ head -5 pi-rust/crates/pi-session/scripts/make-ts-fixture.mjs
 * 开工 `33G / 50G`（70%），余 15G。本轮自建 `/tmp/pi-target-1203`（fmt/clippy/test 用时 1m13s + 5m35s）。
 * **已清理**（run 均已 `completed`、无进程持有、逐一 `fuser -m` 复核）：`/tmp/lum-1197-target`（2.4G）、`/tmp/pi-target-1192`（863M）、`/tmp/lum-1200-target`（2.6G）、`/tmp/pi-target-1202`（2.4G）、本 run 的 `/tmp/pi-target-1203`。
 * **保留** `/tmp/pi-target-lum1199`（LUM-1199 在飞）。
+
+## LUM-1207 round — 核验 LUM-1199 切片 2 已由 worker 直推 tip（`af9e351b7`，全量 **138 / 2075 / 0 / 2**）→ 处置 08:50 服务端 503 打死的三条 run：LUM-1205 重派 + LUM-1204 晋升 + LUM-1206（重复轮）停放
+
+本轮是 **LUM-981** 的推进/协调轮。与前几轮不同：**本轮没有任何可合并分支**，主要工作是核验一条已被 worker 直推的 tip + 处置一次服务端 503 打死三条 run 的后果。
+
+### 一、开工盘点：tip 已被 worker 推进，本轮无合并动作
+
+```console
+$ git ls-remote origin feature/pi.rs
+af9e351b7aee06103af2ff76a98af3b191cfa260      refs/heads/feature/pi.rs
+
+$ git log --oneline -3 origin/feature/pi.rs
+af9e351b7 Merge origin/feature/pi.rs (LUM-1203 status doc) into work/lum-1199
+bacd5cb20 feat(pi-coding-agent): 扩展 streamSimple 适配器 + 凭据优先级 + 文档（LUM-1199 切片 2）
+b50fbb566 docs(status): LUM-1203 协调轮 …
+```
+
+* **LUM-1199 的 worker run 第二次自己把切片合进并直推了 `feature/pi.rs`**（`b50fbb566..af9e351b7`，非 force；`af9e351b7` 是 `bacd5cb20` 与 `b50fbb566` 的 merge）→ 按 LUM-1201 第七节第 3 条：**只核验、不重复合并**。
+* 工作区 `mirror/feature/pi.rs` 仍停在 `b50fbb566`（陈旧），再次印证「开工必须 `git ls-remote origin feature/pi.rs` 直读远端」。
+* `multica daemon status --output json`：开工 `running_task_count = 1`（仅本 run）。
+
+### 二、08:50 服务端 503 一次打死三条 run
+
+三条在飞 run 在 **08:50** 同刻以 `503: {"message":"Service temporarily unavailable","type":"api_error"}` 终止（`agent_error.provider_server_error`）：
+
+| issue | run | 产物 | 本轮处置 |
+| --- | --- | --- | --- |
+| LUM-1199（Stage 51） | `01a0bdca-af86` | **有**：切片 2 已 commit 并直推 tip（`bacd5cb20` + merge `af9e351b7`） | `in_progress` → `in_review`（`--no-start`）✓ |
+| LUM-1205（Stage 54） | `01a0bdf4-25cf` | **无**：`work/LUM-1205 == 0a70fc4e8`（零提交） | **重派**（`multica issue rerun`，新 run `01a0be12-55ea` 已 `running`）✓ |
+| LUM-1206（同目标 autopilot 重复轮） | `01a0bdf8-e4f9` | **无** | **停放 `backlog`**（`--no-start`），避免第四个并发轮 |
+
+→ 这是本项目首次出现「**终止原因是服务端 503**」（此前是 provider EOF / 16384 自爆）。处置原则不变：**先看 work 分支 SHA** —— 有提交 = 直接核验合并，零提交 = 重派。
+
+### 三、核验 tip（`af9e351b7`）：私有 target dir 全量门 **138 / 2075 / 0 / 2**
+
+`b50fbb566..af9e351b7` 是 **纯代码 + 文档**（5 文件 / +963 / −59，全部落在 `pi-extensions` + `pi-coding-agent`）：
+
+```console
+$ git diff --stat b50fbb566 af9e351b7
+ pi-rust/crates/pi-coding-agent/src/extensions/wiring.rs | 820 ++++++++-
+ pi-rust/crates/pi-coding-agent/src/provider.rs          |  17 +
+ pi-rust/crates/pi-extensions/docs/EXTENSIONS.md         |   2 +-
+ pi-rust/crates/pi-extensions/docs/SDK_MODULES.md        |  88 ++-
+ pi-rust/crates/pi-extensions/src/host.rs                |  95 ++-
+```
+
+```console
+$ CARGO_TARGET_DIR=/tmp/pi-target-1207 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+    cargo fmt --all -- --check                                        # OK
+$ ... cargo clippy --workspace --all-targets --offline -- -D warnings  # exit 0（1m15s）
+$ ... cargo test --workspace --offline --no-fail-fast                  # exit 0（约 5.5m）
+  suites = 138, passed = 2075, failed = 0, ignored = 2
+```
+
+* 上一轮基线（LUM-1203 的 `9639b3fae`）= **138 / 2070 / 0 / 2** → 本轮 **+5 passed、套件数不变**：LUM-1199 切片 2 自报新增 5 个端到端用例（native `Provider` → 路由 → `streamSimple` 事件、stored api-key 与 stored OAuth access token 优先于声明 key、声明式快照跳过 handler 型 provider、handler 失败在流内报错），零倒退。
+* LUM-1199 自报的 `cargo test -p pi-coding-agent -p pi-extensions`（42 测试目标 / 761 用例 / 0 failed）在本轮**全量门**下复现。
+
+### 四、可合并性扫描（`origin` + `mirror` 双向）
+
+对每个 `refs/heads` 与 `refs/remotes` 的 `work/*`、`agent/devbox1/*` 算 `rev-list --count tip..ref`（ahead）与 `git cherry tip ref | grep -c '^+'`（patch 级唯一）：
+
+* **零个可合并分支**。所有 ahead>0 的分支都是 **behind 数百提交的旧树**，`cherry` 唯一提交（rustfmt 对齐 / 早期 Gemini provider / QuickJS host / telemetry 设计）都已被 tip 的更新实现覆盖 —— 维持 LUM-1173 / 1187 / 1191 / 1193 / 1195 / 1201 / 1202 / 1203 的结论，逐个不合并。
+* `work/LUM-1205 == 0a70fc4e8`、`work/LUM-1206 == b50fbb566` 都是基线自身（零产物）。
+
+### 五、派发：满槽 **3/3**（本 run + LUM-1205 重派 + LUM-1204 晋升）
+
+| issue | 动作 | 依据 |
+| --- | --- | --- |
+| **LUM-1204**（Stage 53，`backlog` → `todo`） | compat 八个 lazy api family 的 host 桥接 | issue 正文写死「**LUM-1199 合入 `feature/pi.rs` 后由协调轮晋升**」；LUM-1199 已在 tip `af9e351b7`，依赖解除 ✓ |
+| **LUM-1205**（Stage 54） | `rerun`（零产物） | run 被 503 打断且 work 分支零提交 |
+| **LUM-1206**（同目标 autopilot 重复轮） | `todo` → `backlog`（`--no-start`） | 与本轮完全同题、run 同样被 503 打死且零产物；停放以守住「最多 3 个同时运行」 |
+| **LUM-1199**（Stage 51） | `in_progress` → `in_review`（`--no-start`） | 产物已在 tip 且本轮全量门复现 |
+
+文件面互斥：LUM-1204 只碰 `pi-extensions/runtime/pi-ext-shim.mjs` + `docs/SDK_MODULES.md`；LUM-1205 只碰 `pi-session/**`（正文显式排除 `pi-extensions` / `pi-coding-agent`）→ **零重叠**。
+
+派发后 `multica daemon status`：`running_task_count = 3` / `active_task_count = 3` ✓。
+
+### 六、frontier（本轮后）
+
+1. **质量门基线** = **138 套件 / 2075 passed / 0 failed / 2 ignored（`af9e351b7`，本轮实跑）**；下一欠账点 = LUM-1204 或 LUM-1205 任一合入时。
+2. **Stage 51（LUM-1199）已交付并核验**：native `Provider` 对象 + `oauth` 块 + `streamSimple` handler + 凭据优先级 + 文档兼容表；刻意差异（`cost` 不可表示、`streamSimple` 缓冲投递无中途 abort、`oauth` 回调不驱动）已写进 `EXTENSIONS.md`。
+3. **Stage 53（LUM-1204，本轮晋升）**：compat 八个 lazy api family 的 host 桥接。
+4. **Stage 54（LUM-1205，本轮重派）**：`pi-session` 上游 storage format 4 读路径 + 真 TS fixture。
+5. **Stage 55 / 56**（session 写路径 v4 + `migrate`；`usage_ledger` / `session-stats` / `branch_*`）：等 LUM-1205 落盘后晋升（写路径要碰 `pi-coding-agent` session 命令）。
+6. **Autopilot 重复轮**：本轮同题 issue 三层（LUM-1182 仍 `todo`、LUM-1206 本轮停放、LUM-1207 本 run）。建议 owner 把周期放宽到 ≥1h 或对同一 autopilot 目标串行化（维持 LUM-1195 / 1196 / 1198 / 1201 / 1202 / 1203 建议）。
+
+### 七、磁盘（本轮）
+
+* 开工 `33G / 50G`（71%），余 14G；清理两条 run 已死、无进程持有的 target dir：`/tmp/pi-target-lum1199`（**11G**）、`/tmp/pi-target-1205`（492M）→ 余 **25G**。
+* 本轮自建 `/tmp/pi-target-1207`（frugal 配置下 fmt/clippy/test 后约 2.4G），收尾清理。
