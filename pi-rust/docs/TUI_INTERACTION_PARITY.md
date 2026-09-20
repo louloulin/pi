@@ -175,3 +175,32 @@ pub const CONSUMED_APP_ACTIONS: &[&str] = &[/* app.interrupt, … */];
 - 停在 frontier 上、等槽位空出的：Stage 67（LUM-1230）、Stage 68、Stage 69，
   以及 Stage 70 / 71 的收尾。
 - 本轮产物：本文 + `docs/screenshots/lum1240-*.png`（6 张），合入 `feature/pi.rs`。
+
+## 10. 第十一轮（LUM-1242）：§4 的 4 条死键位 + `Ctrl+L` 语义，已收口（含与 LUM-1245 的撞车）
+
+§6 的补丁规格被**两条并行分支同时实现**：`work/LUM-1245-tui-keybindings` 合入
+`0b351ff5d`（合并点 `b435e2dbc`），本轮把自己那份实现降级为只交增量。下面是收口后的状态。
+
+| §4 的条目 | 收口方式 | 落点 |
+| --- | --- | --- |
+| `app.model.select`（`Ctrl+L`）语义反了 | driver 在 App 之前抢下 chord，开的就是 `/model` 的 `Pick a model`；`App::step_key` 里硬编码的「清空转写」删掉（清空仍可 `/clear`） | `pi-coding-agent/src/interactive.rs`（`open_model_selector`） |
+| 广告了却没人消费 | 新增消费轴 `app_action_is_consumed`，启动头与 `/hotkeys` 都用它过滤 | `pi-tui/src/keybindings.rs`、`pi-tui/src/locale.rs`、`commands/slash.rs` |
+| `app.suspend`（`Ctrl+Z`）/ `app.editor.external`（`Ctrl+G`） | **仍不实现，改为不再广告**（两个面都摘掉） | 同上 + `pi-coding-agent/tests/startup_header.rs` 的 `KNOWN_UNWIRED` tripwire |
+| `app.thinking.cycle`（`Shift+Tab`） | Stage 67（LUM-1230）已接线；本轮把它补进 `/hotkeys` 的 `app` 组（此前只有启动头广告） | `commands/slash.rs` 的 `APP` 表 |
+| 第三条广告面 `/help` | `Ctrl+L      clear the screen` → `open the model selector` | `commands/slash.rs::help_text` |
+
+三个广告面（启动头 / `/hotkeys` / `/help`）现在一致；一致性由测试守着，不再靠人工核对：
+
+- `pi-coding-agent/tests/startup_header.rs`：`KNOWN_UNWIRED` + `SELECTOR_SCOPED` 两个清单，
+  「广告 = 已消费」的契约按**和弦单元格集合**比较（按 id 逐个 `contains` 不可判定：
+  `Shift+T` 是 `Shift+Tab` 的前缀，`ctrl+p` 同时属于两个 id）。
+- `pi-tui/tests/startup_header.rs::the_header_keeps_the_live_component_rows`：
+  `tui.*` 行不被过滤（本轮的 filter 第一版曾静默删掉 `Ctrl+K to delete to end`，
+  只有 PTY 抓帧发现）。
+- `pi-coding-agent/src/interactive.rs`：`Ctrl+L` 三条 driver 行为测试（开选择器 / 提交切模型 /
+  覆盖层打开时惰性）。
+- `pi-coding-agent/src/commands/slash.rs`：`/help` 图例测试 + 两份 `format_chord` 的一致性测试。
+
+实机 A/B（BEFORE `b435e2dbc` / AFTER 本轮）与差距实测数值见
+`TUI_UX_AUDIT.md` §17.3 / §17.4；截图 `docs/screenshots/lum1242-*.png`（含 `.png.txt` 字符网格）
+与 `lum1245-ctrl-l-model-selector.png` 并存，互不覆盖。

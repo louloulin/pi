@@ -179,7 +179,7 @@ pub fn help_text() -> String {
     out.push_str("  Home / End  jump to the start / end of the chat log\n");
     out.push_str("  Ctrl+C      abort the current turn (or exit on idle)\n");
     out.push_str("  Ctrl+D      exit on an empty prompt\n");
-    out.push_str("  Ctrl+L      clear the screen\n");
+    out.push_str("  Ctrl+L      open the model selector\n");
     out.push_str("  Ctrl+U      clear the prompt buffer\n");
     out.push_str("  Esc         close selector / cancel turn\n");
     out
@@ -323,6 +323,10 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ("app.clear", "clear the prompt (twice: exit)"),
         ("app.exit", "exit when the prompt is empty"),
         ("app.suspend", "suspend to the background"),
+        // Stage 67 (LUM-1230) gave `app.thinking.cycle` a consumer; the row
+        // has to come back with it, or the header advertises Shift+Tab while
+        // `/hotkeys` stays silent (LUM-1242).
+        ("app.thinking.cycle", "cycle the thinking level"),
         ("app.model.cycleForward", "cycle to the next model"),
         ("app.model.cycleBackward", "cycle to the previous model"),
         ("app.message.copy", "copy the last assistant message"),
@@ -399,6 +403,10 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
 
 /// Title-case a chord id for display (`ctrl+p` → `Ctrl+P`, `pageUp` →
 /// `PgUp`), matching the legend style in [`help_text`].
+///
+/// Duplicated on purpose from `pi_tui::locale::format_chord` (the header is
+/// rendered by the App, which cannot reach into this crate);
+/// `the_two_chord_formatters_agree` keeps the copies from drifting.
 fn format_chord(chord: &str) -> String {
     chord
         .split('+')
@@ -602,6 +610,32 @@ mod tests {
     }
 
     #[test]
+    fn the_two_chord_formatters_agree() {
+        // `pi-tui` renders the startup header and `pi-coding-agent` renders
+        // `/hotkeys`; both need `ctrl+p` → `Ctrl+P`, and the App cannot call
+        // into this crate, so the mapping is duplicated. A drift here means
+        // the same action is spelled two ways on two surfaces (LUM-1242).
+        for chord in [
+            "ctrl+p",
+            "shift+ctrl+p",
+            "alt+h",
+            "escape",
+            "ctrl+c",
+            "pageUp",
+            "alt+enter",
+            "shift+tab",
+            "ctrl+o",
+            "alt+up",
+        ] {
+            assert_eq!(
+                format_chord(chord),
+                pi_tui::locale::format_chord(chord),
+                "the two copies of the chord formatter disagree on {chord}"
+            );
+        }
+    }
+
+    #[test]
     fn help_text_documents_scroll_keys() {
         // The fullscreen App owns the scrollback (alternate screen), so the
         // legend has to name the scroll bindings
@@ -614,6 +648,25 @@ mod tests {
     #[test]
     fn help_text_lists_hotkeys_command() {
         assert!(help_text().contains("/hotkeys"), "{}", help_text());
+    }
+
+    #[test]
+    fn the_help_legend_describes_ctrl_l_as_the_model_selector() {
+        // `/help` is the third advertisement surface (the startup header and
+        // `/hotkeys` are the other two), and it kept saying `clear the screen`
+        // long after the driver had claimed `app.model.select` for the model
+        // selector — the chord the shipped header advertises.
+        // `interactive.rs::ctrl_l_opens_the_model_selector` pins the behavior
+        // this legend describes; this test pins the legend.
+        let text = help_text();
+        assert!(
+            text.contains("Ctrl+L      open the model selector"),
+            "the /help legend must describe app.model.select, not a screen wipe:\n{text}"
+        );
+        assert!(
+            !text.contains("clear the screen"),
+            "no legend row may still advertise the removed clear-the-transcript chord:\n{text}"
+        );
     }
 
     #[test]
@@ -667,13 +720,23 @@ mod tests {
             "app.model.select missing:\n{text}"
         );
         assert!(text.contains("Ctrl+L"), "{text}");
-        // The invariant itself, not just the two known rows: every advertised
-        // `app.*` id must have a consumer.
-        for id in crate::keybindings::APP_KEYBINDING_IDS {
-            if !pi_tui::keybindings::app_action_is_consumed(id) {
-                assert!(!text.contains(id), "{id} advertised but not wired");
-            }
-        }
+        // The exhaustive contract — the group's chord cells are exactly the
+        // cells of the bound, consumed, non-selector-scoped `app.*` ids — lives
+        // in `tests/startup_header.rs`, where it can build both sets. Here the
+        // two rows that were lying are pinned directly, by their rendered cell
+        // rather than by substring (`Shift+T` is a prefix of `Shift+Tab`, and
+        // `ctrl+p` is bound to two ids, so neither `contains` nor a per-id
+        // lookup can answer "is this row printed" — LUM-1242).
+        let cell_is_advertised = |chords: &[&str]| {
+            let rendered: Vec<String> = chords.iter().map(|c| format_chord(c)).collect();
+            let prefix = format!("  {:<16} ", rendered.join(" / "));
+            text.lines().any(|line| line.starts_with(&prefix))
+        };
+        assert!(
+            !cell_is_advertised(&["ctrl+z"]),
+            "app.suspend is advertised on /hotkeys but has no consumer:\n{text}"
+        );
+        assert!(cell_is_advertised(&["ctrl+l"]), "{text}");
     }
 
     #[test]

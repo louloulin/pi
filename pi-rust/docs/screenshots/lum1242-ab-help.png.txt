@@ -1,0 +1,78 @@
+# lum1242-ab-help.png — chars, 100x34 cells
+#
+# BEFORE = origin/feature/pi.rs @ b435e2dbc (LUM-1245's Ctrl+L / wired-axis fix already merged)
+# AFTER  = work/LUM-1242 @ this commit (this round's delta)
+# binary = pi-rust/target/debug/pi, --model faux/faux-model, TERM=xterm-256color, PI_LANG=en
+# harness = pty.fork + pyte (deliberately not committed: pyte/Pillow must never gate the build)
+
+===== [1] BEFORE — /help says `Ctrl+L clear the screen` (false: Ctrl+L opens the model selector) ========
+
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> display name /model pick a model (opens selector) /session show the current session info /export │
+> [path] export the session (HTML, or JSONL for a .jsonl path) /resume resume a previous session   │
+> /tree navigate the session tree and switch branches /fork branch a new session from a user messag┃
+> /clone copy the current session into a new session file /settings show or change interface       ┃
+> settings /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)     ┃
+> /trust show or set project trust (/trust yes|no) /compact summarize the conversation prefix to   ┃
+> free context /hotkeys list the keyboard shortcuts /exit quit the interactive session keys: Enter ┃
+> submit prompt Up / Down navigate prompt history PgUp/PgDn scroll the chat log one page Home / End┃
+> jump to the start / end of the chat log Ctrl+C abort the current turn (or exit on idle) Ctrl+D   ┃
+> exit on an empty prompt Ctrl+L clear the screen Ctrl+U clear the prompt buffer Esc close selector┃
+> / cancel turn                                                                                    ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7167e05ed65b7                              in 0 out 0 ?/8.2k  ? for help
+
+===== [2] AFTER — /help says `Ctrl+L open the model selector` ========
+
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> display name /model pick a model (opens selector) /session show the current session info /export │
+> [path] export the session (HTML, or JSONL for a .jsonl path) /resume resume a previous session   │
+> /tree navigate the session tree and switch branches /fork branch a new session from a user messag┃
+> /clone copy the current session into a new session file /settings show or change interface       ┃
+> settings /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)     ┃
+> /trust show or set project trust (/trust yes|no) /compact summarize the conversation prefix to   ┃
+> free context /hotkeys list the keyboard shortcuts /exit quit the interactive session keys: Enter ┃
+> submit prompt Up / Down navigate prompt history PgUp/PgDn scroll the chat log one page Home / End┃
+> jump to the start / end of the chat log Ctrl+C abort the current turn (or exit on idle) Ctrl+D   ┃
+> exit on an empty prompt Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close  ┃
+> selector / cancel turn                                                                           ┃
+> type a prompt — /help for commands
+Faux test model  session-18d716a8aa946dc6                              in 0 out 0 ?/8.2k  ? for help

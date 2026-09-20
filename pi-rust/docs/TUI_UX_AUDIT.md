@@ -1373,3 +1373,150 @@ SGR 报成裸的 6 位 hex，于是所有 truecolor 单元格退化成默认灰�
   模型上带级别段）；`pi-coding-agent/src/interactive.rs` 9 条（cycle 前进 / 回绕 /
   不支持回报、`/thinking <level>` 直设与不可用级别、`/thinking` 选择器与预选中、
   选择器取值过滤、`defaultThinkingLevel` 落盘往返 + 写失败回报）。
+
+## 十七、第十一轮（LUM-1242）：广告面可信度的增量收口 —— 与并行分支撞车后的真实合并
+
+§16 之后，第十轮的审计（LUM-1240）把「4 条被广告却无人消费的键位」和
+「`Ctrl+L` 语义反了」写成了补丁规格。本轮开工时**两条并行分支在互不知情的情况下各自实现了
+同一组 P0 补丁**：`work/LUM-1245-tui-keybindings` 先一步合入
+`feature/pi.rs`（`0b351ff5d` → 合并点 `b435e2dbc`），本轮将自己那份实现降级为
+「只交增量」——两份同时上线会让仓库里出现两套 `CONSUMED_APP_ACTIONS`、两条
+wired 判定路径，那比原来的缺陷更难维护。
+
+### 17.1 机制归并：为什么留下的是 `pi-tui` 侧那一份
+
+| 方案 | 列表位置 | 传给 App 的方式 | 结论 |
+| --- | --- | --- | --- |
+| LUM-1245（已合入） | `pi-tui::keybindings::CONSUMED_APP_ACTIONS` | 无参数：`app_action_is_consumed(id)` | **采用** |
+| 本轮早先实现 | `pi-coding-agent::keybindings::CONSUMED_APP_ACTIONS` | `AppConfig.wired_app_actions: Option<&'static [&'static str]>` 由 driver 注入 | 废弃 |
+
+分层上「库不该内置 coding-agent 的动作清单」是成立的，但 `pi-tui` 的
+`locale.rs::STARTUP_HINTS` **本来就逐条写着 `app.suspend` / `app.thinking.cycle` 这些 id**
+——耦合早已存在，把「有没有消费者」的答案放在同一个文件里并不新增依赖，而 config 注入
+要多一条只在测试里有意义的 `None` 分支。两组测试也不同：LUM-1245 的 `is_wired()` 无参数，
+本轮那份可以在测试里注入任意列表——**代价是本轮早先的实现真的把 `tui.*` 行也过滤掉了**：
+第一版 `is_wired` 对所有 `Chord` id 生效，`tui.editor.deleteToLineEnd` 不在清单里，
+于是启动头上的 `Ctrl+K to delete to end`（完全可用）被静默删除；静态测试全绿，
+是真实 PTY 抓帧才发现的。修复后的判定规则是
+**`!id.starts_with("app.") || wired.contains(&id)`**，LUM-1245 的 `app_action_is_consumed`
+从一开始就是这个形状，本轮补的是把它钉住的测试（§17.2 第 4 条）。
+
+### 17.2 本轮真正落地的增量
+
+1. **第三条广告面 `/help`**：`help_text()` 一行一直写着 `Ctrl+L      clear the screen`，
+   两个上游面（启动头、`/hotkeys`）改了它没改。改为 `open the model selector`。
+   新增 `the_help_legend_describes_ctrl_l_as_the_model_selector`。
+2. **`/hotkeys` 漏广告 `app.thinking.cycle`**：Stage 67（LUM-1230）把 `Shift+Tab` 接到了
+   `handle_thinking_cycle`，LUM-1245 也把它放进了消费清单，但 `/hotkeys` 的 `APP` 表里
+   没有这一行——**启动头广告 `Shift+Tab`，`/hotkeys` 保持沉默**。补
+   `("app.thinking.cycle", "cycle the thinking level")`。这条是 §17.2 第 3 条的
+   tripwire 测试首次运行时报出来的，不是人工复查发现的。
+3. **`/hotkeys` 的契约测试原本是空转**：LUM-1245 的
+   `hotkeys_text_skips_bound_but_unimplemented_actions` 末尾断言
+   `!text.contains(id)`（`id` 形如 `app.suspend`）——而这张表只印**和弦与标签**、从不印 id，
+   所以这个循环**恒真**。改成集合比较：**打印出的和弦单元格集合 == 已绑定 ∧ 已消费 ∧
+   非选择器作用域的 `app.*` id 的单元格集合**。改完立刻暴露两类假匹配：
+   `Shift+T`（`app.tree.toggleLabelTimestamp`，无消费者）是 `Shift+Tab` 的**前缀**；
+   `ctrl+p` **同时绑给** `app.model.cycleForward`（有消费者）和 `app.session.togglePath`（没有）。
+   两者都说明「按 id 逐个 `contains`」在这张表上不可判定，只能比单元格集合。
+4. **补 `tui.*` 行的回归钉子**：`pi-tui/tests/startup_header.rs` 新增
+   `the_header_keeps_the_live_component_rows`，钉住 `Ctrl+K to delete to end` 与
+   `Ctrl+C to clear`——就是上面那次静默删除的事故现场。（`tui.*` 的 `is_wired` 语义由
+   `app_action_is_consumed` 的 `!id.starts_with("app.")` 前缀规则保证。）
+5. **两份和弦格式化实现钉一致性**：`pi_tui::locale::format_chord` 与
+   `commands::slash::format_chord` 是**故意重复**（App 渲染启动头，取不到 coding-agent），
+   新增 `the_two_chord_formatters_agree` 逐 chord 比对，避免同一个动作在两个面上拼法不同。
+6. **driver 侧 `Ctrl+L` 三条行为测试**（LUM-1245 只留了 PTY 场景 json，没有 Rust 测试）：
+   `ctrl_l_opens_the_model_selector`（开的就是 `/model` 那个 `Pick a model`、可搜索、
+   `model:a`/`model:b` 有序，且**不清空**转写）、
+   `committing_the_ctrl_l_picker_switches_the_model`（提交走同一条 `/model` 路径，模型真的换）、
+   `ctrl_l_is_inert_while_an_overlay_owns_the_keyboard`（搜索覆盖层开着时惰性）。
+7. **`pi-coding-agent/tests/startup_header.rs`（新文件）**：用**真实合并表**（44 条 `app.*`）
+   而不是手工子集渲染启动头，并把「广告 = 已消费」的契约写成
+   `KNOWN_UNWIRED = [app.suspend, app.editor.external]` 的 tripwire：
+   `every_advertised_app_hint_is_wired_or_a_known_dead_chord` 会遍历 `STARTUP_HINTS` 里
+   每一个 id，任一 id 既不在消费清单也不是已知死键位就失败。rebase 时它**真的响过一次**——
+   Stage 67 把 `Shift+Tab` 变成活键位，`app.thinking.cycle` 必须从 `KNOWN_UNWIRED`
+   移到消费清单，否则测试红。
+   `SELECTOR_SCOPED = [app.thinking.save]` 记录唯一的例外：`Ctrl+S` 只在思考选择器内部
+   生效，不是全局快捷键，`app` 分组**故意不列**它（上游
+   `interactive-mode.ts:6343-6352` 同样不列 `saveThinking`）。
+
+### 17.3 实机 A/B（BEFORE = `origin/feature/pi.rs` @ `b435e2dbc`；AFTER = 本节所在提交）
+
+被测二进制都是 debug 构建的 `pi-rust/target/debug/pi`，`--model faux/faux-model`，
+`TERM=xterm-256color`、`PI_LANG=en`、100×34 网格；harness 为
+`pty.fork` + `pyte` + Pillow（与 §16 同规则：harness 不入库，图与字符网格入库）。
+
+| 画面 | BEFORE（`b435e2dbc`） | AFTER（本轮） |
+| --- | --- | --- |
+| `/help` 图例 | `Ctrl+L      clear the screen`（假） | `Ctrl+L      open the model selector`（真） |
+| `/hotkeys` 的 `app:` 组 | 17 行（表里 19 行 − 死键位 `app.suspend`），**没有** `Shift+Tab` | 18 行，多出 `Shift+Tab cycle the thinking level` |
+| 启动头 | 18 行（`STARTUP_HINTS` 20 条 − 死键位 `Ctrl+Z`/`Ctrl+G`），含 `Shift+Tab to cycle thinking level`、`Ctrl+K to delete to end` | **逐字相同**（LUM-1245 已修，本轮不动） |
+
+图与解析后的字符网格原文同目录入库：`lum1242-ab-help.png` / `.png.txt`、
+`lum1242-ab-hotkeys.png` / `.png.txt`、`lum1242-ab-header.png` / `.png.txt`。
+
+### 17.4 Rust ↔ TS 差距实测（本节数字由脚本从工作树直接量出，方法写在下面）
+
+| 面 | 上游 TS | Rust | 覆盖率 | 量法 |
+| --- | --- | --- | --- | --- |
+| `app.*` 键位 | 44（`packages/coding-agent/src/core/keybindings.ts`） | 44 绑定 / **19 有消费者** | **43%** | 消费清单 `CONSUMED_APP_ACTIONS` |
+| `tui.*` 键位 | 47 | 47 绑定 / 38 有非测试消费者引用 | **81%** | 去掉声明/广告表与 `tests/` 后的 token 引用 |
+| 启动头广告行 | — | 声明 20 条 → 渲染 **18 行**（2 条死键位被过滤） | — | `STARTUP_HINTS` 过滤后计数 |
+| `/hotkeys` 广告行 | 62（`interactive-mode.ts:6315-6419`） | `app` 组 **18 行**（表里 19 行 − `app.suspend`） | — | 单元格集合 |
+| `/` 命令 | 23（`slash-commands.ts`） | 16 个名字命中 | **70%** | `handle_command` 的 match 分支 |
+| 内置工具 | 8（bash/edit/find/grep/ls/powershell/read/write） | 7 | **88%** | 工具注册表 |
+
+「有消费者」的判定是**机械 token 匹配**：把 id 当作完整标识符，在
+「绑定表 / 广告表 / `locale.rs` / `tests/`」之外的非测试源码里找引用。
+它**低估**真实实现——组件也可能通过类型化的动作枚举分发（`tui.*` 尤其如此），
+所以上表的百分比是**下界**，不是「还有这么多没做」。
+另一侧的上界是 `app.*` 里 **23 条既没消费者也没被广告**的 id
+（其中 5 条只在测试里出现：`app.tree.foldOrUp`、`app.tree.unfoldOrDown`、
+`app.tree.filter.all`、`app.tree.toggleLabelTimestamp`、`app.session.togglePath`）
+——这些是 Stage 58/59 遗留的会话树与路径动作，用户看不到也按不出来，
+风险等级低于本轮修掉的「广告了但按不出来」。
+
+### 17.5 门禁
+
+- `cargo fmt --all -- --check` 干净。
+- `cargo clippy -p pi-tui -p pi-coding-agent --all-targets` 对我们的 crate 零告警
+  （`--message-format short` 过滤后只剩 vendored `rquickjs-core` 的既有告警）。
+- `cargo test -p pi-tui -p pi-coding-agent` → **1473 passed / 0 failed**。
+- `cargo build --bin pi` 干净（PTY A/B 用的就是它）。
+- 新增测试 **10 条**：`pi-tui/tests/startup_header.rs` 1、
+  `pi-coding-agent/tests/startup_header.rs` 4（新文件）、
+  `pi-coding-agent/src/commands/slash.rs` 2、`pi-coding-agent/src/interactive.rs` 3。
+
+### 17.6 完成度（真实值，不是目标值）
+
+| 维度 | 完成度 | 说明 |
+| --- | --- | --- |
+| 键位**声明**面（表里有的 id 都绑定 chord） | ~100% | 91 条 id 全部绑定 |
+| 键位**消费**面（`app.*`） | **43%** | 19/44；本轮把「广告 vs 消费」的一致性做成测试，不再是人工核对 |
+| 键位**消费**面（`tui.*`） | **81%**（下界） | 38/47 有非测试引用；组件用类型化枚举分发时会低估 |
+| 键位整体 | **63%**（下界） | 57/91 |
+| 广告面**可信度** | 启动头 / `/hotkeys` / `/help` 三面已一致 | 死键位不再出现；`Ctrl+L` 文案与行为一致 |
+| `/` 命令面 | **70%** | 16/23 |
+| 内置工具面 | **88%** | 7/8，缺 `powershell` |
+| **整体判断** | **约 75%** | 交互主干（出帧、输入通道、覆盖层、忙态、思考级别、会话树）已可用；缺口集中在「少数动作未实现但仍在表里」（已从广告面摘掉）与「未实现的动作本身」 |
+
+判断值的来源与不确定性：百分比来自上表的机械量法，**不是人工印象**；
+「整体 75%」按各面加权（键位 40% / 命令面 15% / 工具面 15% / 交互主干 30%）估出，
+权重是本次主观选择，所以这个数只能当量级用；`tui.*`、`app.*` 两行是下界，
+真实值只会更高。
+
+### 17.7 仍然缺口（按用户可感知程度排序）
+
+1. `app.suspend`（`Ctrl+Z`）与 `app.editor.external`（`Ctrl+G`/上游 `Ctrl+E`）**仍未实现**，
+   本轮的处理是**停止广告**而不是实现；实现它们需要终端交接（`SIGTSTP` + 恢复、
+   `$EDITOR` 前台化），属于 Stage 59 遗留，未在本轮范围。
+2. `app.*` 里 23 条无消费者的 id（会话树/路径/筛选）仍是「表里有、按不出来」，
+   本轮只保证它们**不出现在任何广告面**；要真正可用得按 Stage 58/59 的计划逐条接线。
+3. `powershell` 工具与 7 条 `/` 命令（`scoped-models`、`import`、`share`、`changelog`、
+   `login`、`logout`、`reload`）未实现——`/hotkeys` 与 `/help` 都不广告它们，
+   所以不是「撒谎」而是「缺失」。
+4. `Ctrl+C` 的「先清空、二次退出」双击语义（LUM-1238 在飞）与本轮无关，仍未闭合。
+5. 工具卡片 / 思考块 / 耗时统计的 `/resume` 回放仍缺（第六、七轮记录），
+   `faux` 提供商不产生工具调用，本轮截图依旧无法覆盖该面。

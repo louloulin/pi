@@ -179,3 +179,26 @@ fn an_unbound_action_is_dropped_from_the_header() {
 
     reset_keybindings();
 }
+
+#[test]
+fn the_header_keeps_the_live_component_rows() {
+    let _guard = lock_registry();
+    install(&[]);
+    let text = header_lines().join("\n");
+
+    // The `is_wired` filter only governs the `app.*` namespace. The `tui.*`
+    // rows are consumed by the `pi-tui` components themselves, so gating them
+    // on a hand-kept list would delete live shortcuts — the first cut of the
+    // filter did exactly that and silently dropped this row, which only the
+    // real PTY capture caught (LUM-1242). Pin it from now on.
+    assert!(
+        text.contains("Ctrl+K to delete to end"),
+        "the live `tui.editor.deleteToLineEnd` row disappeared:\n{text}"
+    );
+    assert!(
+        text.contains("Ctrl+C to clear"),
+        "the live `app.clear` row disappeared:\n{text}"
+    );
+
+    reset_keybindings();
+}

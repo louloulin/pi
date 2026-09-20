@@ -3457,6 +3457,112 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // `app.model.select` (`Ctrl+L`) — LUM-1240 P0-1
+    // -----------------------------------------------------------------------
+
+    /// `Ctrl+L` is `app.model.select` upstream
+    /// (`packages/coding-agent/src/core/keybindings.ts:116`, "Open model
+    /// selector"). The App used to hardcode the chord as "clear the
+    /// transcript", which shadowed the advertised action; the driver owns the
+    /// chord now and opens the same picker `/model` does.
+    #[tokio::test]
+    async fn ctrl_l_opens_the_model_selector() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        let mut bash = BashRunner::default();
+        app.messages_mut()
+            .push(pi_tui::message::MessageItem::user("seed"));
+
+        let event = InputEvent::Key(Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, event)
+            .await
+            .expect("Ctrl+L");
+
+        assert!(app.selector_open(), "Ctrl+L must open the selector");
+        let selector = app.selector().expect("selector");
+        assert_eq!(selector.title(), "Pick a model");
+        assert!(selector.is_searchable(), "the model picker is searchable");
+        assert_eq!(
+            selector
+                .items()
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model:a", "model:b"],
+            "sorted catalog order"
+        );
+        // P0-1: it is *not* a clear chord any more.
+        assert!(!app.messages().is_empty(), "Ctrl+L must not clear the log");
+    }
+
+    /// Committing from the `Ctrl+L` picker switches the agent's model — the
+    /// path is shared with `/model`, so this pins that sharing.
+    #[tokio::test]
+    async fn committing_the_ctrl_l_picker_switches_the_model() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        let mut bash = BashRunner::default();
+
+        let ctrl_l = InputEvent::Key(Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, ctrl_l)
+            .await
+            .expect("Ctrl+L");
+        assert!(app.selector_open());
+
+        // Move to `beta/b` and commit.
+        handle_input_event(
+            &mut app,
+            &agent,
+            &mut options,
+            &mut bash,
+            key(KeyCode::Down),
+        )
+        .await
+        .expect("Down");
+        handle_input_event(
+            &mut app,
+            &agent,
+            &mut options,
+            &mut bash,
+            key(KeyCode::Enter),
+        )
+        .await
+        .expect("Enter");
+
+        assert!(!app.selector_open(), "committing closes the picker");
+        assert_eq!(agent.lock().await.model().id, "b");
+    }
+
+    /// The chord is claimed only while no overlay owns the keyboard — the
+    /// same guard every `app.*` driver intercept uses. With the search
+    /// overlay open `Ctrl+L` stays inert instead of opening a second modal.
+    #[tokio::test]
+    async fn ctrl_l_is_inert_while_an_overlay_owns_the_keyboard() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        let mut bash = BashRunner::default();
+        app.open_search();
+        assert!(app.search_open());
+
+        let event = InputEvent::Key(Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, event)
+            .await
+            .expect("Ctrl+L");
+
+        assert!(!app.selector_open(), "the overlay keeps the keyboard");
+        assert!(app.search_open(), "the overlay is still open");
+    }
+
+    // -----------------------------------------------------------------------
     // Queued input while streaming (LUM-1216)
     // -----------------------------------------------------------------------
 
