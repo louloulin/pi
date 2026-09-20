@@ -10,6 +10,7 @@
 
 pub mod auth;
 pub mod env_api_keys;
+pub mod images;
 pub mod json_parse;
 pub mod models;
 pub mod overflow;
@@ -34,6 +35,7 @@ pub use env_api_keys::{
     find_env_keys, get_env_api_key, ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV,
     ANTHROPIC_OAUTH_TOKEN_ENV,
 };
+pub use images::{generate_images, AssistantImages, ImagesError, ImagesStopReason};
 pub use json_parse::{
     close_partial_json, parse_json_with_repair, parse_streaming_json, parse_value_with_repair,
     repair_json,

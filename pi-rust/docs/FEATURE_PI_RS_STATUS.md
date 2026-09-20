@@ -12123,3 +12123,183 @@ tips 再前进一格后以 `git ls-remote` 为准。
 - 本轮本人只写 `crates/pi-extensions/{src/digest.rs,src/lib.rs,src/host.rs,runtime/pi-ext-shim.mjs,
   tests/web_globals.rs,docs/NODE_BUILTINS.md,docs/EXTENSIONS.md}` 与本文档；
   **未碰** `pi-coding-agent/**`、`pi-ai/**`、`pi-tui/**`、`pi-protocol/**`。
+
+## LUM-1164 round — `pi-ai` 图像生成子系统（`images/` 垂直切片：types / registry / models / openrouter / builtins）+ 合并 Stage 48（LUM-1160）+ 3/3 满槽不派发
+
+本轮起点 `9816266c0`（LUM-1159 轮文档），开工 `cargo check -p pi-ai --offline` 通过（复用
+LUM-1153 检出的 `CARGO_TARGET_DIR`）。本轮是**自实现一刀 + 一次补合并**：把上游
+`packages/ai/src/images*` 这一整条图像生成链落成 Rust 垂直切片，并把**已完成但一直未合入**
+的 Stage 48（LUM-1160，`pi-ai/auth/`）补合到 `feature/pi.rs`。因为 `active_task_count` 已是
+3/3（本人 + Stage 47/LUM-1162 + LUM-1163），本轮**不派发新 issue**。
+
+### 一、本轮定位与选型
+
+- **为什么是 `images`**：LUM-1159 的 frontier 第 3 项把它与 bedrock / mistral / azure / vertex 并列，
+  并明确写「`images` 需先看上游 `packages/ai/src/images/` 的实际形状」。本轮先做了这件事：
+  上游的图像链不是单个 `images.ts`，而是 8 个文件——
+  `images.ts`（facade）+ `types.ts` 的图像切片（契约）+ `images-api-registry.ts`（api → adapter 注册表）
+  + `image-models.ts` / `image-models.generated.ts`（目录）+ `providers/images/register-builtins.ts`
+  （内置注册）+ `api/openrouter-images.ts`（唯一 adapter）+ 更高层的 `images-models.ts`
+  （带 auth 的 `ImagesProvider` / `ImagesModels` 集合）。
+- **射程选择**：把前七者（不含 `images-models.ts` 与 789 行的生成目录）做成
+  `pi-ai/src/images/` 一个自包含模块。理由是它**可离线验证**（纯函数 + 一个 loopback HTTP
+  用例）、**不与在跑任务抢文件**（只碰 `pi-ai/src/images/**`、`tests/images.rs` 与 `lib.rs` 两行）、
+  且 `images-models.ts` 直接依赖 `auth/`（Stage 48 刚落地的层），硬做会与合并中的
+  Stage 48 撞线，留作下一轮更合适。
+- **为什么不派发**：`multica daemon status` 开工即 `active_task_count=3`（本人 LUM-1164、
+  Stage 47/LUM-1162、另一个 pi autopilot LUM-1163），上限 3，本轮只做自己的活。
+- **本轮不碰**：`pi-coding-agent/**`（Stage 47）、`pi-extensions/**`、`pi-tui/**`、
+  `pi-protocol/**`、`pi-ai/src/auth/**`（Stage 48，本轮只合并不修改）。
+
+### 二、改动清单（8 文件，+1671 / −0，相对 `54e10c8ac`）
+
+`54e10c8ac` 本身是本轮 cherry-pick 进来的 Stage 48 提交（见第七节）。
+
+| 文件 | 改动 |
+| --- | --- |
+| `crates/pi-ai/src/images/types.rs`（新，338 行） | 契约层：`ImagesApi` / `ImageModality` / `ImagesInputContent`（= `ImagesOutputContent`）/ `ImagesContext` / `ImagesStopReason` / `UsageCost` / `ImagesUsage` / `AssistantImages`（`new` / `error` / `aborted`）/ `ImageModelCost` / `ImagesModel`（`new`）/ `ImagesOptions` / `ProviderImages` trait / `ImagesError` |
+| `crates/pi-ai/src/images/registry.rs`（新，152 行） | `images-api-registry.ts` 移植：全局 `RwLock<HashMap>`、`register_images_api_provider` / `get_images_api_provider` / `registered_images_api_providers` / `clear_images_api_providers` / `image_api_provider_source_id` / `registered_api_of`，以及上游那层 `Mismatched api` 守卫 |
+| `crates/pi-ai/src/images/openrouter.rs`（新，370 行） | `api/openrouter-images.ts` 移植：`build_params` / `parse_usage` / `apply_response` / `parse_data_url`、`merged_headers`、`describe_error`、`send_request`（reqwest + `retry_provider_request`）、`send_once`、`OpenRouterImagesProvider` |
+| `crates/pi-ai/src/images/models.rs`（新，138 行） | `image-models.ts` 移植：`ImageModels`（`register_provider` / `register_provider_json` / `get_image_model` / `get_image_models` / `get_image_providers` / `len`），不内置生成目录 |
+| `crates/pi-ai/src/images/builtins.rs`（新，37 行） | `providers/images/register-builtins.ts` 移植：`register_builtin_images_api_providers` + `Once` 懒注册 `ensure_registered` |
+| `crates/pi-ai/src/images/mod.rs`（新，91 行） | `images.ts` 移植：`generate_images` facade（`NoApiProvider`）+ 模块文档 / 重导出 / 可运行 doctest |
+| `crates/pi-ai/src/lib.rs`（+2） | `pub mod images;` + `pub use images::{generate_images, AssistantImages, ImagesError, ImagesStopReason};` |
+| `crates/pi-ai/tests/images.rs`（新，543 行） | 15 条离线用例：注册表 / facade 路由 / mismatch 守卫 / 参数形状 / modalities / usage 与 cost 数学 / 响应解析（含三种畸形体）/ data URL / 缺 key / **loopback HTTP 端到端**（含 429 错误体）/ 目录 |
+
+未新增任何 crate 依赖（`reqwest` / `async-trait` / `serde_json` 都是 `pi-ai` 既有依赖）。
+
+### 三、设计取舍
+
+1. **图像侧自带类型，不复用 `pi_protocol::Usage`**：上游 `AssistantImages.usage` 用的是带
+   `cost` 的 `Usage`，而 `pi_protocol::Usage` 没有 cost 字段（协议层只描述线上消息）。
+   因此 `ImagesUsage` / `UsageCost` 落在 `images/types.rs`，成本按上游口径由
+   `model.cost`（$/1M tokens）换算；协议层一个字段都不用动。
+2. **`ImagesApi` 是 `String` 而不是枚举**：上游 `ImagesApi` 本就是开放的
+   （`KnownImagesApi | (string & {})`），第三方 adapter 可以注册任意 id；用 enum 会把
+   这个扩展点焊死。
+3. **注册表是进程全局 + `Once` 懒注册**：Rust 没有 upstream 那种「import 即注册」的副作用，
+   所以 `register_builtin_images_api_providers` 显式可调，`generate_images` facade 再
+   通过 `Once` 兜底。**已知副作用**：`clear_images_api_providers()` 之后同一进程里 `Once`
+   不会重跑，内置 adapter 需要宿主自己再注册一次——这条写进了 `builtins.rs` 的文档与
+   frontier，供宿主（例如测试 harness）注意。
+4. **`Mismatched api` 从 throw 改成 `error` 结果**：`ProviderImages::generate_images` 按上游
+   图像契约是 infallible（错误装在 `AssistantImages.errorMessage` 里），所以注册表包装层
+   不能抛；它返回 `stopReason = error`、`errorMessage = "Mismatched api: X expected Y"`。
+   语义差异写进模块头，调用方按 message 区分。
+5. **不内置 789 行 `image-models.generated.ts`**：与聊天侧 `models.rs` 的既有决策一致
+   （生成目录由宿主注入），`ImageModels::register_provider_json` 吃上游那份 JSON 形状
+   （`[{id, api, base_url, name}]`，兼容 `baseUrl`）。
+6. **HTTP 直接 `reqwest` + 复用既有 `retry_provider_request` / `error_body`**：与
+   `pi-ai` 里所有其它 provider 一致，不引 OpenAI SDK；`maxRetries: 0` + 外层
+   `ProviderRetryPolicy` 的语义与上游逐字对齐，`Retry-After-Ms` / `X-Should-Retry`
+   也顺带拿到了。
+7. **`sanitizeSurrogates` 在 Rust 无对应物**：上游 `buildParams` 对文本先跑
+   `utils/sanitize-unicode.ts`，而 Rust 的 `String` 保证是合法 UTF-8、不可能含孤立代理项，
+   这一步天然为空，已在 `build_params` 文档里注明（不是遗漏）。
+8. **data URL 严格按上游正则**：只接受 `^data:([^;]+);base64,(.+)$`——缺 `;base64`、
+   mime 为空或含 `;`、payload 为空都跳过，与上游 `continue` 行为一致；`https:` 链接同样跳过。
+   （`parse_data_url` 同时也是这条正则的单测入口。）
+9. **wasm32 返回明确错误**：`reqwest` 在 `wasm32-unknown-unknown` 上不可用（`mio` 不编译），
+   与其它 provider 一样在 wasm 分支返回 `error` + 「unavailable on wasm32」，不静默失败。
+10. **HTTP 用例是离线可复现的**：`tests/images.rs` 里用一次性 `TcpListener`（loopback、0 端口）
+    起一个假服务端，断言请求行、`Bearer` 头、自定义头与 JSON body，同时覆盖 200 解析与 429
+    错误体 —— 不需要真实网络，也不引 mock server 依赖。
+
+### 四、验证
+
+- `cargo test -p pi-ai --offline`：**10 个测试目标 + 2 条 doctest 全绿，共 215 条**
+  （新 `images` 目标 15 条；`auth` 25 条来自合并进来的 Stage 48；`deferred_tools` 目标
+  在本轮 rebase 后从 9 条变 12 条，来自 Stage 47/LUM-1162）。
+  关键断言：RFC 风格向量不必（本轮无摘要）；`parse_usage` 的
+  `cache_write > 0 ? max(0, cached - cache_write) : cached` 两条分支分别断言；
+  `model.output` 含/不含 `text` 时 `modalities` 分别为 `["image","text"]` / `["image"]`；
+  loopback 用例断言 `POST /chat/completions`、`authorization: bearer test-key`、
+  `x-custom: yes` 与 `{model, messages[0].content[0].text}`。
+- `cargo clippy -p pi-ai --offline --all-targets`：**本轮文件零告警**。
+  加上 `-D warnings` 时 crate 会因 **1 条既有告警**失败：
+  `crates/pi-ai/src/utils/deferred_tools.rs:92` 的 `clippy::needless_lifetimes`
+  （`split_deferred_tools_from_context<'a>` 的 `'a` 可省略）—— 该函数由
+  Stage 47/LUM-1162 本轮合并进来，不是本轮改动。按既往惯例（LUM-1159 记录
+  `deflate.rs` precedence 等既有告警时同样处理）**不在本轮顺手改，留给质量门清偿**，
+  但已列入 frontier 第 1 项，后续轮次跑 `-D warnings` 会立刻撞上。
+- 格式：本轮 8 个文件 `rustfmt --check` **零命中**；`lib.rs` 的两行重导出按 rustfmt 的
+  `pub use` 排序手工落位。既有漂移（`examples/anthropic_stream.rs`、`src/models.rs`、
+  `src/providers/{anthropic,google,openai_responses,registry}.rs`、`tests/{anthropic,google}.rs`）
+  保持原样，留给 LUM-1138，不在本轮制造无关噪声。
+- **未验证**：`cargo test/check --workspace`（磁盘只剩 1.2G 可用，见第八节；
+  改动对下游是纯增量，`pi-ai` 既有导出未改签名）、wasm32 构建、
+  真实 OpenRouter 图像调用（需要 key，且 `openrouter-images` 的 model id 取自上游生成目录）。
+
+### 五、已知限制（后继轮次的前置）
+
+- **`images-models.ts` 未移植**：上游还有一层带 auth 的 `ImagesProvider` / `ImagesModels`
+  集合（`getAuth()` / `getModels()` / `refreshModels()` / `generate()`），图像侧的
+  provider 工厂 `providers/openrouter-images.ts` 也在这层之上。它依赖 `auth/` 的
+  `resolveProviderAuth`（Stage 48 刚落地），下一轮可以顺着接；本轮只做了它下面的
+  api 层与目录层。
+- **生成目录未内置**：`image-models.generated.ts`（789 行）里的 openrouter 条目要靠宿主
+  `register_provider_json` 注入；在此之前 `ImageModels` 默认是空表（不影响 `generate_images`，
+  它只按 `model.api` 查 adapter）。
+- **`onPayload` / `onResponse` / `fetch` 注入未建模**：`ImagesOptions` 有意收窄成 adapters
+  真正会用到的字段，加回来只需要扩结构体。
+- **mismatch 语义差异**：见三.4。
+- **`clear` 后 `Once` 不重注册**：见三.3。
+- **WASM 下不可用**：`openrouter` adapter 在 wasm 返回错误结果；这与聊天侧 provider 的
+  wasm 现状一致。
+
+### 六、frontier（本轮更新）
+
+1. **质量门清偿** = LUM-1138（`backlog`）：`cargo fmt` 漂移仍在（清单见四）。
+   **（本轮新增）** 另有一条 clippy 门禁挡路：`pi-ai/src/utils/deferred_tools.rs:92` 的
+   `needless_lifetimes`（Stage 47/LUM-1162 引入），修法是按 clippy 建议把
+   `split_deferred_tools_from_context<'a>(context: &'a Context, …) -> SplitDeferredTools<'a>`
+   改成省略生命周期版；因为它是别的轮次刚落地的代码，本轮不代改。
+2. **~~images~~**：**本轮收口 core 半边**——契约 / 注册表 / adapter / 目录 / 内置注册 + 15 条
+   测试。剩 `images-models.ts`（auth-aware 集合）与生成目录内置两项。
+3. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex —— 仍需 models.dev
+   目录数据，维持「不猜」；`oauth` 已由 Stage 48 收口，`images` 本轮收口。
+4. **协议层两处缺口**（`AssistantMessage.error_message` / `ToolResult.added_tool_names`）：
+   已由 LUM-1158 派 **Stage 47（LUM-1162）**，本轮开工时仍在跑。
+5. **（本轮实测纠正 LUM-1157 的 stale 断言）`pi-ai/utils/` 远未「全部有 Rust 对应物」**：
+   上游 `packages/ai/src/utils/` 现在有 **23 个文件**，Rust 侧只有 7 个有对应
+   （`deferred_tools` / `error_body` / `estimate` / `json_parse` / `overflow` /
+   `provider_retry`(+`retry`)），且 `validation.ts` 只落了 coercion 半边（在
+   `pi-coding-agent`）。明确未移植、且被上游 provider 实际使用的有：
+   `headers.ts`（`providerHeadersToRecord` / `headersToRecord`，本轮在 `images/openrouter.rs`
+   里只做了局部实现）、`abort.ts` / `abort-signals.ts`（`AbortSignal` 组合子）、
+   `assistant-message-frame.ts`、`provider-env.ts`、`pi-user-agent.ts`、`text.ts`、
+   `sleep.ts`、`hash.ts`、`uuid.ts`、`sanitize-unicode.ts`、`diagnostics.ts`、
+   `typebox-helpers.ts`、`node-http-proxy.ts`；`event-stream.ts` 有部分落在 `stream.rs`。
+   后续轮次按「被多少 provider 引用」排序挑，`headers.ts` 与 `abort*.ts` 优先级最高。
+6. **`pi-extensions` 侧仍未桥的全局**（沿用 LUM-1159）：`URL`、`DOMException`、
+   `structuredClone`、`console.table` / `time*`、`AbortSignal.timeout`。
+
+### 七、合并与派发
+
+- **补合并 Stage 48（LUM-1160）**：该轮分支 `agent/devbox1/142cee5d0ed9` 的提交
+  `5b373578c`（`pi-ai/auth/**` + `env_api_keys.rs` + `tests/auth.rs`，25 条用例）此前
+  **一直没进 `feature/pi.rs`**（tip 还是 `9816266c0`）。本轮在 `work/lum-1164` 上
+  `git cherry-pick 5b373578c` → `54e10c8ac`，随后本轮图像提交叠在其上，一并推送。
+  选择 cherry-pick 而非 merge，是因为需要让「Stage 48」与「LUM-1164」在
+  `feature/pi.rs` 上保持线性、便于 `git log` 追溯；提交信息保留了原作者与 LUM-1160 号。
+- **本轮不派发**：`active_task_count=3`，上限 3。没有撤销、没有晋升。
+- **并发**：本人只写 `pi-ai/src/images/**`、`pi-ai/src/lib.rs`（2 行）、
+  `pi-ai/tests/images.rs` 与本文档；与 Stage 47（`pi-protocol` / `pi-coding-agent`）、
+  Stage 48（`pi-ai/auth`）文件集不相交。
+
+### 八、环境与并发记录
+
+- 复用 **LUM-1153 检出内的 `pi-rust/target`**（`CARGO_TARGET_DIR` 显式指向，16G，未新建 /
+  未删除 target）；`CARGO_HOME=/tmp/cargo-home`；所有 cargo 命令 `--offline`。
+- 磁盘：开工 **1.2G 可用（98% 已用）**，因此**刻意不跑** `--workspace` 构建；
+  本轮增量只有 `pi-ai` 一个 crate + 1 个测试目标。
+- Git 身份用 worktree 级覆盖：`git config --worktree user.name multica-agent` /
+  `user.email agent@multica.local`。
+- 合并后复跑：`cargo test -p pi-ai --offline` 全绿（215 条）、
+  `cargo clippy -p pi-ai --all-targets --offline` 本轮文件零告警（整 crate `-D warnings`
+  会被 Stage 47 的一条既有 `needless_lifetimes` 挡住，见四/frontier 第 1 项），
+  均在含 `54e10c8ac`（Stage 48）与 `eda5b98c4`（Stage 47）的树上完成。
+- **rebase 记录**：本轮提交前 `origin/feature/pi.rs` 已从 `9816266c0` 前进到
+  `eda5b98c4`（Stage 47/LUM-1162 + 一条 `pi-extensions/digest.rs` clippy 修复），
+  本分支用 `git rebase --onto eda5b98c4 9816266c0 work/lum-1164` 重放两个提交
+  （Stage 48 cherry-pick + 本轮图像提交），**零冲突**，随后推送为快进。
