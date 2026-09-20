@@ -3,6 +3,7 @@
 pub mod anthropic;
 pub mod faux;
 pub mod google;
+pub mod mistral;
 pub mod openai;
 pub mod openai_responses;
 pub mod registry;

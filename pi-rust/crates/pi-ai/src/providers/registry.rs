@@ -330,6 +330,113 @@ const OPENAI_RESPONSES_MODELS: &[ModelSpec] = &[
     ModelSpec::new("o4-mini", "o4-mini").with_limits(200_000, 100_000),
 ];
 
+/// Mistral — `https://api.mistral.ai` (`POST /v1/chat/completions`).
+///
+/// The catalog is copied from the version-matched upstream data snapshot
+/// (`@earendil-works/pi-ai@0.85.1` → `dist/providers/data/mistral.json`, the
+/// models.dev-generated file the TypeScript build consumes; the checked-out
+/// `packages/ai` is the same 0.85.1), so ids, labels, context windows and rates
+/// track upstream instead of being estimated. models.dev regenerates that list,
+/// so this snapshot needs a refresh whenever the data is regenerated.
+const MISTRAL_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("codestral-latest", "Codestral (latest)")
+        .with_limits(256_000, 4_096)
+        .with_pricing(Pricing::micro_usd(300_000, 900_000, 30_000, 0)),
+    ModelSpec::new("devstral-2512", "Devstral 2")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 40_000, 0)),
+    ModelSpec::new("devstral-latest", "Devstral 2")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 40_000, 0)),
+    ModelSpec::new("devstral-medium-2507", "Devstral Medium")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 40_000, 0)),
+    ModelSpec::new("devstral-medium-latest", "Devstral 2 (latest)")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 40_000, 0)),
+    ModelSpec::new("devstral-small-2505", "Devstral Small 2505")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(100_000, 300_000, 10_000, 0)),
+    ModelSpec::new("devstral-small-2507", "Devstral Small")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(100_000, 300_000, 10_000, 0)),
+    // Free upstream (all-zero rates): omitting `pricing` is how the
+    // registry expresses "no published price".
+    ModelSpec::new("labs-devstral-small-2512", "Devstral Small 2").with_limits(256_000, 256_000),
+    ModelSpec::new("magistral-medium-latest", "Magistral Medium (latest)")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(2_000_000, 5_000_000, 200_000, 0)),
+    ModelSpec::new("magistral-small", "Magistral Small")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(500_000, 1_500_000, 50_000, 0)),
+    ModelSpec::new("ministral-3b-latest", "Ministral 3B (latest)")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(40_000, 40_000, 4_000, 0)),
+    ModelSpec::new("ministral-8b-latest", "Ministral 8B (latest)")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(100_000, 100_000, 10_000, 0)),
+    ModelSpec::new("mistral-large-2411", "Mistral Large 2.1")
+        .with_limits(131_072, 16_384)
+        .with_pricing(Pricing::micro_usd(2_000_000, 6_000_000, 200_000, 0)),
+    ModelSpec::new("mistral-large-2512", "Mistral Large 3")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(500_000, 1_500_000, 50_000, 0)),
+    ModelSpec::new("mistral-large-latest", "Mistral Large (latest)")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(500_000, 1_500_000, 50_000, 0)),
+    ModelSpec::new("mistral-medium-2505", "Mistral Medium 3")
+        .with_limits(131_072, 131_072)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 40_000, 0)),
+    ModelSpec::new("mistral-medium-2508", "Mistral Medium 3.1")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(400_000, 2_000_000, 40_000, 0)),
+    ModelSpec::new("mistral-medium-2604", "Mistral Medium 3.5")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(1_500_000, 7_500_000, 150_000, 0)),
+    ModelSpec::new("mistral-medium-3.5", "Mistral Medium 3.5")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(1_500_000, 7_500_000, 0, 0)),
+    ModelSpec::new("mistral-medium-latest", "Mistral Medium (latest)")
+        .with_limits(262_144, 262_144)
+        .with_pricing(Pricing::micro_usd(1_500_000, 7_500_000, 150_000, 0)),
+    ModelSpec::new("mistral-nemo", "Mistral Nemo")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(150_000, 150_000, 15_000, 0)),
+    ModelSpec::new("mistral-small-2506", "Mistral Small 3.2")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(100_000, 300_000, 10_000, 0)),
+    ModelSpec::new("mistral-small-2603", "Mistral Small 4")
+        .with_limits(256_000, 256_000)
+        .with_pricing(Pricing::micro_usd(150_000, 600_000, 15_000, 0)),
+    ModelSpec::new("mistral-small-latest", "Mistral Small (latest)")
+        .with_limits(256_000, 256_000)
+        .with_pricing(Pricing::micro_usd(150_000, 600_000, 15_000, 0)),
+    ModelSpec::new("open-mistral-7b", "Mistral 7B")
+        .with_limits(8_000, 8_000)
+        .with_pricing(Pricing::micro_usd(250_000, 250_000, 25_000, 0)),
+    ModelSpec::new("open-mistral-nemo", "Open Mistral Nemo")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(150_000, 150_000, 15_000, 0)),
+    ModelSpec::new("open-mixtral-8x22b", "Mixtral 8x22B")
+        .with_limits(64_000, 64_000)
+        .with_pricing(Pricing::micro_usd(2_000_000, 6_000_000, 200_000, 0)),
+    ModelSpec::new("open-mixtral-8x7b", "Mixtral 8x7B")
+        .with_limits(32_000, 32_000)
+        .with_pricing(Pricing::micro_usd(700_000, 700_000, 70_000, 0)),
+    ModelSpec::new("pixtral-12b", "Pixtral 12B")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(150_000, 150_000, 15_000, 0)),
+    ModelSpec::new("pixtral-large-latest", "Pixtral Large (latest)")
+        .with_limits(128_000, 128_000)
+        .with_pricing(Pricing::micro_usd(2_000_000, 6_000_000, 200_000, 0)),
+    ModelSpec::new("voxtral-small-latest", "Voxtral Small (latest)")
+        .with_limits(32_000, 32_000)
+        .with_pricing(Pricing::micro_usd(100_000, 300_000, 10_000, 0)),
+    ModelSpec::new("zai-glm-5-2", "GLM-5.2")
+        .with_limits(1_000_000, 131_072)
+        .with_pricing(Pricing::micro_usd(1_400_000, 4_400_000, 140_000, 0)),
+];
+
 /// The first-party providers plus the OpenAI-compatible family.
 ///
 /// First-party providers (faux / openai / openai-responses / anthropic /
@@ -461,6 +568,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["HF_TOKEN"],
         base_url_env: &["HUGGINGFACE_BASE_URL"],
         models: HUGGINGFACE_MODELS,
+    },
+    ProviderSpec {
+        id: "mistral",
+        display_name: "Mistral",
+        api: Api::MistralConversations,
+        default_base_url: "https://api.mistral.ai",
+        api_key_env: &["MISTRAL_API_KEY"],
+        base_url_env: &["MISTRAL_BASE_URL"],
+        models: MISTRAL_MODELS,
     },
     ProviderSpec {
         id: "moonshotai",
@@ -725,6 +841,38 @@ mod tests {
             "grok-4.6 must be selectable via `--model xai/grok-4.6`"
         );
         assert!(spec.models.iter().all(|m| m.max_output_tokens > 0));
+    }
+
+    #[test]
+    fn mistral_uses_its_own_adapter_family_and_catalog() {
+        let spec = find_provider("mistral").expect("mistral provider");
+        // Mistral is *not* OpenAI-compatible: it has its own API family
+        // and its own adapter, and the adapter appends `/v1/chat/completions`
+        // to the bare host (upstream builds the URL the same way).
+        assert_eq!(spec.api, Api::MistralConversations);
+        assert_eq!(spec.api_key_env, &["MISTRAL_API_KEY"]);
+        assert_eq!(spec.base_url_env, &["MISTRAL_BASE_URL"]);
+        assert_eq!(spec.default_base_url, "https://api.mistral.ai");
+        assert!(!spec.default_base_url.ends_with("/v1"));
+        // Catalog copied from the upstream generated snapshot.
+        assert_eq!(spec.models.len(), 32);
+        assert!(spec
+            .models
+            .iter()
+            .all(|m| m.context_window > 0 && m.max_output_tokens > 0));
+        let large = spec
+            .pricing_for("mistral-large-latest")
+            .expect("mistral-large-latest pricing");
+        assert!((large.input_usd() - 0.5).abs() < 1e-9);
+        assert!((large.output_usd() - 1.5).abs() < 1e-9);
+        assert!((large.cache_read_usd() - 0.05).abs() < 1e-9);
+        let codestral = spec
+            .models
+            .iter()
+            .find(|m| m.id == "codestral-latest")
+            .expect("codestral-latest");
+        assert_eq!(codestral.context_window, 256_000);
+        assert_eq!(codestral.max_output_tokens, 4_096);
     }
 
     #[test]

@@ -1,0 +1,6 @@
+data: {"id":"cmpl-error","choices":[{"index":0,"delta":{"content":"partial answer"},"finish_reason":null}]}
+
+data: {"id":"cmpl-error","choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+
+data: [DONE]
+

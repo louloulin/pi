@@ -35,6 +35,8 @@ pub enum Api {
     BedrockConverse,
     /// Cohere v2.
     CohereV2,
+    /// Mistral native Chat Completions.
+    MistralConversations,
     /// Stub used by the faux provider in tests.
     Faux,
 }
