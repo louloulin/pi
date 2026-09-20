@@ -50,7 +50,31 @@ const KNOWN_UNWIRED: &[&str] = &["app.suspend", "app.editor.external"];
 /// omits its `saveThinking` from the same table
 /// (`packages/coding-agent/src/core/interactive-mode.ts:6343-6352`), and its
 /// own legend documents it.
-const SELECTOR_SCOPED: &[&str] = &["app.thinking.save"];
+///
+/// The same is true of the picker-scoped chords Stage 68 (LUM-1255) wired:
+/// `app.session.toggleSort` … `app.session.deleteNoninvasive` only act while
+/// the `/resume` picker is open, and the `app.tree.*` filters / folds / label
+/// toggle only act inside the `/tree` overlay. Upstream advertises them in
+/// those components' own footers, which is where the port shows them too.
+const SELECTOR_SCOPED: &[&str] = &[
+    "app.thinking.save",
+    "app.session.toggleSort",
+    "app.session.togglePath",
+    "app.session.toggleNamedFilter",
+    "app.session.rename",
+    "app.session.delete",
+    "app.session.deleteNoninvasive",
+    "app.tree.foldOrUp",
+    "app.tree.unfoldOrDown",
+    "app.tree.toggleLabelTimestamp",
+    "app.tree.filter.default",
+    "app.tree.filter.noTools",
+    "app.tree.filter.userOnly",
+    "app.tree.filter.labeledOnly",
+    "app.tree.filter.all",
+    "app.tree.filter.cycleForward",
+    "app.tree.filter.cycleBackward",
+];
 
 static REGISTRY: Mutex<()> = Mutex::new(());
 

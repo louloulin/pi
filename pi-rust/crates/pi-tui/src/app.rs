@@ -1928,6 +1928,14 @@ impl App {
         self.selector = Some(selector);
     }
 
+    /// Mutably borrow the open selector.
+    ///
+    /// The driver uses it to move the cursor after it rebuilt the picker
+    /// items itself (e.g. the `/tree` fold chords' branch jump).
+    pub fn selector_mut(&mut self) -> Option<&mut Selector> {
+        self.selector.as_mut()
+    }
+
     /// Whether the selector modal is currently visible.
     pub fn selector_open(&self) -> bool {
         self.selector.is_some()
