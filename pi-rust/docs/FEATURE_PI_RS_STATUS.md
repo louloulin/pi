@@ -15156,3 +15156,128 @@ LUM-1214 / LUM-1220 都在本轮内收工，槽位释放；按「TUI 优先 + �
   本轮与 LUM-1220 的重复成本是真实发生的（两份合并 + 两份全量门）；建议调长周期，或只保留合并轮按需触发。
 * **给 worker 的硬约束（已写进 LUM-1212 / LUM-1223 描述）**：**run 结束前必须先 commit 再 push**。
   Stage 58 的 run 就是完成时零提交，产物差点随工作树被回收。
+
+## LUM-1222 round — 与 LUM-1221 **并发的重复协调轮**：独立合并出**逐字相同的树**（tree hash 交叉验证）→ 却发现 tip 实为**红门**（文档提交吃掉代码 fence）并修复 → `/hotkeys` 补回 `app.tools.expand` → Stage 58 验收复核 4/5 通过 + 2 条遗留 → 槽位已满（3/3）**零派发**
+
+### 一、开工基线与重复判定
+
+* 开工 `origin/feature/pi.rs` = `d22c5d694`（LUM-1220 轮：61 + 60；LUM-1221 尚未推送）。
+* 本轮按惯例先合 **Stage 58 = LUM-1214**（`origin/work/LUM-1214` = `6d4f64e62`），四处冲突全部人工过：
+  `interactive.rs` 的 `set_session_name` 与 `set_tool_block_renderer` 并留；`app.rs` / `lib.rs` 的 `use` 合并；
+  `message.rs` 的 `MessageView` 字段与 `Clone` 取并集，并**手写 `impl Default` 补回 `pending_steering` /
+  `pending_follow_up`**（Stage 58 把 `#[derive(Default)]` 换成了手写 `impl Default`）。
+* `cargo check` 通过后提交 `96cfd2eb0`，随后 `git fetch` 发现 **LUM-1221（同题并发轮）已经做了同一件事**
+  并推送 `76d1d634e`（合并）+ `b20800ed3`（文档）。
+* **对账（本轮最有价值的一步）**：`git rev-parse <commit>^{tree}` 显示本轮的 `work/LUM-1222^{tree}` =
+  `a42b444d06db7c0035d90a52196585605510867c`，LUM-1221 的 `76d1d634e^{tree}` **完全相同** —— 两条
+  独立合并线在四处冲突上得到**逐字相同**的树，是比「门数字相同」更强的交叉验证。
+  故弃用本轮的重复合并提交，`git checkout -B work/LUM-1222 origin/feature/pi.rs` 以远端为基（同 LUM-1219 口径）。
+* 本轮在自己的那棵等价树上实跑全量门 = `145 / 2159 / 0 / 2`，与 LUM-1221 自报**逐字一致**。
+
+### 二、发现并修复：`feature/pi.rs` 的 tip 其实是**红的**
+
+LUM-1221 的门跑在合并提交 `76d1d634e` 上，而**文档提交 `b20800ed3` 在其之后**。该提交在
+`docs/TUI_UX_AUDIT.md` 里插第三轮验证块时**吃掉了首轮块的起始 fence**：
+
+```console
+$ python3 <fence 配对扫描>
+UNCLOSED docs/TUI_UX_AUDIT.md opened at line 295 marker ```
+```
+
+`pi-evals` 的 `docs-code-fences-balanced` 会审计 `pi-rust/docs/**/*.md` + 两个 README，于是
+**`origin/feature/pi.rs` 上的 `cargo test --workspace` 退出码 101**：
+
+```console
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --workspace --offline
+  pi-evals: 5 passed / 3 failed / 1 ignored   →  exit 101
+  failing eval cases: ["docs-code-fences-balanced"]
+```
+
+这不是 flake（`offline_suites_are_green` / `harness_writes_artifacts` / `repetitions_rerun_each_case`
+三条同因失败）。修复：在 `首轮（LUM-1210）：` 之后补回 ` ```console ` 起始 fence，全仓重新扫描无未闭合块。
+
+**教训（写入流程）**：文档提交同样是产品的一部分，必须和代码提交一起过全量门；「合并轮」不能在
+写完文档前就把「全量门全绿」写进结论。
+
+### 三、第二处修复：`/hotkeys` 补回 `app.tools.expand`
+
+Stage 58 让 `app.tools.expand`（Ctrl+O）有了真实消费者，但 `pi-coding-agent/src/commands/slash.rs:152`
+的 app 分组表**没有加这一行** —— 直接违反该文件自己在 `docs/TUI_UX_AUDIT.md` 里定的规则
+「`/hotkeys` 只列出**已实现**的动作」。结果是：功能做好了，用户按 `/hotkeys` 却看不到刚上线的折叠入口
+（信息密度类缺陷，正是本轮 TUI 审计关注的那一类）。
+
+改动：APP 分组新增 `("app.tools.expand", "expand or collapse tool output (Ctrl+O by default)")`，
+新增单测 `commands::slash::tests::hotkeys_text_lists_the_tool_fold_chord`（断言 `Ctrl+O` 与文案）。
+
+### 四、修复后全量门（本 tip 上的权威数字）
+
+```console
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --workspace --offline
+  145 套件 / 2160 passed / 0 failed / 2 ignored      （上一基线 145 / 2159 / 0 / 2；+1 = 本轮新单测）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings
+  exit 0；13 条 warning 全部来自 `vendor/rquickjs-core`，本仓零 warning
+$ cargo fmt --all -- --check
+  干净
+```
+
+同一棵树在 11:57（`load average = 12.5 / 16.2 / 17.8`，其它 agent 正在编译）重跑时，
+**命中已知的负载相关偶发失败**：`pi-extensions/tests/pi_ai_provider.rs:667`
+`a_live_stream_extends_the_host_call_deadline` 报 `runtime error: Error: interrupted`
+（栈在 `__pi_tokenize` → `__pi_analyze_module` → `_pi_load_extension`）。
+按「先排除、再单跑」的标准做法复核：
+
+```console
+$ cargo test --workspace --offline -- --skip a_live_stream_extends_the_host_call_deadline
+  145 套件 / 2159 passed / 0 failed / 2 ignored   exit 0
+$ cargo test -p pi-extensions --offline --test pi_ai_provider
+  test a_live_stream_extends_the_host_call_deadline ... ok   （6 passed / 0 failed）
+```
+
+即：**不是本轮引入的回归**（上一轮全绿已在同一树上验证过），而是该用例的 CPU 争用敏感性。
+但它揭示一个**真实的健壮性缺口**（不属 TUI 面，记录备查）：宿主中断期限在**扩展加载**
+（`__pi_tokenize`）阶段也会生效，机器拥堵时扩展会以 `interrupted` 加载失败，而不是等
+live stream 去续期 —— 建议单独开一个小切片（“扩展加载阶段免受中断”）。
+
+### 五、Stage 58 验收复核（对照 LUM-1214 的 5 条标准）
+
+| # | 标准 | 结论 | 证据 |
+| --- | --- | --- | --- |
+| 1 | 默认折叠 + 预览行数可注入 | ✅ | `pi-tui/src/message.rs:48` `TOOL_PREVIEW_LINES = 4`；`:444` / `:455` 注入；`:1167-1175` 取**尾部** N 行 + `tool_fold_hint`；短块不折叠（`:1714`） |
+| 2 | `app.tools.expand` 可被 `keybindings.json` 覆盖，回落 ctrl+o | ✅ | `pi-tui/src/app.rs:2051` `matches_app_key(..., "app.tools.expand", &["ctrl+o"])` → `toggle_tools_expanded` + 状态栏 flash；`pi-tui/tests/keybinding_consumer.rs:46` 覆盖成 `ctrl+g` 后原键失能、新键生效 |
+| 3 | 单击只切该块；滚轮语义不变 | ✅ | `app.rs:2932` 单击命中 `tool_block_at` 记 `tool_press`，**同格释放**才提交（拖拽仍选词）；`pi-tui/tests/mouse_scroll.rs:289-295` 断言滚轮不改 `tools_expanded` |
+| 4 | `render.rs` 至少接 bash / read / edit | ✅ | `pi-coding-agent/src/tools/render.rs:1576` `InteractiveToolRenderer`（`impl pi_tui::ToolBlockRenderer`）在 `interactive.rs:276` 安装；`renderer_for` 覆盖 read / write / edit / bash / find / grep / ls；`pi-tui/tests/tool_blocks.rs` +10 用例 |
+| 5 | 全量门绿 | ⚠️→✅ | tip 上原为红（见第二节），本轮修 fence 后绿 |
+
+两条**遗留**（都不属 LUM-1214 的编号验收标准，记录备查）：
+
+1. 折叠提示**硬编码 `Ctrl+O`**（`message.rs:54` `tool_fold_hint`）：用户把 `app.tools.expand` 改到
+   `ctrl+g` 后界面仍提示 Ctrl+O；上游的提示取自**生效 chord**。修法需把 chord 字符串由 driver
+   注入 `MessageView`（`pi-tui` 不能反向依赖 `pi-coding-agent`）。建议并入 Stage 63 或单开小切片。
+2. 上游「启动头（`ExpandableText`）与工具块共用 `app.tools.expand`」在 Rust 端**没有对应物**
+   （`grep -rn 'ExpandableText\|app.header' pi-rust/crates` 零命中）：所以「两套折叠状态」的风险
+   实际不存在，只是该开关的覆盖面比上游窄一格。
+
+### 六、槽位与派发决定（本轮**零派发**）
+
+* `multica daemon status --output json`：`running_task_count = 3` = **LUM-1212（Stage 56）+ LUM-1223
+  （Stage 62）+ 本轮 LUM-1222**。按「最多 3 个任务同时运行」的既定口径，**稳态已满，本轮不派第四个 run**。
+* 这 3 个槽位里只有 1 个是本轮自己（且本轮分钟级收工），另外两个是 LUM-1221 在收工前按
+  「TUI 优先 + 非冲突面」派发的：Stage 62（`!cmd`/`!!cmd`，TUI 入口缺失）与 Stage 56
+  （`pi-session` 读路径，与 62 零文件重叠，是 `/tree`/`/fork` 的前置）—— 与本轮会做的判断一致，
+  故**没有重复建 stage**。
+* **LUM-1224（Stage 63，图片 chip）保持 `backlog`**：与 Stage 62 同改 `editor.rs` / `app.rs`，必须串行。
+
+### 七、frontier / 下一轮衔接
+
+* **第一件事**：合 **LUM-1223（Stage 62）**；它与已合入的 58/61 共用 `interactive.rs` 的同一条提交分支
+  （先判 bash 前缀、再判 pending 队列），冲突逐处过。
+* **第二件事**：合 **LUM-1212（Stage 56）** 后晋升 **LUM-1224（Stage 63）** 与 Stage 59 余下的
+  `app.session.tree|fork|resume`。
+* **第三件事**：把上面两条遗留（`tool_fold_hint` 的动态 chord、启动头开关）并入 63 或单开一个
+  「折叠提示联动」小切片（都很小，但要改 `MessageView` 的注入面）。
+* **流程提醒（第七次记录）**：autopilot 20 分钟一轮，LUM-1213 / 1215 / 1217 / 1219 / 1220 / 1221 / 1222
+  已八轮同题。本轮与 LUM-1221 的重复成本再次真实发生（两份冲突解 + 两份全量门），但**重复也换来了
+  一条硬证据**：两条独立合并线的 tree hash 逐字相同，等于对 Stage 58 + 61 + 60 三方共存的合并正确性
+  做了一次双盲验证 —— 这是单轮做不到的。仍建议把周期调长（或改成「只保留合并轮按需触发」）。
+* **给 worker 的硬约束（沿用）**：**run 结束前必须先 commit 再 push**；**文档提交也要过全量门**
+  （本轮 tip 变红就是漏了这一步）。

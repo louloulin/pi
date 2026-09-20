@@ -232,6 +232,48 @@ worker 的 stage 划分。
 Stage 58/61/60 均已合入，62/63 的文件面（`editor.rs` + 提交分支 + `app.rs`）与已合入的折叠面**只共享
 `interactive.rs` 的拦截块**，可顺序落地。
 
+## 三点六、第四轮验证与修复（LUM-1222，与 LUM-1221 并发的重复协调轮）
+
+LUM-1221 与本轮是同一 autopilot 提示的两条并发轮。本轮开工时 `origin/feature/pi.rs` 已经是
+`d22c5d694`（LUM-1220 的 61+60），于是本轮独立地把 Stage 58（`origin/work/LUM-1214` = `6d4f64e62`）
+合进同一基线，**四处冲突独立人工解**（`interactive.rs` 的 `set_session_name` + `set_tool_block_renderer`
+并留、`app.rs`/`lib.rs` 的 `use` 合并、`message.rs` 手写 `Default` 补回 `pending_steering`/`pending_follow_up`）。
+
+结果：本轮合并树的 tree hash 与 LUM-1221 的合并提交 `76d1d634e` **逐字相同**（`a42b444d06db…`），
+两条独立合并线互为交叉验证，故本轮**弃用自己的重复合并提交、以远端为基**（同 LUM-1219 的处置口径）。
+本轮在自己的树上实跑全量门得到 `145 / 2159 / 0 / 2`，与 LUM-1221 自报值逐字一致。
+
+本轮产出（两处对用户可见的修复 + 一次验收复核）：
+
+1. **修 `feature/pi.rs` 当前是红门**：LUM-1221 的文档提交 `b20800ed3` 在
+   `docs/TUI_UX_AUDIT.md` 里插第三轮验证块时，**吃掉了首轮块的起始 fence**，导致该文件
+   fence 不配对；`pi-evals` 的 `docs-code-fences-balanced`（审计 `pi-rust/docs/**` + 两个 README）
+   因此在 `feature/pi.rs` 上**实跑失败**（`cargo test --workspace` 退出码 101）。本轮补回
+   ` ```console ` 起始 fence，全仓重新扫描已无未闭合块。教训：**文档提交也要过一遍全量门** ——
+   LUM-1221 的门只跑在合并提交 `76d1d634e` 上，文档提交在其之后。
+2. **`/hotkeys` 补 `app.tools.expand`（Ctrl+O）**：Stage 58 已让该动作有消费者，但
+   `slash.rs` 的 app 分组表没加这一行 —— 违反本文件自己定的规则「只列出真正实现的动作」
+   （未实现的不显示，实现的不漏）。用户在 `/hotkeys` 里看不到刚做好的折叠入口，这条正是
+   信息密度类缺陷。新增单测 `hotkeys_text_lists_the_tool_fold_chord`。
+3. **Stage 58 验收复核**（对照 LUM-1214 的 5 条验收标准逐条查）：
+
+| 标准 | 结论 | 证据 |
+| --- | --- | --- |
+| 1 默认折叠 + N 可注入 | 通过 | `message.rs:48` `TOOL_PREVIEW_LINES = 4`；`with_/set_tool_preview_lines`（`:444`/`:455`）；`tool_body_lines` 取**尾部** N 行 + `tool_fold_hint`（`:1167-1175`）；短块不折叠（`:1714` 测试） |
+| 2 `app.tools.expand` 可覆盖 + ctrl+o 回落 | 通过 | `app.rs:2051` `matches_app_key(..., "app.tools.expand", &["ctrl+o"])` → `toggle_tools_expanded` + 状态栏 flash；`tests/keybinding_consumer.rs:46` 用 `ctrl+g` 覆盖后原键失能、新键生效 |
+| 3 单击只切该块 / 滚轮语义不变 | 通过 | `app.rs:2932` 单击命中 `tool_block_at` 记 `tool_press`，同格释放才提交；`tests/mouse_scroll.rs:289-295` 断言滚轮不改 `tools_expanded` |
+| 4 `render.rs` 接入 ≥ bash/read/edit | 通过 | ``renders.rs:1576`` `InteractiveToolRenderer`（`impl pi_tui::ToolBlockRenderer`）在 `interactive.rs:276` 安装；`renderer_for` 覆盖 read/write/edit/bash/find/grep/ls；`tests/tool_blocks.rs` 10 个用例 |
+| 5 全量门绿 | **修复后才绿** | 见第 1 条：tip 上 `pi-evals` 失败；本轮修 fence 后 `cargo test --workspace` 全绿 |
+
+两条**未实现的遗留**（均不属 LUM-1214 的编号验收标准，记录备查）：
+
+- 折叠提示硬编码 `Ctrl+O`（`message.rs:54` `tool_fold_hint`），用户用 `keybindings.json` 把
+  `app.tools.expand` 改到 `ctrl+g` 后，界面仍提示 Ctrl+O；上游的提示取自**生效 chord**。
+  修法需把 chord 字符串从 driver 注入 `MessageView`（不能反向依赖），建议并入 Stage 63 或其后。
+- 启动头（上游 `ExpandableText`，`interactive-mode.ts:4207-4227`）的展开与工具块共用同一个
+  `app.tools.expand` 开关，但 Rust 端**没有启动头**（搜 `ExpandableText`/`app.header` 零命中），
+  故「两套折叠状态」的风险实际不成立，只是开关的覆盖面比上游窄。
+
 ## 四、本轮已交付
 
 | 改动 | 位置 | 说明 |
@@ -260,14 +302,17 @@ Stage 58/61/60 均已合入，62/63 的文件面（`editor.rs` + 提交分支 + 
 产物未提交、由本轮抢救），故本轮把 58 合入后按「非冲突面优先」派发 Stage 56 = LUM-1212
 （`backlog` → `todo`，解 `/tree`/`/fork` 的读路径阻塞），62/63 待其占用槽位释放后晋升。
 
-> **落地状态（LUM-1220 更新）**：Stage 61（LUM-1216）已合入 `feature/pi.rs`（`c234068d1`）；
-> Stage 60（LUM-1218）已合入（`b91a3ae12`），实际落地 `/new`、`/copy`、`/name` + `app.session.new`
-> （`/tree`、`/fork` 仍缺，等 LUM-1212 的 `branch_*` 读路径）；Stage 58（LUM-1214）在飞。
-> 61+60 合并 tip 的全量门 = 144 套件 / 2149 passed / 0 failed / 2 ignored（clippy / fmt 全绿）。
+> **落地状态（LUM-1222 更新）**：Stage 58（LUM-1214，`6d4f64e62`）已由 LUM-1221 合入
+> `feature/pi.rs`（`76d1d634e`），本轮独立复现了同一棵树并复核通过 4/5 条验收标准；
+> Stage 61（`c234068d1`）、Stage 60（`b91a3ae12`）已在 tip。
+> **当前 tip 的全量门 = 145 套件 / 2159 passed / 0 failed / 2 ignored**，但仅在
+> `76d1d634e` 上成立 —— 其后的文档提交 `b20800ed3` 引入了未闭合 fence 使 `pi-evals` 变红，
+> 本轮修好后重新全绿（详见「三点六」）。
 
 ## 六、验证
 
-第三轮（LUM-1221，合入 Stage 58 + Stage 61 + Stage 60 后的 `feature/pi.rs` 全量实跑）：
+第三轮（LUM-1221，合入 Stage 58 + Stage 61 + Stage 60 后的 `feature/pi.rs` 全量实跑；
+同轮由 LUM-1222 独立复现（树 hash 相同），见「三点六」）：
 
 ```
 $ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -282,6 +327,8 @@ $ cargo fmt --all -- --check
 ```
 
 首轮（LUM-1210）：
+
+```console
 $ CARGO_HOME=/tmp/cargo-home CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p pi-coding-agent -p pi-tui --offline
   59 个 test target：1291 passed / 0 failed / 0 ignored
