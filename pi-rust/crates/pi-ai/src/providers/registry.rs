@@ -57,12 +57,7 @@ pub struct Pricing {
 
 impl Pricing {
     /// Build a pricing entry from micro-USD per-1M-token rates.
-    pub const fn micro_usd(
-        input: u64,
-        output: u64,
-        cache_read: u64,
-        cache_write: u64,
-    ) -> Self {
+    pub const fn micro_usd(input: u64, output: u64, cache_read: u64, cache_write: u64) -> Self {
         Self {
             input_micro_usd: input,
             output_micro_usd: output,
@@ -437,6 +432,136 @@ const MISTRAL_MODELS: &[ModelSpec] = &[
         .with_pricing(Pricing::micro_usd(1_400_000, 4_400_000, 140_000, 0)),
 ];
 
+/// Azure OpenAI Responses deployment catalog.
+///
+/// Ids, labels, limits and rates come from the upstream generated
+/// `azure-openai-responses` catalog (the `azure-openai-responses.json` data
+/// blob shipped with `@earendil-works/pi-ai`). Azure deployment names are
+/// resolved separately at request time (`AZURE_OPENAI_DEPLOYMENT_NAME_MAP`).
+/// The catalog keeps `id`/`label`/limits/pricing; upstream-only fields the
+/// Rust `ModelSpec` cannot carry (`reasoning`, `input` modalities, `compat`,
+/// `thinkingLevelMap`) are dropped.
+const AZURE_OPENAI_RESPONSES_MODELS: &[ModelSpec] = &[
+    ModelSpec::new("gpt-4", "GPT-4")
+        .with_limits(8_192, 8_192)
+        .with_pricing(Pricing::micro_usd(30_000_000, 60_000_000, 0, 0)),
+    ModelSpec::new("gpt-4-turbo", "GPT-4 Turbo")
+        .with_limits(128_000, 4_096)
+        .with_pricing(Pricing::micro_usd(10_000_000, 30_000_000, 0, 0)),
+    ModelSpec::new("gpt-4.1", "GPT-4.1")
+        .with_limits(1_047_576, 32_768)
+        .with_pricing(Pricing::micro_usd(2_000_000, 8_000_000, 500_000, 0)),
+    ModelSpec::new("gpt-4.1-mini", "GPT-4.1 mini")
+        .with_limits(1_047_576, 32_768)
+        .with_pricing(Pricing::micro_usd(400_000, 1_600_000, 100_000, 0)),
+    ModelSpec::new("gpt-4.1-nano", "GPT-4.1 nano")
+        .with_limits(1_047_576, 32_768)
+        .with_pricing(Pricing::micro_usd(100_000, 400_000, 25_000, 0)),
+    ModelSpec::new("gpt-4o", "GPT-4o")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(2_500_000, 10_000_000, 1_250_000, 0)),
+    ModelSpec::new("gpt-4o-2024-05-13", "GPT-4o (2024-05-13)")
+        .with_limits(128_000, 4_096)
+        .with_pricing(Pricing::micro_usd(5_000_000, 15_000_000, 0, 0)),
+    ModelSpec::new("gpt-4o-2024-08-06", "GPT-4o (2024-08-06)")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(2_500_000, 10_000_000, 1_250_000, 0)),
+    ModelSpec::new("gpt-4o-2024-11-20", "GPT-4o (2024-11-20)")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(2_500_000, 10_000_000, 1_250_000, 0)),
+    ModelSpec::new("gpt-4o-mini", "GPT-4o mini")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(150_000, 600_000, 75_000, 0)),
+    ModelSpec::new("gpt-5", "GPT-5")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(1_250_000, 10_000_000, 125_000, 0)),
+    ModelSpec::new("gpt-5-chat-latest", "GPT-5 Chat Latest")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(1_250_000, 10_000_000, 125_000, 0)),
+    ModelSpec::new("gpt-5-mini", "GPT-5 Mini")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(250_000, 2_000_000, 25_000, 0)),
+    ModelSpec::new("gpt-5-nano", "GPT-5 Nano")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(50_000, 400_000, 5_000, 0)),
+    ModelSpec::new("gpt-5-pro", "GPT-5 Pro")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(15_000_000, 120_000_000, 0, 0)),
+    ModelSpec::new("gpt-5.1", "GPT-5.1")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(1_250_000, 10_000_000, 125_000, 0)),
+    ModelSpec::new("gpt-5.2", "GPT-5.2")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
+    ModelSpec::new("gpt-5.2-chat-latest", "GPT-5.2 Chat")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
+    ModelSpec::new("gpt-5.2-pro", "GPT-5.2 Pro")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(21_000_000, 168_000_000, 0, 0)),
+    ModelSpec::new("gpt-5.3-chat-latest", "GPT-5.3 Chat (latest)")
+        .with_limits(128_000, 16_384)
+        .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
+    ModelSpec::new("gpt-5.3-codex", "GPT-5.3 Codex")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
+    ModelSpec::new("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark")
+        .with_limits(128_000, 32_000)
+        .with_pricing(Pricing::micro_usd(1_750_000, 14_000_000, 175_000, 0)),
+    ModelSpec::new("gpt-5.4", "GPT-5.4")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(2_500_000, 15_000_000, 250_000, 0)),
+    ModelSpec::new("gpt-5.4-mini", "GPT-5.4 mini")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(750_000, 4_500_000, 75_000, 0)),
+    ModelSpec::new("gpt-5.4-nano", "GPT-5.4 nano")
+        .with_limits(400_000, 128_000)
+        .with_pricing(Pricing::micro_usd(200_000, 1_250_000, 20_000, 0)),
+    ModelSpec::new("gpt-5.4-pro", "GPT-5.4 Pro")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(30_000_000, 180_000_000, 0, 0)),
+    ModelSpec::new("gpt-5.5", "GPT-5.5")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(5_000_000, 30_000_000, 500_000, 0)),
+    ModelSpec::new("gpt-5.5-pro", "GPT-5.5 Pro")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(30_000_000, 180_000_000, 0, 0)),
+    ModelSpec::new("gpt-5.6-luna", "GPT-5.6 Luna")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(200_000, 1_200_000, 20_000, 250_000)),
+    ModelSpec::new("gpt-5.6-sol", "GPT-5.6 Sol")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(
+            4_000_000, 20_000_000, 400_000, 5_000_000,
+        )),
+    ModelSpec::new("gpt-5.6-terra", "GPT-5.6 Terra")
+        .with_limits(1_050_000, 128_000)
+        .with_pricing(Pricing::micro_usd(
+            2_000_000, 12_000_000, 200_000, 2_500_000,
+        )),
+    ModelSpec::new("gpt-realtime-2.1", "GPT-Realtime-2.1")
+        .with_limits(128_000, 32_000)
+        .with_pricing(Pricing::micro_usd(4_000_000, 24_000_000, 400_000, 0)),
+    ModelSpec::new("o1", "o1")
+        .with_limits(200_000, 100_000)
+        .with_pricing(Pricing::micro_usd(15_000_000, 60_000_000, 7_500_000, 0)),
+    ModelSpec::new("o1-pro", "o1-pro")
+        .with_limits(200_000, 100_000)
+        .with_pricing(Pricing::micro_usd(150_000_000, 600_000_000, 0, 0)),
+    ModelSpec::new("o3", "o3")
+        .with_limits(200_000, 100_000)
+        .with_pricing(Pricing::micro_usd(2_000_000, 8_000_000, 500_000, 0)),
+    ModelSpec::new("o3-mini", "o3-mini")
+        .with_limits(200_000, 100_000)
+        .with_pricing(Pricing::micro_usd(1_100_000, 4_400_000, 550_000, 0)),
+    ModelSpec::new("o3-pro", "o3-pro")
+        .with_limits(200_000, 100_000)
+        .with_pricing(Pricing::micro_usd(20_000_000, 80_000_000, 0, 0)),
+    ModelSpec::new("o4-mini", "o4-mini")
+        .with_limits(200_000, 100_000)
+        .with_pricing(Pricing::micro_usd(1_100_000, 4_400_000, 275_000, 0)),
+];
+
 /// The first-party providers plus the OpenAI-compatible family.
 ///
 /// First-party providers (faux / openai / openai-responses / anthropic /
@@ -469,6 +594,15 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["OPENAI_API_KEY"],
         base_url_env: &["OPENAI_BASE_URL"],
         models: OPENAI_RESPONSES_MODELS,
+    },
+    ProviderSpec {
+        id: "azure-openai-responses",
+        display_name: "Azure OpenAI",
+        api: Api::AzureOpenAiResponses,
+        default_base_url: "",
+        api_key_env: &["AZURE_OPENAI_API_KEY"],
+        base_url_env: &["AZURE_OPENAI_BASE_URL"],
+        models: AZURE_OPENAI_RESPONSES_MODELS,
     },
     ProviderSpec {
         id: "anthropic",
@@ -756,8 +890,12 @@ mod tests {
 
     #[test]
     fn credentialed_providers_have_a_default_base_url() {
+        // Azure OpenAI has no fixed host: its base URL is assembled from
+        // `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME` at request
+        // time, so an empty `default_base_url` is correct for it.
+        const ENV_ONLY_BASE_URL: &[&str] = &["azure-openai-responses"];
         for spec in BUILTIN_PROVIDERS {
-            if spec.requires_api_key() {
+            if spec.requires_api_key() && !ENV_ONLY_BASE_URL.contains(&spec.id) {
                 assert!(
                     !spec.default_base_url.is_empty(),
                     "provider `{}` needs a default base URL",
@@ -765,6 +903,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn azure_openai_responses_has_its_own_api_family_and_deployment_catalog() {
+        let spec = find_provider("azure-openai-responses").expect("azure provider");
+        assert_eq!(spec.api, Api::AzureOpenAiResponses);
+        assert_eq!(spec.api_key_env, &["AZURE_OPENAI_API_KEY"]);
+        assert_eq!(spec.base_url_env, &["AZURE_OPENAI_BASE_URL"]);
+        // No fixed host: the adapter resolves it from env / resource name.
+        assert!(spec.default_base_url.is_empty());
+        assert!(!spec.models.is_empty());
+        assert!(spec
+            .models
+            .iter()
+            .all(|m| m.context_window > 0 && m.max_output_tokens > 0));
+        assert!(spec.pricing_for("gpt-4o").is_some());
     }
 
     #[test]

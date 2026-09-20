@@ -87,6 +87,7 @@ pub fn api_name(api: Api) -> &'static str {
     match api {
         Api::OpenAiChatCompletions => "openai_chat_completions",
         Api::OpenAiResponses => "openai_responses",
+        Api::AzureOpenAiResponses => "azure_openai_responses",
         Api::AnthropicMessages => "anthropic_messages",
         Api::GoogleGenerativeAi => "google_generative_ai",
         Api::BedrockConverse => "bedrock_converse",

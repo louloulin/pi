@@ -58,7 +58,10 @@ fn registry_invariants_case() -> crate::harness::Case {
                     model_count += spec.models.len() as u64;
                 }
                 let needs_transport = spec.api != Api::Faux;
-                if needs_transport && spec.default_base_url.is_empty() {
+                // Azure OpenAI resolves its host from `AZURE_OPENAI_BASE_URL`
+                // or `AZURE_OPENAI_RESOURCE_NAME`, so it has no fixed default.
+                let env_only_base_url = spec.id == "azure-openai-responses";
+                if needs_transport && spec.default_base_url.is_empty() && !env_only_base_url {
                     providers_missing_base_url += 1;
                 }
                 if needs_transport && spec.api_key_env.is_empty() {
@@ -224,6 +227,8 @@ fn api_inference_case() -> crate::harness::Case {
                     Api::GoogleGenerativeAi => "google_generative_ai",
                     Api::BedrockConverse => "bedrock_converse",
                     Api::CohereV2 => "cohere_v2",
+                    Api::MistralConversations => "mistral_conversations",
+                    Api::AzureOpenAiResponses => "azure_openai_responses",
                     Api::Faux => "faux",
                 })
             };

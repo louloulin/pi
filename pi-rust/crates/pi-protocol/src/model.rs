@@ -27,6 +27,12 @@ pub enum Api {
     OpenAiChatCompletions,
     /// OpenAI Responses.
     OpenAiResponses,
+    /// Azure OpenAI Responses — the deployment-scoped variant of
+    /// [`Api::OpenAiResponses`] (`POST /deployments/{name}/responses`,
+    /// `api-key` header). Mirrors the upstream `azure-openai-responses`
+    /// API family.
+    #[serde(rename = "azure-openai-responses")]
+    AzureOpenAiResponses,
     /// Anthropic Messages.
     AnthropicMessages,
     /// Google Generative AI.
