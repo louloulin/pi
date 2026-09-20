@@ -369,7 +369,16 @@ async fn run_loop(
         // Poll for crossterm events with a short timeout so the
         // render loop continues to tick.
         if ct_event::poll(config.event_poll_interval)? {
-            while let Some(event) = read_event()? {
+            // Drain only the events that are ready *right now*, then go back
+            // to rendering. `crossterm::event::read()` blocks until the *next*
+            // event, and `read_event` never returns `None` (every `CtEvent`
+            // variant maps to `Some`), so `while let Some(event) =
+            // read_event()?` parked here after the first key and the render
+            // loop never ran again — the frame froze and every later key was
+            // applied to a screen nobody could see (P0, reproduced by
+            // LUM-1233 over a real PTY; fixed here).
+            while ct_event::poll(Duration::ZERO)? {
+                let Some(event) = read_event()? else { break };
                 let translated = App::translate_event(event);
                 if let Some(action) =
                     handle_input_event(&mut app, &agent, &mut options, &mut bash, translated)
