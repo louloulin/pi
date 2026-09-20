@@ -272,7 +272,8 @@ use crate::input::{
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
 use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
 use crate::locale::{
-    format_chord, Locale, HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
+    format_chord, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH, HEADER_ONBOARDING_EN,
+    HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
 };
 use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
@@ -455,6 +456,36 @@ pub struct AppConfig {
     pub startup_header_expanded: bool,
     /// Copy table the built-in startup header reads (see [`crate::locale`]).
     pub locale: Locale,
+    /// The extension summary the built-in startup header shows under the
+    /// title (see [`ExtensionHeader`]).
+    ///
+    /// The driver owns extension discovery (`pi-tui` cannot depend on
+    /// `pi-coding-agent`), so it hands the App this projection. The default
+    /// is [`ExtensionHeader::Hidden`], which keeps the headless and
+    /// no-extension header byte-identical to the pre-Stage-71 surface.
+    pub extension_header: ExtensionHeader,
+}
+
+/// What the built-in startup header says about loaded extensions.
+///
+/// A `ctx.ui.setHeader` from an extension still replaces the whole built-in
+/// header (including this row): upstream renders `customHeader ??
+/// builtInHeader` (`interactive-mode.ts:958`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ExtensionHeader {
+    /// No extension row. Nothing was loaded (or the caller says nothing).
+    #[default]
+    Hidden,
+    /// `N extension(s): <display names>` right under the title.
+    Loaded {
+        /// How many sources loaded.
+        count: usize,
+        /// Display names, already shortened by the driver (`~` / `./`).
+        names: Vec<String>,
+    },
+    /// The user turned extension loading off (`--no-extensions`): the header
+    /// says `extensions: none (--no-extensions)`.
+    Disabled,
 }
 
 impl Default for AppConfig {
@@ -470,6 +501,7 @@ impl Default for AppConfig {
             startup_header: false,
             startup_header_expanded: true,
             locale: Locale::default(),
+            extension_header: ExtensionHeader::Hidden,
         }
     }
 }
@@ -1339,7 +1371,7 @@ impl App {
         }
         let kb = get_keybindings();
         let locale = self.config.locale;
-        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 3);
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 4);
         // Logo, upstream `interactive-mode.ts:913`.
         lines.push(vec![
             StyledSpan::new(
@@ -1351,6 +1383,14 @@ impl App {
                 SpanStyle::fg(ThemeColor::Dim),
             ),
         ]);
+        // Extension summary, right under the title so it is the first thing
+        // a user who ran `pi -e ./ext.mjs` reads. Absent by default.
+        if let Some(summary) = self.extension_header_line() {
+            lines.push(vec![StyledSpan::new(
+                summary,
+                SpanStyle::fg(ThemeColor::Muted),
+            )]);
+        }
         for hint in STARTUP_HINTS {
             let Some(keys) = hint.key.label(|id| kb.get_keys(id)) else {
                 // Unbound in this table: an unbound action is not a hint.
@@ -1372,6 +1412,30 @@ impl App {
             SpanStyle::fg(ThemeColor::Dim),
         )]);
         lines
+    }
+
+    /// The header's extension row, or `None` when there is nothing to
+    /// advertise.
+    ///
+    /// The copy lives in [`crate::locale`]; the width budget is one row
+    /// (`plan_chrome` counts lines, and the renderer clips — it never
+    /// wraps — a line wider than the viewport).
+    fn extension_header_line(&self) -> Option<String> {
+        let locale = self.config.locale;
+        match &self.config.extension_header {
+            ExtensionHeader::Hidden => None,
+            ExtensionHeader::Disabled => Some(
+                locale
+                    .tr(EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH)
+                    .to_string(),
+            ),
+            // A `Loaded` with no names carries no information; hide it
+            // rather than print a dangling count.
+            ExtensionHeader::Loaded { names, .. } if names.is_empty() => None,
+            ExtensionHeader::Loaded { count, names } => Some(
+                crate::locale::extensions_summary_line(locale, *count, names),
+            ),
+        }
     }
 
     /// Whether markdown links render as OSC 8 hyperlinks.

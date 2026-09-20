@@ -19,7 +19,7 @@ pub mod slash;
 pub mod tree;
 
 pub use export::{run_cli_export, run_slash_export, ActiveSession};
-pub use slash::{handle_command, help_text, SlashCommand};
+pub use slash::{display_path, extensions_text, handle_command, help_text, SlashCommand};
 pub use tree::{
     clone_session, entry_display_text, fork_selector, fork_session, session_tip, tree_selector,
     CreatedSession,

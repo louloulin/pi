@@ -151,6 +151,78 @@ impl std::fmt::Debug for ExtensionLoadOutcome {
     }
 }
 
+/// Read-only projection of one extension load pass, for a UI surface
+/// (the interactive startup header and `/extensions`).
+///
+/// [`ExtensionLoadOutcome`] owns live handles — the executor and the JS
+/// host — that a UI must not touch. This struct keeps only what a surface
+/// renders: which sources loaded, what they registered, what failed, and
+/// whether the user disabled loading altogether.
+///
+/// The load pass does not track *which* source registered a command or a
+/// provider, so [`tools`](Self::tools), [`commands`](Self::commands) and
+/// [`providers`](Self::providers) are the union across every loaded
+/// source; [`loaded`](Self::loaded) is per source.
+///
+/// `RegisteredCommand` has no `PartialEq`, so this type cannot derive the
+/// comparison traits either.
+#[derive(Debug, Clone, Default)]
+pub struct ExtensionReport {
+    /// Sources that were evaluated successfully, in load order.
+    pub loaded: Vec<PathBuf>,
+    /// Extension tool names advertised to the model (the built-in
+    /// collision filter already dropped the shadowed ones).
+    pub tools: Vec<String>,
+    /// Extension tool names that a built-in tool already claimed; the
+    /// built-in wins and the registration is dropped.
+    pub shadowed: Vec<String>,
+    /// Commands registered via `pi.registerCommand`, in registration
+    /// order.
+    pub commands: Vec<RegisteredCommand>,
+    /// Provider ids registered via `pi.registerProvider`, in
+    /// registration order.
+    pub providers: Vec<String>,
+    /// Per-source failures (`path`, human-readable reason). Non-fatal:
+    /// the agent starts with whatever did load.
+    pub errors: Vec<(PathBuf, String)>,
+    /// `--no-extensions` was passed. Nothing was discovered, and the UI
+    /// says so instead of showing an empty list.
+    pub disabled: bool,
+}
+
+impl ExtensionReport {
+    /// True when there is nothing to advertise: no source, no failure and
+    /// no explicit opt-out.
+    pub fn is_empty(&self) -> bool {
+        self.loaded.is_empty() && self.errors.is_empty() && !self.disabled
+    }
+}
+
+impl ExtensionLoadOutcome {
+    /// Project this outcome into the UI-facing [`ExtensionReport`].
+    ///
+    /// `disabled` mirrors the CLI's `--no-extensions`: the early return in
+    /// [`load`] leaves an otherwise empty outcome, so the flag is not
+    /// recoverable from the outcome itself.
+    pub fn report(&self, disabled: bool) -> ExtensionReport {
+        ExtensionReport {
+            loaded: self.loaded.clone(),
+            tools: self.tools.clone(),
+            shadowed: self.shadowed.clone(),
+            commands: self.runtime.commands().to_vec(),
+            providers: self
+                .runtime
+                .providers()
+                .configs()
+                .iter()
+                .map(|config| config.name.clone())
+                .collect(),
+            errors: self.errors.clone(),
+            disabled,
+        }
+    }
+}
+
 /// Live handle to the JS extension host for one process.
 ///
 /// A mode uses it for two things:
@@ -1262,6 +1334,61 @@ mod tests {
         assert!(!outcome.executor.definitions().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn report_projects_the_load_outcome_for_the_ui() {
+        // The interactive header and `/extensions` read this projection;
+        // it must carry exactly what the outcome advertised.
+        let source = r#"
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "ext_greet",
+                    label: "Greet",
+                    description: "greets",
+                    parameters: { type: "object" },
+                    execute: function () {
+                        return { content: [{ type: "text", text: "hi" }] };
+                    },
+                });
+                pi.registerCommand("ext-hello", {
+                    description: "hello",
+                    handler: function () { return "hi"; },
+                });
+            };
+        "#;
+        let (_runtime, outcome) = load_extension("report", source);
+        assert!(outcome.errors.is_empty(), "errors: {:?}", outcome.errors);
+
+        let report = outcome.report(false);
+        assert_eq!(report.loaded, outcome.loaded);
+        assert_eq!(report.tools, vec!["ext_greet".to_string()]);
+        assert!(report.shadowed.is_empty());
+        assert_eq!(report.commands.len(), 1);
+        assert_eq!(report.commands[0].name, "ext-hello");
+        assert!(report.providers.is_empty());
+        assert!(report.errors.is_empty());
+        assert!(!report.disabled);
+        assert!(!report.is_empty());
+
+        // `--no-extensions` is the caller's flag, not the outcome's: the
+        // early return in `load` leaves it unrecoverable from the outcome.
+        assert!(outcome.report(true).disabled);
+    }
+
+    #[test]
+    fn an_empty_report_stays_empty_until_something_is_advertised() {
+        assert!(ExtensionReport::default().is_empty());
+        assert!(!ExtensionReport {
+            disabled: true,
+            ..ExtensionReport::default()
+        }
+        .is_empty());
+        assert!(!ExtensionReport {
+            loaded: vec![PathBuf::from("/tmp/ext.js")],
+            ..ExtensionReport::default()
+        }
+        .is_empty());
     }
 
     /// Minimal extension source registering one named tool.
