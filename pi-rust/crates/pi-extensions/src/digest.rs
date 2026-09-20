@@ -59,6 +59,43 @@ pub fn digest(algorithm: Algorithm, data: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Block size of both supported algorithms (FIPS 180-4: SHA-1 and SHA-256
+/// process 512-bit blocks).
+const BLOCK_SIZE: usize = 64;
+
+/// HMAC of `data` under `key` (RFC 2104): `H((K ^ opad) || H((K ^ ipad) || m))`.
+///
+/// Both supported algorithms use a 64-byte block, so a key longer than that
+/// is first replaced by its own digest, as the RFC requires. Built on the
+/// same hand-rolled [`sha1`] / [`sha256`] primitives as [`digest`], so no new
+/// dependency is needed for `crypto.createHmac`.
+pub fn hmac(algorithm: Algorithm, key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed = digest(algorithm, key);
+        key_block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5cu8; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        inner_pad[index] ^= key_block[index];
+        outer_pad[index] ^= key_block[index];
+    }
+
+    let mut inner = Vec::with_capacity(BLOCK_SIZE + data.len());
+    inner.extend_from_slice(&inner_pad);
+    inner.extend_from_slice(data);
+    let inner_digest = digest(algorithm, &inner);
+
+    let mut outer = Vec::with_capacity(BLOCK_SIZE + inner_digest.len());
+    outer.extend_from_slice(&outer_pad);
+    outer.extend_from_slice(&inner_digest);
+    digest(algorithm, &outer)
+}
+
 /// SHA-256 of `data` (FIPS 180-4 §6.2).
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
@@ -306,6 +343,116 @@ mod tests {
         assert_eq!(
             hex(&sha1(&[b'a'; 64])),
             "0098ba824b5c16427bd7a1122a5a442a25ec644d"
+        );
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231_and_rfc_2202_vectors() {
+        // RFC 4231 cases 1-4, 6 (SHA-256) plus the SHA-1 cases from RFC 2202.
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, &[0x0b; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hex(&hmac(
+                Algorithm::Sha256,
+                b"Jefe",
+                b"what do ya want for nothing?"
+            )),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, &[0xaa; 20], &[0xdd; 50])),
+            "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"
+        );
+        let short_key: Vec<u8> = (1u8..=25).collect();
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, &short_key, &[0xcd; 50])),
+            "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b"
+        );
+        // 131-byte key > block size: the key must be hashed first (RFC 4231 §4.2).
+        assert_eq!(
+            hex(&hmac(
+                Algorithm::Sha256,
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha1, &[0x0b; 20], b"Hi There")),
+            "b617318655057264e28bc0b6fb378c8ef146be00"
+        );
+        assert_eq!(
+            hex(&hmac(
+                Algorithm::Sha1,
+                b"Jefe",
+                b"what do ya want for nothing?"
+            )),
+            "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
+        );
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha1, &[0xaa; 20], &[0xdd; 50])),
+            "125d7342b9ac11cd91a39af48aa17b4f63f175d3"
+        );
+        assert_eq!(
+            hex(&hmac(
+                Algorithm::Sha1,
+                &[0xaa; 80],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "aa4ae5e15272d00e95705637ce8a3b55ed402112"
+        );
+        assert_eq!(
+            hex(&hmac(
+                Algorithm::Sha1,
+                &[0xaa; 80],
+                b"Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data"
+            )),
+            "e8e99d0f45237d786d6bbaa7965c7808bbff1a91"
+        );
+    }
+
+    #[test]
+    fn hmac_handles_empty_key_and_message() {
+        // 64 zero bytes of key material with an empty message: ipad = 0x36 x64,
+        // opad = 0x5c x64. Values from Python `hmac.new(b"", b"", ...)`.
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, b"", b"")),
+            "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+        );
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, b"", b"data")),
+            "e528c4d99e6177f5841f712a143b90843299a4aa181a06501422d9ca862bd2a5"
+        );
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha1, b"", b"")),
+            "fbdb1d1b18aa6c08324b7d64b71fb76370690e1d"
+        );
+    }
+
+    #[test]
+    fn hmac_block_sized_key_is_not_rehashed() {
+        // Exactly 64 bytes stays as-is; 65 bytes is digested first, which is
+        // the RFC boundary a naive `key.len() >= block_size` gets wrong.
+        let key64 = [0x0bu8; 64];
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, &key64, b"msg")),
+            "9b252c2ac19c29ed62691647a7a6685413d786074621d3486bc8b5f8502b3d41"
+        );
+        // Re-hashing the 64-byte key must change the result: it did not get
+        // folded into its own digest first.
+        assert_ne!(
+            hex(&hmac(Algorithm::Sha256, &key64, b"msg")),
+            hex(&hmac(Algorithm::Sha256, &sha256(&key64), b"msg")),
+        );
+        let mut key65 = [0x0bu8; 65];
+        key65[64] = 0x0c;
+        assert_eq!(
+            hex(&hmac(Algorithm::Sha256, &key65, b"msg")),
+            // Python `hmac.new(bytes([0x0b]*64 + [0x0c]), b"msg", hashlib.sha256)`.
+            "34acac58aab047653508ffffb1bae067a6fd8cd5b839ec193f9c5d97f1cc13e4"
         );
     }
 

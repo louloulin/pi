@@ -9,8 +9,8 @@
 //! `btoa` / `atob`, `crypto.subtle.digest("SHA-256", …)` and
 //! `new URLSearchParams({…})`. These tests drive that surface through the
 //! real host (`JsExtensionHost::load` + `execute_tool`) so the shim, the
-//! `crypto.digest` bridge op and the Rust digest module are all covered end
-//! to end.
+//! `crypto.digest` / `crypto.hmac` bridge ops and the Rust digest module are
+//! all covered end to end.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -512,4 +512,234 @@ fn globals_survive_a_second_extension_load() {
             "the probes must not write files"
         );
     });
+}
+
+/// `crypto.createHmac` — the RFC 2104 contract behind the host's
+/// `crypto.hmac` op, for both supported algorithms.
+///
+/// The vectors are RFC 4231 (SHA-256 cases 1, 2, 3 and 6) and RFC 2202
+/// (SHA-1 cases 2 and 6); case 6 covers the `key > block size` branch where
+/// the key must be replaced by its own digest first.
+#[test]
+fn crypto_create_hmac_matches_rfc_vectors() {
+    let details = rt().block_on(probe(
+        "crypto_hmac",
+        r#"
+            import { createHash, createHmac } from "node:crypto";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "crypto_hmac",
+                    label: "crypto hmac",
+                    description: "exercises createHmac",
+                    parameters: { type: "object", properties: {} },
+                    execute: () => {
+                        const errorName = (fn) => {
+                            try {
+                                fn();
+                                return "no-throw";
+                            } catch (error) {
+                                return error.name + ": " + error.message.slice(0, 40);
+                            }
+                        };
+                        const key20 = Buffer.alloc(20, 0x0b);
+                        const key20aa = Buffer.alloc(20, 0xaa);
+                        const key80aa = Buffer.alloc(80, 0xaa);
+
+                        const hmac = createHmac("sha256", key20);
+                        return {
+                            content: [{ type: "text", text: "hmac" }],
+                            details: {
+                                // RFC 4231 case 1.
+                                case1: createHmac("sha256", key20)
+                                    .update("Hi There")
+                                    .digest("hex"),
+                                // RFC 4231 case 2 — string key, default UTF-8.
+                                case2: createHmac("sha256", "Jefe")
+                                    .update("what do ya want for nothing?")
+                                    .digest("hex"),
+                                // RFC 4231 case 3 — binary message.
+                                case3: createHmac("sha256", key20aa)
+                                    .update(Buffer.alloc(50, 0xdd))
+                                    .digest("hex"),
+                                // RFC 4231 case 6 — 131-byte key is hashed first.
+                                case6: createHmac("SHA-256", Buffer.alloc(131, 0xaa))
+                                    .update("Test Using Larger Than Block-Size Key - Hash Key First")
+                                    .digest("hex"),
+                                // RFC 2202 case 2 with SHA-1.
+                                sha1Case2: createHmac("sha1", "Jefe")
+                                    .update("what do ya want for nothing?")
+                                    .digest("hex"),
+                                // RFC 2202 case 6 with SHA-1.
+                                sha1Case6: createHmac("sha1", key80aa)
+                                    .update("Test Using Larger Than Block-Size Key - Hash Key First")
+                                    .digest("hex"),
+                                // `update` may be called repeatedly, mixing types.
+                                chained: createHmac("sha256", key20)
+                                    .update("Hi")
+                                    .update(Buffer.from(" "))
+                                    .update(new TextEncoder().encode("There"))
+                                    .digest("hex"),
+                                updateReturnsThis: (() => {
+                                    const h = createHmac("sha256", "k");
+                                    return h.update("a") === h;
+                                })(),
+                                bufferDigest: Buffer.isBuffer(
+                                    createHmac("sha256", key20).update("Hi There").digest(),
+                                ),
+                                digestLength: createHmac("sha256", key20)
+                                    .update("Hi There")
+                                    .digest().length,
+                                base64: createHmac("sha256", key20)
+                                    .update("Hi There")
+                                    .digest("base64"),
+                                // Node's `{ encoding }` third argument applies to
+                                // string keys: "6b6579" (hex) is the key "key".
+                                keyEncoding: createHmac("sha256", "6b6579", { encoding: "hex" })
+                                    .update("msg")
+                                    .digest("hex"),
+                                emptyKeyAndMessage: createHmac("sha256", Buffer.alloc(0))
+                                    .update("")
+                                    .digest("hex"),
+                                unknownAlgorithm: errorName(() =>
+                                    createHmac("md5", "k").update("x").digest("hex"),
+                                ),
+                                missingKey: errorName(() => createHmac("sha256")),
+                                badKeyType: errorName(() => createHmac("sha256", 42)),
+                                badData: errorName(() =>
+                                    createHmac("sha256", "k").update(42).digest("hex"),
+                                ),
+                                distinctCalls: (() => {
+                                    const a = createHmac("sha256", "k").update("a");
+                                    const b = createHmac("sha256", "k").update("b");
+                                    return a.digest("hex") !== b.digest("hex");
+                                })(),
+                                // Node raises ERR_CRYPTO_HASH_FINALIZED; both the
+                                // HMAC and the hash share the finalized guard.
+                                hmacDigestTwice: errorName(() => {
+                                    const h = createHmac("sha256", "k").update("a");
+                                    h.digest("hex");
+                                    h.digest("hex");
+                                }),
+                                hmacUpdateAfterDigest: errorName(() => {
+                                    const h = createHmac("sha256", "k").update("a");
+                                    h.digest();
+                                    h.update("b");
+                                }),
+                                hashDigestTwice: errorName(() => {
+                                    const h = createHash("sha256").update("a");
+                                    h.digest("hex");
+                                    h.digest("hex");
+                                }),
+                                hashUpdateAfterDigest: errorName(() => {
+                                    const h = createHash("sha256").update("a");
+                                    h.digest();
+                                    h.update("b");
+                                }),
+                            },
+                        };
+                    },
+                });
+            }
+        "#,
+    ));
+
+    assert_eq!(
+        details["case1"],
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert_eq!(
+        details["case2"],
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    assert_eq!(
+        details["case3"],
+        "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"
+    );
+    assert_eq!(
+        details["case6"],
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+    assert_eq!(
+        details["sha1Case2"],
+        "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
+    );
+    assert_eq!(
+        details["sha1Case6"],
+        "aa4ae5e15272d00e95705637ce8a3b55ed402112"
+    );
+    // Chunked `update` must equal the one-shot digest.
+    assert_eq!(details["chained"], details["case1"]);
+    assert_eq!(details["updateReturnsThis"], true);
+    assert_eq!(details["bufferDigest"], true);
+    assert_eq!(details["digestLength"], 32);
+    assert_eq!(
+        details["base64"],
+        "sDRMYdjbOFNcqK/OrwvxK4gdwgDJgz2nJuk3bC4yz/c="
+    );
+    assert_eq!(
+        details["keyEncoding"],
+        "2d93cbc1be167bcb1637a4a23cbff01a7878f0c50ee833954ea5221bb1b8c628"
+    );
+    assert_eq!(
+        details["emptyKeyAndMessage"],
+        "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+    );
+    assert!(
+        details["unknownAlgorithm"]
+            .as_str()
+            .unwrap()
+            .starts_with("Error: unsupported hmac algorithm"),
+        "{details}"
+    );
+    assert!(
+        details["missingKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("TypeError: createHmac"),
+        "{details}"
+    );
+    assert!(
+        details["badKeyType"]
+            .as_str()
+            .unwrap()
+            .starts_with("TypeError: createHmac key"),
+        "{details}"
+    );
+    assert!(
+        details["badData"]
+            .as_str()
+            .unwrap()
+            .starts_with("TypeError: createHmac.update"),
+        "{details}"
+    );
+    assert_eq!(details["distinctCalls"], true);
+    assert!(
+        details["hmacDigestTwice"]
+            .as_str()
+            .unwrap()
+            .starts_with("Error: createHmac.digest"),
+        "{details}"
+    );
+    assert!(
+        details["hmacUpdateAfterDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("Error: createHmac.update"),
+        "{details}"
+    );
+    assert!(
+        details["hashDigestTwice"]
+            .as_str()
+            .unwrap()
+            .starts_with("Error: createHash.digest"),
+        "{details}"
+    );
+    assert!(
+        details["hashUpdateAfterDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("Error: createHash.update"),
+        "{details}"
+    );
 }

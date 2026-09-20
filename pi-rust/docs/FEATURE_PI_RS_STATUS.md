@@ -13157,3 +13157,71 @@ $ cargo test --workspace --offline                                       # exit 
 * 三个新 issue 都挂在 **LUM-1177** 下（沿用「协调轮派发的子任务挂协调轮」的既有约定，与 LUM-1168↔LUM-1167、LUM-1174/1175↔LUM-1173 一致），unstage，`priority = high`。
 * 复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1176`（2.0G，LUM-1176 轮遗留），全程 `--offline`：冷 check 1m10s、clippy 25s、`--workspace` 全量 test 在既有产物上主要花在链接与跑测试。未清理 `/tmp/pi-fresh-1173` / `/tmp/pi-fresh-1174`（属在飞任务）。
 * Git 身份沿用 `multica-agent <agent@multica.local>`；本轮推送 `work/lum-1177-2` 与 `feature/pi.rs`。
+
+## LUM-1181 round — pi-extensions 补 `crypto.createHmac`（RFC 2104 HMAC-SHA1/256 + 新 `crypto.hmac` 桥）+ 合并推送 feature/pi.rs（并发满槽不派发）
+
+### 一、选型（为什么本轮做 HMAC）
+
+frontier 第 6 条列出的 pi-extensions 引擎缺口里，`crypto.createHmac` 是唯一**零新依赖、可离线逐字节验证、改动面局限在单个 crate、且不与在飞分支重叠**的项：SHA-1 / SHA-256 已在
+`crates/pi-extensions/src/digest.rs` 自研（LUM-1159），RFC 2104 的 HMAC 直接叠在其上（`H(K⊕opad ‖ H(K⊕ipad ‖ m))`），不需要任何哈希/密码后端。
+
+其余候选被排除：
+
+* `fs.createWriteStream` — 与并发轮 **LUM-1179** 的 fs 区段重叠（同文件 + 同模块对象），合并必然冲突；
+* `fs.watch` — 需要 `notify` + host→JS 异步回推，是 fs 家族里最重的一项；
+* `URL` — 本轮开工时已被并发协调轮 **LUM-1177** 实现并推送（`885606ce7`）；
+* `ctx.ui.custom()` overlay — 横切 `pi-tui` 渲染循环，需要独占轮，且不可离线端到端验证；
+* `@earendil-works/pi-ai/compat` 内建 factories — 需要 host streaming 桥，跨 crate（LUM-1177 已停放为 LUM-1180）。
+
+**与 LUM-1177 建议的差异（需人裁决）**：LUM-1177 轮末的 frontier 第 2 条明确写着 `crypto.createHmac`「已核实无扩展消费方（`grep createHmac` 在
+`examples/` 与 `.pi/` 下为空），**建议等出现消费方再做，别为凑全表面而派发**」。本轮**没有派发**该任务（并发 4 路已满），而是把它当作本 run 自身的垂直切片实现：
+理由是当时的可选集里没有「有消费方」的项可在不改跨 crate / 不撞在飞分支的前提下完成，而这条是 frontier 上最小、最可验证的一个。
+若评审认为「无消费方的补齐」不该进主干，**可以单独 revert 本轮的 `e48185309`**，它与其它改动零耦合（只碰 `pi-extensions` 内 4 个文件 + 2 处文档）。
+
+### 二、改动清单
+
+| 文件 | 改动 | 内容 |
+| --- | --- | --- |
+| `crates/pi-extensions/src/digest.rs` | `+hmac()`、`+3` 单元测试 | `pub fn hmac(Algorithm, key, data)`：64 字节块，`key > block` 先做一次 digest（RFC 2104 §2）；测试覆盖 RFC 4231 case 1/2/3/6（SHA-256）、RFC 2202 case 2/6（SHA-1）、空键/空消息、以及 **64 / 65 字节键的块边界**（naive `>=` 会写错的那一格）。向量由 Python `hmac` 独立复算 |
+| `crates/pi-extensions/src/host.rs` | `+crypto.hmac` op（~15 行） | 参数 `{algorithm, keyBase64, base64}`，复用 `Algorithm::parse` → `md5` / `sha512` 得到可读的 `unsupported hmac algorithm` 而非错误 MAC；与 `crypto.digest` 同走 `base64_encode` 回值 |
+| `crates/pi-extensions/runtime/pi-ext-shim.mjs` | `+sourceBytes()`、`+createHmac()`、删旧 stub、注释更新 | `createHash` / `createHmac` 共享 BufferSource 强制转换（`TypeError` 指明哪个参数）；`createHmac(algorithm, key[, {encoding}])`，`update` 链式、`digest([encoding])` 返回 `Buffer` 或字符串；两者都加 **finalized 卫兵**（`digest` 后再 `update`/`digest` 抛错，对应 Node 的 `ERR_CRYPTO_HASH_FINALIZED`），这是本轮顺带收掉的一处静默错误语义 |
+| `crates/pi-extensions/tests/web_globals.rs` | `+1` 集成测试（~230 行） | `crypto_create_hmac_matches_rfc_vectors`：经真实宿主（`JsExtensionHost::load` + `execute_tool`）断言 RFC 向量、分片 `update` 等价性、`{encoding:"hex"}` 键、`Buffer`/base64/长度形态、未知算法、缺键/错类型键/错类型数据、finalized 卫兵（HMAC 与 Hash 各两条） |
+| `crates/pi-extensions/docs/NODE_BUILTINS.md` | crypto 节 + frontier 表 | `crypto.digest` / `crypto.hmac` 双桥说明；把 `crypto.createHmac` 从 frontier 行中移出（该行现在只剩 key-based WebCrypto） |
+| `docs/FEATURE_PI_RS_STATUS.md` | 本节 | 本轮小结 |
+
+首个提交：`e48185309 feat(pi-extensions): node:crypto createHmac (RFC 2104 HMAC-SHA1/256) — LUM-1181`（6 文件 +572 / −34）。
+
+### 三、验证
+
+```
+$ cargo fmt --all -- --check                                   # exit 0
+$ cargo clippy --workspace --all-targets -- -D warnings         # exit 0（仅 rquickjs-core 依赖既有提示）
+$ cargo clippy -p pi-extensions --all-targets -- -D warnings    # exit 0
+$ cargo test -p pi-extensions --lib --test web_globals --test node_builtins
+```
+
+| 套件 | passed | failed |
+| --- | --- | --- |
+| `pi-extensions --lib`（含 3 个新 HMAC 单测） | 14 | 0 |
+| `web_globals`（含新 `crypto_create_hmac_matches_rfc_vectors`） | 5 | 0 |
+| `node_builtins`（含文档一致性门 `upstream_node_imports_are_all_bridged_or_documented`） | 6 | 0 |
+
+**未跑完：全量 `cargo test --workspace`。** 本轮并发 4 路（LUM-1177/1178/1179 + 本 run）共用同一块 overlay，构建到 `pi-tui` 测试链接时
+根分区 100%（`couldn't create a temp dir: No space left on device`），属磁盘约束而非测试失败。清理已完成轮次的构建缓存换出余量后，
+用上述**针对改动 crate 的定向套件**完成验证；workspace 级 `clippy --all-targets` 已覆盖全部 target 的类型/借用检查。下一轮磁盘宽松时应补跑全量确认（对照 LUM-1177 轮末 127 套件 / 1915 passed 应增加 3 个单测 + 1 个集成用例）。
+
+### 四、divergence / 已知限制
+
+* HMAC 只在 Node 的 `createHmac` 面可用；`crypto.subtle` 的 key-based 操作（`importKey` / `sign` / `encrypt` / `exportKey`）仍抛错——宿主没有 key-object 模型，也没有密码后端。
+* 算法只有 SHA-1 / SHA-256（与 `crypto.digest` 同一自研集合）；`md5` / `sha512` / `sha384` 报 host 的可读错误，不会给出错误 MAC。
+* `createHmac` 的第三参只支持 `{encoding}`（作用于字符串键）；不支持 Node 的 `KeyObject` 与 `crypto.createSecretKey`，也不支持 `hmac.copy()`。
+* `digest()` 后再用会抛错（同 Node），但错误是普通 `Error`，不带 `code: ERR_CRYPTO_HASH_FINALIZED` 字段。
+* 这是**原语补齐**，不是消费方接线：`packages/` 里仍没有调用方，收益体现在第三方扩展不再撞 `undefined is not a function`（见上「与 LUM-1177 建议的差异」）。
+
+### 五、并发与磁盘
+
+* 并发 **4 路在飞**（LUM-1177 协调轮 + LUM-1178 session export + LUM-1179 fs.createWriteStream + 本 run），已超「最多 3」的并发目标 → **本轮不派发任何新任务**，只做本 crate 的垂直切片 + 推送。
+* 合并策略：本 run 基线 `e38eeb778`；推送前 `fetch` 发现 `feature/pi.rs` 已前进到 `885606ce7`（LUM-1177 的 URL + 协调轮），于是把 `work/lum-1181` 合到最新 tip。**唯一冲突**是本文档两轮各在末尾追加一节（`--ours` 保留 LUM-1177 节段后追加本节）；`NODE_BUILTINS.md`、`pi-ext-shim.mjs`、`web_globals.rs` 三个同文件改动 git 自动合并（改的是不同 region）。
+* 与 LUM-1179 的避让：本轮只动 `node:crypto` 段与测试文件末尾，未触碰 fs 段；测试也刻意放进 `web_globals.rs` 末位而非 `node_builtins.rs`，避免与 LUM-1179 的 `node_builtins.rs` 追加冲突。
+* 磁盘：开工即 100%（0 可用），且 `/tmp/pi-fresh-1173` 被 LUM-1178 与本 run **共享**，中途还出现过共享 target dir 被并发清理导致的 `No such file or directory` 假失败。**教训**：后续轮次应带 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`（LUM-1173 已记录，本轮开始时沿用不足）以把产物压到约 1/4；共享 target dir 的轮次之间应互相避让，避免同时链接大测试二进制。
+* Git 身份沿用 `multica-agent <agent@multica.local>`；本轮推送 `work/lum-1181` 与 `feature/pi.rs`。
