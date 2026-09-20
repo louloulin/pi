@@ -1174,7 +1174,14 @@ fn parse_diff_line(line: &str) -> Option<(char, &str, &str)> {
 }
 
 /// Append a non-empty run to an intra-line diff side.
-fn push_diff_run(runs: &mut Vec<(String, bool)>, text: String, changed: bool) {
+/// One `(text, changed)` fragment of a diff line.
+type DiffRun = (String, bool);
+
+/// A whole diff line as an ordered list of [`DiffRun`]s.
+type DiffRuns = Vec<DiffRun>;
+
+/// Append a fragment to a run list, skipping empty text.
+fn push_diff_run(runs: &mut DiffRuns, text: String, changed: bool) {
     if !text.is_empty() {
         runs.push((text, changed));
     }
@@ -1184,12 +1191,9 @@ fn push_diff_run(runs: &mut Vec<(String, bool)>, text: String, changed: bool) {
 ///
 /// Ports `renderIntraLineDiff`: the leading whitespace of the first changed
 /// run is emitted unhighlighted so indentation never gets inverse video.
-fn render_intra_line_diff(
-    old_content: &str,
-    new_content: &str,
-) -> (Vec<(String, bool)>, Vec<(String, bool)>) {
-    let mut removed_line: Vec<(String, bool)> = Vec::new();
-    let mut added_line: Vec<(String, bool)> = Vec::new();
+fn render_intra_line_diff(old_content: &str, new_content: &str) -> (DiffRuns, DiffRuns) {
+    let mut removed_line: DiffRuns = Vec::new();
+    let mut added_line: DiffRuns = Vec::new();
     let mut is_first_removed = true;
     let mut is_first_added = true;
 
@@ -1232,7 +1236,7 @@ fn render_intra_line_diff(
 fn intra_line_spans(
     prefix: char,
     line_num: &str,
-    runs: &[(String, bool)],
+    runs: &[DiffRun],
     color: ThemeColor,
 ) -> StyledLine {
     let mut out = StyledLine::new();

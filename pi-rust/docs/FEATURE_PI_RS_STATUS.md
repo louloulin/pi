@@ -11831,3 +11831,136 @@ pub fn split_deferred_tools<'a>(context: &'a Context, enabled: bool,
 **快进至 `f9533a60a`**，`git ls-remote` 复查一致：`f9533a60af164e411e1a8cc8b961559136a5376b`；
 留档分支 `work/lum-1157` 一并推送（同哈希）。本条哈希补记是紧随其后的纯文档提交，
 tips 再前进一格后以 `git ls-remote` 为准。
+
+## LUM-1158 round — `pi-coding-agent` edit 工具对齐上游 `edits[]` 契约 + `edit-diff.ts` 移植 + `edit` 渲染器（`renderers/` 收口）+ 合并推送 feature/pi.rs
+
+### 一、本轮定位与选型
+
+- 开工核验：`feature/pi.rs` tip = `026b6827c`（LUM-1090 轮纯文档补记），
+  `cargo check -p pi-coding-agent --all-targets --offline` 9.94s 通过。
+- 槽位：开工时 `multica daemon status` 为 `running_task_count=2`（本人 + LUM-1157 Stage 46）；
+  LUM-1157 于 00:09 转 `in_review` 并已自行合入 `feature/pi.rs`（tip 前推至 `d43df51e8`），
+  故本轮结束前有 1 个空槽。
+- 选型：**edit 工具保真**。这一刀同时收口两处：
+  1. LUM-1155 frontier 第 4 项「`renderers/` 唯一缺口是 `edit`」；
+  2. 一个真实功能缺口 —— Rust 侧 `edit` 只有 `old_text`/`new_text`/`replace_all` 单块改写，
+     而上游契约是 `{path, edits: [{oldText, newText}, …]}`（多块、原子、fuzzy match、行内 diff 细节）。
+- 刻意**不碰** `pi-ai`（LUM-1157 的地盘）、`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`。
+
+### 二、改动清单（11 个文件，+2462 / −134）
+
+- **新增** `crates/pi-coding-agent/src/tools/text_diff.rs`：零依赖的 Myers O(ND) diff。
+  `DiffKind { Equal, Added, Removed }` / `DiffPart { kind, value }`；
+  `split_lines_with_endings`（保留行尾，供 patch 还原）、`tokenize_words`（空白/词/标点三类 run）、
+  `myers_steps` + `backtrack` + `parts_from_steps`（**先 removed 后 added**，与 jsdiff 输出顺序一致）；
+  公开 `diff_lines` / `diff_words`。9 个单测。
+- **新增** `crates/pi-coding-agent/src/tools/edit_diff.rs`：`edit-diff.ts`（556 行）的 Rust 对应物。
+  类型 `Edit`（serde 同时吃 `oldText`/`old_text`）、`EditMatch`、`DiffResult { diff, first_changed_line }`、
+  `FuzzyMatchResult`、`AppliedEditsResult`；
+  函数 `detect_line_ending` / `normalize_to_lf` / `restore_line_endings` /
+  `normalize_for_fuzzy_match`（NFKC + 逐行 `trim_end` + 智能引号/破折号/空白折叠）、
+  `get_line_spans` / `replacement_line_range` / `apply_replacements` /
+  `apply_replacements_preserving_unchanged_lines` / `fuzzy_find_text` / `count_occurrences`、
+  `apply_edits_to_normalized_content`（**逐字复刻上游报错文案**）、
+  `generate_diff_string`（`context_lines` 控制、带行号、`...` 折叠）、`generate_unified_patch`、
+  `resolve_to_cwd`、`split_bom`（`pub`，返回 `(&str /* bom */, &str)`）、
+  `compute_edits_diff(path, edits, cwd)`。17 个单测。
+- **重写** `crates/pi-coding-agent/src/tools/edit.rs`：
+  - 细节类型换成上游形状 `EditToolDetails { diff, patch, first_changed_line }`
+    （`#[serde(rename_all = "camelCase")]` → `firstChangedLine`）；
+  - `EditArgs { path, edits, old_text/new_text(oldText/newText), replace_all(replaceAll) }`；
+  - `prepare_edits`：`edits` 接受数组 / 单个对象 / 字符串化 JSON（解析失败按上游静默吞掉），
+    并把 legacy 的 `old_text`/`new_text` 折进去；
+  - `execute`：走 `crate::paths::absolute` → 读文件 → `split_bom` → `detect_line_ending` →
+    `normalize_to_lf` → `apply_edits_to_normalized_content` → `restore_line_endings` → 写回；
+    成功文案 `Successfully replaced {n} block(s) in {path}.`；
+    legacy 无 `edits` 时仍走 `replace_all` 单块路径（`Replaced {count} occurrence(s) in …`）；
+  - `parameters()`：`required: ["path"]`（**`edits` 不是 required**，见第三节偏离 1）、
+    `additionalProperties: false`、`edits` 为 `{oldText, newText}` 数组，另含 legacy 三个字段。
+- **`crates/pi-coding-agent/src/tools/mod.rs`**：注册 `text_diff` / `edit_diff`，re-export
+  `Edit` / `DiffResult` / `compute_edits_diff` / `apply_edits_to_normalized_content` /
+  `generate_diff_string` / `generate_unified_patch`，以及 `EditRenderer` / `render_diff`。
+- **`crates/pi-tui/src/styled.rs`**：`SpanStyle` 新增 `inverse: bool`（+ `.inverse()` 构造器），
+  在 `ansi()` 里按 chalk 顺序施加（strikethrough 之后、前景色之前 → `fg(inverse(text))`），
+  `to_style()` 映射 `Modifier::REVERSED`；`PLAIN` 常量同步。
+  （上游 `renderIntraLineDiff` 用 `theme.inverse(...)` 标记改动片段，没有这个字段就画不出同款高亮。）
+- **`crates/pi-coding-agent/src/tools/render.rs`**：新增 `render_diff` + `EditRenderer`，
+  `renderer_for` 注册 `"edit"`。`parse_diff_line` 复刻上游
+  `^([+-\s])(\s*\d*)\s(.*)$`；`render_diff` 把「连续 removed + 紧随 1 行 added」判为行内 diff，
+  否则逐行渲染；行内 diff 用 `diff_words` 并剥掉首个 changed run 的前导空白；模板变量
+  `toolDiffContext` 可用，不认识的行原样透传。
+- **测试**：`crates/pi-coding-agent/tests/tools.rs` 的 edit 段重写为 13 个用例
+  （多块原子性、按原文匹配、超大间隔折叠、BOM/CRLF、智能引号 fuzzy、重叠/空 edits 拒绝、
+  缺文件、失败不留半成品…）；`tests/tools_render.rs` 的渲染器注册表断言加入 `"edit"`；
+  `render.rs` 内部测试新增 6 个 diff 渲染用例 + pi-tui 1 个 inverse 用例。
+
+依赖：workspace `Cargo.toml` 与 `pi-coding-agent/Cargo.toml` 增加
+`unicode-normalization = "=0.1.25"`（`normalize_for_fuzzy_match` 的 NFKC）。
+它是 `idna_adapter` 既有传递依赖，**不新增包**，`Cargo.lock` 仅多 1 行。
+
+### 三、与上游的偏离（都在调用点/模块头注释里写明）
+
+1. **`edits` 不是 JSON Schema 的 required**（上游是 `required: ["path","edits"]`）：
+   保留 legacy `old_text`/`new_text` 形态需要它可选；`tests/tool_argument_coercion.rs` 的
+   `"replace_all": "true"` 用例依赖这条。运行时行为与上游一致（没有 `edits` 也没有 legacy 字段
+   时报同一句 `Edit tool input is invalid. edits must contain at least one replacement.`）。
+2. **错误码文案**：上游 `Could not edit file: {path}. Error code: ENOENT.` 依赖 Node 的
+   `err.code`；`std::io::Error` 没有可移植的 code 字符串，改为
+   `Could not edit file: {path}. {error}.`（`Display` 形态），前缀与语义不变。
+3. **byte offset 而非 UTF-16 index**：TS 的偏移量是 UTF-16 单元，Rust 用字节偏移；
+   因为全程只用 `find` 结果切片，两者等价，且对多字节字符更正确。
+4. **unified patch 头**：只发 `===`/`---`/`+++`，不发 jsdiff 的 `Index:` 行。
+5. **`EditRenderer` 不实现流式预览抑制**：Rust 侧渲染器只渲染**已完成**的结果，
+   没有「preview 期间隐藏 diff」这条分支，永远展示 `details.diff`（无 diff 则展示错误正文）。
+6. **`render_diff` 忽略 `filePath` 选项**（上游其实也忽略）。
+
+### 四、验证
+
+- `cargo test -p pi-coding-agent --offline`：lib **339 passed / 0 failed**（含 `text_diff` 9 +
+  `edit_diff` 17 + `render` 新增 6），15 个集成目标全绿（`tools` 13 个 edit 用例在内），
+  doc-tests 6 passed。
+- `cargo test -p pi-tui --offline`：270 passed / 0 failed（含新增 `inverse_modifier_reverses_video`）。
+- `cargo check --workspace --all-targets --offline`：EXIT 0。
+- 格式：只对**叶子文件**跑 `rustfmt --edition 2021`；`mod.rs` 用
+  `--config skip_children=true`（否则会递归重排它声明的子模块，LUM-1090 已有判例）。
+  本轮所有新增/改动文件现在 `rustfmt --check` 零命中。
+- 未跑：`cargo test --workspace`、`cargo fmt`（全量漂移属 LUM-1138）、`cargo clippy --workspace`。
+
+### 五、frontier（本轮更新）
+
+1. **质量门清偿** = LUM-1138（`backlog`）：全量 `cargo fmt` 漂移仍在；本轮新增行零漂移。
+2. **P3 provider catalog / LUM-1090**：维持「无上游数据源，不猜」；RPC 客户端已收口。
+3. **未移植的 `pi-ai` 上游模块**：bedrock / mistral / azure / vertex / oauth / images
+   —— 现在与 `pi-ai` `utils/` 一起，是**下一块最大的未移植面**。
+4. ~~**`edit` 渲染器**~~：→ **本轮收口**（`render_diff` + `EditRenderer`，`renderers/` 已无缺口）。
+5. **（LUM-1157 新增）协议层两处缺口**：`AssistantMessage.error_message`（LUM-1150 记过）与
+   `ToolResult.added_tool_names`（deferred-tools 接线的硬前置）。后者要同时改 `pi-protocol`
+   wire 测试与多处结构体字面量 → **本轮已派发 Stage 47**。
+6. **（本轮新增）`edit` 的「多块 edits 匹配语义」还有一条上游细节没抄**：上游
+   `applyReplacementsPreservingUnchangedLines` 只在「所有 edit 都落在互不相邻的行区间」时启用，
+   否则退回整体替换。Rust 侧已实现函数但当前只有整体替换路径在用（函数有单测覆盖），
+   若将来出现「大文件小改动导致 diff 上下文漂移」的真实反馈，再接线。
+7. ~~**TypeBox 等价校验**~~ 仍维持「有意引入 `jsonschema` 时再谈」的口子，不是遗漏。
+
+并发口径维持：上限 3 路；`pi-tui/src/app.rs`、`pi-extensions/src/host.rs`、
+`docs/FEATURE_PI_RS_STATUS.md` 各自一次只允许一路在写。本轮本人只写
+`crates/pi-coding-agent/src/tools/{edit.rs,edit_diff.rs,text_diff.rs,mod.rs,render.rs}`、
+`crates/pi-coding-agent/tests/{tools.rs,tools_render.rs}`、`crates/pi-tui/src/styled.rs`
+与本文档；**未碰** `pi-ai`、`pi-protocol`、`pi-extensions`、`pi-tui/src/app.rs`。
+
+### 六、派发（槽位 1/3 → 2/3）
+
+- 开 1 路：**[Stage 47] `pi-protocol` + `pi-ai`：补齐 `AssistantMessage.error_message` 与
+  `ToolResult.added_tool_names`**（LUM-1157 frontier 第 6 项；deferred-tools 的硬前置，
+  改协议字段要连带 wire 测试），`status=todo` 立即起跑。
+- 不开第 2 路：LUM-1159（下一条 autopilot 轮，00:20 建、`todo`）会自己占第 3 槽；
+  未移植 provider（bedrock/mistral/azure/vertex）体量等于 3~4 个 Stage，留给后续轮次切。
+
+### 七、环境与并发记录
+
+- 复用 **LUM-1153 检出内的 `pi-rust/target`**（`CARGO_TARGET_DIR` 显式指向）：
+  未新建任何 target，也未删除任何 target；该 target 现 12G，根分区开工与结束时均为 **18G 可用**。
+- `CARGO_HOME=/tmp/cargo-home`，所有 cargo 命令 `--offline`。
+- Git 身份用 worktree 级覆盖（`multica-agent <agent@multica.local>`）。
+- 本分支基于 `026b6827c`，rebase 到 `d43df51e8`（LUM-1157 合入后的 feature/pi.rs）后重跑测试，
+  全绿；`git push origin HEAD:feature/pi.rs` 为快进。
