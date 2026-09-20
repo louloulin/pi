@@ -75,9 +75,7 @@ fn registry_invariants_case() -> crate::harness::Case {
                 .ok_or_else(|| EvalError::Case("faux spec is missing from the registry".into()))?;
             let faux_requires_key = faux_spec.requires_api_key();
             if faux_requires_key {
-                return Err(EvalError::Case(
-                    "faux must not require an API key".into(),
-                ));
+                return Err(EvalError::Case("faux must not require an API key".into()));
             }
             Ok(CaseOutput {
                 output: json!({

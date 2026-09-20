@@ -105,7 +105,12 @@ fn load_case() -> Case {
                 .find(|tool| tool.name == "hello")
                 .and_then(|tool| tool.parameters.get("required"))
                 .and_then(|value| value.as_array())
-                .map(|values| values.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             let extension_ids: Vec<String> = host
                 .registered_extensions()
@@ -219,8 +224,10 @@ fn agent_round_trip_case() -> Case {
                 }
             })
             .map_err(|error| EvalError::Case(error.to_string()))?;
-            let provider: pi_ai::SharedStreamFn =
-                Arc::new(OpenAiProvider::with_base_url("fixture-key", server.base_url()));
+            let provider: pi_ai::SharedStreamFn = Arc::new(OpenAiProvider::with_base_url(
+                "fixture-key",
+                server.base_url(),
+            ));
             let model = support::model("acme", FIXTURE_MODEL, Api::OpenAiChatCompletions);
             let options = AgentOptions::new(model, provider, "Use tools when asked.")
                 .with_tool_executor(Arc::new(ExtensionToolExecutor { host, definitions }));

@@ -171,7 +171,11 @@ impl Drop for FixtureServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         // Wake the blocking `accept` with a throwaway connection.
-        if let Ok(address) = self.origin.trim_start_matches("http://").parse::<SocketAddr>() {
+        if let Ok(address) = self
+            .origin
+            .trim_start_matches("http://")
+            .parse::<SocketAddr>()
+        {
             let _ = TcpStream::connect_timeout(&address, Duration::from_millis(200));
         }
         if let Some(handle) = self.handle.take() {
@@ -181,9 +185,7 @@ impl Drop for FixtureServer {
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 2048];
     let header_end = loop {

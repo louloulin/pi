@@ -1,7 +1,9 @@
 //! Shared helpers used by the built-in suites.
 
 use pi_agent_core::{Agent, AgentEvent};
-use pi_protocol::{Api, AssistantMessage, Content, Message, Model, ProviderId, Role, ToolResult, Usage};
+use pi_protocol::{
+    Api, AssistantMessage, Content, Message, Model, ProviderId, Role, ToolResult, Usage,
+};
 use serde_json::Value;
 
 use crate::harness::{EvalError, TokenUsage, TranscriptEvent};
@@ -198,9 +200,7 @@ fn tool_result_event(result: &ToolResult, prior: &[TranscriptEvent]) -> Transcri
         tool_call_id: result.tool_call_id.clone(),
         name,
         content: serde_json::to_value(&result.content).unwrap_or(Value::Null),
-        error: result
-            .is_error
-            .then(|| content_text(&result.content)),
+        error: result.is_error.then(|| content_text(&result.content)),
     }
 }
 

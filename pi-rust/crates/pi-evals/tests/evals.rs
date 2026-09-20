@@ -60,9 +60,9 @@ async fn offline_suites_are_green() {
             "the live provider case should be skipped offline"
         );
         assert!(
-            report
-                .cases()
-                .any(|case| case.id == "providers-live-openai" && case.status == CaseStatus::Skipped),
+            report.cases().any(
+                |case| case.id == "providers-live-openai" && case.status == CaseStatus::Skipped
+            ),
             "providers-live-openai should be recorded as skipped"
         );
     }
@@ -90,7 +90,10 @@ async fn harness_writes_artifacts() {
     }
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
-    assert!(parsed["suites"].as_array().map(|s| !s.is_empty()).unwrap_or(false));
+    assert!(parsed["suites"]
+        .as_array()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false));
     let runs = std::fs::read_to_string(dir.join("runs.jsonl")).unwrap();
     assert_eq!(runs.lines().count(), report.totals.total);
 }
@@ -198,10 +201,7 @@ async fn thresholds_gate_the_score() {
         .collect();
     assert_eq!(
         statuses,
-        vec![
-            ("below", CaseStatus::Failed),
-            ("at", CaseStatus::Passed),
-        ]
+        vec![("below", CaseStatus::Failed), ("at", CaseStatus::Passed),]
     );
     assert_eq!(report.totals.failed, 1);
 }
@@ -224,16 +224,16 @@ fn fixture_server_records_and_responds() {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
 
-    assert!(response.starts_with("HTTP/1.1 200 OK"), "response: {response}");
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "response: {response}"
+    );
     assert!(response.contains(r#""ok":true"#), "response: {response}");
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, "POST");
     assert_eq!(requests[0].path, "/v1/chat");
-    assert_eq!(
-        requests[0].header("content-type"),
-        Some("application/json")
-    );
+    assert_eq!(requests[0].header("content-type"), Some("application/json"));
     assert_eq!(requests[0].json().unwrap()["hello"], "world");
 }
 

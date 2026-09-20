@@ -268,8 +268,7 @@ fn metadata_divergence_case() -> Case {
         .run(|| async {
             let spec = pi_ai::providers::registry::find_provider("deepseek")
                 .ok_or_else(|| EvalError::Case("deepseek spec missing".into()))?;
-            let mut model =
-                support::model("deepseek", "deepseek-chat", Api::OpenAiChatCompletions);
+            let mut model = support::model("deepseek", "deepseek-chat", Api::OpenAiChatCompletions);
             model.label = Some("DeepSeek Chat".into());
             let mut fields: Vec<String> = serde_json::to_value(&model)?
                 .as_object()
@@ -371,9 +370,9 @@ fn acme_handler(request: &crate::fixture::RecordedRequest) -> FixtureResponse {
         .get("messages")
         .and_then(Value::as_array)
         .and_then(|messages| {
-            messages.iter().find(|message| {
-                message.get("role").and_then(Value::as_str) == Some("user")
-            })
+            messages
+                .iter()
+                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
         })
         .and_then(|message| message.get("content"))
         .and_then(Value::as_str);
