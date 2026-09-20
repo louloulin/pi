@@ -13225,3 +13225,76 @@ $ cargo test -p pi-extensions --lib --test web_globals --test node_builtins
 * 与 LUM-1179 的避让：本轮只动 `node:crypto` 段与测试文件末尾，未触碰 fs 段；测试也刻意放进 `web_globals.rs` 末位而非 `node_builtins.rs`，避免与 LUM-1179 的 `node_builtins.rs` 追加冲突。
 * 磁盘：开工即 100%（0 可用），且 `/tmp/pi-fresh-1173` 被 LUM-1178 与本 run **共享**，中途还出现过共享 target dir 被并发清理导致的 `No such file or directory` 假失败。**教训**：后续轮次应带 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`（LUM-1173 已记录，本轮开始时沿用不足）以把产物压到约 1/4；共享 target dir 的轮次之间应互相避让，避免同时链接大测试二进制。
 * Git 身份沿用 `multica-agent <agent@multica.local>`；本轮推送 `work/lum-1181` 与 `feature/pi.rs`。
+
+## LUM-1183 round — 合并 LUM-1178（`preRenderCustomTools`）/ LUM-1179（`fs.createWriteStream`）+ 晋升 LUM-1180（`pi-ai/compat` 内建工厂 + host 流式桥）+ 派发 LUM-1184（pi-tui 扩展 UI 宿主面）+ 推送 feature/pi.rs
+
+### 一、在飞分支盘点与合并
+
+开工 `feature/pi.rs` tip = `368b68564`（LUM-1181 轮的 HMAC 合并），开工 `active_task_count = running_task_count = 1`（只有本 run）。`origin/work/*` 上有**两条已完成但未合并**的分支，本轮的协调职责就是把它们并进来：
+
+| 分支 | 提交 | 基线 | 内容 |
+| --- | --- | --- | --- |
+| `work/lum-1178` | `c2fc3e21a` | `e38eeb778` | 会话导出 `preRenderCustomTools`（`export/ansi_to_html.rs` + `export/rendered_tools.rs`，9 文件 +1115/−29） |
+| `work/lum-1179` | `381a75241` | `885606ce7` | pi-extensions `fs.createWriteStream` + 最小 `Writable` 事件面（3 文件 +395/−2） |
+
+合并落在 `work/lum-1183-integrate`（基线 `368b68564`）：
+
+* `039220608` — Merge `work/lum-1178`（零冲突）。
+* `85753a581` — Merge `work/lum-1179`：**唯一冲突**在 `crates/pi-extensions/docs/NODE_BUILTINS.md` 的 frontier 表——LUM-1181 已把 `crypto.createHmac` 行改写成「HMAC 已桥、只剩 key-based WebCrypto」，LUM-1179 又把 `fs.watch, fs.createWriteStream` 行收敛成只剩 `fs.watch`。两处是**不同表格行**，冲突只是相邻行块。解法：保留 HEAD 的 crypto 行（LUM-1181 的措辞更准），采用 LUM-1179 的 `fs.watch` 单独行。其余（`pi-ext-shim.mjs`、`node_builtins.rs`）git 自动合并。
+
+两路改动面与基线里的 LUM-1181 完全不相交（1178 只碰 `pi-coding-agent/export/**`，1179 只碰 `pi-extensions` 的 fs 段与 `node_builtins.rs`），所以这是一次干净的集成。
+
+### 二、验证（`work/lum-1183-integrate` @ `85753a581`，全绿）
+
+```
+$ export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-fresh-1179
+$ cargo check  --workspace --all-targets --offline                    # exit 0（24s，复用依赖产物）
+$ cargo clippy --workspace --all-targets --offline -- -D warnings    # exit 0（31s，仅 rquickjs-core 依赖既有提示）
+$ cargo fmt --all -- --check                                          # exit 0，0 行输出
+$ cargo test   --workspace --offline                                  # exit 0
+```
+
+| 树 | 套件 | passed | failed | ignored |
+| --- | --- | --- | --- | --- |
+| LUM-1177 轮末（对照） | 127 | 1915 | 0 | 2 |
+| **本轮末**（+ LUM-1178 / LUM-1179 / LUM-1181） | **127** | **1941** | **0** | **2** |
+
+**+26 的构成**（逐套件核对）：
+
+| 来源 | 套件 | Δ |
+| --- | --- | --- |
+| LUM-1178 | `pi-coding-agent` lib `379→387`（`ansi_to_html` 13 + `rendered_tools` 6）、`session_export` `5→7` | **+21** |
+| LUM-1179 | `pi-extensions` `node_builtins` `7→8` | **+1** |
+| LUM-1181 | `pi-extensions` lib `11→14`（HMAC 单测）、`web_globals` `4→5` | **+4** |
+
+套件数不变（无新测试目标），失败 0，`ignored` 仍是既有的 2 个。关键点：LUM-1181 轮的作者**没跑全量**（当时并发 4 路 + 磁盘 100%），本轮把它的 4 个测试也一起跑进了 1941 —— 那条「下一轮补跑全量」的欠账**已清**。
+
+### 三、派发（本轮 2 路，加本 run = 3/3）
+
+frontier 上两条最大的缺口**都横切 `pi-extensions` + `pi-coding-agent`**，无法并行（会撞同一批 host 桥文件），所以本轮把它们拆成「跨 crate 的那条」与「pi-tui 半边」分派：
+
+| issue | 状态 | 范围（互斥） | 为什么是它 |
+| --- | --- | --- | --- |
+| **LUM-1180**（晋升 `backlog → todo`） | 承接 | `pi-extensions` + `pi-ai` + `pi-coding-agent` | `@earendil-works/pi-ai/compat` 内建 provider 工厂 + **host 流式事件桥**；解开 `custom-provider-*` 一族 OAuth 示例跑不到底的最后一个阻塞。LUM-1177 已停放它等空闲槽，本轮槽位空出，按停放理由**独占**这两个 crate。 |
+| **LUM-1184**（本轮新建，父 = LUM-1183） | 承接 | **仅** `pi-rust/crates/pi-tui/**` | `ctx.ui.custom()` / `setWidget` / `setFooter` / `setHeader` / `setEditorText` / `setEditorComponent` 的 **pi-tui 宿主面**：`Component` trait + header/footer/above-below-editor 区域 + custom overlay + 快照测试。这是 frontier 第 6 条「最大插件生态缺口」里**可离线快照验证、且不与 LUM-1180 抢文件**的那一半。 |
+
+**互斥性说明**：LUM-1184 明确禁止改 `pi-extensions` / `pi-coding-agent` / `pi-ai` / `pi-protocol` / `pi-mono` / 本状态文档，所以它与 LUM-1180 的分支没有任何重叠文件；两者的结果由下一协调轮合并。两条都要求在**叶子文件**上跑 rustfmt（不跑 `cargo fmt -p <crate>`，沿用 LUM-1133 的判例）。
+
+### 四、frontier（本轮后）
+
+1. **质量门**：保持绿（fmt / clippy `-D warnings` / 全量 test 本轮全部实跑过）。
+2. **插件生态桥**（下两个缺口，正被 LUM-1180 / LUM-1184 分别处理）：
+   * `@earendil-works/pi-ai/compat` 内建 provider 工厂（**LUM-1180 在飞**）；
+   * `ctx.ui.custom()` overlay/render channel（**LUM-1184 在飞**，pi-tui 半边；pi-extensions 侧的 `ctx.ui.*` 接线仍待后续轮）。
+3. **`pi.registerProvider(...)` host 桥**（`EXTENSIONS.md` 末行「Provider registration ⚠️ Partial」）：让 agent 真正**用上**扩展注册的 provider，与 LUM-1180 同属 `pi-ai/compat` 一族、同一批文件 → 留到 LUM-1180 合入后再评估，**本轮不派发**（避免同文件并发）。
+4. **pi-extensions 引擎级残余**：`fs.watch`（需要 `notify` crate，**离线 registry 里没有**，本环境做不了）、key-based WebCrypto（需要密码后端/crate，同样缺）、`node:test` / `node:assert` 全局（无消费方）。三条都建议等消费方或依赖可用再动。
+5. **图像侧**：维持 LUM-1177 的结论——上游 TS 也没有生产消费方，不为它派发。
+6. **provider 家族**：`bedrock-converse` / `cohere-v2` / `google-vertex` 仍缺（云凭据/签名，本环境拿不到）。
+7. **`assistant-message-frame` / 事件枚举扩宽**：仍延后（横切全部 provider 适配器，与并行冲突；且与 LUM-1180 的 `pi-ai` 改动同域）。
+
+### 五、并发与磁盘
+
+* 开工 `active_task_count = running_task_count = 1`（只有本 run）→ 派发 2 路后 3/3 满槽（本 run + LUM-1180 + LUM-1184）；**LUM-1183 自身不再做代码切片**，本轮的垂直交付 = 合并 1178/1179 + 全量验证 + 派发。
+* 复用 `CARGO_HOME=/tmp/cargo-home` + `CARGO_TARGET_DIR=/tmp/pi-fresh-1179`（LUM-1179 遗留，11G；依赖产物命中，增量 check 24s / clippy 31s / 全量 test 6m11s）。开工根分区 `50G` 用 `34G`、**14G 可用**，全程 `--offline`。
+* 教训沿用：**只用 `rustfmt --edition 2021 <leaf-file>`**；协调轮的基线取两次（动手前一次、推送前一次），本轮推送前 `feature/pi.rs` 未前进（仍是 `368b68564`），无需重接。
+* Git 身份沿用 `multica-agent <agent@multica.local>`；本轮推送 `work/lum-1183-integrate` 与 `feature/pi.rs`。
