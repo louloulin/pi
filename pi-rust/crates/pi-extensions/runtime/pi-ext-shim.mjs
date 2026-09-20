@@ -23,7 +23,12 @@
 //   - `host_child_read(handle, stream)` — return Promise<{data,done}> for a
 //     `node:child_process` pipe (see `child_process.spawn`)
 //   - `host_child_wait(handle)`          — return Promise<{code,signal,…}>
-//
+//   - `host_pi_ai_stream_start(requestJson)` — start one built-in pi-ai
+//     provider stream; return Promise<{ok,id}> / Promise<{ok:false,error}>
+//   - `host_pi_ai_stream_next(id)`       — return the next provider event as
+//     Promise<{ok,done,event}>
+//   - `host_pi_ai_stream_cancel(id)`     — abort and release that stream
+////
 // Internal entry points exposed on `globalThis._pi_host`:
 //   - `_pi_dispatch(eventJson)`   — deliver an `ExtensionEvent` payload
 //     to subscribed handlers; returns a JSON string with the dispatch
@@ -7184,9 +7189,9 @@ function __pi_sdk_create_assistant_message_event_stream() {
 // and exposes `registerApiProvider` / `stream` / `streamSimple` so an
 // extension can plug its own streaming implementation in — that is exactly
 // what `packages/coding-agent/examples/extensions/custom-provider-*` does.
-// The registry itself is pure JS; only the *builtin* providers
-// (`anthropicMessagesApi`, `openAIResponsesApi`, …) need the host streaming
-// bridge and stay documented gaps.
+// The registry itself is pure JS. The *builtin* provider factories
+// (`anthropicMessagesApi` / `openAIResponsesApi`) are driven over the host
+// streaming bridge below, so they no longer need to stay gaps.
 const __pi_sdk_api_providers = new Map();
 
 function __pi_sdk_wrap_api_stream(api, stream) {
@@ -7261,6 +7266,264 @@ function __pi_sdk_compat_complete(model, context, options) {
 function __pi_sdk_compat_complete_simple(model, context, options) {
   return __pi_sdk_compat_stream_simple(model, context, options).result();
 }
+
+// --- pi-ai/compat built-in provider factories (LUM-1180) ------------------
+
+// Upstream `anthropicMessagesApi()` / `openAIResponsesApi()` return a
+// `ProviderStreams` whose `stream` / `streamSimple` lazily import the concrete
+// provider module (`api/*.lazy.ts` → `lazyApi`). The shim cannot import that
+// TypeScript module, so the *host* runs the provider instead:
+// `host_pi_ai_stream_start` opens one stream, `host_pi_ai_stream_next` yields
+// one upstream-shaped `AssistantMessageEvent` at a time and
+// `host_pi_ai_stream_cancel` aborts it. The events land in the pure-JS
+// `AssistantMessageEventStream` above, so `for await` and `result()` behave
+// exactly like upstream — setup failures and transport errors terminate the
+// stream with an `error` event instead of throwing.
+//
+// Only the two apis the Rust providers implement are built in; the other
+// eight upstream lazy factories stay documented gaps.
+const __pi_sdk_builtin_api_apis = ["anthropic-messages", "openai-responses"];
+
+// Mirrors upstream `builtinApiProviderInstances`: the registry entry each
+// builtin api owns, so a later re-register can be told apart.
+const __pi_sdk_builtin_instances = new Map();
+
+function __pi_sdk_builtin_empty_message(model) {
+  return {
+    role: "assistant",
+    content: [],
+    api: model && model.api !== undefined ? model.api : "unknown",
+    provider: model && model.provider !== undefined ? model.provider : "unknown",
+    model: model && model.id !== undefined ? model.id : "unknown",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "pending",
+    timestamp: Date.now(),
+  };
+}
+
+// Upstream `createSetupErrorMessage` (api/lazy.ts): the `error` field of an
+// `error` event is a whole `AssistantMessage`, never a bare string.
+function __pi_sdk_builtin_error_message(model, message, stopReason) {
+  const output = __pi_sdk_builtin_empty_message(model);
+  output.stopReason = stopReason || "error";
+  output.errorMessage = message;
+  return output;
+}
+
+// Best-effort partial for an abort: upstream keeps accumulating blocks and
+// flips the stop reason at the end. The host sends `partial` with every event,
+// so the last one seen is the closest equivalent.
+function __pi_sdk_builtin_partial(model, lastEvent, stopReason, errorMessage) {
+  const source =
+    lastEvent && lastEvent.partial && typeof lastEvent.partial === "object"
+      ? lastEvent.partial
+      : __pi_sdk_builtin_empty_message(model);
+  const output = Object.assign({}, source);
+  if (Array.isArray(source.content)) output.content = source.content.slice();
+  output.stopReason = stopReason;
+  output.errorMessage = errorMessage;
+  return output;
+}
+
+// Strip what JSON cannot carry: the `AbortSignal` travels out of band (the
+// shim owns the cancel call) and callbacks stay on the JS side.
+function __pi_sdk_builtin_serialize_options(options) {
+  const out = {};
+  if (!options || typeof options !== "object") return out;
+  for (const key of Object.keys(options)) {
+    if (key === "signal") continue;
+    const value = options[key];
+    if (value === undefined || typeof value === "function") continue;
+    try {
+      JSON.stringify(value);
+    } catch (_error) {
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function __pi_sdk_builtin_envelope(raw, stage) {
+  try {
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (_error) {
+    return { ok: false, error: "pi extension host returned malformed JSON for pi-ai stream " + stage };
+  }
+}
+
+async function __pi_sdk_pump_builtin_api_stream(api, model, context, options, stream, state) {
+  let hostId = null;
+  try {
+    const started = __pi_sdk_builtin_envelope(
+      await globalThis.host_pi_ai_stream_start(JSON.stringify({ api: api, model: model, context: context, options: options })),
+      "start",
+    );
+    if (!started || started.ok !== true) {
+      stream.push({
+        type: "error",
+        reason: "error",
+        error: __pi_sdk_builtin_error_message(
+          model,
+          (started && started.error) || "the pi-ai provider stream failed to start",
+        ),
+      });
+      return;
+    }
+    hostId = started.id;
+    state.hostId = hostId;
+    if (state.cancelled) return;
+    for (;;) {
+      const next = __pi_sdk_builtin_envelope(await globalThis.host_pi_ai_stream_next(hostId), "next");
+      if (!next || next.ok !== true) {
+        if (!state.cancelled) {
+          stream.push({
+            type: "error",
+            reason: "error",
+            error: __pi_sdk_builtin_error_message(
+              model,
+              (next && next.error) || "the pi-ai provider stream failed",
+            ),
+          });
+        }
+        return;
+      }
+      if (next.done) return;
+      state.lastEvent = next.event;
+      stream.push(next.event);
+      if (state.cancelled) return;
+      if (next.event && (next.event.type === "done" || next.event.type === "error")) return;
+    }
+  } catch (error) {
+    if (!state.cancelled) {
+      stream.push({
+        type: "error",
+        reason: "error",
+        error: __pi_sdk_builtin_error_message(model, error && error.message ? error.message : String(error)),
+      });
+    }
+  } finally {
+    if (state.signal && typeof state.signal.removeEventListener === "function" && state.onAbort) {
+      state.signal.removeEventListener("abort", state.onAbort);
+    }
+    // Releases the host-side stream (and its provider connection) even when
+    // the consumer stops iterating early or the stream completed.
+    if (hostId !== null && typeof globalThis.host_pi_ai_stream_cancel === "function") {
+      globalThis.host_pi_ai_stream_cancel(hostId);
+    }
+    stream.end();
+  }
+}
+
+// Synchronous `AssistantMessageEventStream`, async work behind it — the same
+// contract as upstream `lazyStream`.
+function __pi_sdk_builtin_api_stream(api, model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const opts = options && typeof options === "object" ? options : {};
+  const signal = opts.signal && typeof opts.signal === "object" ? opts.signal : undefined;
+  const state = { cancelled: false, hostId: null, lastEvent: null, signal: signal, onAbort: null };
+
+  if (typeof globalThis.host_pi_ai_stream_start !== "function") {
+    stream.push({
+      type: "error",
+      reason: "error",
+      error: __pi_sdk_builtin_error_message(model, "pi-ai provider streaming is not available in this host build"),
+    });
+    stream.end();
+    return stream;
+  }
+
+  if (signal && typeof signal.addEventListener === "function") {
+    state.onAbort = () => {
+      if (state.cancelled) return;
+      state.cancelled = true;
+      if (state.hostId !== null && typeof globalThis.host_pi_ai_stream_cancel === "function") {
+        globalThis.host_pi_ai_stream_cancel(state.hostId);
+      }
+      stream.push({
+        type: "error",
+        reason: "aborted",
+        error: __pi_sdk_builtin_partial(model, state.lastEvent, "aborted", "Request was aborted"),
+      });
+      stream.end();
+    };
+    signal.addEventListener("abort", state.onAbort);
+  }
+
+  if (signal && signal.aborted) {
+    if (state.onAbort) {
+      state.onAbort();
+    } else {
+      stream.push({
+        type: "error",
+        reason: "aborted",
+        error: __pi_sdk_builtin_partial(model, null, "aborted", "Request was aborted"),
+      });
+      stream.end();
+    }
+    return stream;
+  }
+
+  __pi_sdk_pump_builtin_api_stream(
+    api,
+    model,
+    context,
+    __pi_sdk_builtin_serialize_options(opts),
+    stream,
+    state,
+  );
+  return stream;
+}
+
+// `ProviderStreams` for one builtin api. `stream` / `streamSimple` take the
+// same host path: the Rust providers consume the simple option set directly.
+function __pi_sdk_builtin_provider_streams(api) {
+  return {
+    stream: (model, context, options) => __pi_sdk_builtin_api_stream(api, model, context, options),
+    streamSimple: (model, context, options) => __pi_sdk_builtin_api_stream(api, model, context, options),
+  };
+}
+
+function __pi_sdk_anthropic_messages_api() {
+  return __pi_sdk_builtin_provider_streams("anthropic-messages");
+}
+
+function __pi_sdk_openai_responses_api() {
+  return __pi_sdk_builtin_provider_streams("openai-responses");
+}
+
+// Upstream `registerBuiltInApiProviders`: register without clobbering an
+// existing entry, because compat can load after a test or extension already
+// registered an override for a builtin api id.
+function __pi_sdk_register_built_in_api_providers() {
+  for (const api of __pi_sdk_builtin_api_apis) {
+    if (!__pi_sdk_get_api_provider(api)) {
+      const streams = __pi_sdk_builtin_provider_streams(api);
+      __pi_sdk_register_api_provider({ api: api, stream: streams.stream, streamSimple: streams.streamSimple });
+    }
+    __pi_sdk_builtin_instances.set(api, __pi_sdk_get_api_provider(api));
+  }
+}
+
+// Upstream `resetApiProviders`: drop *everything* (extension overrides
+// included) and re-register the builtins, exactly like `clearApiProviders()`
+// followed by `registerBuiltInApiProviders()`.
+function __pi_sdk_reset_api_providers() {
+  __pi_sdk_api_providers.clear();
+  __pi_sdk_builtin_instances.clear();
+  __pi_sdk_register_built_in_api_providers();
+}
+
+// Upstream calls this at module init, so the builtins are available to
+// `stream` / `complete` even when an extension imports nothing but those.
+__pi_sdk_register_built_in_api_providers();
 
 // --- module plumbing ------------------------------------------------------
 
@@ -7419,7 +7682,8 @@ const __pi_sdk_pi_coding_agent = __pi_sdk_module(
   {},
 );
 
-const __pi_sdk_stream_gap = "streaming assistant-message events need the model-streaming bridge, which the extension host does not expose yet";
+const __pi_sdk_stream_gap =
+  "this builtin api needs a provider implementation the extension host does not bundle; only `anthropic-messages` and `openai-responses` are bridged";
 
 const __pi_sdk_pi_ai = __pi_sdk_module("@earendil-works/pi-ai", {
   AssistantMessageEventStream: AssistantMessageEventStream,
@@ -7435,21 +7699,29 @@ const __pi_sdk_pi_ai = __pi_sdk_module("@earendil-works/pi-ai", {
 const __pi_sdk_pi_ai_compat = __pi_sdk_module(
   "@earendil-works/pi-ai/compat",
   {
+    anthropicMessagesApi: __pi_sdk_anthropic_messages_api,
     complete: __pi_sdk_compat_complete,
     completeSimple: __pi_sdk_compat_complete_simple,
     createAssistantMessageEventStream: __pi_sdk_create_assistant_message_event_stream,
     getApiProvider: __pi_sdk_get_api_provider,
     getApiProviders: __pi_sdk_get_api_providers,
+    openAIResponsesApi: __pi_sdk_openai_responses_api,
     registerApiProvider: __pi_sdk_register_api_provider,
+    registerBuiltInApiProviders: __pi_sdk_register_built_in_api_providers,
+    resetApiProviders: __pi_sdk_reset_api_providers,
     stream: __pi_sdk_compat_stream,
     streamSimple: __pi_sdk_compat_stream_simple,
     unregisterApiProviders: __pi_sdk_unregister_api_providers,
   },
   {
-    anthropicMessagesApi: __pi_sdk_stream_gap,
-    openAIResponsesApi: __pi_sdk_stream_gap,
-    registerBuiltInApiProviders: __pi_sdk_stream_gap,
-    resetApiProviders: __pi_sdk_stream_gap,
+    azureOpenAIResponsesApi: __pi_sdk_stream_gap,
+    bedrockConverseStreamApi: __pi_sdk_stream_gap,
+    googleGenerativeAIApi: __pi_sdk_stream_gap,
+    googleVertexApi: __pi_sdk_stream_gap,
+    mistralConversationsApi: __pi_sdk_stream_gap,
+    openAICodexResponsesApi: __pi_sdk_stream_gap,
+    openAICompletionsApi: __pi_sdk_stream_gap,
+    piMessagesApi: __pi_sdk_stream_gap,
   },
 );
 

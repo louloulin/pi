@@ -24,6 +24,11 @@ thiserror.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+# `futures` for the boxed provider event stream and `tokio-util` for its
+# cancellation token. Both are already in the workspace dependency graph
+# (`pi-ai` uses them for exactly this), so this adds no crate to `Cargo.lock`.
+futures.workspace = true
+tokio-util.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true

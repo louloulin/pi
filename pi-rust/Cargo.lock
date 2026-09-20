@@ -1129,6 +1129,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "indexmap",
  "once_cell",
  "parking_lot",
@@ -1140,6 +1141,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "walkdir",
  "zstd",

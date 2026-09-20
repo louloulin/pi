@@ -10,6 +10,7 @@
 
 pub mod auth;
 pub mod env_api_keys;
+pub mod ext_bridge;
 pub mod images;
 pub mod json_parse;
 pub mod models;
@@ -35,6 +36,10 @@ pub use auth::{
 pub use env_api_keys::{
     find_env_keys, get_env_api_key, ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV,
     ANTHROPIC_OAUTH_TOKEN_ENV,
+};
+pub use ext_bridge::{
+    api_key_from_js, base_url_from_js, context_from_js, model_from_js, stream_options_from_js,
+    JsAssistantEventStream, JsEventEncoder,
 };
 pub use images::{generate_images, AssistantImages, ImagesError, ImagesStopReason};
 pub use json_parse::{

@@ -9,7 +9,7 @@ coding-agent helpers:
 @earendil-works/pi-coding-agent   defineTool / getAgentDir / parseFrontmatter / …
 @earendil-works/pi-ai             Type / StringEnum / uuidv7 / calculateCost / …
 @earendil-works/pi-agent-core     (type-only in the upstream examples)
-@earendil-works/pi-ai/compat      provider registry + event stream (gaps below)
+@earendil-works/pi-ai/compat      provider registry + event stream + builtin apis
 @earendil-works/gondolin          third-party sandbox VM (unbridged)
 ```
 
@@ -31,12 +31,16 @@ getAgentDir()                   __pi_os_module.homedir() ───────�
 ```
 
 Unlike `node:*`, most SDK modules are **pure JS**: the components and
-helpers live in the shim itself and need no host import. Two families
+helpers live in the shim itself and need no host import. Three families
 cross into Rust: `getAgentDir()` (reads `os.homedir()` through
-`host_node_call`) and the built-in tool factories (`createReadTool` …),
+`host_node_call`), the built-in tool factories (`createReadTool` …),
 which run a built-in tool through the `host_builtin_tool_definition` /
 `host_builtin_tool` bridge described under
-[`@earendil-works/pi-coding-agent`](#earendil-workspi-coding-agent--helpers-bridged-tool-factories-bridged).
+[`@earendil-works/pi-coding-agent`](#earendil-workspi-coding-agent--helpers-bridged-tool-factories-bridged),
+and the two built-in model adapters behind `@earendil-works/pi-ai/compat`,
+which stream provider events through `host_pi_ai_stream_start` /
+`host_pi_ai_stream_next` / `host_pi_ai_stream_cancel` (see
+[`@earendil-works/pi-ai/compat`](#earendil-workspi-ai-compat--provider-registry--builtin-apis)).
 
 ### Every specifier is registered under three names
 
@@ -207,12 +211,13 @@ Divergences:
   so it needs no host bridge; the async iterator is hand-rolled rather
   than an `async function*`, matching the rest of the shim.
 
-### `@earendil-works/pi-ai/compat` — provider registry + builtin gaps
+### `@earendil-works/pi-ai/compat` — provider registry + builtin apis
 
 Upstream `compat.ts` keeps a module-level `Map<Api, RegisteredApiProvider>`
 so an extension can plug its own streaming implementation in; that is
-exactly what the `custom-provider-*` examples do. The registry and the
-`AssistantMessageEventStream` factory are pure JS and are **implemented**:
+exactly what the `custom-provider-*` examples do. The registry, the
+`AssistantMessageEventStream` factory and the two built-in provider
+factories the Rust port has adapters for are **implemented**:
 
 | Export | Notes |
 |---|---|
@@ -220,12 +225,47 @@ exactly what the `custom-provider-*` examples do. The registry and the
 | `unregisterApiProviders(sourceId)` / `getApiProvider(api)` / `getApiProviders()` | Registry maintenance, same shapes as upstream. |
 | `stream` / `streamSimple` / `complete` / `completeSimple` | Resolve the registered provider for `model.api`, stream, and (for `complete*`) await `result()`. |
 | `createAssistantMessageEventStream()` | Same factory as `@earendil-works/pi-ai`. |
+| `anthropicMessagesApi()` / `openAIResponsesApi()` | Return a `ProviderStreams` whose `stream` / `streamSimple` run the host's `AnthropicProvider` / `OpenAiResponsesProvider` (LUM-1180). |
+| `registerBuiltInApiProviders()` | Called at module init: registers the two bridged apis **without clobbering** an entry an extension already registered for the same api id. |
+| `resetApiProviders()` | Clears the whole registry (extension overrides included) and re-registers the builtins. |
 
-Documented gaps still need the host streaming bridge:
-`anthropicMessagesApi`, `openAIResponsesApi`,
-`registerBuiltInApiProviders`, `resetApiProviders`. The module resolves,
-so an extension that imports a gap only fails when it actually reaches for
-that factory.
+#### The built-in provider streaming bridge
+
+The two factories normally `import()` a TypeScript provider module that
+talks to the network. The shim cannot, and `pi-extensions` cannot depend
+on `pi-ai`, so the embedding crate injects a **stream runner** into the
+host and the traffic crosses three host imports:
+
+| Host import | Contract |
+|---|---|
+| `host_pi_ai_stream_start(requestJson)` | `{api, model, context, options}` → `Promise<{ok:true, id}>` or `Promise<{ok:false, error}>`. The `options.signal` is stripped before serialising; the host owns cancellation. |
+| `host_pi_ai_stream_next(id)` | `Promise<{ok:true, done:false, event}>` for one upstream-shaped `AssistantMessageEvent`, `{ok:true, done:true}` when the stream ended, `{ok:false, error}` for an unknown id. Never rejects. |
+| `host_pi_ai_stream_cancel(id)` | Aborts the request and drops the host-side stream (and its connection). A no-op for an unknown or finished `id`. |
+
+`anthropicMessagesApi().streamSimple(model, context, options)` is
+**synchronous** — it hands back an `AssistantMessageEventStream` and drives
+the host behind it, mirroring upstream's `lazyStream`. The events land in
+the same pure-JS queue as `@earendil-works/pi-ai`, so `for await` and
+`await stream.result()` behave exactly like upstream, and `complete()` /
+`completeSimple()` fold the same stream into an `AssistantMessage`. A
+stream that fails to start, a transport error, and an `AbortSignal` abort
+all terminate the stream with an `error` event (`reason` `error` /
+`aborted`) carrying a whole `AssistantMessage` — never a thrown exception.
+
+A live stream raises the per-call host deadline to 10 minutes (the default
+is 5 seconds), because a single extension tool call can drive a whole model
+turn; `AbortSignal` remains the normal way to stop earlier.
+
+Without a runner (a host that is not `pi-coding-agent`) the factories
+still import and return a stream that terminates with an error event
+naming the missing runner.
+
+Documented gaps still need a host adapter for that api family:
+`azureOpenAIResponsesApi`, `bedrockConverseStreamApi`,
+`googleGenerativeAIApi`, `googleVertexApi`, `mistralConversationsApi`,
+`openAICodexResponsesApi`, `openAICompletionsApi`, `piMessagesApi`. The
+module resolves, so an extension that imports a gap only fails when it
+actually reaches for that factory.
 
 Divergences:
 
@@ -233,10 +273,29 @@ Divergences:
   look the model up in the builtin catalogue and route cloudflare models
   through `Models`; the shim has neither, so they go straight to the
   registry and throw `No API provider registered for api: …` when the
-  extension has not registered one.
+  extension has not registered one. The two bridged apis are the
+  exception: `registerBuiltInApiProviders()` runs at module init, so
+  `stream` / `complete` reach them even when the extension imports nothing
+  but those.
 * **No env API-key injection.** Upstream's `withEnvApiKey` fills in
   `options.apiKey` from the provider environment; the shim has no
-  `getEnvApiKey` bridge, so the caller must pass `apiKey` explicitly.
+  `getEnvApiKey` bridge, so the caller must pass `apiKey` explicitly. The
+  *host* runner still falls back to the provider's env vars
+  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) when `apiKey` is absent.
+* **Custom `options.headers` are not forwarded.** The Rust Anthropic /
+  OpenAI-Responses adapters take only a credential and a base URL, so a
+  header-based credential (the upstream `custom-provider-gitlab-duo`
+  example passes `apiKey: "gitlab-duo"` plus an `Authorization` header)
+  does not reach the request yet. `apiKey`, `baseUrl`,
+  `temperature` and `maxTokens` are forwarded.
+* **`Done` carries no thinking blocks.** The Rust `Done` event's
+  `content` has no thinking variant, so streamed
+  `thinking_delta` events reach the extension but the final
+  `AssistantMessage` only keeps text and tool calls.
+* **Cost is not carried.** The host's `Done` usage has no `cost` field;
+  the shim leaves the zeroed `cost` object in place. Use
+  `calculateCost(model, usage)` from `@earendil-works/pi-ai` if the
+  extension needs it.
 
 ### `@earendil-works/pi-agent-core` — resolves, no runtime exports
 

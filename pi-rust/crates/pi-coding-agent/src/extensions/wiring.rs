@@ -24,6 +24,7 @@ use pi_extensions::{
 use pi_protocol::{ExtensionEvent, ResourcesDiscoverReason, UiLevel};
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
+use crate::extensions::pi_ai_runner::BuiltinPiAiStreamRunner;
 use crate::extensions::ui_bridge::TuiUiBridge;
 use crate::tool_executor::{BuiltinToolBridge, BuiltinToolExecutor, ExtensionToolExecutor};
 
@@ -291,6 +292,11 @@ pub fn load(
     // dialog bridge means the shim's non-interactive path (deny +
     // warn) is the truth, so a mode cannot claim a UI it cannot show.
     let has_ui = options.has_ui && options.ui.is_some();
+    // The runner behind `@earendil-works/pi-ai/compat`'s built-in provider
+    // factories. Built from the environment like `ProviderRouter`:
+    // `options.apiKey` wins, then the provider's env vars.
+    let pi_ai_runner: Arc<dyn pi_extensions::PiAiStreamRunner> =
+        Arc::new(BuiltinPiAiStreamRunner::from_env());
     let host_options = match &options.ui {
         Some(ui) => HostOptions::default()
             .with_ui_handler(ui.handler())
@@ -300,7 +306,8 @@ pub fn load(
                 has_ui,
                 cwd: cwd.clone(),
             })
-            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone()))),
+            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone())))
+            .with_pi_ai_stream_runner(pi_ai_runner.clone()),
         None => HostOptions::default()
             .with_ui_handler(Arc::new(StderrUiHandler))
             .with_tool_context(ToolContext {
@@ -308,7 +315,8 @@ pub fn load(
                 has_ui,
                 cwd: cwd.clone(),
             })
-            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone()))),
+            .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone())))
+            .with_pi_ai_stream_runner(pi_ai_runner),
     };
 
     let result = runtime.block_on(async {
