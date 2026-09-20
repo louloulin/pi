@@ -12184,8 +12184,10 @@ provider 家族 —— Mistral 原生 Chat Completions（`packages/ai/src/api/mi
    `AssistantMessageEvent::Error { message: "Provider stopped with: {reason}" }` 再发
    `Done { stop_reason: Error }`。原因：`agent_loop.rs:707` 把 `Error` 事件转成
    `Err(AgentError::Provider(message))`，`retry.rs` 才能按文本判定可重试（与上游重试语义一致），
-   同时不丢服务端的错误原因。Stage 47 给 `AssistantMessage` 加上 `error_message` 后，
-   这里可以改成写字段、与兄弟适配器收敛。
+   同时不丢服务端的错误原因。上游是在 `message.errorMessage` 上带错误文案的，而 Rust 侧
+   `AssistantMessageEvent::Done` **只有 `{content, stop_reason, usage}`，没有错误槽位**
+   （Stage 47 / LUM-1162 落地 `AssistantMessage.error_message` 时也确认了这一点），
+   所以本轮仍走 `Error` 事件；等 `Done` 带上完整 `AssistantMessage` 再收敛。
 4. **thinking 只流不存**：`AssistantMessageEvent::ThinkingDelta` 照发，但 `AssistantMessage.content`
    里不保留（`pi-protocol` 没有 `Content::Thinking`）。另外 `push_text` 对**连续的文本 delta
    合并进同一个文本块**，只有 thinking / tool-call delta 才关闭当前文本块 —— 否则
@@ -12238,14 +12240,19 @@ provider 家族 —— Mistral 原生 Chat Completions（`packages/ai/src/api/mi
 ### 六、frontier（本轮更新）
 
 1. **~~Mistral provider~~**：**本轮收口**（适配器 + 目录 + fixture + 集成测试 + registry/router 接线）。
-2. **未移植的 `pi-ai` 上游模块**：剩 bedrock / azure / vertex / images 四项
-   （`oauth` 在 LUM-1160 Stage 48）。其中 **azure（`openai-compatible` + `api-key` 头差异）
+2. **未移植的 `pi-ai` 上游模块**：剩 bedrock / azure / vertex 三项。`oauth`（Stage 48 / LUM-1160）
+   与 **`images`（LUM-1164，本轮 rebase 时其 `8735af881` 已在 `origin/feature/pi.rs` 上）**
+   都已收口 —— 上一节（LUM-1164 轮）的目录写「mistral 与 images 并列待办」，本轮合并后
+   该表已过时，以本节为准。剩下三项里 **azure（`openai-compatible` + `api-key` 头差异）
    和 vertex（`google-vertex` = Google 适配器 + 不同的鉴权/URL 前缀）** 是两个「已有适配器的
    变体」，可以复用现成解析器，**不需要新目录数据**，是下一步成本最低的两项；
-   bedrock 需要 SigV4 签名，images 需要先看 `packages/ai/src/images/` 的实际形状。
+   bedrock 需要 SigV4 签名（本环境没有对应后端可验证）。
 3. **协议层两处缺口**（`AssistantMessage.error_message` / `ToolResult.added_tool_names`）：
-   LUM-1158 派的 **Stage 47** 仍在跑（LUM-1162 正在改这两个结构体）；落地后第 3 节的
-   Mistral 错误帧策略可以收敛回写字段，别忘了一起改。
+   LUM-1158 派的 **Stage 47** 已由 LUM-1162 落地（`ca4b15c99`：`AssistantMessage.error_message`
+   + `ToolResult.added_tool_names`，两条都为 `Option` + serde default）。**但仍差一步**：
+   `AssistantMessageEvent::Done` 只带 `{content, stop_reason, usage}`，没有错误文案槽位，
+   所以第 3 节的 Mistral 错误策略暂时保持 `Error` 事件（LUM-1162 在 overflow / retry
+   分类上的文档也写了同一结论）。下一步如果要收敛，得先给 `Done` 带上完整 `AssistantMessage`。
 4. **质量门清偿** = LUM-1138（`backlog`）：`registry.rs` / `provider.rs` 的既有 fmt 漂移仍在外，
    本轮新增文件零漂移。
 5. **`pi-ai` 提供商家族现状**（本轮后）：`openai` / `anthropic` / `google` / `cohere` /
@@ -12273,15 +12280,33 @@ provider 家族 —— Mistral 原生 Chat Completions（`packages/ai/src/api/mi
   （5.9G，纯增量重建缓存，非源码、非 `deps`）** → **5.5G 可用**（50G 盘）。
   未触碰 LUM-1162 的 target（它在跑）、未删任何源码/分支/提交。后续轮次若再遇打满，
   可考虑的下一个目标是 `/tmp/pi-fresh-1160`（2.2G），本轮保留作为 LUM-1162 的余量。
+- **第二次打满（1.3G 可用 → rebase 连临时目录都建不出来）**：这次只清理了**本轮自己的**
+  `target/debug/incremental`（2.6G）—— 因为 `ps` 显示 `/tmp/pi-fresh-1160` 正被
+  **另一个 run（LUM-1166）** 用来跑 `cargo test -p pi-ai --test mistral`（对本轮 slice 的
+  独立复核），不能动。清理后 3.5G 可用，`--offline -j 4` 复跑通过。
+  未清 LUM-1153（16G）/ LUM-1162（15G）的 `target` —— 它们是别人的检出，只有在确认为
+  idle 且磁盘再次阻断构建时才考虑，此处记录备查。
 - 构建：`CARGO_HOME=/tmp/cargo-home`、`CARGO_TARGET_DIR=$PWD/target`、全部 `--offline -j 4`；
   `cargo check -p pi-ai --offline` ≈ 6.8s（增量）。
 - Git 身份沿用 worktree 级 `multica-agent <agent@multica.local>`（与 `feature/pi.rs` 历史一致）。
-- 合并：本分支基于 `9816266c0`，提交后 rebase 到 `origin/feature/pi.rs` 最新 tip 再推送，
-  随后快进合并 `feature/pi.rs` 并推送（与 LUM-1152…LUM-1159 同款流程）。
+- 合并：本分支基于 `9816266c0`；第一次推 `feature/pi.rs` 时被拒 —— 期间 LUM-1162 推了
+  **Stage 47（`ca4b15c99` `ToolResult.added_tool_names` + `AssistantMessage.error_message`）**
+  和一条 `pi-extensions` clippy 修复（`eda5b98c4`），即本轮的「预测撞车面」真的发生了：
+  rebase 后有 **2 处编译错误**（`mistral.rs` 两条单测里的 `ToolResult` 字面量缺
+  `added_tool_names`），补 `None` 后全绿 —— 这是本轮唯一一处因他轮改动而产生的代码修改。
+  随后 LUM-1164（images + 补合 Stage 48）又推了 `8735af881`，第二次 rebase 时
+  **只有状态文档末尾冲突**（两轮都往文末追加章节），按「先 landed 的在前」合并；
+  代码侧 `pi-ai/src/images/**`、`pi-ai/src/auth/**` 与本轮文件零重叠，`mistral.rs` 一字未改。
+- **最终去向**：本节在飞期间 LUM-1166 已把 `origin/work/lum-1163`（`e2d3b2f15`，本节初版）
+  合并进 `feature/pi.rs`（`9913d6f8f`），并独立修了同一处 `added_tool_names` 编译缺口
+  （`110759b29`）—— 两轮独立发现同一缺口，说明「Stage 47 改结构体 + 新 provider 内联字面量」
+  这条交叉面值得在派发时写进约束。本节（frontier 校正 + 二次清理备案）由本人在其之上补上；
+  本轮代码与本轮初版的差异只有 `tool_message` 的一处注释。
 - 本轮本人只写 `crates/pi-ai/{src/providers/mistral.rs,src/providers/mod.rs,src/providers/registry.rs,
   fixtures/mistral/**,tests/mistral.rs}`、`crates/pi-protocol/src/model.rs`、
   `crates/pi-agent-core/src/telemetry.rs`、`crates/pi-coding-agent/src/provider.rs` 与本文档；
   **未碰** `pi-ai/src/auth/**`、`pi-extensions/**`、`pi-tui/**`、`pi-protocol/src/{content,events}.rs`。
+
 ## LUM-1164 round — `pi-ai` 图像生成子系统（`images/` 垂直切片：types / registry / models / openrouter / builtins）+ 合并 Stage 48（LUM-1160）+ 3/3 满槽不派发
 
 本轮起点 `9816266c0`（LUM-1159 轮文档），开工 `cargo check -p pi-ai --offline` 通过（复用

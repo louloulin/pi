@@ -470,6 +470,10 @@ fn tool_message(
     normalizer: &mut MistralToolCallIdNormalizer,
     tool_names: &HashMap<&str, &str>,
 ) -> Option<MistralChatMessage> {
+    // `added_tool_names` is not projected: upstream consumes it in
+    // `transformMessages` only for compat modes that re-register deferred
+    // tools; the native Mistral API has no such body field. The names stay on
+    // the transcript (`pi_ai::utils::deferred_tools` reads them back).
     let result_block = msg.content.iter().find_map(|c| match c {
         Content::ToolResult(r) => Some(r),
         _ => None,
