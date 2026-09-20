@@ -13669,3 +13669,54 @@ pi-rust/docs/FEATURE_PI_RS_STATUS.md          # 唯一差异（+83），且只�
 
 * 开工 `25G / 50G`（53%），余 **23G**；`/tmp/pi-target` 3.0G（活跃）、`/tmp/rustup-home` 718M、`/tmp/cargo-home` 546M。**无**「owner 已 `in_review` 且无进程持有」的大 target 目录，故本轮未清理。
 * 本轮未跑全量构建；LUM-1188 重跑会自建 target dir，按 LUM-1186 结论 frugal 配置（`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0`）下 2–3G 足够。
+
+### 九、LUM-1191 补记 — 重派仍自爆（第三次）→ 根因再深一层：**单次输出上限 16384 是模型硬约束**；改由协调轮亲自落地「切片 1」并合入（**131 / 2013**）；内核切成 3 片
+
+**时间线（第三次零产物）**：`multica issue rerun LUM-1188` @ 06:06:20 → run `01a0bd6c-36a5` @ **06:08:28 结束**，`result.output = ""`、`delivered_comment_ids = []`、issue 上 0 条评论、workdir 工作区 clean。session `20260920T060621.041246671.jsonl` 末条 assistant：**单段 54,836 字符 thinking**、`stopReason = length`、`usage.output = 16384` / `reasoning = 16384`。
+
+**关键证据：单条 thinking 的长度在 run 内单调升级，直到吃满预算**
+
+```
+891 → 170 → 203 → 1103 → 673 → 479 → 1671 → 20,289 → 54,836(✗ 无工具调用)
+  读上游 220-440   读上游 440-696/依赖     查 edition/基线        "设计整个模块"
+```
+
+即：**「短推理 + 勤落盘 + 每组本地 commit」的作业规程对 `deepseek-v4.1-flash` 无效**。模型随上下文增长把越来越长的设计推演塞进**单条** thinking，撞上 16384 上限的那次调用必然不产出工具调用，run 随即退出 —— 这与切片大小只弱相关，与「模型是否在单条 thinking 里做全局设计」强相关。
+
+**模型侧的事实（本轮的硬发现）**：`~/.pi/agent/models-store.json` 里 provider `lumos` 的 6 个模型 **`maxOut` 全部 = 16384**（`deepseek-v4.1-flash` / `glm-5.3-flash` / `gpt-5.4` / `gpt-5.4-mini` / `gpt-5.6-sol` / `kimi-for-coding`）；只有 provider `minimax-cn` 的 `MiniMax-M2.7`（131072）与 `M3`（512000）更大，且其凭据存在于 pi auth store。**devbox1 runtime 的默认模型 = `lumos/deepseek-v4.1-flash`（`llmgates/last-model.json`）**，agent `22e8b20d` 的 `model` 字段为空 = 走 runtime 默认。换模型属**工作区级配置变更**（`multica agent update --model` / 新建大输出 agent），影响 devbox1 上所有任务，**需 owner 决定，本轮不动**。
+
+**处置：协调轮亲自实现「切片 1（能力层）」并合入**
+
+| 项 | 值 |
+| --- | --- |
+| 新增 | `pi-rust/crates/pi-tui/src/terminal_image.rs`（能力层，`terminal-image.ts:6-211`：12 条能力分支 / `PI_*` 覆盖 / 可重置缓存 / 单元格像素 / `KITTY_PREFIX`+`ITERM2_PREFIX`+`is_image_line` / `allocate_image_id`） |
+| 新增 | `pi-rust/crates/pi-tui/tests/terminal_image.rs`（14 用例：能力矩阵逐分支、覆盖优先级、缓存与重置语义、`Override` 三态、id 取值范围） |
+| 改动 | `pi-rust/crates/pi-tui/src/lib.rs`（模块注册 + `pub use`，+8 行） |
+| commit | **`3922deb8b`**（已推 `origin` + `mirror`，`feature/pi.rs`） |
+| 质量门（本轮**实跑**） | `cargo fmt --all -- --check` OK / `cargo clippy --workspace --all-targets -- -D warnings` OK / `cargo test --workspace --offline` = **131 套件 / 2013 passed / 0 failed / 2 ignored**（基线 130 / 1999 / 0 / 2 → **+1 套件 +14 用例**，零倒退） |
+| 单 crate | `cargo test -p pi-tui` = 31 套件 / 638 passed |
+| 与上游的 divergence | tmux 转发仍不做子进程探测（沿用 `hyperlink.rs` 决定）；环境读取一次收敛到 `CapabilityInputs` + 纯函数 `detect_capabilities_with`，使全部分支可测；`allocate_image_id` 用 xorshift64\* 而非 `Math.random`（`rand` 不是本 crate 依赖） |
+
+**内核再切成 3 片（文件面按函数分区，互不重叠）**
+
+| issue | 内容 | 上游行号 | 状态 |
+| --- | --- | --- | --- |
+| LUM-1188（= 切片 2） | 编码器（`encodeKitty` 分块 / `delete*` / `encodeITerm2`）+ kitty 元数据表 + `getKittyImagePlacement` + `cropKittyImageLine` | 215-433 | run `01a0bd7b-600a` **queued**（无空槽，等 slot） |
+| LUM-1194（新建·停放） | 几何 + 四种像素尺寸解析 + `renderImage` + `shortenImagePath` / `imageFallback` | 435-696 | `backlog` |
+| LUM-1192（既有·停放） | `Image` 组件 + ANSI/OSC-8 aware `truncate_to_width` + 主题回退着色 | `components/image.ts` | `backlog` |
+
+依赖：切片 1（已合入）→ 切片 2 → 切片 3；组件片依赖切片 2/3 的接口。
+
+### 十、下一轮动作（在第七节基础上更新）
+
+1. **LUM-1190 / LUM-1188（切片 2）任一推分支就合并它**，合并后补跑全量门；**当前基线 = 131 套件 / 2013 passed / 0 failed / 2 ignored（`3922deb8b`）**。
+2. LUM-1188 切片 2 合入后**晋升 LUM-1194**，再往后晋升 LUM-1192。
+3. **判定规则（本轮升级版）**：run 零产物时先读 session 末条 `stopReason`/`usage`——
+   * `length` + 单条 thinking 逼近 16384 → 模型自爆；切片已经不能再小的话，**必须推动 owner 换大输出模型**（`lumos` 全系 16384；可用 `minimax-cn/MiniMax-M2.7`），或者由协调轮亲自实现（本轮已示范：一个能力层切片在 1 个 turn 内落地 + 全量门通过）。
+   * `toolUse` 却零产物 → 才偏向 harness / 环境，`rerun` 对症。
+4. 协调轮开工例程里保留「产物四查 + session 预算核对」，并**优先亲自实现最小一片**，而不是无限重派。
+
+### 十一、磁盘（补记）
+
+* 本轮自建 `CARGO_TARGET_DIR=/tmp/pi-target-1191`：全量 workspace 构建后 **2.5G**（印证 LUM-1186 的 frugal 结论：`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_TEST_DEBUG=0` 下 2–3G 足够）。
+* 结束时根分区 `30G / 50G`（64%），余 **18G**；`/tmp/pi-target` 5.4G（在飞 LUM-1190 的）、`/tmp/cargo-home` 546M、`/tmp/rustup-home` 718M。**未做清理**（无「owner 已 `in_review` 且无进程持有」的目录）。
