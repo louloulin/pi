@@ -12461,3 +12461,100 @@ LUM-1153 检出的 `CARGO_TARGET_DIR`）。本轮是**自实现一刀 + 一次�
   `eda5b98c4`（Stage 47/LUM-1162 + 一条 `pi-extensions/digest.rs` clippy 修复），
   本分支用 `git rebase --onto eda5b98c4 9816266c0 work/lum-1164` 重放两个提交
   （Stage 48 cherry-pick + 本轮图像提交），**零冲突**，随后推送为快进。
+
+## LUM-1166 round — 合并 LUM-1163（Mistral provider）进 `feature/pi.rs` + 修一处跨轮编译缺口（Stage 47 新增字段）+ 磁盘绑定不派发
+
+本轮起点 `8735af881`（LUM-1164 已把 Stage 48 `pi-ai/auth/` 与 `images/` 垂直切片推上
+`feature/pi.rs`），收尾 `110759b29`。本轮是**纯协调轮**：不动 frontier、不新增功能，
+只做「把在飞的支线收进主干 + 在主干上复验 + 修合并暴露的缺口」。
+
+### 一、本轮动作
+
+1. **合并 `origin/work/lum-1163`（Mistral 原生适配器，14 文件 / +2254）**。
+   `git merge --no-commit` 只在 `pi-rust/docs/FEATURE_PI_RS_STATUS.md` 冲突（两条轮次记录
+   追加到同一锚点），按轮次顺序排成 LUM-1163 段 → LUM-1164 段；**代码零冲突**
+   （mistral 的落点 `providers/{mistral,mod,registry}.rs` / `pi-protocol/model.rs` /
+   `pi-agent-core/telemetry.rs` / `pi-coding-agent/provider.rs` 与 auth / images 的落点不重叠）。
+2. **修复合并暴露的编译缺口**：`crates/pi-ai/src/providers/mistral.rs:1343,1408` 两个内联单测
+   构造 `ToolResult` 时漏了 Stage 47（LUM-1162）新增的 `added_tool_names` 字段
+   （`cargo check -p pi-ai` 的 **lib 目标**能过，只有 `--all-targets` 的 lib test 目标报 E0063）。
+   补 `added_tool_names: None`，与 `pi-protocol` 的 `Default` 及兄弟适配器一致。
+3. **主干复验**（见第三节）。
+4. 更新本文档（本节）+ 推送 `feature/pi.rs`。
+
+### 二、为什么会出现这个缺口（合并流程的教训）
+
+LUM-1163 在 `9816266c0` 基线上自验「`cargo test -p pi-ai` 全绿」是真的 —— 但那个基线上
+`ToolResult` 还没有 `added_tool_names`。Stage 47（LUM-1162）在同一时间窗内往
+`pi-protocol/src/content.rs` 加了这个字段并合入 `feature/pi.rs`，于是 **两条各自全绿的支线
+合并后才会红**。可复用结论：
+
+- 协调轮对「合入主干」的支线**必须至少跑一次 `--all-targets`**（`cargo check` 的 lib-only
+  目标不编译 `#[cfg(test)]` 代码，正好漏掉这一类断裂）。
+- 反过来，`--all-targets` 能覆盖的错误类型有限（不链接、不跑断言）；本轮因磁盘无法链接
+  test 二进制，`pi-coding-agent` / `pi-agent-core` 的**链接**仍未验证（见第四节「未验证」）。
+
+### 三、验证（`110759b29` 上，合并 + 修复后）
+
+```bash
+export CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/pi-fresh-1160 CARGO_INCREMENTAL=0
+
+cargo check -p pi-ai -p pi-agent-core -p pi-coding-agent -p pi-protocol \
+            --all-targets --offline -j 2
+# → Finished（唯一告警来自既有 vendor/rquickjs-core）
+
+cargo test -p pi-ai --lib    --offline   # 103 passed
+cargo test -p pi-ai --test mistral --offline  #   9 passed（含本轮补字段的两个用例）
+cargo test -p pi-ai --test auth    --offline  #  25 passed
+cargo test -p pi-ai --test images  --offline  #  15 passed
+```
+
+`--all-targets` 是判定合并可否推送的**新下限**：本轮之前，LUM-1163 与 LUM-1162 各自的
+「全绿」加在一起并不能推出「合起来绿」。
+
+### 四、未验证 / 已知限制
+
+- **未链接** `pi-coding-agent` / `pi-agent-core` 的测试二进制：`cargo test` 在
+  `could not create a temp dir: No space left on device (os error 28)` 处中断
+  （`pi-coding-agent` example `manual_check` 的链接）。这是**磁盘**而非代码问题，
+  但必须写明「本轮的 pi-coding-agent / pi-agent-core 测试未在合并树上跑过」。
+- 未跑 `--workspace` 全量（磁盘）、未跑 wasm32 构建、未跑 `cargo clippy -D warnings`
+  （整仓仍被既有 `deferred_tools.rs` 的 `needless_lifetimes` 与 vendor 告警挡住）。
+- LUM-1163 的轮次记录里写了「rebase 后推送 feature/pi.rs」，但本轮开始时
+  `origin/feature/pi.rs` 只有 LUM-1164 的 `8735af881`（不含 mistral）—— 无论中间发生过
+  什么，**本轮把它补上了**；LUM-1163 那个 run 若随后再推自己的合并提交，内容应与本轮等价。
+
+### 五、frontier（本轮后）
+
+1. **`pi-ai` provider 家族**：`openai` / `anthropic` / `google` / `cohere` / `mistral` /
+   `faux` 六个齐备（本轮把 mistral 收进主干）；`Api` 枚举里仍无实现的只剩
+   **bedrock / azure / vertex**（三者都要本环境拿不到的签名/云凭据后端）。
+2. **`pi-ai/utils/` 缺口**（LUM-1164 实测）：上游 23 个文件，Rust 侧 7 个有对应；
+   优先级最高的是 `headers.ts` 与 `abort.ts` / `abort-signals.ts`（被上游 provider 使用）。
+3. **auth 接线**（LUM-1160 遗留、原文写明「留给协调轮」）：`pi-coding-agent/src/provider.rs`
+   尚未消费 `pi_ai::auth::resolve_provider_auth` / `find_env_keys`，目前 key 解析仍是
+   provider.rs 自己的一份。
+4. **质量门清偿** = LUM-1138（`backlog`）：`cargo fmt` 仍有既有漂移
+   （`providers/{anthropic,google,openai_responses}.rs`、`examples/anthropic_stream.rs`、
+   `tests/{anthropic,google}.rs`、`src/models.rs`）+ `utils/deferred_tools.rs:92`
+   的 `needless_lifetimes`。本轮新增行零漂移。
+
+### 六、派发与并发（本轮不派发）
+
+- 开工 `multica daemon status` → `active_task_count=3`：本人 + LUM-1162（收尾）+ LUM-1163
+  （在跑）。随后 LUM-1162 / LUM-1164 转 `in_review` 退出，**LUM-1163 仍在跑**（本轮结束时
+  它正在 `cargo test -p pi-ai -p pi-protocol -p pi-coding-agent -p pi-agent-core`）。
+- **不派发**的理由是**磁盘**而非槽位：根分区在 `50G/46G`（多次接近 0 可用），
+  本轮自己就撞了两次 ENOSPC，必须删 `debug/incremental`（1.3G）才继续；在 0–1.6G 余量下
+  再起一路 build-heavy 的 run，会把正在跑的 LUM-1163 一起拖死。
+- 下一轮建议按第 5 节的 1→2→3 顺序挑**一条**派发（`headers`/`abort` 工具层、
+  `provider.rs` auth 接线、bedrock/azure/vertex 三选一），并等 LUM-1163 退出后再派。
+
+### 七、环境记录（磁盘是唯一对外部目录的写操作，备案）
+
+- `CARGO_HOME=/tmp/cargo-home`、`CARGO_TARGET_DIR=/tmp/pi-fresh-1160`（LUM-1160/1162 留的
+  检出目标，开工时闲置）、全部 `--offline -j 2`；测试阶段加 `CARGO_INCREMENTAL=0`。
+- 删除：**`/tmp/pi-fresh-1160/debug/incremental`（1.3G）** —— 纯增量缓存，非源码、非 `deps`；
+  未触碰 LUM-1153 / LUM-1163 的 target（LUM-1163 的 run 正在写自己的 target）。
+- Git 身份沿用 worktree 级 `multica-agent <agent@multica.local>`；本轮本人只写
+  `crates/pi-ai/src/providers/mistral.rs`（2 行补字段）与本文档，其余全部是合并带入。
