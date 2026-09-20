@@ -27,6 +27,13 @@ worker 的 stage 划分。
    这是输入丢失，严重度高于 P0-1 的「刷屏」；修复面与 P0-1 的富渲染器接线互不重叠，因此单独
    停放为 Stage 61（见第五节）。
 
+> **落地（LUM-1220）**：Stage 61 = LUM-1216 已修并合入 `feature/pi.rs`（`c234068d1`）。忙时
+> Enter 与 alt+enter 都入队（steering / follow-up 两段），alt+up 把排队消息取回编辑器，待发消息
+> 以 dim `Steering:` / `Follow-up:` 行渲染在转录尾部，turn 结束后按序逐条投递。已知差异：`Agent`
+> 在整段 `prompt()` 期间被 `AsyncMutex` 独占，队列只能在下个 turn 边界投递（steer 优先于
+> followUp），**不是**中途插入当前 turn；真正的 mid-turn steer 需要 core 暴露共享队列并补发
+> `UserMessage` 事件，留作后续切片。
+
 > **行号校正（LUM-1219，tip `570f6158d`）**：LUM-1215 写下的 `app.rs:1849-1852` / `:1236-1239` /
 > `:1772` / `:1778` 是 `3e7566bf2` 之前的旧坐标，被 LUM-1213（thinking 渲染）的合并往下推了约 83 行。
 > 现在请一律以 P1-3 表格里校正后的坐标为准；**代码结构未变**（同一处 `prompt.clear()` + 同一处忙时
@@ -214,6 +221,11 @@ worker 的 stage 划分。
 并发约束：LUM-1210 轮时 LUM-1209（Stage 55）+ LUM-1211（Stage 57）+ 协调轮已占满 3 槽；
 LUM-1215 轮（第二轮 TUI 审计）仍是 3 个在飞（另加 LUM-1213 = 重复协调轮），故两轮都**不派发**，
 上面的 58/59/60/61 留给下一轮协调按槽位释放情况逐个开。
+
+> **落地状态（LUM-1220 更新）**：Stage 61（LUM-1216）已合入 `feature/pi.rs`（`c234068d1`）；
+> Stage 60（LUM-1218）已合入（`b91a3ae12`），实际落地 `/new`、`/copy`、`/name` + `app.session.new`
+> （`/tree`、`/fork` 仍缺，等 LUM-1212 的 `branch_*` 读路径）；Stage 58（LUM-1214）在飞。
+> 61+60 合并 tip 的全量门 = 144 套件 / 2149 passed / 0 failed / 2 ignored（clippy / fmt 全绿）。
 
 ## 六、验证
 
