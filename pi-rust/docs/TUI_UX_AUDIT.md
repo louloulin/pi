@@ -1520,3 +1520,123 @@ wired 判定路径，那比原来的缺陷更难维护。
 4. `Ctrl+C` 的「先清空、二次退出」双击语义（LUM-1238 在飞）与本轮无关，仍未闭合。
 5. 工具卡片 / 思考块 / 耗时统计的 `/resume` 回放仍缺（第六、七轮记录），
    `faux` 提供商不产生工具调用，本轮截图依旧无法覆盖该面。
+
+## 十八、Stage 71 交付（LUM-1239）：扩展对用户可见 —— 启动头摘要行 + `/extensions`
+
+> 编号说明：issue 正文把这节写作「第十六节」，本文件按顺序是第十五节（第十四节 = LUM-1235）。
+
+本节补的正是 14.5 的第 2 条：`-e` / 默认搜索路径装载的扩展在启动头与 `/extensions` 里都看不见。
+
+### 15.1 问题
+
+`load_extensions`（`crates/pi-coding-agent/src/main.rs:504`）把装载结果全部写 stderr
+（`:524` / `:528` / `:534` / `:543`）。alternate screen 一进去这些行就被整屏覆盖，于是：
+装了什么、装了哪个、哪个工具被内建顶掉、哪个文件加载失败，用户在屏幕上一个字都看不到；
+也没有任何查询入口（`/extensions` 此前不存在）。装载本身是好的 —— `registerProvider`、工具、
+命令都到达了 runtime。
+
+### 15.2 三个先定的设计决定
+
+1. **一个扩展都没装载时**（含 `--no-extensions`），二选一。本轮取
+   「**默认整行不出现；`--no-extensions` 时显示 `extensions: none (--no-extensions)`**」。
+   理由：无扩展运行是绝大多数，启动头与 Stage 70 保持逐像素一致，回归面最小；而
+   `--no-extensions` 是用户的显式选择，「确实是关掉的」这句话让「参数生效了吗」在屏幕上有答案。
+   反过来的方案（默认显示 `extensions: none`）会让每个用户的启动头多一行噪音。
+2. **`/extensions` 的归属粒度**：装载器不记录「这条命令 / 这个工具是谁注册的」——
+   `RegistrationLog` 的命令是扁平列表，`RegisteredProviderConfig` 只有 `name`，
+   工具注册表也没有按来源分组的 getter。要逐条归属得改 `pi-extensions`，不在本轮范围。
+   所以 `/extensions` 里 **sources 逐条列出**，`tools` / `commands` / `providers` 是
+   **全部已装载来源的并集**；多于一个来源时显式补一行
+   `note: tools / commands / providers are the union across the loaded sources.`，
+   不让「并集」被误读成「每个工具都来自第一个扩展」。
+3. **结构化数据进 TUI，TUI 只排版**：新增 `ExtensionLoadOutcome::report(disabled)`
+   （`crates/pi-coding-agent/src/extensions/wiring.rs:207`）投影出 `ExtensionReport`，
+   启动头与 `/extensions` 都读它，不各自解析字符串。`disabled` 由调用方传：`load` 在
+   `--no-extensions` 上是提前返回，outcome 里读不到这个标志。
+
+### 15.3 改动清单
+
+| 文件 | 位置 | 改动 |
+| --- | --- | --- |
+| `crates/pi-coding-agent/src/extensions/wiring.rs` | `:170` `:207` | `ExtensionReport`（`loaded` / `tools` / `shadowed` / `commands` / `providers` / `errors` / `disabled`）+ `report(disabled)`（不能派 `PartialEq`：`RegisteredCommand` 没有实现） |
+| `crates/pi-coding-agent/src/commands/slash.rs` | `:72` `:113` `:165` `:189` `:284` | `SlashCommand::Extensions`、解析、`/help` 行、`extensions_text`、`display_path`（`~` / `./` 收缩，跳过单段基路径） |
+| `crates/pi-coding-agent/src/interactive.rs` | `:138` `:252` `:1702` | `InteractiveOptions::extension_report`（连手工 `Debug` 一起）、`extension_header_for`、`/extensions` → `app.info` |
+| `crates/pi-coding-agent/src/main.rs` | `:150` | `loaded_extensions.report(cli.no_extensions)` 传进 `InteractiveOptions` |
+| `crates/pi-tui/src/app.rs` | `:466` `:475` `:504` `:1368` `:1423` | `AppConfig::extension_header`、`ExtensionHeader { Hidden, Loaded { count, names }, Disabled }`、内建头部容量 +4、摘要行紧跟标题行（Muted）、`extension_header_line` |
+| `crates/pi-tui/src/locale.rs` | `:223` `:231` | `EXTENSIONS_DISABLED_EN/ZH`、`extensions_summary_line`（en / zh 两版） |
+
+**`ctx.ui.setHeader` 的覆盖契约不变**：`composed_frame` 只在 `frame.header.is_empty()` 时回落到内建头部，
+而摘要行是内建头部的第二行 —— 扩展一旦自己 setHeader，整块内建头部（含摘要行）都不画。
+行预算也不受影响：`plan_chrome` 按行数分配，`write_styled_line` 对超宽行是裁剪而不是换行，
+所以一条再长的 `N extension(s): ...` 也只会被截断，不会顶掉键位提示或 onboarding 行。
+
+stderr 上的装载日志本轮**保留**：它是给 `pi --print` / `pi rpc` 和脚本用的，删除会打断既有消费者；
+本轮做的是在屏幕上补一份可见副本，两者共存。
+
+### 15.4 测试
+
+| 位置 | 断言 |
+| --- | --- |
+| `crates/pi-tui/tests/startup_header.rs:204` | 摘要行落在标题行**正下一行**，内容为 `2 extension(s): ./fixture-ext.mjs, ~/.pi/agent/extensions/foo.mjs` |
+| `crates/pi-tui/tests/startup_header.rs:223` | `Disabled` → `extensions: none (--no-extensions)` |
+| `crates/pi-tui/tests/startup_header.rs:232` | 默认（`Hidden`）整行不出现（`Loaded { count: 0, names: [] }` 也不出现，防御性） |
+| `crates/pi-tui/tests/startup_header.rs:250` | `ctx.ui.setHeader` 之后摘要行不再出现 |
+| `crates/pi-tui/src/locale.rs:331` | en / zh 两份文案的拼接与 `extensions: none` 形状 |
+| `crates/pi-coding-agent/src/commands/slash.rs:705` `:718` | `/extensions` 解析（含多余参数）、`/help` 收录该命令 |
+| `crates/pi-coding-agent/src/commands/slash.rs:742` `:798` `:809` `:822` | `extensions_text` 的 loaded / none / `--no-extensions` 三分支（含并集 note 与 `(none)` 行）与 `display_path` 收缩 |
+| `crates/pi-coding-agent/src/extensions/wiring.rs:1340` `:1380` | 真装载一个注册了工具 + 命令的扩展后 `report()` 的投影；`is_empty()` 的三种输入 |
+| `crates/pi-coding-agent/tests/startup_header.rs:109` `:133` `:148` `:156` | 驱动侧映射（`Loaded` / `Disabled` / `Hidden`）与「真实 `interactive_app_config` 渲染出的第 2 行」 |
+
+`crates/pi-coding-agent/tests/startup_header.rs` 里会渲染的测试全部走新增的 `lock_registry()`：
+`install_keybindings_from` / `reset_keybindings` 是进程级状态，cargo 同二进制内并发跑测试，
+不串行化会与既有的「启动头解析真键位」用例互踩（本轮首次跑就复现了这个 flake）。
+
+### 15.5 实机 PTY 证据
+
+harness：`pty.fork` + `TIOCSWINSZ`，`pyte` 还原屏幕、Pillow 渲成 PNG（**临时工具，未入库**，
+理由同第十四节：它依赖终端仿真与 PIL，不适合成为构建门槛）。
+一个必要的仿真修正：`pyte` 的 `Screen` 不实现 `CSI ? 1049 h` 的清屏语义，会把进 alternate screen
+**之前**写下的 stderr 文字留在缓冲里 —— 真终端那一下是空白屏。harness 覆盖 `set_mode` 在 1049 上清屏后，
+截图与真机一致（首版截图逐行左侧是启动头、右侧叠加着 stderr 残影，就是这条仿真缺陷）。
+被测二进制是本仓 `target/debug/pi`，离线 faux：`--model faux/faux-model`。
+夹具是三个扩展：`good.mjs`（工具 `ext_echo` + 命令 `ext-echo` + provider `acme-proxy`）、
+`shadow.mjs`（把工具注册成 `bash`，另有 `ext_greet`）、`broken.mjs`（语法错误）。
+
+| 画面 | 观察 |
+| --- | --- |
+| 已装载（2 成功 / 1 失败 / 1 个工具被顶掉） | 标题正下方一行 `2 extension(s): ./good.mjs, ./shadow.mjs`，键位提示整体下移一行；stderr 的装载日志在屏幕上依旧不可见 |
+| `/extensions` | `extensions: 2 loaded, 1 failed, 1 tool(s) shadowed` + `sources:` / `tools:` / `commands:` / `providers:` / `shadowed by a built-in tool (the built-in wins): bash` / `failed to load: ./broken.mjs — …` + 并集 note |
+| `--no-extensions` | `extensions: none (--no-extensions)` |
+| 无参数、环境里没有扩展 | 没有该行（与 Stage 70 的启动头一致） |
+
+![Stage 71：装载 2 个扩展时的启动头摘要行](screenshots/stage71-extension-header.png)
+
+![Stage 71：`/extensions` 列出来源、工具、命令、provider、被顶掉的工具与失败原因](screenshots/stage71-extensions-command.png)
+
+![Stage 71：`--no-extensions` 显示 extensions: none (--no-extensions)](screenshots/stage71-no-extensions-flag.png)
+
+![Stage 71：无扩展运行时没有摘要行](screenshots/stage71-no-extensions-default.png)
+
+一条实机才暴露的排版约束：`app.info` 走的是**流式段落**渲染（`plain_lines` → `wrap_text`，
+按词重组、句内换行不保留，`/help` 一直如此）。所以 `extensions_text` 是**一节一行、条目逗号分隔**，
+靠 `sources:` / `tools:` / `commands:` / `providers:` 这些标签而不是缩进保持可读性 ——
+首版按「每条一行 + 缩进」写，屏幕上摊平成一整段（截图里能看到），本轮改成现在这种形状。
+
+### 15.6 本轮实测
+
+`cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui -p pi-coding-agent --all-targets
+-- -D warnings` 退出码 0；`cargo test -p pi-tui -p pi-coding-agent` **1456 passed / 0 failed**
+（`pi-tui` 761）；`cargo test -p pi-evals` **8 passed / 0 failed / 1 ignored**（含
+`docs-code-fences-balanced` 与相对链接两个 case，本节与四张新截图都在审计范围内）。
+
+本机 overlay 是多任务共享的，本轮构建期间两次撞到「剩余 0」；门禁用
+`CARGO_INCREMENTAL=0` + `CARGO_PROFILE_DEV_DEBUG=0` 跑完（不影响语义，只去掉调试信息），
+跑完按约定清掉本轮 `target`。这一条写出来是因为它解释了为什么门禁命令带着这两个环境变量。
+
+### 15.7 仍然缺的（顺延）
+
+1. **逐扩展归属**：`/extensions` 里 tools / commands / providers 仍是并集（见 15.2 第 2 条），
+   要精确到「哪个扩展提供了哪个工具」得让 `pi-extensions` 的注册日志带上来源。
+2. **`/reload` 热重载**：issue 明确划在本轮范围外。
+3. **`/help` 与 `/extensions` 的排版**：都受 `app.info` 的流式段落渲染限制，
+   等 TUI 有「保留换行的普通文本块」再统一改善。

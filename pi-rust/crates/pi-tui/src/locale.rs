@@ -233,6 +233,27 @@ pub const HEADER_ONBOARDING_EN: &str =
 pub const HEADER_ONBOARDING_ZH: &str =
     "Pi 可以讲解自身功能并检索文档。直接问它「怎么用」或「怎么扩展」。";
 
+/// Startup-header copy for `--no-extensions`.
+///
+/// Kept in the `extensions: none` shape the audit pins, with the flag that
+/// caused it in parentheses: the user who typed `--no-extensions` wanted
+/// exactly that, and a silent header would read as "the flag did nothing".
+pub const EXTENSIONS_DISABLED_EN: &str = "extensions: none (--no-extensions)";
+/// Chinese rendering of [`EXTENSIONS_DISABLED_EN`].
+pub const EXTENSIONS_DISABLED_ZH: &str = "扩展: 无（--no-extensions）";
+
+/// The startup header's extension summary: `N extension(s): a.mjs, b.mjs`.
+///
+/// The caller (the App's built-in header) guarantees `names` is non-empty,
+/// so the row never renders a count with nothing behind it.
+pub fn extensions_summary_line(locale: Locale, count: usize, names: &[String]) -> String {
+    let list = names.join(", ");
+    match locale {
+        Locale::En => format!("{count} extension(s): {list}"),
+        Locale::Zh => format!("{count} 个扩展: {list}"),
+    }
+}
+
 /// Render a key id as the reader sees it: `ctrl+o` → `Ctrl+O`, `alt+enter` →
 /// `Alt+Enter`, `escape` → `Esc`.
 ///
@@ -322,6 +343,23 @@ mod tests {
             "app.session.tree" => Vec::new(),
             _ => Vec::new(),
         }
+    }
+
+    #[test]
+    fn extension_summary_line_joins_the_names() {
+        let names = vec!["./a.mjs".to_string(), "~/b.mjs".to_string()];
+        assert_eq!(
+            extensions_summary_line(Locale::En, 2, &names),
+            "2 extension(s): ./a.mjs, ~/b.mjs"
+        );
+        assert_eq!(
+            extensions_summary_line(Locale::Zh, 2, &names),
+            "2 个扩展: ./a.mjs, ~/b.mjs"
+        );
+        // The `--no-extensions` copy keeps the `extensions: none` shape so
+        // the audit's acceptance wording holds.
+        assert!(EXTENSIONS_DISABLED_EN.starts_with("extensions: none"));
+        assert!(!EXTENSIONS_DISABLED_ZH.is_empty());
     }
 
     #[test]

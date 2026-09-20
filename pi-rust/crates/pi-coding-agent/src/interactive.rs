@@ -54,14 +54,14 @@ use crate::compaction::{
 use crate::config::{self, ConfigSources};
 use crate::extensions::events::ExtensionEventMapper;
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
-use crate::extensions::wiring::ExtensionRuntime;
+use crate::extensions::wiring::{ExtensionReport, ExtensionRuntime};
 use crate::prompt_templates::PromptTemplate;
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
 use crate::tools::AgentTool;
 
-use pi_tui::app::{App, AppConfig, FollowUpOutcome, Submission};
+use pi_tui::app::{App, AppConfig, ExtensionHeader, FollowUpOutcome, Submission};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
 use pi_tui::selector::{Selector, SelectorItem};
@@ -136,6 +136,10 @@ pub struct InteractiveOptions {
     /// Loaded JS extensions, when any. `None` disables extension
     /// command dispatch and side-effect persistence.
     pub extensions: Option<Arc<ExtensionRuntime>>,
+    /// UI-facing projection of the load pass (startup header summary +
+    /// `/extensions`). Always populated by `main.rs`, including the
+    /// `--no-extensions` case; empty means "nothing to show".
+    pub extension_report: ExtensionReport,
     /// Interactive UI bridge for `ctx.ui.confirm / input / select`.
     /// `None` keeps the headless behaviour (deny / cancel), which is
     /// what tests and non-TTY runs get.
@@ -177,6 +181,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("stream_fn", &"<dyn StreamFn>")
             .field("tool_executor", &"<dyn ToolExecutor>")
             .field("extensions", &self.extensions.is_some())
+            .field("extension_report", &self.extension_report)
             .field("extension_ui", &self.extension_ui.is_some())
             .field("retry", &self.retry)
             .field("quiet_startup", &self.quiet_startup)
@@ -202,6 +207,7 @@ impl Default for InteractiveOptions {
             stream_fn: Arc::new(FauxProvider::default()) as SharedStreamFn,
             tool_executor: default_executor(),
             extensions: None,
+            extension_report: ExtensionReport::default(),
             extension_ui: None,
             retry: RetryPolicy::default(),
             clipboard: None,
@@ -238,6 +244,32 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // and a folded header costs no rows.
         startup_header_expanded: true,
         locale: locale_from_env(std::env::var("PI_LANG").ok().as_deref()),
+        extension_header: extension_header_for(options),
+    }
+}
+
+/// Project the extension report onto the startup header's extension row.
+///
+/// `--no-extensions` is its own state (the header says so); an empty report
+/// hides the row, which keeps a no-extension run byte-identical to the
+/// pre-Stage-71 header.
+fn extension_header_for(options: &InteractiveOptions) -> ExtensionHeader {
+    let report = &options.extension_report;
+    if report.disabled {
+        return ExtensionHeader::Disabled;
+    }
+    if report.loaded.is_empty() {
+        return ExtensionHeader::Hidden;
+    }
+    let home = crate::paths::home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    ExtensionHeader::Loaded {
+        count: report.loaded.len(),
+        names: report
+            .loaded
+            .iter()
+            .map(|path| crate::commands::display_path(path, home.as_deref(), &cwd))
+            .collect(),
     }
 }
 
@@ -2011,6 +2043,15 @@ async fn run_slash_command(
         }
         SlashCommand::Hotkeys => {
             app.info(crate::commands::slash::hotkeys_text());
+        }
+        SlashCommand::Extensions => {
+            let home = crate::paths::home_dir();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            app.info(crate::commands::extensions_text(
+                &options.extension_report,
+                home.as_deref(),
+                &cwd,
+            ));
         }
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;
