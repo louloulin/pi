@@ -1,6 +1,6 @@
 # lum1259-ctrl-c-draft-loss.png — chars, 120x34 cells
 
-===== LUM-1259 tip 4b187b418 — §12.4 item 1: a single Ctrl+C with a non-empty composer still exits  |  [1] 1. startup frame after a no-op repaint  (cursor 120,33) =====
+===== LUM-1259 tip b5769b585 — §12.4 item 1 after the LUM-1238 rescue: Ctrl+C #1 clears the draft and stays alive, #2 inside 500ms exits  |  [1] 1. startup frame after a no-op repaint  (cursor 120,33) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -34,9 +34,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d71f902afe3b39                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d72091a904bd22                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1259 tip 4b187b418 — §12.4 item 1: a single Ctrl+C with a non-empty composer still exits  |  [2] 2. a real draft is in the composer  (cursor 36,32) =====
+===== LUM-1259 tip b5769b585 — §12.4 item 1 after the LUM-1238 rescue: Ctrl+C #1 clears the draft and stays alive, #2 inside 500ms exits  |  [2] 2. a real draft is in the composer  (cursor 36,32) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -70,9 +70,9 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > this draft must not be lost▍
-Faux test model  session-18d71f902afe3b39                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d72091a904bd22                                                  in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1259 tip 4b187b418 — §12.4 item 1: a single Ctrl+C with a non-empty composer still exits  |  [3] 3. one Ctrl+C -> process already gone (no 500ms double-press window), screen restored, draft lost  (cursor 36,32) =====
+===== LUM-1259 tip b5769b585 — §12.4 item 1 after the LUM-1238 rescue: Ctrl+C #1 clears the draft and stays alive, #2 inside 500ms exits  |  [3] 3. after Ctrl+C #1 — alive, composer cleared (upstream handleCtrlC semantics: the draft text is dropped, the process is not)  (cursor 36,32) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -105,5 +105,41 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 
-> this draft must not be lost▍
-Faux test model  session-18d71f902afe3b39                                                  in 0 out 0 ?/8.2k  ? for help
+> type a prompt — /help for commands
+Faux test model  session-18d72091a904bd22                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1259 tip b5769b585 — §12.4 item 1 after the LUM-1238 rescue: Ctrl+C #1 clears the draft and stays alive, #2 inside 500ms exits  |  [4] 4. two Ctrl+C in quick succession (inside the 500ms window) — the process exits and the screen is restored  (cursor 36,32) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d72091a904bd22                                                  in 0 out 0 ?/8.2k  ? for help

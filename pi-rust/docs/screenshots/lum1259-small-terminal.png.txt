@@ -1,6 +1,6 @@
 # lum1259-small-terminal.png — chars, 80x24 cells
 
-===== LUM-1259 tip 4b187b418 on a standard 80x24 terminal  |  [1] 1. startup on 80x24 — the header legend vs the transcript area  (cursor 80,23) =====
+===== LUM-1259 tip b5769b585 on a standard 80x24 terminal  |  [1] 1. startup on 80x24 — the header legend vs the transcript area  (cursor 80,23) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -24,9 +24,9 @@ pi v0.1.0
 Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 > type a prompt — /help for commands
-Faux test model  session-18d71fa18f9a8c29          in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d720953200d9a2          in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1259 tip 4b187b418 on a standard 80x24 terminal  |  [2] 2. /help on 80x24  (cursor 80,21) =====
+===== LUM-1259 tip b5769b585 on a standard 80x24 terminal  |  [2] 2. /help on 80x24  (cursor 80,21) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -48,11 +48,11 @@ pi v0.1.0
   drop files to attach
 
 Pi can explain its own features and look up its docs. Ask it how to use or exten
-> selector / cancel turn                                                       ┃
+· buffer Esc close selector / cancel turn                                      ┃
 > type a prompt — /help for commands
-Faux test model  session-18d71fa18f9a8c29          in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d720953200d9a2          in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1259 tip 4b187b418 on a standard 80x24 terminal  |  [3] 3. a real prompt, then Enter, on 80x24  (cursor 25,21) =====
+===== LUM-1259 tip b5769b585 on a standard 80x24 terminal  |  [3] 3. a real prompt, then Enter, on 80x24  (cursor 41,21) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -76,30 +76,30 @@ pi v0.1.0
 Pi can explain its own features and look up its docs. Ask it how to use or exten
   faux-model (faux) hello                                                      ┃
 > type a prompt — /help for commands
-Faux test model  session-18d71fa18f9a8c29          in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d720953200d9a2          in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1259 tip 4b187b418 on a standard 80x24 terminal  |  [4] 4. Alt+H (the header's own advertised workaround) on 80x24  (cursor 80,23) =====
-> slash commands: /help show this help text /clear clear the message view /new
-> start a new session /copy copy the last assistant message to the clipboard
-> /name [name] show or set the session display name /model pick a model (opens
-> selector) /session show the current session info /export [path] export the
-> session (HTML, or JSONL for a .jsonl path) /resume resume a previous session
-> /tree navigate the session tree and switch branches /fork branch a new session
-> from a user message /clone copy the current session into a new session file
-> /settings show or change interface settings /thinking set the reasoning level
-> (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project
-> trust (/trust yes|no) /compact summarize the conversation prefix to free
-> context /hotkeys list the keyboard shortcuts /exit quit the interactive
-> session keys: Enter submit prompt Up / Down navigate prompt history PgUp/PgDn
-> scroll the chat log one page Home / End jump to the start / end of the chat
-> log Ctrl+C abort the current turn (or exit on idle) Ctrl+D exit on an empty
-> prompt Ctrl+L open the model selector Ctrl+U clear the prompt buffer Esc close
-> selector / cancel turn
+===== LUM-1259 tip b5769b585 on a standard 80x24 terminal  |  [4] 4. Alt+H (the header's own advertised workaround) on 80x24  (cursor 80,23) =====
+· slash commands: /help show this help text /clear clear the message view /new
+· start a new session /copy copy the last assistant message to the clipboard
+· /name [name] show or set the session display name /model pick a model (opens
+· selector) /session show the current session info /export [path] export the
+· session (HTML, or JSONL for a .jsonl path) /resume resume a previous session
+· /tree navigate the session tree and switch branches /fork branch a new session
+· from a user message /clone copy the current session into a new session file
+· /settings show or change interface settings /thinking set the reasoning level
+· (/thinking off|minimal|low|medium|high|xhigh|max) /trust show or set project
+· trust (/trust yes|no) /compact summarize the conversation prefix to free
+· context /hotkeys list the keyboard shortcuts /extensions list loaded
+· extensions and what they register /exit quit the interactive session keys:
+· Enter submit prompt Up / Down navigate prompt history PgUp/PgDn scroll the
+· chat log one page Home / End jump to the start / end of the chat log Ctrl+C
+· abort the current turn (or clear the prompt on idle; twice exits) Ctrl+D exit
+· on an empty prompt Ctrl+L open the model selector Ctrl+U clear the prompt
+· buffer Esc close selector / cancel turn
 > hello
   faux-model (faux) hello
 
 
 
-
 > type a prompt — /help for commands
-Faux test model  session-18d71fa18f9a8c29  in 0 out 0 ?/8.2k  Startup header: co
+Faux test model  session-18d720953200d9a2  in 0 out 0 ?/8.2k  Startup header: co
