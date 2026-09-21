@@ -3,6 +3,20 @@
 //! `packages/tui/components/editor.ts` together with the `prompt()`
 //! shell in `packages/coding-agent/src/modes/interactive/interactive-mode.ts`.
 //!
+//! # The composer window
+//!
+//! A draft taller than the rows the composer has is shown through a
+//! *window*: only `max_rows` rows are painted. Which rows those are is a
+//! decision that has to survive across frames — a window re-anchored from
+//! scratch on every keystroke would jump a whole page when the caret
+//! crossed a page boundary — so [`Prompt::render_lines`] takes the window
+//! start the caller remembers and returns the value for the next frame
+//! (upstream keeps the same number in `Editor.scrollOffset`,
+//! `packages/tui/src/components/editor.ts:304`). The window then follows
+//! the caret one row at a time, and the rows it hides are reported in the
+//! label column (`↑` / `↓`), the port's only stable chrome in place of
+//! upstream's scrollable top / bottom border.
+//!
 //! [`Editor`]: crate::Editor
 
 use crate::editor::{Editor, EditorAction, HistorySearchStatus};
@@ -273,7 +287,8 @@ impl Prompt {
         rows.clamp(1, max_rows.max(1))
     }
 
-    /// Render the prompt into 1..=`max_rows` lines at the given width.
+    /// Render the prompt into 1..=`max_rows` lines at the given width,
+    /// continuing the composer window at `scroll`.
     ///
     /// The first row carries the label (e.g. `"> "`) and the placeholder
     /// (when the buffer is empty); subsequent rows are indented to keep
@@ -285,19 +300,27 @@ impl Prompt {
     /// A hard break (`\n`) always starts a new row, including a blank one,
     /// so `Shift+Enter` grows the composer immediately.
     ///
-    /// When the draft needs more rows than `max_rows`, the window follows
-    /// the cursor (see [`scroll_window_start`]) instead of showing the tail:
-    /// a cursor above the tail used to be scrolled off the composer
-    /// entirely.
+    /// `scroll` is the first draft row the caller's window showed last
+    /// frame (`0` when there is nothing to remember). The returned `usize`
+    /// is the window start this frame drew — store it and pass it back, or
+    /// the window re-anchors and jumps by whole pages instead of following
+    /// the caret one row at a time. The window keeps the caret visible by
+    /// moving the start one row at a time ([`follow_cursor`]), which is
+    /// upstream's rule in `render`
+    /// (`packages/tui/src/components/editor.ts:532-540`).
+    ///
+    /// Rows hidden above / below the window are reported in the label
+    /// column (`↑` / `↓`, with the hidden row count when the gutter has
+    /// room), so a clipped draft always says that there is more of it.
     ///
     /// Callers that size the composer by content pass the value returned
     /// by [`Prompt::line_count`]; callers that want a fixed-height
     /// composer pass `1` and get the existing single-row behaviour.
-    pub fn render_lines(&self, width: u16, max_rows: usize) -> Vec<String> {
+    pub fn render_lines(&self, width: u16, max_rows: usize, scroll: usize) -> (Vec<String>, usize) {
         let width = width as usize;
         let max_rows = max_rows.max(1);
         if width == 0 {
-            return vec![String::new()];
+            return (vec![String::new()], 0);
         }
         // The reverse-search row owns row 0 while the search is open; the
         // draft keeps the rows below it.
@@ -336,29 +359,28 @@ impl Prompt {
                 };
                 out.push(blank_row(prefix, width));
             }
-            return out;
+            return (out, 0);
         }
 
         let layout = VisualLayout::new(&text, available);
         let (cursor_row, cursor_col) = layout.caret(self.editor.display_cursor());
         let total_rows = layout.len();
         let show_rows = total_rows.min(max_rows);
-        let skip = scroll_window_start(cursor_row, total_rows, show_rows);
+        let skip = follow_cursor(scroll, cursor_row, total_rows, show_rows);
         let indent = " ".repeat(label_width);
+        let hidden_above = skip;
+        let hidden_below = total_rows - (skip + show_rows);
 
         let mut out: Vec<String> = Vec::with_capacity(show_rows);
-        for (offset, row) in layout.rows()[skip..skip + show_rows].iter().enumerate() {
-            let index = skip + offset;
-            // The label belongs to the draft's own first row; a scrolled
-            // window indents every row it shows.
-            let prefix = if index == 0 {
-                self.label.as_str()
-            } else {
-                indent.as_str()
-            };
+        for index in skip..skip + show_rows {
+            let row = &layout.rows()[index];
             let draw_cursor = index == cursor_row;
+            // The label belongs to the draft's own first row; a scrolled
+            // window marks where the draft continues instead.
+            let prefix =
+                self.window_prefix(index, skip, show_rows, hidden_above, hidden_below, &indent);
             out.push(build_prompt_row(
-                prefix,
+                &prefix,
                 &row.text,
                 if draw_cursor { cursor_col } else { usize::MAX },
                 width,
@@ -380,7 +402,44 @@ impl Prompt {
             };
             out.push(blank_row(prefix, width));
         }
-        out
+        (out, skip)
+    }
+
+    /// The chrome column the row at `index` is drawn with, where the window
+    /// shows draft rows `skip..skip + show_rows` out of `total_rows`.
+    ///
+    /// The draft's own first row always keeps the label — the user must not
+    /// lose the mode marker just because the draft scrolled. Every other row
+    /// is indented, except the window's first / last row when the draft
+    /// continues above / below it: those carry `↑` / `↓` and the number of
+    /// hidden rows, which is upstream's scroll border
+    /// (`createScrollBorder`, `packages/tui/src/components/editor.ts:266`)
+    /// expressed in the one column the port's chrome owns.
+    fn window_prefix(
+        &self,
+        index: usize,
+        skip: usize,
+        show_rows: usize,
+        hidden_above: usize,
+        hidden_below: usize,
+        indent: &str,
+    ) -> String {
+        if index == 0 {
+            return self.label.clone();
+        }
+        let gutter = self.label.chars().count();
+        // A one-row window has no room for two separate markers: it is both
+        // the first and the last visible row, so it reports both sides.
+        if show_rows == 1 && hidden_above > 0 && hidden_below > 0 {
+            return scroll_marker('↕', hidden_above + hidden_below, gutter);
+        }
+        if index == skip && hidden_above > 0 {
+            return scroll_marker('↑', hidden_above, gutter);
+        }
+        if index + 1 == skip + show_rows && hidden_below > 0 {
+            return scroll_marker('↓', hidden_below, gutter);
+        }
+        indent.to_string()
     }
 
     /// Empty single-row representation (placeholder + padding).
@@ -447,20 +506,53 @@ fn build_prompt_row(
     line
 }
 
-/// First row of the composer window that keeps the cursor visible.
+/// First row of the composer window for this frame, given the window start
+/// the caller remembered (`start`).
 ///
-/// The window is page-aligned on the cursor row instead of centred on it:
-/// `render_lines` takes `&self`, so the renderer cannot remember a scroll
-/// offset, and re-anchoring on every keystroke would make the composer jump
-/// while the cursor moves inside one page. The last page is clamped, so the
-/// tail of a long draft is always fully visible.
-fn scroll_window_start(cursor_row: usize, total_rows: usize, show_rows: usize) -> usize {
+/// The window follows the caret one row at a time: it shrinks to the caret's
+/// row when the caret moved above it, and grows to `caret + 1 - show_rows`
+/// when the caret moved below it. That is upstream's rule in `render`
+/// (`packages/tui/src/components/editor.ts:532-540`), and it is what makes
+/// the window *smooth*: re-anchoring on the caret's page instead (the
+/// pre-LUM-1317 compromise) moved the window by a whole page as soon as the
+/// caret crossed a page boundary. The last window is clamped, so the tail of
+/// a long draft is always fully visible.
+fn follow_cursor(start: usize, cursor_row: usize, total_rows: usize, show_rows: usize) -> usize {
     let show_rows = show_rows.max(1);
-    if show_rows >= total_rows {
-        return 0;
+    let max_start = total_rows.saturating_sub(show_rows);
+    let mut start = start.min(max_start);
+    if cursor_row < start {
+        start = cursor_row;
+    } else if cursor_row >= start + show_rows {
+        start = cursor_row + 1 - show_rows;
     }
-    let page = (cursor_row / show_rows) * show_rows;
-    page.min(total_rows - show_rows)
+    start.min(max_start)
+}
+
+/// Chrome column for a scrolled composer window: `↑` / `↓` plus as many
+/// digits of the hidden row count as the gutter holds.
+///
+/// Upstream writes the count into the editor's top / bottom border
+/// (`createScrollBorder`, `packages/tui/src/components/editor.ts:266`),
+/// which the Rust prompt does not have. The columns the label occupies are
+/// its only stable chrome, so the marker lives there and the count is
+/// dropped when the gutter cannot hold it — the arrow is the affordance, the
+/// count is the detail.
+fn scroll_marker(direction: char, hidden: usize, gutter: usize) -> String {
+    let mut marker = String::new();
+    if gutter == 0 {
+        return marker;
+    }
+    marker.push(direction);
+    let count = hidden.to_string();
+    // One of the gutter's columns is the arrow itself.
+    if count.chars().count() < gutter {
+        marker.push_str(&count);
+    }
+    while marker.chars().count() < gutter {
+        marker.push(' ');
+    }
+    marker
 }
 
 /// Split a string into `(before, after)` halves at the nth character
@@ -585,18 +677,19 @@ mod tests {
     }
 
     /// `render_lines` with `max_rows == 1` and a buffer that needs more
-    /// rows shows only the cursor row (the scroll behaviour). The label
-    /// only appears on the very first row of the rendered slice, so the
-    /// cursor row here uses the indent, not the label.
+    /// rows shows the cursor row (the scroll behaviour) and marks the
+    /// draft as continuing above it. The label only appears on the very
+    /// first row of the draft, so a scrolled window uses the marker
+    /// column, not the label.
     #[test]
     fn render_lines_with_one_row_keeps_the_legacy_compat() {
         let mut prompt = Prompt::new("> ");
         prompt.editor_mut().insert_str("abcdefghij");
-        let lines = prompt.render_lines(8, 1);
+        let (lines, scroll) = prompt.render_lines(8, 1, 0);
         assert_eq!(lines.len(), 1);
+        assert_eq!(scroll, 1, "the window follows the caret off the first row");
         // Body width is 8 - 2 (label) = 6; only the trailing 4 chars fit.
-        assert!(!lines[0].starts_with("> "));
-        assert!(lines[0].starts_with("  "));
+        assert!(lines[0].starts_with('↑'), "{:?}", lines[0]);
         assert!(!lines[0].contains("abcdef"));
         assert!(lines[0].contains("ghij"));
         assert!(lines[0].contains('▍'));
@@ -608,8 +701,9 @@ mod tests {
     fn render_lines_multi_row_indents_continuation_rows() {
         let mut prompt = Prompt::new("> ");
         prompt.editor_mut().insert_str("hello world foo bar");
-        let lines = prompt.render_lines(10, 8);
+        let (lines, scroll) = prompt.render_lines(10, 8, 0);
         assert!(lines.len() >= 3, "got {} lines", lines.len());
+        assert_eq!(scroll, 0, "nothing is hidden when the draft fits");
         assert!(lines[0].starts_with("> "));
         for cont in &lines[1..] {
             assert!(
@@ -627,16 +721,16 @@ mod tests {
         let mut prompt = Prompt::new("> ");
         // 14 chars; width 6 (label "> ") → body width 4.
         prompt.editor_mut().insert_str("abcdefghij klm");
-        let lines = prompt.render_lines(6, 8);
+        let (lines, _) = prompt.render_lines(6, 8, 0);
         let cursors: Vec<_> = lines.iter().map(|line| line.contains('▍')).collect();
         // Exactly one row carries the cursor.
         let cursor_rows = cursors.iter().filter(|c| **c).count();
         assert_eq!(cursor_rows, 1, "cursors on rows: {cursors:?}");
     }
 
-    /// When the buffer needs more rows than `max_rows`, the head is
-    /// dropped so the cursor (always near the tail) stays visible —
-    /// the upstream editor's scroll behaviour.
+    /// When the buffer needs more rows than `max_rows`, the window follows
+    /// the cursor and reports the rows it hid; the caller gets the window
+    /// start back so the next frame continues from it.
     #[test]
     fn render_lines_caps_to_max_rows_keeping_the_cursor() {
         let mut prompt = Prompt::new("> ");
@@ -644,10 +738,15 @@ mod tests {
             .editor_mut()
             .insert_str("a b c d e f g h i j k l m n o p");
         // Width 6 (body 4) → 8 rows of natural content; cap to 3.
-        let lines = prompt.render_lines(6, 3);
+        let (lines, scroll) = prompt.render_lines(6, 3, 0);
         assert_eq!(lines.len(), 3);
+        assert_eq!(scroll, 5, "3 rows ending at the caret's row 7");
         // The cursor row must still be in the rendered slice.
         assert!(lines.iter().any(|line| line.contains('▍')));
+        // The window's first row says how much is above it; the last row is
+        // the caret's row, so nothing is below.
+        assert!(lines[0].starts_with('↑'), "{:?}", lines[0]);
+        assert!(!lines[2].starts_with('↓'), "{:?}", lines[2]);
     }
 
     /// An empty prompt renders the placeholder + padding across the
@@ -656,8 +755,9 @@ mod tests {
     fn render_lines_empty_buffer_uses_placeholder() {
         let mut prompt = Prompt::new("> ");
         prompt.set_placeholder("type a prompt");
-        let lines = prompt.render_lines(20, 3);
+        let (lines, scroll) = prompt.render_lines(20, 3, 0);
         assert_eq!(lines.len(), 3);
+        assert_eq!(scroll, 0);
         assert!(lines[0].contains("type a prompt"));
         for row in &lines[1..] {
             // No label / no body / padded with spaces — the cursor only

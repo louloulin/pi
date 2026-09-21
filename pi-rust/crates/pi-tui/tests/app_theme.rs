@@ -12,6 +12,8 @@ use pi_agent_core::{Agent, AgentOptions, ThinkingLevel};
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, Model, ProviderId};
 use pi_tui::app::{App, AppConfig};
+use pi_tui::autocomplete::{CombinedAutocompleteProvider, SlashCommand};
+use pi_tui::input::Key;
 use pi_tui::theme::{builtin_theme, ColorMode};
 use pi_tui::{MessageItem, Selector, SelectorItem};
 use ratatui::buffer::Buffer;
@@ -259,6 +261,61 @@ fn selector_overlay_uses_the_title_border_and_selected_row_slots() {
     assert!(is_unstyled(style_at(&buf, 2, 4)));
     assert_eq!(style_at(&buf, 34, 4).fg, Some(MUTED));
     assert_eq!(symbol_at(&buf, 34, 4), "t"); // "two" starts at column 34
+}
+
+#[test]
+fn the_composer_dropdown_paints_the_select_list_theme_roles() {
+    // LUM-1305: the dropdown is laid out by the shared `SelectList`
+    // implementation, so its cells carry the same roles the modal pickers
+    // do — `accent` over `selectedBg` for the highlighted row, `muted` for
+    // the description column, and an unstyled label. The App used to derive
+    // the style from the row text itself and painted every candidate row
+    // `muted`, so a label and its description came out the same colour.
+    let mut app = app();
+    app.prompt_mut()
+        .editor_mut()
+        .set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
+            vec![
+                SlashCommand::new("help").with_description("show this help text"),
+                SlashCommand::new("clear").with_description("wipe the message view"),
+            ],
+            std::env::temp_dir(),
+        )));
+    app.step_key(Key::char('/'));
+    let buf = render(&mut app, 80, 12);
+
+    let selected_row = row_containing(&buf, 80, 12, "❯ help");
+    let plain_row = row_containing(&buf, 80, 12, "  clear");
+    assert_eq!(plain_row, selected_row + 1, "the list is one row per item");
+
+    // Slash menu layout: a 12-column primary column, so the descriptions
+    // start at 2 (marker) + 12 = 14 on both rows.
+    assert_eq!(symbol_at(&buf, 14, selected_row), "s");
+    assert_eq!(symbol_at(&buf, 14, plain_row), "w");
+
+    // The selected row is wrapped whole: accent fg over selectedBg, label and
+    // description alike.
+    let selected_label = style_at(&buf, 2, selected_row);
+    assert_eq!(selected_label.fg, Some(ACCENT));
+    assert_eq!(selected_label.bg, Some(SELECTED_BG));
+    let selected_description = style_at(&buf, 14, selected_row);
+    assert_eq!(selected_description.fg, Some(ACCENT));
+    assert_eq!(selected_description.bg, Some(SELECTED_BG));
+
+    // A plain row keeps its label at the terminal default and only the
+    // description column takes `muted`.
+    assert!(is_unstyled(style_at(&buf, 2, plain_row)));
+    assert_eq!(style_at(&buf, 14, plain_row).fg, Some(MUTED));
+    // …and the row it borrowed from the transcript is blanked to the right of
+    // the candidate, not left showing the output underneath.
+    assert_eq!(symbol_at(&buf, 79, plain_row), " ");
+}
+
+/// The `y` of the first row whose text contains `needle`.
+fn row_containing(buf: &Buffer, width: u16, height: u16, needle: &str) -> u16 {
+    (0..height)
+        .find(|y| row_text(buf, *y, width).contains(needle))
+        .unwrap_or_else(|| panic!("no row contains {needle:?}"))
 }
 
 #[test]

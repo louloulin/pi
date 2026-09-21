@@ -24,10 +24,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pi_tui::autocomplete::{
-    AutocompleteItem, AutocompleteProvider, CombinedAutocompleteProvider, SlashCommand,
+    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
+    CompletionResult, SlashCommand,
 };
 use pi_tui::input::{KeyCode, KeyModifiers};
-use pi_tui::{Editor, EditorAction, Key};
+use pi_tui::{Editor, EditorAction, Key, Selector, SelectorItem, SelectorLayout};
 
 /// A scratch directory that is removed when the test ends.
 struct TempDir {
@@ -441,6 +442,219 @@ fn dropdown_rendering_marks_the_selection_and_windows_long_lists() {
     assert_eq!(editor.autocomplete_max_visible(), 3);
 }
 
+/// The dropdown borrows the `SelectList` row layout, so its description
+/// column starts at the same offset on every row — `label  description` with
+/// two blanks is exactly what this replaced (LUM-1305).
+#[test]
+fn slash_dropdown_aligns_descriptions_into_the_select_list_column() {
+    let mut editor = editor_with(command_provider());
+    type_text(&mut editor, "/");
+    let rows = editor.autocomplete_render_lines(80);
+    assert_eq!(rows.len(), 3);
+
+    // Slash menu: `SLASH_COMMAND_SELECT_LIST_LAYOUT` (12..32). The widest
+    // label here is "render" (6) + the 2-column gap = 8, under the floor, so
+    // the primary column is 12 and every description starts at
+    // 2 (marker) + 12 = 14.
+    let column = 2 + 12;
+    let descriptions: Vec<String> = rows
+        .iter()
+        .map(|row| row.chars().skip(column).collect())
+        .collect();
+    assert_eq!(
+        descriptions,
+        vec![
+            "show this help text",
+            "wipe the message view",
+            "redraw the view"
+        ],
+        "{rows:?}"
+    );
+    assert!(rows[0].starts_with("❯ help"));
+    assert!(rows[1].starts_with("  clear"));
+    // The labels themselves are padded out to the column, not separated by
+    // the old two-blank shortcut: `help` is followed by 6 blanks.
+    let padded: String = rows[0].chars().skip(2).take(10).collect();
+    assert_eq!(padded, "help      ", "{rows:?}");
+}
+
+/// The primary column tracks the widest command name inside `[12, 32]`
+/// (upstream `getPrimaryColumnWidth`), so a long command pushes the
+/// description right instead of running into it.
+#[test]
+fn slash_dropdown_primary_column_tracks_the_widest_label() {
+    let provider = CombinedAutocompleteProvider::new(
+        vec![
+            SlashCommand::new("a-very-long-command-name").with_description("first"),
+            SlashCommand::new("ok").with_description("second"),
+        ],
+        ".",
+    );
+    let mut editor = editor_with(provider);
+    type_text(&mut editor, "/");
+    let rows = editor.autocomplete_render_lines(80);
+
+    // Widest label 24 + gap 2 = 26, inside [12, 32], so the column is 26 and
+    // the descriptions start at 2 + 26 = 28 on both rows.
+    let column = 2 + 26;
+    for (row, description) in rows.iter().zip(["first", "second"]) {
+        assert_eq!(row.chars().skip(column).collect::<String>(), description);
+    }
+    // A short label is padded out to the tracked column.
+    assert_eq!(&rows[1][..8], "  ok    ", "{rows:?}");
+}
+
+/// A label wider than the primary column is clamped to it, so the description
+/// column still starts at the same offset (upstream `truncatePrimary`).
+#[test]
+fn slash_dropdown_clamps_a_label_wider_than_the_primary_column() {
+    let provider = CombinedAutocompleteProvider::new(
+        vec![
+            SlashCommand::new("a-command-name-that-is-far-too-long-for-the-column")
+                .with_description("kept"),
+        ],
+        ".",
+    );
+    let mut editor = editor_with(provider);
+    type_text(&mut editor, "/");
+    let rows = editor.autocomplete_render_lines(80);
+
+    // The column is clamped at 32, so the label is truncated to 30 columns
+    // and the description still starts at 2 + 32 = 34.
+    assert_eq!(rows[0].chars().count(), 34 + "kept".len());
+    assert_eq!(rows[0].chars().skip(34).collect::<String>(), "kept");
+    assert!(
+        rows[0].starts_with("❯ a-command-name-that-is-far-too"),
+        "{rows:?}"
+    );
+    assert!(!rows[0].contains("long"), "{rows:?}");
+}
+
+/// Non-slash completions (the `@` file menu) use the `SelectList` default —
+/// a fixed 32-column primary column — because their labels are file names
+/// (upstream `createAutocompleteList`'s `undefined` layout).
+#[test]
+fn file_dropdown_uses_the_fixed_primary_column() {
+    let dir = TempDir::new("primary-column");
+    fs::write(dir.path().join("readme.md"), "").unwrap();
+    let provider = CombinedAutocompleteProvider::new(Vec::new(), dir.path().clone());
+    let mut editor = editor_with(provider);
+    type_text(&mut editor, "@readme");
+    let rows = editor.autocomplete_render_lines(80);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+
+    // Default layout: a fixed 32-column primary column, so the path
+    // description starts at 2 (marker) + 32 = 34.
+    assert!(rows[0].starts_with("❯ readme.md"), "{rows:?}");
+    assert_eq!(rows[0].chars().skip(34).collect::<String>(), "readme.md");
+    // And that is exactly where a modal `Selector` with the same row puts it.
+    let selector = Selector::new(
+        "Pick",
+        vec![SelectorItem::new("x", "readme.md").with_description("readme.md")],
+    );
+    let modal = selector.render_lines(80);
+    assert_eq!(modal[2].chars().skip(34).collect::<String>(), "readme.md");
+}
+
+/// Rows narrower than the upstream threshold (40 columns) fall back to the
+/// label alone — the description column is not squeezed, it is dropped.
+#[test]
+fn narrow_dropdown_drops_the_description_column() {
+    let mut editor = editor_with(command_provider());
+    type_text(&mut editor, "/");
+    for width in [40, 30, 20] {
+        let rows = editor.autocomplete_render_lines(width);
+        assert!(
+            !rows.iter().any(|row| row.contains("help text")),
+            "{rows:?}"
+        );
+        assert!(rows[0].starts_with("❯ help"), "{rows:?}");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width),
+            "{rows:?}"
+        );
+    }
+}
+
+/// One `SelectList` layout, two lists: with the same rows, the dropdown and
+/// the modal `Selector` must place the label and the description identically.
+/// This is the regression gate for "the editor grew its own renderer".
+#[test]
+fn the_dropdown_and_the_modal_selector_share_one_row_layout() {
+    let items = vec![
+        AutocompleteItem::new("help", "help").with_description("show this help text"),
+        AutocompleteItem::new("clear", "clear").with_description("wipe the message view"),
+    ];
+    let mut editor = Editor::new();
+    editor.set_autocomplete_provider(Arc::new(FixedProvider {
+        items: items.clone(),
+    }));
+    editor.handle_key(Key::char('/'));
+    // The `/` menu is the one context with upstream's slash layout; the modal
+    // selector is told the same bounds, which is the point of the gate.
+    assert_eq!(
+        editor.autocomplete_layout(),
+        SelectorLayout::slash_command(),
+        "the slash menu must use upstream's slash bounds"
+    );
+    let dropdown = editor.autocomplete_render_lines(80);
+
+    let selector = Selector::new(
+        "Pick",
+        items
+            .iter()
+            .map(|item| {
+                SelectorItem::new(item.value.clone(), item.label.clone())
+                    .with_description(item.description.clone().unwrap_or_default())
+            })
+            .collect(),
+    )
+    .with_primary_column_width(12, 32);
+    // `Selector::render_lines` adds the title and the `─` rule above the rows.
+    let modal = selector.render_lines(80);
+    assert_eq!(dropdown, modal[2..].to_vec());
+}
+
+/// A provider that always offers the same candidates — enough to drive the
+/// dropdown without a filesystem.
+#[derive(Debug)]
+struct FixedProvider {
+    items: Vec<AutocompleteItem>,
+}
+
+impl AutocompleteProvider for FixedProvider {
+    fn get_suggestions(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+        _force: bool,
+    ) -> Option<AutocompleteSuggestions> {
+        let line = lines.get(cursor_line)?;
+        Some(AutocompleteSuggestions {
+            items: self.items.clone(),
+            prefix: line[..cursor_col].to_string(),
+        })
+    }
+
+    fn apply_completion(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        _cursor_col: usize,
+        item: &AutocompleteItem,
+        _prefix: &str,
+    ) -> CompletionResult {
+        let mut lines = lines.to_vec();
+        lines[cursor_line] = item.value.clone();
+        CompletionResult {
+            lines,
+            cursor_line,
+            cursor_col: item.value.len(),
+        }
+    }
+}
+
 #[test]
 fn move_autocomplete_wraps_around_the_candidate_list() {
     let mut editor = editor_with(command_provider());
@@ -572,9 +786,12 @@ fn the_app_paints_the_dropdown_directly_above_the_prompt() {
     // The list is bottom-anchored: its last row is the one directly above
     // the prompt, and it grows from there towards older output.
     assert!(selected_at < prompt_at, "{:?}", snapshot.lines);
+    // The list is laid out by the shared `SelectList` implementation, so the
+    // slash menu's 12-column primary column puts the description at 2 + 12 =
+    // 14 (LUM-1305) instead of the old two-blank separator.
     assert_eq!(
         snapshot.lines[prompt_at - 1].trim_end(),
-        "  hotkeys  list shortcuts",
+        "  hotkeys     list shortcuts",
         "{:?}",
         snapshot.lines
     );

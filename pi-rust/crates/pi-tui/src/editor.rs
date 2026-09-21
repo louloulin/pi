@@ -21,6 +21,16 @@
 //!   `Ctrl+Right`) move by one word (`tui.editor.cursorWordLeft` /
 //!   `cursorWordRight`) using the boundaries from
 //!   [`crate::word_navigation`].
+//! * `PageUp` / `PageDown` (`tui.editor.pageUp` / `pageDown`, also
+//!   `Ctrl+PageUp` / `Ctrl+PageDown`) move the cursor one *page* of visual
+//!   rows, keeping the display column, exactly like upstream
+//!   `Editor.pageScroll` (`packages/tui/src/components/editor.ts:1949`):
+//!   the cursor moves and the composer window then follows it, so the page
+//!   key pages the draft rather than the transcript. The `App` decides
+//!   which of the two the bare keys mean — see `App::composer_overflows`:
+//!   while the draft fits the composer window the chord stays the
+//!   transcript's, which is what upstream's fullscreen keybinding table
+//!   does with its shadowing duplicate (`packages/tui/src/keybindings.ts:159`).
 //! * `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) move the cursor
 //!   one *visual* row at a time while a draft occupies more than one row,
 //!   keeping the display column across rows; at the first visual row they
@@ -64,10 +74,6 @@
 //! Chords that have **no consumer** in this port, listed here rather than
 //! silently implemented:
 //!
-//! * `tui.editor.pageUp` / `tui.editor.pageDown`: the viewport belongs to
-//!   the `App`, which consumes `tui.altScreen.pageUp` / `pageDown` before
-//!   the prompt sees the key, so the editor never scrolls. The composer
-//!   window itself follows the cursor (see [`crate::Prompt::render_lines`]).
 //! * `tui.editor.historyPrevious` / `historyNext`: unbound by default;
 //!   `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) reach the history
 //!   from the first / last visual row instead.
@@ -140,6 +146,13 @@
 //!   autocomplete block; the provider is opt-in, so a caller that never
 //!   installs one (the [`App`] / [`Prompt`] path) keeps the
 //!   pre-autocomplete behaviour byte for byte.
+//!   The dropdown's rows are laid out by the shared `SelectList`
+//!   implementation in [`crate::selector`]
+//!   ([`Editor::autocomplete_render_styled_lines`]) rather than by a second
+//!   renderer here: upstream renders a real `SelectList` under the composer
+//!   (`components/editor.ts:605-614`), so the label column, the description
+//!   column, the width thresholds and the scroll window are the same code
+//!   path the modal pickers use.
 //!
 //! # Composer image chips
 //!
@@ -192,6 +205,9 @@ use crate::history_store::HistoryStore;
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::keybindings::{get_keybindings, KeybindingsManager};
 use crate::kill_ring::{KillDirection, KillRing};
+use crate::selector::{select_list_row_spans, select_list_visible_range, SelectorLayout};
+use crate::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
+use crate::theme::ThemeColor;
 use crate::undo_stack::UndoStack;
 use crate::visual_text::VisualLayout;
 use crate::word_navigation::{find_word_backward, find_word_forward};
@@ -473,6 +489,10 @@ pub struct Editor {
     /// Width the App wraps the composer body at, recorded before key
     /// dispatch. `0` until the first frame is painted.
     visual_width: usize,
+    /// Rows one `PageUp` / `PageDown` covers, recorded before key dispatch
+    /// (the height of the composer window the last frame painted). `0`
+    /// until a frame is painted, in which case a page is a single row.
+    page_rows: usize,
     /// Sticky display column kept across a run of vertical cursor moves,
     /// upstream's `preferredVisualCol`.
     preferred_col: Option<usize>,
@@ -538,6 +558,7 @@ impl Editor {
             buffer: String::new(),
             cursor: 0,
             visual_width: 0,
+            page_rows: 0,
             preferred_col: None,
             history: VecDeque::new(),
             history_index: None,
@@ -631,6 +652,24 @@ impl Editor {
     /// The width recorded by [`Editor::set_visual_width`].
     pub fn visual_width(&self) -> usize {
         self.visual_width
+    }
+
+    /// Record how many rows one composer page covers.
+    ///
+    /// `PageUp` / `PageDown` move the cursor by this many visual rows and
+    /// the window then follows it, so the page size has to be the number
+    /// of rows the user can actually see — the App hands over the composer
+    /// window height the last frame used. `0` means "no frame painted
+    /// yet": a page is then a single row, which keeps a directly driven
+    /// [`Editor`] (unit tests, embedders) well-behaved instead of making
+    /// the key a no-op.
+    pub fn set_page_rows(&mut self, rows: usize) {
+        self.page_rows = rows;
+    }
+
+    /// Rows one page covers, never zero.
+    pub fn page_rows(&self) -> usize {
+        self.page_rows.max(1)
     }
 
     /// The rendered layout of the current draft.
@@ -1402,6 +1441,52 @@ impl Editor {
         self.move_end()
     }
 
+    /// `tui.editor.pageUp`: move the cursor one composer page up, keeping
+    /// the display column. Upstream `pageScroll(-1)`
+    /// (`packages/tui/src/components/editor.ts:1949`).
+    pub fn page_up(&mut self) -> EditorAction {
+        self.page_scroll(-1)
+    }
+
+    /// `tui.editor.pageDown`: the mirror of [`Editor::page_up`], upstream
+    /// `pageScroll(1)`.
+    pub fn page_down(&mut self) -> EditorAction {
+        self.page_scroll(1)
+    }
+
+    /// Shared body of `PageUp` / `PageDown`: [`Editor::move_vertical`] by a
+    /// page at a time, with the target row clamped to the draft's first /
+    /// last row.
+    ///
+    /// Upstream `pageScroll` moves the *cursor* by a page and lets the
+    /// renderer scroll the window to keep it visible; the port keeps that
+    /// split, so the composer window follows the caret smoothly instead of
+    /// the key jumping the viewport by itself. The page size is
+    /// [`Editor::page_rows`] — the composer window height — where upstream
+    /// uses `max(5, floor(terminalRows * 0.3))`, which is the same number
+    /// as its own `maxVisibleLines`.
+    fn page_scroll(&mut self, direction: isize) -> EditorAction {
+        let layout = self.visual_layout();
+        let cursor = self.display_cursor();
+        let (row, column) = layout.caret(cursor);
+        let goal = *self.preferred_col.get_or_insert(column);
+        let last_row = layout.len().saturating_sub(1) as isize;
+        let target =
+            (row as isize + direction * self.page_rows() as isize).clamp(0, last_row) as usize;
+        let landed = goal.min(layout.row_len(target));
+        let next = layout.cursor_at(target, landed);
+        if landed >= goal {
+            // The row could hold the column the run started at, so the run
+            // is over: the next vertical move takes its column from here.
+            self.preferred_col = None;
+        }
+        if next == cursor {
+            return EditorAction::None;
+        }
+        self.set_display_cursor(next);
+        EditorAction::Changed
+    }
+
     /// Move the cursor one word to the left (`Alt+B`, `Alt+Left` or
     /// `Ctrl+Left`, `tui.editor.cursorWordLeft`). Trailing whitespace is
     /// skipped, then the cursor stops at the next word / punctuation
@@ -1809,48 +1894,77 @@ impl Editor {
     /// Render the dropdown rows for a widget `width`, one entry per
     /// candidate (already windowed to the configured height). The
     /// highlighted row is marked with `❯`.
-    pub fn autocomplete_render_lines(&self, width: usize) -> Vec<String> {
+    ///
+    /// The layout is the shared `SelectList` one
+    /// ([`select_list_row_spans`], upstream `SelectList::renderItem`) — the
+    /// label sits in the primary column, the description starts at the same
+    /// offset on every row, and both are width-clamped. Upstream's editor
+    /// builds a real `SelectList` and renders it under the composer
+    /// (`components/editor.ts:605-614`); this is the same layout, applied to
+    /// the provider's candidates.
+    ///
+    /// The selected row is wrapped whole (`accent` over `selectedBg`), a
+    /// plain row's description is `muted` — upstream's `selectList` theme
+    /// roles. A plain-text render is [`Editor::autocomplete_render_lines`].
+    pub fn autocomplete_render_styled_lines(&self, width: usize) -> Vec<StyledLine> {
         let len = self.autocomplete_items.len();
         if len == 0 || width == 0 {
             return Vec::new();
         }
-        let visible = self.autocomplete_max_visible.min(len);
-        let (start, end) = self.autocomplete_visible_range(visible);
-        let mut rows = Vec::with_capacity(end - start);
+        // Upstream measures the primary column over the whole candidate list
+        // (`getPrimaryColumnWidth`), not just the visible window, so a scroll
+        // never re-flows the description column.
+        let primary_column_width = self
+            .autocomplete_layout()
+            .primary_column_width(self.autocomplete_items.iter());
+        let (start, end) = select_list_visible_range(
+            len,
+            self.autocomplete_selected,
+            Some(self.autocomplete_max_visible),
+        );
+        let mut rows = Vec::with_capacity(end - start + 1);
         for index in start..end {
-            let item = &self.autocomplete_items[index];
-            let marker = if index == self.autocomplete_selected {
-                "❯ "
-            } else {
-                "  "
-            };
-            let text = match &item.description {
-                Some(description) if width > 44 => {
-                    format!("{marker}{}  {description}", item.label)
-                }
-                _ => format!("{marker}{}", item.label),
-            };
-            rows.push(truncate_display(&text, width));
+            rows.push(select_list_row_spans(
+                &self.autocomplete_items[index],
+                index == self.autocomplete_selected,
+                width,
+                primary_column_width,
+            ));
         }
-        if len > visible {
-            rows.push(format!("  ({}/{len})", self.autocomplete_selected + 1));
+        if start > 0 || end < len {
+            rows.push(vec![StyledSpan::new(
+                format!("  ({}/{len})", self.autocomplete_selected + 1),
+                SpanStyle::fg(ThemeColor::Muted),
+            )]);
         }
         rows
     }
 
-    /// The `(start, end)` window of candidates to render, keeping the
-    /// selection centred like [`crate::Selector`].
-    fn autocomplete_visible_range(&self, visible: usize) -> (usize, usize) {
-        let len = self.autocomplete_items.len();
-        if visible >= len {
-            return (0, len);
+    /// Render the dropdown rows as plain text (the styling of
+    /// [`Editor::autocomplete_render_styled_lines`] dropped, the layout
+    /// kept).
+    pub fn autocomplete_render_lines(&self, width: usize) -> Vec<String> {
+        self.autocomplete_render_styled_lines(width)
+            .iter()
+            .map(|line| plain_text(line))
+            .collect()
+    }
+
+    /// Primary-column bounds for the dropdown — upstream
+    /// `createAutocompleteList`'s `prefix.startsWith("/") ?
+    /// SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined`
+    /// (`components/editor.ts:2228`).
+    ///
+    /// The slash-command menu is the one context whose labels are short
+    /// enough that a fixed 32-column primary column would push the
+    /// description off a 40-80 column terminal, so it tracks the widest
+    /// command name within `[12, 32]` instead.
+    pub fn autocomplete_layout(&self) -> SelectorLayout {
+        if self.autocomplete_prefix.starts_with('/') {
+            SelectorLayout::slash_command()
+        } else {
+            SelectorLayout::default()
         }
-        let half = visible / 2;
-        let start = self
-            .autocomplete_selected
-            .saturating_sub(half)
-            .min(len - visible);
-        (start, start + visible)
     }
 
     /// Apply one candidate, capturing an undo snapshot first (upstream
@@ -2233,6 +2347,20 @@ impl Editor {
             return self.move_right();
         }
 
+        // `tui.editor.pageUp` / `pageDown`: a page of the draft. The `App`
+        // only lets the bare chords reach the editor while the draft
+        // overflows the composer window
+        // (`App::composer_overflows`); otherwise it consumed them for the
+        // transcript's own paging first. The `Ctrl+PageUp` / `Ctrl+PageDown`
+        // spellings are the editor's either way, because the transcript
+        // binding is the bare key only.
+        if Self::matches_binding(&kb, &key, "tui.editor.pageUp") {
+            return self.page_up();
+        }
+        if Self::matches_binding(&kb, &key, "tui.editor.pageDown") {
+            return self.page_down();
+        }
+
         // `tui.editor.undo`.
         if Self::matches_binding(&kb, &key, "tui.editor.undo") {
             return self.undo();
@@ -2495,14 +2623,6 @@ fn clamp_to_char_boundary(text: &str, pos: usize) -> usize {
     pos
 }
 
-/// Truncate `text` to at most `max` characters.
-fn truncate_display(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars().take(max).collect()
-}
-
 /// Whether the character just before the token in `before` is a space or
 /// tab — upstream's "the trigger character starts a token" test.
 fn at_token_boundary(before: &str) -> bool {
@@ -2663,6 +2783,79 @@ mod tests {
         assert_eq!(ed.cursor(), 0);
         ed.move_end();
         assert_eq!(ed.cursor(), 5);
+    }
+
+    /// `PageUp` / `PageDown` move the caret a page of visual rows at a time
+    /// and clamp at the draft's ends (upstream `Editor.pageScroll`).
+    #[test]
+    fn page_scroll_moves_by_page_rows_and_clamps() {
+        let mut ed = Editor::new();
+        ed.set_visual_width(4);
+        ed.set_page_rows(3);
+        ed.insert_str("a\nb\nc\nd\ne\nf\ng\nh");
+        assert_eq!(ed.visual_caret().0, 7, "the caret starts on the last row");
+
+        assert_eq!(ed.page_up(), EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 4);
+        assert_eq!(ed.page_up(), EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 1);
+        assert_eq!(ed.page_up(), EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 0, "the page clamps at the first row");
+        // Already at the top: the key is not a redraw.
+        assert_eq!(ed.page_up(), EditorAction::None);
+
+        assert_eq!(ed.page_down(), EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 3);
+        for _ in 0..3 {
+            let _ = ed.page_down();
+        }
+        assert_eq!(ed.visual_caret().0, 7, "and at the last one");
+        assert_eq!(ed.page_down(), EditorAction::None);
+    }
+
+    /// A page keeps the display column across the rows it crosses, exactly
+    /// like a single-row vertical move.
+    #[test]
+    fn page_scroll_keeps_the_display_column() {
+        let mut ed = Editor::new();
+        ed.set_visual_width(10);
+        ed.set_page_rows(2);
+        ed.insert_str("abcdefghij\nk\nlmnopqrst");
+        assert_eq!(ed.visual_caret(), (2, 9));
+
+        assert_eq!(ed.page_up(), EditorAction::Changed);
+        // Two rows up reaches row 0, which can hold column 9.
+        assert_eq!(ed.visual_caret(), (0, 9));
+    }
+
+    /// Without a page size the key still moves a row instead of becoming a
+    /// no-op — the fallback for an editor nobody hand a frame to.
+    #[test]
+    fn page_scroll_falls_back_to_one_row_without_a_page_size() {
+        let mut ed = Editor::new();
+        ed.set_visual_width(80);
+        ed.insert_str("a\nb\nc");
+        assert_eq!(ed.page_rows(), 1);
+        assert_eq!(ed.page_up(), EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 1);
+    }
+
+    /// The default `tui.editor.pageUp` / `pageDown` chords reach the page
+    /// scroll through [`Editor::handle_key`].
+    #[test]
+    fn page_keys_dispatch_to_the_page_scroll() {
+        let mut ed = Editor::new();
+        ed.set_visual_width(80);
+        ed.set_page_rows(5);
+        ed.insert_str("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+        assert_eq!(ed.visual_caret().0, 9);
+
+        let action = ed.handle_key(Key::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(action, EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 4);
+        let action = ed.handle_key(Key::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(action, EditorAction::Changed);
+        assert_eq!(ed.visual_caret().0, 9);
     }
 
     #[test]

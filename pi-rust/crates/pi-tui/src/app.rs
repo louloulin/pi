@@ -254,7 +254,7 @@
 //! module executes extension JavaScript.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -1130,6 +1130,23 @@ pub struct App {
     /// `&self`, so the frame records it here for
     /// [`App::step_key_at`] to hand over.
     composer_body_width: AtomicU16,
+    /// First draft row the composer window showed as of the last render —
+    /// the composer's scroll offset. It lives on the App rather than in
+    /// [`crate::Prompt`] because it has to survive between frames while
+    /// `render_lines` stays a `&self` render, and because `render_snapshot`
+    /// (also `&self`) must advance it exactly like a live frame does. The
+    /// frame stores what [`crate::Prompt::render_lines`] returned; the key
+    /// path only reads it.
+    ///
+    /// A draft that fits the window always resolves back to `0`, so the
+    /// offset cannot leak from one draft to the next.
+    composer_scroll: AtomicUsize,
+    /// Rows the composer window could show as of the last render, i.e. the
+    /// height [`App::paint_prompt`] was given after the
+    /// [`AppConfig::composer_max_rows`] clamp. This is the capacity a draft
+    /// overflows, and therefore the capacity that hands `PageUp` /
+    /// `PageDown` to the editor (see [`App::composer_overflows`]).
+    composer_window: AtomicU16,
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1311,6 +1328,8 @@ impl App {
             viewport_reserved: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
             composer_body_width: AtomicU16::new(0),
+            composer_scroll: AtomicUsize::new(0),
+            composer_window: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -1714,6 +1733,14 @@ impl App {
     /// Borrow the prompt.
     pub fn prompt(&self) -> &Prompt {
         &self.prompt
+    }
+
+    /// First draft row the last frame's composer window showed — the
+    /// composer's scroll offset (`0` when the whole draft fits, or before
+    /// the first frame). Exposed for tests and audits: it is the state that
+    /// makes the window scroll smoothly instead of jumping by pages.
+    pub fn composer_scroll(&self) -> usize {
+        self.composer_scroll.load(Ordering::Relaxed)
     }
 
     /// Mutable borrow of the prompt.
@@ -2826,7 +2853,14 @@ impl App {
         // intentionally shadow the unmodified editor bindings in
         // fullscreen mode"); `Ctrl+A` / `Ctrl+E` still reach the editor
         // for start / end of line.
-        if kb.matches(&event, "tui.altScreen.pageUp") {
+        //
+        // LUM-1317: the shadowing is unconditional in the transcript's
+        // favour only while the composer has nothing hidden. A draft taller
+        // than the composer window is content the user cannot reach any
+        // other way, so `PageUp` / `PageDown` page *it* then —
+        // `tui.editor.pageUp` / `pageDown` — and the transcript keeps them
+        // when it fits (see [`App::composer_overflows`]).
+        if kb.matches(&event, "tui.altScreen.pageUp") && !self.composer_overflows() {
             let page = self.message_page();
             return if self.scroll_viewport_up(page) {
                 StepOutcome::Redraw
@@ -2834,7 +2868,7 @@ impl App {
                 StepOutcome::Idle
             };
         }
-        if kb.matches(&event, "tui.altScreen.pageDown") {
+        if kb.matches(&event, "tui.altScreen.pageDown") && !self.composer_overflows() {
             let page = self.message_page();
             return if self.scroll_viewport_down(page) {
                 StepOutcome::Redraw
@@ -2870,10 +2904,14 @@ impl App {
         // while it handles the key: `Up` / `Down` move by visual row, and a
         // different width would move the caret to a row the frame did not
         // draw it on. `0` (no frame yet) leaves the draft on one row per
-        // hard line. (An open reverse search returned above, before the
-        // app-level chords could claim the key.)
+        // hard line. The page height is the same story for `PageUp` /
+        // `PageDown`, which move the caret by a windowful. (An open reverse
+        // search returned above, before the app-level chords could claim the
+        // key.)
         let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+        let composer_page = self.composer_window_rows();
         self.prompt.editor_mut().set_visual_width(composer_width);
+        self.prompt.editor_mut().set_page_rows(composer_page);
 
         self.step_prompt(key)
     }
@@ -4656,6 +4694,35 @@ impl App {
         height.max(1) as usize
     }
 
+    /// Rows the composer window can show: the height
+    /// [`App::paint_prompt`] last used after the
+    /// [`AppConfig::composer_max_rows`] clamp, or the configured cap itself
+    /// before the first frame — the same number the first frame will use on
+    /// a terminal tall enough to grant it, so a key pressed before any
+    /// paint takes the branch it would take one frame later.
+    pub fn composer_window_rows(&self) -> usize {
+        let rows = self.composer_window.load(Ordering::Relaxed) as usize;
+        if rows == 0 {
+            self.config.composer_max_rows.max(1)
+        } else {
+            rows
+        }
+    }
+
+    /// True when the composer's draft needs more rows than the composer
+    /// window can show, i.e. when part of the draft is outside it.
+    ///
+    /// This is the condition that decides who owns `PageUp` / `PageDown`:
+    /// a clipped composer pages itself (the editor's `tui.editor.pageUp` /
+    /// `pageDown`), and a composer that fits hands the bare chords to the
+    /// transcript (`tui.altScreen.pageUp` / `pageDown`), so a draft that
+    /// already fits cannot swallow the chat log's own scrolling. The row
+    /// count is measured with the width the last frame wrapped at, so it
+    /// answers exactly the question the renderer answered.
+    fn composer_overflows(&self) -> bool {
+        self.prompt.editor().visual_row_count() > self.composer_window_rows()
+    }
+
     /// Largest valid scroll offset for the viewport the App last rendered.
     fn max_scroll(&self) -> usize {
         let (width, height) = self.viewport();
@@ -5108,6 +5175,11 @@ impl App {
     /// taller than one row when the buffer wraps (see
     /// [`crate::Prompt::render_lines`]); the cap lives in
     /// [`AppConfig::composer_max_rows`].
+    ///
+    /// The frame is also where the composer window's two remembered facts
+    /// come from: the draft rows it showed (`composer_scroll`) and the rows
+    /// it could show (`composer_window`). Both are read back by the key path
+    /// before [`crate::Prompt::render_lines`] runs again.
     fn paint_prompt(&self, rect: Rect, buf: &mut Buffer) {
         if rect.width == 0 || rect.height == 0 {
             return;
@@ -5118,7 +5190,11 @@ impl App {
         // [`App::composer_body_width`]).
         self.composer_body_width
             .store(self.prompt.body_width(rect.width) as u16, Ordering::Relaxed);
-        let lines = self.prompt.render_lines(rect.width, max_rows);
+        self.composer_window
+            .store(max_rows as u16, Ordering::Relaxed);
+        let scroll = self.composer_scroll.load(Ordering::Relaxed);
+        let (lines, scroll) = self.prompt.render_lines(rect.width, max_rows, scroll);
+        self.composer_scroll.store(scroll, Ordering::Relaxed);
         // Upstream paints the editor chrome in `bashMode` while the buffer is
         // a `!` submission, otherwise in the thinking level's border colour
         // (`updateEditorBorderColor`,
@@ -5160,13 +5236,19 @@ impl App {
     /// above the editor, on top of the message view.
     ///
     /// The dropdown itself belongs to [`crate::Editor`] (candidates,
-    /// windowing, selection); the App only places it. Upstream draws the
-    /// list above the input and grows it towards older output
-    /// (`Editor.renderAutocomplete`), so the rows are anchored to the
-    /// editor's top edge and the prompt line is never covered. Without this
-    /// the provider could be installed and still show nothing, which is
-    /// exactly the state LUM-1236 found: the engine and the keyboard map
-    /// were in place, the paint call was not.
+    /// `SelectList` layout, windowing, selection); the App only places it and
+    /// hands the rows to the buffer. Upstream draws the list above the input
+    /// and grows it towards older output (`Editor.renderAutocomplete`), so the
+    /// rows are anchored to the editor's top edge and the prompt line is never
+    /// covered. Without this the provider could be installed and still show
+    /// nothing, which is exactly the state LUM-1236 found: the engine and the
+    /// keyboard map were in place, the paint call was not.
+    ///
+    /// The rows arrive as theme-slot spans from the shared `SelectList` layout
+    /// (LUM-1305), so the dropdown paints the same roles the modal pickers do —
+    /// plain label, `muted` description column, `accent` over `selectedBg` for
+    /// the highlighted row — instead of the App re-deriving a style from the
+    /// text.
     fn paint_autocomplete(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
         let editor = self.prompt.editor();
         if !editor.is_showing_autocomplete() || editor_area.width == 0 {
@@ -5180,7 +5262,7 @@ impl App {
             return;
         }
         let width = editor_area.width as usize;
-        let mut rows = editor.autocomplete_render_lines(width);
+        let mut rows = editor.autocomplete_render_styled_lines(width);
         if rows.is_empty() {
             return;
         }
@@ -5190,22 +5272,21 @@ impl App {
         if rows.len() > available {
             rows.drain(..rows.len() - available);
         }
-        let selected_style = SpanStyle::fg(ThemeColor::Accent);
-        let plain_style = SpanStyle::fg(ThemeColor::Muted);
         let first_row = editor_area.y - rows.len() as u16;
-        for (offset, row) in rows.iter().enumerate() {
-            let style = if row.starts_with('❯') {
-                selected_style
-            } else {
-                plain_style
-            };
-            // Pad to the full width so a short candidate never leaves the
-            // transcript's cells showing through on its right.
-            let mut text = row.clone();
-            text.push_str(&" ".repeat(width.saturating_sub(text.chars().count())));
-            let line = [StyledSpan::new(text, style)];
+        for (offset, line) in rows.iter().enumerate() {
             let y = first_row + offset as u16;
-            write_styled_line(buf, editor_area.x, y, editor_area.width, &line, &self.theme);
+            // Blank the borrowed row first: a candidate is shorter than the
+            // transcript line it covers, and ratatui only emits the cells this
+            // buffer changed — an unblanked row left the old output bleeding
+            // through on the right of the dropdown. `reset` also drops the
+            // covered cell's colours, so the row behind cannot tint the one on
+            // top. Same rule as the selector overlay below.
+            for col in 0..editor_area.width {
+                if let Some(cell) = buf.cell_mut((editor_area.x + col, y)) {
+                    cell.reset();
+                }
+            }
+            write_styled_line(buf, editor_area.x, y, editor_area.width, line, &self.theme);
         }
     }
 

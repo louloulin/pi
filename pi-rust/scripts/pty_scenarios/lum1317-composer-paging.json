@@ -1,0 +1,133 @@
+{
+  "cols": 76,
+  "rows": 26,
+  "caption": "LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle: one composer row, `? for help` in the header",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "? for help",
+      "expect": ["> type a prompt"]
+    },
+    {
+      "label": "2. /help fills the transcript past one viewport (the transcript is what PageUp used to own)",
+      "send": "/help<Enter>",
+      "wait": 1.8,
+      "wait_for": "insert a new line"
+    },
+    {
+      "label": "3. a 12-row draft: the composer window shows 8 rows, so 4 are hidden above the caret and `↑4` says so",
+      "send": "row 01<C-j>row 02<C-j>row 03<C-j>row 04<C-j>row 05<C-j>row 06<C-j>row 07<C-j>row 08<C-j>row 09<C-j>row 10<C-j>row 11<C-j>row 12",
+      "wait": 1.0,
+      "probe": [
+        {
+          "text": "↑4row 05",
+          "why": "the window starts on draft row 4 and marks the 4 rows it is hiding above"
+        },
+        { "text": "row 12▍", "why": "the caret is on the draft's last row, inside the window" }
+      ],
+      "reject": [
+        { "text": "row 01", "why": "the head of the draft is scrolled off, not painted" },
+        {
+          "text": "Jump to latest message",
+          "why": "typing did not detach the transcript; the viewport still follows the tail"
+        }
+      ]
+    },
+    {
+      "label": "4. PgUp with an overflowing draft: the caret jumps one page (11 → 3) and the window follows it one row (4 → 3); the transcript does NOT move",
+      "send": "<PgUp>",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "↑3row 04▍",
+          "why": "page 8 rows up lands the caret on draft row 3, which the marker row also carries"
+        }
+      ],
+      "reject": [
+        {
+          "text": "↑4",
+          "why": "the window followed the caret instead of staying at the tail"
+        },
+        {
+          "text": "Jump to latest message",
+          "why": "the load-bearing one: PgUp paged the composer, so the chat log never detached"
+        }
+      ]
+    },
+    {
+      "label": "5. one Up: the window moves exactly one row (3 → 2), not a page",
+      "send": "<Up>",
+      "wait": 0.6,
+      "probe": [
+        {
+          "text": "↑2row 03▍",
+          "why": "one keystroke, one row of scroll — the caret left the window's top row"
+        }
+      ]
+    },
+    {
+      "label": "6. one more Up: the last visible row now reports the rows below the window (`↓3`)",
+      "send": "<Up>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "↑1row 02▍", "why": "the caret is on draft row 1" },
+        { "text": "↓3row 09", "why": "draft rows 9..11 are hidden below the window" }
+      ]
+    },
+    {
+      "label": "7. Up onto draft row 0: the first row keeps the `> ` label and `↓4` closes the window",
+      "send": "<Up>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "> row 01▍", "why": "the draft's own first row always keeps the label" },
+        { "text": "↓4row 08", "why": "4 rows are hidden below the window's last row" }
+      ],
+      "reject": [{ "text": "↑", "why": "nothing is hidden above the window any more" }]
+    },
+    {
+      "label": "8. PgDn from row 0 still pages the draft (0 → 8, a windowful) and the transcript still does not move",
+      "send": "<PgDn>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "↑1row 02", "why": "the window starts one row down" },
+        {
+          "text": "↓3row 09▍",
+          "why": "the caret is on the window's last row, which is also where the ↓ marker lives"
+        }
+      ],
+      "reject": [
+        { "text": "Jump to latest message", "why": "the chat log was not the thing that paged" }
+      ]
+    },
+    {
+      "label": "9. Ctrl+C clears the 12-row draft and a fresh two-row draft fits the window, so it paints no marker (the cleared one-row state is panel 1)",
+      "send": "<C-c>fits 01<C-j>fits 02",
+      "wait": 1.0,
+      "probe": [
+        { "text": "> fits 01", "why": "the label row of a composer the window can hold" },
+        { "text": "fits 02▍", "why": "the caret is on the second and last row, nothing is windowed" }
+      ],
+      "reject": [
+        { "text": "↑", "why": "a draft that fits hides nothing, so it paints no marker" },
+        { "text": "↓", "why": "and reports nothing below it either" },
+        { "text": "row 12", "why": "the 12-row draft is gone" }
+      ]
+    },
+    {
+      "label": "10. the same PgUp with a fitting draft scrolls the chat log instead: the jump-to-latest pill appears and the composer stays put",
+      "send": "<PgUp>",
+      "wait": 1.0,
+      "probe": [
+        {
+          "text": "Jump to latest message",
+          "why": "the transcript detached: the key went to tui.altScreen.pageUp as before LUM-1317"
+        },
+        { "text": "> fits 01", "why": "the composer did not move" }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

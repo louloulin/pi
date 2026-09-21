@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::fuzzy::fuzzy_rank;
+use crate::selector::SelectListRow;
 
 /// Characters that end a token when the provider scans backwards for the
 /// token the cursor sits in (upstream `PATH_DELIMITERS`).
@@ -108,6 +109,20 @@ impl AutocompleteItem {
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
+    }
+}
+
+impl SelectListRow for AutocompleteItem {
+    fn value(&self) -> &str {
+        &self.value
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 }
 

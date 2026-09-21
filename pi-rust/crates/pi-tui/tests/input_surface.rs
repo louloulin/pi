@@ -298,9 +298,11 @@ fn typing_slash_paints_the_command_dropdown_above_the_prompt() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(tail.contains("❯ help"), "the dropdown is painted:\n{tail}");
-    // `autocomplete_render_lines` only appends the description past 44
-    // columns (`crates/pi-tui/tests/autocomplete.rs` covers that); at this
-    // canonical 40-column size the label alone is the candidate row.
+    // At this canonical 40-column size the `SelectList` layout drops the
+    // description column (upstream: descriptions only past 40 columns,
+    // LUM-1305 took the dropdown onto that same layout — see
+    // `crates/pi-tui/tests/autocomplete.rs` for the wide-row cases).
+    assert!(!tail.contains("show this help text"), "{tail}");
     assert!(
         tail.contains("  hotkeys"),
         "every candidate is listed:\n{tail}"
