@@ -1,0 +1,80 @@
+# lum1310-startup-ui-keys-before.png — chars, 120x34 cells
+
+===== LUM-1310 — hideThinkingBlock + autocompleteMaxVisible applied from settings.json at startup. Prepared HOME says `hideThinkingBlock: true, autocompleteMaxVisible: 10`; `/settings` reads the live App, so `Hide thinking  true` / `Autocomplete max items  10` can only appear if the file was read before the first frame. Pre-fix the same scenario reports `false` / `5`. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [1] 1. idle 120x34 — the frame painted before any command runs  (cursor 120,33, frame 9b4fb43fdd8a, px ae99ebde2bc8, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761a8726ca63f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+
+===== LUM-1310 — hideThinkingBlock + autocompleteMaxVisible applied from settings.json at startup. Prepared HOME says `hideThinkingBlock: true, autocompleteMaxVisible: 10`; `/settings` reads the live App, so `Hide thinking  true` / `Autocomplete max items  10` can only appear if the file was read before the first frame. Pre-fix the same scenario reports `false` / `5`. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [2] 2. /settings — the new rows read the running App: thinking + dropdown height come from the file  (cursor 37,8, frame 986986eb8ad2, px 4d6ccef39b3c, alive=True) =====
+pi v0.1.0
+>
+
+→ Auto-compact               true
+  Fullscreen copy on select  true
+  Theme                      dark
+
+  Automatically compact context when it gets too large
+
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761a8726ca63f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert FAIL   expect       'Hide thinking'
+  assert FAIL   expect       'Autocomplete max items'
+  assert FAIL   expect       'Quiet startup'
+  assert XFAIL  probe        '^  Hide thinking\\s+true$'  — LUM-1310 hideThinkingBlock startup application
+  assert XFAIL  probe        '^  Autocomplete max items\\s+10$'  — LUM-1310 autocompleteMaxVisible startup application

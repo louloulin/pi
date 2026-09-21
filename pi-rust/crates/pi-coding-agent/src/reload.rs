@@ -9,7 +9,7 @@
 //! | slice | source | effect |
 //! |---|---|---|
 //! | keybindings | `<agent dir>/keybindings.json` | the merged table is re-resolved and re-installed into the process-wide `pi-tui` registry every component resolves chords against |
-//! | UI settings | `settings.json` (`theme`, `fullscreenCopyOnSelect`) | live palette / copy-on-select |
+//! | UI settings | `settings.json` (`theme`, `fullscreenCopyOnSelect`, `hideThinkingBlock`, `autocompleteMaxVisible`, `quietStartup`) | live palette / copy-on-select / thinking visibility / dropdown height, plus `quietStartup` reported for the next start |
 //!
 //! Extensions, skills, prompts and context files are **not** re-read here:
 //! the extension host owns a QuickJS runtime built once for the session, and
@@ -50,6 +50,14 @@ pub struct ReloadReport {
     pub theme_error: Option<String>,
     /// Copy-on-select applied from `settings.json`.
     pub copy_on_select: bool,
+    /// `hideThinkingBlock` applied from `settings.json` (LUM-1310).
+    pub hide_thinking_block: bool,
+    /// `autocompleteMaxVisible` after the editor's 3..=20 clamp (LUM-1310).
+    pub autocomplete_max_visible: usize,
+    /// `quietStartup` as written to disk. Reported but **not** applied: the
+    /// startup header is a layout decision, and a `--no-header` CLI flag has
+    /// to keep winning over the setting (LUM-1310).
+    pub quiet_startup: bool,
 }
 
 /// Re-read `keybindings.json` and `settings.json` and apply them to the live
@@ -74,9 +82,14 @@ pub fn reload(app: &mut App, agent_dir: &Path, sources: &ConfigSources) -> Reloa
     let keybindings_file_exists = keybindings_path.exists();
     reload_keybindings(&mut manager);
 
-    // UI settings: the two keys `/settings` writes and the running App
-    // consumes. Both are applied unconditionally — a file that omits a key
-    // means "the default", which is exactly what a reload should land on.
+    // UI settings: the keys `/settings` writes and the running App consumes.
+    // All are applied unconditionally — a file that omits a key means "the
+    // default", which is exactly what a reload should land on.
+    //
+    // LUM-1310 adds `hideThinkingBlock` and `autocompleteMaxVisible`, both of
+    // which upstream re-applies live (as `/settings` does,
+    // `interactive-mode.ts:4674,4738`). `quietStartup` is re-read and
+    // reported but deliberately not applied — see [`ReloadReport`].
     let ui = config::load_ui_settings(sources);
     let mut theme = None;
     let mut theme_error = None;
@@ -87,6 +100,8 @@ pub fn reload(app: &mut App, agent_dir: &Path, sources: &ConfigSources) -> Reloa
         }
     }
     app.set_copy_on_select(ui.fullscreen_copy_on_select);
+    app.set_thinking_visible(!ui.hide_thinking_block);
+    app.set_autocomplete_max_visible(ui.autocomplete_max_visible);
 
     let report = ReloadReport {
         keybindings_path,
@@ -95,6 +110,9 @@ pub fn reload(app: &mut App, agent_dir: &Path, sources: &ConfigSources) -> Reloa
         theme,
         theme_error,
         copy_on_select: ui.fullscreen_copy_on_select,
+        hide_thinking_block: ui.hide_thinking_block,
+        autocomplete_max_visible: app.autocomplete_max_visible(),
+        quiet_startup: ui.quiet_startup,
     };
     for line in summary_lines(&report) {
         app.info(line);
@@ -126,8 +144,18 @@ pub fn summary_lines(report: &ReloadReport) -> Vec<String> {
         (None, Some(err)) => format!("theme → not applied: {err}"),
         (None, None) => "theme → unchanged (settings.json names none)".to_string(),
     };
+    let ui = format!(
+        "thinking {}, autocomplete {} row(s), quiet startup {} (from the next start)",
+        if report.hide_thinking_block {
+            "hidden"
+        } else {
+            "shown"
+        },
+        report.autocomplete_max_visible,
+        if report.quiet_startup { "on" } else { "off" },
+    );
     vec![
-        format!("/reload: {bindings}; {theme}"),
+        format!("/reload: {bindings}; {theme}; {ui}"),
         "/reload: extensions, skills, prompts and context files are read at startup and are not re-read here (use /new for a fresh session)".to_string(),
     ]
 }
@@ -144,6 +172,9 @@ mod tests {
             theme: Some("light".into()),
             theme_error: None,
             copy_on_select: false,
+            hide_thinking_block: false,
+            autocomplete_max_visible: 5,
+            quiet_startup: false,
         }
     }
 

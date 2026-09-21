@@ -9,7 +9,7 @@ use pi_coding_agent::cli::{Cli, Command};
 use pi_coding_agent::commands::session::new_session_id;
 use pi_coding_agent::config::{
     load_agent_retry_policy_default, load_compaction_settings_default,
-    load_provider_retry_policy_default,
+    load_provider_retry_policy_default, load_quiet_startup_default,
 };
 use pi_coding_agent::extensions::ui_bridge::TuiUi;
 use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
@@ -219,8 +219,12 @@ fn main() -> ExitCode {
                 // defaults; the driver keeps it across selector opens.
                 pickers: Default::default(),
                 // `--no-header`: the startup key-hint screen. Upstream's
-                // equivalent is the `quietStartup` setting.
-                quiet_startup: cli.no_header,
+                // equivalent is the `quietStartup` setting, which it reads
+                // while constructing the session (`interactive-mode.ts:859`).
+                // LUM-1310: the setting is honoured here too, not only by
+                // `/settings` — the header is a layout decision taken before
+                // the first frame, so it has to be resolved at this point.
+                quiet_startup: cli.no_header || load_quiet_startup_default(),
             };
             match runtime.block_on(run_interactive(options)) {
                 Ok(_) => ExitCode::SUCCESS,
