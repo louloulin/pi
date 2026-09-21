@@ -89,14 +89,16 @@ $ python3 scripts/pty_capture.py \
     --bin target/debug/pi \
     --steps scripts/pty_scenarios/lum1282-multi-line-composer.json \
     --out docs/screenshots/lum1282-fresh-tip.png
-  5/5 panels PASS (60x24, long draft wraps; 80-col paste wraps; cursor on row 2)
+  7/7 checks over 5 panels — 7 PASS, 0 FAIL, 0 XFAIL (60x24; long draft wraps to "> aaa…" + "  aaa…▍"; 80-col paste wraps to row 2 with indent; cursor `▍` on row 2)
 
 $ python3 scripts/pty_capture.py \
     --bin target/debug/pi \
     --steps scripts/pty_scenarios/lum1267-interaction-assertions.json \
     --out docs/screenshots/lum1282-interaction-tip.png
-  20/20 panels, 57 PASS / 1 FAIL / 2 XFAIL / 0 XPASS
-  (the 1 FAIL is LUM-1271 'keys:' clipping, not from this commit)
+  57 PASS / 1 FAIL / 2 XFAIL / 0 XPASS over 20 panels / 60 checks
+  (the 1 FAIL is on panel 18 `/hotkeys` 'keys:' needle — same LUM-1271
+   baseline-revision gap that the tip-vs-baseline gate documented; this
+   round did not regress it; a fix is filed under the P1.3 follow-up list)
 ```
 
 新增的 7 个测试（4 integration + 3 单元）：
