@@ -524,6 +524,16 @@ pub struct AppConfig {
     /// is [`ExtensionHeader::Hidden`], which keeps the headless and
     /// no-extension header byte-identical to the pre-Stage-71 surface.
     pub extension_header: ExtensionHeader,
+    /// Upper cap on how many rows the composer can grow into when the
+    /// buffer wraps. The composer never shrinks below one row.
+    ///
+    /// The prompt computes the natural row count from the buffer and the
+    /// available width (see [`crate::Prompt::line_count`]); this field is
+    /// the upper bound the App hands [`crate::Prompt::render_lines`].
+    /// `1` reproduces the pre-multi-line single-row composer; `8`
+    /// matches Martty's `min(h/2, 12)` cap for tall terminals
+    /// (`src/ui.rs:25-54`). The default is `8`.
+    pub composer_max_rows: usize,
 }
 
 /// What the built-in startup header says about loaded extensions.
@@ -562,6 +572,7 @@ impl Default for AppConfig {
             startup_header_expanded: true,
             locale: Locale::default(),
             extension_header: ExtensionHeader::Hidden,
+            composer_max_rows: 8,
         }
     }
 }
@@ -4633,7 +4644,11 @@ impl App {
         // else: the message viewport this frame paints is what the scroll,
         // selection and search paths must index.
         let frame = self.composed_frame(area.width, area.height);
-        let layout = plan_chrome(area.height, &frame);
+        let editor_min_rows = self
+            .prompt
+            .line_count(area.width, self.config.composer_max_rows)
+            .max(1) as u16;
+        let layout = plan_chrome(area.height, &frame, editor_min_rows);
         // Record the geometry first so the refresh below indexes the exact
         // viewport this frame is about to paint.
         let (message_area, reserved) = self.viewport_for_render(message_rect(area, &layout), true);
@@ -4962,12 +4977,16 @@ impl App {
         }
     }
 
-    /// Paint the built-in prompt into the first row of the editor region.
+    /// Paint the built-in prompt into the editor region. The region may be
+    /// taller than one row when the buffer wraps (see
+    /// [`crate::Prompt::render_lines`]); the cap lives in
+    /// [`AppConfig::composer_max_rows`].
     fn paint_prompt(&self, rect: Rect, buf: &mut Buffer) {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
-        let line = self.prompt.render_line(rect.width);
+        let max_rows = (rect.height as usize).min(self.config.composer_max_rows.max(1));
+        let lines = self.prompt.render_lines(rect.width, max_rows);
         // Upstream paints the editor chrome in `bashMode` while the buffer is
         // a `!` submission, otherwise in the thinking level's border colour
         // (`updateEditorBorderColor`,
@@ -4981,16 +5000,24 @@ impl App {
         };
         let label_style = Some(SpanStyle::fg(label_slot).to_style(&self.theme));
         let label_width = self.prompt.label().chars().count() as u16;
-        for (col, ch) in line.chars().enumerate() {
-            let x = rect.x + col as u16;
-            if x >= rect.x + rect.width {
+        for (row, line) in lines.iter().enumerate() {
+            let y = rect.y + row as u16;
+            if y >= rect.y + rect.height {
                 break;
             }
-            if let Some(cell) = buf.cell_mut((x, rect.y)) {
-                cell.set_char(ch);
-                if let Some(style) = label_style {
-                    if (col as u16) < label_width {
-                        cell.set_style(style);
+            for (col, ch) in line.chars().enumerate() {
+                let x = rect.x + col as u16;
+                if x >= rect.x + rect.width {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(ch);
+                    if let Some(style) = label_style {
+                        // Only the first row owns the label; subsequent rows
+                        // are blank-padded with spaces.
+                        if row == 0 && (col as u16) < label_width {
+                            cell.set_style(style);
+                        }
                     }
                 }
             }
@@ -5070,7 +5097,11 @@ impl App {
         // OSC 8 escapes, so links fall back to the inline `(url)` form
         // regardless of the live capability.
         let frame = self.composed_frame(width, height);
-        let layout = plan_chrome(height, &frame);
+        let editor_min_rows = self
+            .prompt
+            .line_count(width, self.config.composer_max_rows)
+            .max(1) as u16;
+        let layout = plan_chrome(height, &frame, editor_min_rows);
         self.render_to_buffer_impl(area, &mut buf, false, false, &frame, &layout);
         let lines = buf
             .content()

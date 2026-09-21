@@ -1,0 +1,58 @@
+{
+  "cols": 60,
+  "rows": 24,
+  "caption": "LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle at 60x24: a single-line prompt placeholder, cursor on the only row",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "? for help",
+      "expect": ["> type a prompt"]
+    },
+    {
+      "label": "2. short draft: one composer row, cursor at end of buffer",
+      "send": "<C-u>hello world",
+      "wait": 0.8,
+      "expect": ["> hello world"]
+    },
+    {
+      "label": "3. long draft wraps to multiple composer rows; first row owns the label, continuation rows are indented",
+      "send": "<C-u>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> aaa",
+          "why": "LUM-1282 F1 fix: label row is first, body starts on the same row"
+        },
+        {
+          "text": "  aaa",
+          "why": "continuation rows are indented (2 spaces), not labelled"
+        }
+      ]
+    },
+    {
+      "label": "4. cursor `▍` is on the row the user is typing into (last row when buffer is longer than the cap)",
+      "send": "",
+      "wait": 0.4,
+      "expect": ["▍"]
+    },
+    {
+      "label": "5. a paste of 80 columns wraps to two rows at 60 cols wide; the message view shrinks rather than the composer disappearing",
+      "send": "<C-u>01234567890123456789012345678901234567890123456789012345678901234567890123456789",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "  8901234567",
+          "why": "wrap continuation: chars 58+ land on row 2 with the indent"
+        },
+        {
+          "text": "  6789",
+          "count": "<=1",
+          "why": "the body after the indent starts with 8, not 6, so `  6789` is not on the grid anywhere"
+        }
+      ]
+    }
+  ]
+}

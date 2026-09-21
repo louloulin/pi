@@ -1,0 +1,137 @@
+# lum1282-multi-line-composer.png — chars, 60x24 cells
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [1] 1. idle at 60x24: a single-line prompt placeholder, cursor on the only row  (cursor 60,23, frame 5b304461cfbc, px 2e540c2be929, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d735710cb9b2a3  in 0 out 0 ?/8.2k
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [2] 2. short draft: one composer row, cursor at end of buffer  (cursor 36,22, frame a67520fc7b00, px 4c314941c373, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello world▍
+Faux test model  session-18d735710cb9b2a3  in 0 out 0 ?/8.2k
+  assert PASS   expect       '> hello world'
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [3] 3. long draft wraps to multiple composer rows; first row owns the label, continuation rows are indented  (cursor 46,22, frame 32ae04b5846c, px 2f89fa6ee5ff, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa▍
+Faux test model  session-18d735710cb9b2a3  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> aaa'  — LUM-1282 F1 fix: label row is first, body starts on the same row
+  assert PASS   probe        '  aaa'  — continuation rows are indented (2 spaces), not labelled
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [4] 4. cursor `▍` is on the row the user is typing into (last row when buffer is longer than the cap)  (cursor 46,22, frame 32ae04b5846c, px 2f89fa6ee5ff, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa▍
+Faux test model  session-18d735710cb9b2a3  in 0 out 0 ?/8.2k
+  assert PASS   expect       '▍'
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [5] 5. a paste of 80 columns wraps to two rows at 60 cols wide; the message view shrinks rather than the composer disappearing  (cursor 46,22, frame a3acd9237622, px dded78717597, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 0123456789012345678901234567890123456789012345678901234567
+  8901234567890123456789▍
+Faux test model  session-18d735710cb9b2a3  in 0 out 0 ?/8.2k
+  assert XFAIL  probe        '  6789'  — wrap continuation: trailing 4 chars land on row 2

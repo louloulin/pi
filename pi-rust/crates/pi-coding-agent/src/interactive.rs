@@ -262,6 +262,12 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         startup_header_expanded: true,
         locale: locale_from_env(std::env::var("PI_LANG").ok().as_deref()),
         extension_header: extension_header_for(options),
+        // Multi-line composer (LUM-1282): the App passes the prompt's
+        // natural row count to `plan_chrome` so a wrapping buffer grows
+        // the editor region rather than disappearing into the chrome
+        // budget. `8` matches Martty's `min(h/2, 12)` cap on tall
+        // terminals (`src/ui.rs:25-54`).
+        composer_max_rows: 8,
     }
 }
 

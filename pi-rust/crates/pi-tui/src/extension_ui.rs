@@ -437,7 +437,18 @@ pub(crate) struct ChromeLayout {
 /// See the module docs for the policy; the short version is "reserve the
 /// status row, the prompt and one message row, then hand out the rest in
 /// render order, truncating the tail".
-pub(crate) fn plan_chrome(total: u16, frame: &ExtensionFrame) -> ChromeLayout {
+///
+/// `editor_min_rows` is the smallest number of rows the built-in prompt
+/// needs to render its current buffer at the App's current width. Pass
+/// `1` for the legacy single-row composer; pass
+/// [`crate::Prompt::line_count`] when the prompt is wrapped so the
+/// composer is allowed to grow before the header steals the rows. The
+/// editor always gets at least `1` row — the prompt is never invisible.
+pub(crate) fn plan_chrome(
+    total: u16,
+    frame: &ExtensionFrame,
+    editor_min_rows: u16,
+) -> ChromeLayout {
     let status = 1u16.min(total);
     // One row stays with the message view so it never vanishes.
     let mut budget = total.saturating_sub(status).saturating_sub(1);
@@ -460,7 +471,9 @@ pub(crate) fn plan_chrome(total: u16, frame: &ExtensionFrame) -> ChromeLayout {
         frame
             .editor
             .as_ref()
-            .map_or(1, |lines| lines_height(lines).max(1)),
+            .map_or(editor_min_rows.max(1), |lines| {
+                lines_height(lines).max(editor_min_rows.max(1))
+            }),
     );
     let header = take(lines_height(&frame.header));
     let above = take(lines_height(&frame.above));
@@ -751,7 +764,7 @@ mod tests {
     #[test]
     fn plan_chrome_reserves_status_and_one_message_row() {
         // No extension content: message takes everything but status + editor.
-        let layout = plan_chrome(10, &frame_with(0, 0, None, 0, 0));
+        let layout = plan_chrome(10, &frame_with(0, 0, None, 0, 0), 1);
         assert_eq!(
             (layout.header, layout.above, layout.editor, layout.below),
             (0, 0, 1, 0)
@@ -766,7 +779,7 @@ mod tests {
         // takes its reserved row first (it is the region the user cannot work
         // without), then the header takes the remaining 2 and the tail — the
         // Above/Below widgets and the footer — renders nothing.
-        let layout = plan_chrome(5, &frame_with(10, 2, None, 2, 4));
+        let layout = plan_chrome(5, &frame_with(10, 2, None, 2, 4), 1);
         assert_eq!((layout.editor, layout.header), (1, 2));
         assert_eq!((layout.above, layout.below), (0, 0));
         assert_eq!((layout.status, layout.footer), (1, 0));
@@ -783,7 +796,7 @@ mod tests {
     fn the_startup_header_cannot_starve_the_prompt() {
         let header = 21u16;
         // 24 rows: everything fits — header intact, prompt, one message row.
-        let layout = plan_chrome(24, &frame_with(header as usize, 0, None, 0, 0));
+        let layout = plan_chrome(24, &frame_with(header as usize, 0, None, 0, 0), 1);
         assert_eq!(
             (layout.header, layout.editor, layout.message, layout.status),
             (21, 1, 1, 1)
@@ -791,7 +804,7 @@ mod tests {
         // 23 and 22 rows: the prompt and the message row survive; the header
         // is truncated by exactly the rows they needed.
         for total in [23u16, 22] {
-            let layout = plan_chrome(total, &frame_with(header as usize, 0, None, 0, 0));
+            let layout = plan_chrome(total, &frame_with(header as usize, 0, None, 0, 0), 1);
             assert_eq!(
                 (layout.header, layout.editor, layout.message, layout.status),
                 (header - (24 - total), 1, 1, 1),
@@ -810,7 +823,7 @@ mod tests {
         // room for both, and the row stays with the transcript (the terminal
         // is unusable either way).
         for total in 2..24u16 {
-            let layout = plan_chrome(total, &frame_with(22, 0, None, 0, 0));
+            let layout = plan_chrome(total, &frame_with(22, 0, None, 0, 0), 1);
             assert_eq!(layout.status, 1.min(total), "total {total}");
             let expected_editor = u16::from(total >= 3);
             assert_eq!(
@@ -825,15 +838,29 @@ mod tests {
 
     #[test]
     fn plan_chrome_keeps_the_editor_region_non_empty() {
-        let layout = plan_chrome(4, &frame_with(0, 0, Some(0), 0, 0));
+        let layout = plan_chrome(4, &frame_with(0, 0, Some(0), 0, 0), 1);
         assert_eq!(layout.editor, 1);
         assert_eq!(layout.message, 2);
     }
 
     #[test]
+    fn plan_chrome_grows_the_editor_for_a_wrapped_prompt() {
+        // The prompt needs 3 rows; the chrome reserves them, even when the
+        // header would otherwise claim all available space.
+        let layout = plan_chrome(10, &frame_with(15, 0, None, 0, 0), 3);
+        assert_eq!(layout.editor, 3, "the prompt got its three rows");
+        assert!(
+            layout.header <= 5,
+            "the header gave way to the prompt (got {})",
+            layout.header
+        );
+        assert!(layout.message >= 1);
+    }
+
+    #[test]
     fn tiny_terminals_do_not_panic() {
         for total in 0..4u16 {
-            let layout = plan_chrome(total, &frame_with(3, 3, None, 3, 3));
+            let layout = plan_chrome(total, &frame_with(3, 3, None, 3, 3), 1);
             let used = layout.header
                 + layout.above
                 + layout.editor
