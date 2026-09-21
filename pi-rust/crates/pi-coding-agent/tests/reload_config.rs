@@ -67,9 +67,9 @@ fn transcript(app: &App) -> String {
 #[test]
 fn reload_rereads_keybindings_and_ui_settings_mid_session() {
     let dir = tempfile::tempdir().expect("temp dir");
-    write(&dir.path().to_path_buf(), KEYBINDINGS, r#"{"cursorUp":["ctrl+p"]}"#);
+    write(dir.path(), KEYBINDINGS, r#"{"cursorUp":["ctrl+p"]}"#);
     write(
-        &dir.path().to_path_buf(),
+        dir.path(),
         SETTINGS,
         r#"{"theme":"light","fullscreenCopyOnSelect":false}"#,
     );
@@ -129,7 +129,11 @@ fn reload_picks_up_an_edited_file_without_a_restart() {
         vec!["ctrl+p".to_string()]
     );
 
-    write(&path, KEYBINDINGS, r#"{"cursorUp":["ctrl+n"],"pageUp":["ctrl+y"]}"#);
+    write(
+        &path,
+        KEYBINDINGS,
+        r#"{"cursorUp":["ctrl+n"],"pageUp":["ctrl+y"]}"#,
+    );
     let report = reload(&mut app, dir.path(), &sources(dir.path()));
     assert_eq!(
         get_keybindings().get_keys("tui.editor.cursorUp"),
@@ -147,7 +151,11 @@ fn reload_falls_back_to_defaults_and_reports_a_missing_file() {
     let path = dir.path().to_path_buf();
     // Only settings.json exists: the keybinding slice has to say so rather
     // than report "0 overrides from <path>" as if the file were read.
-    write(&path, SETTINGS, r#"{"theme":"light","fullscreenCopyOnSelect":false}"#);
+    write(
+        &path,
+        SETTINGS,
+        r#"{"theme":"light","fullscreenCopyOnSelect":false}"#,
+    );
 
     let mut app = app();
     let report = reload(&mut app, dir.path(), &sources(dir.path()));
@@ -165,7 +173,11 @@ fn reload_falls_back_to_defaults_and_reports_a_missing_file() {
     assert_eq!(app.theme().name(), Some("light"), "theme left untouched");
     assert_eq!(report.theme, None);
     assert!(app.copy_on_select());
-    assert!(transcript(&app).contains("unchanged"), "{}", transcript(&app));
+    assert!(
+        transcript(&app).contains("unchanged"),
+        "{}",
+        transcript(&app)
+    );
 
     reset_keybindings();
 }

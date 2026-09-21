@@ -89,11 +89,11 @@ pub fn added_tool_names_from_messages(messages: &[Message]) -> Vec<String> {
 /// result's `addedToolNames`, so callers do not have to extract them. The
 /// explicit-slice version stays available for callers that build the marker
 /// set themselves.
-pub fn split_deferred_tools_from_context<'a>(
-    context: &'a Context,
+pub fn split_deferred_tools_from_context(
+    context: &Context,
     enabled: bool,
     normalize_name: impl Fn(&str) -> String,
-) -> SplitDeferredTools<'a> {
+) -> SplitDeferredTools<'_> {
     let added_tool_names = added_tool_names_from_messages(&context.messages);
     split_deferred_tools(context, enabled, &added_tool_names, normalize_name)
 }

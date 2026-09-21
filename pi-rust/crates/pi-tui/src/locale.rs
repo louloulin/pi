@@ -371,7 +371,12 @@ mod tests {
         // The `--no-extensions` copy keeps the `extensions: none` shape so
         // the audit's acceptance wording holds.
         assert!(EXTENSIONS_DISABLED_EN.starts_with("extensions: none"));
-        assert!(!EXTENSIONS_DISABLED_ZH.is_empty());
+        // Not just non-empty: the Chinese copy has to carry the same two facts
+        // (`--no-extensions` and "none"). `!is_empty()` on a `&str` const was
+        // a vacuous assertion (`clippy::const_is_empty`), and LUM-1308 tightened
+        // it to the content instead of silencing the lint.
+        assert!(EXTENSIONS_DISABLED_ZH.contains("扩展: 无"));
+        assert!(EXTENSIONS_DISABLED_ZH.contains("--no-extensions"));
     }
 
     #[test]

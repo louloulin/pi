@@ -255,11 +255,7 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "List loaded extensions and what they register",
         None,
     ),
-    (
-        "reload",
-        "Reload keybindings and interface settings",
-        None,
-    ),
+    ("reload", "Reload keybindings and interface settings", None),
     ("exit", "Quit the interactive session", None),
 ];
 
@@ -501,6 +497,9 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
             "expand or collapse the startup header (Alt+H by default)",
         ),
         ("app.model.select", "open the model selector"),
+        // Stage LUM-1308 gave both of these a consumer, so the rows come back
+        // (they were filtered out while the chords were false ads).
+        ("app.editor.external", "edit the prompt in $EDITOR"),
         ("app.session.new", "start a new session"),
         ("app.session.tree", "open the session tree"),
         ("app.session.fork", "fork a session from a message"),
@@ -918,12 +917,11 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_text_skips_bound_but_unimplemented_actions() {
+    fn hotkeys_text_advertises_every_consumed_action() {
         // LUM-1240: four advertised chords were bound but answered by no
-        // consumer. `/hotkeys` read "has a default chord" as "is
-        // implemented". `app.suspend` (Ctrl+Z) and `app.editor.external` are
-        // still unimplemented, so they must not be advertised; `app.model.select`
-        // is implemented as of LUM-1245 and must be.
+        // consumer, so `/hotkeys` had to filter them. LUM-1308 wired the last
+        // two (`app.suspend`, `app.editor.external`), which retires the whole
+        // class: a bound `app.*` id with a consumer must now be advertised.
         let manager = pi_tui::keybindings::KeybindingsManager::new(
             crate::keybindings::merged_definitions(
                 &crate::keybindings::Platform::Linux,
@@ -931,16 +929,19 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        // Bound in the table, so the filter is what drops them.
         assert_eq!(
             manager.get_keys("app.suspend"),
             ["ctrl+z"],
-            "app.suspend stays bound; only the advertisement is filtered"
+            "app.suspend stays bound"
         );
         let text = hotkeys_text_with(&manager);
         assert!(
-            !text.contains("suspend to the background"),
-            "unimplemented app.suspend advertised:\n{text}"
+            text.contains("suspend to the background"),
+            "app.suspend has a consumer but is not advertised:\n{text}"
+        );
+        assert!(
+            text.contains("edit the prompt in $EDITOR"),
+            "app.editor.external has a consumer but is not advertised:\n{text}"
         );
         assert!(
             text.contains("open the model selector"),
@@ -959,10 +960,8 @@ mod tests {
             let prefix = format!("  {:<16} ", rendered.join(" / "));
             text.lines().any(|line| line.starts_with(&prefix))
         };
-        assert!(
-            !cell_is_advertised(&["ctrl+z"]),
-            "app.suspend is advertised on /hotkeys but has no consumer:\n{text}"
-        );
+        assert!(cell_is_advertised(&["ctrl+z"]), "{text}");
+        assert!(cell_is_advertised(&["ctrl+g"]), "{text}");
         assert!(cell_is_advertised(&["ctrl+l"]), "{text}");
     }
 

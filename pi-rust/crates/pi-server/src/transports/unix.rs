@@ -9,8 +9,10 @@
 //! removes a stale path when the filesystem entry is a socket, which preserves
 //! the safety property that matters (`Session` `mode` / permission handling is
 //! delegated to the OS) without the inode dance.
-
-#![cfg(unix)]
+//!
+//! The `#[cfg(unix)]` gate lives on the `pub mod unix;` declaration in
+//! `transports/mod.rs`; the inner `#![cfg(unix)]` that used to repeat it here
+//! was the only `clippy::duplicated_attributes` hit in the workspace.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -424,7 +424,9 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         let current_line = lines.get(cursor_line).map(String::as_str).unwrap_or("");
         let text_before_cursor = safe_prefix(current_line, cursor_col);
         let trimmed = text_before_cursor.trim();
-        !(trimmed.starts_with('/') && !trimmed.contains(' '))
+        // De Morgan form so `clippy::nonminimal_bool` stays quiet:
+        // `!(a && b)` is exactly `!a || b_negated`.
+        !trimmed.starts_with('/') || trimmed.contains(' ')
     }
 }
 

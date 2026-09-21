@@ -52,7 +52,14 @@ fn hex_decode(text: &str) -> Vec<u8> {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+
+    // `clippy::format_collect`: build the string with `write!` instead of
+    // allocating a `String` per byte and then concatenating them.
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 // ---------------------------------------------------------------------------

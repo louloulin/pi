@@ -210,7 +210,9 @@ impl Serialize for ColorValue {
 
 struct ColorValueVisitor;
 
-impl<'de> Visitor<'de> for ColorValueVisitor {
+// `clippy::needless_lifetimes`: the impl introduces no lifetime of its own, so
+// the anonymous form is equivalent and shorter.
+impl Visitor<'_> for ColorValueVisitor {
     type Value = ColorValue;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

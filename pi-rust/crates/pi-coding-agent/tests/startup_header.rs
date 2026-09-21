@@ -41,18 +41,23 @@ use pi_tui::keybindings::{
 const WIDTH: u16 = 100;
 const HEIGHT: u16 = 34;
 
-/// The `app.*` ids that are bound with a default chord but answered by no
-/// consumer — the two actions that need terminal hand-over semantics the port
-/// does not have (`SIGTSTP` + restore for `Ctrl+Z`, an `$EDITOR` hand-over for
-/// `Ctrl+G`).
+/// The `app.*` ids that are advertised with a default chord but answered by no
+/// consumer.
 ///
-/// This is the tripwire: every other advertised `app.*` id has to be in
-/// [`CONSUMED_APP_ACTIONS`], so wiring one of these (or un-wiring a live one)
-/// forces this list to be updated rather than leaving a surface lying. When a
-/// rebase brings in a sibling branch that wires an action — `Shift+Tab` did
-/// exactly that on the way to `feature/pi.rs` (Stage 67 / LUM-1230) — this
-/// test fails until the id moves across.
-const KNOWN_UNWIRED: &[&str] = &["app.suspend", "app.editor.external"];
+/// **Emptied by LUM-1308**, which wired the last two: the driver now claims
+/// `Ctrl+G` (`app.editor.external` — the tty is handed to `$EDITOR`, see
+/// `pi-coding-agent/src/external_editor.rs`) and `Ctrl+Z` (`app.suspend` — the
+/// terminal is restored before `SIGTSTP`). The list is kept as the tripwire for
+/// the next false ad: a new hint whose action has no consumer fails
+/// `every_advertised_app_hint_is_wired_or_a_known_dead_chord` until it is wired
+/// or listed here.
+///
+/// A function rather than a `const &[]` because `clippy::const_is_empty`
+/// rejects `KNOWN_UNWIRED.is_empty()` on a const that is *literally* empty —
+/// and the assertion is the whole point of the tripwire.
+fn known_unwired() -> &'static [&'static str] {
+    &[]
+}
 
 /// Consumed, but only while one of the App's own overlays owns the keyboard,
 /// so it is not a global shortcut and the `app` group stays silent about it:
@@ -181,20 +186,29 @@ fn printed_cells(group: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_shipped_header_hides_the_dead_chords_and_keeps_the_live_ones() {
+fn the_shipped_header_advertises_the_recovered_chords_and_keeps_the_live_ones() {
     let _guard = lock_registry();
     set_keybindings(manager());
     let text = header_lines().join("\n");
 
-    // Dead: bound in this very table, answered by nobody.
-    for dead in KNOWN_UNWIRED {
+    // No false ads left: the tripwire list is empty, and both recovered chords
+    // now have a consumer...
+    assert!(known_unwired().is_empty(), "a dead chord came back");
+    for recovered in ["app.suspend", "app.editor.external"] {
         assert!(
-            !CONSUMED_APP_ACTIONS.contains(dead),
-            "{dead} is classified dead but is consumed"
+            CONSUMED_APP_ACTIONS.contains(&recovered),
+            "{recovered} is not consumed any more"
         );
     }
-    assert!(!text.contains("to suspend"), "{text}");
-    assert!(!text.contains("for external editor"), "{text}");
+    // ...so the header has to advertise them (LUM-1308).
+    assert!(
+        text.contains("Ctrl+Z to suspend"),
+        "Ctrl+Z lost its header hint:\n{text}"
+    );
+    assert!(
+        text.contains("Ctrl+G for external editor"),
+        "Ctrl+G lost its header hint:\n{text}"
+    );
     // Live, and advertised because it is: `Shift+Tab` became real when Stage
     // 67 (LUM-1230) landed, and this row must come back with it.
     assert!(text.contains("Shift+Tab to cycle thinking level"), "{text}");
@@ -212,12 +226,12 @@ fn the_shipped_hotkeys_group_lists_only_consumed_actions() {
     let text = hotkeys_text_with(&manager());
     let app = app_group(&text);
 
-    // The two dead chords are gone from the group that lists `app.*` actions.
+    // Both recovered chords are in the group that lists `app.*` actions.
     // `Ctrl+G` is checked inside that group only: it is still a live chord for
     // the *transcript* action (`tui.altScreen.searchNext`), and this group is
     // about `app.*`.
-    assert!(!advertised(app, &["Ctrl+Z".into()]), "{app}");
-    assert!(!advertised(app, &["Ctrl+G".into()]), "{app}");
+    assert!(advertised(app, &["Ctrl+Z".into()]), "{app}");
+    assert!(advertised(app, &["Ctrl+G".into()]), "{app}");
     assert!(advertised(app, &["Ctrl+L".into()]), "{app}");
     assert!(advertised(app, &["Shift+Tab".into()]), "{app}");
 
@@ -268,7 +282,7 @@ fn every_advertised_app_hint_is_wired_or_a_known_dead_chord() {
     assert!(!ids.is_empty(), "the hint table named no actions at all");
     for id in ids {
         assert!(
-            app_action_is_consumed(id) || KNOWN_UNWIRED.contains(&id),
+            app_action_is_consumed(id) || known_unwired().contains(&id),
             "{id} is advertised but neither wired nor a known dead chord: wire it and add \
              it to CONSUMED_APP_ACTIONS, or list it as unwired, or stop advertising it"
         );
@@ -276,21 +290,23 @@ fn every_advertised_app_hint_is_wired_or_a_known_dead_chord() {
 }
 
 #[test]
-fn the_known_dead_chords_are_bound_but_not_consumed() {
+fn the_recovered_chords_are_bound_and_consumed() {
+    // LUM-1308 successor of `the_known_dead_chords_are_bound_but_not_consumed`:
+    // with the list empty, the property that matters is that the two ids the
+    // list used to hold are now on the consuming side, and that no advertised
+    // hint is left without a consumer.
+    assert!(known_unwired().is_empty());
     let manager = manager();
-    for id in KNOWN_UNWIRED {
+    for id in ["app.suspend", "app.editor.external"] {
         assert!(
-            APP_KEYBINDING_IDS.contains(id),
+            APP_KEYBINDING_IDS.contains(&id),
             "{id} is a coding-agent keybinding"
         );
         assert!(
             !manager.get_keys(id).is_empty(),
-            "{id} is hidden from the surfaces, so it should still be bound"
+            "{id} is advertised, so it has to be bound"
         );
-        assert!(
-            !app_action_is_consumed(id),
-            "{id} is listed as unwired but something consumes it now"
-        );
+        assert!(app_action_is_consumed(id), "{id} has no consumer again");
     }
 }
 

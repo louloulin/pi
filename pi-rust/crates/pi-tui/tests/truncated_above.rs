@@ -223,7 +223,10 @@ fn the_transcript_snapshot_carries_no_hint() {
 
     let snapshot = app.render_snapshot(WIDTH, HEIGHT);
     assert!(
-        !snapshot.lines.iter().any(|line| line.contains("lines above")),
+        !snapshot
+            .lines
+            .iter()
+            .any(|line| line.contains("lines above")),
         "found the hint in {:?}",
         snapshot.lines
     );
@@ -254,7 +257,10 @@ fn clicking_the_hint_does_the_key_it_advertises() {
     // max-scroll value, not the `usize::MAX` sentinel that
     // `MessageView::scroll_to_top` uses internally.
     let (width, height) = app.viewport();
-    let expected_offset = app.messages().line_count(width).saturating_sub(height as usize);
+    let expected_offset = app
+        .messages()
+        .line_count(width)
+        .saturating_sub(height as usize);
     assert_eq!(
         app.messages().scroll_offset(),
         expected_offset,
@@ -265,7 +271,9 @@ fn clicking_the_hint_does_the_key_it_advertises() {
         "the click scrolled the viewport up; the head is now in view"
     );
     let buf = render(&mut app);
-    let pill = app.scroll_to_end_rect().expect("detached view paints the pill");
+    let pill = app
+        .scroll_to_end_rect()
+        .expect("detached view paints the pill");
     let label: String = (pill.x..pill.x + pill.width)
         .map(|x| symbol_at(&buf, x, pill.y))
         .collect();

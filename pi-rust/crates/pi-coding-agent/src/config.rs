@@ -139,6 +139,41 @@ pub fn load_ui_settings(sources: &ConfigSources) -> UiSettings {
     }
 }
 
+/// The command `app.editor.external` (`Ctrl+G`) launches.
+///
+/// Upstream reads `externalEditor` from `settings.json` inside
+/// `SettingsManager.getExternalEditorCommand`
+/// (`core/settings-manager.ts:969-979`) and falls back to `VISUAL`, then
+/// `EDITOR`, then a platform default (`nano` / `notepad`). The environment
+/// half of that chain lives here rather than in
+/// [`crate::external_editor`] so the resolver stays a pure function of its
+/// arguments.
+///
+/// A malformed (non-string) value warns and falls through to the environment
+/// instead of silently disabling the chord.
+pub fn load_external_editor_command(sources: &ConfigSources) -> String {
+    let merged = merged_settings(sources);
+    let configured = match merged.get("externalEditor") {
+        None => None,
+        Some(Value::String(command)) => Some(command.as_str()),
+        Some(other) => {
+            warn(&format!(
+                "externalEditor must be a string (got {}); falling back to VISUAL/EDITOR",
+                json_kind(other)
+            ));
+            None
+        }
+    };
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    crate::external_editor::resolve_command(
+        configured,
+        visual.as_deref(),
+        editor.as_deref(),
+        cfg!(windows),
+    )
+}
+
 /// Read the top-level `theme` string setting, warning on a malformed value.
 fn read_theme(merged: &Map<String, Value>) -> Option<String> {
     match merged.get("theme") {

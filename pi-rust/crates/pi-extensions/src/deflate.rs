@@ -647,7 +647,7 @@ pub(crate) fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>, ZlibError> {
     if usize::from(cmf >> 4) > 7 {
         return Err(ZlibError::data("zlib window size is too large"));
     }
-    if (u16::from(cmf) << 8 | u16::from(flg)) % 31 != 0 {
+    if ((u16::from(cmf) << 8) | u16::from(flg)) % 31 != 0 {
         return Err(ZlibError::data("invalid zlib header check bits"));
     }
     if flg & 0x20 != 0 {

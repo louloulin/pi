@@ -1,0 +1,13 @@
+== case A: pi spawned directly (own session -> orphaned group) ==
+   startup frame         : True
+   Ctrl+Z: state=S alive=True repainted=False
+   (expected: SIGTSTP discarded — orphaned group, see module docstring)
+== case B: pi started from an interactive bash (job control) ==
+   shell prompt          : True (pid 717)
+   monitor mode on       : True
+   TUI started           : True
+   pi pid / state        : 720 / S
+   after Ctrl+Z          : state=T stopped=True bash_said_stopped=True
+   after fg              : state=S resumed=True repainted=True alive=True
+
+verdict: case B PASS (Ctrl+Z stopped the TUI, fg resumed and repainted it)

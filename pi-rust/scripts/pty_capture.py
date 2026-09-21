@@ -654,11 +654,24 @@ def main() -> int:
     os.makedirs(home, exist_ok=True)
     os.makedirs(cwd, exist_ok=True)
     # Fixture files so `@`-completion has stable, reviewable candidates.
-    for rel in scenario.get("fixtures", []):
+    #
+    # A scenario can also name `"fixtures": {"name": "contents"}` to give a
+    # fixture real contents — the `app.editor.external` scenarios use it to
+    # install a fake `$EDITOR` (LUM-1308). A fixture whose name ends in `.sh`
+    # is made executable: it is about to be run as a command, and the child
+    # resolves `./editor.sh` relative to its own cwd.
+    declared_fixtures = scenario.get("fixtures", [])
+    if isinstance(declared_fixtures, dict):
+        fixture_items = declared_fixtures.items()
+    else:
+        fixture_items = ((rel, "// fixture for pty_capture.py\n") for rel in declared_fixtures)
+    for rel, contents in fixture_items:
         path = os.path.join(cwd, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("// fixture for pty_capture.py\n")
+            fh.write(contents)
+        if rel.endswith(".sh"):
+            os.chmod(path, 0o755)
     # Real extension sources, under the global search path so the run
     # covers extension loading + the event fan-out end to end.
     declared = scenario.get("extensions") or {}
@@ -687,6 +700,14 @@ def main() -> int:
             "NO_COLOR": "",
         }
     )
+    # Scenario-level overrides last, so a scenario can pin `EDITOR`/`VISUAL`
+    # (the `app.editor.external` scenarios) without the harness guessing. An
+    # explicit empty value removes the variable instead of exporting "".
+    for key, value in (scenario.get("env") or {}).items():
+        if value == "":
+            env.pop(key, None)
+        else:
+            env[key] = value
     env.pop("PI_HOME", None)
 
     screen = pyte.Screen(cols, rows)

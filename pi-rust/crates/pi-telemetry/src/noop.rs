@@ -34,7 +34,7 @@ impl TelemetryContext for NoopTelemetry {
     }
 }
 
-fn admit_noop<'a>(callback: SpanCallback<'a>) -> BoxFuture<'a, ()> {
+fn admit_noop(callback: SpanCallback<'_>) -> BoxFuture<'_, ()> {
     // Invoke the callback before the returned future starts polling so the
     // inert span is available synchronously, matching the upstream contract.
     let inner = callback(noop_span());

@@ -54,6 +54,7 @@ pub mod config;
 pub mod context_files;
 pub mod export;
 pub mod extensions;
+pub mod external_editor;
 pub mod file_processor;
 pub mod frontmatter;
 pub mod interactive;

@@ -392,8 +392,8 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
 /// (`pi-coding-agent`'s `commands::slash::hotkeys_text`) — used to read a
 /// default chord as proof of a working shortcut, so a default-table entry no
 /// consumer answers was still advertised. LUM-1240 measured four such dead
-/// keys on the port's tip; `app.suspend` and `app.editor.external` are still
-/// unhonoured here.
+/// keys on the port's tip; LUM-1308 closed the last two, `app.suspend` and
+/// `app.editor.external`.
 ///
 /// This list is the missing axis. An `app.*` id appears in a hint only when
 /// it is both bound and listed here; `tui.*` ids are consumed by the `pi-tui`
@@ -411,10 +411,18 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
 /// (`interactive.rs::handle_picker_key`). Upstream consumes them inside its
 /// selector components, so the component-level exemption does not apply here:
 /// the port's shared `Selector` ignores them and the driver intercepts them.
+///
+/// [# LUM-1308] `app.editor.external` (`Ctrl+G`) and `app.suspend` (`Ctrl+Z`)
+/// are claimed by the driver's `handle_input_event`, which hands the terminal
+/// to `$EDITOR` (`crate::external_editor`) and to `SIGTSTP` respectively. This
+/// retires the *whole* false-ad class: every `app.*` id in the merged table now
+/// has a consumer.
 pub const CONSUMED_APP_ACTIONS: &[&str] = &[
     "app.interrupt",
     "app.clear",
     "app.exit",
+    "app.suspend",
+    "app.editor.external",
     "app.thinking.cycle",
     "app.thinking.save",
     "app.thinking.toggle",

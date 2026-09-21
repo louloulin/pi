@@ -225,12 +225,12 @@ fn start_recorded(
     (id, span)
 }
 
-fn run_recorded<'a>(
+fn run_recorded(
     state: Arc<Mutex<MemoryState>>,
     id: u64,
     span: SpanRef,
-    callback: SpanCallback<'a>,
-) -> BoxFuture<'a, ()> {
+    callback: SpanCallback<'_>,
+) -> BoxFuture<'_, ()> {
     let inner = callback(span);
     Box::pin(async move {
         match inner.await {

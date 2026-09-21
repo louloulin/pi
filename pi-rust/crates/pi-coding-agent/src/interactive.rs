@@ -597,6 +597,12 @@ async fn run_loop(
                 {
                     match action {
                         InternalAction::Exit => break,
+                        InternalAction::ExternalEditor { command } => {
+                            run_external_editor(terminal, &mut app, &command);
+                        }
+                        InternalAction::Suspend => {
+                            suspend_to_background(terminal, &mut app);
+                        }
                     }
                 }
             }
@@ -667,10 +673,24 @@ fn apply_clipboard_paste(app: &mut App, paste: crate::clipboard::ClipboardPaste)
 }
 
 /// Internal action returned from `handle_input_event`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: [`InternalAction::ExternalEditor`] carries an owned command.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InternalAction {
     /// User requested exit.
     Exit,
+    /// `app.editor.external` (`Ctrl+G`): the driver must release the tty, run
+    /// `command` on the editor draft and take the tty back. Handled in the
+    /// render loop because the terminal lives there, not in
+    /// `handle_input_event`.
+    ExternalEditor {
+        /// The resolved editor command line (see
+        /// [`crate::config::load_external_editor_command`]).
+        command: String,
+    },
+    /// `app.suspend` (`Ctrl+Z`): restore the terminal, stop this process
+    /// group, repaint when it is continued.
+    Suspend,
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,6 +1085,34 @@ async fn handle_input_event(
         ) {
             open_resume_selector(app, options);
             return Ok(None);
+        }
+        // `app.editor.external` (`Ctrl+G`) — upstream hands the draft to
+        // `$EDITOR` (`interactive-mode.ts:4246-4262`). The driver runs the
+        // editor because only it owns the terminal; nothing is claimed here
+        // beyond the resolution of which command to run.
+        if pi_tui::keybindings::matches_with_fallback(
+            &keybindings,
+            &event,
+            "app.editor.external",
+            &["ctrl+g"],
+        ) {
+            return Ok(Some(InternalAction::ExternalEditor {
+                command: crate::config::load_external_editor_command(&settings_sources()),
+            }));
+        }
+        // `app.suspend` (`Ctrl+Z`) — upstream `process.kill(0, "SIGTSTP")`
+        // after stopping the TUI (`interactive-mode.ts:3550-3600`). Unbound on
+        // Windows by the merged table, so that platform can never reach this
+        // branch; the guard keeps the meaning explicit if a user binds it.
+        if !cfg!(windows)
+            && pi_tui::keybindings::matches_with_fallback(
+                &keybindings,
+                &event,
+                "app.suspend",
+                &["ctrl+z"],
+            )
+        {
+            return Ok(Some(InternalAction::Suspend));
         }
     }
 
@@ -3702,6 +3750,16 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 }
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    suspend_tui(terminal)
+}
+
+/// Hand the tty back: leave raw mode and the alternate screen so a child
+/// process (an editor, or a suspended shell) gets a terminal it can use.
+///
+/// Split out of [`teardown_terminal`] for `app.editor.external` / `app.suspend`,
+/// which need the same *leaving* sequence but must come back afterwards — see
+/// [`resume_tui`].
+fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -3710,6 +3768,129 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyho
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Take the tty back after [`suspend_tui`], mirroring [`setup_terminal`].
+///
+/// The terminal state on the *normal* screen is untouched by ratatui (the
+/// child printed there), so the caller's next `terminal.draw` must repaint from
+/// scratch — which is why the ratatui back buffer is invalidated here.
+fn resume_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+    Ok(())
+}
+
+/// Run `app.editor.external` (`Ctrl+G`): suspend the TUI, run the resolved
+/// editor on the composer draft, then repaint and install the result.
+///
+/// Errors from either terminal hand-off are reported *after* an attempt to
+/// restore the terminal, so a failure cannot strand the session on the normal
+/// screen.
+fn run_external_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    command: &str,
+) {
+    let draft = app.editor_text();
+    let suspended = suspend_tui(terminal);
+    let result = if suspended.is_ok() {
+        crate::external_editor::edit_in_external_editor(
+            &crate::external_editor::ExternalEditorOptions {
+                command: command.to_string(),
+                content: draft.clone(),
+            },
+        )
+    } else {
+        crate::external_editor::ExternalEditorResult::Failed
+    };
+    let resumed = resume_tui(terminal);
+    if let Err(err) = suspended {
+        app.flash_status(format!(
+            "external editor: cannot release the terminal: {err}"
+        ));
+        return;
+    }
+    if let Err(err) = resumed {
+        app.flash_status(format!(
+            "external editor: cannot restore the terminal: {err}"
+        ));
+        return;
+    }
+    match result {
+        // Upstream changes the editor only on success; an unchanged draft is
+        // still "success", it just costs a repaint.
+        crate::external_editor::ExternalEditorResult::Complete(content) => {
+            if content != draft {
+                app.set_editor_text(&content);
+            }
+        }
+        // Upstream leaves the draft alone and lets the failure show on the
+        // normal screen; under the repainted TUI a status line is the only
+        // place the user can still see it.
+        crate::external_editor::ExternalEditorResult::Failed => {
+            app.flash_status("external editor failed; draft unchanged");
+        }
+    }
+}
+
+/// Run `app.suspend` (`Ctrl+Z`): give the terminal back, stop this process
+/// group, and repaint once the job is continued.
+fn suspend_to_background(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) {
+    if let Err(err) = suspend_tui(terminal) {
+        app.flash_status(format!("suspend: cannot release the terminal: {err}"));
+        return;
+    }
+    let stopped = stop_process_group();
+    if let Err(err) = resume_tui(terminal) {
+        app.flash_status(format!("suspend: cannot restore the terminal: {err}"));
+        return;
+    }
+    if let Err(err) = stopped {
+        app.flash_status(format!("suspend failed: {err}"));
+    }
+}
+
+/// Send `SIGTSTP` to this process group — upstream's
+/// `process.kill(0, "SIGTSTP")`, where pid `0` means "the caller's process
+/// group".
+///
+/// Two properties are load-bearing:
+///
+/// * The signal is raised through the POSIX `kill` utility because
+///   `#![forbid(unsafe_code)]` in this crate rules out `libc::kill`. `sh -c`
+///   keeps the command portable between coreutils' `kill` and a shell
+///   builtin.
+/// * `kill` inherits this process group, so it is stopped by the same signal.
+///   Waiting for it therefore *is* the "continued" edge: this returns only
+///   once the group has been resumed with `SIGCONT` (or immediately, if the
+///   kernel discarded the stop because the group is orphaned — see below).
+///
+/// Limitation, shared with upstream: the kernel discards `SIGTSTP` aimed at an
+/// **orphaned** process group (one with no parent in the same session). Under a
+/// job-control shell this is never the case, so `Ctrl+Z` behaves; a launcher
+/// that puts `pi` in its own session sees `Ctrl+Z` as a plain repaint. That is
+/// also why the automated PTY scenarios cannot assert the stop itself.
+fn stop_process_group() -> std::io::Result<()> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("kill -TSTP 0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "`kill -TSTP 0` exited with {status}"
+    )))
 }
 
 /// Drain the crossterm events that are **already buffered**, and return as

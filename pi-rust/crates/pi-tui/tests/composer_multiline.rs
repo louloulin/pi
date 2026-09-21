@@ -63,7 +63,10 @@ fn prompt_grows_when_the_buffer_wraps() {
     assert_eq!(prompt.line_count(12, 8), 2);
     let lines = prompt.render_lines(12, 8);
     assert_eq!(lines.len(), 8);
-    assert!(lines[0].starts_with("> "), "first row owns the label: {lines:?}");
+    assert!(
+        lines[0].starts_with("> "),
+        "first row owns the label: {lines:?}"
+    );
     for row in &lines[1..] {
         assert!(
             row.starts_with("  "),
@@ -124,9 +127,7 @@ fn app_renders_multi_row_composer_into_the_editor_region() {
 #[test]
 fn cap_protects_against_pathologically_long_buffers() {
     let mut app = app_with_composer_max(3);
-    app.prompt_mut()
-        .editor_mut()
-        .insert_str(&"x ".repeat(200));
+    app.prompt_mut().editor_mut().insert_str(&"x ".repeat(200));
     let snapshot = app.render_snapshot(80, 24);
     // The composer must not exceed the cap, even on a 24-row viewport.
     let editor_rows: Vec<_> = snapshot

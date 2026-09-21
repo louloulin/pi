@@ -265,11 +265,17 @@ impl Prompt {
             let row_text = row.as_str();
             let row_start = row_starts[i];
             let cursor_in_row = if i == cursor_row {
-                cursor.saturating_sub(row_start).min(row_text.chars().count())
+                cursor
+                    .saturating_sub(row_start)
+                    .min(row_text.chars().count())
             } else {
                 usize::MAX
             };
-            let prefix = if i == 0 { self.label.as_str() } else { indent.as_str() };
+            let prefix = if i == 0 {
+                self.label.as_str()
+            } else {
+                indent.as_str()
+            };
             out.push(build_prompt_row(
                 prefix,
                 row_text,
@@ -286,7 +292,11 @@ impl Prompt {
         let cont_prefix = indent.as_str();
         while out.len() < max_rows {
             let row_index = out.len();
-            let prefix = if row_index == 0 { first_prefix } else { cont_prefix };
+            let prefix = if row_index == 0 {
+                first_prefix
+            } else {
+                cont_prefix
+            };
             out.push(blank_row(prefix, width));
         }
         out
@@ -409,7 +419,11 @@ fn wrap_hard_line(line: &str, width: usize, rows: &mut Vec<String>) {
             current_width = buf_width;
             continue;
         }
-        let needed = if current.is_empty() { word_width } else { current_width + 1 + word_width };
+        let needed = if current.is_empty() {
+            word_width
+        } else {
+            current_width + 1 + word_width
+        };
         if needed > width && !current.is_empty() {
             rows.push(std::mem::take(&mut current));
             current.push_str(word);
@@ -635,7 +649,9 @@ mod tests {
     #[test]
     fn render_lines_caps_to_max_rows_keeping_the_cursor() {
         let mut prompt = Prompt::new("> ");
-        prompt.editor_mut().insert_str("a b c d e f g h i j k l m n o p");
+        prompt
+            .editor_mut()
+            .insert_str("a b c d e f g h i j k l m n o p");
         // Width 6 (body 4) → 8 rows of natural content; cap to 3.
         let lines = prompt.render_lines(6, 3);
         assert_eq!(lines.len(), 3);
