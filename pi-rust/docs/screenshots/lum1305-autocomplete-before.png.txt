@@ -1,0 +1,166 @@
+# lum1305-autocomplete-before.png — chars, 120x34 cells
+
+===== LUM-1305 — pi-rust TUI: the composer's autocomplete dropdown now renders through the shared SelectList row layout (label column + aligned description column) instead of the editor's own `label  description` renderer. Both captures run this one scenario against two binaries built on the same tree: BEFORE = origin/feature/pi.rs (LUM-1274 tip), AFTER = LUM-1305 rebased onto it. Real binary + real PTY + pyte; the `probe` rows are the A/B markers (XFAIL on BEFORE, PASS on AFTER) and the `reject` rows name the layout the fix removed.  |  [1] 1. idle 120x34 (faux model) — no dropdown  (cursor 120,33, frame aae34914d16e, px 8f6537b151a1, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7647a6bd742b0                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+  assert PASS   reject       '❯ '
+
+===== LUM-1305 — pi-rust TUI: the composer's autocomplete dropdown now renders through the shared SelectList row layout (label column + aligned description column) instead of the editor's own `label  description` renderer. Both captures run this one scenario against two binaries built on the same tree: BEFORE = origin/feature/pi.rs (LUM-1274 tip), AFTER = LUM-1305 rebased onto it. Real binary + real PTY + pyte; the `probe` rows are the A/B markers (XFAIL on BEFORE, PASS on AFTER) and the `reject` rows name the layout the fix removed.  |  [2] 2. type `/` — the command menu opens; description column = widest command + 2 (slash layout)  (cursor 36,32, frame b557deb12bf2, px e39fd8bba55e, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+❯ help  Show this help text
+  clear  Clear the message view
+  new  Start a new session
+  copy  Copy last agent message to clipboard
+  name  <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d7647a6bd742b0                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       'Show this help text'
+  assert PASS   expect       '(1/'
+  assert FAIL   expect       '  clear          Clear the message view'
+  assert FAIL   reject       '❯ help  Show this help text'
+  assert FAIL   reject       '  clear  Clear the message view'
+  assert XFAIL  probe        '❯ help           Show this help text'
+
+===== LUM-1305 — pi-rust TUI: the composer's autocomplete dropdown now renders through the shared SelectList row layout (label column + aligned description column) instead of the editor's own `label  description` renderer. Both captures run this one scenario against two binaries built on the same tree: BEFORE = origin/feature/pi.rs (LUM-1274 tip), AFTER = LUM-1305 rebased onto it. Real binary + real PTY + pyte; the `probe` rows are the A/B markers (XFAIL on BEFORE, PASS on AFTER) and the `reject` rows name the layout the fix removed.  |  [3] 3. type `mo` — the menu narrows; the primary column does not move  (cursor 6,32, frame b639fc8be023, px 839335051151, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+❯ model  <provider/model> — Select model (opens selector UI)
+  scoped-models  Configure which models Ctrl+P cycles
+  copy  Copy last agent message to clipboard
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  (1/8)
+> /mo▍
+Faux test model  session-18d7647a6bd742b0                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Select model (opens selector UI)'
+  assert PASS   expect       '(1/'
+  assert FAIL   expect       '❯ model          <provider/model> — Select model (opens selector UI)'
+  assert FAIL   reject       '❯ model  <provider/model>'
+  assert XFAIL  probe        '❯ model          <provider/model> — Select model (opens selector UI)'
+
+===== LUM-1305 — pi-rust TUI: the composer's autocomplete dropdown now renders through the shared SelectList row layout (label column + aligned description column) instead of the editor's own `label  description` renderer. Both captures run this one scenario against two binaries built on the same tree: BEFORE = origin/feature/pi.rs (LUM-1274 tip), AFTER = LUM-1305 rebased onto it. Real binary + real PTY + pyte; the `probe` rows are the A/B markers (XFAIL on BEFORE, PASS on AFTER) and the `reject` rows name the layout the fix removed.  |  [4] 4. Ctrl+U clears, then `@` — the file menu uses the default 32-column primary column (description at column 34)  (cursor 6,32, frame 814929a4b9f8, px e8f4ea09ba9f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ src/  src
+  README.md  README.md
+  Cargo.toml  Cargo.toml
+  main.rs  src/main.rs
+> @▍
+Faux test model  session-18d7647a6bd742b0                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Cargo.toml'
+  assert PASS   expect       'README.md'
+  assert FAIL   expect       '  Cargo.toml                      Cargo.toml'
+  assert FAIL   reject       '❯ src/  src'
+  assert XFAIL  probe        '❯ src/                            src'
+  assert XFAIL  probe        '  main.rs                         src/main.rs'

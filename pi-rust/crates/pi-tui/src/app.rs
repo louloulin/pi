@@ -5139,13 +5139,19 @@ impl App {
     /// above the editor, on top of the message view.
     ///
     /// The dropdown itself belongs to [`crate::Editor`] (candidates,
-    /// windowing, selection); the App only places it. Upstream draws the
-    /// list above the input and grows it towards older output
-    /// (`Editor.renderAutocomplete`), so the rows are anchored to the
-    /// editor's top edge and the prompt line is never covered. Without this
-    /// the provider could be installed and still show nothing, which is
-    /// exactly the state LUM-1236 found: the engine and the keyboard map
-    /// were in place, the paint call was not.
+    /// `SelectList` layout, windowing, selection); the App only places it and
+    /// hands the rows to the buffer. Upstream draws the list above the input
+    /// and grows it towards older output (`Editor.renderAutocomplete`), so the
+    /// rows are anchored to the editor's top edge and the prompt line is never
+    /// covered. Without this the provider could be installed and still show
+    /// nothing, which is exactly the state LUM-1236 found: the engine and the
+    /// keyboard map were in place, the paint call was not.
+    ///
+    /// The rows arrive as theme-slot spans from the shared `SelectList` layout
+    /// (LUM-1305), so the dropdown paints the same roles the modal pickers do —
+    /// plain label, `muted` description column, `accent` over `selectedBg` for
+    /// the highlighted row — instead of the App re-deriving a style from the
+    /// text.
     fn paint_autocomplete(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
         let editor = self.prompt.editor();
         if !editor.is_showing_autocomplete() || editor_area.width == 0 {
@@ -5159,7 +5165,7 @@ impl App {
             return;
         }
         let width = editor_area.width as usize;
-        let mut rows = editor.autocomplete_render_lines(width);
+        let mut rows = editor.autocomplete_render_styled_lines(width);
         if rows.is_empty() {
             return;
         }
@@ -5169,22 +5175,21 @@ impl App {
         if rows.len() > available {
             rows.drain(..rows.len() - available);
         }
-        let selected_style = SpanStyle::fg(ThemeColor::Accent);
-        let plain_style = SpanStyle::fg(ThemeColor::Muted);
         let first_row = editor_area.y - rows.len() as u16;
-        for (offset, row) in rows.iter().enumerate() {
-            let style = if row.starts_with('❯') {
-                selected_style
-            } else {
-                plain_style
-            };
-            // Pad to the full width so a short candidate never leaves the
-            // transcript's cells showing through on its right.
-            let mut text = row.clone();
-            text.push_str(&" ".repeat(width.saturating_sub(text.chars().count())));
-            let line = [StyledSpan::new(text, style)];
+        for (offset, line) in rows.iter().enumerate() {
             let y = first_row + offset as u16;
-            write_styled_line(buf, editor_area.x, y, editor_area.width, &line, &self.theme);
+            // Blank the borrowed row first: a candidate is shorter than the
+            // transcript line it covers, and ratatui only emits the cells this
+            // buffer changed — an unblanked row left the old output bleeding
+            // through on the right of the dropdown. `reset` also drops the
+            // covered cell's colours, so the row behind cannot tint the one on
+            // top. Same rule as the selector overlay below.
+            for col in 0..editor_area.width {
+                if let Some(cell) = buf.cell_mut((editor_area.x + col, y)) {
+                    cell.reset();
+                }
+            }
+            write_styled_line(buf, editor_area.x, y, editor_area.width, line, &self.theme);
         }
     }
 

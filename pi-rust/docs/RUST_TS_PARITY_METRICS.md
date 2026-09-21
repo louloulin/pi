@@ -174,6 +174,25 @@ TUI 轴的其余未达项（23 个 `app.*` 未接线、`@` 补全首行重复、
 **两个二进制 md5 不同**）在 `docs/screenshots/lum1310-{startup-ui-keys,quiet-startup-on,quiet-startup-off}-{before,after}.png`。
 TUI 轴的其余未达项（7 个 silent `app.*`、`/settings` 剩余的 31 行、`fullscreen*` 三项）本轮未动。
 
+### 0.7 LUM-1305 复测：composer 下拉框与模态选择器合并为同一套 `SelectList` 行布局（tip `feature/pi.rs` + 本轮）
+
+本轮把「下拉框」从编辑器侧的自绘渲染改成共享 `SelectList` 行布局，并亲自复测了三条轴：
+
+| 轴 | 本轮 | 上轮公开值 |
+|---|---|---|
+| TUI 模块数 | 33 / 42 = **78.6%** | 33/41 = 80.5%（上游文件数长了） |
+| `app.*` 接线率 | wired **43/44 = 97.7%**，advertised **0/44**，silent 1/44 | 37/44 = 84.1% |
+| 测试用例数（Rust / TS） | 2570 / 5439 = **47.3%** | 2,232 / 5,309 = 42.0% |
+
+**加权总分需更正一条口径**：§3.7 的「模块 80.5% 与快捷键 47.7% 的加权 = 58%」没有公开取法
+（50/50 得 64.1），改用公开公式 `轴5 = (模块率 + 接线率) / 2` 后，本轮加权为 **80.4%**
+（上轮公开值 76.05%；差额里 3.4pt 是这条口径，其余是接线率与用例数真实上表）。公式与逐项拆解见
+`docs/LUM1305_AUTOCOMPLETE_SELECT_LIST.md` §6。
+
+另外一条修正：§6 的第 7 条把 `@` 补全首行的「label 与 description 相同」当成缺陷，
+但上游就是 `label: entryName` + `description: displayPath`，**这不是 port 的错**（同条里的
+`#` 触发符缺口成立，保留为 P1）。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
@@ -360,7 +379,12 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 4. **P2 · slash 命令 8 个**：`thinking, scoped-models, import, share, changelog, login, logout, reload`。
 5. **P2 · 会话写入侧上游兼容**：当前只保证"读"上游 sqlite/JSONL 格式。
 6. **P3 · `powershell` 工具**：Windows 专属，本平台可不做。
-7. **已知 UI 细节缺陷（实测复现）**：`@` 文件补全候选首行 label/value 重复显示（截图 frame 7：`❯ src/  src`）；`#` 触发符没有任何 provider 支撑（截图 frame 8，输入 `#` 无候选）。
+7. **UI 细节项（LUM-1305 重新定性）**：`@` 文件补全首行的 `❯ src/  src` **不是缺陷**——上游
+   `packages/tui/src/autocomplete.ts:801-805` 就是 `label: entryName` + `description: displayPath`，
+   顶层条目两者天然相同，Rust 侧逐字对齐；LUM-1305 后它落在与模态选择器同一套对齐描述列上。
+   同一条里的另一半——`#` 触发符没有任何 provider 支撑（`DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS`
+   声明了 `#`）——**仍然成立**，降为 P1（与 `app.*` 假广告同类：宣传了但不干活），
+   详见 `docs/LUM1305_AUTOCOMPLETE_SELECT_LIST.md` §6.2。
 
 ## 7. 建议的推进顺序
 

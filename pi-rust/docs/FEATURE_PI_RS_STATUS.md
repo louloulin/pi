@@ -15328,3 +15328,50 @@ live stream 去续期 —— 建议单独开一个小切片（“扩展加载阶
   进程，两个同伴 run 均已收工，不再新增 stage。
 * 无新 stage 停放：本轮选的是审计 12.3 这一格（既有清单内、且不与 Stage 63/66 的文件面重叠），
   其余 P1 缺口（`app.clear` 双击窗口、jump-to-latest 指示器）依旧留在 12.4。
+
+## LUM-1305 round — composer 下拉框改走共享 `SelectList` 行布局（清掉编辑器侧第二套渲染）；真 PTY A/B；Rust↔TS 口径更正
+
+### 一、本轮交付
+
+issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉编辑器侧第二套渲染）」。审计确认这确实是
+**真缺口**：`Editor::autocomplete_render_lines`（`editor.rs`）自绘 `label + 两个空格 + description`（44 列
+以上才出描述），`App::paint_autocomplete` 再从行首 `❯` 反推样式；而 `selector.rs` 里已经有一份完整的
+`SelectList` 实现（列宽 clamp、描述列对齐、`accent`+`selectedBg` 选中行）。上游 `editor.ts:2224-2248`
+的 composer 下拉框**就是** `SelectList`，所以两份实现里编辑器侧那份是偏离。
+
+落地：
+
+* `selector.rs` 提炼共享件：`SelectListRow`（trait）、`SelectorLayout`（`new` / `slash_command` / `bounds` /
+  `primary_column_width`）、`select_list_visible_range`、`select_list_row_spans`；`Selector` 自己退化成委托。
+* `Editor::autocomplete_render_styled_lines`（新）+ `autocomplete_layout()`（slash 菜单 `[12,32]`，其余 `[32,32]`，
+  逐字对应 `editor.ts:2228`）；`autocomplete_render_lines` 保留为纯文本薄壳。
+* 删除 `autocomplete_visible_range`、`fn truncate_display`、App 的样式反推；下拉框借用的行先 `reset()`。
+* `AutocompleteItem` 实现 `SelectListRow`；新增回归门 `the_dropdown_and_the_modal_selector_share_one_row_layout`
+  （同一批候选，下拉框行 == 同 bounds 的 `Selector` 行，逐字节）。
+
+### 二、门禁与实测（最终树）
+
+* 最终树 = `4ad27d5f8`（LUM-1274 / LUM-1312 已合入的 `origin/feature/pi.rs` tip）+ 本轮提交：
+  `cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets --locked -- -D warnings` 0 findings；
+  `cargo test --workspace --locked` **exit 0，2570 passed / 0 failed**，164 suites（本轮新增 7 条用例）。
+* 真 PTY A/B（同一 scenario，改动前/后二进制建在同一棵树，`scripts/pty_scenarios/lum1305-autocomplete.json`）：
+  改动前 **10 PASS / 7 FAIL / 4 XFAIL**，改动后 **21 PASS / 0 FAIL / 0 XFAIL**；
+  截图 `docs/screenshots/lum1305-autocomplete{,-before}.png` + 字符网格 dump。
+  可见差异：`❯ help  Show this help text` → `❯ help           Show this help text`（主列 = 最宽命令 + 2），
+  `❯ src/  src` → `❯ src/                            src`（默认 32 列主列，描述第 34 列）。
+  列宽跟着命令表走：LUM-1274 落地 `/scoped-models`（13 列）后，同一个二进制的主列从 12 变成 15。
+
+### 三、Rust↔TS 口径更正（本轮亲自复测，不是引用）
+
+* TUI 模块 33/42 = 78.6%；`app.*` wired 43/44 = 97.7%、advertised 0/44、silent 1/44
+  （`scripts/app_action_coverage.py` 实跑，只剩 `app.tree.editLabel`）；测试用例 2570/5439 = 47.3%。
+* `RUST_TS_PARITY_METRICS.md` §3.7 的「模块 80.5% 与快捷键 47.7% 加权 = 58%」取法未公开（50/50 应为 64.1），
+  改用公开公式后本轮加权 **80.4%**（上轮公开值 76.05%）。已把该口径写进 §0.7。
+* §6 第 7 条「`@` 补全首行 label/value 重复」经核对**不是缺陷**（上游 `autocomplete.ts:801-805` 同构），
+  已在该文件改正，只保留同条里的 `#` 触发符缺口（P1）。
+
+### 四、槽位 / 派发
+
+**零派发**：「最多 3 个任务」是上限，本 issue 的交付在同一 run 内完成并过全量门，再派子任务只会把同一块
+代码面（`pi-tui` 行布局）拆成并发写者。下一轮序列（扩展生命周期事件 P0 +5.6pt、下拉框鼠标点选、`#` 触发起）
+列在 `docs/LUM1305_AUTOCOMPLETE_SELECT_LIST.md` §6.2，不新增 stage。
