@@ -274,15 +274,11 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // Cross-session prompt history (LUM-1319): submitted prompts are
         // appended to `~/.pi/agent/history.jsonl` and the tail is read back at
         // startup, so `Up` / `Ctrl+R` reach prompts from earlier processes.
-        // Resolved like every other agent-dir resource (themes, extensions):
-        // `$HOME/.pi/agent`, not `PI_HOME` — see the doc's limitations.
-        history_file: Some(crate::paths::agent_dir_or_default().join(HISTORY_FILE_NAME)),
+        // Resolved by [`crate::paths::history_file_path`] (the same agent dir
+        // themes and extensions come from).
+        history_file: Some(crate::paths::history_file_path()),
     }
 }
-
-/// File name of the cross-session prompt history inside the agent dir
-/// (`~/.pi/agent/history.jsonl`, codex's `history.jsonl`).
-const HISTORY_FILE_NAME: &str = "history.jsonl";
 
 /// Project the extension report onto the startup header's extension row.
 ///
@@ -3119,21 +3115,6 @@ async fn run_slash_command(
         }
         SlashCommand::Hotkeys => {
             app.info_block(crate::commands::slash::hotkeys_text());
-        }
-        SlashCommand::ClearHistory => {
-            // Explicit cleanup (the issue's "显式清理入口"): `/clear` keeps the
-            // history, this drops the in-session entries and deletes
-            // `~/.pi/agent/history.jsonl`, so the next start begins empty.
-            let path = app
-                .prompt()
-                .editor()
-                .history_store()
-                .map(|store| store.path().display().to_string());
-            app.prompt_mut().clear_persisted_history();
-            match path {
-                Some(path) => app.info(format!("Prompt history cleared ({path})")),
-                None => app.info("Prompt history cleared".to_string()),
-            }
         }
         SlashCommand::Extensions => {
             let home = crate::paths::home_dir();

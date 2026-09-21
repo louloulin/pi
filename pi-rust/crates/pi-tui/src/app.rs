@@ -1626,12 +1626,20 @@ impl App {
         lines
     }
 
-    /// The expanded header's tail: one row per resolvable hint, a blank row
-    /// and the onboarding line.
+    /// The expanded header's tail: one row per resolvable hint and the
+    /// onboarding line.
+    ///
+    /// The blank separator row upstream renders between the two
+    /// (`interactive-mode.ts:951`, `\n\n` in `expandedInstructions`) is
+    /// dropped: the header is chrome above the transcript, and every row it
+    /// takes is a row the transcript (and an open modal) does not get. The
+    /// hint list has already grown past upstream's — `app.header`,
+    /// `app.editor.external` and now the reverse-search chords — while
+    /// terminals have not, so the gap is what gives way (LUM-1319 §3.4).
     fn header_hint_lines(&self) -> Vec<StyledLine> {
         let kb = get_keybindings();
         let locale = self.config.locale;
-        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 2);
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 1);
         for hint in STARTUP_HINTS {
             // Two filters: the id must resolve to a chord in the live table
             // *and* name an action this port consumes. The second is what
@@ -1655,7 +1663,6 @@ impl App {
         if lines.is_empty() {
             return lines;
         }
-        lines.push(Vec::new());
         lines.push(vec![StyledSpan::new(
             locale
                 .tr(HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH)
@@ -4840,6 +4847,20 @@ impl App {
         // least one row. See the module docs for the order and
         // [`crate::extension_ui::plan_chrome`] for the budget.
         let message_height = layout.message;
+        // Where a modal overlay must stop: the top of the composer, not the
+        // bottom of the message viewport.
+        //
+        // Every overlay is painted from the top of the frame downwards (it is
+        // an overlay, so it is allowed to cover the startup header), and what
+        // it must never cover is the input the user is typing into. Until
+        // LUM-1319 the bound was `message_height`, which tied the modal's row
+        // budget to the *transcript*'s size — so one extra startup-header hint
+        // row silently cost the `/settings` modal its last row
+        // (`docs/LUM1319_HISTORY_PERSISTENCE.md` §3.4, LUM-1310's six-row
+        // assertion). Bounding it above the composer keeps the original
+        // guarantee (status + prompt stay outside) and makes the modal's
+        // visible rows independent of how tall the header happens to be.
+        let overlay_bottom = area.y + layout.header + layout.above + message_height;
         let (message_area, reserved) =
             self.viewport_for_render(message_rect(area, layout), scrollbar);
         let header_area = Rect {
@@ -4980,7 +5001,7 @@ impl App {
             let start_row = area.y + 1;
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
-                if y >= area.y + message_height {
+                if y >= overlay_bottom {
                     break;
                 }
                 // Blank the row first: the settings modal is the whole
@@ -5001,7 +5022,7 @@ impl App {
             let start_row = area.y;
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
-                if y >= area.y + message_height {
+                if y >= overlay_bottom {
                     break;
                 }
                 // Blank the row first: a modal must be readable even

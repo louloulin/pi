@@ -27,6 +27,20 @@ pub fn agent_dir_or_default() -> PathBuf {
     agent_dir().unwrap_or_else(|| PathBuf::from(CONFIG_DIR_NAME).join("agent"))
 }
 
+/// File name of the cross-session prompt history inside the agent directory
+/// (`~/.pi/agent/history.jsonl`, codex's own `history.jsonl`).
+pub const HISTORY_FILE_NAME: &str = "history.jsonl";
+
+/// The cross-session prompt history file (`<agent dir>/history.jsonl`).
+///
+/// Resolved like every other agent-dir resource (themes, extensions,
+/// keybindings): `$HOME/.pi/agent`. `PI_HOME` (which the *package* installer
+/// honours) deliberately does **not** redirect it — see
+/// `docs/LUM1319_HISTORY_PERSISTENCE.md` §4.
+pub fn history_file_path() -> PathBuf {
+    agent_dir_or_default().join(HISTORY_FILE_NAME)
+}
+
 /// Collapse `.` / `..` components without touching the filesystem.
 pub fn normalize_lexically(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();

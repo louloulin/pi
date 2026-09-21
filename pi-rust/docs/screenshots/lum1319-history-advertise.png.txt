@@ -1,6 +1,6 @@
-# lum1319-history-clear.png — chars, 120x34 cells
+# lum1319-history-advertise.png — chars, 120x34 cells
 
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [1] 1. idle 120x34: the startup header advertises the new reverse-search chord  (cursor 120,33, frame c1e634327d83, px c4a8a8185b29, alive=True) =====
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [1] 1. idle 120x34: the startup header advertises the new reverse-search chords  (cursor 120,33, frame 8fa1fe94c6d2, px 40716e9a1401, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -8,7 +8,7 @@ pi v0.1.0
   Ctrl+D to exit (empty)
   Ctrl+Z to suspend
   Ctrl+K to delete to end
-  Ctrl+R to search history
+  Ctrl+R/Ctrl+S to search history
   Shift+Tab to cycle thinking level
   Ctrl+P/Shift+Ctrl+P to cycle models
   Ctrl+L to select model
@@ -23,7 +23,6 @@ pi v0.1.0
   Alt+Up to edit all queued messages
   Ctrl+V to paste image (with text fallback)
   drop files to attach
-
 Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
 
 
@@ -33,49 +32,50 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 
-> type a prompt — /help for commands
-Faux test model  session-18d7671c1d864e9d                                                  in 0 out 0 ?/8.2k  ? for help
-  assert PASS   expect       'Ctrl+R to search history'
-
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [2] 2. Alt+H folds the header, so the transcript gets the rows /hotkeys needs  (cursor 120,33, frame 35a3d5b86cfd, px fa1c924815f1, alive=True) =====
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 > type a prompt — /help for commands
-Faux test model  session-18d7671c1d864e9d                   in 0 out 0 ?/8.2k  Startup header: collapsed (Alt+H to show)
+Faux test model  session-18d76eef7aae0581                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Ctrl+R/Ctrl+S to search history'
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [2] 2. Alt+H folds the header, so the transcript gets the rows /hotkeys needs  (cursor 120,33, frame fdba705bbfc6, px 5a54f2cb54b2, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76eef7aae0581                   in 0 out 0 ?/8.2k  Startup header: collapsed (Alt+H to show)
   assert PASS   expect       '> type a prompt'
-  assert PASS   probe        'Ctrl+R to search history' (x0)  — the hint rows are folded away
+  assert PASS   probe        'to search history' (x0)  — the hint rows are folded away
 
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [3] 3. the cross-process history is still recallable before the cleanup  (cursor 120,33, frame 23b7ee760251, px 9339c82fb59c, alive=True) =====
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [3] 3. the cross-process history is still recallable before the cleanup  (cursor 120,33, frame 7dc29c221c4f, px 50a208136e8b, alive=True) =====
 
 
 
@@ -109,10 +109,10 @@ Faux test model  session-18d7671c1d864e9d                   in 0 out 0 ?/8.2k  S
 
 
 > third prompt▍
-Faux test model  session-18d7671c1d864e9d                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eef7aae0581                                                  in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> third prompt'
 
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [4] 4. /hotkeys prints the keyboard legend (its tail, since the block is taller than the viewport)  (cursor 36,32, frame d4b9c5918d38, px fbe10a2751f8, alive=True) =====
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [4] 4. /hotkeys prints the keyboard legend (its tail, since the block is taller than the viewport)  (cursor 36,32, frame c421f5d789fb, px ccc7da1f8015, alive=True) =====
  ⋯ 46 lines above · Home  when the prompt is empty                                                                     │
 ·   Ctrl+Z           suspend to the background                                                                         │
 ·   Shift+Tab        cycle the thinking level                                                                          │
@@ -146,10 +146,10 @@ Faux test model  session-18d7671c1d864e9d                                       
 ·   Esc             close the selector / overlay first                                                                 ┃
 ·                                                                                                                      ┃
 > type a prompt — /help for commands
-Faux test model  session-18d7671c1d864e9d                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eef7aae0581                                                  in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'commands:'
 
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [5] 5. Home jumps to the top of the log, where both reverse-search rows are  (cursor 120,31, frame b18d41852391, px 80eb0e300208, alive=True) =====
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [5] 5. Home jumps to the top of the log, where both reverse-search rows are  (cursor 120,31, frame 1d3d75f78b49, px 318034023e32, alive=True) =====
 · keyboard shortcuts:                                                                                                  ┃
 ·                                                                                                                      ┃
 · navigation:                                                                                                          ┃
@@ -183,15 +183,16 @@ Faux test model  session-18d7671c1d864e9d                                       
 ·                                                                                                                      │
 · chat log:                                 ↓ Jump to latest message · End                                             │
 > type a prompt — /help for commands
-Faux test model  session-18d7671c1d864e9d                                                  in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eef7aae0581                                                  in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'navigation:'
   assert PASS   expect       'Ctrl+R'
   assert PASS   expect       'search the prompt history'
   assert PASS   expect       'Ctrl+S'
   assert PASS   expect       'prompt history search match'
 
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [7] 6. /clear-history drops the in-session history and deletes the file  (cursor 73,31, frame 245ef96532e3, px d7b0c51f359d, alive=True) =====
- ⋯ 47 lines above · Home end to the background                                                                         │
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [7] 6. the composer is back and still holds the cross-process recall  (cursor 36,32, frame b030f9bf8271, px 6d4492bc9237, alive=True) =====
+ ⋯ 46 lines above · Home  when the prompt is empty                                                                     │
+·   Ctrl+Z           suspend to the background                                                                         │
 ·   Shift+Tab        cycle the thinking level                                                                          │
 ·   Ctrl+P           cycle to the next model                                                                           │
 ·   Shift+Ctrl+P     cycle to the previous model                                                                       │
@@ -209,7 +210,7 @@ Faux test model  session-18d7671c1d864e9d                                       
 ·   Alt+R            resume a session                                                                                  │
 ·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             │
 ·                                                                                                                      │
-· selectors and completion:                                                                                            │
+· selectors and completion:                                                                                            ┃
 ·   Up               move the selection up                                                                             ┃
 ·   Down             move the selection down                                                                           ┃
 ·   PgUp             selection page up                                                                                 ┃
@@ -222,45 +223,6 @@ Faux test model  session-18d7671c1d864e9d                                       
 ·   /               slash commands (/help, /model, /hotkeys, …)                                                        ┃
 ·   Esc             close the selector / overlay first                                                                 ┃
 ·                                                                                                                      ┃
-> Prompt history cleared (/tmp/lum1319/run3/home/.pi/agent/history.jsonl)                                              ┃
-> type a prompt — /help for commands
-Faux test model  session-18d7671c1d864e9d                                                  in 0 out 0 ?/8.2k  ? for help
-  assert PASS   expect       'Prompt history cleared'
-
-===== LUM-1319 `/clear-history`: the startup header advertises `Ctrl+R to search history`, `/hotkeys` lists both reverse-search chords, and the explicit cleanup entry drops the in-session history *and* deletes the history file — after which `Up` has nothing to recall. Real binary + real PTY + pyte VT emulator.  |  [8] 7. with the file gone, Up has nothing to recall  (cursor 73,31, frame 245ef96532e3, px d7b0c51f359d, alive=True) =====
- ⋯ 47 lines above · Home end to the background                                                                         │
-·   Shift+Tab        cycle the thinking level                                                                          │
-·   Ctrl+P           cycle to the next model                                                                           │
-·   Shift+Ctrl+P     cycle to the previous model                                                                       │
-·   Ctrl+X           copy the last assistant message                                                                   │
-·   Alt+Enter        queue a follow-up message                                                                         │
-·   Alt+Up           restore queued messages to the editor                                                             │
-·   Ctrl+T           show or hide thinking blocks                                                                      │
-·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                │
-·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          │
-·   Ctrl+L           open the model selector                                                                           │
-·   Ctrl+G           edit the prompt in $EDITOR                                                                        │
-·   Alt+N            start a new session                                                                               │
-·   Alt+T            open the session tree                                                                             │
-·   Alt+F            fork a session from a message                                                                     │
-·   Alt+R            resume a session                                                                                  │
-·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             │
-·                                                                                                                      │
-· selectors and completion:                                                                                            │
-·   Up               move the selection up                                                                             ┃
-·   Down             move the selection down                                                                           ┃
-·   PgUp             selection page up                                                                                 ┃
-·   PgDn             selection page down                                                                               ┃
-·   Enter            confirm the selection                                                                             ┃
-·   Esc / Ctrl+C     close the selection list                                                                          ┃
-·   Tab              path completion / accept autocomplete                                                             ┃
-·                                                                                                                      ┃
-· commands:                                                                                                            ┃
-·   /               slash commands (/help, /model, /hotkeys, …)                                                        ┃
-·   Esc             close the selector / overlay first                                                                 ┃
-·                                                                                                                      ┃
-> Prompt history cleared (/tmp/lum1319/run3/home/.pi/agent/history.jsonl)                                              ┃
-> type a prompt — /help for commands
-Faux test model  session-18d7671c1d864e9d                                                  in 0 out 0 ?/8.2k  ? for help
-  assert PASS   expect       '> type a prompt'
-  assert PASS   probe        'reverse-i-search' (x0)  — no search mode is entered by Up
+> third prompt▍
+Faux test model  session-18d76eef7aae0581                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> third prompt'

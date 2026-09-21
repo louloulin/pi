@@ -78,12 +78,6 @@ pub enum SlashCommand {
     /// `/hotkeys` — list the effective keyboard shortcuts. Mirrors upstream
     /// `handleHotkeysCommand` (`interactive-mode.ts:6315`).
     Hotkeys,
-    /// `/clear-history` — drop the composer's prompt history: the in-session
-    /// entries **and** the cross-session file.
-    ///
-    /// `/clear` deliberately leaves history alone (upstream behaviour), so this
-    /// is the explicit cleanup entry point the history file needs.
-    ClearHistory,
     /// `/extensions` — list the loaded extensions and what they register
     /// (tools / commands / providers), plus any load failure and any tool
     /// a built-in shadowed.
@@ -138,7 +132,6 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "exit" | "quit" => SlashCommand::Exit,
         "trust" => SlashCommand::Trust(parse_trust_decision(args)),
         "hotkeys" => SlashCommand::Hotkeys,
-        "clear-history" => SlashCommand::ClearHistory,
         "extensions" => SlashCommand::Extensions,
         "reload" => SlashCommand::Reload,
         other => SlashCommand::Unknown(other.to_string()),
@@ -196,7 +189,6 @@ pub fn help_text() -> String {
     out.push_str("  /trust    show or set project trust (/trust yes|no)\n");
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
     out.push_str("  /hotkeys  list the keyboard shortcuts\n");
-    out.push_str("  /clear-history drop the prompt history and delete its file\n");
     out.push_str("  /extensions list loaded extensions and what they register\n");
     out.push_str("  /reload   re-read keybindings.json and the interface settings\n");
     out.push_str("  /exit     quit the interactive session\n");
@@ -271,11 +263,6 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         Some("[instructions]"),
     ),
     ("hotkeys", "Show all keyboard shortcuts", None),
-    (
-        "clear-history",
-        "Drop the prompt history and delete the history file",
-        None,
-    ),
     (
         "extensions",
         "List loaded extensions and what they register",
@@ -794,27 +781,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_clear_history_command() {
-        // `/clear-history` (LUM-1319) is the explicit cleanup entry the
-        // persistent prompt history needs; `/clear` keeps the file.
-        assert_eq!(
-            handle_command("/clear-history").unwrap(),
-            SlashCommand::ClearHistory
-        );
-        let text = help_text();
-        assert!(
-            text.contains("/clear-history"),
-            "/clear-history missing from:\n{text}"
-        );
-        assert!(
-            autocomplete_commands()
-                .iter()
-                .any(|command| command.name == "clear-history"),
-            "/clear-history missing from the composer dropdown"
-        );
-    }
-
-    #[test]
     fn hotkeys_text_lists_the_history_search_chords() {
         // LUM-1319 gave `tui.editor.historySearch` / `historySearchNext` a
         // consumer in the composer, so the legend has to advertise them.
@@ -1242,7 +1208,6 @@ mod tests {
             "trust",
             "compact",
             "hotkeys",
-            "clear-history",
             "extensions",
             "reload",
             "exit",

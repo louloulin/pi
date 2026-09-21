@@ -137,8 +137,9 @@ fn the_header_resolves_the_live_chords() {
     assert!(text.contains("Ctrl+Z to suspend"), "{text}");
     assert!(text.contains("Ctrl+E for external editor"), "{text}");
     // LUM-1319: the reverse history search is a real composer chord, so the
-    // header advertises it.
-    assert!(text.contains("Ctrl+R to search history"), "{text}");
+    // header advertises it — on one row with its newer/older partner chord,
+    // so the transcript does not lose a row to it.
+    assert!(text.contains("Ctrl+R/Ctrl+S to search history"), "{text}");
     assert!(text.contains("Shift+Tab to cycle thinking level"), "{text}");
     assert!(
         text.contains("Ctrl+P/Shift+Ctrl+P to cycle models"),

@@ -58,6 +58,13 @@ fn main() -> ExitCode {
         return run_export_cli(input, output);
     }
 
+    // `pi --clear-history` is the explicit cleanup entry point for the
+    // cross-session prompt history (LUM-1319): it deletes the file and exits,
+    // before the provider router, so it works with no credentials configured.
+    if cli.clear_history {
+        return clear_prompt_history_cli();
+    }
+
     let mut models = build_default_models();
     let model_override = cli
         .model
@@ -418,6 +425,27 @@ enum ModeTarget {
     Rpc,
     Session,
     Packages,
+}
+
+/// Run `pi --clear-history` and exit.
+///
+/// Deletes `<agent dir>/history.jsonl` — the composer's cross-session prompt
+/// history — and prints the path it cleared. A missing file is a success ("no
+/// history" is what the caller asked for), a permission error exits 74
+/// (`EX_IOERR`) with the path on stderr.
+fn clear_prompt_history_cli() -> ExitCode {
+    let path = pi_coding_agent::paths::history_file_path();
+    let store = pi_tui::history_store::HistoryStore::new(&path);
+    match store.clear() {
+        Ok(()) => {
+            println!("Cleared prompt history: {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("pi: could not clear {}: {err}", path.display());
+            ExitCode::from(74)
+        }
+    }
 }
 
 /// Run `pi --export <session.jsonl> [output.html]` and exit.

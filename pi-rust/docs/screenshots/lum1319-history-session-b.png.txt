@@ -1,6 +1,6 @@
 # lum1319-history-session-b.png — chars, 76x26 cells
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [1] 1. fresh process: Up recalls the newest prompt written by the previous process  (cursor 36,24, frame b7e8ab8de968, px 16c1781bc211, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [1] 1. fresh process: Up recalls the newest prompt written by the previous process  (cursor 36,24, frame 351fba035fb7, px 26eac18675d5, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -26,11 +26,11 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > third prompt▍
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> third prompt'
   assert PASS   probe        '> first prompt' (x0)  — Up starts at the newest entry: the transcript is empty in this process, so the only `> third prompt` is the recalled draft
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [2] 2. Down leaves the history again and restores the empty draft  (cursor 36,24, frame c23ee6174804, px a23f80882c17, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [2] 2. Down leaves the history again and restores the empty draft  (cursor 36,24, frame 6b6c3cbda5b2, px 946589c19f73, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -56,10 +56,10 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> type a prompt'
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [3] 3. Ctrl+R opens the reverse search with an empty query: no preview, no draft damage  (cursor 2,24, frame 9cf0334cd54f, px 3eef57286ae4, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [3] 3. Ctrl+R opens the reverse search with an empty query: no preview, no draft damage  (cursor 2,24, frame 13fda7d62950, px a7b8a3944008, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -85,11 +85,11 @@ hints hidden on a short terminal — Alt+H shows them
 
 reverse-i-search:
 > type a prompt — /help for commands
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'reverse-i-search:'
   assert PASS   probe        'third prompt' (x0)  — codex's Idle state: opening the search previews nothing until a query is typed
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [4] 4. typing `prompt` filters the history and previews the newest match  (cursor 36,24, frame ca3a50cefd87, px 31bcd28647fb, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [4] 4. typing `prompt` filters the history and previews the newest match  (cursor 36,24, frame 2d1702ee454a, px f91b4ccb3ecc, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -115,13 +115,13 @@ hints hidden on a short terminal — Alt+H shows them
 
 reverse-i-search: prompt  Enter accept · Esc cancel
 > third prompt▍
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'reverse-i-search: prompt'
   assert PASS   expect       'Enter accept'
   assert PASS   expect       'Esc cancel'
   assert PASS   expect       '> third prompt'
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [5] 5. Ctrl+R again steps to the older unique match  (cursor 16,24, frame ee37e46fd9be, px fb9d0feabe72, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [5] 5. Ctrl+R again steps to the older unique match  (cursor 16,24, frame 34a58e855e36, px 255eddca73ea, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -147,10 +147,10 @@ hints hidden on a short terminal — Alt+H shows them
 
 reverse-i-search: prompt  Enter accept · Esc cancel
 > second prompt▍
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> second prompt'
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [6] 6. Ctrl+R at the oldest match keeps it (boundary, not a miss)  (cursor 16,24, frame e6025bf0585b, px 2e8da2e0621f, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [6] 6. Ctrl+R at the oldest match keeps it (boundary, not a miss)  (cursor 16,24, frame 65e1bfc6e0d3, px 7406002280aa, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -176,11 +176,11 @@ hints hidden on a short terminal — Alt+H shows them
 
 reverse-i-search: prompt  Enter accept · Esc cancel
 > first prompt▍
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> first prompt'
   assert PASS   expect       'no match' (x0)  — a boundary is not a miss
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [7] 7. Esc cancels the search and restores the pre-search draft  (cursor 36,24, frame c23ee6174804, px a23f80882c17, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [7] 7. Esc cancels the search and restores the pre-search draft  (cursor 36,24, frame 6b6c3cbda5b2, px 946589c19f73, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -206,11 +206,11 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> type a prompt'
   assert PASS   probe        'reverse-i-search' (x0)  — the search row is gone with the mode
 
-===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [8] 8. Up recalls and Enter submits the cross-process prompt  (cursor 25,3, frame 017103812b26, px abc38468d8a7, alive=True) =====
+===== LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.  |  [8] 8. Up recalls and Enter submits the cross-process prompt  (cursor 25,3, frame 4f06666c8e3b, px eb2d2b91b398, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 > third prompt
@@ -236,5 +236,5 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d766f1fe78b66e      in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d76eebb39037ef      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> third prompt'
