@@ -437,6 +437,17 @@ const SCROLLBAR_COLUMNS: u16 = 1;
 /// (`packages/coding-agent/src/modes/interactive/tui-renderer.ts:29-33`).
 const SCROLL_TO_END_LABEL: &str = " ↓ Jump to latest message ";
 
+/// Leading half of the "cut above" hint's label, followed by the number of
+/// hidden lines and the key that jumps to the log's head.
+///
+/// This is the one piece of transcript furniture that has no upstream
+/// counterpart: upstream renders nothing when the top edge of the viewport
+/// lands in the middle of a block, so a block taller than the viewport (a
+/// `/help` dump, a long tool result, a long answer) is indistinguishable from
+/// a block that simply *starts* there. See
+/// `docs/TUI_TRUNCATION_AFFORDANCE_LUM1273.md`.
+const TRUNCATED_ABOVE_LEAD: &str = " ⋯ ";
+
 /// Configuration knobs for the App.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -1079,6 +1090,12 @@ pub struct App {
     /// record in `scrollToEndIndicatorRect`
     /// (`packages/tui/src/tui-alt-screen.ts:222,1618-1634`).
     scroll_to_end: (AtomicU16, AtomicU16, AtomicU16),
+    /// Rectangle of the "cut above" hint as of the last render:
+    /// `(row, column, width)`. `width == 0` means it was not painted —
+    /// either the top edge is a block boundary or the reader has scrolled
+    /// away from the tail. Same shape as [`App::scroll_to_end`] for the
+    /// same reason: the pointer reads it between renders.
+    truncated_above: (AtomicU16, AtomicU16, AtomicU16),
     /// Active chat-log text selection, if any.
     selection: Option<Selection>,
     /// Region-local cell of a left press that landed inside a modal overlay,
@@ -1241,6 +1258,7 @@ impl App {
             viewport_height: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
+            truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             selection: None,
             search: None,
             modal_mouse_press: None,
@@ -3393,6 +3411,128 @@ impl App {
         self.scroll_to_end.2.store(width, Ordering::Relaxed);
     }
 
+    /// Rectangle of the "cut above" hint as of the last render, or `None`
+    /// when the top edge of the viewport is a block boundary (or the reader
+    /// has scrolled away from the tail) and nothing was painted.
+    pub fn truncated_above_rect(&self) -> Option<Rect> {
+        let width = self.truncated_above.2.load(Ordering::Relaxed);
+        (width > 0).then(|| Rect {
+            x: self.truncated_above.1.load(Ordering::Relaxed),
+            y: self.truncated_above.0.load(Ordering::Relaxed),
+            width,
+            height: 1,
+        })
+    }
+
+    /// How many lines of the block at the viewport's top edge are off-screen
+    /// above it, or `None` when there is nothing to disclose.
+    ///
+    /// The transcript is laid out as items, and [`MessageView::item_line_ranges`]
+    /// gives each item's row span in the same layout the renderer uses, so a
+    /// top edge that falls strictly *inside* one span is exactly "this block
+    /// is cut" — as opposed to a top edge that coincides with a boundary,
+    /// which every scrolled transcript has and which hides nothing.
+    ///
+    /// Only reported while the viewport is pinned to the tail. A detached
+    /// reader already has the jump-to-latest pill telling them where they
+    /// are; showing both would spend a second transcript row to say what the
+    /// first one already says.
+    pub fn truncated_above_lines(&self) -> Option<usize> {
+        let (width, height) = self.viewport();
+        // One row is not a viewport: the hint would be the whole transcript.
+        if width == 0 || height < 2 {
+            return None;
+        }
+        if !self.messages.is_following() || self.resolved_scroll() != 0 {
+            return None;
+        }
+        let total = self.messages.line_count(width);
+        let start = total.saturating_sub(height as usize);
+        if start == 0 {
+            return None;
+        }
+        let (item_start, _) = self
+            .messages
+            .item_line_ranges(width)
+            .into_iter()
+            .find(|(from, to)| *from <= start && start < *to)?;
+        let hidden = start - item_start;
+        (hidden > 0).then_some(hidden)
+    }
+
+    /// The hint's label: ` ⋯ <n> line(s) above · <shortcut> ` — the prompt
+    /// half of the affordance, resolved from `tui.altScreen.top` (the key it
+    /// actually points at) with the same unbound-action rule
+    /// [`App::scroll_to_end_label`] follows.
+    fn truncated_above_label(&self, hidden: usize) -> StyledSpan {
+        let shortcut = get_keybindings()
+            .get_keys("tui.altScreen.top")
+            .iter()
+            .map(|chord| format_chord(chord))
+            .collect::<Vec<_>>()
+            .join("/");
+        let noun = if hidden == 1 { "line" } else { "lines" };
+        let base = format!("{TRUNCATED_ABOVE_LEAD}{hidden} {noun} above ");
+        let text = if shortcut.is_empty() {
+            base
+        } else {
+            format!("{base}· {shortcut} ")
+        };
+        StyledSpan {
+            text,
+            style: SpanStyle::fg(ThemeColor::Muted),
+            link: None,
+        }
+    }
+
+    /// Disclose that the block at the top edge of the viewport continues
+    /// above it, on the viewport's first row, left-aligned and never wider
+    /// than the space left of the scrollbar column.
+    ///
+    /// The covered row is a continuation row of a block the reader cannot see
+    /// the head of, so the trade is one unreadable old line for knowing that
+    /// there is something to look for — the alternative (paint nothing, as
+    /// upstream does) leaves a cut block looking like a block that starts
+    /// there.
+    fn paint_truncated_above(&self, message_area: Rect, buf: &mut Buffer) {
+        // Every path out clears the record, so a stale rectangle can never
+        // keep swallowing clicks after the hint is gone.
+        self.truncated_above.2.store(0, Ordering::Relaxed);
+        if message_area.width == 0 || message_area.height < 2 {
+            return;
+        }
+        let Some(hidden) = self.truncated_above_lines() else {
+            return;
+        };
+        let available = match self.scrollbar_geometry() {
+            Some(geometry) if geometry.column > message_area.x => {
+                (geometry.column - message_area.x).min(message_area.width)
+            }
+            _ => message_area.width,
+        };
+        let label = self.truncated_above_label(hidden);
+        let label_width = crate::hyperlink::visible_width(&label.text) as u16;
+        if label_width == 0 || available == 0 {
+            return;
+        }
+        let width = label_width.min(available);
+        let column = message_area.x;
+        let row = message_area.y;
+        // Blank the covered cells first, for the same reason the pill does:
+        // ratatui only emits the cells this buffer changed, so an unblanked
+        // row would let the covered text bleed through the hint's tail.
+        for offset in 0..width {
+            if let Some(cell) = buf.cell_mut((column + offset, row)) {
+                cell.reset();
+            }
+        }
+        let line = [label];
+        write_styled_line(buf, column, row, width, &line, &self.theme);
+        self.truncated_above.0.store(row, Ordering::Relaxed);
+        self.truncated_above.1.store(column, Ordering::Relaxed);
+        self.truncated_above.2.store(width, Ordering::Relaxed);
+    }
+
     /// Whether the pointer currently rests on the chat-log scrollbar.
     ///
     /// Upstream's `scrollbarHover`
@@ -3655,6 +3795,24 @@ impl App {
                 self.scrollbar_hover = false;
                 self.scrollbar_drag = None;
                 self.messages.set_following(true);
+                return StepOutcome::Redraw;
+            }
+        }
+        // The "cut above" hint is the second piece of transcript furniture to
+        // get the pointer: it advertises `tui.altScreen.top`, so a left press
+        // on it does exactly what that key does — never a selection of cells
+        // the hint is covering.
+        if let Some(rect) = self.truncated_above_rect() {
+            let on_hint = gesture.y == rect.y
+                && gesture.x >= rect.x
+                && gesture.x < rect.x.saturating_add(rect.width);
+            if on_hint && matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)) {
+                self.stop_selection_autoscroll();
+                self.selection = None;
+                self.selection_dragging = false;
+                self.scrollbar_hover = false;
+                self.scrollbar_drag = None;
+                self.scroll_viewport_to_top();
                 return StepOutcome::Redraw;
             }
         }
@@ -4631,8 +4789,10 @@ impl App {
         // which is also what keeps `/transcript` free of screen furniture.
         if scrollbar {
             self.paint_scroll_to_end(message_area, buf);
+            self.paint_truncated_above(message_area, buf);
         } else {
             self.scroll_to_end.2.store(0, Ordering::Relaxed);
+            self.truncated_above.2.store(0, Ordering::Relaxed);
         }
 
         // The editor region: a custom component (a non-overlay `custom`
