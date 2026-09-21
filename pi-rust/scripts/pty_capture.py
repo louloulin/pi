@@ -50,7 +50,8 @@ scenario exit *gracefully* — `<C-d>` quits the TUI, which is the only way
 the process runs its shutdown path (extension `session_shutdown`).
 
 `send` is literal text plus key tokens: `<Enter> <Esc> <Tab> <BS> <Up>
-<Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>`.
+<Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>
+<M-a>..<M-z> <M-Up> <M-Down> <M-Left> <M-Right>`.
 Every panel is fed into the *same* process, so panels are cumulative
 frames of one interactive session. `skip_capture` drives the UI without
 emitting a panel (useful for intermediate keystrokes). `wait_for` (with
@@ -128,9 +129,25 @@ _KEY_TOKENS = {
     "<F2>": "\x1bOQ",
     "<F3>": "\x1bOR",
     "<BackTab>": "\x1b[Z",
+    # Alt+arrow in the xterm CSI-modifier encoding (`ESC [ 1 ; 3 A` = "cursor up
+    # with modifier 3 = Alt"), which is what a real terminal sends and what
+    # crossterm decodes into Alt+Arrow. Needed by the `/scoped-models` reorder
+    # chords (`app.models.reorderUp` / `reorderDown` default to
+    # `alt+up` / `alt+down`).
+    #
+    # The deprecated `ESC ESC [ A` form must not be used here: the first `ESC`
+    # is delivered on its own and closes whatever overlay is open before the
+    # arrow ever arrives (LUM-1274 measured exactly that).
+    "<M-Up>": "\x1b[1;3A",
+    "<M-Down>": "\x1b[1;3B",
+    "<M-Left>": "\x1b[1;3D",
+    "<M-Right>": "\x1b[1;3C",
 }
 for _c in "abcdefghijklmnopqrstuvwxyz":
     _KEY_TOKENS[f"<C-{_c}>"] = chr(ord(_c) - ord("a") + 1)
+    # Alt+letter arrives as `ESC` followed by the letter (the `metaSendsEscape`
+    # terminal convention), which crossterm decodes as Alt+Char.
+    _KEY_TOKENS[f"<M-{_c}>"] = "\x1b" + _c
 _KEY_TOKENS["<C-[>"] = "\x1b"
 
 

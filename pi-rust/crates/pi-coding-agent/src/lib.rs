@@ -67,6 +67,7 @@ pub mod provider;
 mod reload;
 pub mod resource_loader;
 pub mod rpc;
+pub mod scoped_models;
 pub mod session_log;
 pub mod skills;
 pub mod system_prompt;
