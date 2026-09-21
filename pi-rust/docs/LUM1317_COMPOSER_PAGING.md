@@ -11,9 +11,9 @@ composer 窗口从「按光标所在页整页对齐」换成**逐行跟随光标
 
 证据是**同一份**场景 `scripts/pty_scenarios/lum1317-composer-paging.json`（9 面板，76×26，
 `--model faux/faux-model`）跑在**两个真二进制**上：`4ad27d5f8`（改动前基线，`feature/pi.rs`
-当时的树）与 `cc53297c4`（本轮）。
+当时的树）与 `2fe76f71a`（本轮，含与 `origin/feature/pi.rs` 的合并）。
 
-| 行为 | 改动前（`4ad27d5f8`） | 改动后（`cc53297c4`） |
+| 行为 | 改动前（`4ad27d5f8`） | 改动后（`2fe76f71a`） |
 |---|---|---|
 | 12 行草稿 + `PgUp` | `tui.altScreen.pageUp` 先截走 → **聊天记录翻页**：视口脱钩，底部出现 `↓ Jump to latest message`（面板 4 的那条 FAIL 就是它） | 草稿溢出窗口 → `tui.editor.pageUp`：光标 11 → 3，窗口 4 → 3；**pill 不出现**，transcript 一个像素没动（面板 4） |
 | 草稿滚动窗口 | `scroll_window_start()`：`page = (cursor_row / show_rows) * show_rows`，光标在一个页内移动时窗口不动，跨页时**整页跳** | `follow_cursor()`：`cursor_row < start → start = cursor_row`；`cursor_row >= start + show_rows → start = cursor_row + 1 - show_rows`，**逐行**跟随（面板 5/6/7：`↑2` → `↑1` → `> `） |
@@ -108,10 +108,12 @@ assertions: 24 checks over 9 panels — 24 PASS, 0 FAIL, 0 XFAIL, 0 XPASS
 |---|---|
 | `cargo fmt --all -- --check` | PASS（无 diff） |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS（exit 0，无 warning/error） |
-| `cargo test --workspace --locked` | **2575 passed / 0 failed / 2 ignored（165 suites）**（本轮前基线 2563/164） |
-| 真 PTY 断言 `lum1317-composer-paging` | **24/24 PASS**（9 面板，76×26，见 §1 与附件截图） |
+| `cargo test --workspace --locked` | **2582 passed / 0 failed / 2 ignored（165 suites）**（合并 `origin/feature/pi.rs` 前的本轮树是 2575/165；本轮前的基线 2563/164） |
+| `cargo fmt --all -- --check`（合并后复测） | PASS（无 diff） |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings`（合并后复测） | PASS（exit 0，无 warning/error） |
+| 真 PTY 断言 `lum1317-composer-paging`（合并后复测） | **24/24 PASS**（9 面板，76×26，见 §1 与附件截图） |
 | 同一场景跑基线 `4ad27d5f8` | 14 PASS / 1 FAIL / 9 XFAIL（BEFORE 证据） |
-| 既有场景回归（基线 vs 本轮，同一二进制对同一份 json） | `lum1267` **47 PASS / 11 FAIL / 2 XFAIL 与基线逐条一致**；`lum1271` 39/40 + 1 FAIL 与基线逐条一致；`lum1312-chatinput-multiline` 19/19、`lum1312-full-tui` 7/7、`lum1282` 7/7、`lum1308` 5/5、`lum1298` 12/13（那 1 条 XFAIL 与基线相同）；`lum1260` / `lum1257` / `lum1259` / `input-surface` 为截图场景（无断言）exit 0 |
+| 既有场景回归（基线 vs 本轮，同一二进制对同一份 json） | `lum1267` **47 PASS / 11 FAIL / 2 XFAIL 与基线逐条一致**；`lum1271` 39/40 + 1 FAIL 与基线逐条一致；`lum1305-autocomplete` 21/21；`lum1312-chatinput-multiline` 19/19、`lum1312-full-tui` 7/7、`lum1282` 7/7、`lum1308` 5/5、`lum1298` 12/13（那 1 条 XFAIL 与基线相同）；`lum1260` / `lum1257` / `lum1259` / `input-surface` 为截图场景（无断言）exit 0 |
 | `scripts/app_action_coverage.py` | `wired 43/44 (97.7%)`、`advertised 0/44`（本轮不动 `app.*` 轴） |
 | `tui.editor.*` + `tui.input.*` id | 27 个 id，直接消费 **23/27 → 25/27**（新增的正是 `tui.editor.pageUp` / `pageDown`；剩 2 个是默认不绑定的 `historyPrevious` / `historyNext`，`Up/Down` 走到 history 由上游规则覆盖） |
 
