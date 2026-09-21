@@ -89,6 +89,17 @@ const SELECTOR_SCOPED: &[&str] = &[
     "app.tree.filter.all",
     "app.tree.filter.cycleForward",
     "app.tree.filter.cycleBackward",
+    // LUM-1274: the six `app.models.*` chords answer only while the
+    // `/scoped-models` panel is open, and upstream advertises them in that
+    // panel's own footer (`scoped-models-selector.ts:204-208`) rather than in
+    // `/hotkeys` — whose table lists only the cycle/select chords. The port
+    // renders the same footer.
+    "app.models.save",
+    "app.models.enableAll",
+    "app.models.clearAll",
+    "app.models.toggleProvider",
+    "app.models.reorderUp",
+    "app.models.reorderDown",
 ];
 
 /// `install_keybindings_from` and `reset_keybindings` mutate process state,

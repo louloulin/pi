@@ -25,6 +25,10 @@ pub enum SlashCommand {
     },
     /// `/model` — open the model selector.
     Model,
+    /// `/scoped-models` — open the model configuration panel (which models
+    /// the `Ctrl+P` cycle walks). Mirrors upstream
+    /// `showModelsSelector` / `ScopedModelsSelectorComponent`.
+    ScopedModels,
     /// `/session` — print session info.
     Session,
     /// `/export [path]` — write the current session to a file.
@@ -109,6 +113,7 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
             name: (!args.is_empty()).then(|| args.to_string()),
         },
         "model" => SlashCommand::Model,
+        "scoped-models" => SlashCommand::ScopedModels,
         "session" => SlashCommand::Session,
         "export" => SlashCommand::Export {
             path: (!args.is_empty()).then(|| strip_quotes(args)),
@@ -170,6 +175,7 @@ pub fn help_text() -> String {
     out.push_str("  /copy     copy the last assistant message to the clipboard\n");
     out.push_str("  /name [name] show or set the session display name\n");
     out.push_str("  /model    pick a model (opens selector)\n");
+    out.push_str("  /scoped-models configure which models Ctrl+P cycles\n");
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /export [path] export the session (HTML, or JSONL for a .jsonl path)\n");
     out.push_str("  /resume   resume a previous session\n");
@@ -218,6 +224,11 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "model",
         "Select model (opens selector UI)",
         Some("<provider/model>"),
+    ),
+    (
+        "scoped-models",
+        "Configure which models Ctrl+P cycles",
+        None,
     ),
     ("session", "Show session info and stats", None),
     (
@@ -1157,6 +1168,7 @@ mod tests {
             "copy",
             "name",
             "model",
+            "scoped-models",
             "session",
             "export",
             "resume",

@@ -1,0 +1,353 @@
+# lum1274-scoped-models.png — chars, 120x34 cells
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [1] 1. shipped startup header on the post-LUM-1308 binary (unchanged by this round)  (cursor 120,33, frame 54293b583e1d, px 8da1bc1156fd, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+  assert PASS   expect       'Faux test model'
+  assert PASS   expect       'Ctrl+O to expand tools'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [2] 2. Alt+H hides the header, /scoped-models opens the panel: title, checked rows with provider column, key legend footer  (cursor 85,22, frame 2c48643659db, px c9f57cce52b8, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+❯ ✓ ant-ling/Ling-2.6-1T          ant-ling
+  ✓ ant-ling/Ling-2.6-flash       ant-ling
+  ✓ ant-ling/Ring-2.6-1T          ant-ling
+  ✓ anthropic/claude-haiku-4-5    anthropic
+  ✓ anthropic/claude-opus-4-5     anthropic
+  ✓ anthropic/claude-sonnet-4-5   anthropic
+  ✓ azure-openai-responses/gpt-4  azure-openai-responses
+  ✓ azure-openai-responses/gpt-4  azure-openai-responses
+  (1/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  all enabled
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Model Configuration'
+  assert PASS   expect       'Enter toggle · Ctrl+A enable all · Ctrl+X clear all'
+  assert PASS   expect       'Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save'
+  assert PASS   expect       'Session-only. Ctrl+S to save to settings.'
+  assert PASS   expect       'all enabled'
+  assert PASS   probe        'ant-ling/Ling-2.6-1T'
+  assert PASS   probe        'anthropic/claude-haiku-4-5'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [3] 3. Enter (tui.select.confirm) toggles the highlighted model off — panel stays open, footer flips to (unsaved)  (cursor 27,15, frame 612ea90dabc9, px 2d6a03f2ce5e, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+  ✓ zai/glm-5.1                   zai
+  ✓ zai/glm-5.2                   zai
+  ✓ zai/glm-5.3                   zai
+  ✓ zai-coding-cn/glm-4.6v        zai-coding-cn
+  ✓ zai-coding-cn/glm-5.1         zai-coding-cn
+  ✓ zai-coding-cn/glm-5.3         zai-coding-cn
+  ✓ zai-coding-cn/glm-5v-turbo    zai-coding-cn
+❯ ant-ling/Ling-2.6-1T            ant-ling
+  (192/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  191/192 enabled (unsaved)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '191/192 enabled (unsaved)'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [4] 4. Ctrl+X (app.models.clearAll) empties the scope  (cursor 27,15, frame b28896129b62, px 7bee148dc96f, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+❯ ant-ling/Ling-2.6-1T            ant-ling
+  ant-ling/Ling-2.6-flash         ant-ling
+  ant-ling/Ring-2.6-1T            ant-ling
+  anthropic/claude-haiku-4-5      anthropic
+  anthropic/claude-opus-4-5       anthropic
+  anthropic/claude-sonnet-4-5     anthropic
+  azure-openai-responses/gpt-4    azure-openai-responses
+  azure-openai-responses/gpt-4-t  azure-openai-responses
+  (1/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  0/192 enabled (unsaved)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '0/192 enabled (unsaved)'
+  assert PASS   reject       'all enabled'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [5] 5. Ctrl+A (app.models.enableAll) puts every model back  (cursor 25,15, frame a63c38fe306e, px 0e2423e15598, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+❯ ✓ ant-ling/Ling-2.6-1T          ant-ling
+  ✓ ant-ling/Ling-2.6-flash       ant-ling
+  ✓ ant-ling/Ring-2.6-1T          ant-ling
+  ✓ anthropic/claude-haiku-4-5    anthropic
+  ✓ anthropic/claude-opus-4-5     anthropic
+  ✓ anthropic/claude-sonnet-4-5   anthropic
+  ✓ azure-openai-responses/gpt-4  azure-openai-responses
+  ✓ azure-openai-responses/gpt-4  azure-openai-responses
+  (1/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  all enabled (unsaved)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'all enabled'
+  assert PASS   reject       '0/192'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [6] 6. Ctrl+P (app.models.toggleProvider) on the highlighted ant-ling row disables that whole provider  (cursor 27,15, frame 2249830ac68e, px 60afb26a3293, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+  ✓ zai/glm-5.3                   zai
+  ✓ zai-coding-cn/glm-4.6v        zai-coding-cn
+  ✓ zai-coding-cn/glm-5.1         zai-coding-cn
+  ✓ zai-coding-cn/glm-5.3         zai-coding-cn
+  ✓ zai-coding-cn/glm-5v-turbo    zai-coding-cn
+❯ ant-ling/Ling-2.6-1T            ant-ling
+  ant-ling/Ling-2.6-flash         ant-ling
+  ant-ling/Ring-2.6-1T            ant-ling
+  (190/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  189/192 enabled (unsaved)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '189/192 enabled'
+  assert PASS   probe        'ant-ling/Ling-2.6-flash'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [7] 7. Ctrl+X then Enter on row 0 and row 1: the scope is exactly the two ant-ling Ling models, in catalog order  (cursor 27,15, frame 8f99d477508b, px a46ce279c985, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+❯ ✓ ant-ling/Ling-2.6-1T          ant-ling
+  ✓ ant-ling/Ling-2.6-flash       ant-ling
+  ant-ling/Ring-2.6-1T            ant-ling
+  anthropic/claude-haiku-4-5      anthropic
+  anthropic/claude-opus-4-5       anthropic
+  anthropic/claude-sonnet-4-5     anthropic
+  azure-openai-responses/gpt-4    azure-openai-responses
+  azure-openai-responses/gpt-4-t  azure-openai-responses
+  (1/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  2/192 enabled (unsaved)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Model Configuration'
+  assert PASS   expect       '2/192 enabled (unsaved)'
+  assert PASS   expect       '✓ ant-ling/Ling-2.6-1T          ant-ling\n  ✓ ant-ling/Ling-2.6-flash       ant-ling'
+  assert PASS   probe        'ant-ling/Ling-2.6-1T'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [8] 8. Alt+Down (app.models.reorderDown) moves the highlighted model below its neighbour — the two rows swap, the (N/192) scroll counter moves with them  (cursor 4,11, frame 6cf018ec95e2, px 0ba00aa6ea65, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+  ✓ ant-ling/Ling-2.6-flash       ant-ling
+❯ ✓ ant-ling/Ling-2.6-1T          ant-ling
+  ant-ling/Ring-2.6-1T            ant-ling
+  anthropic/claude-haiku-4-5      anthropic
+  anthropic/claude-opus-4-5       anthropic
+  anthropic/claude-sonnet-4-5     anthropic
+  azure-openai-responses/gpt-4    azure-openai-responses
+  azure-openai-responses/gpt-4-t  azure-openai-responses
+  (2/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  2/192 enabled (unsaved)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '2/192 enabled (unsaved)'
+  assert PASS   expect       '(2/192)'
+  assert PASS   expect       '✓ ant-ling/Ling-2.6-flash       ant-ling\n❯ ✓ ant-ling/Ling-2.6-1T          ant-ling'
+  assert PASS   probe        'ant-ling/Ling-2.6-flash'
+
+===== LUM-1274 — `/scoped-models` ("Model Configuration") on the Rust port: the panel that consumes the last six silent `app.*` chords. Real binary + real PTY + pyte VT emulator, same harness / parser / binary as LUM-1286/1293/1294/1298/1308. Scene 1 is the shipped startup header; scene 2 hides it (Alt+H) and opens the panel, because the selector overlay is clipped to the transcript viewport and the 21-row startup header would cut the footer off (the filed P0 LUM-1262); scenes 3-9 walk the chord families.  |  [9] 9. Ctrl+S (app.models.save) persists the scope to settings.json — the footer says so and drops (unsaved)  (cursor 35,16, frame d011814a8000, px df559a95142a, alive=True) =====
+
+Model Configuration
+────────────────────────────────────────
+  ✓ ant-ling/Ling-2.6-flash       ant-ling
+❯ ✓ ant-ling/Ling-2.6-1T          ant-ling
+  ant-ling/Ring-2.6-1T            ant-ling
+  anthropic/claude-haiku-4-5      anthropic
+  anthropic/claude-opus-4-5       anthropic
+  anthropic/claude-sonnet-4-5     anthropic
+  azure-openai-responses/gpt-4    azure-openai-responses
+  azure-openai-responses/gpt-4-t  azure-openai-responses
+  (2/192)
+  Enter toggle · Ctrl+A enable all · Ctrl+X clear all
+  Ctrl+P toggle provider · Alt+Up / Alt+Down reorder · Ctrl+S save
+  Session-only. Ctrl+S to save to settings.
+  2/192 enabled
+  Model selection saved to settings
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761acf9584b8d                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Model selection saved to settings'
+  assert PASS   reject       '(unsaved)'
