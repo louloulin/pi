@@ -50,6 +50,28 @@
 //!   column at `DEFAULT_PRIMARY_COLUMN_WIDTH` columns unless the caller
 //!   overrides it with [`Selector::with_primary_column_width`]; widths are
 //!   counted in `char`s, exactly like the rest of this crate.
+//!
+//! # One row layout, two lists
+//!
+//! Upstream's `SelectList` is also what renders the composer's autocomplete
+//! dropdown: `Editor.createAutocompleteList` builds a `SelectList` and
+//! renders it under the composer (`components/editor.ts:2224-2248`, `:605-614`).
+//! The two consumers keep their own candidates — the modal pickers filter
+//! fuzzily, the dropdown follows an [`AutocompleteProvider`] — so the parts
+//! that must not drift are factored out as the `SelectList` primitives below:
+//!
+//! | upstream | here |
+//! |---|---|
+//! | `SelectList.getPrimaryColumnWidth` | [`SelectorLayout::primary_column_width`] |
+//! | `SelectList.renderItem` | [`select_list_row_spans`] |
+//! | `SelectList.getVisibleRange` | [`select_list_visible_range`] |
+//!
+//! [`Selector`] and [`Editor::autocomplete_render_styled_lines`] are both thin
+//! callers of those three, so a change to the description column, the width
+//! thresholds or the windowing lands in one place.
+//!
+//! [`AutocompleteProvider`]: crate::autocomplete::AutocompleteProvider
+//! [`Editor::autocomplete_render_styled_lines`]: crate::Editor::autocomplete_render_styled_lines
 
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::styled::{plain_text, themed_text, SpanStyle, StyledLine, StyledSpan};
@@ -67,14 +89,20 @@ const PRIMARY_COLUMN_GAP: usize = 2;
 const MIN_DESCRIPTION_WIDTH: usize = 10;
 /// Rows narrower than this render the label alone (upstream `width > 40`).
 const MIN_DESCRIPTION_LIST_WIDTH: usize = 40;
+/// Lower bound of the slash-command primary column, upstream
+/// `SLASH_COMMAND_SELECT_LIST_LAYOUT.minPrimaryColumnWidth`.
+const SLASH_COMMAND_MIN_PRIMARY_COLUMN_WIDTH: usize = 12;
+/// Upper bound of the slash-command primary column, upstream
+/// `SLASH_COMMAND_SELECT_LIST_LAYOUT.maxPrimaryColumnWidth`.
+const SLASH_COMMAND_MAX_PRIMARY_COLUMN_WIDTH: usize = 32;
 
-/// Primary-column width bounds for a [`Selector`] — the Rust equivalent of
+/// Primary-column width bounds for a `SelectList` — the Rust equivalent of
 /// upstream `SelectListLayoutOptions`.
 ///
 /// Upstream's default is a fixed 32-column primary column (the model and
 /// session pickers use it as-is). Callers that want the column to track the
 /// widest label pass explicit bounds through
-/// [`Selector::with_primary_column_width`].
+/// [`Selector::with_primary_column_width`] or [`SelectorLayout::slash_command`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectorLayout {
     /// Lower bound of the primary column, in `char` columns.
@@ -89,6 +117,184 @@ impl Default for SelectorLayout {
             min_primary_column_width: DEFAULT_PRIMARY_COLUMN_WIDTH,
             max_primary_column_width: DEFAULT_PRIMARY_COLUMN_WIDTH,
         }
+    }
+}
+
+impl SelectorLayout {
+    /// Explicit bounds for the primary column.
+    pub const fn new(min_primary_column_width: usize, max_primary_column_width: usize) -> Self {
+        Self {
+            min_primary_column_width,
+            max_primary_column_width,
+        }
+    }
+
+    /// The bounds upstream uses for the slash-command menu —
+    /// `SLASH_COMMAND_SELECT_LIST_LAYOUT` (`components/editor.ts:245-248`):
+    /// the column tracks the widest command name but never runs past 32, so
+    /// `/` completions keep room for their descriptions. Every other
+    /// completion context uses [`SelectorLayout::default`], exactly like
+    /// upstream's `prefix.startsWith("/") ? … : undefined`.
+    pub const fn slash_command() -> Self {
+        Self::new(
+            SLASH_COMMAND_MIN_PRIMARY_COLUMN_WIDTH,
+            SLASH_COMMAND_MAX_PRIMARY_COLUMN_WIDTH,
+        )
+    }
+
+    /// Normalised `(min, max)` bounds — upstream `getPrimaryColumnBounds`,
+    /// including its `Math.max(1, …)` floor for empty or inverted input.
+    pub fn bounds(self) -> (usize, usize) {
+        let raw_min = self.min_primary_column_width;
+        let raw_max = self.max_primary_column_width;
+        (raw_min.min(raw_max).max(1), raw_min.max(raw_max).max(1))
+    }
+
+    /// Width of the primary column for `rows` — upstream
+    /// `SelectList::getPrimaryColumnWidth`: the widest label plus
+    /// [`PRIMARY_COLUMN_GAP`], clamped to [`SelectorLayout::bounds`].
+    ///
+    /// The widest label is measured over *every* row the list would show,
+    /// not just the visible window, so scrolling never re-flows the column.
+    pub fn primary_column_width<'a, R>(self, rows: impl IntoIterator<Item = &'a R>) -> usize
+    where
+        R: SelectListRow + ?Sized + 'a,
+    {
+        let (min, max) = self.bounds();
+        let widest = rows
+            .into_iter()
+            .map(|row| display_width(display_value(row)) + PRIMARY_COLUMN_GAP)
+            .max()
+            .unwrap_or(0);
+        widest.max(min).min(max)
+    }
+}
+
+/// The three fields one `SelectList` row needs — upstream `SelectItem`.
+///
+/// Two row types in this crate carry exactly those fields:
+/// [`SelectorItem`] for the modal pickers and
+/// [`AutocompleteItem`](crate::autocomplete::AutocompleteItem) for the
+/// composer dropdown. The row layout is written once against this trait
+/// instead of once per type, which is what keeps the dropdown and the modal
+/// pickers from drifting apart.
+pub trait SelectListRow {
+    /// Payload of the row — what a pick returns.
+    fn value(&self) -> &str;
+    /// Human-readable label drawn in the primary column. An empty label
+    /// falls back to [`SelectListRow::value`] (upstream `getDisplayValue`).
+    fn label(&self) -> &str;
+    /// Optional secondary text drawn in the description column.
+    fn description(&self) -> Option<&str>;
+}
+
+impl SelectListRow for SelectorItem {
+    fn value(&self) -> &str {
+        &self.value
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+}
+
+/// The `(start, end)` window of rows to draw — upstream
+/// `SelectList::getVisibleRange`.
+///
+/// The window is centred on `selected` and clamped to the list; `None`
+/// means "no `maxVisible`", which draws the whole list (upstream's modal
+/// selectors and this crate's [`Selector`] default). A `max_visible` larger
+/// than the list is the same as no window at all, which is what upstream's
+/// arithmetic collapses to as well.
+pub fn select_list_visible_range(
+    len: usize,
+    selected: usize,
+    max_visible: Option<usize>,
+) -> (usize, usize) {
+    let Some(max_visible) = max_visible else {
+        return (0, len);
+    };
+    if len == 0 || max_visible >= len {
+        return (0, len);
+    }
+    let start = selected
+        .saturating_sub(max_visible / 2)
+        .min(len.saturating_sub(max_visible));
+    (start, start + max_visible)
+}
+
+/// Render one `SelectList` row — upstream `SelectList::renderItem`.
+///
+/// A row that has a description and enough horizontal room renders the
+/// description in a column that starts at the same offset on every row;
+/// otherwise it falls back to a width-clamped label alone.
+///
+/// The row is returned as theme-slot spans, so the same layout drives the
+/// modal [`Selector`], the composer dropdown and the ANSI renders: the
+/// selected row is wrapped whole (upstream `select-list.ts:205,216`), a
+/// non-selected description column is wrapped on its own
+/// (`select-list.ts:208`).
+pub fn select_list_row_spans<R>(
+    row: &R,
+    selected: bool,
+    width: usize,
+    primary_column_width: usize,
+) -> StyledLine
+where
+    R: SelectListRow + ?Sized,
+{
+    let marker = if selected { "❯ " } else { "  " };
+    let prefix_width = display_width(marker);
+
+    let display = display_value(row);
+    if let Some(description) = row.description() {
+        let description = normalize_single_line(description);
+        if !description.is_empty() && width > MIN_DESCRIPTION_LIST_WIDTH {
+            let column = primary_column_width
+                .min(width.saturating_sub(prefix_width + 4))
+                .max(1);
+            let label_width = column.saturating_sub(PRIMARY_COLUMN_GAP).max(1);
+            let truncated = truncate_to_width(display, label_width);
+            let truncated_width = display_width(&truncated);
+            let spacing = " ".repeat(column.saturating_sub(truncated_width).max(1));
+            let description_start = prefix_width + truncated_width + display_width(&spacing);
+            let remaining = width.saturating_sub(description_start + 2);
+            if remaining > MIN_DESCRIPTION_WIDTH {
+                let truncated_description = truncate_to_width(&description, remaining);
+                if selected {
+                    let body = format!("{marker}{truncated}{spacing}{truncated_description}");
+                    return vec![StyledSpan::new(
+                        body,
+                        SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
+                    )];
+                }
+                // Upstream wraps the gap and the description together:
+                // `this.theme.description(spacing + truncatedDesc)`
+                // (`select-list.ts:208`).
+                return vec![
+                    StyledSpan::new(format!("{marker}{truncated}"), SpanStyle::PLAIN),
+                    StyledSpan::new(
+                        format!("{spacing}{truncated_description}"),
+                        SpanStyle::fg(ThemeColor::Muted),
+                    ),
+                ];
+            }
+        }
+    }
+
+    let max_width = width.saturating_sub(prefix_width + 2).max(1);
+    let body = format!("{marker}{}", truncate_to_width(display, max_width));
+    if selected {
+        vec![StyledSpan::new(
+            body,
+            SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
+        )]
+    } else {
+        vec![StyledSpan::new(body, SpanStyle::PLAIN)]
     }
 }
 
@@ -552,51 +758,23 @@ impl Selector {
         self.max_visible.unwrap_or(10).max(1)
     }
 
-    /// Visible row range `(start, end)` — upstream `getVisibleRange`:
-    /// the window is centred on the cursor and clamped to the list.
+    /// Visible row range `(start, end)` — upstream `getVisibleRange`,
+    /// shared with the composer's autocomplete dropdown through
+    /// [`select_list_visible_range`].
     fn visible_range(&self) -> (usize, usize) {
-        let Some(max_visible) = self.max_visible else {
-            return (0, self.filtered.len());
-        };
-        let len = self.filtered.len();
-        if len == 0 {
-            return (0, 0);
-        }
-        let start = self
-            .cursor
-            .saturating_sub(max_visible / 2)
-            .min(len.saturating_sub(max_visible));
-        (start, (start + max_visible).min(len))
+        select_list_visible_range(self.filtered.len(), self.cursor, self.max_visible)
     }
 
     /// Width of the primary (label) column — upstream
-    /// `SelectList::getPrimaryColumnWidth`: the widest visible label plus
-    /// [`PRIMARY_COLUMN_GAP`], clamped to the configured bounds.
+    /// `SelectList::getPrimaryColumnWidth` over this selector's filtered
+    /// rows.
     fn primary_column_width(&self) -> usize {
-        let (min, max) = self.primary_column_bounds();
-        let widest = self
-            .filtered
-            .iter()
-            .filter_map(|idx| self.items.get(*idx))
-            .map(|item| display_width(display_value(item)) + PRIMARY_COLUMN_GAP)
-            .max()
-            .unwrap_or(0);
-        widest.max(min).min(max)
+        self.layout
+            .primary_column_width(self.filtered.iter().filter_map(|idx| self.items.get(*idx)))
     }
 
-    /// Normalised `(min, max)` bounds for the primary column — upstream
-    /// `getPrimaryColumnBounds`.
-    fn primary_column_bounds(&self) -> (usize, usize) {
-        let raw_min = self.layout.min_primary_column_width;
-        let raw_max = self.layout.max_primary_column_width;
-        (raw_min.min(raw_max).max(1), raw_min.max(raw_max).max(1))
-    }
-
-    /// Render one row — upstream `SelectList::renderItem`.
-    ///
-    /// A row that has a description and enough horizontal room renders the
-    /// description in a column that starts at the same offset on every row;
-    /// otherwise it falls back to a width-clamped label alone.
+    /// Render one row — upstream `SelectList::renderItem`, shared with the
+    /// composer's autocomplete dropdown through [`select_list_row_spans`].
     ///
     /// The row is returned as theme-slot spans, so the same layout drives the
     /// plain render, the ANSI `*_themed` render and the App's styled buffer:
@@ -610,55 +788,7 @@ impl Selector {
         width: usize,
         primary_column_width: usize,
     ) -> StyledLine {
-        let marker = if selected { "❯ " } else { "  " };
-        let prefix_width = display_width(marker);
-
-        let display = display_value(item);
-        if let Some(description) = &item.description {
-            let description = normalize_single_line(description);
-            if !description.is_empty() && width > MIN_DESCRIPTION_LIST_WIDTH {
-                let column = primary_column_width
-                    .min(width.saturating_sub(prefix_width + 4))
-                    .max(1);
-                let label_width = column.saturating_sub(PRIMARY_COLUMN_GAP).max(1);
-                let truncated = truncate_to_width(display, label_width);
-                let truncated_width = display_width(&truncated);
-                let spacing = " ".repeat(column.saturating_sub(truncated_width).max(1));
-                let description_start = prefix_width + truncated_width + display_width(&spacing);
-                let remaining = width.saturating_sub(description_start + 2);
-                if remaining > MIN_DESCRIPTION_WIDTH {
-                    let truncated_description = truncate_to_width(&description, remaining);
-                    if selected {
-                        let body = format!("{marker}{truncated}{spacing}{truncated_description}");
-                        return vec![StyledSpan::new(
-                            body,
-                            SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
-                        )];
-                    }
-                    // Upstream wraps the gap and the description together:
-                    // `this.theme.description(spacing + truncatedDesc)`
-                    // (`select-list.ts:208`).
-                    return vec![
-                        StyledSpan::new(format!("{marker}{truncated}"), SpanStyle::PLAIN),
-                        StyledSpan::new(
-                            format!("{spacing}{truncated_description}"),
-                            SpanStyle::fg(ThemeColor::Muted),
-                        ),
-                    ];
-                }
-            }
-        }
-
-        let max_width = width.saturating_sub(prefix_width + 2).max(1);
-        let body = format!("{marker}{}", truncate_to_width(display, max_width));
-        if selected {
-            vec![StyledSpan::new(
-                body,
-                SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
-            )]
-        } else {
-            vec![StyledSpan::new(body, SpanStyle::PLAIN)]
-        }
+        select_list_row_spans(item, selected, width, primary_column_width)
     }
 
     /// Render the selector as a flat vector of lines (used by the App
@@ -776,11 +906,14 @@ fn truncate_to_width(text: &str, max: usize) -> String {
 
 /// Upstream `SelectList::getDisplayValue`: the label, falling back to the
 /// value for label-less rows.
-fn display_value(item: &SelectorItem) -> &str {
-    if item.label.is_empty() {
-        &item.value
+fn display_value<R>(row: &R) -> &str
+where
+    R: SelectListRow + ?Sized,
+{
+    if row.label().is_empty() {
+        row.value()
     } else {
-        &item.label
+        row.label()
     }
 }
 
