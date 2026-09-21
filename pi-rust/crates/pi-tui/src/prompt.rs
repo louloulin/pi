@@ -7,6 +7,7 @@
 
 use crate::editor::{Editor, EditorAction};
 use crate::input::{InputEvent, Key, KeyCode};
+use crate::visual_text::VisualLayout;
 
 /// Action returned from [`Prompt::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,18 +188,29 @@ impl Prompt {
     /// The buffer is word-wrapped the same way [`Prompt::render_lines`]
     /// does, so callers can reserve the row count ahead of time and the
     /// resulting layout does not jump when the buffer is typed into.
+    pub fn body_width(&self, width: u16) -> usize {
+        wrap_available(width as usize, self.label.chars().count()).max(1)
+    }
+
+    /// Columns of `width` the draft itself may use (the label takes the
+    /// rest, and at least one column always remains).
+    ///
+    /// Exposed because the composer's word wrap is not only a rendering
+    /// concern: [`crate::Editor`]'s vertical cursor motion has to measure
+    /// the draft with the same number, or the caret lands on a row the
+    /// renderer did not draw it on. The App hands this value to the editor
+    /// before every key press.
     pub fn line_count(&self, width: u16, max_rows: usize) -> usize {
         let width = width as usize;
         if width == 0 || max_rows == 0 {
             return 1;
         }
-        let available = wrap_available(width, self.label.chars().count());
         let text = self.editor.display_text();
         if text.is_empty() {
             return 1;
         }
-        let lines = wrap_text_for_prompt(&text, available);
-        lines.len().clamp(1, max_rows.max(1))
+        let rows = VisualLayout::new(&text, self.body_width(width as u16)).len();
+        rows.clamp(1, max_rows.max(1))
     }
 
     /// Render the prompt into 1..=`max_rows` lines at the given width.
@@ -207,10 +219,16 @@ impl Prompt {
     /// (when the buffer is empty); subsequent rows are indented to keep
     /// the visual column of the buffer aligned across the wrap.
     /// Word-wrapping matches upstream's `wordWrapLine`
-    /// (`packages/tui/src/components/editor.ts:111`), preferring to break
-    /// on whitespace and hard-breaking words that are wider than the row.
-    /// The trailing visual row carries the `▍` cursor marker at the
-    /// cursor's column.
+    /// (`packages/tui/src/components/editor.ts:121`) through
+    /// [`VisualLayout`], which also supplies the cursor's row and column, so
+    /// the `▍` marker cannot disagree with the rows it is drawn on.
+    /// A hard break (`\n`) always starts a new row, including a blank one,
+    /// so `Shift+Enter` grows the composer immediately.
+    ///
+    /// When the draft needs more rows than `max_rows`, the window follows
+    /// the cursor (see [`scroll_window_start`]) instead of showing the tail:
+    /// a cursor above the tail used to be scrolled off the composer
+    /// entirely.
     ///
     /// Callers that size the composer by content pass the value returned
     /// by [`Prompt::line_count`]; callers that want a fixed-height
@@ -222,9 +240,8 @@ impl Prompt {
             return vec![String::new()];
         }
         let label_width = self.label.chars().count();
-        let available = wrap_available(width, label_width).max(1);
+        let available = self.body_width(width as u16);
         let text = self.editor.display_text();
-        let cursor = self.editor.display_cursor();
 
         if text.is_empty() {
             // Empty buffer — placeholder on the first row, blank padded
@@ -244,44 +261,30 @@ impl Prompt {
             return out;
         }
 
-        // Wrap the buffer into visual rows, tracking the absolute
-        // character offset where each visual row starts. The cursor row
-        // is the one whose `[start, end)` window contains `cursor`.
-        let visual_rows = wrap_text_for_prompt(&text, available);
-        let row_starts = row_starts_for(&visual_rows);
-        let total_rows = visual_rows.len();
-        let cursor_row = cursor_row_for(&row_starts, cursor, total_rows);
+        let layout = VisualLayout::new(&text, available);
+        let (cursor_row, cursor_col) = layout.caret(self.editor.display_cursor());
+        let total_rows = layout.len();
         let show_rows = total_rows.min(max_rows);
+        let skip = scroll_window_start(cursor_row, total_rows, show_rows);
         let indent = " ".repeat(label_width);
 
-        // When the buffer needs more rows than `max_rows` allows, the
-        // head is dropped and the tail (the cursor row, where the user
-        // is typing) stays on screen. This mirrors the upstream scroll
-        // behaviour and is what the App wants when the terminal cannot
-        // grow the composer any further.
-        let skip = total_rows.saturating_sub(show_rows);
         let mut out: Vec<String> = Vec::with_capacity(show_rows);
-        for (i, row) in visual_rows.iter().enumerate().skip(skip) {
-            let row_text = row.as_str();
-            let row_start = row_starts[i];
-            let cursor_in_row = if i == cursor_row {
-                cursor
-                    .saturating_sub(row_start)
-                    .min(row_text.chars().count())
-            } else {
-                usize::MAX
-            };
-            let prefix = if i == 0 {
+        for (offset, row) in layout.rows()[skip..skip + show_rows].iter().enumerate() {
+            let index = skip + offset;
+            // The label belongs to the draft's own first row; a scrolled
+            // window indents every row it shows.
+            let prefix = if index == 0 {
                 self.label.as_str()
             } else {
                 indent.as_str()
             };
+            let draw_cursor = index == cursor_row;
             out.push(build_prompt_row(
                 prefix,
-                row_text,
-                cursor_in_row,
+                &row.text,
+                if draw_cursor { cursor_col } else { usize::MAX },
                 width,
-                i == cursor_row && !self.editor.is_empty(),
+                draw_cursor,
             ));
         }
         // Pad with blank rows if the cap exceeds the natural row count.
@@ -366,110 +369,20 @@ fn build_prompt_row(
     line
 }
 
-/// Word-wrap a body string into visual rows of at most `width` columns,
-/// matching upstream's `wordWrapLine`. Hard line breaks (`\n`) become
-/// row boundaries; long words are hard-broken at the row width; runs of
-/// whitespace collapse to one space when joining words.
-fn wrap_text_for_prompt(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut rows: Vec<String> = Vec::new();
-    for hard_line in split_prompt_lines(text) {
-        wrap_hard_line(&hard_line, width, &mut rows);
-    }
-    if rows.is_empty() {
-        rows.push(String::new());
-    }
-    rows
-}
-
-fn split_prompt_lines(text: &str) -> Vec<String> {
-    text.replace("\r\n", "\n")
-        .split('\n')
-        .map(str::to_string)
-        .collect()
-}
-
-fn wrap_hard_line(line: &str, width: usize, rows: &mut Vec<String>) {
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for word in line.split_whitespace() {
-        let word_width = word.chars().count();
-        if word_width == 0 {
-            continue;
-        }
-        // Hard-break words longer than the row, so they do not push
-        // every subsequent character off-screen.
-        if word_width > width {
-            if !current.is_empty() {
-                rows.push(std::mem::take(&mut current));
-            }
-            let mut buf = String::new();
-            let mut buf_width = 0;
-            for ch in word.chars() {
-                if buf_width == width {
-                    rows.push(std::mem::take(&mut buf));
-                    buf_width = 0;
-                }
-                buf.push(ch);
-                buf_width += 1;
-            }
-            current.push_str(&buf);
-            current_width = buf_width;
-            continue;
-        }
-        let needed = if current.is_empty() {
-            word_width
-        } else {
-            current_width + 1 + word_width
-        };
-        if needed > width && !current.is_empty() {
-            rows.push(std::mem::take(&mut current));
-            current.push_str(word);
-            current_width = word_width;
-        } else if current.is_empty() {
-            current.push_str(word);
-            current_width = word_width;
-        } else {
-            current.push(' ');
-            current.push_str(word);
-            current_width += 1 + word_width;
-        }
-    }
-    if !current.is_empty() {
-        rows.push(current);
-    }
-}
-
-/// Absolute character offsets where each wrapped row begins in the
-/// original (concatenated) text. Used by [`Prompt::render_lines`] to
-/// place the cursor marker on the correct visual row.
-fn row_starts_for(rows: &[String]) -> Vec<usize> {
-    let mut starts = Vec::with_capacity(rows.len());
-    let mut offset = 0usize;
-    for row in rows {
-        starts.push(offset);
-        offset = offset.saturating_add(row.chars().count());
-    }
-    starts
-}
-
-fn cursor_row_for(starts: &[usize], cursor: usize, total_rows: usize) -> usize {
-    if total_rows == 0 {
+/// First row of the composer window that keeps the cursor visible.
+///
+/// The window is page-aligned on the cursor row instead of centred on it:
+/// `render_lines` takes `&self`, so the renderer cannot remember a scroll
+/// offset, and re-anchoring on every keystroke would make the composer jump
+/// while the cursor moves inside one page. The last page is clamped, so the
+/// tail of a long draft is always fully visible.
+fn scroll_window_start(cursor_row: usize, total_rows: usize, show_rows: usize) -> usize {
+    let show_rows = show_rows.max(1);
+    if show_rows >= total_rows {
         return 0;
     }
-    // The cursor is at the *boundary* between characters. Pick the row
-    // whose start is the largest start <= cursor.
-    let mut picked = 0;
-    for (i, start) in starts.iter().enumerate() {
-        if *start <= cursor {
-            picked = i;
-        } else {
-            break;
-        }
-    }
-    picked
+    let page = (cursor_row / show_rows) * show_rows;
+    page.min(total_rows - show_rows)
 }
 
 /// Split a string into `(before, after)` halves at the nth character

@@ -1,4 +1,4 @@
-//! Single-line editor component with prompt history.
+//! Composer editor component: a multi-line buffer with prompt history.
 //!
 //! Every chord below is resolved through the process-wide keybinding
 //! registry ([`crate::keybindings::get_keybindings`]) with
@@ -21,11 +21,32 @@
 //!   `Ctrl+Right`) move by one word (`tui.editor.cursorWordLeft` /
 //!   `cursorWordRight`) using the boundaries from
 //!   [`crate::word_navigation`].
-//! * `Up` / `Down` navigate the prompt history (most recent first). The
-//!   first `Up` saves the current draft so `Down` past the bottom of
-//!   the history restores it.
+//! * `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) move the cursor
+//!   one *visual* row at a time while a draft occupies more than one row,
+//!   keeping the display column across rows; at the first visual row they
+//!   browse the prompt history (most recent first) and at the last visual
+//!   row they leave the history again. This is upstream's rule
+//!   (`Editor.handleInput`, `packages/tui/src/components/editor.ts:913-940`)
+//!   and the one codex documents for its own composer ("Up Arrow / Ctrl+P
+//!   moves up through the recalled message line by line, or through prompt
+//!   history depending on cursor position", codex#21833). The first `Up`
+//!   saves the current draft so `Down` past the bottom of the history
+//!   restores it.
+//! * `Home` / `End` (`tui.editor.cursorLineStart` / `cursorLineEnd`, also
+//!   `Ctrl+A` / `Ctrl+E`) move to the start / end of the **logical line**
+//!   the cursor is on, which is what upstream `moveToLineStart` /
+//!   `moveToLineEnd` do and what codex documents (`Home` / `Ctrl+A` jumps
+//!   to the start of the current line, not the top of the whole draft —
+//!   codex#21833). On a single-line draft that is the whole buffer, which
+//!   is the port's historical behaviour.
 //! * `Enter` returns [`EditorAction::Submit`] with the draft text (chips
-//!   expanded to their `[Image #N]` labels).
+//!   expanded to their `[Image #N]` labels), except when the character
+//!   before the cursor is a backslash: then the backslash is deleted and a
+//!   newline is inserted instead (upstream's fallback for terminals that
+//!   cannot report `Shift+Enter`).
+//! * `tui.input.newLine` (`shift+enter`, `ctrl+j`) inserts a newline at the
+//!   cursor, so the composer grows instead of submitting. `tui.input.submit`
+//!   (`enter`) is resolved first, so rebinding it changes the submit chord.
 //! * `Ctrl+C` is `tui.input.copy`. This editor has no selection model, so
 //!   there is never text to copy: the chord returns
 //!   [`EditorAction::Interrupt`], handing it back to the caller (the `App`
@@ -40,35 +61,34 @@
 //!   the coding-agent's `app.*` table, so a bare `pi-tui` registry does not
 //!   contain the id and the built-in `Ctrl+D` chord stands in for it.
 //!
-//! Chords that have **no consumer** in this single-line port, listed here
-//! rather than silently implemented:
+//! Chords that have **no consumer** in this port, listed here rather than
+//! silently implemented:
 //!
-//! * `tui.input.newLine` (`shift+enter`, `ctrl+j`): the Rust editor is
-//!   single-line, so there is nowhere to insert a newline. `Shift+Enter`
-//!   therefore keeps its pre-keybinding behaviour and submits through the
-//!   `Enter` branch; `Ctrl+J` stays a no-op. `tui.input.submit` (`enter`)
-//!   is resolved first, so rebinding it changes the submit chord.
 //! * `tui.editor.pageUp` / `tui.editor.pageDown`: the viewport belongs to
 //!   the `App`, which consumes `tui.altScreen.pageUp` / `pageDown` before
-//!   the prompt sees the key, so the editor never scrolls.
+//!   the prompt sees the key, so the editor never scrolls. The composer
+//!   window itself follows the cursor (see [`crate::Prompt::render_lines`]).
 //! * `tui.editor.historyPrevious` / `historyNext`: unbound by default;
-//!   `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) drive the
-//!   single-line history instead.
+//!   `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) reach the history
+//!   from the first / last visual row instead.
 //!
 //! Legacy control-byte spellings that `keys.ts` normalises before matching
 //! (crossterm decodes them differently) are still accepted: `Ctrl+5` /
 //! `Ctrl+Alt+5` for `ctrl+]` / `ctrl+alt+]` and `Ctrl+7` / `Ctrl+_` for
 //! `ctrl+-`, but only while the id's resolved chords actually contain the
 //! canonical spelling.
-//! * `Ctrl+U` / `Ctrl+K` kill to the start / end of the buffer and push
-//!   the killed text onto the [`KillRing`]. Because the Rust editor is
-//!   single-line, "line start" and "line end" are the buffer corners
-//!   (`tui.editor.deleteToLineStart` / `deleteToLineEnd`); consecutive
-//!   kills accumulate into one ring entry, exactly like upstream.
+//! * `Ctrl+U` / `Ctrl+K` kill to the start / end of the **logical line** the
+//!   cursor is on and push the killed text onto the [`KillRing`]; at a line
+//!   boundary the newline itself is what gets killed, which merges the two
+//!   lines — upstream `deleteToStartOfLine` / `deleteToEndOfLine`. Consecutive
+//!   kills accumulate into one ring entry, exactly like upstream. On a
+//!   single-line draft the logical line is the buffer, so the historical
+//!   behaviour is unchanged.
 //! * `Ctrl+W` / `Alt+Backspace` kill the word before the cursor and
 //!   `Alt+D` / `Alt+Delete` the word after it
-//!   (`tui.editor.deleteWordBackward` / `deleteWordForward`). Word kills
-//!   take part in the same accumulation chain as the line kills.
+//!   (`tui.editor.deleteWordBackward` / `deleteWordForward`). Word kills are
+//!   scoped to the logical line and take part in the same accumulation
+//!   chain as the line kills.
 //! * `Ctrl+Y` yanks the most recent ring entry at the cursor and
 //!   `Alt+Y` cycles through older entries (`tui.editor.yank` /
 //!   `tui.editor.yankPop`).
@@ -129,6 +149,16 @@
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
 //!
+//! # Visual rows
+//!
+//! Everything that needs to know where a character sits on screen — the
+//! `▍` marker, `Up` / `Down`, the scroll window — goes through
+//! [`crate::visual_text::VisualLayout`], the same layout [`crate::Prompt`]
+//! paints with. The App hands the editor the width it wrapped at
+//! ([`Editor::set_visual_width`]) before every key press; until the first
+//! frame is painted the width is unknown, and a draft then lays out one row
+//! per hard line, so vertical motion still walks what the user typed.
+//!
 //! [`App`]: crate::App
 //! [`Prompt`]: crate::Prompt
 //! [`ImageContent`]: pi_protocol::ImageContent
@@ -144,6 +174,7 @@ use crate::input::{InputEvent, Key, KeyCode};
 use crate::keybindings::{get_keybindings, KeybindingsManager};
 use crate::kill_ring::{KillDirection, KillRing};
 use crate::undo_stack::UndoStack;
+use crate::visual_text::VisualLayout;
 use crate::word_navigation::{find_word_backward, find_word_forward};
 
 #[cfg(test)]
@@ -301,12 +332,18 @@ struct EditorSnapshot {
     images: Vec<ImageContent>,
 }
 
-/// Single-line text editor with prompt history and an Emacs-style kill
+/// Multi-line text editor with prompt history and an Emacs-style kill
 /// ring.
 #[derive(Debug, Clone)]
 pub struct Editor {
     buffer: String,
     cursor: usize,
+    /// Width the App wraps the composer body at, recorded before key
+    /// dispatch. `0` until the first frame is painted.
+    visual_width: usize,
+    /// Sticky display column kept across a run of vertical cursor moves,
+    /// upstream's `preferredVisualCol`.
+    preferred_col: Option<usize>,
     history: VecDeque<String>,
     history_index: Option<usize>,
     /// Draft saved when the user starts navigating history. Restored
@@ -361,6 +398,8 @@ impl Editor {
         Self {
             buffer: String::new(),
             cursor: 0,
+            visual_width: 0,
+            preferred_col: None,
             history: VecDeque::new(),
             history_index: None,
             history_draft: None,
@@ -429,7 +468,38 @@ impl Editor {
         self.last_action = LastAction::Other;
         self.undo_stack.clear();
         self.jump_mode = None;
+        self.preferred_col = None;
         self.cancel_autocomplete();
+    }
+
+    /// Record the width the App wrapped the composer body at.
+    ///
+    /// Vertical cursor motion must measure the draft exactly like the
+    /// renderer does, and `Prompt::render_lines` takes `&self`, so the App
+    /// hands the width over before dispatching a key. `0` means "no frame
+    /// painted yet": a draft then lays out one row per hard line.
+    pub fn set_visual_width(&mut self, width: usize) {
+        self.visual_width = width;
+    }
+
+    /// The width recorded by [`Editor::set_visual_width`].
+    pub fn visual_width(&self) -> usize {
+        self.visual_width
+    }
+
+    /// The rendered layout of the current draft.
+    fn visual_layout(&self) -> VisualLayout {
+        VisualLayout::new(&self.display_text(), self.visual_width)
+    }
+
+    /// The `(row, column)` the cursor is drawn at.
+    pub fn visual_caret(&self) -> (usize, usize) {
+        self.visual_layout().caret(self.display_cursor())
+    }
+
+    /// Number of visual rows the draft occupies at the recorded width.
+    pub fn visual_row_count(&self) -> usize {
+        self.visual_layout().len()
     }
 
     /// The armed jump direction, if `Ctrl+]` / `Ctrl+Alt+]` is waiting
@@ -721,20 +791,80 @@ impl Editor {
         EditorAction::Changed
     }
 
-    /// Move the cursor to the start of the buffer.
+    /// Byte range of the logical line the cursor is on, with `end`
+    /// exclusive of its terminating newline.
+    ///
+    /// A cursor sitting on a newline belongs to the line that newline
+    /// terminates, so `end == cursor` there — the same place upstream's
+    /// `cursorCol == line.length` puts it.
+    fn line_bounds(&self) -> (usize, usize) {
+        let cursor = self.cursor.min(self.buffer.len());
+        let start = self.buffer[..cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let end = self
+            .buffer
+            .get(cursor..)
+            .and_then(|rest| rest.find('\n'))
+            .map(|offset| cursor + offset)
+            .unwrap_or(self.buffer.len());
+        (start, end)
+    }
+
+    /// Index of the logical line the cursor is on (0-based).
+    fn cursor_line(&self) -> usize {
+        self.buffer[..self.cursor.min(self.buffer.len())]
+            .matches('\n')
+            .count()
+    }
+
+    /// Byte offset of `display` (a character offset into
+    /// [`Editor::display_text`]) back in the raw buffer.
+    ///
+    /// A chip renders as a multi-character `[Image #N]` label, so an
+    /// offset landing inside one resolves to the chip's own byte: the
+    /// cursor sits on the chip rather than in the middle of its label.
+    fn raw_byte_for_display_offset(&self, display: usize) -> usize {
+        let label_width = chip_label(1).chars().count();
+        let mut seen = 0usize;
+        for (byte, ch) in self.buffer.char_indices() {
+            if seen >= display {
+                return byte;
+            }
+            seen += if ch == CHIP_CHAR { label_width } else { 1 };
+        }
+        self.buffer.len()
+    }
+
+    /// Move the cursor to a character offset in [`Editor::display_text`].
+    fn set_display_cursor(&mut self, display: usize) {
+        self.cursor = self.raw_byte_for_display_offset(display);
+        self.last_action = LastAction::Other;
+        self.refresh_autocomplete_if_open();
+    }
+
+    /// Move the cursor to the start of the logical line it is on
+    /// (`Home` / `Ctrl+A`, `tui.editor.cursorLineStart`). Upstream
+    /// `moveToLineStart`.
     pub fn move_home(&mut self) -> EditorAction {
-        if self.cursor == 0 {
+        let (start, _) = self.line_bounds();
+        self.preferred_col = None;
+        if self.cursor == start {
             return EditorAction::None;
         }
-        self.cursor = 0;
+        self.cursor = start;
         self.last_action = LastAction::Other;
         self.refresh_autocomplete_if_open();
         EditorAction::Changed
     }
 
-    /// Move the cursor to the end of the buffer.
+    /// Move the cursor to the end of the logical line it is on
+    /// (`End` / `Ctrl+E`, `tui.editor.cursorLineEnd`). Upstream
+    /// `moveToLineEnd`.
     pub fn move_end(&mut self) -> EditorAction {
-        let end = self.buffer.len();
+        let (_, end) = self.line_bounds();
+        self.preferred_col = None;
         if self.cursor == end {
             return EditorAction::None;
         }
@@ -744,15 +874,106 @@ impl Editor {
         EditorAction::Changed
     }
 
+    /// Insert a hard line break at the cursor (`tui.input.newLine`:
+    /// `Shift+Enter` / `Ctrl+J`). Upstream `addNewLine`.
+    pub fn insert_newline(&mut self) -> EditorAction {
+        self.cancel_autocomplete();
+        self.reset_history_navigation();
+        self.push_undo_snapshot();
+        self.buffer.insert(self.cursor, '\n');
+        self.cursor += 1;
+        self.last_action = LastAction::Other;
+        self.preferred_col = None;
+        EditorAction::Changed
+    }
+
+    /// Move the cursor one visual row up (`delta < 0`) or down in the
+    /// draft, keeping the display column across the rows it crosses.
+    ///
+    /// The column is sticky for the whole run of moves (`preferred_col`),
+    /// so walking down through a short row and continuing does not lose
+    /// the column the run started at; it is dropped again as soon as a
+    /// row can accommodate it, exactly like upstream's `preferredVisualCol`
+    /// decision table (`moveToVisualLine`,
+    /// `packages/tui/src/components/editor.ts:1470`).
+    pub fn move_vertical(&mut self, delta: isize) -> EditorAction {
+        let layout = self.visual_layout();
+        let cursor = self.display_cursor();
+        let (row, column) = layout.caret(cursor);
+        let goal = *self.preferred_col.get_or_insert(column);
+        let target = row as isize + delta;
+        if target < 0 || target as usize >= layout.len() {
+            return EditorAction::None;
+        }
+        let target = target as usize;
+        let landed = goal.min(layout.row_len(target));
+        let next = layout.cursor_at(target, landed);
+        if landed >= goal {
+            // The row could hold the column the run started at, so the run
+            // is over: the next vertical move takes its column from here.
+            self.preferred_col = None;
+        }
+        if next == cursor {
+            return EditorAction::None;
+        }
+        self.set_display_cursor(next);
+        EditorAction::Changed
+    }
+
+    /// `tui.editor.cursorUp`: one visual row up inside a draft that has
+    /// one, otherwise the prompt history — and a move to the line start
+    /// when the cursor is on the first row but past column 0, so a second
+    /// press reaches the history. Upstream's rule
+    /// (`packages/tui/src/components/editor.ts:913-926`).
+    pub fn cursor_up(&mut self) -> EditorAction {
+        let (row, column) = self.visual_caret();
+        if row > 0 {
+            return self.move_vertical(-1);
+        }
+        if self.is_empty() || self.history_index.is_some() || column == 0 {
+            return self.history_prev();
+        }
+        self.move_home()
+    }
+
+    /// `tui.editor.cursorDown`: the mirror of [`Editor::cursor_up`],
+    /// ending at the line end when the cursor is on the last row but not
+    /// at the end of it (upstream
+    /// `packages/tui/src/components/editor.ts:927-937`).
+    pub fn cursor_down(&mut self) -> EditorAction {
+        let layout = self.visual_layout();
+        let (row, _) = layout.caret(self.display_cursor());
+        if row + 1 < layout.len() {
+            return self.move_vertical(1);
+        }
+        if self.history_index.is_some() {
+            return self.history_next();
+        }
+        self.move_end()
+    }
+
     /// Move the cursor one word to the left (`Alt+B`, `Alt+Left` or
     /// `Ctrl+Left`, `tui.editor.cursorWordLeft`). Trailing whitespace is
     /// skipped, then the cursor stops at the next word / punctuation
-    /// boundary.
+    /// boundary; at the start of a logical line it steps onto the end of
+    /// the previous one (upstream `moveWordBackwards`).
     pub fn move_word_left(&mut self) -> EditorAction {
         if self.cursor == 0 {
             return EditorAction::None;
         }
-        self.cursor = find_word_backward(&self.buffer, self.cursor);
+        let (start, _) = self.line_bounds();
+        let target = if self.cursor == start {
+            // At the start of the line: step onto the previous line's end,
+            // which is the newline's own offset.
+            start - 1
+        } else {
+            start + find_word_backward(&self.buffer[start..self.cursor], self.cursor - start)
+        };
+        if target == self.cursor {
+            return EditorAction::None;
+        }
+        self.preferred_col = None;
+        self.cursor = target;
         self.last_action = LastAction::Other;
         self.refresh_autocomplete_if_open();
         EditorAction::Changed
@@ -761,12 +982,29 @@ impl Editor {
     /// Move the cursor one word to the right (`Alt+F`, `Alt+Right` or
     /// `Ctrl+Right`, `tui.editor.cursorWordRight`). Leading whitespace is
     /// skipped, then the cursor stops at the next word / punctuation
-    /// boundary.
+    /// boundary; at the end of a logical line it steps onto the start of
+    /// the next one (upstream `moveWordForwards`).
     pub fn move_word_right(&mut self) -> EditorAction {
         if self.cursor >= self.buffer.len() {
             return EditorAction::None;
         }
-        self.cursor = find_word_forward(&self.buffer, self.cursor);
+        let (start, end) = self.line_bounds();
+        let target = if self.cursor >= end {
+            // At the end of the line: step past the newline onto the start
+            // of the next line when there is one.
+            if end < self.buffer.len() {
+                end + 1
+            } else {
+                end
+            }
+        } else {
+            start + find_word_forward(&self.buffer[start..end], self.cursor - start)
+        };
+        if target == self.cursor {
+            return EditorAction::None;
+        }
+        self.preferred_col = None;
+        self.cursor = target;
         self.last_action = LastAction::Other;
         self.refresh_autocomplete_if_open();
         EditorAction::Changed
@@ -777,18 +1015,36 @@ impl Editor {
     /// the most recent kill ring entry when the previous action was
     /// also a kill, matching upstream's accumulation rule.
     pub fn kill_to_line_start(&mut self) -> EditorAction {
-        if self.cursor == 0 {
+        let (start, _) = self.line_bounds();
+        if self.cursor > start {
+            return self.kill_range(start, self.cursor, KillDirection::Prepend);
+        }
+        if start > 0 {
+            // At the start of a line: kill the newline before it, which is
+            // what merges the two lines (upstream `deleteToStartOfLine`).
+            return self.kill_range(start - 1, start, KillDirection::Prepend);
+        }
+        EditorAction::None
+    }
+
+    /// Kill `[from, to)` and push it onto the kill ring, leaving the cursor
+    /// at `from`.
+    fn kill_range(&mut self, from: usize, to: usize, direction: KillDirection) -> EditorAction {
+        if from >= to {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
         self.cancel_autocomplete();
-        let killed = strip_chips(&self.buffer[..self.cursor]);
+        let killed = strip_chips(&self.buffer[from..to]);
+        // Read the previous action *before* overwriting it: a kill that
+        // follows another kill accumulates into the same ring entry
+        // instead of opening a new chain (upstream `deleteWordBackwards`).
         let accumulate = self.last_action == LastAction::Kill;
-        self.remove_images_in_range(0..self.cursor);
-        self.buffer.replace_range(..self.cursor, "");
-        self.cursor = 0;
-        self.kill_ring
-            .push(&killed, KillDirection::Prepend, accumulate);
+        self.remove_images_in_range(from..to);
+        self.buffer.replace_range(from..to, "");
+        self.cursor = from;
+        self.preferred_col = None;
+        self.kill_ring.push(&killed, direction, accumulate);
         self.last_action = LastAction::Kill;
         self.reset_history_navigation();
         EditorAction::Changed
@@ -799,20 +1055,16 @@ impl Editor {
     /// most recent kill ring entry when the previous action was also a
     /// kill.
     pub fn kill_to_line_end(&mut self) -> EditorAction {
-        if self.cursor >= self.buffer.len() {
-            return EditorAction::None;
+        let (_, end) = self.line_bounds();
+        if self.cursor < end {
+            return self.kill_range(self.cursor, end, KillDirection::Append);
         }
-        self.push_undo_snapshot();
-        self.cancel_autocomplete();
-        let killed = strip_chips(&self.buffer[self.cursor..]);
-        let accumulate = self.last_action == LastAction::Kill;
-        self.remove_images_in_range(self.cursor..self.buffer.len());
-        self.buffer.truncate(self.cursor);
-        self.kill_ring
-            .push(&killed, KillDirection::Append, accumulate);
-        self.last_action = LastAction::Kill;
-        self.reset_history_navigation();
-        EditorAction::Changed
+        if end < self.buffer.len() {
+            // At the end of a line: kill the newline after it, which is
+            // what merges the next line (upstream `deleteToEndOfLine`).
+            return self.kill_range(end, end + 1, KillDirection::Append);
+        }
+        EditorAction::None
     }
 
     /// Kill the word before the cursor (`Ctrl+W` / `Alt+Backspace`,
@@ -823,25 +1075,16 @@ impl Editor {
         if self.cursor == 0 {
             return EditorAction::None;
         }
-        let delete_from = find_word_backward(&self.buffer, self.cursor);
-        if delete_from == self.cursor {
-            return EditorAction::None;
+        let (start, _) = self.line_bounds();
+        if self.cursor == start {
+            // At the start of a line this behaves like a backspace at
+            // column 0: the newline goes, the word does not
+            // (upstream `deleteWordBackwards`).
+            return self.kill_range(start - 1, start, KillDirection::Prepend);
         }
-        self.push_undo_snapshot();
-        self.cancel_autocomplete();
-        let killed = strip_chips(&self.buffer[delete_from..self.cursor]);
-        // Read the previous action *before* overwriting it: a kill that
-        // follows another kill accumulates into the same ring entry
-        // instead of opening a new chain (upstream `deleteWordBackwards`).
-        let accumulate = self.last_action == LastAction::Kill;
-        self.remove_images_in_range(delete_from..self.cursor);
-        self.buffer.replace_range(delete_from..self.cursor, "");
-        self.cursor = delete_from;
-        self.kill_ring
-            .push(&killed, KillDirection::Prepend, accumulate);
-        self.last_action = LastAction::Kill;
-        self.reset_history_navigation();
-        EditorAction::Changed
+        let delete_from =
+            start + find_word_backward(&self.buffer[start..self.cursor], self.cursor - start);
+        self.kill_range(delete_from, self.cursor, KillDirection::Prepend)
     }
 
     /// Kill the word after the cursor (`Alt+D` / `Alt+Delete`,
@@ -852,21 +1095,18 @@ impl Editor {
         if self.cursor >= self.buffer.len() {
             return EditorAction::None;
         }
-        let delete_to = find_word_forward(&self.buffer, self.cursor);
-        if delete_to == self.cursor {
+        let (start, end) = self.line_bounds();
+        if self.cursor >= end {
+            // At the end of a line this behaves like a forward delete on
+            // the newline: the next line is joined onto this one
+            // (upstream `deleteWordForward`).
+            if end < self.buffer.len() {
+                return self.kill_range(end, end + 1, KillDirection::Append);
+            }
             return EditorAction::None;
         }
-        self.push_undo_snapshot();
-        self.cancel_autocomplete();
-        let killed = strip_chips(&self.buffer[self.cursor..delete_to]);
-        let accumulate = self.last_action == LastAction::Kill;
-        self.remove_images_in_range(self.cursor..delete_to);
-        self.buffer.replace_range(self.cursor..delete_to, "");
-        self.kill_ring
-            .push(&killed, KillDirection::Append, accumulate);
-        self.last_action = LastAction::Kill;
-        self.reset_history_navigation();
-        EditorAction::Changed
+        let delete_to = start + find_word_forward(&self.buffer[start..end], self.cursor - start);
+        self.kill_range(self.cursor, delete_to, KillDirection::Append)
     }
 
     /// Yank the most recent kill ring entry at the cursor (`Ctrl+Y`,
@@ -883,6 +1123,7 @@ impl Editor {
         self.push_undo_snapshot();
         self.buffer.insert_str(self.cursor, &text);
         self.cursor += text.len();
+        self.preferred_col = None;
         self.last_yank_len = text.len();
         self.last_action = LastAction::Yank;
         self.reset_history_navigation();
@@ -922,6 +1163,7 @@ impl Editor {
         }
         self.buffer.insert_str(self.cursor, &text);
         self.cursor += text.len();
+        self.preferred_col = None;
         self.last_yank_len = text.len();
         self.last_action = LastAction::Yank;
         self.reset_history_navigation();
@@ -945,6 +1187,7 @@ impl Editor {
         self.buffer = snapshot.buffer;
         self.cursor = snapshot.cursor.min(self.buffer.len());
         self.images = snapshot.images;
+        self.preferred_col = None;
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
         self.reset_history_navigation();
@@ -1066,7 +1309,7 @@ impl Editor {
         }
         let before = self.before_cursor_text();
         let trimmed = before.trim_start();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+        if self.cursor_line() == 0 && trimmed.starts_with('/') && !trimmed.contains(' ') {
             self.request_autocomplete(false, true)
         } else {
             self.request_autocomplete(true, true)
@@ -1084,12 +1327,14 @@ impl Editor {
         let Some(provider) = self.autocomplete_provider.clone() else {
             return false;
         };
-        let lines = [self.buffer.clone()];
-        let cursor_col = self.cursor;
-        if force && !provider.should_trigger_file_completion(&lines, 0, cursor_col) {
+        let lines = self.buffer_lines();
+        let cursor_line = self.cursor_line();
+        let cursor_col = self.cursor_col();
+        if force && !provider.should_trigger_file_completion(&lines, cursor_line, cursor_col) {
             return false;
         }
-        let Some(suggestions) = provider.get_suggestions(&lines, 0, cursor_col, force) else {
+        let Some(suggestions) = provider.get_suggestions(&lines, cursor_line, cursor_col, force)
+        else {
             self.cancel_autocomplete();
             return false;
         };
@@ -1165,16 +1410,43 @@ impl Editor {
             return;
         };
         self.push_undo_snapshot();
-        let lines = [self.buffer.clone()];
-        let result = provider.apply_completion(&lines, 0, self.cursor, item, prefix);
-        self.buffer = strip_chips(&result.lines.into_iter().next().unwrap_or_default());
-        self.cursor = clamp_to_char_boundary(&self.buffer, result.cursor_col);
+        let lines = self.buffer_lines();
+        let cursor_line = self.cursor_line();
+        let result =
+            provider.apply_completion(&lines, cursor_line, self.cursor_col(), item, prefix);
+        self.buffer = strip_chips(&result.lines.join("\n"));
+        self.cursor = self.byte_offset_of(result.cursor_line, result.cursor_col);
         // A completion rewrites the whole line; the chip/attachment pairing
         // cannot survive that, so the chips go with it (same rule as
         // `set_text_internal`).
         self.images.clear();
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
+        self.preferred_col = None;
+    }
+
+    /// The buffer split into logical lines, the shape the autocomplete
+    /// provider interface takes (upstream `state.lines`).
+    fn buffer_lines(&self) -> Vec<String> {
+        self.buffer.split('\n').map(str::to_string).collect()
+    }
+
+    /// Byte offset of the cursor inside its logical line.
+    fn cursor_col(&self) -> usize {
+        let (start, _) = self.line_bounds();
+        self.cursor.saturating_sub(start)
+    }
+
+    /// Byte offset of `col` in logical line `line` of `text`.
+    fn byte_offset_of(&self, line: usize, col: usize) -> usize {
+        let mut offset = 0usize;
+        for (index, chunk) in self.buffer.split('\n').enumerate() {
+            if index == line {
+                return clamp_to_char_boundary(&self.buffer, offset + col.min(chunk.len()));
+            }
+            offset += chunk.len() + 1;
+        }
+        self.buffer.len()
     }
 
     /// Recompute the dropdown after an edit.
@@ -1219,10 +1491,12 @@ impl Editor {
     /// Whether typing `c` (now part of `before`) should open the
     /// dropdown, upstream `handleInput`'s autocomplete trigger.
     fn opens_autocomplete_after_insert(&self, c: char, before: &str) -> bool {
-        // `/` at the start of the message always opens the command menu.
+        // `/` at the start of the message always opens the command menu —
+        // and only on the first line, which is where a command can be
+        // typed (upstream `isSlashMenuAllowed`).
         if c == '/' {
             let trimmed = before.trim();
-            if trimmed.is_empty() || trimmed == "/" {
+            if self.cursor_line() == 0 && (trimmed.is_empty() || trimmed == "/") {
                 return true;
             }
         }
@@ -1239,15 +1513,20 @@ impl Editor {
     /// the provider can complete. Upstream's
     /// `isInSlashCommandContext(text) || triggerPattern.test(text)`.
     fn opens_autocomplete_for_text(&self, text: &str) -> bool {
-        if text.trim_start().starts_with('/') {
+        if self.cursor_line() == 0 && text.trim_start().starts_with('/') {
             return true;
         }
         trigger_pattern_matches(text, &self.autocomplete_trigger_characters)
     }
 
-    /// The buffer text before the cursor.
+    /// The text of the logical line before the cursor.
+    ///
+    /// Line-scoped, like upstream's `textBeforeCursor =
+    /// currentLine.slice(0, cursorCol)`: a command or a path is recognised
+    /// inside the line the user is on, not across the whole draft.
     fn before_cursor_text(&self) -> &str {
-        &self.buffer[..self.cursor.min(self.buffer.len())]
+        let (start, _) = self.line_bounds();
+        &self.buffer[start..self.cursor.min(self.buffer.len())]
     }
 
     /// True for trigger characters the editor accepts (`/` is handled
@@ -1472,13 +1751,14 @@ impl Editor {
         if Self::matches_binding(&kb, &key, "tui.editor.cursorWordRight") {
             return self.move_word_right();
         }
-        // `Up` / `Down` browse the single-line prompt history, the
-        // roles the pre-keybinding editor gave them.
+        // `Up` / `Down`: a visual row inside the draft, the prompt
+        // history from its first / last row (upstream
+        // `packages/tui/src/components/editor.ts:913-940`).
         if Self::matches_binding(&kb, &key, "tui.editor.cursorUp") {
-            return self.history_prev();
+            return self.cursor_up();
         }
         if Self::matches_binding(&kb, &key, "tui.editor.cursorDown") {
-            return self.history_next();
+            return self.cursor_down();
         }
         if Self::matches_binding(&kb, &key, "tui.editor.cursorLeft") {
             return self.move_left();
@@ -1492,8 +1772,21 @@ impl Editor {
             return self.undo();
         }
 
-        // `tui.input.submit` (`Enter`).
+        // `tui.input.newLine` (`Shift+Enter` / `Ctrl+J`): a hard line
+        // break, checked before the submit branch so `Shift+Enter` grows
+        // the composer instead of sending the draft.
+        if Self::matches_binding(&kb, &key, "tui.input.newLine") {
+            return self.insert_newline();
+        }
+        // `tui.input.submit` (`Enter`). The backslash fallback is
+        // upstream's `shouldSubmitOnBackslashEnter`: in a terminal that
+        // cannot report `Shift+Enter`, a trailing backslash means "I
+        // wanted a newline", so it is consumed instead of submitting.
         if Self::matches_binding(&kb, &key, "tui.input.submit") {
+            if self.buffer[..self.cursor.min(self.buffer.len())].ends_with('\\') {
+                self.backspace();
+                return self.insert_newline();
+            }
             return EditorAction::Submit(self.display_text());
         }
 
@@ -1520,19 +1813,16 @@ impl Editor {
         // absent.
         match key.code {
             KeyCode::Char(c) => self.insert_char(c),
-            // `Shift+Enter` is `tui.input.newLine`, which the single-line
-            // editor cannot honour; the pre-keybinding editor submitted on
-            // it, so it keeps submitting (see the module docs).
-            KeyCode::Enter if key.modifiers.shift => {
-                let submitted = self.display_text();
-                EditorAction::Submit(submitted)
-            }
+            // `Shift+Enter` is `tui.input.newLine`; the registry matches
+            // modifiers exactly, so the shifted spelling is handled here
+            // for the same reason the other shifted chords below are.
+            KeyCode::Enter if key.modifiers.shift => self.insert_newline(),
             KeyCode::Left if key.modifiers.shift => self.move_left(),
             KeyCode::Right if key.modifiers.shift => self.move_right(),
             KeyCode::Home if key.modifiers.shift => self.move_home(),
             KeyCode::End if key.modifiers.shift => self.move_end(),
-            KeyCode::Up if key.modifiers.shift => self.history_prev(),
-            KeyCode::Down if key.modifiers.shift => self.history_next(),
+            KeyCode::Up if key.modifiers.shift => self.cursor_up(),
+            KeyCode::Down if key.modifiers.shift => self.cursor_down(),
             _ => EditorAction::None,
         }
     }

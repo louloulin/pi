@@ -188,15 +188,17 @@ pub fn help_text() -> String {
     out.push_str("  /exit     quit the interactive session\n");
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
-    out.push_str("  Up / Down   navigate prompt history\n");
+    out.push_str("  Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)\n");
+    out.push_str("  Up / Down   move within the draft, then prompt history at the top / bottom\n");
     out.push_str("  PgUp/PgDn   scroll the chat log one page\n");
     out.push_str("  Home / End  jump to the start / end of the chat log\n");
+    out.push_str("  Ctrl+A / E  jump to the start / end of the current line\n");
+    out.push_str("  Ctrl+K      delete to the end of the line (Ctrl+U: to its start)\n");
     out.push_str(
         "  Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)\n",
     );
     out.push_str("  Ctrl+D      exit on an empty prompt\n");
     out.push_str("  Ctrl+L      open the model selector\n");
-    out.push_str("  Ctrl+U      clear the prompt buffer\n");
     out.push_str("  Esc         close selector / cancel turn\n");
     out
 }

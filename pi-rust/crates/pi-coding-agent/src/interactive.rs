@@ -3744,9 +3744,39 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     // App mirrors. Text selection by the terminal itself is therefore
     // unavailable, matching upstream.
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    request_keyboard_enhancement(&mut stdout);
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
+}
+
+/// Ask the terminal to disambiguate its escape codes, best effort.
+///
+/// `tui.input.newLine` is `shift+enter`, and the legacy encoding of
+/// `Shift+Enter` is the two bytes `ESC` `CR` — which a byte-level parser can
+/// recognise (upstream's `data === "\x1b\r"`,
+/// `packages/tui/src/components/editor.ts:879`) but `crossterm` has already
+/// split into `Esc` + `Enter` by the time the editor sees it. Terminals
+/// speaking the kitty keyboard protocol report `Shift+Enter` as `CSI 13;2u`
+/// instead, which `crossterm` decodes as `Enter` + `SHIFT` and the editor
+/// honours. This sequence is private-mode; a terminal that does not know it
+/// ignores it, so the request is deliberately unchecked and
+/// `Ctrl+J` / the trailing-backslash fallback stay the paths that work
+/// everywhere (see `docs/LUM1312_CHATINPUT_MULTILINE.md`).
+fn request_keyboard_enhancement(out: &mut impl Write) {
+    let _ = execute!(
+        out,
+        ct_event::PushKeyboardEnhancementFlags(
+            ct_event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
+}
+
+/// Undo [`request_keyboard_enhancement`] before handing the tty back, so a
+/// child process (an editor, a suspended shell) sees the terminal in the mode
+/// it expects.
+fn release_keyboard_enhancement(out: &mut impl Write) {
+    let _ = execute!(out, ct_event::PopKeyboardEnhancementFlags);
 }
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
@@ -3760,6 +3790,7 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyho
 /// which need the same *leaving* sequence but must come back afterwards — see
 /// [`resume_tui`].
 fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    release_keyboard_enhancement(terminal.backend_mut());
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -3782,6 +3813,7 @@ fn resume_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resu
         EnterAlternateScreen,
         EnableMouseCapture
     )?;
+    request_keyboard_enhancement(terminal.backend_mut());
     terminal.hide_cursor()?;
     terminal.clear()?;
     Ok(())

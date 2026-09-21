@@ -1090,6 +1090,13 @@ pub struct App {
     /// Height of the message viewport as of the last render; the page size
     /// for `PageUp` / `PageDown`.
     viewport_height: AtomicU16,
+    /// Width of the composer body as of the last render, i.e. the columns
+    /// [`App::paint_prompt`] word-wrapped the draft into. The editor needs
+    /// it *before* a key is handled — vertical cursor motion has to measure
+    /// the draft exactly like the renderer did — and `render_lines` takes
+    /// `&self`, so the frame records it here for
+    /// [`App::step_key_at`] to hand over.
+    composer_body_width: AtomicU16,
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1267,6 +1274,7 @@ impl App {
             viewport_width: AtomicU16::new(0),
             viewport_reserved: AtomicU16::new(0),
             viewport_height: AtomicU16::new(0),
+            composer_body_width: AtomicU16::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -2776,6 +2784,14 @@ impl App {
         if self.extension.handle_editor_input(key) {
             return StepOutcome::Redraw;
         }
+
+        // The composer's wrap width is a rendering fact the editor needs
+        // while it handles the key: `Up` / `Down` move by visual row, and a
+        // different width would move the caret to a row the frame did not
+        // draw it on. `0` (no frame yet) leaves the draft on one row per
+        // hard line.
+        let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+        self.prompt.editor_mut().set_visual_width(composer_width);
 
         match self.prompt.handle_key(key) {
             PromptAction::None => StepOutcome::Idle,
@@ -4986,6 +5002,11 @@ impl App {
             return;
         }
         let max_rows = (rect.height as usize).min(self.config.composer_max_rows.max(1));
+        // Record the body width the wrap uses, so the next key press measures
+        // the draft the same way this frame did (see
+        // [`App::composer_body_width`]).
+        self.composer_body_width
+            .store(self.prompt.body_width(rect.width) as u16, Ordering::Relaxed);
         let lines = self.prompt.render_lines(rect.width, max_rows);
         // Upstream paints the editor chrome in `bashMode` while the buffer is
         // a `!` submission, otherwise in the thinking level's border colour

@@ -1,0 +1,136 @@
+{
+  "cols": 76,
+  "rows": 26,
+  "caption": "LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle: one composer row, `? for help` in the header",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "? for help",
+      "expect": ["> type a prompt"]
+    },
+    {
+      "label": "2. Ctrl+J inserts a newline: the composer grows to two rows and does NOT submit",
+      "send": "<C-u>explain this code<C-j>and add a test",
+      "wait": 1.0,
+      "probe": [
+        { "text": "> explain this code", "why": "the first line keeps the label" },
+        {
+          "text": "  and add a test",
+          "why": "the second line is a real draft row, indented like a wrapped continuation row"
+        },
+        { "text": "and add a test▍", "why": "the cursor sits at the end of the new line" }
+      ]
+    },
+    {
+      "label": "3. Up moves one visual row and keeps the display column (14 columns here, the width of the second line)",
+      "send": "<C-a><C-e><Up>",
+      "wait": 0.6,
+      "probe": [
+        {
+          "text": "explain this c▍ode",
+          "why": "Up left the second row, so no `and add a test▍`; the caret is on the first row, 14 columns in — the sticky column codex and pi both implement"
+        }
+      ]
+    },
+    {
+      "label": "4. Down comes back to the row it left",
+      "send": "<Down>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "and add a test▍", "why": "Down returns to the second row" }
+      ]
+    },
+    {
+      "label": "5. Ctrl+A is scoped to the current line: line 2's start, line 1 untouched. (Bare Home is the chat-log jump, as upstream binds it: `tui.altScreen.top`.)",
+      "send": "<C-a>",
+      "wait": 0.6,
+      "probe": [
+        {
+          "text": "  ▍and add a test",
+          "why": "the caret is at the start of line 2, not at the start of the draft"
+        },
+        { "text": "> explain this code", "why": "line 1 is untouched" }
+      ]
+    },
+    {
+      "label": "6. Ctrl+U kills to the start of the current line only",
+      "send": "<C-u>",
+      "wait": 0.6,
+      "probe": [
+        {
+          "text": "> explain this code",
+          "why": "the first line survives — Ctrl+U is line-scoped, not a buffer clear"
+        }
+      ]
+    },
+    {
+      "label": "7. Ctrl+Y yanks the killed line back at the cursor",
+      "send": "<C-y>",
+      "wait": 0.6,
+      "probe": [
+        {
+          "text": "▍and add a test",
+          "why": "the kill ring round-trips the line: the restored text sits at the cursor, which is at the start of line 2"
+        }
+      ]
+    },
+    {
+      "label": "8. Enter submits the two-line draft as one prompt",
+      "send": "<Enter>",
+      "wait": 1.2,
+      "probe": [
+        { "text": "> explain this code", "why": "the submitted prompt is echoed in the transcript" }
+      ]
+    },
+    {
+      "label": "9. Up on the empty composer recalls the two-line prompt from the history",
+      "send": "<Up>",
+      "wait": 0.8,
+      "probe": [
+        { "text": "> explain this code", "why": "the recall restores the whole multi-line draft..." },
+        { "text": "  and add a test", "why": "...including its second row" }
+      ]
+    },
+    {
+      "label": "10. a 95-character draft on line 2 wraps across three composer rows at 76 columns",
+      "send": "<Enter>012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345",
+      "wait": 1.0,
+      "probe": [
+        { "text": "> 0123456789", "why": "row 1 keeps the label" },
+        {
+          "text": "  4567890",
+          "why": "characters past the body width (74 columns) continue on an indented row: character 74 is the 5th of the repeating 0-9 run"
+        }
+      ]
+    },
+    {
+      "label": "11. Up inside the wrapped draft moves the caret one row up, keeping the label row intact",
+      "send": "<Up>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "▍", "why": "the caret is still drawn somewhere in the composer" },
+        { "text": "> 0123456789", "why": "the labelled row is unchanged by the move" }
+      ]
+    },
+    {
+      "label": "12. /help advertises the chords that reach the editor in the real app",
+      "send": "<C-u><Enter>/help<Enter>",
+      "wait": 1.5,
+      "wait_for": "insert a new line",
+      "probe": [
+        {
+          "text": "insert a new line",
+          "why": "Ctrl+J is advertised as the newline chord, because it is the one every terminal can deliver"
+        },
+        {
+          "text": "delete to the end of the line",
+          "why": "the line-scoped kills are advertised instead of the old buffer clear"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

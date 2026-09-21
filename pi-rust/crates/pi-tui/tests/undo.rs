@@ -113,15 +113,29 @@ fn history_browsing_undoes_back_to_the_draft() {
     type_text(&mut ed, "draft");
     assert_eq!(ed.text(), "draft");
 
+    // LUM-1312: `Up` is upstream's `tui.editor.cursorUp`, so on a one-row
+    // draft it snaps the cursor to the line start first and only reaches
+    // the prompt history from column 0 (`interactive-mode.ts`'s editor,
+    // `packages/tui/src/components/editor.ts:913-926`).
+    assert_eq!(
+        ed.handle_event(key(KeyCode::Up, KeyModifiers::NONE)),
+        EditorAction::Changed
+    );
+    assert_eq!(ed.text(), "draft");
+    assert_eq!(ed.cursor(), 0);
     assert_eq!(
         ed.handle_event(key(KeyCode::Up, KeyModifiers::NONE)),
         EditorAction::Changed
     );
     assert_eq!(ed.text(), "older");
 
+    // Entering history browsing captured an undo snapshot, so the draft
+    // comes back through the undo stack as well as through `Down`. The
+    // cursor is where it stood when browsing began — at the line start the
+    // first `Up` reached — because that is what the snapshot holds.
     assert_eq!(ed.handle_event(ctrl('-')), EditorAction::Changed);
     assert_eq!(ed.text(), "draft");
-    assert_eq!(ed.cursor(), 5);
+    assert_eq!(ed.cursor(), 0);
 }
 
 #[test]

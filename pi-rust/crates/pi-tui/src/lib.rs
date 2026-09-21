@@ -41,6 +41,7 @@ pub mod terminal_image;
 pub mod theme;
 pub mod tree;
 pub mod undo_stack;
+pub(crate) mod visual_text;
 pub mod word_navigation;
 
 pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot, ScrollbarGeometry};

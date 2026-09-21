@@ -10,9 +10,18 @@
 //! Kept in its own integration binary: `set_keybindings` mutates process
 //! state, and cargo gives every `tests/*.rs` file its own process, so this
 //! test can replace the global table without racing the other suites.
+//!
+//! Within this binary the tests still share that one registry, so they take
+//! [`registry_guard`] for their whole body. Without it, the *first* full
+//! workspace run of LUM-1312 reported `left: ["up"] right: ["ctrl+n"]` in
+//! `reload_picks_up_an_edited_file_without_a_restart`: the sibling test that
+//! finished first had already called `reset_keybindings()`, so the second
+//! reload's freshly installed table was gone before the assertion read it.
+//! Cargo's per-file process isolation does not help — the race is *inside*
+//! the file.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use pi_agent_core::{Agent, AgentOptions};
 use pi_ai::providers::faux::FauxProvider;
@@ -64,8 +73,23 @@ fn transcript(app: &App) -> String {
     app.render_snapshot(80, 24).lines.join("\n")
 }
 
+/// Serialize the tests that install a table into the process-wide keybinding
+/// registry (and reset it afterwards).
+///
+/// The registry is one global, so two tests running at the same time cannot
+/// both own it. Poisoning is recovered from instead of propagated: a test
+/// that panicked still leaves the registry usable for the next one, and
+/// swallowing the panic would only turn one red test into several.
+fn registry_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn reload_rereads_keybindings_and_ui_settings_mid_session() {
+    let _guard = registry_guard();
     let dir = tempfile::tempdir().expect("temp dir");
     write(dir.path(), KEYBINDINGS, r#"{"cursorUp":["ctrl+p"]}"#);
     write(
@@ -114,6 +138,7 @@ fn reload_rereads_keybindings_and_ui_settings_mid_session() {
 
 #[test]
 fn reload_picks_up_an_edited_file_without_a_restart() {
+    let _guard = registry_guard();
     // The defect a "reload" command exists to fix: the registry holds a clone
     // of the table, so re-reading the file without re-installing is invisible.
     // Two reloads with different fixtures is the observable proof.
@@ -147,6 +172,7 @@ fn reload_picks_up_an_edited_file_without_a_restart() {
 
 #[test]
 fn reload_falls_back_to_defaults_and_reports_a_missing_file() {
+    let _guard = registry_guard();
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().to_path_buf();
     // Only settings.json exists: the keybinding slice has to say so rather
@@ -184,6 +210,7 @@ fn reload_falls_back_to_defaults_and_reports_a_missing_file() {
 
 #[test]
 fn reload_reports_a_theme_that_does_not_resolve() {
+    let _guard = registry_guard();
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().to_path_buf();
     write(&path, SETTINGS, r#"{"theme":"no-such-theme"}"#);
