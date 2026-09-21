@@ -63,6 +63,7 @@ pub mod paths;
 pub mod print_mode;
 pub mod prompt_templates;
 pub mod provider;
+mod reload;
 pub mod resource_loader;
 pub mod rpc;
 pub mod session_log;
@@ -111,6 +112,7 @@ pub use prompt_templates::{
     PromptTemplatesLoadResult,
 };
 pub use provider::{api_key_env_vars, base_url_env_vars, ProviderError, ProviderRouter};
+pub use reload::{reload, ReloadReport};
 pub use resource_loader::{
     build_cli_system_prompt, load_resources, resolve_cli_project_trust, LoadedResources,
     ResourceLoadOptions,

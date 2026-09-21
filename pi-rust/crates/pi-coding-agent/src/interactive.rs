@@ -350,8 +350,12 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     // `pi-tui` defaults.
     //
     // The returned manager is the handle a config reload re-installs through
-    // (`keybindings::reload_keybindings`); the render loop has no reload
-    // trigger yet, so it is only kept alive for the session here.
+    // (`keybindings::reload_keybindings`). The `/reload` command rebuilds its
+    // own manager from this same agent dir (`crate::reload::reload`, which
+    // resolves the identical file with the identical platform table) rather
+    // than holding this one, so nothing has to travel through the render
+    // loop; the startup handle stays bound only for the process-global
+    // install the call above performs.
     let _keybindings =
         crate::keybindings::install_keybindings_from(crate::paths::agent_dir_or_default());
 
@@ -2791,6 +2795,16 @@ async fn run_slash_command(
                 home.as_deref(),
                 &cwd,
             ));
+        }
+        SlashCommand::Reload => {
+            // The agent dir is the one the startup path installed the merged
+            // keybinding table from (`install_keybindings_from` in
+            // `run_interactive`), so the reload reads the same file.
+            let _ = crate::reload::reload(
+                app,
+                &crate::paths::agent_dir_or_default(),
+                &settings_sources(),
+            );
         }
         SlashCommand::Session => {
             let agent_guard = agent.lock().await;

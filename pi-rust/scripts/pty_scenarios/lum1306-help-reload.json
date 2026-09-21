@@ -1,0 +1,25 @@
+{
+  "cols": 120,
+  "rows": 62,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "62 rows so the whole 32-line /help block fits one viewport without scrolling."
+  ],
+  "final_send": "<C-d>",
+  "caption": "LUM-1306 — /help at 120x62 (one viewport, no scrolling): the command list now ends with /reload, the row this round added. Same binary/HOME as lum1306-reload.json.",
+  "panels": [
+    {
+      "label": "1. /clear + /help 120x62 — the full command list including /reload",
+      "send": "/clear<Enter>/help<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "slash commands:",
+        "/reload",
+        "re-read keybindings.json and the interface settings"
+      ]
+    }
+  ]
+}

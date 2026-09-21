@@ -78,6 +78,12 @@ pub enum SlashCommand {
     /// (tools / commands / providers), plus any load failure and any tool
     /// a built-in shadowed.
     Extensions,
+    /// `/reload` — re-read `keybindings.json` and the UI slice of
+    /// `settings.json` into the running session. Mirrors upstream
+    /// `handleReloadCommand` (`interactive-mode.ts:5972`) for the slices
+    /// this port reloads; see [`crate::reload`] for what it deliberately
+    /// does not re-read.
+    Reload,
     /// Anything else, captured as the command name (without the slash).
     Unknown(String),
 }
@@ -122,6 +128,7 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "trust" => SlashCommand::Trust(parse_trust_decision(args)),
         "hotkeys" => SlashCommand::Hotkeys,
         "extensions" => SlashCommand::Extensions,
+        "reload" => SlashCommand::Reload,
         other => SlashCommand::Unknown(other.to_string()),
     };
     Ok(cmd)
@@ -177,6 +184,7 @@ pub fn help_text() -> String {
     out.push_str("  /compact  summarize the conversation prefix to free context\n");
     out.push_str("  /hotkeys  list the keyboard shortcuts\n");
     out.push_str("  /extensions list loaded extensions and what they register\n");
+    out.push_str("  /reload   re-read keybindings.json and the interface settings\n");
     out.push_str("  /exit     quit the interactive session\n");
     out.push_str("\nkeys:\n");
     out.push_str("  Enter       submit prompt\n");
@@ -245,6 +253,11 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     (
         "extensions",
         "List loaded extensions and what they register",
+        None,
+    ),
+    (
+        "reload",
+        "Reload keybindings and interface settings",
         None,
     ),
     ("exit", "Quit the interactive session", None),
@@ -726,6 +739,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_reload_command() {
+        // `/reload` (LUM-1306) re-reads the config slices the running TUI
+        // owns. The parser, `/help` and the composer dropdown have to agree,
+        // or the command is advertised without ever reaching a handler.
+        assert_eq!(handle_command("/reload").unwrap(), SlashCommand::Reload);
+        // A trailing argument is not part of the command; the parser splits
+        // on whitespace and ignores the tail for argument-less commands.
+        assert_eq!(
+            handle_command("/reload everything").unwrap(),
+            SlashCommand::Reload
+        );
+        let text = help_text();
+        assert!(text.contains("/reload"), "/reload missing from:\n{text}");
+        assert!(
+            autocomplete_commands()
+                .iter()
+                .any(|command| command.name == "reload"),
+            "/reload missing from the composer dropdown"
+        );
+    }
+
+    #[test]
     fn hotkeys_text_lists_the_session_branch_chords() {
         // Stage 65 wires `app.session.tree` / `fork` / `resume`; the app
         // group has to advertise them once the actions have consumers.
@@ -1135,6 +1170,7 @@ mod tests {
             "compact",
             "hotkeys",
             "extensions",
+            "reload",
             "exit",
         ];
         let names: Vec<String> = autocomplete_commands()

@@ -605,8 +605,16 @@ def main() -> int:
     ap.add_argument("--steps", required=True, help="scenario JSON file")
     ap.add_argument("--out", required=True, help="PNG output path")
     ap.add_argument("--text-out", default=None, help="text dump path (default: <out>.txt)")
-    ap.add_argument("--home", default=None, help="HOME for the child (default: fresh temp dir)")
-    ap.add_argument("--cwd", default=None, help="cwd for the child (default: temp fixture dir)")
+    ap.add_argument(
+        "--home",
+        default=None,
+        help="HOME for the child (default: fresh temp dir; an explicit --home is kept)",
+    )
+    ap.add_argument(
+        "--cwd",
+        default=None,
+        help="cwd for the child (default: fresh temp dir; an explicit --cwd is kept)",
+    )
     ap.add_argument("--keep-temp", action="store_true")
     ap.add_argument("--font-size", type=int, default=15)
     ap.add_argument("--scale", type=int, default=2)
@@ -780,8 +788,15 @@ def main() -> int:
         reap(pid)
         os.close(master)
         if not args.keep_temp:
-            shutil.rmtree(home, ignore_errors=True)
-            shutil.rmtree(cwd, ignore_errors=True)
+            # Only the scratch dirs the harness created itself are its to
+            # remove. An explicit `--home` / `--cwd` is the caller's fixture
+            # — deleting it silently emptied the prepared agent dir that a
+            # `/reload`-style scenario depends on, and the run then reported
+            # "no file" for a fixture that was there at spawn time.
+            if args.home is None:
+                shutil.rmtree(home, ignore_errors=True)
+            if args.cwd is None:
+                shutil.rmtree(cwd, ignore_errors=True)
 
     renderer = Renderer(font_size=args.font_size, scale=args.scale)
     images = [renderer.render_panel(frame, head) for head, _, frame, _, _, _ in cards]
