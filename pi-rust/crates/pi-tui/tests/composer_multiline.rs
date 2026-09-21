@@ -61,7 +61,7 @@ fn prompt_grows_when_the_buffer_wraps() {
     let mut prompt = Prompt::new("> ");
     prompt.editor_mut().insert_str("aaaaaaaaaa bbbbbb");
     assert_eq!(prompt.line_count(12, 8), 2);
-    let lines = prompt.render_lines(12, 8);
+    let lines = prompt.render_lines(12, 8, 0).0;
     assert_eq!(lines.len(), 8);
     assert!(
         lines[0].starts_with("> "),
