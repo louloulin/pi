@@ -534,6 +534,13 @@ pub struct AppConfig {
     /// matches Martty's `min(h/2, 12)` cap for tall terminals
     /// (`src/ui.rs:25-54`). The default is `8`.
     pub composer_max_rows: usize,
+    /// Cross-session prompt-history file (`~/.pi/agent/history.jsonl`).
+    ///
+    /// `None` (the default) keeps the App's composer history in memory only,
+    /// which is what every headless caller and test wants. The interactive
+    /// driver points it at the agent dir, so submitted prompts survive a
+    /// restart and are reachable from `Up` / `Ctrl+R`.
+    pub history_file: Option<std::path::PathBuf>,
 }
 
 /// What the built-in startup header says about loaded extensions.
@@ -573,6 +580,7 @@ impl Default for AppConfig {
             locale: Locale::default(),
             extension_header: ExtensionHeader::Hidden,
             composer_max_rows: 8,
+            history_file: None,
         }
     }
 }
@@ -862,6 +870,15 @@ pub struct Submission {
     pub text: String,
     /// Pasted images attached to the draft, in buffer order.
     pub images: Vec<pi_protocol::ImageContent>,
+    /// The draft's raw buffer ([`crate::editor::CHIP_CHAR`] sentinels
+    /// included) when the submission came from the composer.
+    ///
+    /// This is what lets a recalled history entry put its image chips back
+    /// exactly where they were; a submission built from a plain string has no
+    /// raw form and its history entry stays text-only. `None` keeps the field
+    /// invisible to every existing caller (`Submission::new`, `From`,
+    /// `Default`).
+    pub raw_text: Option<String>,
 }
 
 impl Submission {
@@ -870,6 +887,16 @@ impl Submission {
         Self {
             text: text.into(),
             images: Vec::new(),
+            raw_text: None,
+        }
+    }
+
+    /// A submission carrying the composer's raw buffer as well.
+    pub fn with_raw(text: impl Into<String>, raw: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+            raw_text: raw,
         }
     }
 
@@ -1005,6 +1032,12 @@ pub struct RenderSnapshot {
     pub search_query: String,
     /// Rendered search-bar lines (when open).
     pub search_lines: Vec<String>,
+    /// Whether a `Ctrl+R` reverse history search is open in the composer.
+    pub history_search_open: bool,
+    /// The open history search's query (empty while closed).
+    pub history_search_query: String,
+    /// The composer's reverse-search row (when open).
+    pub history_search_row: Option<String>,
     /// Status bar snapshot.
     pub status: StatusData,
 }
@@ -1240,6 +1273,9 @@ impl App {
         status_data.hint = Some("? for help".to_string());
         let mut prompt = Prompt::new("> ");
         prompt.set_placeholder(config.prompt_placeholder.clone());
+        if let Some(path) = config.history_file.clone() {
+            prompt.set_history_store(crate::history_store::HistoryStore::new(path));
+        }
         let event_rx = agent.subscribe();
         let markdown = config.markdown;
         let tool_preview_lines = config.tool_preview_lines;
@@ -2028,7 +2064,11 @@ impl App {
             }
             self.messages
                 .push_pending(PendingMessageKind::Steer, text.clone());
-            self.prompt.push_history(&text);
+            self.prompt.push_history_entry(
+                text.clone(),
+                submission.raw_text.clone(),
+                submission.images.clone(),
+            );
             return;
         }
         if self.event_rx.is_none() {
@@ -2038,7 +2078,11 @@ impl App {
             }
         }
         self.messages.push(MessageItem::user(&text));
-        self.prompt.push_history(&text);
+        self.prompt.push_history_entry(
+            text.clone(),
+            submission.raw_text.clone(),
+            submission.images.clone(),
+        );
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
         self.turn_busy.store(true, Ordering::SeqCst);
@@ -2091,12 +2135,17 @@ impl App {
         let submission = Submission {
             text: self.prompt.text(),
             images: self.prompt.images().to_vec(),
+            raw_text: Some(self.prompt.editor().text().to_string()),
         };
         self.prompt.clear();
         if busy {
             self.messages
                 .push_pending(PendingMessageKind::FollowUp, submission.text.clone());
-            self.prompt.push_history(&submission.text);
+            self.prompt.push_history_entry(
+                submission.text.clone(),
+                submission.raw_text.clone(),
+                submission.images.clone(),
+            );
             FollowUpOutcome::Queued
         } else {
             FollowUpOutcome::Submitted(submission)
@@ -2632,6 +2681,16 @@ impl App {
         if self.settings.is_some() {
             return self.step_settings(key);
         }
+        // An open `Ctrl+R` reverse search owns the keyboard before every
+        // app-level chord, exactly like the transcript-search overlay below:
+        // `Esc` must restore the pre-search draft instead of aborting a turn,
+        // and `Ctrl+C` must cancel the search instead of clearing the composer
+        // (`chat_composer/history_search.rs:154-248`).
+        if self.prompt.editor().history_search_active() {
+            let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+            self.prompt.editor_mut().set_visual_width(composer_width);
+            return self.step_prompt(key);
+        }
         // Global keys. Resolved through the keybinding registry so an
         // installed override reaches the App; with nothing installed the
         // registry serves the defaults, so the behaviour below is the
@@ -2804,10 +2863,19 @@ impl App {
         // while it handles the key: `Up` / `Down` move by visual row, and a
         // different width would move the caret to a row the frame did not
         // draw it on. `0` (no frame yet) leaves the draft on one row per
-        // hard line.
+        // hard line. (An open reverse search returned above, before the
+        // app-level chords could claim the key.)
         let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
         self.prompt.editor_mut().set_visual_width(composer_width);
 
+        self.step_prompt(key)
+    }
+
+    /// Route a key to the composer and translate its action.
+    ///
+    /// Split out of [`App::step_key_at`] so the reverse-search guard can hand
+    /// the composer the keyboard without duplicating the arm below.
+    fn step_prompt(&mut self, key: Key) -> StepOutcome {
         match self.prompt.handle_key(key) {
             PromptAction::None => StepOutcome::Idle,
             PromptAction::Changed => StepOutcome::Redraw,
@@ -2826,7 +2894,14 @@ impl App {
                     self.flash_status("Cannot attach images while a turn is running");
                     return StepOutcome::Redraw;
                 }
-                let submitted = Submission { text, images };
+                // The raw buffer (chip sentinels included) is captured before
+                // `clear()` wipes it, so history recall can restore the chips.
+                let raw_text = Some(self.prompt.editor().text().to_string());
+                let submitted = Submission {
+                    text,
+                    images,
+                    raw_text,
+                };
                 self.prompt.clear();
                 StepOutcome::Submitted(submitted)
             }
@@ -5194,6 +5269,14 @@ impl App {
                     crate::search::search_bar_text(&render_search_bar(&state.bar, width).lines)
                 })
                 .unwrap_or_default(),
+            history_search_open: self.prompt.editor().history_search_active(),
+            history_search_query: self
+                .prompt
+                .editor()
+                .history_search_query()
+                .unwrap_or_default()
+                .to_string(),
+            history_search_row: self.prompt.history_search_row(width),
             status: self.status_for_render().into_owned(),
         }
     }

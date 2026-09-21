@@ -5,7 +5,7 @@
 //!
 //! [`Editor`]: crate::Editor
 
-use crate::editor::{Editor, EditorAction};
+use crate::editor::{Editor, EditorAction, HistorySearchStatus};
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::visual_text::VisualLayout;
 
@@ -102,6 +102,54 @@ impl Prompt {
     /// Push a submitted prompt onto the editor's history.
     pub fn push_history(&mut self, text: impl Into<String>) {
         self.editor.push_history(text);
+    }
+
+    /// Push a submitted prompt together with the draft state a recall must
+    /// restore (raw chip buffer + attachments). See
+    /// [`Editor::push_history_entry`].
+    pub fn push_history_entry(
+        &mut self,
+        text: impl Into<String>,
+        raw: Option<String>,
+        images: Vec<pi_protocol::ImageContent>,
+    ) {
+        self.editor.push_history_entry(text, raw, images);
+    }
+
+    /// Attach the cross-session history file (see
+    /// [`Editor::set_history_store`]).
+    pub fn set_history_store(&mut self, store: crate::history_store::HistoryStore) {
+        self.editor.set_history_store(store);
+    }
+
+    /// Drop the in-session history and delete the persistent file
+    /// (`/clear-history`).
+    pub fn clear_persisted_history(&mut self) {
+        self.editor.clear_persisted_history();
+    }
+
+    /// The reverse-search row, when `Ctrl+R` search is open.
+    ///
+    /// Mirrors codex's footer line while its history search is active
+    /// (`codex-rs/tui/src/bottom_pane/chat_composer/history_search.rs:383-420`,
+    /// `reverse-i-search: <query>` plus a phase hint). `None` when no search
+    /// is open. The row is truncated **and padded** to `width` so the
+    /// composer region repaints it completely on every frame.
+    pub fn history_search_row(&self, width: u16) -> Option<String> {
+        let status = self.editor.history_search_status()?;
+        let query = self.editor.history_search_query().unwrap_or_default();
+        let mut line = format!("reverse-i-search: {query}");
+        match status {
+            HistorySearchStatus::Idle => {}
+            HistorySearchStatus::Match => line.push_str("  Enter accept · Esc cancel"),
+            HistorySearchStatus::NoMatch => line.push_str("  no match · Esc cancel"),
+        }
+        let width = width as usize;
+        let mut row = char_truncate(&line, width);
+        while row.chars().count() < width {
+            row.push(' ');
+        }
+        Some(row)
     }
 
     /// Reset the prompt — clear buffer and history. Used by `/clear`.
@@ -205,6 +253,18 @@ impl Prompt {
         if width == 0 || max_rows == 0 {
             return 1;
         }
+        let rows = self.body_line_count(width, max_rows);
+        if self.editor.history_search_active() {
+            // The search row sits above the body and costs one of the
+            // composer's rows, so the region grows by one instead of the
+            // draft losing its last row.
+            return rows + 1;
+        }
+        rows
+    }
+
+    /// Rows the draft itself needs, clamped to `max_rows` (no search row).
+    fn body_line_count(&self, width: usize, max_rows: usize) -> usize {
         let text = self.editor.display_text();
         if text.is_empty() {
             return 1;
@@ -239,6 +299,24 @@ impl Prompt {
         if width == 0 {
             return vec![String::new()];
         }
+        // The reverse-search row owns row 0 while the search is open; the
+        // draft keeps the rows below it.
+        let search_row = self.history_search_row(width as u16);
+        let body_rows = if search_row.is_some() {
+            max_rows.saturating_sub(1).max(1)
+        } else {
+            max_rows
+        };
+        let mut out = self.render_body(width, body_rows);
+        if let Some(row) = search_row {
+            out.insert(0, row);
+            out.truncate(max_rows);
+        }
+        out
+    }
+
+    /// The composer body rows (everything below the optional search row).
+    fn render_body(&self, width: usize, max_rows: usize) -> Vec<String> {
         let label_width = self.label.chars().count();
         let available = self.body_width(width as u16);
         let text = self.editor.display_text();

@@ -151,6 +151,11 @@ pub const STARTUP_HINTS: &[HeaderHint] = &[
         zh: "删除到行尾",
     },
     HeaderHint {
+        key: HeaderKey::Chord("tui.editor.historySearch"),
+        en: "to search history",
+        zh: "反查历史",
+    },
+    HeaderHint {
         key: HeaderKey::Chord("app.thinking.cycle"),
         en: "to cycle thinking level",
         zh: "切换思考等级",

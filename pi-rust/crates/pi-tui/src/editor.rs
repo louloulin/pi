@@ -71,6 +71,24 @@
 //! * `tui.editor.historyPrevious` / `historyNext`: unbound by default;
 //!   `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) reach the history
 //!   from the first / last visual row instead.
+//! * `tui.editor.historySearch` (`Ctrl+R`, `tui.editor.historySearchNext`
+//!   `Ctrl+S`): reverse incremental search over the same history, modelled on
+//!   codex's `ChatComposerHistory` search
+//!   (`codex-rs/tui/src/bottom_pane/chat_composer/history_search.rs`). While
+//!   the search is open it owns every key: printable characters extend the
+//!   query (restarting from the newest match), `Ctrl+R` / `Up` step to older
+//!   unique matches, `Ctrl+S` / `Down` back to newer ones, `Enter` accepts
+//!   the preview as the draft, and `Esc` / `Ctrl+C` restore the draft that
+//!   was in the composer when the search opened. `Ctrl+U` clears the query.
+//!
+//! History is **persistent**: [`Editor::set_history_store`] attaches a
+//! [`crate::history_store::HistoryStore`], the tail of the file is read into
+//! `history` at attach time, and every later [`Editor::push_history_entry`]
+//! appends the prompt to it (text only — attachments are an in-session
+//! feature, exactly like codex). An entry captured in this process keeps its
+//! chip attachments, so recalling it restores both the text and the images;
+//! an entry read back from the file was stored as text and comes back that
+//! way, with any `[Image #N]` label left as literal text.
 //!
 //! Legacy control-byte spellings that `keys.ts` normalises before matching
 //! (crossterm decodes them differently) are still accepted: `Ctrl+5` /
@@ -163,13 +181,14 @@
 //! [`Prompt`]: crate::Prompt
 //! [`ImageContent`]: pi_protocol::ImageContent
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
 use pi_protocol::ImageContent;
 
 use crate::autocomplete::{AutocompleteItem, AutocompleteProvider};
+use crate::history_store::HistoryStore;
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::keybindings::{get_keybindings, KeybindingsManager};
 use crate::kill_ring::{KillDirection, KillRing};
@@ -182,6 +201,119 @@ use crate::input::KeyModifiers;
 
 /// Maximum number of history entries kept by the editor.
 pub const HISTORY_LIMIT: usize = 100;
+
+/// One prompt-history entry.
+///
+/// Mirrors codex's `HistoryEntry`
+/// (`codex-rs/tui/src/bottom_pane/chat_composer_history.rs:37-52`) as far as
+/// this port's model reaches: the visible text, plus the draft state a recall
+/// has to rehydrate. codex also carries text elements, mention bindings and
+/// pending pastes; the Rust composer has no mention or paste-placeholder
+/// model, so the chips are the whole of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryEntry {
+    /// The draft as the user sees it: chip sentinels expanded to their
+    /// `[Image #N]` labels. This is what the search matches on and what the
+    /// persistent file stores.
+    text: String,
+    /// The raw buffer of an in-session draft, chip sentinels included.
+    ///
+    /// `Some` only for an entry captured from this process' composer that
+    /// carried attachments, so a recall can put the chips back exactly. It is
+    /// `None` for a text-only entry and for one read from the persistent
+    /// file — codex stores no attachments there, so a recalled persistent
+    /// entry keeps its `[Image #N]` label as text.
+    raw: Option<String>,
+    /// Attachments of an in-session draft, in buffer order.
+    images: Vec<ImageContent>,
+}
+
+impl HistoryEntry {
+    /// A text-only entry.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into().trim().to_string(),
+            raw: None,
+            images: Vec::new(),
+        }
+    }
+
+    /// The entry's visible text.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// The attachments a recall restores (empty for a persistent entry).
+    pub fn images(&self) -> &[ImageContent] {
+        &self.images
+    }
+
+    /// True when the entry was captured in this process with attachments,
+    /// i.e. a recall can rebuild the exact draft buffer.
+    pub fn has_restorable_images(&self) -> bool {
+        self.raw.is_some() && !self.images.is_empty()
+    }
+}
+
+/// Direction a [`Editor::step_history_search`] moves in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySearchDirection {
+    /// Towards older prompts (`Ctrl+R` / `Up`) — the `Up` history direction.
+    Older,
+    /// Towards newer prompts (`Ctrl+S` / `Down`).
+    Newer,
+}
+
+/// User-visible phase of an open reverse search.
+///
+/// codex has a fourth `Searching` state for an in-flight persistent fetch
+/// (`chat_composer/history_search.rs:88-94`); this port reads the whole file
+/// synchronously, so a search never waits and the state is unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySearchStatus {
+    /// The query is empty: no preview, the draft is untouched.
+    Idle,
+    /// A match is previewed in the composer.
+    Match,
+    /// The query matched nothing; the draft is restored, the search stays
+    /// open so the user can keep editing the query.
+    NoMatch,
+}
+
+/// State of one open `Ctrl+R` search.
+#[derive(Debug, Clone)]
+struct HistorySearch {
+    query: String,
+    /// Indices into `history` of the unique matches, newest first.
+    matches: Vec<usize>,
+    /// The previewed match (`None` while idle or after a miss).
+    selected: Option<usize>,
+    /// The draft the search opened over; `Esc` / `Ctrl+C` restore it.
+    draft: HistoryEntry,
+}
+
+impl HistorySearch {
+    /// A fresh search over `draft` with an empty query.
+    fn new(draft: HistoryEntry) -> Self {
+        Self {
+            query: String::new(),
+            matches: Vec::new(),
+            selected: None,
+            draft,
+        }
+    }
+
+    /// The current phase of the search.
+    fn status(&self) -> HistorySearchStatus {
+        if self.query.trim().is_empty() {
+            return HistorySearchStatus::Idle;
+        }
+        match self.selected {
+            Some(_) => HistorySearchStatus::Match,
+            None => HistorySearchStatus::NoMatch,
+        }
+    }
+}
 
 /// Sentinel standing in for one composer image chip in the buffer.
 ///
@@ -344,11 +476,18 @@ pub struct Editor {
     /// Sticky display column kept across a run of vertical cursor moves,
     /// upstream's `preferredVisualCol`.
     preferred_col: Option<usize>,
-    history: VecDeque<String>,
+    history: VecDeque<HistoryEntry>,
     history_index: Option<usize>,
     /// Draft saved when the user starts navigating history. Restored
-    /// when the user navigates back below index 0.
-    history_draft: Option<String>,
+    /// when the user navigates back below index 0. It carries the chips as
+    /// well as the text, so a recall can never eat a pasted image.
+    history_draft: Option<HistoryEntry>,
+    /// Cross-session history file. `None` (the default) keeps the editor
+    /// purely in-memory, which is what every non-interactive caller and test
+    /// wants.
+    history_store: Option<HistoryStore>,
+    /// Open `Ctrl+R` reverse search, if any (see [`HistorySearch`]).
+    history_search: Option<HistorySearch>,
     /// Emacs-style kill ring fed by `Ctrl+U` / `Ctrl+K` and drained by
     /// `Ctrl+Y` / `Alt+Y`.
     kill_ring: KillRing,
@@ -403,6 +542,8 @@ impl Editor {
             history: VecDeque::new(),
             history_index: None,
             history_draft: None,
+            history_store: None,
+            history_search: None,
             kill_ring: KillRing::new(),
             last_action: LastAction::Other,
             last_yank_len: 0,
@@ -459,12 +600,17 @@ impl Editor {
     /// stack. Upstream clears its stack the same way when a prompt is
     /// submitted, so `Ctrl+-` cannot resurrect an already-sent prompt.
     /// Pasted images go with the text.
+    ///
+    /// An open reverse search is dropped too: the composer it previewed into
+    /// no longer exists, and leaving the mode armed would trap the next keys
+    /// in a search with nothing to show.
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
         self.images.clear();
         self.history_index = None;
         self.history_draft = None;
+        self.history_search = None;
         self.last_action = LastAction::Other;
         self.undo_stack.clear();
         self.jump_mode = None;
@@ -615,33 +761,126 @@ impl Editor {
         self.history.len()
     }
 
+    /// Attach the cross-session history file and read its tail into the
+    /// in-session history.
+    ///
+    /// The file's rows are **older** than anything this process submits, so
+    /// they are appended at the back of the in-session deque (which keeps the
+    /// newest entry at index 0) in file order. Rows equal to an entry already
+    /// in the deque are skipped, so attaching twice is harmless and a resumed
+    /// session that already carries the same prompt does not double it.
+    ///
+    /// A store that cannot be read contributes nothing: a corrupt or missing
+    /// file degrades to "in-session history only" and never fails.
+    pub fn set_history_store(&mut self, store: HistoryStore) {
+        let persisted = store.load();
+        // The deque keeps the newest entry at index 0, and the file is oldest
+        // first, so the rows go in back-to-front.
+        for text in persisted.into_iter().rev() {
+            if self.history.iter().any(|entry| entry.text == text) {
+                continue;
+            }
+            self.history.push_back(HistoryEntry::text(text));
+        }
+        while self.history.len() > HISTORY_LIMIT {
+            self.history.pop_back();
+        }
+        self.history_store = Some(store);
+    }
+
+    /// The attached history store, if any.
+    pub fn history_store(&self) -> Option<&HistoryStore> {
+        self.history_store.as_ref()
+    }
+
     /// Push a prompt onto the history (newest at index 0). Empty / pure
     /// whitespace entries are dropped; consecutive duplicates collapse.
+    ///
+    /// Text-only convenience for callers with no attachments; the composer's
+    /// own submit path uses [`Editor::push_history_entry`], which also keeps
+    /// the draft's chips.
     pub fn push_history(&mut self, text: impl Into<String>) {
-        let trimmed = text.into();
-        let trimmed_trimmed = trimmed.trim();
-        if trimmed_trimmed.is_empty() {
+        self.push_history_entry(text, None, Vec::new());
+    }
+
+    /// Push a submitted prompt, with the draft state a recall has to restore.
+    ///
+    /// `raw` is the raw buffer of the draft (chip sentinels included) and
+    /// `images` its attachments, in buffer order. When `raw` is absent or does
+    /// not line up with `images`, the raw buffer is rebuilt from the
+    /// `[Image #N]` labels in `text`; if that fails too the entry degrades to
+    /// text-only (the recall then shows the labels as literal text, exactly
+    /// like a persistent entry).
+    ///
+    /// The visible text is appended to the attached history file (text only —
+    /// attachments live for the session, codex parity) and the file is trimmed
+    /// to [`HISTORY_LIMIT`] rows. An append failure is ignored: the in-session
+    /// entry stays, the session simply loses its persistence.
+    pub fn push_history_entry(
+        &mut self,
+        text: impl Into<String>,
+        raw: Option<String>,
+        images: Vec<ImageContent>,
+    ) {
+        let text = text.into();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
             return;
         }
-        if self.history.front().map(String::as_str) == Some(trimmed_trimmed) {
+        if self.history.front().map(|entry| entry.text.as_str()) == Some(trimmed) {
             return;
         }
-        self.history.push_front(trimmed.trim().to_string());
+        let raw = match raw.or_else(|| rebuild_raw(trimmed, &images)) {
+            Some(raw) if raw.matches(CHIP_CHAR).count() == images.len() && !images.is_empty() => {
+                Some(raw)
+            }
+            _ => None,
+        };
+        let entry = HistoryEntry {
+            text: trimmed.to_string(),
+            images: if raw.is_some() { images } else { Vec::new() },
+            raw,
+        };
+        if let Some(store) = &self.history_store {
+            let _ = store.append(&entry.text);
+        }
+        self.history.push_front(entry);
         while self.history.len() > HISTORY_LIMIT {
             self.history.pop_back();
         }
     }
 
-    /// Drop all history entries.
+    /// Drop all in-session history entries (the file, if any, is untouched).
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.history_index = None;
         self.history_draft = None;
+        self.history_search = None;
     }
 
-    /// Read-only access to history (oldest first).
+    /// Drop the in-session history **and** delete the persistent file.
+    ///
+    /// The explicit cleanup entry point the issue asks for (`/clear-history`);
+    /// plain `/clear` deliberately keeps the file, like upstream.
+    pub fn clear_persisted_history(&mut self) {
+        let result = self.history_store.as_ref().map(HistoryStore::clear);
+        if let Some(Err(err)) = result {
+            // Nothing to report through this API; the in-memory drop below is
+            // what the user asked for and is always honoured.
+            let _ = err;
+        }
+        self.clear_history();
+    }
+
+    /// Read-only access to history texts, newest first (index 0 is the most
+    /// recently submitted prompt).
     pub fn history(&self) -> impl Iterator<Item = &str> {
-        self.history.iter().map(String::as_str)
+        self.history.iter().map(|entry| entry.text.as_str())
+    }
+
+    /// Read-only access to the history entries themselves, newest first.
+    pub fn history_entries(&self) -> impl Iterator<Item = &HistoryEntry> {
+        self.history.iter()
     }
 
     /// Move the cursor to the previous history entry. Captures the
@@ -662,11 +901,11 @@ impl Editor {
             // the draft the user was typing. Mirrors upstream
             // `navigateHistory` capturing the state on first entry.
             self.push_undo_snapshot();
-            self.history_draft = Some(self.buffer.clone());
+            self.history_draft = Some(self.current_draft_entry());
         }
         self.history_index = Some(next);
         let entry = self.history[next].clone();
-        self.set_text_internal(entry);
+        self.restore_history_entry(&entry);
         EditorAction::Changed
     }
 
@@ -679,12 +918,223 @@ impl Editor {
         };
         if current == 0 {
             self.history_index = None;
-            let draft = self.history_draft.take().unwrap_or_default();
-            self.set_text_internal(draft);
+            let draft = self
+                .history_draft
+                .take()
+                .unwrap_or_else(|| self.current_draft_entry());
+            self.restore_history_entry(&draft);
         } else {
             self.history_index = Some(current - 1);
             let entry = self.history[current - 1].clone();
-            self.set_text_internal(entry);
+            self.restore_history_entry(&entry);
+        }
+        EditorAction::Changed
+    }
+
+    /// The composer's current content as a history entry.
+    fn current_draft_entry(&self) -> HistoryEntry {
+        HistoryEntry {
+            text: self.display_text(),
+            raw: Some(self.buffer.clone()),
+            images: self.images.clone(),
+        }
+    }
+
+    /// Put `entry` into the composer, chips and all.
+    ///
+    /// A text-only (or persistent) entry lands as a plain text draft; an entry
+    /// captured in this process restores its attachments too, so
+    /// `image_count()` is back to what it was when the prompt was submitted.
+    fn restore_history_entry(&mut self, entry: &HistoryEntry) {
+        match (&entry.raw, entry.images.is_empty()) {
+            (Some(raw), false) => self.set_buffer_and_images(raw, entry.images.clone()),
+            _ => self.set_text_internal(entry.text.as_str()),
+        }
+    }
+
+    /// Set the buffer and its chip attachments without touching undo or
+    /// history navigation state (the history-recall path).
+    fn set_buffer_and_images(&mut self, buffer: &str, images: Vec<ImageContent>) {
+        self.buffer = buffer.to_string();
+        self.cursor = self.buffer.len();
+        self.images = images;
+        self.last_action = LastAction::Other;
+        self.cancel_autocomplete();
+    }
+
+    // -----------------------------------------------------------------
+    // Reverse incremental search (`tui.editor.historySearch`, `Ctrl+R`)
+    // -----------------------------------------------------------------
+
+    /// Whether a `Ctrl+R` reverse search is open.
+    pub fn history_search_active(&self) -> bool {
+        self.history_search.is_some()
+    }
+
+    /// The open search's query (empty while idle).
+    pub fn history_search_query(&self) -> Option<&str> {
+        self.history_search.as_ref().map(|s| s.query.as_str())
+    }
+
+    /// The open search's phase, for the composer's search row.
+    pub fn history_search_status(&self) -> Option<HistorySearchStatus> {
+        self.history_search.as_ref().map(HistorySearch::status)
+    }
+
+    /// The entry the open search is previewing, if any.
+    pub fn history_search_match(&self) -> Option<&HistoryEntry> {
+        let search = self.history_search.as_ref()?;
+        let index = search.selected?;
+        search.matches.get(index).and_then(|i| self.history.get(*i))
+    }
+
+    /// Open reverse search over the history, leaving the composer untouched.
+    ///
+    /// codex starts *idle* with an empty query and previews nothing
+    /// (`chat_composer/history_search.rs:109-141`), so a reflexive `Ctrl+R`
+    /// cannot replace what the user was typing. The same call while a search
+    /// is already open behaves like a `Ctrl+R` press (older match).
+    pub fn begin_history_search(&mut self) -> EditorAction {
+        if self.history_search.is_some() {
+            return self.step_history_search(HistorySearchDirection::Older);
+        }
+        self.cancel_autocomplete();
+        self.reset_history_navigation();
+        self.history_search = Some(HistorySearch::new(self.current_draft_entry()));
+        EditorAction::Changed
+    }
+
+    /// Extend the search query by one character, restarting at the newest
+    /// match (codex `update_history_search_query`).
+    pub fn history_search_push(&mut self, c: char) -> EditorAction {
+        let Some(search) = self.history_search.as_mut() else {
+            return EditorAction::None;
+        };
+        search.query.push(c);
+        self.run_history_search()
+    }
+
+    /// Drop the query's last character (`Backspace` / `Ctrl+H`).
+    pub fn history_search_backspace(&mut self) -> EditorAction {
+        let Some(search) = self.history_search.as_mut() else {
+            return EditorAction::None;
+        };
+        search.query.pop();
+        self.run_history_search()
+    }
+
+    /// Clear the whole query (`Ctrl+U`).
+    pub fn history_search_clear_query(&mut self) -> EditorAction {
+        let Some(search) = self.history_search.as_mut() else {
+            return EditorAction::None;
+        };
+        search.query.clear();
+        self.run_history_search()
+    }
+
+    /// Step to the next unique match in `direction`.
+    ///
+    /// Restarts from the newest match when the query is empty (there is
+    /// nothing to restart from), and keeps the current preview at a boundary —
+    /// codex's `AtBoundary`, which explicitly does **not** advance hidden
+    /// cursor state or report a miss.
+    pub fn step_history_search(&mut self, direction: HistorySearchDirection) -> EditorAction {
+        let Some(search) = self.history_search.as_mut() else {
+            return EditorAction::None;
+        };
+        if search.query.trim().is_empty() {
+            return self.run_history_search();
+        }
+        let Some(selected) = search.selected else {
+            return self.run_history_search();
+        };
+        let next = match direction {
+            HistorySearchDirection::Older => selected + 1,
+            HistorySearchDirection::Newer => selected.checked_sub(1).unwrap_or(selected),
+        };
+        if next == selected || next >= search.matches.len() {
+            // Boundary: the preview stays, the search stays open.
+            return EditorAction::None;
+        }
+        search.selected = Some(next);
+        let entry = search
+            .matches
+            .get(next)
+            .and_then(|index| self.history.get(*index))
+            .cloned();
+        if let Some(entry) = entry {
+            self.restore_history_entry(&entry);
+        }
+        EditorAction::Changed
+    }
+
+    /// Close the search and put the pre-search draft back (`Esc` / `Ctrl+C`).
+    pub fn cancel_history_search(&mut self) -> EditorAction {
+        let Some(search) = self.history_search.take() else {
+            return EditorAction::None;
+        };
+        self.restore_history_entry(&search.draft);
+        self.reset_history_navigation();
+        EditorAction::Changed
+    }
+
+    /// Accept the previewed match as the editable draft (`Enter`).
+    ///
+    /// A no-op while idle or after a miss: codex only accepts a `Match`
+    /// (`chat_composer/history_search.rs:196-215`), which is what keeps `Enter`
+    /// on a failed query from submitting the stale draft.
+    pub fn accept_history_search(&mut self) -> EditorAction {
+        match self.history_search_status() {
+            Some(HistorySearchStatus::Match) => {
+                self.history_search = None;
+                self.reset_history_navigation();
+                self.cursor = self.buffer.len();
+                self.last_action = LastAction::Other;
+                EditorAction::Changed
+            }
+            _ => EditorAction::None,
+        }
+    }
+
+    /// Re-run the current query from the newest match, rewriting the matches
+    /// list and previewing the newest hit.
+    ///
+    /// Duplicate suppression is scoped to this one query, exactly like codex's
+    /// `seen_texts`: repeated `Ctrl+R` walks *unique* prompt texts, and a new
+    /// query starts a new scan.
+    fn run_history_search(&mut self) -> EditorAction {
+        let Some(search) = self.history_search.as_mut() else {
+            return EditorAction::None;
+        };
+        let query = search.query.trim().to_lowercase();
+        let draft = search.draft.clone();
+        search.matches.clear();
+        search.selected = None;
+        if query.is_empty() {
+            self.restore_history_entry(&draft);
+            return EditorAction::Changed;
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let matches: Vec<usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.text.to_lowercase().contains(&query))
+            .filter(|(_, entry)| seen.insert(entry.text.as_str()))
+            .map(|(index, _)| index)
+            .collect();
+        let Some(first) = matches.first().copied() else {
+            // Miss: the draft comes back while the query stays editable.
+            self.restore_history_entry(&draft);
+            return EditorAction::Changed;
+        };
+        let entry = self.history.get(first).cloned();
+        if let Some(search) = self.history_search.as_mut() {
+            search.matches = matches;
+            search.selected = Some(0);
+        }
+        if let Some(entry) = entry {
+            self.restore_history_entry(&entry);
         }
         EditorAction::Changed
     }
@@ -1623,6 +2073,22 @@ impl Editor {
     pub fn handle_key(&mut self, key: Key) -> EditorAction {
         let kb = get_keybindings();
 
+        // An open `Ctrl+R` reverse search owns every key, exactly like codex's
+        // `handle_history_search_key`
+        // (`chat_composer/history_search.rs:154-248`): the query is edited here,
+        // `Ctrl+R` / `Up` step to older matches, `Enter` accepts the preview,
+        // `Esc` / `Ctrl+C` restore the pre-search draft, and everything else is
+        // swallowed (`Ctrl+U` clears the query). Checked before every other
+        // chord so the search cannot leak a keystroke into the draft behind it.
+        if self.history_search_active() {
+            return self.handle_history_search_key(&kb, &key);
+        }
+
+        // `tui.editor.historySearch` (`Ctrl+R`) opens the search.
+        if Self::matches_binding(&kb, &key, "tui.editor.historySearch") {
+            return self.begin_history_search();
+        }
+
         // An armed jump consumes this key: a printable character is the
         // target, the hotkey again (or anything that is not a plain
         // printable character) cancels the mode. Cancelling keys fall
@@ -1832,6 +2298,50 @@ impl Editor {
         self.history_draft = None;
     }
 
+    /// One key press while a reverse search is open.
+    ///
+    /// The chord order and the swallow-everything fallback mirror codex's
+    /// `handle_history_search_key`; see [`Editor::handle_key`].
+    fn handle_history_search_key(&mut self, kb: &KeybindingsManager, key: &Key) -> EditorAction {
+        // Older / newer match: `Ctrl+R` / `Up` and `Ctrl+S` / `Down`, the two
+        // pairs codex binds (`history_search_previous` / `_next`).
+        if Self::matches_binding(kb, key, "tui.editor.historySearch")
+            || Self::matches_binding(kb, key, "tui.editor.cursorUp")
+        {
+            return self.step_history_search(HistorySearchDirection::Older);
+        }
+        if Self::matches_binding(kb, key, "tui.editor.historySearchNext")
+            || Self::matches_binding(kb, key, "tui.editor.cursorDown")
+        {
+            return self.step_history_search(HistorySearchDirection::Newer);
+        }
+        if key.code == KeyCode::Esc {
+            return self.cancel_history_search();
+        }
+        // `Ctrl+C` cancels the search instead of interrupting the turn; the
+        // App never sees it while a search is open (see `App::step_key_at`).
+        if Self::matches_binding(kb, key, "tui.input.copy") {
+            return self.cancel_history_search();
+        }
+        if key.code == KeyCode::Enter {
+            return self.accept_history_search();
+        }
+        if Self::matches_binding(kb, key, "tui.editor.deleteCharBackward") {
+            return self.history_search_backspace();
+        }
+        if Self::matches_binding(kb, key, "tui.editor.deleteToLineStart") {
+            return self.history_search_clear_query();
+        }
+        if !key.modifiers.control && !key.modifiers.alt && !key.modifiers.meta {
+            if let KeyCode::Char(c) = key.code {
+                return self.history_search_push(c);
+            }
+        }
+        // Any other key is consumed without a state change (codex's `_ =>`
+        // arm): a stray chord must not edit the draft under the search.
+        EditorAction::None
+    }
+
     /// Find the previous UTF-8 character boundary at or before `pos`.
     /// Returns the byte offset of the start of the character that ends
     /// at or before `pos`. Returns 0 when `pos == 0` or the buffer is
@@ -1902,6 +2412,31 @@ fn strip_chips(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Rebuild the raw draft buffer (chip sentinels included) from a display text
+/// and the attachments it was submitted with.
+///
+/// [`Editor::display_text`] numbers the chips in buffer order, so the display
+/// form spells the n-th attachment `[Image #n]`. Walking `1..=images.len()` and
+/// replacing each label with a [`CHIP_CHAR`] therefore recovers the buffer the
+/// user submitted — unless the user literally typed `[Image #n]` themselves, in
+/// which case the label that is found first wins. The caller's captured `raw`
+/// buffer is preferred over this reconstruction for exactly that reason; this
+/// is the fallback for a caller that only has the display text.
+///
+/// `None` when any label is missing or the attachments are empty.
+fn rebuild_raw(display: &str, images: &[ImageContent]) -> Option<String> {
+    if images.is_empty() {
+        return None;
+    }
+    let mut out = display.to_string();
+    for index in 1..=images.len() {
+        let label = chip_label(index);
+        let at = out.find(&label)?;
+        out.replace_range(at..at + label.len(), &CHIP_CHAR.to_string());
+    }
+    Some(out)
 }
 
 /// Accept the legacy control-byte spelling of a resolved chord.

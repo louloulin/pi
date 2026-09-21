@@ -221,6 +221,16 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
             "Select next prompt history entry",
         ),
         entry(
+            "tui.editor.historySearch",
+            ["ctrl+r"],
+            "Search prompt history (reverse incremental search)",
+        ),
+        entry(
+            "tui.editor.historySearchNext",
+            ["ctrl+s"],
+            "Move to the next (newer) prompt history search match",
+        ),
+        entry(
             "tui.editor.cursorLeft",
             ["left", "ctrl+b"],
             "Move cursor left",
