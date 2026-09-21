@@ -84,6 +84,19 @@ $ cargo clippy -p pi-tui --all-targets
 
 $ cargo check --workspace --all-targets
   0 errors
+
+$ python3 scripts/pty_capture.py \
+    --bin target/debug/pi \
+    --steps scripts/pty_scenarios/lum1282-multi-line-composer.json \
+    --out docs/screenshots/lum1282-fresh-tip.png
+  5/5 panels PASS (60x24, long draft wraps; 80-col paste wraps; cursor on row 2)
+
+$ python3 scripts/pty_capture.py \
+    --bin target/debug/pi \
+    --steps scripts/pty_scenarios/lum1267-interaction-assertions.json \
+    --out docs/screenshots/lum1282-interaction-tip.png
+  20/20 panels, 57 PASS / 1 FAIL / 2 XFAIL / 0 XPASS
+  (the 1 FAIL is LUM-1271 'keys:' clipping, not from this commit)
 ```
 
 新增的 7 个测试（4 integration + 3 单元）：
@@ -111,6 +124,11 @@ $ cargo check --workspace --all-targets
    `cargo build -p pi-coding-agent` 没成功；按 `LUM-1260/LUM-1267` 的
    「无法验证就不落码」惯例，scenario + 集成测试是这轮能交付的承重证据，
    真二进制截图等下一轮有 disk headroom 时跑。
+   - **二轮（commit `5798d36` 后）追跑成功**：
+     `docs/screenshots/lum1282-fresh-tip.png{,.txt}` 是 60×24 的 5 面板
+     `lum1282-multi-line-composer.json` 真二进制截帧 — panel 1..5 全 PASS，
+     长 draft wrap 到 "> aaa…" + "  aaa…▍" 两行，80 字符 paste 同样
+     wrap 成功。
 
 ## 与上游 + Martty 的对账
 
