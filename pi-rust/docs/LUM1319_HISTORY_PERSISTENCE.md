@@ -5,7 +5,7 @@
 > `pi-rust/crates/pi-tui/tests/{composer_history,composer_images,startup_header}.rs`,
 > `pi-rust/crates/pi-coding-agent/tests/history_file.rs`,
 > `pi-rust/scripts/pty_scenarios/lum1319-history-*.json`
-> branch: `work/LUM-1319` → merged into `feature/pi.rs`
+> branch: `work/LUM-1319` → merged `origin/feature/pi.rs`（`231abbc4d`）→ fast-forwarded into `feature/pi.rs`
 > reference: codex `codex-rs/tui/src/bottom_pane/chat_composer_history.rs` +
 > `chat_composer/history_search.rs` + `keymap.rs` (local checkout `7d99ee8`, §5)
 
@@ -199,14 +199,19 @@ $ . pi-rust/scripts/toolchain.sh && \
 |---|---|
 | `cargo fmt --all -- --check` | 通过（无 diff） |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | `No issues found` |
-| `cargo test --workspace --locked` | **2603 passed, 0 failed, 2 ignored**（166 suites，59.5s） |
+| `cargo test --workspace --locked` | **2622 passed, 0 failed, 2 ignored**（167 suites，67.9s） |
 | 新增单测 | `crates/pi-tui/tests/composer_history.rs` **29 passed**；`history_store.rs` 内 8 个；`history_file.rs` 2 个；`startup_header.rs` +1 断言；`slash.rs` +1 单测 |
 | 真 PTY | `lum1319-history-session-a` 4/4、`-session-b` 15/15、`-advertise` 11/11 |
-| 既有 PTY 回归 | `feature/pi.rs` tip 与本报改动后二进制各跑 **45 个既有 scenario**，逐条断言文本完全一致（`0` 处差异）；新增/改写的只有 `lum1319-history-*` 三个 |
+| 既有 PTY 回归 | `origin/feature/pi.rs` tip（`231abbc4d`，已含 LUM-1317 的草稿内翻页）与本报改动后二进制各跑 **45 个既有 scenario**，逐条断言文本完全一致（`0` 处差异）；新增/改写的只有 `lum1319-history-*` 三个 |
 
 回归对比方法（可复现）：`git worktree add <base> origin/feature/pi.rs` → 编
 `pi-baseline` → 对 `scripts/pty_scenarios/*.json` 逐个跑两个二进制（同一 `--home` 策略、
 每个 scenario 之前清空 HOME），把 `PASS/FAIL/XFAIL/XPASS` 行排序后 `diff`。
+
+合并 LUM-1317 时 `prompt.rs` / `app.rs` 有冲突（对方把 `render_lines` 改成
+`(&self, width, max_rows, scroll) -> (Vec<String>, usize)`，并新增 `set_page_rows`）：
+解决方式是保留对方的滚动窗口参数与 `↑`/`↓` 提示，本轮的搜索行仍占第 0 行、
+`line_count` 仍在搜索打开时 +1，草稿窗口在搜索行之下按对方的 `scroll` 语义工作。
 
 ## 5. 与 codex `ChatComposerHistory` 的逐条对照
 

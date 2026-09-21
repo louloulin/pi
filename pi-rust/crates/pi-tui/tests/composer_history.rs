@@ -647,7 +647,7 @@ fn the_search_row_reports_the_query_and_the_phase() {
     assert!(matched.contains("Enter accept"), "{matched}");
     assert!(matched.contains("Esc cancel"), "{matched}");
     // The composer body previews the match under the search row.
-    let lines = prompt.render_lines(60, 8);
+    let (lines, _) = prompt.render_lines(60, 8, 0);
     assert!(lines[0].contains("reverse-i-search: old"), "{lines:?}");
     assert!(lines[1].starts_with("> older prompt"), "{lines:?}");
 

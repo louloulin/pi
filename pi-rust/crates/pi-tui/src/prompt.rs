@@ -330,16 +330,16 @@ impl Prompt {
         } else {
             max_rows
         };
-        let mut out = self.render_body(width, body_rows);
+        let (mut out, start) = self.render_body(width, body_rows, scroll);
         if let Some(row) = search_row {
             out.insert(0, row);
             out.truncate(max_rows);
         }
-        out
+        (out, start)
     }
 
     /// The composer body rows (everything below the optional search row).
-    fn render_body(&self, width: usize, max_rows: usize) -> Vec<String> {
+    fn render_body(&self, width: usize, max_rows: usize, scroll: usize) -> (Vec<String>, usize) {
         let label_width = self.label.chars().count();
         let available = self.body_width(width as u16);
         let text = self.editor.display_text();
