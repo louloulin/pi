@@ -60,6 +60,9 @@ use crate::extensions::events::ExtensionEventMapper;
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
 use crate::extensions::wiring::{ExtensionReport, ExtensionRuntime};
 use crate::prompt_templates::PromptTemplate;
+use crate::scoped_models::{
+    value_to_id, ScopedModelsPanel, MAX_VISIBLE, PANEL_TITLE, VALUE_PREFIX,
+};
 use crate::session_log::SessionLog;
 use crate::text_fallback::{run_text_fallback, FallbackReason};
 use crate::tool_executor::default_executor;
@@ -475,6 +478,10 @@ async fn run_loop(
     // resolver rejects is reported instead of silently keeping the default.
     {
         let startup_ui = apply_startup_ui_settings(&mut app, &settings_sources());
+        // `settings.json`'s `enabledModels` bounds the `Ctrl+P` cycle from the
+        // first key press, the way upstream resolves it into
+        // `session.scopedModels` before the loop starts (`main.ts:448`).
+        seed_model_scope(&mut options, &settings_sources());
         if let Some(err) = &startup_ui.theme_error {
             app.info(format!("theme → not applied: {err}"));
         }
@@ -1500,6 +1507,102 @@ fn open_model_selector(app: &mut App, options: &InteractiveOptions) {
     app.open_selector(selector);
 }
 
+/// Open the `/scoped-models` panel — upstream `showModelsSelector`
+/// (`interactive-mode.ts:5010`), reusing the shared [`Selector`] like every
+/// other picker.
+///
+/// The panel state is created once and reused: upstream's component lives for
+/// the whole session and re-opening it shows the same selection and dirty
+/// flag. The catalog is re-read on every open because providers can be
+/// registered while the session runs.
+fn open_scoped_models_selector(app: &mut App, options: &mut InteractiveOptions) {
+    let catalog = sorted_models(&options.models);
+    if catalog.is_empty() {
+        app.info("no models available".to_string());
+        return;
+    }
+    match options.pickers.scoped_models.as_mut() {
+        Some(panel) => panel.update_catalog(&catalog),
+        None => {
+            let configured = config::load_enabled_models(&settings_sources());
+            options.pickers.scoped_models =
+                Some(ScopedModelsPanel::new(&catalog, configured.as_deref()));
+        }
+    }
+    refresh_scoped_models_selector(app, options, None);
+}
+
+/// Seed the `Ctrl+P` scope from `settings.json` before the first key is read.
+///
+/// Upstream resolves `enabledModels` into `session.scopedModels` at startup
+/// (`main.ts:448`), so the cycle honours the saved selection without the user
+/// opening the panel. Failure to read the file is shrugged off: an unreadable
+/// setting only means the full catalog stays in scope.
+pub fn seed_model_scope(options: &mut InteractiveOptions, sources: &ConfigSources) {
+    if options.pickers.scoped_models.is_some() {
+        return;
+    }
+    let Some(configured) = config::load_enabled_models(sources) else {
+        return;
+    };
+    let catalog = sorted_models(&options.models);
+    if catalog.is_empty() {
+        return;
+    }
+    options.pickers.scoped_models = Some(ScopedModelsPanel::new(&catalog, Some(&configured)));
+}
+
+/// Rebuild the open `/scoped-models` panel after a change.
+///
+/// `keep` is the id the cursor must follow (upstream keeps `selectedIndex` on
+/// the toggled or moved item); the search filter survives too. When `keep` is
+/// `None` the previous cursor index is reused.
+fn refresh_scoped_models_selector(app: &mut App, options: &InteractiveOptions, keep: Option<&str>) {
+    let Some(panel) = options.pickers.scoped_models.as_ref() else {
+        return;
+    };
+    let (filter, cursor) = app
+        .selector()
+        .map(|selector| (selector.filter().to_string(), selector.cursor()))
+        .unwrap_or_else(|| (String::new(), 0));
+    let items = panel.items();
+    let mut selector = Selector::new(PANEL_TITLE, items.clone())
+        .searchable(true)
+        .with_max_visible(MAX_VISIBLE)
+        .with_footer(panel.footer());
+    if !filter.is_empty() {
+        selector.set_filter(filter.clone());
+    }
+    let index = match keep {
+        Some(id) => scoped_row_index(&items, &filter, id).unwrap_or(cursor),
+        None => cursor,
+    };
+    selector.set_cursor(index);
+    app.replace_selector(selector);
+}
+
+/// The cursor index of `id`'s row inside the *filtered* view.
+///
+/// The shared [`Selector`] ranks its matches with [`pi_tui::fuzzy::fuzzy_rank`]
+/// (`selector.rs::refilter`); running the same function over the same items
+/// gives the same order, so the row can be located without poking at the
+/// selector's private index list.
+fn scoped_row_index(items: &[SelectorItem], filter: &str, id: &str) -> Option<usize> {
+    let value = format!("{VALUE_PREFIX}{id}");
+    let row = items.iter().position(|item| item.value == value)?;
+    pi_tui::fuzzy::fuzzy_rank(items, filter, |item| item.search_text())
+        .iter()
+        .position(|index| *index == row)
+}
+
+/// The id highlighted in the open `/scoped-models` panel.
+fn selected_scoped_id(app: &App) -> Option<String> {
+    app.selector()
+        .and_then(|selector| selector.selected_value())
+        .and_then(value_to_id)
+        .map(str::to_string)
+}
+
 /// Which way `app.model.cycleForward` / `app.model.cycleBackward` move
 /// through the model catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1526,6 +1629,38 @@ fn sorted_models(models: &Models) -> Vec<(ProviderId, Model)> {
     catalog
 }
 
+/// The models `app.model.cycleForward` / `cycleBackward` walk.
+///
+/// Upstream cycles `session.scopedModels` when a scope is set and the whole
+/// catalog otherwise; `scope_ids` is the already-resolved scope from
+/// [`ScopedModelsPanel::cycle_scope`]. The scope's *order* is honoured — that
+/// is what `app.models.reorderUp` / `reorderDown` edit.
+fn cycle_catalog(
+    options: &InteractiveOptions,
+    scope_ids: Option<&[String]>,
+) -> Vec<(ProviderId, Model)> {
+    let catalog = sorted_models(&options.models);
+    let Some(scope_ids) = scope_ids else {
+        return catalog;
+    };
+    let scoped = scope_ids
+        .iter()
+        .filter_map(|id| {
+            catalog
+                .iter()
+                .find(|(provider, model)| crate::scoped_models::full_id(provider, model) == *id)
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    if scoped.is_empty() {
+        // Every scoped id is unavailable: cycling nothing would look like a
+        // dead chord, so fall back to the catalog (upstream's
+        // `hasEnabledAvailableModel` guard does the same).
+        return catalog;
+    }
+    scoped
+}
+
 /// `app.model.cycleForward` / `app.model.cycleBackward` — move the live
 /// session to the next / previous catalog model.
 ///
@@ -1535,13 +1670,26 @@ async fn cycle_model(
     options: &InteractiveOptions,
     direction: CycleDirection,
 ) {
-    let catalog = sorted_models(&options.models);
+    let scoped = options
+        .pickers
+        .scoped_models
+        .as_ref()
+        .and_then(ScopedModelsPanel::cycle_scope);
+    let catalog = cycle_catalog(options, scoped.as_deref());
     if catalog.is_empty() {
         app.info("no models available".to_string());
         return;
     }
     if catalog.len() == 1 {
-        app.info("only one model available".to_string());
+        // Upstream picks the wording from the scope
+        // (`interactive-mode.ts:4192`): a one-model *scope* is a different
+        // situation from a one-model *catalog*.
+        let message = if scoped.is_some() {
+            "only one model in scope"
+        } else {
+            "only one model available"
+        };
+        app.info(message.to_string());
         return;
     }
     let mut agent_guard = agent.lock().await;
@@ -1789,6 +1937,13 @@ pub struct PickerState {
     session: SessionPickerState,
     /// `/tree` picker view state (filter, folds, label timestamps).
     tree: TreeView,
+    /// `/scoped-models` panel state (catalog, enabled set, dirty flag).
+    ///
+    /// `None` until the panel is opened. Seeded from `settings.json`'s
+    /// `enabledModels` at startup so the `Ctrl+P` cycle honours it without the
+    /// user opening the panel first (upstream resolves the same list into
+    /// `session.scopedModels` in `main.ts:448`).
+    scoped_models: Option<ScopedModelsPanel>,
 }
 
 /// Which picker is open, decided from the item values rather than the
@@ -1799,6 +1954,8 @@ enum PickerKind {
     Session,
     /// The `/tree` overlay (`tree:*` values).
     Tree,
+    /// The `/scoped-models` panel (`scoped:*` values).
+    ScopedModels,
     /// Any other selector (`/model`, `/thinking`, `/fork`, extension
     /// dialogs): no picker chords apply.
     Other,
@@ -1813,6 +1970,9 @@ fn picker_kind(selector: &Selector) -> PickerKind {
         if value.starts_with("tree:") {
             return PickerKind::Tree;
         }
+        if value.starts_with(VALUE_PREFIX) {
+            return PickerKind::ScopedModels;
+        }
         // A populated picker with other values (`model:`, `thinking:`, …)
         // is never one of ours, whatever its title says.
         return PickerKind::Other;
@@ -1824,6 +1984,8 @@ fn picker_kind(selector: &Selector) -> PickerKind {
         PickerKind::Session
     } else if selector.title() == "Session tree" {
         PickerKind::Tree
+    } else if selector.title() == PANEL_TITLE {
+        PickerKind::ScopedModels
     } else {
         PickerKind::Other
     }
@@ -1965,8 +2127,105 @@ fn handle_picker_key(
             }
             false
         }
+        PickerKind::ScopedModels => {
+            // Every chord here is consumed inside upstream's
+            // `ScopedModelsSelectorComponent.handleInput`
+            // (`scoped-models-selector.ts:296-401`).
+            let Some(id) = selected_scoped_id(app) else {
+                // An empty list (catalog empty or filter matched nothing);
+                // let the generic selector path keep the filter chords.
+                return false;
+            };
+            // Enter toggles instead of closing (upstream's
+            // `tui.select.confirm` branch), so it must be claimed here.
+            if matches("tui.select.confirm", &["enter"]) {
+                scoped_panel_change(app, options, |panel| panel.toggle(&id), Some(&id));
+                return true;
+            }
+            if matches("app.models.reorderUp", &["alt+up"]) {
+                scoped_panel_change(app, options, |panel| panel.reorder(&id, -1), Some(&id));
+                return true;
+            }
+            if matches("app.models.reorderDown", &["alt+down"]) {
+                scoped_panel_change(app, options, |panel| panel.reorder(&id, 1), Some(&id));
+                return true;
+            }
+            // `enableAll` / `clearAll` act on the *filtered* rows while a
+            // search is active and on the whole catalog otherwise
+            // (`scoped-models-selector.ts:332-350`).
+            let filter = app
+                .selector()
+                .map(|selector| selector.filter().to_string())
+                .unwrap_or_default();
+            let targets = (!filter.is_empty()).then(|| {
+                options
+                    .pickers
+                    .scoped_models
+                    .as_ref()
+                    .map(|panel| panel.filtered_ids(&filter))
+                    .unwrap_or_default()
+            });
+            if matches("app.models.enableAll", &["ctrl+a"]) {
+                scoped_panel_change(
+                    app,
+                    options,
+                    |panel| panel.enable_all(targets.as_deref()),
+                    Some(&id),
+                );
+                return true;
+            }
+            if matches("app.models.clearAll", &["ctrl+x"]) {
+                scoped_panel_change(
+                    app,
+                    options,
+                    |panel| panel.clear_all(targets.as_deref()),
+                    Some(&id),
+                );
+                return true;
+            }
+            if matches("app.models.toggleProvider", &["ctrl+p"]) {
+                scoped_panel_change(app, options, |panel| panel.toggle_provider(&id), Some(&id));
+                return true;
+            }
+            if matches("app.models.save", &["ctrl+s"]) {
+                let scope = options
+                    .pickers
+                    .scoped_models
+                    .as_ref()
+                    .and_then(|panel| panel.enabled().clone());
+                let status =
+                    match config::save_enabled_models(&settings_sources(), scope.as_deref()) {
+                        Ok(_path) => "Model selection saved to settings".to_string(),
+                        Err(err) => format!("/scoped-models: {err}"),
+                    };
+                if let Some(panel) = options.pickers.scoped_models.as_mut() {
+                    panel.mark_saved(status);
+                }
+                refresh_scoped_models_selector(app, options, Some(&id));
+                return true;
+            }
+            false
+        }
         PickerKind::Other => false,
     }
+}
+
+/// Apply one `/scoped-models` change and redraw the panel.
+///
+/// The panel is redrawn even when the change was a no-op: a rejected reorder
+/// (first row moving up) must not silently do nothing *and* leave the footer
+/// untouched, and upstream redraws unconditionally
+/// (`scoped-models-selector.ts:298-330`).
+fn scoped_panel_change(
+    app: &mut App,
+    options: &mut InteractiveOptions,
+    change: impl FnOnce(&mut ScopedModelsPanel) -> bool,
+    keep: Option<&str>,
+) {
+    if let Some(panel) = options.pickers.scoped_models.as_mut() {
+        change(panel);
+    }
+    refresh_scoped_models_selector(app, options, keep);
 }
 
 /// The [`SessionRef`] the session picker highlights, resolved by session
@@ -2845,6 +3104,9 @@ async fn run_slash_command(
         SlashCommand::Model => {
             open_model_selector(app, options);
         }
+        SlashCommand::ScopedModels => {
+            open_scoped_models_selector(app, options);
+        }
         SlashCommand::Hotkeys => {
             app.info_block(crate::commands::slash::hotkeys_text());
         }
@@ -3075,6 +3337,15 @@ pub struct StartupUiSettings {
     pub theme_error: Option<String>,
     /// `fullscreenCopyOnSelect` as written to disk, applied to the App.
     pub copy_on_select: bool,
+    /// `hideThinkingBlock` as written to disk, applied to the App.
+    pub hide_thinking_block: bool,
+    /// `autocompleteMaxVisible` as written to disk, **after** the editor's
+    /// 3..=20 clamp (the clamp lives in the setter, matching upstream).
+    pub autocomplete_max_visible: usize,
+    /// `quietStartup` as written to disk. Also folded into
+    /// [`InteractiveOptions::quiet_startup`] before the App is built, so this
+    /// is the value the first frame was already laid out with.
+    pub quiet_startup: bool,
 }
 
 /// Apply the persisted UI slice of `settings.json` to a freshly built [`App`].
@@ -3093,6 +3364,21 @@ pub struct StartupUiSettings {
 /// to. A named theme that does not resolve leaves the default palette in
 /// place and is reported back (and into the transcript) rather than being
 /// swallowed — the same honesty contract `/reload` follows.
+///
+/// LUM-1310 extends the same read site to the three further keys upstream
+/// applies at construction:
+///
+/// | key | upstream read | effect here |
+/// |---|---|---|
+/// | `hideThinkingBlock` (`interactive-mode.ts:573`) | `getHideThinkingBlock()` | `App::set_thinking_visible(!hide)` — reasoning collapses from the first frame |
+/// | `autocompleteMaxVisible` (`:557`) | `getAutocompleteMaxVisible()` | `App::set_autocomplete_max_visible(n)`, editor clamps to 3..=20 |
+/// | `quietStartup` (`:859`) | `getQuietStartup()` | folded into `InteractiveOptions::quiet_startup` *before* the App exists, so the header is never laid out |
+///
+/// `quietStartup` is the one key that cannot be applied here: the header is a
+/// layout decision taken while `AppConfig` is built, so setting it afterwards
+/// would only be correct for the second frame. It is read by
+/// [`crate::config::load_quiet_startup_default`] in `main.rs` instead, and
+/// reported back here so the startup path stays assertable in one place.
 pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> StartupUiSettings {
     let ui = config::load_ui_settings(sources);
     let mut theme = None;
@@ -3104,11 +3390,18 @@ pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> Star
         }
     }
     app.set_copy_on_select(ui.fullscreen_copy_on_select);
+    app.set_thinking_visible(!ui.hide_thinking_block);
+    app.set_autocomplete_max_visible(ui.autocomplete_max_visible);
 
     StartupUiSettings {
         theme,
         theme_error,
         copy_on_select: ui.fullscreen_copy_on_select,
+        hide_thinking_block: ui.hide_thinking_block,
+        // Read back from the App: the editor is where upstream's clamp lives,
+        // and `autocompleteMaxVisible` is stored raw on disk.
+        autocomplete_max_visible: app.autocomplete_max_visible(),
+        quiet_startup: ui.quiet_startup,
     }
 }
 
@@ -3153,6 +3446,22 @@ fn open_settings(app: &mut App, options: &InteractiveOptions, sources: &ConfigSo
         SettingItem::new("theme", "Theme")
             .with_description("Color theme for the interface")
             .with_values(["dark", "light"], theme),
+        // LUM-1310: the three rows below were already read by this port's
+        // loader for the settings file, but had no row — so the only way to
+        // set them was to hand-edit JSON. Labels and descriptions are
+        // upstream's, verbatim (`components/settings-selector.ts:499,527,796`).
+        SettingItem::new("hide-thinking", "Hide thinking")
+            .with_description("Hide thinking blocks in assistant responses")
+            .with_values(["true", "false"], boolean(!app.thinking_visible())),
+        SettingItem::new("autocomplete-max-visible", "Autocomplete max items")
+            .with_description("Max visible items in autocomplete dropdown (3-20)")
+            .with_values(
+                ["3", "5", "7", "10", "15", "20"],
+                app.autocomplete_max_visible().to_string(),
+            ),
+        SettingItem::new("quiet-startup", "Quiet startup")
+            .with_description("Disable verbose printing at startup")
+            .with_values(["true", "false"], boolean(!app.header_visible())),
     ];
 
     // Upstream windows the list at `min(items.length, 10)` rows.
@@ -3197,8 +3506,9 @@ fn apply_setting_change(
 ) {
     // Each row owns one settings key and its JSON type: the booleans are
     // stored as booleans (`core/settings-manager.ts:849,1284`), the theme
-    // as a string. A stringified `"false"` would be rejected by the
-    // loader and silently fall back to the default.
+    // as a string and `autocompleteMaxVisible` as a number
+    // (`core/settings-manager.ts:1387`). A stringified `"false"` would be
+    // rejected by the loader and silently fall back to the default.
     use serde_json::Value;
 
     let (key, json_value, applied, note) = match id {
@@ -3236,6 +3546,56 @@ fn apply_setting_change(
                 return;
             }
         },
+        // `hideThinkingBlock` is the inverse of the live "thinking visible"
+        // flag: upstream stores `true` to *hide*, the App tracks visibility.
+        "hide-thinking" => {
+            let hidden = value == "true";
+            app.set_thinking_visible(!hidden);
+            (
+                "hideThinkingBlock",
+                Value::Bool(hidden),
+                format!("hide thinking → {value}"),
+                "",
+            )
+        }
+        // Stored as a number, and clamped by the editor's own setter — the
+        // transcript reports the clamped value, not the choice, so a stored
+        // out-of-range number cannot look applied when it was not.
+        "autocomplete-max-visible" => {
+            let Ok(rows) = value.parse::<usize>() else {
+                app.info(format!(
+                    "/settings: autocompleteMaxVisible must be a number (got {value:?})"
+                ));
+                return;
+            };
+            app.set_autocomplete_max_visible(rows);
+            let effective = app.autocomplete_max_visible();
+            (
+                "autocompleteMaxVisible",
+                Value::Number(effective.into()),
+                format!("autocomplete max items → {effective}"),
+                if effective == rows {
+                    ""
+                } else {
+                    " (clamped to 3-20)"
+                },
+            )
+        }
+        // Upstream's `onQuietStartupChange` only persists
+        // (`interactive-mode.ts:4694`), and the key is otherwise read once
+        // while the session is constructed. This port matches that: the row
+        // is not applied to the live header, because the header was already
+        // laid out and a `--no-header` CLI flag must keep winning over the
+        // setting. The transcript says which start it lands on instead.
+        "quiet-startup" => {
+            let quiet = value == "true";
+            (
+                "quietStartup",
+                Value::Bool(quiet),
+                format!("quiet startup → {value}"),
+                " (applies from the next start)",
+            )
+        }
         other => {
             app.info(format!("/settings: unknown setting {other:?}"));
             return;
@@ -4432,7 +4792,7 @@ mod tests {
     }
 
     #[test]
-    fn open_settings_shows_the_live_state_of_three_items() {
+    fn open_settings_shows_the_live_state_of_every_wired_item() {
         let mut app = settings_app();
         let options = InteractiveOptions {
             compaction: settings(false),
@@ -4449,10 +4809,76 @@ mod tests {
                 ("autocompact".to_string(), "false".to_string()),
                 ("fullscreen-copy-on-select".to_string(), "false".to_string()),
                 ("theme".to_string(), "dark".to_string()),
+                // LUM-1310 rows. `settings_app()` builds with the AppConfig
+                // default (`startup_header: false`), so the quiet-startup row
+                // reads `true` here; a real session goes through
+                // `interactive_app_config`, asserted separately below.
+                ("hide-thinking".to_string(), "false".to_string()),
+                ("autocomplete-max-visible".to_string(), "5".to_string()),
+                ("quiet-startup".to_string(), "true".to_string()),
             ],
             "upstream order, restricted to the wired settings"
         );
         assert!(!options.compaction.enabled);
+    }
+
+    #[test]
+    fn the_quiet_startup_row_reads_false_on_a_normal_launch() {
+        // `interactive_app_config` is what a CLI run uses; it shows the
+        // header unless `--no-header` / `quietStartup` asked otherwise, so
+        // the row must not read `true` out of the box.
+        let options = InteractiveOptions {
+            quiet_startup: false,
+            ..InteractiveOptions::default()
+        };
+        let mut app = App::new(
+            &Agent::new(AgentOptions::new(
+                small_window_model(1_000_000),
+                Arc::new(FauxProvider::default()),
+                "you are pi",
+            )),
+            interactive_app_config(&options),
+        );
+
+        open_settings(&mut app, &options, &ConfigSources::default());
+
+        let settings = app.settings().expect("modal open");
+        assert_eq!(
+            settings.item("quiet-startup").expect("row").current_value,
+            "false"
+        );
+        assert_eq!(
+            settings
+                .item("autocomplete-max-visible")
+                .expect("row")
+                .current_value,
+            "5",
+            "upstream's `autocompleteMaxVisible ?? 5`"
+        );
+    }
+
+    #[test]
+    fn the_no_header_flag_makes_the_quiet_startup_row_read_true() {
+        let options = InteractiveOptions {
+            quiet_startup: true,
+            ..InteractiveOptions::default()
+        };
+        let mut app = App::new(
+            &Agent::new(AgentOptions::new(
+                small_window_model(1_000_000),
+                Arc::new(FauxProvider::default()),
+                "you are pi",
+            )),
+            interactive_app_config(&options),
+        );
+
+        open_settings(&mut app, &options, &ConfigSources::default());
+
+        let settings = app.settings().expect("modal open");
+        assert_eq!(
+            settings.item("quiet-startup").expect("row").current_value,
+            "true"
+        );
     }
 
     /// `(id, current value)` for every row, in display order.
@@ -4462,6 +4888,147 @@ mod tests {
             .iter()
             .map(|item| (item.id.clone(), item.current_value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn startup_ui_settings_apply_thinking_visibility_and_the_dropdown_height() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"hideThinkingBlock":true,"autocompleteMaxVisible":10}"#,
+        )
+        .expect("write settings fixture");
+
+        let mut app = settings_app();
+        // Upstream's defaults: reasoning visible, five dropdown rows.
+        assert!(app.thinking_visible());
+        assert_eq!(app.autocomplete_max_visible(), 5);
+
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert!(applied.hide_thinking_block);
+        assert_eq!(applied.autocomplete_max_visible, 10);
+        assert!(!app.thinking_visible(), "thinking collapses from frame one");
+        assert_eq!(app.autocomplete_max_visible(), 10);
+    }
+
+    #[test]
+    fn startup_ui_settings_clamp_a_hand_written_dropdown_height() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Upstream keeps the clamp in the setter, so `100` lands on 20 and
+        // the reported value is the *effective* one, not the stored one.
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"autocompleteMaxVisible":100}"#,
+        )
+        .expect("write settings fixture");
+
+        let mut app = settings_app();
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert_eq!(applied.autocomplete_max_visible, 20);
+        assert_eq!(app.autocomplete_max_visible(), 20);
+    }
+
+    #[test]
+    fn startup_ui_settings_keep_the_thinking_and_dropdown_defaults_without_a_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let mut app = settings_app();
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert!(!applied.hide_thinking_block);
+        assert_eq!(applied.autocomplete_max_visible, 5);
+        assert!(!applied.quiet_startup);
+        assert!(app.thinking_visible());
+        assert_eq!(app.autocomplete_max_visible(), 5);
+    }
+
+    #[test]
+    fn cycling_the_hide_thinking_row_collapses_reasoning_and_persists_a_boolean() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        // Put the cursor on `hide-thinking` (row 4 of 6).
+        open_settings(&mut app, &options, &sources);
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+
+        assert!(app.thinking_visible());
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        assert!(!app.thinking_visible(), "the row applies live");
+        // Stored as a JSON boolean, so the loader reads it back next launch.
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).unwrap())
+                .expect("settings.json is valid JSON");
+        assert_eq!(stored["hideThinkingBlock"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn cycling_the_autocomplete_row_applies_and_persists_a_number() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        open_settings(&mut app, &options, &sources);
+        // Row 5 of 6.
+        for _ in 0..4 {
+            press(&mut app, &mut options, &sources, KeyCode::Down);
+        }
+        assert_eq!(app.autocomplete_max_visible(), 5);
+
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        // `5` is followed by `7` in the choice list.
+        assert_eq!(app.autocomplete_max_visible(), 7);
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).unwrap())
+                .expect("settings.json is valid JSON");
+        assert_eq!(stored["autocompleteMaxVisible"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn cycling_the_quiet_startup_row_persists_without_touching_the_live_header() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        let mut app = App::new(
+            &Agent::new(AgentOptions::new(
+                small_window_model(1_000_000),
+                Arc::new(FauxProvider::default()),
+                "you are pi",
+            )),
+            interactive_app_config(&options),
+        );
+        let mut options = options;
+        open_settings(&mut app, &options, &sources);
+        // Row 6 of 6.
+        for _ in 0..5 {
+            press(&mut app, &mut options, &sources, KeyCode::Down);
+        }
+        assert!(app.header_visible());
+
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        // Upstream's `onQuietStartupChange` only persists
+        // (`interactive-mode.ts:4694`), so the live header is untouched.
+        assert!(app.header_visible(), "persist-only, like upstream");
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).unwrap())
+                .expect("settings.json is valid JSON");
+        assert_eq!(stored["quietStartup"], serde_json::Value::Bool(true));
     }
 
     #[test]
@@ -4709,6 +5276,275 @@ mod tests {
         assert_eq!(agent.lock().await.model().id, "a");
         let rendered = transcript(&app);
         assert!(rendered.contains("only one model available"), "{rendered}");
+    }
+
+    /// Three providers so a scope can hold two models while the catalog holds
+    /// three.
+    fn three_model_catalog() -> Models {
+        let mut models = Models::new();
+        models.set_provider(ProviderId::new("alpha"), vec![catalog_model("alpha", "a")]);
+        models.set_provider(ProviderId::new("beta"), vec![catalog_model("beta", "b")]);
+        models.set_provider(ProviderId::new("gamma"), vec![catalog_model("gamma", "c")]);
+        models
+    }
+
+    /// Open the `/scoped-models` panel without touching `settings.json`:
+    /// `open_scoped_models_selector` reads `settings_sources()` (the developer's
+    /// real `~/.pi/agent/settings.json`), which a test must not depend on.
+    fn open_panel(app: &mut App, options: &mut InteractiveOptions, configured: Option<&[String]>) {
+        let catalog = sorted_models(&options.models);
+        options.pickers.scoped_models = Some(ScopedModelsPanel::new(&catalog, configured));
+        refresh_scoped_models_selector(app, options, None);
+    }
+
+    fn panel_labels(app: &App) -> Vec<String> {
+        app.selector()
+            .expect("panel open")
+            .items()
+            .iter()
+            .map(|item| item.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn picker_kind_recognises_the_scoped_models_panel() {
+        let selector = Selector::new(
+            PANEL_TITLE,
+            vec![SelectorItem::new("scoped:alpha/a", "alpha/a")],
+        );
+        assert_eq!(picker_kind(&selector), PickerKind::ScopedModels);
+    }
+
+    #[test]
+    fn picker_kind_falls_back_to_the_title_for_an_empty_panel() {
+        // A search that matched nothing leaves an empty item list, and the
+        // chords still have to answer.
+        let selector = Selector::new(PANEL_TITLE, Vec::new());
+        assert_eq!(picker_kind(&selector), PickerKind::ScopedModels);
+        let other = Selector::new("Pick a model", Vec::new());
+        assert_eq!(picker_kind(&other), PickerKind::Other);
+    }
+
+    #[tokio::test]
+    async fn enter_toggles_a_model_and_keeps_the_panel_open() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        open_panel(&mut app, &mut options, None);
+        assert_eq!(panel_labels(&app), vec!["✓ alpha/a", "✓ beta/b"]);
+
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            Key::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .await;
+
+        // The disabled row drops below the enabled ones, and the cursor
+        // follows the model that was toggled (upstream keeps `selectedIndex`
+        // on the item rather than on the row number).
+        assert!(app.selector_open(), "the panel must stay open");
+        assert_eq!(panel_labels(&app), vec!["✓ beta/b", "alpha/a"]);
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("scoped:alpha/a")
+        );
+        assert_eq!(
+            options
+                .pickers
+                .scoped_models
+                .as_ref()
+                .map(|p| p.enabled().clone()),
+            Some(Some(vec!["beta/b".to_string()]))
+        );
+        let footer = app.selector().expect("panel").footer().join("\n");
+        assert!(footer.contains("1/2 enabled"), "{footer}");
+        assert!(footer.contains("(unsaved)"), "{footer}");
+    }
+
+    #[tokio::test]
+    async fn the_scoped_models_chords_drive_the_enabled_set() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        open_panel(&mut app, &mut options, None);
+        let enabled = |options: &InteractiveOptions| {
+            options
+                .pickers
+                .scoped_models
+                .as_ref()
+                .expect("panel")
+                .enabled()
+                .clone()
+        };
+
+        // `app.models.clearAll` (Ctrl+X) empties the scope.
+        send(&mut app, &agent, &mut options, ctrl('x')).await;
+        assert_eq!(enabled(&options), Some(Vec::new()));
+        assert!(app
+            .selector()
+            .expect("panel")
+            .footer()
+            .join("\n")
+            .contains("0/2 enabled"));
+
+        // `app.models.enableAll` (Ctrl+A) collapses back to "all enabled".
+        send(&mut app, &agent, &mut options, ctrl('a')).await;
+        assert_eq!(enabled(&options), None);
+
+        // `app.models.toggleProvider` (Ctrl+P) on `alpha` disables just alpha.
+        send(&mut app, &agent, &mut options, ctrl('p')).await;
+        assert_eq!(enabled(&options), Some(vec!["beta/b".to_string()]));
+
+        // `app.models.reorderDown` (Alt+Down) reorders inside the scope; with
+        // one model in scope it cannot move, and must not corrupt the state.
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            Key::new(
+                KeyCode::Down,
+                KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(enabled(&options), Some(vec!["beta/b".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn reorder_moves_a_model_and_the_cursor_follows_it() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: three_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        // `beta/b` first, so Alt+Down swaps the two enabled models.
+        open_panel(
+            &mut app,
+            &mut options,
+            Some(&["beta/b".to_string(), "gamma/c".to_string()]),
+        );
+        assert_eq!(panel_labels(&app)[0], "✓ beta/b");
+
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            Key::new(
+                KeyCode::Down,
+                KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            options
+                .pickers
+                .scoped_models
+                .as_ref()
+                .expect("panel")
+                .enabled()
+                .clone(),
+            Some(vec!["gamma/c".to_string(), "beta/b".to_string()])
+        );
+        assert_eq!(panel_labels(&app), vec!["✓ gamma/c", "✓ beta/b", "alpha/a"]);
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("scoped:beta/b"),
+            "the cursor follows the model that moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scoped_set_bounds_and_orders_the_cycle() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: three_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        open_panel(
+            &mut app,
+            &mut options,
+            Some(&["gamma/c".to_string(), "beta/b".to_string()]),
+        );
+
+        // The pinned model is outside the scope, so the cycle starts at the
+        // scope's first entry...
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+        assert_eq!(agent.lock().await.model().id, "c");
+        // ...then walks the scope's order (`beta` before the catalog order
+        // would put `alpha`).
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+        assert_eq!(agent.lock().await.model().id, "b");
+        // ...and wraps inside the scope, never reaching `alpha/a`.
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+        assert_eq!(agent.lock().await.model().id, "c");
+    }
+
+    #[tokio::test]
+    async fn a_one_model_scope_says_so_instead_of_cycling() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        open_panel(&mut app, &mut options, Some(&["beta/b".to_string()]));
+
+        cycle_model(&mut app, &agent, &options, CycleDirection::Forward).await;
+
+        assert_eq!(agent.lock().await.model().id, "a", "the model did not move");
+        let rendered = transcript(&app);
+        assert!(rendered.contains("only one model in scope"), "{rendered}");
+    }
+
+    #[test]
+    fn seed_model_scope_reads_enabled_models_from_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = dir.path().join("settings.json");
+        std::fs::write(&user, r#"{"enabledModels":["beta/b"]}"#).expect("write");
+        let sources = ConfigSources {
+            user: Some(user),
+            project: None,
+        };
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+
+        seed_model_scope(&mut options, &sources);
+
+        let panel = options.pickers.scoped_models.as_ref().expect("seeded");
+        assert_eq!(panel.enabled(), &Some(vec!["beta/b".to_string()]));
+        assert_eq!(panel.cycle_scope(), Some(vec!["beta/b".to_string()]));
+        assert!(!panel.dirty(), "a seeded scope is not an unsaved edit");
+    }
+
+    #[test]
+    fn seed_model_scope_is_a_no_op_without_the_setting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = ConfigSources {
+            user: Some(dir.path().join("settings.json")),
+            project: None,
+        };
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+
+        seed_model_scope(&mut options, &sources);
+
+        assert!(options.pickers.scoped_models.is_none());
     }
 
     #[test]

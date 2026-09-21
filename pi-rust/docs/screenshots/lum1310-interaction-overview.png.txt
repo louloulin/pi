@@ -1,0 +1,233 @@
+# lum1310-interaction-overview.png — chars, 120x34 cells
+
+===== LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.  |  [1] 1. idle — startup header + composer + status bar  (cursor 120,33, frame bae746b08e07, px 781410af30ea, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7621b1a2e384a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'Esc to interrupt'
+  assert PASS   expect       'Ctrl+T to expand thinking'
+  assert PASS   expect       'type a prompt'
+
+===== LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.  |  [2] 2. /settings — the six wired rows (LUM-1310 added Hide thinking / Autocomplete max items / Quiet startup)  (cursor 37,8, frame bb63e717106e, px b7c249051883, alive=True) =====
+pi v0.1.0
+>
+
+→ Auto-compact               true
+  Fullscreen copy on select  true
+  Theme                      dark
+  Hide thinking              false
+  Autocomplete max items     5
+  Quiet startup              false
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7621b1a2e384a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Auto-compact'
+  assert PASS   expect       'Fullscreen copy on select'
+  assert PASS   expect       'Theme'
+  assert PASS   expect       'Hide thinking'
+  assert PASS   expect       'Autocomplete max items'
+  assert PASS   expect       'Quiet startup'
+
+===== LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.  |  [3] 3. Esc — the settings modal closes and the composer is back  (cursor 37,8, frame bae746b08e07, px 781410af30ea, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7621b1a2e384a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'type a prompt'
+  assert PASS   reject       'Autocomplete max items'
+
+===== LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.  |  [4] 4. /help — command reference block, wrapped per source line (bottom-anchored: only the tail is visible in 120x34)  (cursor 120,31, frame 514283312d05, px 8c9f743fb3c8, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 24 lines above · Home prompt history                                                                                │
+·   PgUp/PgDn   scroll the chat log one page                                                                           │
+·   Home / End  jump to the start / end of the chat log                                                                │
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      │
+·   Ctrl+D      exit on an empty prompt                                                                                │
+·   Ctrl+L      open the model selector                                                                                │
+·   Ctrl+U      clear the prompt buffer                                                                                │
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7621b1a2e384a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '/help'
+
+===== LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.  |  [5] 5. /hotkeys — the chord table including the app.* section  (cursor 54,30, frame b8536ef349af, px 19c4b31742df, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 67 lines above · Home ction page down                                                                               │
+·   Enter            confirm the selection                                                                             │
+·   Esc / Ctrl+C     close the selection list                                                                          │
+·   Tab              path completion / accept autocomplete                                                             │
+·                                                                                                                      │
+· commands:                                                                                                            │
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        │
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7621b1a2e384a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Ctrl+T'
+
+===== LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.  |  [6] 6. `/set` — fuzzy slash-command filtering narrows the list to `settings`  (cursor 36,32, frame 8e8963a77981, px 5bcf310b4c78, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 67 lines above · Home ction page down                                                                               │
+·   Enter            confirm the selection                                                                             │
+·   Esc / Ctrl+C     close the selection list                                                                          │
+❯ settings  Open settings menu
+  name  <name> — Set session display name
+  thinking  [level] — Set the reasoning level (opens the selector)
+  tree  Navigate session tree (switch branches)
+  model  <provider/model> — Select model (opens selector UI)
+  (1/16)
+> /set▍
+Faux test model  session-18d7621b1a2e384a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'settings'
+  assert PASS   reject       'Show this help text'

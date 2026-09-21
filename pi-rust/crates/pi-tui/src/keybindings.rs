@@ -429,6 +429,16 @@ pub const CONSUMED_APP_ACTIONS: &[&str] = &[
     "app.model.cycleForward",
     "app.model.cycleBackward",
     "app.model.select",
+    // [# LUM-1274] the `/scoped-models` panel consumes these six inside the
+    // picker (`interactive.rs::handle_picker_key`, `PickerKind::ScopedModels`).
+    // They were the last *silent* `app.*` ids: bound in the merged table, with
+    // no code path resolving them.
+    "app.models.save",
+    "app.models.enableAll",
+    "app.models.clearAll",
+    "app.models.toggleProvider",
+    "app.models.reorderUp",
+    "app.models.reorderDown",
     "app.tools.expand",
     "app.header",
     "app.message.copy",
