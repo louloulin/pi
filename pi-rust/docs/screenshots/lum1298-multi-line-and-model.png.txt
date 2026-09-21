@@ -1,0 +1,194 @@
+# lum1298-multi-line-and-model.png — chars, 120x34 cells
+
+===== LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.  |  [1] 1. idle 120x34 after startup fold (plan_chrome reserved hint row)  (cursor 120,33, frame aff2d6188b90, px a8858be30114, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d73d6f1845950f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+  assert PASS   expect       'Faux test model'
+
+===== LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.  |  [2] 2. long paste wraps into multi-line composer (LUM-1282 F1)  (cursor 42,32, frame ae104db1c5f1, px c84cf3b4d7d9, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> Please refactor the agent_loop in pi-agent-core so that the shouldStopAfterTurn hook can be expressed as a Rust trait
+  method and the prepareNextTurn hook can be awaited without the HRTB lifetime we hit in stage 1. Keep the wire format
+  compatible with the upstream pi-ts TUI.▍
+Faux test model  session-18d73d6f1845950f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'shouldStopAfterTurn'
+  assert PASS   expect       'prepareNextTurn'
+
+===== LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.  |  [3] 3. Ctrl+U clears, then /model opens the picker (real picker UI replaces the composer)  (cursor 42,32, frame a52ee6a8eb70, px dde9df0befb4, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Pick a model
+────────────────────────────────────────
+❯ Ling 2.6 1T                     ant-ling
+  Ling 2.6 Flash                  ant-ling
+  Ring 2.6 1T                     ant-ling
+  Claude Haiku 4.5                anthropic
+  Claude Opus 4.5                 anthropic
+  Claude Sonnet 4.5               anthropic
+  GPT-4                           azure-openai-responses
+  GPT-4 Turbo                     azure-openai-responses
+> type a prompt — /help for commands
+Faux test model  session-18d73d6f1845950f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Pick a model'
+  assert PASS   probe        'anthropic'
+  assert PASS   probe        'openai'
+
+===== LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.  |  [4] 4. Esc closes picker; Ctrl+U clears; /hotkeys fills the chat so PgUp has real scrollback  (cursor 120,31, frame bd6d4e62106c, px 85450accb408, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 63 lines above · Home  the selection down                                                                           │
+·   PgUp             selection page up                                                                                 │
+·   PgDn             selection page down                                                                               │
+·   Enter            confirm the selection                                                                             │
+·   Esc / Ctrl+C     close the selection list                                                                          │
+·   Tab              path completion / accept autocomplete                                                             │
+·                                                                                                                      │
+· commands:                                                                                                            │
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        │
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d73d6f1845950f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'page'
+  assert PASS   expect       'selection'
+  assert PASS   expect       'slash commands'
+  assert PASS   expect       'lines above'
+
+===== LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.  |  [5] 5. PgUp detaches the viewport -> jump-to-latest pill appears on the last row  (cursor 120,31, frame d72effe3d42e, px 7bad6b0670bd, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                │
+·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          │
+·   Ctrl+L           open the model selector                                                                           │
+·   Alt+N            start a new session                                                                               │
+·   Alt+T            open the session tree                                                                             │
+·   Alt+F            fork a session from a message                                                                     │
+·   Alt+R            resume a session                                                                                  │
+·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             ┃
+·                                                                                                                      ┃
+· selectors and completion:                                                                                            │
+·   Up               move the selection up  ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d73d6f1845950f                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Jump to latest'
