@@ -1753,6 +1753,21 @@ impl App {
         self.config.copy_on_select = enabled;
     }
 
+    /// The autocomplete dropdown height in rows.
+    pub fn autocomplete_max_visible(&self) -> usize {
+        self.prompt.editor().autocomplete_max_visible()
+    }
+
+    /// Set the autocomplete dropdown height in rows, clamped to
+    /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`](crate::editor::MIN_AUTOCOMPLETE_MAX_VISIBLE)..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`](crate::editor::MAX_AUTOCOMPLETE_MAX_VISIBLE).
+    ///
+    /// Backs the `autocompleteMaxVisible` setting, which upstream reads while
+    /// constructing the editor so it is already in effect on the first frame
+    /// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:557`).
+    pub fn set_autocomplete_max_visible(&mut self, rows: usize) {
+        self.prompt.editor_mut().set_autocomplete_max_visible(rows);
+    }
+
     /// Load and install a theme by name, keeping the current colour mode.
     ///
     /// Built-in names (`dark`, `light`) always resolve; custom themes are not

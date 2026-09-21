@@ -10,7 +10,8 @@
 //! * the compaction settings (`compaction.reserveTokens`,
 //!   `compaction.keepRecentTokens`, and the toggle `compaction.enabled`,
 //!   also accepted as a top-level `autoCompact` boolean);
-//! * the `/settings` UI slice — `theme` and `fullscreenCopyOnSelect` —
+//! * the `/settings` UI slice — `theme`, `fullscreenCopyOnSelect`,
+//!   `hideThinkingBlock`, `autocompleteMaxVisible` and `quietStartup` —
 //!   loaded by [`load_ui_settings`];
 //! * the provider-request retry budget (`retry.provider.maxRetries`,
 //!   `retry.provider.maxRetryDelayMs`) loaded by
@@ -59,6 +60,21 @@ pub const DEFAULT_AUTO_COMPACT: bool = DEFAULT_COMPACTION_SETTINGS.enabled;
 /// (`core/settings-manager.ts:1280`).
 pub const DEFAULT_FULLSCREEN_COPY_ON_SELECT: bool = true;
 
+/// Default for `hideThinkingBlock` — upstream `?? false`
+/// (`core/settings-manager.ts:961`), so reasoning is visible unless the
+/// reader asks for it to be collapsed.
+pub const DEFAULT_HIDE_THINKING_BLOCK: bool = false;
+
+/// Default for `autocompleteMaxVisible` — upstream `?? 5`
+/// (`core/settings-manager.ts:1383`). The value is a *number*, not a
+/// string: the editor's setter clamps it to 3..=20.
+pub const DEFAULT_AUTOCOMPLETE_MAX_VISIBLE: usize =
+    pi_tui::editor::DEFAULT_AUTOCOMPLETE_MAX_VISIBLE;
+
+/// Default for `quietStartup` — upstream `?? false`, i.e. the startup header
+/// is shown unless the user silences it.
+pub const DEFAULT_QUIET_STARTUP: bool = false;
+
 /// Default for `retry.provider.maxRetryDelayMs` — upstream
 /// `DEFAULT_MAX_RETRY_DELAY_MS`: a server-requested delay above this fails
 /// the request instead of sleeping.
@@ -99,8 +115,14 @@ pub fn load_compaction_settings_default() -> CompactionSettings {
     load_compaction_settings(&ConfigSources::discover(&cwd))
 }
 
-/// The `/settings` UI slice: the two keys upstream's settings selector
-/// exposes that already have a live or next-launch effect in this build.
+/// The `/settings` UI slice: the keys upstream's settings selector exposes
+/// that already have a live or next-launch effect in this build.
+///
+/// All five are read while the interactive session is constructed
+/// (`interactive-mode.ts:536,556,557,573,574` for the first four and
+/// `:859` for `quietStartup`), so a hand-written `settings.json` is in
+/// effect on the **first frame** rather than only after `/settings` or
+/// `/reload`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiSettings {
     /// `theme` — the explicit theme choice, `None` when the user never
@@ -108,6 +130,14 @@ pub struct UiSettings {
     pub theme: Option<String>,
     /// `fullscreenCopyOnSelect`.
     pub fullscreen_copy_on_select: bool,
+    /// `hideThinkingBlock` — collapse thinking blocks in assistant messages.
+    pub hide_thinking_block: bool,
+    /// `autocompleteMaxVisible` — dropdown height in rows. Stored raw; the
+    /// editor clamps it to
+    /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`](pi_tui::editor::MIN_AUTOCOMPLETE_MAX_VISIBLE)..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`](pi_tui::editor::MAX_AUTOCOMPLETE_MAX_VISIBLE).
+    pub autocomplete_max_visible: usize,
+    /// `quietStartup` — suppress the startup header.
+    pub quiet_startup: bool,
 }
 
 impl Default for UiSettings {
@@ -115,6 +145,9 @@ impl Default for UiSettings {
         Self {
             theme: None,
             fullscreen_copy_on_select: DEFAULT_FULLSCREEN_COPY_ON_SELECT,
+            hide_thinking_block: DEFAULT_HIDE_THINKING_BLOCK,
+            autocomplete_max_visible: DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
+            quiet_startup: DEFAULT_QUIET_STARTUP,
         }
     }
 }
@@ -136,6 +169,47 @@ pub fn load_ui_settings(sources: &ConfigSources) -> UiSettings {
             "fullscreenCopyOnSelect",
             DEFAULT_FULLSCREEN_COPY_ON_SELECT,
         ),
+        hide_thinking_block: read_bool(&merged, "hideThinkingBlock", DEFAULT_HIDE_THINKING_BLOCK),
+        autocomplete_max_visible: read_autocomplete_max_visible(&merged),
+        quiet_startup: read_bool(&merged, "quietStartup", DEFAULT_QUIET_STARTUP),
+    }
+}
+
+/// Load the UI slice from the default locations under the current working
+/// directory.
+pub fn load_quiet_startup_default() -> bool {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_ui_settings(&ConfigSources::discover(&cwd)).quiet_startup
+}
+
+/// Read the top-level `autocompleteMaxVisible` number setting, warning on a
+/// malformed value.
+///
+/// Upstream's getter returns the raw stored number
+/// (`core/settings-manager.ts:1383`) and the `Math.max(3, Math.min(20, …))`
+/// clamp lives in the setter. This loader follows the same split: the value
+/// is read and validated here, and the clamp happens where it is applied
+/// ([`Editor::set_autocomplete_max_visible`](pi_tui::editor::Editor::set_autocomplete_max_visible)),
+/// so a hand-written `100` lands on 20 exactly as it does upstream.
+fn read_autocomplete_max_visible(merged: &Map<String, Value>) -> usize {
+    match merged.get("autocompleteMaxVisible") {
+        None => DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(rows) => rows as usize,
+            None => {
+                warn(&format!(
+                    "autocompleteMaxVisible must be a non-negative integer (got {number}); using {DEFAULT_AUTOCOMPLETE_MAX_VISIBLE}"
+                ));
+                DEFAULT_AUTOCOMPLETE_MAX_VISIBLE
+            }
+        },
+        Some(other) => {
+            warn(&format!(
+                "autocompleteMaxVisible must be a number (got {}); using {DEFAULT_AUTOCOMPLETE_MAX_VISIBLE}",
+                json_kind(other)
+            ));
+            DEFAULT_AUTOCOMPLETE_MAX_VISIBLE
+        }
     }
 }
 
@@ -880,6 +954,99 @@ mod tests {
             project: None,
         });
         assert_eq!(settings, UiSettings::default());
+    }
+
+    #[test]
+    fn ui_settings_read_the_thinking_and_dropdown_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"hideThinkingBlock":true,"autocompleteMaxVisible":10}"#,
+        );
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: None,
+        });
+        assert!(settings.hide_thinking_block);
+        assert_eq!(settings.autocomplete_max_visible, 10);
+        assert!(!settings.quiet_startup, "unset keys keep their default");
+    }
+
+    #[test]
+    fn ui_settings_read_quiet_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(dir.path(), "user.json", r#"{"quietStartup":true}"#);
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: None,
+        });
+        assert!(settings.quiet_startup);
+    }
+
+    #[test]
+    fn ui_settings_keep_the_stored_dropdown_height_raw() {
+        // Upstream's getter does not clamp (`core/settings-manager.ts:1383`);
+        // the 3..=20 clamp lives in the editor's setter. The loader must
+        // therefore hand out what is on disk so `/settings` can report the
+        // clamped, *effective* value rather than the stored one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(dir.path(), "user.json", r#"{"autocompleteMaxVisible":100}"#);
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: None,
+        });
+        assert_eq!(settings.autocomplete_max_visible, 100);
+    }
+
+    #[test]
+    fn ui_settings_fall_back_on_malformed_thinking_and_dropdown_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"hideThinkingBlock":"yes","autocompleteMaxVisible":"ten","quietStartup":1}"#,
+        );
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: None,
+        });
+        assert_eq!(settings, UiSettings::default());
+        assert!(!settings.hide_thinking_block);
+        assert_eq!(settings.autocomplete_max_visible, 5);
+        assert!(!settings.quiet_startup);
+    }
+
+    #[test]
+    fn ui_settings_reject_a_negative_dropdown_height() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(dir.path(), "user.json", r#"{"autocompleteMaxVisible":-3}"#);
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: None,
+        });
+        assert_eq!(settings.autocomplete_max_visible, 5);
+    }
+
+    #[test]
+    fn the_project_file_wins_for_the_new_keys_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"hideThinkingBlock":false,"quietStartup":false}"#,
+        );
+        let project = write(
+            dir.path(),
+            "project.json",
+            r#"{"hideThinkingBlock":true,"quietStartup":true}"#,
+        );
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: Some(project),
+        });
+        assert!(settings.hide_thinking_block);
+        assert!(settings.quiet_startup);
     }
 
     #[test]

@@ -3075,6 +3075,15 @@ pub struct StartupUiSettings {
     pub theme_error: Option<String>,
     /// `fullscreenCopyOnSelect` as written to disk, applied to the App.
     pub copy_on_select: bool,
+    /// `hideThinkingBlock` as written to disk, applied to the App.
+    pub hide_thinking_block: bool,
+    /// `autocompleteMaxVisible` as written to disk, **after** the editor's
+    /// 3..=20 clamp (the clamp lives in the setter, matching upstream).
+    pub autocomplete_max_visible: usize,
+    /// `quietStartup` as written to disk. Also folded into
+    /// [`InteractiveOptions::quiet_startup`] before the App is built, so this
+    /// is the value the first frame was already laid out with.
+    pub quiet_startup: bool,
 }
 
 /// Apply the persisted UI slice of `settings.json` to a freshly built [`App`].
@@ -3093,6 +3102,21 @@ pub struct StartupUiSettings {
 /// to. A named theme that does not resolve leaves the default palette in
 /// place and is reported back (and into the transcript) rather than being
 /// swallowed — the same honesty contract `/reload` follows.
+///
+/// LUM-1310 extends the same read site to the three further keys upstream
+/// applies at construction:
+///
+/// | key | upstream read | effect here |
+/// |---|---|---|
+/// | `hideThinkingBlock` (`interactive-mode.ts:573`) | `getHideThinkingBlock()` | `App::set_thinking_visible(!hide)` — reasoning collapses from the first frame |
+/// | `autocompleteMaxVisible` (`:557`) | `getAutocompleteMaxVisible()` | `App::set_autocomplete_max_visible(n)`, editor clamps to 3..=20 |
+/// | `quietStartup` (`:859`) | `getQuietStartup()` | folded into `InteractiveOptions::quiet_startup` *before* the App exists, so the header is never laid out |
+///
+/// `quietStartup` is the one key that cannot be applied here: the header is a
+/// layout decision taken while `AppConfig` is built, so setting it afterwards
+/// would only be correct for the second frame. It is read by
+/// [`crate::config::load_quiet_startup_default`] in `main.rs` instead, and
+/// reported back here so the startup path stays assertable in one place.
 pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> StartupUiSettings {
     let ui = config::load_ui_settings(sources);
     let mut theme = None;
@@ -3104,11 +3128,18 @@ pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> Star
         }
     }
     app.set_copy_on_select(ui.fullscreen_copy_on_select);
+    app.set_thinking_visible(!ui.hide_thinking_block);
+    app.set_autocomplete_max_visible(ui.autocomplete_max_visible);
 
     StartupUiSettings {
         theme,
         theme_error,
         copy_on_select: ui.fullscreen_copy_on_select,
+        hide_thinking_block: ui.hide_thinking_block,
+        // Read back from the App: the editor is where upstream's clamp lives,
+        // and `autocompleteMaxVisible` is stored raw on disk.
+        autocomplete_max_visible: app.autocomplete_max_visible(),
+        quiet_startup: ui.quiet_startup,
     }
 }
 
@@ -3153,6 +3184,22 @@ fn open_settings(app: &mut App, options: &InteractiveOptions, sources: &ConfigSo
         SettingItem::new("theme", "Theme")
             .with_description("Color theme for the interface")
             .with_values(["dark", "light"], theme),
+        // LUM-1310: the three rows below were already read by this port's
+        // loader for the settings file, but had no row — so the only way to
+        // set them was to hand-edit JSON. Labels and descriptions are
+        // upstream's, verbatim (`components/settings-selector.ts:499,527,796`).
+        SettingItem::new("hide-thinking", "Hide thinking")
+            .with_description("Hide thinking blocks in assistant responses")
+            .with_values(["true", "false"], boolean(!app.thinking_visible())),
+        SettingItem::new("autocomplete-max-visible", "Autocomplete max items")
+            .with_description("Max visible items in autocomplete dropdown (3-20)")
+            .with_values(
+                ["3", "5", "7", "10", "15", "20"],
+                app.autocomplete_max_visible().to_string(),
+            ),
+        SettingItem::new("quiet-startup", "Quiet startup")
+            .with_description("Disable verbose printing at startup")
+            .with_values(["true", "false"], boolean(!app.header_visible())),
     ];
 
     // Upstream windows the list at `min(items.length, 10)` rows.
@@ -3197,8 +3244,9 @@ fn apply_setting_change(
 ) {
     // Each row owns one settings key and its JSON type: the booleans are
     // stored as booleans (`core/settings-manager.ts:849,1284`), the theme
-    // as a string. A stringified `"false"` would be rejected by the
-    // loader and silently fall back to the default.
+    // as a string and `autocompleteMaxVisible` as a number
+    // (`core/settings-manager.ts:1387`). A stringified `"false"` would be
+    // rejected by the loader and silently fall back to the default.
     use serde_json::Value;
 
     let (key, json_value, applied, note) = match id {
@@ -3236,6 +3284,56 @@ fn apply_setting_change(
                 return;
             }
         },
+        // `hideThinkingBlock` is the inverse of the live "thinking visible"
+        // flag: upstream stores `true` to *hide*, the App tracks visibility.
+        "hide-thinking" => {
+            let hidden = value == "true";
+            app.set_thinking_visible(!hidden);
+            (
+                "hideThinkingBlock",
+                Value::Bool(hidden),
+                format!("hide thinking → {value}"),
+                "",
+            )
+        }
+        // Stored as a number, and clamped by the editor's own setter — the
+        // transcript reports the clamped value, not the choice, so a stored
+        // out-of-range number cannot look applied when it was not.
+        "autocomplete-max-visible" => {
+            let Ok(rows) = value.parse::<usize>() else {
+                app.info(format!(
+                    "/settings: autocompleteMaxVisible must be a number (got {value:?})"
+                ));
+                return;
+            };
+            app.set_autocomplete_max_visible(rows);
+            let effective = app.autocomplete_max_visible();
+            (
+                "autocompleteMaxVisible",
+                Value::Number(effective.into()),
+                format!("autocomplete max items → {effective}"),
+                if effective == rows {
+                    ""
+                } else {
+                    " (clamped to 3-20)"
+                },
+            )
+        }
+        // Upstream's `onQuietStartupChange` only persists
+        // (`interactive-mode.ts:4694`), and the key is otherwise read once
+        // while the session is constructed. This port matches that: the row
+        // is not applied to the live header, because the header was already
+        // laid out and a `--no-header` CLI flag must keep winning over the
+        // setting. The transcript says which start it lands on instead.
+        "quiet-startup" => {
+            let quiet = value == "true";
+            (
+                "quietStartup",
+                Value::Bool(quiet),
+                format!("quiet startup → {value}"),
+                " (applies from the next start)",
+            )
+        }
         other => {
             app.info(format!("/settings: unknown setting {other:?}"));
             return;
@@ -4400,7 +4498,7 @@ mod tests {
     }
 
     #[test]
-    fn open_settings_shows_the_live_state_of_three_items() {
+    fn open_settings_shows_the_live_state_of_every_wired_item() {
         let mut app = settings_app();
         let options = InteractiveOptions {
             compaction: settings(false),
@@ -4417,10 +4515,76 @@ mod tests {
                 ("autocompact".to_string(), "false".to_string()),
                 ("fullscreen-copy-on-select".to_string(), "false".to_string()),
                 ("theme".to_string(), "dark".to_string()),
+                // LUM-1310 rows. `settings_app()` builds with the AppConfig
+                // default (`startup_header: false`), so the quiet-startup row
+                // reads `true` here; a real session goes through
+                // `interactive_app_config`, asserted separately below.
+                ("hide-thinking".to_string(), "false".to_string()),
+                ("autocomplete-max-visible".to_string(), "5".to_string()),
+                ("quiet-startup".to_string(), "true".to_string()),
             ],
             "upstream order, restricted to the wired settings"
         );
         assert!(!options.compaction.enabled);
+    }
+
+    #[test]
+    fn the_quiet_startup_row_reads_false_on_a_normal_launch() {
+        // `interactive_app_config` is what a CLI run uses; it shows the
+        // header unless `--no-header` / `quietStartup` asked otherwise, so
+        // the row must not read `true` out of the box.
+        let options = InteractiveOptions {
+            quiet_startup: false,
+            ..InteractiveOptions::default()
+        };
+        let mut app = App::new(
+            &Agent::new(AgentOptions::new(
+                small_window_model(1_000_000),
+                Arc::new(FauxProvider::default()),
+                "you are pi",
+            )),
+            interactive_app_config(&options),
+        );
+
+        open_settings(&mut app, &options, &ConfigSources::default());
+
+        let settings = app.settings().expect("modal open");
+        assert_eq!(
+            settings.item("quiet-startup").expect("row").current_value,
+            "false"
+        );
+        assert_eq!(
+            settings
+                .item("autocomplete-max-visible")
+                .expect("row")
+                .current_value,
+            "5",
+            "upstream's `autocompleteMaxVisible ?? 5`"
+        );
+    }
+
+    #[test]
+    fn the_no_header_flag_makes_the_quiet_startup_row_read_true() {
+        let options = InteractiveOptions {
+            quiet_startup: true,
+            ..InteractiveOptions::default()
+        };
+        let mut app = App::new(
+            &Agent::new(AgentOptions::new(
+                small_window_model(1_000_000),
+                Arc::new(FauxProvider::default()),
+                "you are pi",
+            )),
+            interactive_app_config(&options),
+        );
+
+        open_settings(&mut app, &options, &ConfigSources::default());
+
+        let settings = app.settings().expect("modal open");
+        assert_eq!(
+            settings.item("quiet-startup").expect("row").current_value,
+            "true"
+        );
     }
 
     /// `(id, current value)` for every row, in display order.
@@ -4430,6 +4594,147 @@ mod tests {
             .iter()
             .map(|item| (item.id.clone(), item.current_value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn startup_ui_settings_apply_thinking_visibility_and_the_dropdown_height() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"hideThinkingBlock":true,"autocompleteMaxVisible":10}"#,
+        )
+        .expect("write settings fixture");
+
+        let mut app = settings_app();
+        // Upstream's defaults: reasoning visible, five dropdown rows.
+        assert!(app.thinking_visible());
+        assert_eq!(app.autocomplete_max_visible(), 5);
+
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert!(applied.hide_thinking_block);
+        assert_eq!(applied.autocomplete_max_visible, 10);
+        assert!(!app.thinking_visible(), "thinking collapses from frame one");
+        assert_eq!(app.autocomplete_max_visible(), 10);
+    }
+
+    #[test]
+    fn startup_ui_settings_clamp_a_hand_written_dropdown_height() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Upstream keeps the clamp in the setter, so `100` lands on 20 and
+        // the reported value is the *effective* one, not the stored one.
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"autocompleteMaxVisible":100}"#,
+        )
+        .expect("write settings fixture");
+
+        let mut app = settings_app();
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert_eq!(applied.autocomplete_max_visible, 20);
+        assert_eq!(app.autocomplete_max_visible(), 20);
+    }
+
+    #[test]
+    fn startup_ui_settings_keep_the_thinking_and_dropdown_defaults_without_a_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let mut app = settings_app();
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert!(!applied.hide_thinking_block);
+        assert_eq!(applied.autocomplete_max_visible, 5);
+        assert!(!applied.quiet_startup);
+        assert!(app.thinking_visible());
+        assert_eq!(app.autocomplete_max_visible(), 5);
+    }
+
+    #[test]
+    fn cycling_the_hide_thinking_row_collapses_reasoning_and_persists_a_boolean() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        // Put the cursor on `hide-thinking` (row 4 of 6).
+        open_settings(&mut app, &options, &sources);
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+
+        assert!(app.thinking_visible());
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        assert!(!app.thinking_visible(), "the row applies live");
+        // Stored as a JSON boolean, so the loader reads it back next launch.
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).unwrap())
+                .expect("settings.json is valid JSON");
+        assert_eq!(stored["hideThinkingBlock"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn cycling_the_autocomplete_row_applies_and_persists_a_number() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let mut app = settings_app();
+        let mut options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        open_settings(&mut app, &options, &sources);
+        // Row 5 of 6.
+        for _ in 0..4 {
+            press(&mut app, &mut options, &sources, KeyCode::Down);
+        }
+        assert_eq!(app.autocomplete_max_visible(), 5);
+
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        // `5` is followed by `7` in the choice list.
+        assert_eq!(app.autocomplete_max_visible(), 7);
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).unwrap())
+                .expect("settings.json is valid JSON");
+        assert_eq!(stored["autocompleteMaxVisible"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn cycling_the_quiet_startup_row_persists_without_touching_the_live_header() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sources = temp_sources(dir.path());
+        let options = InteractiveOptions {
+            compaction: settings(true),
+            ..InteractiveOptions::default()
+        };
+        let mut app = App::new(
+            &Agent::new(AgentOptions::new(
+                small_window_model(1_000_000),
+                Arc::new(FauxProvider::default()),
+                "you are pi",
+            )),
+            interactive_app_config(&options),
+        );
+        let mut options = options;
+        open_settings(&mut app, &options, &sources);
+        // Row 6 of 6.
+        for _ in 0..5 {
+            press(&mut app, &mut options, &sources, KeyCode::Down);
+        }
+        assert!(app.header_visible());
+
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+
+        // Upstream's `onQuietStartupChange` only persists
+        // (`interactive-mode.ts:4694`), so the live header is untouched.
+        assert!(app.header_visible(), "persist-only, like upstream");
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(user_settings_path(dir.path())).unwrap())
+                .expect("settings.json is valid JSON");
+        assert_eq!(stored["quietStartup"], serde_json::Value::Bool(true));
     }
 
     #[test]

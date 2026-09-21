@@ -155,6 +155,25 @@ silent:      7/44 (15.9%)  app.models.{clearAll,enableAll,reorderDown,reorderUp,
 从 dark 的 `#8abeb7`/`#808080`/`#666666` 变为 light 的 `#5a8080`/`#6c6c6c`/`#767676`）。
 TUI 轴的其余未达项（23 个 `app.*` 未接线、`@` 补全首行重复、`#` 无 provider）本轮未动。
 
+### 0.6 LUM-1310 复测：启动生效 3 键 + `/settings` 6 行；差距重测（tip `cdc033e21` + 本轮）
+
+本轮是 **TUI 设置缺口修复**，不改任何轴的分母，但把几个可测口径在**同一台机、同一工具链（1.85.0）**上
+重测了一遍。细节与真 PTY A/B 见 `docs/LUM1310_SETTINGS_AND_TUI_AUDIT.md`。
+
+| 口径 | 本轮实测 | 本文旧值 | 说明 |
+| --- | --- | --- | --- |
+| 纯代码规模（src↔src） | **85.1%**（130,333 / 153,106） | 84.4%（129,174 / 153,066，LUM-1307 文） | 同口径；本轮 +1,159 Rust 行 |
+| 测试规模 | **45.5%**（2,416 标记 / 5,309） | 45.0%（2,390 / 5,309） | `cargo test --workspace` 实跑 **2483 passed / 0 failed / 2 ignored** |
+| slash 内置命令 | **16 / 23 (69.6%)**（`exit`≡`quit` 则 17/23） | 17/23（LUM-1307 文） | 本轮逐名重测：缺口 `scoped-models import share changelog login logout quit` |
+| `app.*` 接线 | **37 / 44 (84.1%)**；advertised **0/44**；silent 7/44 | 37/44；advertised 0/44 | 未变（本轮未动键位） |
+| `/settings` 行 | **6 / 37** row id | 3 / 37 | 本轮 +3：`hide-thinking`、`autocomplete-max-visible`、`quiet-startup` |
+| 门禁（1.85.0，`--locked`） | `fmt --check` **干净**；`clippy -D warnings` **0 findings**；`test` **2483 passed** | fmt 15 处 / clippy 11 条（工具链未钉版） | `scripts/toolchain.sh` + 钉版后已可复现 |
+
+对 TUI 轴线本身：本轮关闭「`quietStartup` / `hideThinkingBlock` / `autocompleteMaxVisible` 三键
+只有手改 JSON 一条路、且手改也不在启动帧生效」这一项，A/B 证据（真 PTY，修前/修后各 3 张，
+**两个二进制 md5 不同**）在 `docs/screenshots/lum1310-{startup-ui-keys,quiet-startup-on,quiet-startup-off}-{before,after}.png`。
+TUI 轴的其余未达项（7 个 silent `app.*`、`/settings` 剩余的 31 行、`fullscreen*` 三项）本轮未动。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

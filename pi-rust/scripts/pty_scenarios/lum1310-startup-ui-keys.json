@@ -1,0 +1,48 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1310/home-ui` (settings.json: hideThinkingBlock=true, autocompleteMaxVisible=10).",
+    "Panel 1 is the frame painted before any command: nothing here proves the new keys were applied at startup, which is exactly why panel 2 exists.",
+    "Panel 2 opens `/settings`. Its rows are built from the *live* App (`app.thinking_visible()`, `app.autocomplete_max_visible()`), so the text is the visible proof that startup applied the file rather than the built-in defaults.",
+    "The `probe` rows name post-fix behaviour; on a pre-fix binary they report XFAIL instead of failing the run, which is how one scenario documents both sides of the A/B.",
+    "The quiet-startup row is asserted separately by lum1310-quiet-startup-{on,off}.json, because it is read before the App exists and therefore cannot be proven from inside the modal."
+  ],
+  "caption": "LUM-1310 — hideThinkingBlock + autocompleteMaxVisible applied from settings.json at startup. Prepared HOME says `hideThinkingBlock: true, autocompleteMaxVisible: 10`; `/settings` reads the live App, so `Hide thinking  true` / `Autocomplete max items  10` can only appear if the file was read before the first frame. Pre-fix the same scenario reports `false` / `5`. Real binary + real PTY + pyte VT emulator; nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — the frame painted before any command runs",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "type a prompt"
+      ]
+    },
+    {
+      "label": "2. /settings — the new rows read the running App: thinking + dropdown height come from the file",
+      "send": "/settings<Enter>",
+      "wait": 1.5,
+      "expect": [
+        "Hide thinking",
+        "Autocomplete max items",
+        "Quiet startup"
+      ],
+      "probe": [
+        {
+          "regex": "^  Hide thinking\\s+true$",
+          "why": "LUM-1310 hideThinkingBlock startup application"
+        },
+        {
+          "regex": "^  Autocomplete max items\\s+10$",
+          "why": "LUM-1310 autocompleteMaxVisible startup application"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

@@ -1,0 +1,47 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1310/home-quiet` (settings.json: quietStartup=true).",
+    "A side of the quietStartup A/B: the header must be gone on the *first frame*, which is only possible if `quietStartup` was read before `AppConfig` was built.",
+    "The `probe` entries name the post-fix behaviour, so running this same scenario against a pre-fix binary records XFAIL instead of failing the run — that is how one file documents both sides.",
+    "The composer and status bar must still be there: silencing the header must not cost the prompt."
+  ],
+  "caption": "LUM-1310 — quietStartup=true: the same binary paints no startup header on frame one, and the composer still owns the bottom. Compare with lum1310-quiet-startup-off.json. Real binary + real PTY + pyte VT emulator; nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — settings.json quietStartup:true, so the header is suppressed at startup",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "type a prompt"
+      ],
+      "probe": [
+        {
+          "text": "Esc to interrupt",
+          "count": 0,
+          "why": "LUM-1310 quietStartup startup effect"
+        },
+        {
+          "text": "Ctrl+C to clear",
+          "count": 0,
+          "why": "LUM-1310 quietStartup startup effect"
+        },
+        {
+          "text": "pi v0.1.0",
+          "count": 0,
+          "why": "LUM-1310 quietStartup startup effect"
+        }
+      ],
+      "reject": [
+        "Esc to interrupt",
+        "Ctrl+C to clear"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

@@ -1,0 +1,28 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1310/home-default` (settings.json: quietStartup=false).",
+    "This is the B side of the quietStartup A/B. Panel 1 must show the startup header, because `quietStartup` is false and no `--no-header` was passed.",
+    "Pair it with `lum1310-quiet-startup-on.json`, which is the same binary and the same panel against a HOME whose settings.json says `quietStartup: true`."
+  ],
+  "caption": "LUM-1310 — quietStartup=false: the startup header is laid out on the first frame (B side of the A/B). Real binary + real PTY + pyte VT emulator; nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — quietStartup is false, so the header renders",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "Esc to interrupt",
+        "Ctrl+C to clear",
+        "type a prompt"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}
