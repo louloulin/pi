@@ -1,0 +1,46 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1307/home-light` (settings.json: theme=light, fullscreenCopyOnSelect=false).",
+    "Panel 1 is the frame the binary paints *before any command runs* — the startup theme lives or dies there.",
+    "Panel 2 opens `/settings`, whose three rows read the live App (`app.theme().name()`, `app.copy_on_select()`), so its text is the visible proof that startup applied the file. The pre-fix binary reports `dark` / `true` here, because nothing but `/settings` and `/reload` ever read the file.",
+    "`probe` rows name post-fix behaviour; on the pre-fix binary they report XFAIL instead of failing the run, which is how one scenario documents both sides of the A/B.",
+    "The colours behind panel 1 are audited by `scripts/theme_palette_report.py`: the accent/muted/dim tokens are the light-scheme ones, which is only possible if the palette was installed before the first frame."
+  ],
+  "caption": "LUM-1307 — startup application of settings.json (theme + fullscreenCopyOnSelect) in the real pi-rust TUI. Same keys, same prepared HOME (`theme=light`, `fullscreenCopyOnSelect=false`); the only difference is the build. Pre-fix: the first frame is the dark palette and `/settings` reports copy-on-select ON. Post-fix: the first frame carries the stored light palette and `/settings` reports the stored OFF. Real binary + real PTY + pyte VT emulator; nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — the frame painted before any command: stored light palette applied at startup",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "type a prompt"
+      ]
+    },
+    {
+      "label": "2. /settings — live rows read the running App: theme and copy-on-select come from the file, not from the built-in defaults",
+      "send": "/settings<Enter>",
+      "wait": 1.5,
+      "expect": [
+        "Theme"
+      ],
+      "probe": [
+        {
+          "regex": "^  Theme\\s+light$",
+          "why": "LUM-1307 startup settings"
+        },
+        {
+          "regex": "^  Fullscreen copy on select\\s+false$",
+          "why": "LUM-1307 startup settings"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

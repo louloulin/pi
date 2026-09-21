@@ -467,6 +467,19 @@ async fn run_loop(
         app.set_thinking_level(level);
     }
 
+    // Startup settings (LUM-1307) — the persisted `theme` /
+    // `fullscreenCopyOnSelect` are applied to the App that is about to draw
+    // its first frame. Upstream reads `settings.json` at session start; this
+    // port only read it from `/settings` and `/reload`, so a hand-written
+    // `theme: "light"` was invisible until one of those ran. A theme the
+    // resolver rejects is reported instead of silently keeping the default.
+    {
+        let startup_ui = apply_startup_ui_settings(&mut app, &settings_sources());
+        if let Some(err) = &startup_ui.theme_error {
+            app.info(format!("theme → not applied: {err}"));
+        }
+    }
+
     // Extension lifecycle fan-out (LUM-1246). Extensions subscribe to the
     // *upstream* event names (`turn_start`, `tool_execution_start`, …) that
     // the JS shim exposes, but until now nothing fed the agent's own event
@@ -3003,6 +3016,54 @@ fn settings_sources() -> ConfigSources {
     ConfigSources::discover(&cwd)
 }
 
+/// What [`apply_startup_ui_settings`] applied to the freshly built [`App`],
+/// so the startup path is assertable without a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupUiSettings {
+    /// The `theme` from `settings.json`, set only when it resolved.
+    pub theme: Option<String>,
+    /// The theme name from `settings.json` that could not be resolved, with
+    /// the resolver's message. The previous (default) palette stays installed.
+    pub theme_error: Option<String>,
+    /// `fullscreenCopyOnSelect` as written to disk, applied to the App.
+    pub copy_on_select: bool,
+}
+
+/// Apply the persisted UI slice of `settings.json` to a freshly built [`App`].
+///
+/// Upstream reads its settings file while constructing the interactive
+/// session, so a `theme` / `fullscreenCopyOnSelect` the user wrote by hand is
+/// already in effect on the **first frame**. In this port the UI slice was
+/// only ever read by `/settings` ([`open_settings`]) and by
+/// [`reload::reload`](crate::reload): a user whose `settings.json` said
+/// `theme: "light"` still got the dark palette until they opened the settings
+/// modal or typed `/reload` (LUM-1306 §4.3 names the gap). This is the third
+/// read site, and the one that matches upstream's startup behaviour.
+///
+/// Both keys are applied unconditionally: a file that omits one means "the
+/// built-in default", which is exactly what `UiSettings::default()` resolves
+/// to. A named theme that does not resolve leaves the default palette in
+/// place and is reported back (and into the transcript) rather than being
+/// swallowed — the same honesty contract `/reload` follows.
+pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> StartupUiSettings {
+    let ui = config::load_ui_settings(sources);
+    let mut theme = None;
+    let mut theme_error = None;
+    if let Some(name) = ui.theme {
+        match app.set_theme_by_name(&name) {
+            Ok(()) => theme = Some(name),
+            Err(err) => theme_error = Some(err.to_string()),
+        }
+    }
+    app.set_copy_on_select(ui.fullscreen_copy_on_select);
+
+    StartupUiSettings {
+        theme,
+        theme_error,
+        copy_on_select: ui.fullscreen_copy_on_select,
+    }
+}
+
 /// Build and open the `/settings` modal (upstream
 /// `SettingsSelectorComponent`, `components/settings-selector.ts:449`).
 ///
@@ -4091,6 +4152,70 @@ mod tests {
     ) {
         app.step(InputEvent::Key(Key::new(code, KeyModifiers::NONE)));
         drain_settings_changes(app, options, sources);
+    }
+
+    /// The settings pair a CLI run would use, pointed at a temp dir so the
+    /// test never touches the developer's real `~/.pi/agent/settings.json`.
+    fn startup_sources(dir: &Path) -> ConfigSources {
+        ConfigSources {
+            user: Some(dir.join("settings.json")),
+            project: None,
+        }
+    }
+
+    #[test]
+    fn startup_ui_settings_apply_the_stored_theme_and_copy_on_select() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"theme":"light","fullscreenCopyOnSelect":false}"#,
+        )
+        .expect("write settings fixture");
+
+        let mut app = settings_app();
+        // The state upstream's default would leave behind.
+        assert_eq!(app.theme().name(), Some("dark"));
+        assert!(app.copy_on_select());
+
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert_eq!(applied.theme.as_deref(), Some("light"));
+        assert_eq!(applied.theme_error, None);
+        assert!(!applied.copy_on_select);
+        assert_eq!(app.theme().name(), Some("light"));
+        assert!(!app.copy_on_select());
+    }
+
+    #[test]
+    fn startup_ui_settings_keep_the_builtin_palette_when_no_file_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let mut app = settings_app();
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert_eq!(applied.theme, None);
+        assert_eq!(applied.theme_error, None);
+        // Upstream's `DEFAULT_FULLSCREEN_COPY_ON_SELECT`.
+        assert!(applied.copy_on_select);
+        assert_eq!(app.theme().name(), Some("dark"));
+        assert!(app.copy_on_select());
+    }
+
+    #[test]
+    fn startup_ui_settings_report_an_unresolvable_theme() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("settings.json"), r#"{"theme":"solarized"}"#)
+            .expect("write settings fixture");
+
+        let mut app = settings_app();
+        let applied = apply_startup_ui_settings(&mut app, &startup_sources(dir.path()));
+
+        assert_eq!(applied.theme, None);
+        let err = applied.theme_error.expect("resolver error reported");
+        assert!(err.contains("solarized"), "{err}");
+        // The previous palette stays installed rather than the App ending up
+        // themeless.
+        assert_eq!(app.theme().name(), Some("dark"));
     }
 
     #[test]

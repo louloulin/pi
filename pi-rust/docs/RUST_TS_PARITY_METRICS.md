@@ -134,6 +134,27 @@ silent:      7/44 (15.9%)  app.models.{clearAll,enableAll,reorderDown,reorderUp,
 | `cargo clippy --offline -p pi-tui --all-targets` | 无告警 |
 | 真机 PTY `lum1266-{short-22,short-23,tall-34}` | 3/5/3 帧各不相同、退出码 0（120×22 / 120×23 / 120×34） |
 
+### 0.5 LUM-1307 复测：启动即应用 `settings.json`；门禁与两条口径的更正（tip `0ed96bb8e` + 本轮）
+
+本轮是 **TUI 设置缺口修复**，不改任何轴的分母，但顺手把几个可测口径重测了一遍。细节见
+`docs/LUM1307_STARTUP_SETTINGS.md`。
+
+| 口径 | 本轮实测（命令见该文 §8） | 本文旧值 | 说明 |
+| --- | --- | --- | --- |
+| 纯代码规模（src↔src） | **84.4%**（129,174 / 153,066） | 82.5%（124,242 / 150,538，`af3aa30a4`） | 口径一致，只是增长；LUM-1306 的「57.5%」是**分子用含 tests 的 `.rs`、分母用 TS src+测试**的混用口径 |
+| 测试规模 | **45.0%**（2,390 标记 / 5,309） | 42.0%（2,232 / 5,309） | `cargo test --workspace` 实跑 **2457 passed / 0 failed** |
+| slash 内置命令 | **17 / 23**（逐名核对上游 `BUILTIN_SLASH_COMMANDS`） | 20/23（LUM-1306） | 旧口径分子用了「上游命令 ∪ Rust 独有命令」，分母却是上游；修正后缺 6：`scoped-models import share changelog login logout` |
+| `app.*` 接线 | **35 / 44 (79.5%)** | 35/44 | 未变（本轮未动键位） |
+| 加权完成度（13 轴） | **不重算** | 81.4%（§0.4）/ 82.2%（LUM-1306） | 本文 §0.2/0.4 与 LUM-1306 已给出两个不同总分（权重表分项不可追溯），本轮不再叠一层小数 |
+| 门禁 | 1.85.0 下 `fmt --check` **15 处**、`clippy -D warnings` **11 条**（均既有） | §0.4 记「clippy 无告警」 | 差异来自**工具链版本未钉住**（本文头部记的是 `cargo+rustc 1.98.1`，该工具链已不在本机）；仓库无 `rust-toolchain.toml`，PATH 上的 `cargo` 还是坏 wrapper |
+
+对 TUI 轴线本身：本轮关闭 LUM-1306 §4.3 记录的「`settings.json` 的 UI 切片只有 `/settings` +
+`/reload` 会读，启动帧不生效」这一项，A/B 证据（真 PTY，修前/修后各 2 张）在
+`docs/screenshots/lum1307-startup-ui-{before,after}.png`，颜色维度由新脚本
+`scripts/theme_palette_report.py` 对齐到 `assets/themes/*.json`（启动帧的 accent/muted/dim
+从 dark 的 `#8abeb7`/`#808080`/`#666666` 变为 light 的 `#5a8080`/`#6c6c6c`/`#767676`）。
+TUI 轴的其余未达项（23 个 `app.*` 未接线、`@` 补全首行重复、`#` 无 provider）本轮未动。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
