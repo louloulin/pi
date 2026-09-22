@@ -623,6 +623,46 @@ frame-buffer 截图见 `docs/LUM1460_PASTE_RESCUE.md`。
 **没有带进本轮**（在本机跑不了）；`docs/screenshots/lum1328-paste*.png` 是那条分支的历史实拍，
 不是在本轮代码上拍的。
 
+### 0.18 LUM-1464 复测：`?` 键假广告收口（footer 广告 `? for help`，基线 `pi-rust/crates` 里 `Char('?')` **0 命中**）；加权 **86.8% → 86.9%**（只有测试轴 +0.05pt）
+
+**量的是什么**：footer 文案里的**单字符 chord** 有没有兑现。基线取证（限定路径，不重蹈 LUM-1460 的整树假阳性）：
+
+```bash
+$ git grep -n "Char('?')" origin/feature/pi.rs -- pi-rust/crates | wc -l
+0
+$ git grep -n '"\? for help"' origin/feature/pi.rs -- pi-rust/crates
+origin/feature/pi.rs:pi-rust/crates/pi-tui/src/app.rs:1384:  status_data.hint = Some("? for help".to_string())
+```
+
+对照 codex（`bottom_pane/chat_composer.rs:3154-3157` → `footer.rs::shortcut_overlay_lines`）与 Martty
+（`src/input/keymap.rs:97` 空输入 `Ctrl+K` → `ShowKeys`）：两边都有「空输入 + 单键 = 键位速查表」，
+pi-rust 本轮补齐，并保留「任何其它键先关掉它、再照常处理」（codex `reset_mode_after_activity`）。
+
+| 口径 | 本轮 | 上一快照（LUM-1460） |
+|---|---|---|
+| 纯代码规模（src↔src） | **92.0%**（140,894 / 153,106） | 91.8%（140,615 / 153,106） |
+| 测试规模 | **49.5%**（2,755 / 5,563） | 49.4%（2,740 / 5,309） |
+| `app.*` 接线 | 43/44 = **97.7%** | 43/44 |
+| 扩展生命周期事件 | **36/36** 声明 + **36/36** 生产构造点 | 同 |
+| TUI 模块 | **36/42 = 85.7%** | 35/42 |
+| TUI 交互+视觉轴 | 轴 5 = (0.857 + 0.977)/2 = **91.7%**；轴 6 = 90% | 同形 |
+| 加权完成度 | **86.9%** | 86.8% |
+
+> **口径声明（两条）**：① TS 用例分母由 5,309 改为 5,563 是**换口径**（旧口径只数 `it(`/`test(`，
+> 新口径收 `it.each(` 等包装），不是 TS 测试变多——所以测试轴上那 0.1pt 不可当成绩读；
+> ② TUI 模块 35→36 是**别的轮次并入的模块**，本轮没有新增模块，也没有关闭任何「能力有没有」的轴，
+> 加权从 86.8 到 86.9 只有测试轴的 +0.05pt。**本轮交付的是可信度（广告可兑现），不是覆盖率**。
+
+**门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --offline -p pi-tui --all-targets` 0 warning；
+`cargo test --offline -p pi-tui` **1090 / 0**（基线 1075/0 → +15）；
+`cargo test --offline -p pi-coding-agent -j 2 --no-fail-fast` **826 / 28**（28 条全为 Windows 环境类；
+`reload_rereads_keybindings_and_ui_settings_mid_session` 已用 `git stash` 在基线复现同一条 FAILED →
+新增失败 0）；**反向验证**：禁用触发分支 → 5 条测试立刻红。
+
+**证据分级**：4 张 `docs/screenshots/lum1464-hints-*.png`(+`.txt`) 是 frame-buffer 冻结帧
+（本机无 `pty`），证明几何与内容，**不证明按键时序**；时序由 `tests/shortcut_overlay.rs` 的 11 条覆盖。
+本轮审计与缺口清单见 `docs/LUM1464_SHORTCUT_OVERLAY.md`。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

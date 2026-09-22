@@ -233,6 +233,25 @@ pub const HEADER_ONBOARDING_EN: &str =
 pub const HEADER_ONBOARDING_ZH: &str =
     "Pi 可以讲解自身功能并检索文档。直接问它「怎么用」或「怎么扩展」。";
 
+/// Title of the `?` shortcut overlay (LUM-1464).
+///
+/// The overlay lists the same chords the startup header advertises, so the
+/// copy names the surface the reader already knows rather than inventing a
+/// second vocabulary; codex calls the surface `ShortcutOverlay`
+/// (`bottom_pane/footer.rs`).
+pub const SHORTCUT_OVERLAY_TITLE_EN: &str = "Keyboard shortcuts";
+/// Chinese rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
+pub const SHORTCUT_OVERLAY_TITLE_ZH: &str = "键盘快捷键";
+
+/// How the `?` overlay is dismissed, printed on its title row.
+///
+/// Both chords are literal because both are hardcoded handlers (the `?`
+/// toggle and `Escape`), not registry entries a rebind could move — the same
+/// rule `/hotkeys` follows for its own literals.
+pub const SHORTCUT_OVERLAY_CLOSE_EN: &str = "? / Esc to close";
+/// Chinese rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
+pub const SHORTCUT_OVERLAY_CLOSE_ZH: &str = "? / Esc 关闭";
+
 /// Startup-header row shown when the terminal is too short for the full hint
 /// list and the header folded itself for this frame (LUM-1266).
 ///
