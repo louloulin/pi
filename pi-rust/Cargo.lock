@@ -1238,6 +1238,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

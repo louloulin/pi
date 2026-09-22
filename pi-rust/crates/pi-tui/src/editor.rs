@@ -1708,7 +1708,7 @@ impl Editor {
             return EditorAction::None;
         }
         let target = target as usize;
-        let landed = goal.min(layout.row_len(target));
+        let landed = goal.min(layout.row_width(target));
         let next = layout.cursor_at(target, landed);
         if landed >= goal {
             // The row could hold the column the run started at, so the run
@@ -1786,7 +1786,7 @@ impl Editor {
         let last_row = layout.len().saturating_sub(1) as isize;
         let target =
             (row as isize + direction * self.page_rows() as isize).clamp(0, last_row) as usize;
-        let landed = goal.min(layout.row_len(target));
+        let landed = goal.min(layout.row_width(target));
         let next = layout.cursor_at(target, landed);
         if landed >= goal {
             // The row could hold the column the run started at, so the run

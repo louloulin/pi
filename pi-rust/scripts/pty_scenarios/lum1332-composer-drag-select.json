@@ -13,9 +13,10 @@
     "The caret is the '\\u258d' glyph the renderer inserts at the cursor offset, so 'where is the caret' stays a text assertion. The marker is inserted *mid-row*: cells to its right are shifted one column, which is why a reversed run can be one cell wider than the selected text and why a row text is matched with `.` where the caret sits.",
     "Panels 2, 5 and 7 are pixel-identical to their predecessors on purpose: a copy is not an edit and a click outside the composer changes nothing. Their evidence is the '# clipboard' line, which the grid cannot show.",
     "Panels 1-2 are the drag itself and its release; 3 re-checks LUM-1327's click semantics (caret placed, nothing copied); 4-5 drag across a line break; 6-7 clamp a drag that leaves the composer and prove the transcript underneath is untouched.",
-    "Panel 8 is the dismissal rule: a left press outside the composer drops the composer's highlight (upstream re-anchors its single screen selection on every press), while the caret stays where the drag finished."
+    "Panel 8 is the dismissal rule: a left press outside the composer drops the composer's highlight (upstream re-anchors its single screen selection on every press), while the caret stays where the drag finished.",
+    "Panels 9-10 are the CJK intersection with LUM-1336: the composer lays out in terminal columns there, a wide glyph owns two cells, and the drag/highlight/copy have to agree — the reversed run is five cells (你 2 + marker 1 + 好 2) for a two-character selection."
   ],
-  "caption": "LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.",
+  "caption": "LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Panels 9-10 repeat it over CJK text, where a glyph owns two cells (LUM-1336's column measure): the five highlighted cells are 你 + caret + 好, and the copy is those two glyphs. Nothing mocked.",
   "panels": [
     {
       "label": "1. drag from 'llo' to the 'o' of 'world': the fragment is highlighted",
@@ -198,6 +199,37 @@
           "why": "and the click copies nothing of its own"
         },
         "Faux test model"
+      ]
+    },
+    {
+      "label": "9. a drag over CJK text highlights both cells of every glyph",
+      "send": "<C-c>你好世界<MPress:2,18><MDrag:4,18>",
+      "wait": 1.8,
+      "expect": [
+        {
+          "regex": "^# reverse y=18 x=2-6 ",
+          "why": "你 owns two cells, the caret marker one, 好 two more — five highlighted cells with no gap (LUM-1336 columns × LUM-1332 offsets)"
+        },
+        {
+          "text": "# clipboard",
+          "count": 0,
+          "why": "still nothing copied while the button is down"
+        }
+      ]
+    },
+    {
+      "label": "10. the release copies the two glyphs",
+      "send": "<MRelease:4,18>",
+      "wait": 1.5,
+      "expect": [
+        {
+          "text": "# clipboard: '你好'",
+          "why": "the copied text is exactly the two-glyph fragment the highlight covered"
+        },
+        {
+          "regex": "^# reverse y=18 x=2-6 ",
+          "why": "and the highlight stays"
+        }
       ]
     }
   ],

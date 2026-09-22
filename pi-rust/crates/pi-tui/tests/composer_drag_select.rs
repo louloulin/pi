@@ -204,6 +204,23 @@ fn highlight_text(buf: &Buffer, y: u16) -> String {
         .collect()
 }
 
+/// Absolute cell of the first cell carrying `ch` — the only sane lookup on a
+/// row holding wide glyphs, whose second cell is a filler space.
+fn cell_of_ch(buf: &Buffer, ch: char) -> (u16, u16) {
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            if buf
+                .cell((x, y))
+                .map(|cell| cell.symbol().starts_with(ch))
+                .unwrap_or(false)
+            {
+                return (x, y);
+            }
+        }
+    }
+    panic!("no cell carries {ch:?}");
+}
+
 fn image(data: &str) -> ImageContent {
     ImageContent {
         mime_type: "image/png".into(),
@@ -488,6 +505,27 @@ fn typing_after_a_drag_drops_the_highlight() {
         Vec::new(),
         "and its highlight with it"
     );
+}
+
+#[test]
+fn a_wide_character_is_highlighted_on_both_of_its_cells() {
+    // LUM-1336 put the composer's layout on terminal **columns**, so a CJK
+    // glyph owns two cells: the highlight has to cover both of them, and the
+    // one-cell caret marker (here inserted *between* the glyphs) has to shift
+    // them the way the frame painted it.
+    let mut app = drafted("你好ab");
+    let buf = frame(&mut app);
+    let (from_x, y) = cell_of_ch(&buf, '你');
+    let (to_x, _) = cell_of_ch(&buf, '好');
+
+    app.step(press(from_x, y));
+    app.step(drag(to_x, y));
+    assert_eq!(app.composer_selection_text().as_deref(), Some("你好"));
+    let buf = frame(&mut app);
+    // 你 (2 cells) + the caret marker + 好 (2 cells): five cells, no gap, and
+    // nothing past them.
+    assert_eq!(reversed_runs(&buf, y), vec![(from_x, from_x + 4)]);
+    assert!(!reversed(&buf, from_x + 5, y));
 }
 
 #[test]

@@ -1,0 +1,139 @@
+# lum1336-cjk-composer-baseline.png — chars, 60x24 cells
+
+===== LUM-1336 CJK composer, A side: the pre-change binary at 60x24 lays a draft out one cell per *character*, so a wide glyph (2 terminal columns) shifts every following cell by one and ratatui's diff — which skips the cell after a wide symbol (`Buffer::diff` keeps `to_skip = symbol_width - 1`) — leaves the previous frame's cell on screen. Two glyphs render as `世C`; a 45-glyph draft (90 columns) renders as a single row showing only its first glyph plus that stale cell, i.e. the draft past the first character is invisible.  |  [1] 1. idle at 60x24: single-row prompt placeholder  (cursor 60,23, frame 380c67e90bad, px 9ec3a5a83512, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d78c972959f4c2  in 0 out 0 ?/8.2k
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1336 CJK composer, A side: the pre-change binary at 60x24 lays a draft out one cell per *character*, so a wide glyph (2 terminal columns) shifts every following cell by one and ratatui's diff — which skips the cell after a wide symbol (`Buffer::diff` keeps `to_skip = symbol_width - 1`) — leaves the previous frame's cell on screen. Two glyphs render as `世C`; a 45-glyph draft (90 columns) renders as a single row showing only its first glyph plus that stale cell, i.e. the draft past the first character is invisible.  |  [2] 2. control: 40 half-width characters stay on one row  (cursor 43,22, frame da86c324bde3, px 64925af30f00, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN▍
+Faux test model  session-18d78c972959f4c2  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN'  — half-width characters are one column each, which is why the defect needs wide glyphs to show up
+
+===== LUM-1336 CJK composer, A side: the pre-change binary at 60x24 lays a draft out one cell per *character*, so a wide glyph (2 terminal columns) shifts every following cell by one and ratatui's diff — which skips the cell after a wide symbol (`Buffer::diff` keeps `to_skip = symbol_width - 1`) — leaves the previous frame's cell on screen. Two glyphs render as `世C`; a 45-glyph draft (90 columns) renders as a single row showing only its first glyph plus that stale cell, i.e. the draft past the first character is invisible.  |  [3] 3. two wide glyphs: the cell after 世 is left as the previous frame's `C` (the diff skipped it)  (cursor 43,22, frame 5f4cd6502554, px 82b5f322ae00, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 世C
+Faux test model  session-18d78c972959f4c2  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> 世C'  — the stale cell the pre-change build leaves behind
+  assert PASS   probe        '> 世界' (x0)  — the second glyph is never painted: its cell is skipped as 'covered' by the wide glyph before it
+
+===== LUM-1336 CJK composer, A side: the pre-change binary at 60x24 lays a draft out one cell per *character*, so a wide glyph (2 terminal columns) shifts every following cell by one and ratatui's diff — which skips the cell after a wide symbol (`Buffer::diff` keeps `to_skip = symbol_width - 1`) — leaves the previous frame's cell on screen. Two glyphs render as `世C`; a 45-glyph draft (90 columns) renders as a single row showing only its first glyph plus that stale cell, i.e. the draft past the first character is invisible.  |  [4] 4. 45 wide glyphs (90 columns) do not wrap: the row shows the first glyph and a stale cell, the rest is off-screen  (cursor 4,22, frame 957dccc65040, px 82b5f322ae00, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 中C
+Faux test model  session-18d78c972959f4c2  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> 中C'  — one 45-cell row for a 90-column draft, with the stale cell from the previous frame
+  assert PASS   probe        '  宽字符折行验证中文宽字符折行验证' (x0)  — no continuation row exists, so 91% of the draft is not on screen
+
+===== LUM-1336 CJK composer, A side: the pre-change binary at 60x24 lays a draft out one cell per *character*, so a wide glyph (2 terminal columns) shifts every following cell by one and ratatui's diff — which skips the cell after a wide symbol (`Buffer::diff` keeps `to_skip = symbol_width - 1`) — leaves the previous frame's cell on screen. Two glyphs render as `世C`; a 45-glyph draft (90 columns) renders as a single row showing only its first glyph plus that stale cell, i.e. the draft past the first character is invisible.  |  [5] 5. same frame as 4: the caret marker is not on screen at all - it is placed by character count and its cell is skipped like every other cell after a wide glyph  (cursor 4,22, frame 957dccc65040, px 82b5f322ae00, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 中C
+Faux test model  session-18d78c972959f4c2  in 0 out 0 ?/8.2k
+  assert PASS   probe        '▍' (x0)  — no caret is painted anywhere on the composer row
+  assert PASS   probe        '宽字符折行验证中文宽字符折行验证▍' (x0)  — and certainly not at the end of the draft the user is typing into
