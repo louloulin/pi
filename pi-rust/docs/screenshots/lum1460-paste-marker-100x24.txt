@@ -1,0 +1,26 @@
+FRAME DUMP cols=100 rows=24
+|> Ready — paste a log with Ctrl+V and watch it collapse.                                            |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> [paste #1 +12 lines]▍                                                                             |
+|Faux  lum1460-paste-frames                                             in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP

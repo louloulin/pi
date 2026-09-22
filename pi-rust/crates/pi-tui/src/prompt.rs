@@ -80,8 +80,19 @@ impl Prompt {
 
     /// The draft the prompt shows: chip sentinels expanded to their
     /// `[Image #N]` labels. Use [`Prompt::editor`] for the raw buffer.
+    ///
+    /// A paste marker (`[paste #N +12 lines]`) stays literal here, exactly
+    /// as it is drawn — that is upstream `getText()`. Use
+    /// [`Prompt::expanded_text`] for the content a submission carries.
     pub fn text(&self) -> String {
         self.editor.display_text()
+    }
+
+    /// The draft with paste markers expanded to the text they stand for
+    /// (upstream `getExpandedText`). This is the form the model and the
+    /// external editor get.
+    pub fn expanded_text(&self) -> String {
+        self.editor.expanded_text()
     }
 
     /// Cursor column within [`Prompt::text`].

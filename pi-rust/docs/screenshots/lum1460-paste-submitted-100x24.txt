@@ -1,0 +1,26 @@
+FRAME DUMP cols=100 rows=24
+|> Ready — paste a log with Ctrl+V and watch it collapse.                                            |
+|> log line 1                                                                                        |
+|> log line 2                                                                                        |
+|> log line 3                                                                                        |
+|> log line 4                                                                                        |
+|> log line 5                                                                                        |
+|> log line 6                                                                                        |
+|> log line 7                                                                                        |
+|> log line 8                                                                                        |
+|> log line 9                                                                                        |
+|> log line 10                                                                                       |
+|> log line 11                                                                                       |
+|> log line 12                                                                                       |
+|  ]8;;faux\f]8;;\o                                                                                  |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> type a prompt — /help for commands                                                                |
+|Faux  lum1460-paste-frames                                             in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP
