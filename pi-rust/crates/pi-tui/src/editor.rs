@@ -71,18 +71,18 @@
 //!   the coding-agent's `app.*` table, so a bare `pi-tui` registry does not
 //!   contain the id and the built-in `Ctrl+D` chord stands in for it.
 //!
-//! Chords that have **no consumer** in this port, listed here rather than
-//! silently implemented:
-//!
-//! * `tui.editor.historyPrevious` / `historyNext`: unbound by default;
-//!   `Up` / `Down` (`tui.editor.cursorUp` / `cursorDown`) reach the history
-//!   from the first / last visual row instead.
+//! * `tui.editor.historyPrevious` / `historyNext`: dedicated history chords,
+//!   unbound by default. When bound they browse entries (and close any open
+//!   autocomplete) regardless of where the cursor sits, exactly like
+//!   upstream `packages/tui/src/components/editor.ts:848-856`; `Up` / `Down`
+//!   remain the cursor-aware path.
 //!
 //! Legacy control-byte spellings that `keys.ts` normalises before matching
 //! (crossterm decodes them differently) are still accepted: `Ctrl+5` /
 //! `Ctrl+Alt+5` for `ctrl+]` / `ctrl+alt+]` and `Ctrl+7` / `Ctrl+_` for
 //! `ctrl+-`, but only while the id's resolved chords actually contain the
 //! canonical spelling.
+//!
 //! * `Ctrl+U` / `Ctrl+K` kill to the start / end of the **logical line** the
 //!   cursor is on and push the killed text onto the [`KillRing`]; at a line
 //!   boundary the newline itself is what gets killed, which merges the two
@@ -2235,19 +2235,27 @@ impl Editor {
         )
     }
 
-    /// Process a key.
+    /// Process a key against the process-wide keybindings.
     pub fn handle_key(&mut self, key: Key) -> EditorAction {
         let kb = get_keybindings();
+        self.handle_key_with(&kb, key)
+    }
 
+    /// Process a key against an explicit keybindings table.
+    ///
+    /// The split exists so a test can exercise a *user override* without
+    /// mutating the process-wide manager, which every other test in the
+    /// process shares.
+    pub fn handle_key_with(&mut self, kb: &KeybindingsManager, key: Key) -> EditorAction {
         // `tui.editor.historySearch` (`Ctrl+R`): reverse history search
         // (codex `ChatComposer::begin_history_search`). While a session is
         // open it owns the composer, so this check comes first — ahead of a
         // half-armed `Ctrl+]` jump target, whose next key would otherwise eat
         // the search query character.
         if self.history_search.is_some() {
-            return self.handle_history_search_key(&kb, &key);
+            return self.handle_history_search_key(kb, &key);
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.historySearch") {
+        if Self::matches_binding(kb, &key, "tui.editor.historySearch") {
             return self.begin_history_search();
         }
 
@@ -2257,7 +2265,7 @@ impl Editor {
         // through to their normal handling, mirroring upstream
         // `Editor.handleInput`.
         if let Some(direction) = self.jump_mode.take() {
-            if Self::is_jump_binding(&kb, &key) {
+            if Self::is_jump_binding(kb, &key) {
                 return EditorAction::None;
             }
             if !key.modifiers.control && !key.modifiers.alt {
@@ -2271,11 +2279,11 @@ impl Editor {
         // character jump. Checked before every other chord so the
         // Alt-modified backward spelling (which the other branches would
         // otherwise not recognise) is handled first.
-        if Self::matches_binding(&kb, &key, "tui.editor.jumpBackward") {
+        if Self::matches_binding(kb, &key, "tui.editor.jumpBackward") {
             self.jump_mode = Some(JumpDirection::Backward);
             return EditorAction::None;
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.jumpForward") {
+        if Self::matches_binding(kb, &key, "tui.editor.jumpForward") {
             self.jump_mode = Some(JumpDirection::Forward);
             return EditorAction::None;
         }
@@ -2283,14 +2291,14 @@ impl Editor {
         // `tui.input.copy` (`Ctrl+C`). There is no selection to copy in
         // this editor, so the chord is handed back to the caller; see the
         // module docs.
-        if Self::matches_binding(&kb, &key, "tui.input.copy") {
+        if Self::matches_binding(kb, &key, "tui.input.copy") {
             return EditorAction::Interrupt;
         }
 
         // `app.exit` (`Ctrl+D`): exit only while the buffer is empty,
         // otherwise fall through to `tui.editor.deleteCharForward`,
         // exactly like upstream `CustomEditor` (`custom-editor.ts:117`).
-        if Self::matches_app_exit(&kb, &key) && self.buffer.is_empty() {
+        if Self::matches_app_exit(kb, &key) && self.buffer.is_empty() {
             return EditorAction::Eof;
         }
 
@@ -2299,22 +2307,22 @@ impl Editor {
         // mirroring upstream `Editor.handleInput`'s autocomplete block
         // (which runs after undo, before Tab and deletion).
         if self.is_showing_autocomplete() {
-            if Self::matches_binding(&kb, &key, "tui.select.cancel") {
+            if Self::matches_binding(kb, &key, "tui.select.cancel") {
                 self.cancel_autocomplete();
                 return EditorAction::None;
             }
-            if Self::matches_binding(&kb, &key, "tui.select.up") {
+            if Self::matches_binding(kb, &key, "tui.select.up") {
                 self.move_autocomplete(-1);
                 return EditorAction::Changed;
             }
-            if Self::matches_binding(&kb, &key, "tui.select.down") {
+            if Self::matches_binding(kb, &key, "tui.select.down") {
                 self.move_autocomplete(1);
                 return EditorAction::Changed;
             }
-            if Self::matches_binding(&kb, &key, "tui.input.tab") {
+            if Self::matches_binding(kb, &key, "tui.input.tab") {
                 return self.accept_autocomplete();
             }
-            if Self::matches_binding(&kb, &key, "tui.input.submit") {
+            if Self::matches_binding(kb, &key, "tui.input.submit") {
                 let prefix = self.autocomplete_prefix.clone();
                 let applied = self.accept_autocomplete();
                 if applied == EditorAction::None {
@@ -2332,66 +2340,82 @@ impl Editor {
 
         // Tab with the dropdown closed forces a completion
         // (`tui.input.tab`).
-        if Self::matches_binding(&kb, &key, "tui.input.tab") && self.handle_tab_completion() {
+        if Self::matches_binding(kb, &key, "tui.input.tab") && self.handle_tab_completion() {
             return EditorAction::Changed;
         }
 
         // Deletion chords.
-        if Self::matches_binding(&kb, &key, "tui.editor.deleteToLineStart") {
+        if Self::matches_binding(kb, &key, "tui.editor.deleteToLineStart") {
             return self.kill_to_line_start();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.deleteToLineEnd") {
+        if Self::matches_binding(kb, &key, "tui.editor.deleteToLineEnd") {
             return self.kill_to_line_end();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.deleteWordBackward") {
+        if Self::matches_binding(kb, &key, "tui.editor.deleteWordBackward") {
             return self.kill_word_backward();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.deleteWordForward") {
+        if Self::matches_binding(kb, &key, "tui.editor.deleteWordForward") {
             return self.kill_word_forward();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.deleteCharBackward") {
+        if Self::matches_binding(kb, &key, "tui.editor.deleteCharBackward") {
             return self.backspace();
         }
         // `Delete` and `Ctrl+D` (the Latter already handled above while
         // the buffer was empty).
-        if Self::matches_binding(&kb, &key, "tui.editor.deleteCharForward") {
+        if Self::matches_binding(kb, &key, "tui.editor.deleteCharForward") {
             return self.delete();
         }
 
         // Kill-ring chords.
-        if Self::matches_binding(&kb, &key, "tui.editor.yank") {
+        if Self::matches_binding(kb, &key, "tui.editor.yank") {
             return self.yank();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.yankPop") {
+        if Self::matches_binding(kb, &key, "tui.editor.yankPop") {
             return self.yank_pop();
         }
 
+        // Dedicated history chords (`tui.editor.historyPrevious` /
+        // `historyNext`, unbound by default). Upstream
+        // `packages/tui/src/components/editor.ts:848-856`: they always browse
+        // entries instead of moving the cursor, and they close the dropdown
+        // first. Checked before the cursor chords so a user binding one of
+        // them to `Up`/`Down` still gets history browsing, not row motion
+        // (LUM-1447: these two ids had no consumer at all before this).
+        if Self::matches_binding(kb, &key, "tui.editor.historyPrevious") {
+            self.cancel_autocomplete();
+            return self.history_prev();
+        }
+        if Self::matches_binding(kb, &key, "tui.editor.historyNext") {
+            self.cancel_autocomplete();
+            return self.history_next();
+        }
+
         // Cursor movement.
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorLineStart") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorLineStart") {
             return self.move_home();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorLineEnd") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorLineEnd") {
             return self.move_end();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorWordLeft") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorWordLeft") {
             return self.move_word_left();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorWordRight") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorWordRight") {
             return self.move_word_right();
         }
         // `Up` / `Down`: a visual row inside the draft, the prompt
         // history from its first / last row (upstream
         // `packages/tui/src/components/editor.ts:913-940`).
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorUp") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorUp") {
             return self.cursor_up();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorDown") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorDown") {
             return self.cursor_down();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorLeft") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorLeft") {
             return self.move_left();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.cursorRight") {
+        if Self::matches_binding(kb, &key, "tui.editor.cursorRight") {
             return self.move_right();
         }
 
@@ -2402,29 +2426,29 @@ impl Editor {
         // transcript's own paging first. The `Ctrl+PageUp` / `Ctrl+PageDown`
         // spellings are the editor's either way, because the transcript
         // binding is the bare key only.
-        if Self::matches_binding(&kb, &key, "tui.editor.pageUp") {
+        if Self::matches_binding(kb, &key, "tui.editor.pageUp") {
             return self.page_up();
         }
-        if Self::matches_binding(&kb, &key, "tui.editor.pageDown") {
+        if Self::matches_binding(kb, &key, "tui.editor.pageDown") {
             return self.page_down();
         }
 
         // `tui.editor.undo`.
-        if Self::matches_binding(&kb, &key, "tui.editor.undo") {
+        if Self::matches_binding(kb, &key, "tui.editor.undo") {
             return self.undo();
         }
 
         // `tui.input.newLine` (`Shift+Enter` / `Ctrl+J`): a hard line
         // break, checked before the submit branch so `Shift+Enter` grows
         // the composer instead of sending the draft.
-        if Self::matches_binding(&kb, &key, "tui.input.newLine") {
+        if Self::matches_binding(kb, &key, "tui.input.newLine") {
             return self.insert_newline();
         }
         // `tui.input.submit` (`Enter`). The backslash fallback is
         // upstream's `shouldSubmitOnBackslashEnter`: in a terminal that
         // cannot report `Shift+Enter`, a trailing backslash means "I
         // wanted a newline", so it is consumed instead of submitting.
-        if Self::matches_binding(&kb, &key, "tui.input.submit") {
+        if Self::matches_binding(kb, &key, "tui.input.submit") {
             if self.buffer[..self.cursor.min(self.buffer.len())].ends_with('\\') {
                 self.backspace();
                 return self.insert_newline();
@@ -2727,6 +2751,80 @@ mod tests {
         assert_eq!(ed.history_next(), EditorAction::Changed);
         assert_eq!(ed.text(), "draft");
         assert_eq!(ed.cursor(), "draft".len());
+    }
+
+    /// A `pi-tui`-only manager with user overrides on top of the TUI defaults.
+    fn manager_with(entries: &[(&str, &[&str])]) -> KeybindingsManager {
+        let mut config = crate::keybindings::KeybindingsConfig::new();
+        for (id, keys) in entries {
+            config.set(*id, keys.iter().copied());
+        }
+        KeybindingsManager::new(crate::keybindings::tui_default_keybindings(), config)
+    }
+
+    #[test]
+    fn history_chords_are_unbound_by_default() {
+        // Upstream leaves both unbound (`keybindings.ts:74-81`), so the
+        // cursor-aware `Up` / `Down` stay the only history path out of the
+        // box. This is what makes the two tests below about *overrides*.
+        let kb = KeybindingsManager::tui_defaults();
+        assert!(kb.get_keys("tui.editor.historyPrevious").is_empty());
+        assert!(kb.get_keys("tui.editor.historyNext").is_empty());
+    }
+
+    #[test]
+    fn history_chords_browse_entries_instead_of_moving_the_cursor() {
+        // LUM-1447: both ids had no consumer, so binding them did nothing.
+        // Upstream `editor.ts:848-856` treats them as dedicated history
+        // chords that always browse, whatever row the cursor is on.
+        let kb = manager_with(&[
+            ("tui.editor.historyPrevious", &["ctrl+p"]),
+            ("tui.editor.historyNext", &["ctrl+n"]),
+        ]);
+        let mut ed = Editor::new();
+        ed.push_history("older prompt");
+        ed.insert_str("draft");
+        assert_eq!(ed.cursor(), "draft".len());
+
+        assert_eq!(
+            ed.handle_key_with(&kb, Key::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.text(), "older prompt");
+        assert_eq!(ed.cursor(), "older prompt".len());
+
+        assert_eq!(
+            ed.handle_key_with(&kb, Key::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            EditorAction::Changed
+        );
+        assert_eq!(ed.text(), "draft");
+        assert_eq!(ed.cursor(), "draft".len());
+    }
+
+    #[test]
+    fn history_chord_closes_the_autocomplete_dropdown() {
+        // Upstream calls `cancelAutocomplete()` before navigating, and its
+        // early return still cancels when the history is empty. Both halves
+        // matter: a stale dropdown would keep the next `Enter` for itself.
+        let kb = manager_with(&[("tui.editor.historyPrevious", &["ctrl+p"])]);
+        let mut ed = Editor::new();
+        ed.set_autocomplete_provider(Arc::new(
+            crate::autocomplete::CombinedAutocompleteProvider::new(
+                vec![crate::autocomplete::SlashCommand::new("help")],
+                ".",
+            ),
+        ));
+        ed.insert_str("/he");
+        assert!(ed.request_autocomplete(false, false));
+        assert!(ed.is_showing_autocomplete());
+
+        // Empty history: the chord must still close the dropdown.
+        assert_eq!(
+            ed.handle_key_with(&kb, Key::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            EditorAction::None
+        );
+        assert!(!ed.is_showing_autocomplete());
+        assert_eq!(ed.text(), "/he");
     }
 
     #[test]

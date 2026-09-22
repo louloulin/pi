@@ -59,9 +59,19 @@ pub const TOOL_PREVIEW_LINES: usize = 4;
 /// The `… (+M lines, Ctrl+O to expand)` line a collapsed tool block shows.
 ///
 /// Kept as a free function so the renderer and any driver-side hint agree on
-/// the wording.
+/// the wording. The chord is **resolved from the live keybindings**
+/// (`key_hint_or`, upstream's `keyHint`), not hardcoded: a `keybindings.json`
+/// override for `app.tools.expand` moves both the key that folds the block
+/// and the text that advertises it, and an explicitly unbound id drops the
+/// chord instead of pointing at a dead key (LUM-1447). `app.tools.expand`
+/// lives in the coding-agent's `app.*` table, so the shipped default stands
+/// in when only the bare `pi-tui` registry is installed — the same fallback
+/// `Editor::matches_app_exit` uses for `app.exit`.
 pub fn tool_fold_hint(hidden: usize) -> String {
-    format!("… (+{hidden} lines, Ctrl+O to expand)")
+    format!(
+        "… (+{hidden} lines, {})",
+        crate::keybindings::key_hint_or("app.tools.expand", "Ctrl+O", "to expand")
+    )
 }
 
 /// A driver-rendered tool block: a call header plus the result body.

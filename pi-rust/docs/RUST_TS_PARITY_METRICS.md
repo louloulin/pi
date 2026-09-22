@@ -413,6 +413,48 @@ wire-payload / header 缝，**handler 返回值目前不生效**、`after_provid
 3. settings 的滚轮仍是**全局认领**（`step_settings_wheel`），与上游的矩形前提不同 —— 这是本轮
    **明确保留**的偏差（改动会碰既有 3 条测试），记入 `docs/LUM1445_MODAL_POINTER.md` §8 第 5 条。
 
+### 0.14 LUM-1447 复测：两个死键位接线 + 转录折叠提示按生效键位渲染；`tui.*` 消费面 49/49
+
+本轮只动 `pi-tui`（+1 个扫描脚本），不改任何轴的分母；公式里唯一变动的项是测试轴。
+细节、反证与帧截图见 `docs/LUM1447_BINDING_HINTS.md`。
+
+| 量 | 本轮实测 | LUM-1445 | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **90.2%**（138,153 / 153,106） | 90.1%（137,961） | `python pi-rust/scripts/measure_loc.py`；+192 行 src |
+| 测试规模 | **50.3%**（2,670 / 5,309） | 50.2%（2,663） | +7 = `editor.rs` 3 条单测 + `tests/hint_bindings.rs`（1 条）+ `tests/lum1447_binding_hints_frames.rs`（3 帧） |
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 本轮无新 src 模块 |
+| `app.*` 接线 | 43 / 44 = 97.7%，silent 1（`app.tree.editLabel`） | 同 | 未动 |
+| **TUI 键位消费面（本量）** | **`tui.*` 49 / 49 = 100%**（本轮前 **47/49**） | —— | 新脚本 `python pi-rust/scripts/keybinding_coverage.py pi-rust --check` → exit 0；死键位为 `tui.editor.historyPrevious` / `historyNext` |
+| 扩展生命周期事件 | 36/36（声明 + 生产构造点） | 同 | 未动 |
+
+**加权完成度（权重表见 §4.1，公式公开）**：只有第 12 轴从 0.499 走到 2,670/5,309 = **0.5029**：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.5029 + 3×0.95 = 86.8%
+```
+
+**口径对账**：把第 12 轴换回 0.499 时同一算式为 **86.75%**（§0.13 报作 86.7%），
+所以这 0.1pt 差额**全部**来自「用实测的 2,670/5,309 替掉旧的 0.499」，不是任何轴被重估
+（本轮没有一条轴的能力发生变化）。
+
+**本轮新登记的量与脚本（可反证）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 死键位扫描 | `python pi-rust/scripts/keybinding_coverage.py pi-rust --check` | exit 0：`tui.* 49/49`、`app.* 43/44`、`in sync: 1 known-unconsumed` |
+| 反证 | 把 `editor.rs` 的两个分支 stash 掉再跑上面那条 | exit 1，精确报出 `UNCONSUMED tui.editor.historyPrevious` / `historyNext` |
+| 行为 | `cargo test -p pi-tui --lib history_chord` | 3 passed / 0 failed；删掉两个分支后立刻 2 failed |
+| 提示 | `cargo test -p pi-tui --test hint_bindings` | 1 passed：默认 / override / 双键位 / 解绑 / 未知 id 五种状态 |
+| 帧 | `docs/screenshots/lum1447-fold-hint-{default_ctrl_o,rebound_ctrl_u,unbound}.{png,txt}` | 3 帧，80×20，真 `App::render_to_buffer` |
+| 门禁 | `cargo test -p pi-tui` / `cargo fmt --all -- --check` / `cargo clippy -p pi-tui --all-targets` | **1027 passed / 0 failed**（基线 1020）；fmt 干净；clippy 0 告警 |
+
+**诚实说明**：`tool_fold_hint` 在**裸 `pi-tui` 注册表**（没有 `app.*` 表）下走
+`Ctrl+O` 兜底，因为 `app.tools.expand` 的 id 定义在 `pi-coding-agent` 的表里；
+表里**有**该 id 而用户解绑时才去掉键位（`docs/LUM1447_BINDING_HINTS.md` §3 有两条分支的理由）。
+`/help` 的 `keys:` 段与 dialog/settings 页脚仍是硬编码 chord，**本轮不算已修**，
+列为下一轮第 2、3 条。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
