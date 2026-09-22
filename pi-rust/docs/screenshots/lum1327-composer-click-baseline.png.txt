@@ -1,0 +1,146 @@
+# lum1327-composer-click-baseline.png — chars, 100x20 cells
+
+===== LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.  |  [1] 1. a click in the middle of the draft moves nothing (pre-fix)  (cursor 36,18, frame 83cfe06ca72e, px 5c989b713bec, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello world▍
+Faux test model  session-18d77dd04b85adbe                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> hello world▍'  — the caret is still at the end of the draft
+  assert PASS   reject       '> he▍llo world'  — the post-fix frame — it must not appear on this binary
+
+===== LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.  |  [2] 2. a click on the label gutter moves nothing (pre-fix)  (cursor 36,18, frame 83cfe06ca72e, px 5c989b713bec, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello world▍
+Faux test model  session-18d77dd04b85adbe                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> hello world▍'
+  assert PASS   reject       '> ▍hello world'
+
+===== LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.  |  [3] 3. a click on the second row of a two-line draft moves nothing (pre-fix)  (cursor 13,18, frame eee6d3f5c2f9, px 512a363f1541, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello world
+  second line▍
+Faux test model  session-18d77dd04b85adbe                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> hello world'
+  assert PASS   expect       '  second line▍'
+  assert PASS   expect       '  se▍cond line' (x0)  — the caret never left the end of the second row
+
+===== LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.  |  [4] 4. Ctrl+C clears the draft  (cursor 36,18, frame e147845984e2, px 66ed72a4cb40, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d77dd04b85adbe                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'type a prompt'
+  assert PASS   reject       '  second line'
+
+===== LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.  |  [5] 5. a click on the first row of a wrapped draft keeps the caret on the last row (pre-fix)  (cursor 36,18, frame c5eead02a400, px fc023a941d04, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwwwwwwwww▍
+Faux test model  session-18d77dd04b85adbe                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '^  w{22}▍'  — the caret is still at the end of the draft, on the second visual row
+  assert PASS   reject       '^> w{97}▍'  — the post-fix frame — the caret on the clicked row
+
+===== LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.  |  [6] 6. a click on the status bar changes nothing (pre-fix and post-fix alike)  (cursor 36,18, frame c5eead02a400, px fc023a941d04, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwwwwwwwww▍
+Faux test model  session-18d77dd04b85adbe                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Faux test model'
+  assert PASS   expect       '^  w{22}▍' (x1)  — one caret, where it has been since the draft was typed

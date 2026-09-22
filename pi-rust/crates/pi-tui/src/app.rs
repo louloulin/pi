@@ -301,6 +301,7 @@ use crate::theme::{
     builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
 };
+use crate::visual_text::VisualLayout;
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -922,6 +923,21 @@ impl From<&str> for Submission {
     }
 }
 
+/// What a pointer cell inside the composer region maps onto.
+///
+/// Private to the crate: the pointer path is the only consumer, and the
+/// distinction it draws — "not the composer" versus "the composer, but no
+/// draft position under this cell" — is what keeps a click on the padding
+/// rows from falling through to the chat-log selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerHit {
+    /// A character offset into the draft (the click's caret target).
+    Offset(usize),
+    /// The composer's own cell, with no draft position under it: the
+    /// padding rows below a short draft, or the reverse-search row.
+    Absorbed,
+}
+
 /// Outcome returned by [`App::step`] after each key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -1147,6 +1163,19 @@ pub struct App {
     /// overflows, and therefore the capacity that hands `PageUp` /
     /// `PageDown` to the editor (see [`App::composer_overflows`]).
     composer_window: AtomicU16,
+    /// Rectangle of the composer region as of the last render:
+    /// `(row, column, width, height)`. `height == 0` means the prompt was
+    /// **not** the composer this frame — no frame has been painted yet, or a
+    /// custom editor component replaced the prompt line — and therefore the
+    /// pointer has nothing to hit. Read between renders by the click path
+    /// ([`App::step_composer_mouse_gesture`]) to map a cell onto a draft
+    /// offset, the same shape as [`App::scroll_to_end`].
+    composer_area: (AtomicU16, AtomicU16, AtomicU16, AtomicU16),
+    /// Cell of an in-flight left press inside the composer, kept until its
+    /// release. While it is set the drag / move / release gestures are
+    /// swallowed instead of extending the chat-log selection, so a press
+    /// inside the composer can never drag a transcript selection behind it.
+    composer_press: Option<(u16, u16)>,
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1330,6 +1359,13 @@ impl App {
             composer_body_width: AtomicU16::new(0),
             composer_scroll: AtomicUsize::new(0),
             composer_window: AtomicU16::new(0),
+            composer_area: (
+                AtomicU16::new(0),
+                AtomicU16::new(0),
+                AtomicU16::new(0),
+                AtomicU16::new(0),
+            ),
+            composer_press: None,
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -3991,6 +4027,19 @@ impl App {
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
+        // The composer owns the pointer while it is over the composer region.
+        // Upstream's editor handles its own clicks
+        // (`Editor.handleMouse`'s click branch,
+        // `packages/tui/src/components/editor.ts:615-670`; codex routes them
+        // through `chat_composer/mouse.rs`), and the transcript viewport stops
+        // above the composer, so before this branch a press on the composer
+        // did nothing at all — no caret placement, not even a rejected
+        // selection.
+        if let Some(outcome) = self.step_composer_mouse_gesture(&gesture) {
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
+            return outcome;
+        }
         // The pill is the first thing on the transcript to get the pointer
         // (upstream `handleScrollToEndIndicatorMouseEvent`, tested before the
         // scrollbar and the selection, `packages/tui/src/tui-alt-screen.ts:1017-1024`):
@@ -4047,6 +4096,142 @@ impl App {
         } else {
             outcome
         }
+    }
+
+    /// Route a gesture through the composer: a left press inside the composer
+    /// region places the caret, and its press / drag / release are swallowed
+    /// so they can never start or extend a chat-log selection.
+    ///
+    /// Returns `None` when the gesture does not belong to the composer at all
+    /// (outside its rectangle, a non-left button, or a wheel — the wheel stays
+    /// on the transcript, which is what the composer's own scrolling keys are
+    /// for).
+    ///
+    /// The caret placement itself is upstream's: the click maps to a draft
+    /// row and column through the same [`crate::visual_text`] layout the frame
+    /// painted (`App::paint_prompt` records the region and the window offset),
+    /// and [`crate::Prompt::place_cursor`] turns the offset into a caret. A
+    /// click on the padding rows below a short draft, or on the reverse-search
+    /// row, is absorbed without moving the caret — upstream answers
+    /// `{ handled: true }` and leaves the cursor alone for a click that lands
+    /// on no visual line.
+    fn step_composer_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                let hit = self.composer_hit(gesture.x, gesture.y)?;
+                // A composer press never extends the transcript selection;
+                // any selection already on screen stays where the user left
+                // it (it is not being dragged further).
+                self.stop_selection_autoscroll();
+                self.selection_dragging = false;
+                self.tool_press = None;
+                self.composer_press = Some((gesture.x, gesture.y));
+                let ComposerHit::Offset(display) = hit else {
+                    return Some(StepOutcome::Idle);
+                };
+                Some(match self.prompt.place_cursor(display) {
+                    EditorAction::Changed => StepOutcome::Redraw,
+                    _ => StepOutcome::Idle,
+                })
+            }
+            // A release only belongs to the composer when its press did; the
+            // cell it lands on does not matter, because a composer drag is not
+            // a selection (upstream's editor has no drag-select of its own —
+            // the renderer's screen-level selection does that job).
+            MouseGestureKind::Release(MouseButton::Left)
+                if self.composer_press.take().is_some() =>
+            {
+                Some(StepOutcome::Idle)
+            }
+            MouseGestureKind::Drag(MouseButton::Left) | MouseGestureKind::Move
+                if self.composer_press.is_some() =>
+            {
+                Some(StepOutcome::Idle)
+            }
+            _ => None,
+        }
+    }
+
+    /// Map an absolute pointer cell onto the composer's draft, if it is over
+    /// the composer at all.
+    ///
+    /// `None` means "not the composer's": the gesture falls through to the
+    /// transcript. [`ComposerHit::Absorbed`] means the cell *is* the
+    /// composer's but no draft position exists under it (a padding row below a
+    /// short draft, or the composer while an open `Ctrl+R` owns it).
+    ///
+    /// The composer is docked: its **bottom** row comes from the frame that
+    /// painted it (the row above the status bar, which only moves when the
+    /// extension chrome below the editor changes), while its **top** row is
+    /// derived from the row count the *current* draft needs. The second half
+    /// matters because a frame rectangle is only as fresh as the last paint:
+    /// when several events arrive in one poll drain — typing a long draft and
+    /// clicking it, which is exactly what a terminal paste-and-click looks
+    /// like — the recorded rectangle still describes the one-row composer from
+    /// before the draft grew, and trusting it would drop the click on a row the
+    /// user can plainly see. The window offset is clamped the same way
+    /// [`crate::Prompt::render_body`]'s follow-the-caret rule leaves it, so a
+    /// stale offset cannot shift the mapping either.
+    fn composer_hit(&self, x: u16, y: u16) -> Option<ComposerHit> {
+        let (row, column, width, height) = self.composer_area();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let bottom = row.saturating_add(height).saturating_sub(1);
+        let rows_now = self
+            .prompt
+            .line_count(width, self.config.composer_max_rows)
+            .max(1) as u16;
+        let height_now = rows_now
+            .min(self.config.composer_max_rows.max(1) as u16)
+            .max(1);
+        let top = bottom.saturating_sub(height_now - 1);
+        if y < top || y > bottom {
+            return None;
+        }
+        if x < column || x >= column.saturating_add(width) {
+            return None;
+        }
+        // The body width the frame wrapped at. `0` only before the first
+        // frame, which the rectangle check above already excludes.
+        let body_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+        if body_width == 0 {
+            return None;
+        }
+        let rect_row = (y - top) as usize;
+        // An open reverse search owns the composer — the same way it owns the
+        // keyboard ([`App::step_key_at`] routes every key to it first) — so no
+        // cell of the composer places a caret while it is up.
+        if self.prompt.editor().history_search_active() {
+            return Some(ComposerHit::Absorbed);
+        }
+        let max_scroll = rows_now.saturating_sub(height_now) as usize;
+        let scroll = self.composer_scroll.load(Ordering::Relaxed).min(max_scroll);
+        let draft_row = scroll + rect_row;
+        // The label is the composer's gutter: a click on it belongs to the
+        // draft's first column, like upstream clamping a click inside the left
+        // padding.
+        let gutter = self.prompt.label().chars().count();
+        let body_column = ((x - column) as usize).saturating_sub(gutter);
+        let layout = VisualLayout::new(&self.prompt.text(), body_width);
+        if draft_row >= layout.len() {
+            return Some(ComposerHit::Absorbed);
+        }
+        Some(ComposerHit::Offset(
+            layout.click_offset(draft_row, body_column),
+        ))
+    }
+
+    /// The composer rectangle recorded by the last frame
+    /// (`(row, column, width, height)`; all zero when the prompt was not the
+    /// composer this frame).
+    pub fn composer_area(&self) -> (u16, u16, u16, u16) {
+        (
+            self.composer_area.0.load(Ordering::Relaxed),
+            self.composer_area.1.load(Ordering::Relaxed),
+            self.composer_area.2.load(Ordering::Relaxed),
+            self.composer_area.3.load(Ordering::Relaxed),
+        )
     }
 
     /// Route a non-wheel gesture through the chat-log text selection: start,
@@ -5064,7 +5249,17 @@ impl App {
         // session or `set_editor_component`) replaces the prompt line
         // entirely.
         match &frame.editor {
-            Some(lines) => self.paint_extension_lines(editor_area, lines, buf),
+            Some(lines) => {
+                // A custom editor component owns the region, and with it the
+                // pointer: forget the prompt's rectangle so a click cannot
+                // reach a composer that is not on screen (a stale rectangle
+                // would keep placing carets in a hidden draft).
+                self.composer_area.0.store(0, Ordering::Relaxed);
+                self.composer_area.1.store(0, Ordering::Relaxed);
+                self.composer_area.2.store(0, Ordering::Relaxed);
+                self.composer_area.3.store(0, Ordering::Relaxed);
+                self.paint_extension_lines(editor_area, lines, buf)
+            }
             None => {
                 self.paint_prompt(editor_area, buf);
                 self.paint_autocomplete(message_area, editor_area, buf);
@@ -5240,6 +5435,14 @@ impl App {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
+        // The pointer path reads this rectangle between renders to map a click
+        // onto a draft offset ([`App::composer_hit`]); recording it here — and
+        // nowhere else — is what keeps the hit-test on the region that was
+        // actually painted, including the extension chrome that decides it.
+        self.composer_area.0.store(rect.y, Ordering::Relaxed);
+        self.composer_area.1.store(rect.x, Ordering::Relaxed);
+        self.composer_area.2.store(rect.width, Ordering::Relaxed);
+        self.composer_area.3.store(rect.height, Ordering::Relaxed);
         let max_rows = (rect.height as usize).min(self.config.composer_max_rows.max(1));
         // Record the body width the wrap uses, so the next key press measures
         // the draft the same way this frame did (see

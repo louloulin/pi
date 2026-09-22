@@ -99,6 +99,12 @@ impl Prompt {
         self.editor.display_cursor()
     }
 
+    /// Place the caret at a character offset in [`Prompt::text`] — the
+    /// pointer's click path (see [`Editor::place_display_cursor`]).
+    pub fn place_cursor(&mut self, display: usize) -> EditorAction {
+        self.editor.place_display_cursor(display)
+    }
+
     /// The pasted image chips attached to the draft, in buffer order.
     pub fn images(&self) -> &[pi_protocol::ImageContent] {
         self.editor.image_attachments()
