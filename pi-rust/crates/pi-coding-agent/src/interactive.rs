@@ -898,8 +898,12 @@ async fn handle_input_event(
 ) -> anyhow::Result<Option<InternalAction>> {
     // A rename modal the driver opened itself owns the keyboard until it
     // is answered: the App would drop the resolved dialog before the new
-    // name could be read.
-    if app.dialog_open() && options.pickers.session.pending_rename.is_some() {
+    // name could be read. Pointer events still fall through — the App routes
+    // them to the modal by rectangle.
+    if app.dialog_open()
+        && options.pickers.session.pending_rename.is_some()
+        && matches!(event, InputEvent::Key(_))
+    {
         let InputEvent::Key(key) = event else {
             return Ok(None);
         };
@@ -908,8 +912,12 @@ async fn handle_input_event(
     }
 
     // When the selector is open (and no extension dialog is on top of
-    // it), handle selection first.
-    if app.selector_open() && !app.dialog_open() {
+    // it), handle selection first — but only for keys. A wheel notch or a
+    // pointer gesture falls through to the App below, which hit-tests it
+    // against the list rows the last frame painted (upstream
+    // `dispatchMouseToOverlay` → `SelectList::handleMouse`,
+    // `packages/tui/src/components/select-list.ts:110-148`).
+    if app.selector_open() && !app.dialog_open() && matches!(event, InputEvent::Key(_)) {
         let InputEvent::Key(key) = event else {
             return Ok(None);
         };
@@ -1159,6 +1167,15 @@ async fn handle_input_event(
     }
 
     let step_outcome = app.step(event);
+    // A click on a picker row activates it exactly like `Enter` does — the
+    // App records which row the pointer committed and the driver applies it
+    // here, because what a picker *means* (`/model` switches the model,
+    // `/session` resumes a session) lives on this side of the seam, exactly
+    // like the keyboard path above.
+    if let Some(value) = app.take_selector_commit() {
+        app.close_selector();
+        apply_selector_choice(app, agent, &value, options).await;
+    }
     // `/settings` hands value changes back to the driver — upstream's
     // `onChange(id, newValue)` callback. Apply what the running session
     // can honour, persist everything to the user settings file, and
@@ -4350,6 +4367,7 @@ fn _keep_writer() -> Option<Box<dyn Write>> {
 mod tests {
     use super::*;
     use pi_extensions::JsExtensionHost;
+    use pi_tui::input::{MouseButton, MouseGesture, MouseGestureKind};
 
     #[test]
     fn extension_command_args_returns_text_after_the_name() {
@@ -5700,6 +5718,68 @@ mod tests {
         assert_eq!(agent.lock().await.model().id, "b");
     }
 
+    /// The pointer reaches the picker the driver keeps the keyboard for: a
+    /// notch moves the highlight and a click activates the row, while keys
+    /// keep taking the driver's own path. Upstream gives the overlay the
+    /// mouse before anything else (`dispatchMouseToOverlay` →
+    /// `SelectList::handleMouse`, `packages/tui/src/components/select-list.ts:110-148`).
+    #[tokio::test]
+    async fn the_picker_takes_the_pointer_while_it_owns_the_keyboard() {
+        let (mut app, agent) = app_starting_at(catalog_model("alpha", "a")).await;
+        let mut options = InteractiveOptions {
+            models: two_model_catalog(),
+            ..InteractiveOptions::default()
+        };
+        let mut bash = BashRunner::default();
+
+        let ctrl_l = InputEvent::Key(Key::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, ctrl_l)
+            .await
+            .expect("Ctrl+L");
+        assert!(app.selector_open());
+
+        // The frame records where the picker's rows are: the pointer arrives
+        // between renders and hit-tests those rows.
+        let label = app
+            .selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .find(|item| item.value == "model:b")
+            .expect("the second model is listed")
+            .label
+            .clone();
+        let lines = app.render_snapshot(80, 24).lines;
+        let beta = lines
+            .iter()
+            .position(|line| line.contains(&label))
+            .unwrap_or_else(|| panic!("no row renders {label:?}: {lines:?}"))
+            as u16;
+
+        // A notch on that row moves the highlight without committing...
+        let wheel = InputEvent::wheel(false, false, 2, beta);
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, wheel)
+            .await
+            .expect("wheel");
+        assert_eq!(
+            app.selector().and_then(|s| s.selected_value()),
+            Some("model:b")
+        );
+        assert!(app.selector_open(), "a notch must not commit");
+        assert_eq!(agent.lock().await.model().id, "a", "still the old model");
+
+        // ...and a click on it commits, exactly like Enter.
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, click(beta))
+            .await
+            .expect("press");
+        handle_input_event(&mut app, &agent, &mut options, &mut bash, release(beta))
+            .await
+            .expect("release");
+
+        assert!(!app.selector_open(), "the click commits and closes it");
+        assert_eq!(agent.lock().await.model().id, "b");
+    }
+
     /// The chord is claimed only while no overlay owns the keyboard — the
     /// same guard every `app.*` driver intercept uses. With the search
     /// overlay open `Ctrl+L` stays inert instead of opening a second modal.
@@ -6395,6 +6475,27 @@ mod tests {
 
     fn key(code: KeyCode) -> InputEvent {
         InputEvent::Key(Key::new(code, KeyModifiers::NONE))
+    }
+
+    /// A left press at the absolute cell `(2, y)` — the pointer events the
+    /// driver forwards to the App while a modal is open.
+    fn click(y: u16) -> InputEvent {
+        InputEvent::gesture(MouseGesture::new(
+            MouseGestureKind::Press(MouseButton::Left),
+            2,
+            y,
+            false,
+        ))
+    }
+
+    /// The release that turns [`click`] into a committed click.
+    fn release(y: u16) -> InputEvent {
+        InputEvent::gesture(MouseGesture::new(
+            MouseGestureKind::Release(MouseButton::Left),
+            2,
+            y,
+            false,
+        ))
     }
 
     /// Type `text` into the editor and press Enter, the way the render loop

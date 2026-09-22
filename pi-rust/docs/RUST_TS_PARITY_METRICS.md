@@ -330,6 +330,43 @@ CJK 断点    "你好世界" @6 列 → ["你好世", "界"]（两条断行规�
 3. LUM-1431 §5 的「`cargo fmt --all -- --check` 干净」在基线 `b0c9f89a1` 上**复现不出来**
    （`lum1431_autocomplete_frames.rs` 有 4 处 rustfmt 差异，cargo 1.97.1）；本轮已修绿。
 
+### 0.12 LUM-1445 复测：模态列表认领指针（picker / `ctx.ui.select` 滚轮+点选，`/settings` 点选）；TUI 指针面 6/6
+
+本轮接 LUM-1436 §7 的第 4 条（modal 打开时滚轮归属），做下去发现是**半边**：模态列表不仅不认领滚轮，
+**连点选行都不认领**（`step_modal_mouse_gesture` 只把 press/release 当"点到了模态"用于清日志选区）。
+现状是：上游 `SelectList::handleMouse` 一档一格、press 高亮、click 激活
+（`packages/tui/src/components/select-list.ts:110-148`），`SettingsList::handleMouse` 同构还要跳过搜索行
+（`packages/tui/src/components/settings-list.ts:179-210`）。全部口径本机重测（Windows / cargo 1.97.1 / `--offline`）。
+
+| 量 | 本轮实测 | LUM-1436 | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **89.1%**（136,469 / 153,106） | 88.8%（136,016） | `python pi-rust/scripts/measure_loc.py`；+453 行 src（geometry + 路由 + 三处激活落点 + 驱动放行） |
+| 测试规模 | **49.9%**（2,651 / 5,309） | 49.7%（2,637） | +14 = `modal_pointer.rs`（11 条）+ `lum1445_modal_pointer_frames.rs`（2 帧）+ 驱动用例（1 条） |
+| TUI 模块面 | **35 / 42 = 83.3%** | 35/42 | 本轮无新 src 模块 |
+| `app.*` 接线 | **43 / 44 = 97.7%**，silent 1（`app.tree.editLabel`） | 同 | `python pi-rust/scripts/app_action_coverage.py --check-consumed` → `43 entries; measured wired: 43 / in sync` |
+| composer 鼠标面 | **3 / 3 = 100%** | 3 / 3 | 本轮无回退 |
+| **模态列表指针面** | **3 / 3 = 100%** | 0 / 3 | picker（滚轮+点选）/ `ctx.ui.select`（滚轮+点选）/ settings（点选；滚轮此前已有） |
+| 扩展生命周期事件 | **21/36 声明 = 58.3%**；**20/36 生产构造点 = 55.6%** | 同 | `python pi-rust/scripts/extension_event_coverage.py`；LUM-1432 在办 |
+
+**加权完成度（权重表见 §4.1，公式公开）**：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×0.556 + 9×0.85 + 5×0.499 + 3×0.95 = 83.6%
+```
+
+只有测试轴从 0.497 走到 0.499（+0.01pt），加权仍落在 **83.6%**。
+
+**口径对账**：
+
+1. 「模态列表指针面」同样**不单独进公式**（TUI 轴是模块率与接线率的均值，§0.11 已声明），
+   它与「composer 鼠标面」合起来是本轮可复算的 **TUI 指针面 6 / 6 = 100%**；
+2. 上游的 `shouldDeferViewportInputToOverlay`（`packages/tui/src/tui-alt-screen.ts:645-694`）语义是
+   "命中 overlay 但组件没处理 → 归还未消费"；`pi-tui` 无下游传播链路，等价实现是**丢弃**，
+   两条分支的观感一致（日得不动），已在代码注释里写明；
+3. settings 的滚轮仍是**全局认领**（`step_settings_wheel`），与上游的矩形前提不同 —— 这是本轮
+   **明确保留**的偏差（改动会碰既有 3 条测试），记入 `docs/LUM1445_MODAL_POINTER.md` §8 第 5 条。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

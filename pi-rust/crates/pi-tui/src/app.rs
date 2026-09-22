@@ -259,7 +259,7 @@
 //! module executes extension JavaScript.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -320,6 +320,26 @@ const WHEEL_SCROLL_LINES: usize = 1;
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
 const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+
+/// Which modal list the last frame painted, for the pointer hit test.
+///
+/// The modals are painted straight into the cell buffer (there is no
+/// component tree to hit-test), so the frame records where the *item* rows
+/// landed and [`App::modal_list_hit`] maps a pointer cell back onto a row —
+/// the same seam as [`App::autocomplete_first_item`]. Only one list can be
+/// pointed at, and the painted order decides which: a dialog and a settings
+/// modal win over a selector, exactly like `mouse_regions`.
+const MODAL_LIST_NONE: u8 = 0;
+/// The `/model`-style picker (`self.selector`).
+const MODAL_LIST_SELECTOR: u8 = 1;
+/// The select list of an extension dialog (`self.dialog`, `ctx.ui.select`).
+const MODAL_LIST_DIALOG: u8 = 2;
+/// The `/settings` list (`self.settings`).
+const MODAL_LIST_SETTINGS: u8 = 3;
+
+/// Rows the modal pickers paint above their first item row: the title and
+/// the `─` rule ([`Selector::render_styled_lines`]).
+const SELECTOR_HEADER_ROWS: u16 = 2;
 
 /// How long a second `app.clear` (`Ctrl+C`) press after the first still
 /// counts as a double press.
@@ -1164,6 +1184,33 @@ pub struct App {
     /// `getVisibleRange()`.
     autocomplete_first_item: AtomicUsize,
     autocomplete_item_rows: AtomicUsize,
+    /// Row geometry of the modal list the last frame painted, for the pointer
+    /// hit test: which list ([`MODAL_LIST_SELECTOR`] / [`MODAL_LIST_DIALOG`] /
+    /// [`MODAL_LIST_SETTINGS`] / [`MODAL_LIST_NONE`]), the absolute row its
+    /// first *item* row landed on, the filtered index that row carries, and
+    /// how many item rows followed. Title / rule / `(n/m)` counter / hint rows
+    /// are deliberately excluded: upstream's `SelectList::handleMouse` maps a
+    /// click through `getVisibleRange()` and an unhandled row leaves the event
+    /// to `shouldDeferViewportInputToOverlay`
+    /// (`packages/tui/src/components/select-list.ts:110-140`,
+    /// `packages/tui/src/tui-alt-screen.ts:645-694`).
+    ///
+    /// The modals are drawn straight into the buffer and the pointer arrives
+    /// between renders, so the frame records the geometry here; `kind == 0`
+    /// means the last frame painted no clickable list.
+    modal_list_kind: AtomicU8,
+    modal_list_first_row: AtomicU16,
+    modal_list_first_item: AtomicUsize,
+    modal_list_rows: AtomicUsize,
+    /// Value a pointer click selected in the open picker, waiting for the
+    /// driver to apply it with [`App::take_selector_commit`].
+    ///
+    /// The App does not own what a picker *means* — `/model` switches the
+    /// model, `/session` resumes a session — the interactive driver does (it
+    /// handles the keyboard's `Enter` itself, `interactive.rs:948-962`). A
+    /// click therefore records the same intent the key path would have
+    /// produced, and the driver consumes it right after the step.
+    pending_selector_commit: Option<String>,
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1365,6 +1412,11 @@ impl App {
             autocomplete_size: (AtomicU16::new(0), AtomicU16::new(0)),
             autocomplete_first_item: AtomicUsize::new(0),
             autocomplete_item_rows: AtomicUsize::new(0),
+            modal_list_kind: AtomicU8::new(MODAL_LIST_NONE),
+            modal_list_first_row: AtomicU16::new(0),
+            modal_list_first_item: AtomicUsize::new(0),
+            modal_list_rows: AtomicUsize::new(0),
+            pending_selector_commit: None,
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -2683,6 +2735,18 @@ impl App {
         // modal overlays first and only reaches the chat log with no modal up.
         if let InputEvent::MouseGesture(gesture) = event {
             return self.step_mouse_gesture(gesture);
+        }
+        // A dialog or a picker claims the notches that land on its list rows:
+        // upstream hands them to `dispatchMouseToOverlay` before `routeWheel`
+        // sees them, and an unhandled notch is *deferred* rather than scrolled
+        // (`packages/tui/src/tui-alt-screen.ts:679-694`). While one is open
+        // the transcript behind it therefore never moves, whether or not the
+        // notch hit a row. This has to run before the modal keyboard guards
+        // below, which freeze every other event.
+        if let InputEvent::Mouse { up, y, .. } = event {
+            if self.dialog.is_some() || self.selector.is_some() {
+                return self.step_modal_list_wheel(up, y);
+            }
         }
         // An open modal owns the keyboard: the selector and prompt stay
         // frozen underneath it.
@@ -4319,10 +4383,20 @@ impl App {
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
                 self.modal_mouse_press = Some(point);
-                StepOutcome::Idle
+                // The press highlights the row under the pointer, exactly like
+                // upstream's `SelectList` / `SettingsList` press branch; the
+                // release only *activates* it.
+                self.modal_list_press(gesture.y)
             }
             MouseGestureKind::Release(MouseButton::Left) => {
                 let clicked = self.modal_mouse_press.take() == Some(point);
+                if clicked {
+                    // A click on a list row activates it (upstream
+                    // `SelectList::handleMouse` click branch).
+                    if let Some(outcome) = self.modal_list_click(gesture.y) {
+                        return outcome;
+                    }
+                }
                 if clicked && self.has_selection() {
                     self.clear_selection();
                     StepOutcome::Redraw
@@ -4657,6 +4731,205 @@ impl App {
             return None;
         }
         Some(self.autocomplete_first_item.load(Ordering::Relaxed) + row)
+    }
+
+    /// Record where the last frame painted the open modal's item rows, or
+    /// clear the record when it painted none.
+    ///
+    /// `first_row` is the absolute row of the first painted item row,
+    /// `first_item` the filtered index that row carries and `rows` how many
+    /// item rows followed. The App calls this from the paint path (which
+    /// takes `&self`), hence the atomics — the same seam as
+    /// [`App::record_autocomplete_area`].
+    fn record_modal_list(&self, kind: u8, first_row: u16, first_item: usize, rows: usize) {
+        self.modal_list_kind.store(kind, Ordering::Relaxed);
+        self.modal_list_first_row
+            .store(first_row, Ordering::Relaxed);
+        self.modal_list_first_item
+            .store(first_item, Ordering::Relaxed);
+        self.modal_list_rows.store(rows, Ordering::Relaxed);
+    }
+
+    /// The modal list row under the absolute row `y`, as
+    /// `(kind, filtered item index)`, or `None` for a row that carries no
+    /// item (above the list, on the title, rule, `(n/m)` counter or hint
+    /// rows, or past its end).
+    ///
+    /// Only the row decides ownership, never the column: upstream hit-tests
+    /// the overlay rectangle — which spans the terminal's full width here —
+    /// and then maps `event.y` through `getVisibleRange()`, and neither
+    /// `SelectList::handleMouse` nor `SettingsList::handleMouse` reads the
+    /// column (`packages/tui/src/components/select-list.ts:110-140`,
+    /// `packages/tui/src/components/settings-list.ts:179-210`).
+    fn modal_list_hit(&self, y: u16) -> Option<(u8, usize)> {
+        let kind = self.modal_list_kind.load(Ordering::Relaxed);
+        if kind == MODAL_LIST_NONE {
+            return None;
+        }
+        let rows = self.modal_list_rows.load(Ordering::Relaxed);
+        if rows == 0 {
+            return None;
+        }
+        let first_row = self.modal_list_first_row.load(Ordering::Relaxed);
+        if y < first_row || y >= first_row.saturating_add(rows as u16) {
+            return None;
+        }
+        let row = (y - first_row) as usize;
+        Some((
+            kind,
+            self.modal_list_first_item.load(Ordering::Relaxed) + row,
+        ))
+    }
+
+    /// Route a wheel notch that landed on an open modal's list.
+    ///
+    /// A notch over the item rows moves the highlight **one** row and clamps
+    /// at the ends — upstream's `SelectList::handleMouse` reduces any wheel
+    /// delta to `-1` / `+1` (`delta = wheelDelta < 0 ? -1 : 1`, unlike the
+    /// transcript's `wheelScrollLines`), and `SettingsList::handleMouse`
+    /// does the same. A notch on the title / counter / hint rows, or outside
+    /// the modal's list, is still the modal's: upstream leaves it to
+    /// `shouldDeferViewportInputToOverlay`, which returns it unconsumed, so
+    /// the transcript behind the modal never scrolls either way
+    /// (`packages/tui/src/tui-alt-screen.ts:645-694`).
+    ///
+    /// Only the settings modal is claimed globally instead (see
+    /// [`App::step_settings_wheel`]): it is the only interactive surface on
+    /// screen while it is open, so its own handler never needs the cell.
+    fn step_modal_list_wheel(&mut self, up: bool, y: u16) -> StepOutcome {
+        let Some((kind, _)) = self.modal_list_hit(y) else {
+            return StepOutcome::Idle;
+        };
+        let step: i64 = if up { -1 } else { 1 };
+        match kind {
+            MODAL_LIST_DIALOG => {
+                let Some(dialog) = self.dialog.as_mut() else {
+                    return StepOutcome::Idle;
+                };
+                // `set_select_cursor` clamps to the last option, so the
+                // comparison after it is what reports "nothing moved".
+                let before = dialog.select_cursor();
+                let target = if up {
+                    before.saturating_sub(1)
+                } else {
+                    before.saturating_add(1)
+                };
+                dialog.set_select_cursor(target);
+                if dialog.select_cursor() == before {
+                    StepOutcome::Idle
+                } else {
+                    StepOutcome::Redraw
+                }
+            }
+            MODAL_LIST_SELECTOR => {
+                let Some(selector) = self.selector.as_mut() else {
+                    return StepOutcome::Idle;
+                };
+                let len = selector.filtered_len();
+                if len == 0 {
+                    return StepOutcome::Idle;
+                }
+                let target = (selector.cursor() as i64 + step).clamp(0, len as i64 - 1) as usize;
+                if target == selector.cursor() {
+                    return StepOutcome::Idle;
+                }
+                selector.set_cursor(target);
+                StepOutcome::Redraw
+            }
+            MODAL_LIST_SETTINGS => {
+                let Some(list) = self.settings.as_mut() else {
+                    return StepOutcome::Idle;
+                };
+                match list.scroll_by(step as i32) {
+                    SettingsAction::Changed => StepOutcome::Redraw,
+                    _ => StepOutcome::Idle,
+                }
+            }
+            _ => StepOutcome::Idle,
+        }
+    }
+
+    /// Move the open modal's highlight onto the row under the pointer —
+    /// upstream's press branch, which selects the pressed row without
+    /// activating it (`select-list.ts:126-136`, `settings-list.ts:197-205`).
+    fn modal_list_press(&mut self, y: u16) -> StepOutcome {
+        let Some((kind, index)) = self.modal_list_hit(y) else {
+            return StepOutcome::Idle;
+        };
+        match kind {
+            MODAL_LIST_DIALOG => {
+                let Some(dialog) = self.dialog.as_mut() else {
+                    return StepOutcome::Idle;
+                };
+                if dialog.select_cursor() == index {
+                    return StepOutcome::Idle;
+                }
+                dialog.set_select_cursor(index);
+                StepOutcome::Redraw
+            }
+            MODAL_LIST_SELECTOR => {
+                let Some(selector) = self.selector.as_mut() else {
+                    return StepOutcome::Idle;
+                };
+                if selector.cursor() == index {
+                    return StepOutcome::Idle;
+                }
+                selector.set_cursor(index);
+                StepOutcome::Redraw
+            }
+            MODAL_LIST_SETTINGS => {
+                let Some(list) = self.settings.as_mut() else {
+                    return StepOutcome::Idle;
+                };
+                match list.set_cursor(index) {
+                    SettingsAction::Changed => StepOutcome::Redraw,
+                    _ => StepOutcome::Idle,
+                }
+            }
+            _ => StepOutcome::Idle,
+        }
+    }
+
+    /// Activate the open modal's row under the pointer — upstream's click
+    /// branch (`select-list.ts:137-148`, `settings-list.ts:206-210`).
+    ///
+    /// The three lists commit differently and each reuses the path its
+    /// keyboard already takes: a selector hands the value to the driver
+    /// through [`App::take_selector_commit`], a dialog answers itself (the
+    /// App owns the reply channel), and the settings list activates the row,
+    /// which the driver drains like any other settings change.
+    fn modal_list_click(&mut self, y: u16) -> Option<StepOutcome> {
+        let (kind, index) = self.modal_list_hit(y)?;
+        match kind {
+            MODAL_LIST_DIALOG => {
+                let dialog = self.dialog.as_mut()?;
+                dialog.set_select_cursor(index);
+                Some(self.step_dialog(Key::new(KeyCode::Enter, KeyModifiers::NONE)))
+            }
+            MODAL_LIST_SELECTOR => {
+                let selector = self.selector.as_mut()?;
+                selector.set_cursor(index);
+                let value = selector.selected_value()?.to_string();
+                self.pending_selector_commit = Some(value);
+                Some(StepOutcome::Redraw)
+            }
+            MODAL_LIST_SETTINGS => {
+                let list = self.settings.as_mut()?;
+                list.set_cursor(index);
+                Some(self.step_settings(Key::new(KeyCode::Enter, KeyModifiers::NONE)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Take the picker row a pointer activation selected, if any.
+    ///
+    /// The interactive driver polls this right after feeding the App an
+    /// event: what a picker *means* (`/model` switches the model, `/session`
+    /// resumes a session) lives in the driver, which is also where the
+    /// keyboard's `Enter` is applied (`pi-coding-agent/src/interactive.rs`).
+    pub fn take_selector_commit(&mut self) -> Option<String> {
+        self.pending_selector_commit.take()
     }
 
     /// Route a gesture that landed on the composer's autocomplete dropdown.
@@ -5297,6 +5570,11 @@ impl App {
         // least one row. See the module docs for the order and
         // [`crate::extension_ui::plan_chrome`] for the budget.
         let message_height = layout.message;
+        // The modal list geometry is per-frame: an overlay that is gone this
+        // frame must stop owning the pointer (the same rule
+        // [`App::record_autocomplete_area`] follows). The paint blocks below
+        // record whichever list they actually drew.
+        self.record_modal_list(MODAL_LIST_NONE, 0, 0, 0);
         let (message_area, reserved) =
             self.viewport_for_render(message_rect(area, layout), scrollbar);
         let header_area = Rect {
@@ -5416,6 +5694,20 @@ impl App {
         if let Some(selector) = &self.selector {
             let lines = selector.render_styled_lines(area.width);
             let start_row = message_area.y + 1;
+            // Record the item window for the pointer: the title and the rule
+            // are the selector's own first two rows, so the first *item* row
+            // is `start` rows into the visible window and carries item index
+            // `start` (upstream `SelectList::handleMouse`
+            // (`components/select-list.ts:124-140`)).
+            let (first_item, last_item) = selector.visible_range();
+            let items_row = start_row + SELECTOR_HEADER_ROWS;
+            let clip = (message_area.y + message_area.height).saturating_sub(items_row) as usize;
+            self.record_modal_list(
+                MODAL_LIST_SELECTOR,
+                items_row,
+                first_item,
+                (last_item - first_item).min(clip),
+            );
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
                 if y >= message_area.y + message_area.height {
@@ -5442,6 +5734,20 @@ impl App {
         if let Some(settings) = &self.settings {
             let lines = settings.render_styled_lines(area.width);
             let start_row = area.y + 1;
+            // The pointer maps a clicked row back onto a setting: the search
+            // box and its spacer are the list's first two rows when it is
+            // searchable (upstream `settings-list.ts:186-191` skips them with
+            // `rowOffset = searchEnabled ? 2 : 0`).
+            let (first_item, last_item) = settings.visible_range();
+            let header_rows = if settings.is_searchable() { 2 } else { 0 };
+            let items_row = start_row + header_rows;
+            let clip = (area.y + message_height).saturating_sub(items_row) as usize;
+            self.record_modal_list(
+                MODAL_LIST_SETTINGS,
+                items_row,
+                first_item,
+                (last_item - first_item).min(clip),
+            );
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
                 if y >= area.y + message_height {
@@ -5463,6 +5769,24 @@ impl App {
         if let Some(dialog) = &self.dialog {
             let lines = dialog.render_lines(area.width);
             let start_row = area.y;
+            // A `ctx.ui.select` dialog paints its list first, so the item
+            // rows start at the same title + rule offset; the other flavours
+            // have no list and must not claim the pointer
+            // (`select_window()` is `None` for them).
+            if let Some((first_item, last_item)) = dialog.select_window() {
+                let items_row = start_row + SELECTOR_HEADER_ROWS;
+                let clip = (area.y + message_height).saturating_sub(items_row) as usize;
+                self.record_modal_list(
+                    MODAL_LIST_DIALOG,
+                    items_row,
+                    first_item,
+                    (last_item - first_item).min(clip),
+                );
+            } else {
+                // A `Confirm` / `Input` / `Notify` dialog has no list, and it
+                // is topmost: nothing underneath it keeps owning the pointer.
+                self.record_modal_list(MODAL_LIST_NONE, 0, 0, 0);
+            }
             for (offset, line) in lines.iter().enumerate() {
                 let y = start_row + offset as u16;
                 if y >= area.y + message_height {

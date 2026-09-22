@@ -351,7 +351,11 @@ impl SettingsList {
         }
     }
 
-    fn set_cursor(&mut self, index: usize) -> SettingsAction {
+    /// Move the selection to the filtered row `index`, clamped to the last
+    /// row. Public because the pointer press path maps a clicked row back
+    /// onto a list row (upstream `settings-list.ts:199-205` sets
+    /// `selectedIndex` from `event.y` before the click activates it).
+    pub fn set_cursor(&mut self, index: usize) -> SettingsAction {
         if self.filtered.is_empty() || index == self.selected {
             return SettingsAction::None;
         }

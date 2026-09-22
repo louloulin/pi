@@ -160,6 +160,24 @@ impl Dialog {
         self.selector.cursor()
     }
 
+    /// Visible row range of the select list, or `None` for a dialog with no
+    /// list (`Confirm` / `Input` / `Notify`).
+    ///
+    /// The App paints [`Dialog::render_lines`] itself, so the pointer needs
+    /// the window the last frame drew to map a screen row back onto an
+    /// option — upstream's `SelectList::handleMouse` reads the same range
+    /// from its own state (`components/select-list.ts:124-130`).
+    pub fn select_window(&self) -> Option<(usize, usize)> {
+        (self.kind() == DialogKind::Select).then(|| self.selector.visible_range())
+    }
+
+    /// Move the select cursor to `index` (clamped to the last option). The
+    /// pointer paths use it: a press highlights the pressed row and the
+    /// following click confirms it, exactly like upstream's list.
+    pub fn set_select_cursor(&mut self, index: usize) {
+        self.selector.set_cursor(index);
+    }
+
     /// Whether the dialog has already been answered.
     pub fn is_resolved(&self) -> bool {
         self.resolved.is_some()
