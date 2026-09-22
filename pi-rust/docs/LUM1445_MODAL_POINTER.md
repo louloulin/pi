@@ -10,7 +10,7 @@ LUM-1436 §7 的起手清单有 4 条，前 3 条（扩展事件、`#` provider 
 
 | 顺位 | 项 | 本轮处置 |
 |---|---|---|
-| 1 | 扩展生命周期事件 20/36 → 36/36 | 已单子化 LUM-1432（`pi-protocol`+`pi-agent-core`+`pi-extensions`），不与之并行改文件 |
+| 1 | 扩展生命周期事件 20/36 → 36/36 | LUM-1432 已完成并**由本轮并入 `feature/pi.rs`**（§10）
 | 2 | `#` 技能/工具引用面 | 需 provider 注入点，跨 `pi-coding-agent` 与 LUM-1432 无重叠但与 §3 同文件面，本轮不动 |
 | 3 | CLI flag 面 | 同上 |
 | 4 | **modal 打开时滚轮归属** | **本轮做**：LUM-1436 只写了"滚轮不落到视口"，没做"给 overlay" |
@@ -87,7 +87,7 @@ LUM-1436 §7 的起手清单有 4 条，前 3 条（扩展事件、`#` provider 
 | 测试规模 | **49.9%**（2,651 / 5,309） | 49.7%（2,637） | `grep -rhoE '#\[(tokio::)?test\]' pi-rust/crates --include=*.rs \| wc -l` ↔ `find packages -name '*.test.ts' \| xargs grep -hoE '\bit\(|\btest\(' \| wc -l` |
 | TUI 模块面 | 35 / 42 = 83.3% | 同 | `pi-tui/src`（36 − `lib.rs`）↔ `packages/tui/src` + `components` |
 | `app.*` 接线 | 43 / 44 = 97.7% | 同 | `python pi-rust/scripts/app_action_coverage.py --check-consumed` → `43 entries; 43 wired; in sync` |
-| 扩展生命周期事件 | **20/36 生产构造点 = 55.6%**（声明 21/36） | 同 | `python pi-rust/scripts/extension_event_coverage.py`（15 个缺失逐条列出，LUM-1432 在办） |
+| 扩展生命周期事件 | **20/36 生产构造点 = 55.6%**（声明 21/36） | 同上（本轮自做面不含此轴） | `python pi-rust/scripts/extension_event_coverage.py`；LUM-1432 完成后由本轮并入，见 §10 |
 | **TUI 指针面** | **6 / 6 = 100%** | 3/3（仅 composer） | composer 3（点击定位 / 下拉框点选 / 下拉框滚轮）+ **模态列表 3（picker 滚轮+点选 / dialog select 滚轮+点选 / settings 点选；settings 滚轮在 LUM-1367 已有）** |
 
 **加权完成度**（权重表见 `RUST_TS_PARITY_METRICS.md` §4.1，公式公开）：
@@ -124,7 +124,7 @@ Martty 领先的地方不在 composer，而在宠物（`pet.rs`）、主题、�
 
 | 顺位 | 项 | 范围 | 说明 |
 |---|---|---|---|
-| 1 | 扩展生命周期事件 +15 | `pi-protocol`/`pi-agent-core`/`pi-extensions` | LUM-1432 在办（20/36 → 36/36） |
+| 1 | ~~扩展生命周期事件 +15~~ | — | **已关闭**：LUM-1432 交付并已合入，实测 36/36（§10） |
 | 2 | `#` 技能/工具引用 provider | `pi-coding-agent` autocomplete wrapper | 上游由 provider 注入（`editor.ts:251` 只是触发符） |
 | 3 | CLI flag 面 | `pi-coding-agent/src/cli` | 与上游启动参数对齐 |
 | 4 | modal 内拖拽/悬停 | `pi-tui` | 上游 `SelectList` 明确"hover 不改选中"（窗口以选中行居中），Rust 同构；若要 hover 预览需先改窗口策略 |
@@ -133,15 +133,36 @@ Martty 领先的地方不在 composer，而在宠物（`pet.rs`）、主题、�
 两条已知遗留（记录备查，本轮未动）：`message.rs:63` 的 `tool_fold_hint` 仍硬编码 `Ctrl+O`；
 `app.editor.external` 仍缺（Stage 59）。
 
-## 9. 「最多 3 个任务」的处置 = 1 派发 + 1 自做 + 1 复核
+## 9. 「最多 3 个任务」的处置 = 1 派发 + 1 自做 + 1 收编
 
 - **自做**：模态指针面（全在 `pi-tui` + 驱动 3 处放行）。
-- **派发**：LUM-1432（扩展事件 20/36 → 36/36）此前已指派 `编程助手-devbox1`，本轮核实其状态与文件面
-  （`pi-protocol`/`pi-agent-core`/`pi-extensions`）与本轮**零重叠**，不重复派发。
-- **不派第三条**：§8 的 2、3 条与 LUM-1432 共享 `pi-coding-agent`，并行会重演"同一缺陷两条线各修一次"
-  （LUM-1431 §3、LUM-1436 §8 各清过一次）。
+- **派发**：LUM-1434（CLI flag 面对齐 18/40 → 补齐上游开关并真实生效，backlog/medium，验收标准已写全，
+  范围仅 `pi-coding-agent/src/cli/`）已指派 `编程助手-go`（`f2c22534`）并启动（run `01a0cac6-2294` 已 queued）；
+  它与本轮文件面（`pi-tui` + `interactive.rs`）零重叠，且 `cli/` 与 `interactive.rs` 历史上无交叉提交。
+- **收编**：LUM-1432（扩展事件）本轮完成但停在 `work/LUM-1432`，本轮把它并入 `feature/pi.rs`（§11）。
+- **并发数**：本轮自做 1 条、在办/已收编 1 条、新派 1 条 = 3 条，正好在上限内。
 
-## 10. 范围之外
+## 10. 同轮并入 LUM-1432（扩展事件 36/36）
+
+本轮结束时 LUM-1432 的 run 刚好 `completed`（`01a0caaf-e464`）：扩展生命周期事件
+**20/36 生产构造点 → 36/36**，但只停在 `work/LUM-1432`（`a3b667904`，基于 `40417a2d2`），
+**没进 `feature/pi.rs`**。这正是 LUM-1256 / LUM-1422 两次「已写完但漂在 work/* 分支」的同一模式，
+而且它是加权公式里**最大的单一摆动项**（+3.1pt），因此本轮顺手把它合了：
+
+- 合并基：本轮自己的合并 tip `e877035ed`；冲突只有 `RUST_TS_PARITY_METRICS.md` 一处（两边各加了一节
+  `§0.12`）—— 解决方式：**两节都留**，LUM-1432 作 §0.12、本轮作 §0.13，并把 §0.13 里的"本轮自增"
+  与"分支合计"两个数字分开写（避免用本轮自测数字冒充合并后的值）；
+- 合并后复测（本机）：`extension_event_coverage.py` → **36/36 声明 + 36/36 生产构造点**，0 缺失；
+  `--check-doc` EXIT=0；`extension_lifecycle_hooks` 4/4 绿（`before_agent_start` 换 system prompt、
+  `context` 改消息、`project_trust` 决定项目扩展加载、只对订阅者装钩子）；
+  `cargo test -p pi-tui` **1020/0**、`-p pi-coding-agent --lib` **580/8**（同一批已知 Windows 失败）、
+  `-p pi-protocol -p pi-agent-core -p pi-extensions` 除 `node_builtins` 3 条外全绿 ——
+  这 3 条在合并前 tip `e877035ed` 上**用独立 worktree 实测同样失败**（`ENOENT: open '/dev/urandom'`，
+  Unix-only 路径），不是合并引入；`cargo fmt --all -- --check` 干净。
+- 合并后分支 tip 数字：规模 **90.1%**（137,961 / 153,106）、测试 **50.2%**（2,663 / 5,309）、
+  扩展事件 **36/36**、加权 **86.7%**（§0.13 已重算并标明口径）。
+
+## 11. 范围之外
 
 未碰 `pi-protocol` / `pi-ai` / `pi-agent-core` / `pi-session` / `pi-server` / `pi-client` / `pi-extensions`；
 未碰上游 TS（`packages/**`，只读取证）；Martty 只读（`workdir/Martty`）。

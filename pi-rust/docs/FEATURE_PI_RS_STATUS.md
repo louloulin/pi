@@ -15584,7 +15584,7 @@ LUM-1431 §7 的第一顺位：**滚轮没有坐标**，所以 `App` 只能把�
 `docs/LUM1431_AUTOCOMPLETE_MOUSE.md` §7 的第 3、4 条与派发线共享 `pi-coding-agent`，再派会重演
 「同一缺陷两条并发线各修一次」（LUM-1431 §3 刚清过一次）。
 
-## LUM-1445 round — 模态列表认领指针（picker / `ctx.ui.select` 滚轮+点选，`/settings` 点选）；`pi-tui` 1020/0，`pi-coding-agent --lib` 571/8（8 条经 stash 对账为基线同集）
+## LUM-1445 round — 模态列表认领指针（picker / `ctx.ui.select` 滚轮+点选，`/settings` 点选）+ 并入 LUM-1432；`pi-tui` 1020/0，`pi-coding-agent --lib` 580/8（8 条经 stash 对账为基线同集）
 
 ### 一、本轮交付（`pi-tui` + 驱动侧 3 处事件放行）
 
@@ -15630,22 +15630,24 @@ word/kill 动作，但**没有**撤销栈、**没有**历史反查 `Ctrl+R`、**
 | 门禁 | 结果 |
 |---|---|
 | `cargo test -p pi-tui` | **1020 passed / 0 failed**（基线 1007，+13） |
-| `cargo test -p pi-coding-agent --lib` | **571 / 8**（`stash` 实测基线 570/8，**同一批 8 个** Windows 环境类） |
+| `cargo test -p pi-coding-agent --lib` | **571 / 8**（`stash` 实测基线 570/8，**同一批 8 个** Windows 环境类）；并入 LUM-1432 后同一命令 **580 / 8**（同样那 8 条） |
+| `cargo test -p pi-protocol -p pi-agent-core -p pi-extensions` | 合并后全绿，除 `pi-extensions --test node_builtins` 3 条（`ENOENT: open '/dev/urandom'`，Unix-only）；这 3 条在合并**前** tip 上用独立 worktree 实测**同样失败** |
 | `cargo fmt --all -- --check` | 干净 |
 | `cargo clippy -p pi-tui --all-targets -- -D warnings` | 干净 |
 | clippy `-p pi-coding-agent -D warnings` | 卡在**既存** `pi-extensions/src/host.rs:3144 fn signal_name` 未使用（本轮未改该文件；本轮改动文件在非 `-D` 下零告警） |
 
-Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.12）：规模 **89.1%**（136,469 / 153,106）、
+Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.13）：本条 tip 上规模 **89.1%**（136,469 / 153,106）、
 测试 **49.9%**（2,651 / 5,309）、TUI 模块 **35/42 = 83.3%**、`app.*` **43/44 = 97.7%**、
-扩展事件 **20/36 = 55.6%**（LUM-1432 在办）、**TUI 指针面 6/6 = 100%**（composer 3 + 模态列表 3）、
-加权 **83.6%**。
+**TUI 指针面 6/6 = 100%**（composer 3 + 模态列表 3）、单看本轮加权 **83.6%**；
+同轮并入 LUM-1432 后分支 tip 为：规模 **90.1%**、测试 **50.2%**、扩展事件 **36/36**、加权 **86.7%**（见 §四与 §10）。
 
 两张真帧截图 `docs/screenshots/lum1445-modal-pointer-{before,after}-76x18.png`(+`.txt`)；
 本机 Windows 无 `pty`，走 frame-buffer 通道，**证明几何/高亮与"谁动了"，不证明点击时序**。
 
 ### 四、槽位 / 派发
 
-**0 新派发 + 1 件自做 + 1 件在办**（上限 3）：自做＝模态指针面（`pi-tui` + 驱动 3 处放行）；
-在办＝**LUM-1432**（扩展事件 20/36 → 36/36），run `01a0caaf-e464` 状态 `running`、尚无评论，
-其文件面（`pi-protocol`/`pi-agent-core`/`pi-extensions`）与本轮**零重叠**，故不重复派发、不抢文件。
-不派第三条：`docs/LUM1445_MODAL_POINTER.md` §8 的 2、3 条与 LUM-1432 共享 `pi-coding-agent`。
+**1 件自做 + 1 件新派 + 1 件收编**（上限 3）：自做＝模态指针面（`pi-tui` + 驱动 3 处放行）；
+新派＝**LUM-1434**（CLI flag 面对齐 18/40 → 补上游开关并真实生效，backlog/medium）指派 `编程助手-go`
+（`f2c22534`）并启动（run `01a0cac6-2294` queued，文件面 `pi-coding-agent/src/cli/` 与本轮零重叠）；
+收编＝**LUM-1432**（扩展事件）已完成但停在 `work/LUM-1432`，本轮并入 `feature/pi.rs`（§三）。
+不派第四条：`docs/LUM1445_MODAL_POINTER.md` §8 的 2、3 条与在办线共享 `pi-coding-agent`。
