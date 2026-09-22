@@ -49,6 +49,9 @@ pub struct AgentOptions {
     /// [`RetryPolicy::default`] — the upstream `settings.retry` defaults
     /// (enabled, 3 retries, 2 s base, 60 s cap).
     pub retry: RetryPolicy,
+    /// Optional async lifecycle hooks for the extension events that fire
+    /// inside a run (`context`, `before_agent_start`, …).
+    pub lifecycle: Option<Arc<dyn crate::hooks::LifecycleHooks>>,
 }
 
 impl std::fmt::Debug for AgentOptions {
@@ -69,6 +72,7 @@ impl std::fmt::Debug for AgentOptions {
             .field("tool_execution", &self.tool_execution)
             .field("telemetry", &self.telemetry.as_ref().map(|_| "…"))
             .field("retry", &self.retry)
+            .field("lifecycle", &self.lifecycle.as_ref().map(|_| "…"))
             .finish()
     }
 }
@@ -86,6 +90,7 @@ impl AgentOptions {
             tool_execution: ToolExecutionMode::Parallel,
             telemetry: None,
             retry: RetryPolicy::default(),
+            lifecycle: None,
         }
     }
 
@@ -131,11 +136,23 @@ impl AgentOptions {
         self
     }
 
+    /// Builder-style setter for [`lifecycle`](Self::lifecycle).
+    ///
+    /// The JS extension runtime is installed this way: `pi-coding-agent`
+    /// builds its `LifecycleHooks` implementation after the agent exists (the
+    /// runtime comes from the extension load pass), so it can also assign
+    /// [`Agent::hooks_mut`]`().lifecycle` directly.
+    pub fn with_lifecycle(mut self, hook: Arc<dyn crate::hooks::LifecycleHooks>) -> Self {
+        self.lifecycle = Some(hook);
+        self
+    }
+
     /// Build the [`AgentHookAdapter`] the [`AgentLoop`] consumes.
     pub(crate) fn hook_adapter(&self) -> AgentHookAdapter {
         let mut adapter = AgentHookAdapter::new();
         adapter.should_stop_after_turn = self.should_stop_after_turn.clone();
         adapter.prepare_next_turn = self.prepare_next_turn.clone();
+        adapter.lifecycle = self.lifecycle.clone();
         adapter
     }
 }
@@ -154,6 +171,14 @@ pub struct Agent {
     /// loop because the observer is synchronous (no awaits between
     /// events).
     subscribers: Arc<Mutex<Vec<SubscriberSender>>>,
+    /// System prompt the agent was constructed with.
+    ///
+    /// Upstream `before_agent_start` replaces the system prompt for one run
+    /// and resets to the base prompt on the next
+    /// (`packages/coding-agent/src/core/agent-session.ts:1285`); keeping the
+    /// base here is what makes that reset possible without the host having to
+    /// re-supply it.
+    base_system_prompt: String,
 }
 
 impl Agent {
@@ -177,6 +202,7 @@ impl Agent {
             inner: AgentLoop::new(config, state, hooks),
             queue: MessageQueue::new(QueueMode::default()),
             subscribers: Arc::new(Mutex::new(Vec::new())),
+            base_system_prompt: options.system_prompt.clone(),
         }
     }
 
@@ -311,6 +337,22 @@ impl Agent {
             emit_to(&subscribers, event);
         });
         self.inner.set_event_observer(Some(observer));
+        // Upstream `before_agent_start`: after the prompt was expanded, before
+        // the agent loop. A handler may replace the system prompt for this run;
+        // the next run resets to the base prompt unless a handler overrides it
+        // again (`agent-session.ts:1285`).
+        let prompt_text: String = drained
+            .iter()
+            .map(content_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lifecycle = self.inner.hooks().lifecycle.clone();
+        let base_prompt = self.base_system_prompt.clone();
+        let override_prompt = match &lifecycle {
+            Some(hook) => hook.before_agent_start(&prompt_text, &base_prompt).await,
+            None => None,
+        };
+        self.inner.state_mut().system_prompt = override_prompt.unwrap_or(base_prompt);
         // Bracket the run for extensions (upstream `agent_start`).
         self.emit(AgentEvent::AgentStart);
         let result = self.inner.run(drained, |_turn: &TurnOutcome| {}).await;
@@ -322,6 +364,11 @@ impl Agent {
         self.emit(AgentEvent::AgentEnd {
             messages: self.inner.state().messages.clone(),
         });
+        // Upstream `agent_settled`: the run is over and nothing (retry,
+        // auto-compaction, queued continuation) will restart the loop on its
+        // own. Emitted on the error path too, so a plugin's `finally`-style
+        // cleanup always runs.
+        self.inner.hooks().invoke_agent_settled().await;
         result?;
 
         Ok(())
@@ -343,4 +390,19 @@ impl Agent {
 fn emit_to(subscribers: &Arc<Mutex<Vec<SubscriberSender>>>, event: AgentEvent) {
     let mut guard = subscribers.lock();
     guard.retain(|tx| tx.send(event.clone()).is_ok());
+}
+
+/// Flatten a message's text blocks. Used for `before_agent_start.prompt`,
+/// which upstream carries as a plain string.
+fn content_text(message: &Message) -> String {
+    let mut out = String::new();
+    for block in &message.content {
+        if let pi_protocol::Content::Text(text) = block {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&text.text);
+        }
+    }
+    out
 }

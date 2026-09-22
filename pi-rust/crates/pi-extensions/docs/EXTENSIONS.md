@@ -330,9 +330,33 @@ runtime today:
 | `tool_call`          | `ExtensionEvent::ToolCall { … }`          | Port-only extra; carries the `ToolCall`.                |
 | `tool_result`        | `ExtensionEvent::ToolResult { … }`        | Port-only extra; carries the `ToolResult`.              |
 
-`model_select` is declared (`ExtensionEvent::ModelSelect`) and dispatched
-when it is emitted, but this port has no `/model` switch wired to it yet,
-so no `model_select` event is produced today.
+LUM-1432 closed the rest of the upstream surface — the port now declares and emits
+**all 36 upstream event names** (`python pi-rust/scripts/extension_event_coverage.py pi-rust`
+prints `production emit sites: 36/36`). The events added by that round:
+
+| Event | Wire variant | Semantics |
+|-------|--------------|-----------|
+| `project_trust` | `ExtensionEvent::ProjectTrust` | Asked between the two extension-load passes; the first `yes`/`no` wins, `undecided` falls through. `remember: true` persists to the trust store. |
+| `session_before_switch` | `ExtensionEvent::SessionBeforeSwitch` | Before `/new` (`reason: new`) and `/resume` (`reason: resume`); `{cancel:true}` vetoes. |
+| `session_before_fork` | `ExtensionEvent::SessionBeforeFork` | Before `/fork`; `{cancel:true}` vetoes. |
+| `session_before_compact` | `ExtensionEvent::SessionBeforeCompact` | Before `/compact` and auto-compaction; `{cancel:true}` vetoes. |
+| `session_compact_failed` | `ExtensionEvent::SessionCompactFailed` | Compaction error path. |
+| `session_before_tree` | `ExtensionEvent::SessionBeforeTree` | Before `/tree` navigation; `{cancel:true}` vetoes. |
+| `session_tree` | `ExtensionEvent::SessionTree` | After the leaf moved. |
+| `context` | `ExtensionEvent::Context` | Before each provider call; `{messages}` replaces the list the request carries. |
+| `before_provider_request` | `ExtensionEvent::BeforeProviderRequest` | Request boundary. ⚠️ Handler return values are not applied yet (no wire-payload seam in `pi-ai`). |
+| `before_provider_headers` | `ExtensionEvent::BeforeProviderHeaders` | Header boundary. ⚠️ Same gap. |
+| `after_provider_response` | `ExtensionEvent::AfterProviderResponse` | `status` is derived (200 = stream established, 0 = call failed); `headers` empty. |
+| `before_agent_start` | `ExtensionEvent::BeforeAgentStart` | Before the run; `{systemPrompt}` replaces the system prompt for that run. |
+| `agent_settled` | `ExtensionEvent::AgentSettled` | After the run, including the error path. |
+| `ui_prompt_start` / `ui_prompt_end` | `ExtensionEvent::UiPrompt{Start,End}` | Brackets a blocking `ctx.ui.confirm/input/select` in the TUI. |
+| `model_select` | `ExtensionEvent::ModelSelect` | Now emitted from `/model` (`apply_selector_choice`), with `source: set`. |
+
+The name table (upstream names, the Rust-only tags, and the `session_end` →
+`session_shutdown` alias) lives in `crates/pi-extensions/src/events.rs` and is
+mirrored in `runtime/pi-ext-shim.mjs`; a unit test compares the two lists so they
+cannot drift. Details, emit sites and the documented fidelity gaps are in
+`pi-rust/docs/LUM1432_EXTENSION_EVENTS.md`.
 
 Event payloads use `serde_json` tagged representation; the shim
 inserts three underscore-prefixed context fields before serialising

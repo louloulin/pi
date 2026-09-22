@@ -20,6 +20,66 @@ use pi_protocol::{
     AssistantMessage, Context as AgentContext, Message, Model, ToolCall, ToolResult,
 };
 
+/// Async lifecycle hooks for the extension events that fire *inside* a run
+/// and can rewrite what happens next.
+///
+/// The loop's [`EventObserver`](crate::agent_loop::EventObserver) is a plain
+/// synchronous `Fn`: it fans an event out to every subscriber but cannot
+/// await a plugin's answer. The upstream extension events below are
+/// request/response — `context` replaces the message list,
+/// `before_agent_start` replaces the system prompt — so they need an async
+/// seam instead. This trait *is* that seam.
+///
+/// `pi-agent-core` deliberately does not construct
+/// [`ExtensionEvent`](pi_protocol::ExtensionEvent) values here: the JS
+/// runtime lives in `pi-coding-agent`, which implements this trait and owns
+/// the construction + dispatch (`crate::extensions::lifecycle`). Every
+/// default implementation is a no-op, so a host that implements only one
+/// method does not affect the others.
+#[async_trait]
+pub trait LifecycleHooks: Send + Sync {
+    /// Upstream `before_agent_start`: called once per submitted prompt, before
+    /// the run's `agent_start`. Returning `Some(prompt)` replaces the system
+    /// prompt for this run (upstream chains multiple handlers).
+    async fn before_agent_start(&self, _prompt: &str, _system_prompt: &str) -> Option<String> {
+        None
+    }
+
+    /// Upstream `context`: called before each provider call. Returning a
+    /// different list replaces the messages that request carries.
+    async fn context(&self, messages: Vec<Message>) -> Vec<Message> {
+        messages
+    }
+
+    /// Upstream `agent_settled`: the run really finished — no retry,
+    /// compaction or queued continuation follows.
+    async fn agent_settled(&self) {}
+
+    /// Upstream `before_provider_request`: the request is about to be handed
+    /// to the provider adapter. The returned payload is advisory until the
+    /// Rust port grows a wire-payload seam (see
+    /// `docs/LUM1432_EXTENSION_EVENTS.md`).
+    async fn before_provider_request(&self, payload: serde_json::Value) -> serde_json::Value {
+        payload
+    }
+
+    /// Upstream `before_provider_headers`: request headers were assembled.
+    /// The returned map is advisory for the same reason as
+    /// [`Self::before_provider_request`].
+    async fn before_provider_headers(
+        &self,
+        headers: serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        headers
+    }
+
+    /// Upstream `after_provider_response`: the provider call returned.
+    /// `ok` is `true` when a stream was established; the Rust adapters do not
+    /// surface the HTTP status yet, so the status the event carries is
+    /// derived from this flag and documented as a gap.
+    async fn after_provider_response(&self, _ok: bool) {}
+}
+
 /// Hook called before a tool executes.
 ///
 /// Returning `BeforeToolCallDecision::Block` prevents the tool from running;
@@ -288,6 +348,10 @@ pub struct AgentHookAdapter {
     /// Optional `after_tool_call` hook. When unset the loop emits the
     /// executor's result unchanged.
     pub after_tool_call: Option<Arc<dyn AfterToolCall>>,
+    /// Optional async lifecycle hooks for the extension events that fire
+    /// inside a run (`context`, `before_agent_start`, …). When unset every
+    /// point is a no-op.
+    pub lifecycle: Option<Arc<dyn LifecycleHooks>>,
 }
 
 impl std::fmt::Debug for AgentHookAdapter {
@@ -309,6 +373,7 @@ impl std::fmt::Debug for AgentHookAdapter {
                 "after_tool_call",
                 &self.after_tool_call.as_ref().map(|_| "…"),
             )
+            .field("lifecycle", &self.lifecycle.as_ref().map(|_| "…"))
             .finish()
     }
 }
@@ -340,6 +405,12 @@ impl AgentHookAdapter {
     /// Register an `after_tool_call` hook.
     pub fn with_after_tool_call(mut self, hook: Arc<dyn AfterToolCall>) -> Self {
         self.after_tool_call = Some(hook);
+        self
+    }
+
+    /// Register the async lifecycle hooks.
+    pub fn with_lifecycle(mut self, hook: Arc<dyn LifecycleHooks>) -> Self {
+        self.lifecycle = Some(hook);
         self
     }
 
@@ -378,6 +449,66 @@ impl AgentHookAdapter {
     pub async fn invoke_after_tool_call(&self, result: &mut ToolResult) {
         if let Some(hook) = &self.after_tool_call {
             hook.after_tool_call(result).await;
+        }
+    }
+
+    /// Invoke the registered [`LifecycleHooks::before_agent_start`], or
+    /// return `None` when no lifecycle hook is registered.
+    pub async fn invoke_before_agent_start(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+    ) -> Option<String> {
+        match &self.lifecycle {
+            Some(hook) => hook.before_agent_start(prompt, system_prompt).await,
+            None => None,
+        }
+    }
+
+    /// Invoke the registered [`LifecycleHooks::context`], or return the
+    /// messages unchanged when no lifecycle hook is registered.
+    pub async fn invoke_context(&self, messages: Vec<Message>) -> Vec<Message> {
+        match &self.lifecycle {
+            Some(hook) => hook.context(messages).await,
+            None => messages,
+        }
+    }
+
+    /// Invoke the registered [`LifecycleHooks::agent_settled`].
+    pub async fn invoke_agent_settled(&self) {
+        if let Some(hook) = &self.lifecycle {
+            hook.agent_settled().await;
+        }
+    }
+
+    /// Invoke the registered [`LifecycleHooks::before_provider_request`], or
+    /// return the payload unchanged when no lifecycle hook is registered.
+    pub async fn invoke_before_provider_request(
+        &self,
+        payload: serde_json::Value,
+    ) -> serde_json::Value {
+        match &self.lifecycle {
+            Some(hook) => hook.before_provider_request(payload).await,
+            None => payload,
+        }
+    }
+
+    /// Invoke the registered [`LifecycleHooks::before_provider_headers`], or
+    /// return the map unchanged when no lifecycle hook is registered.
+    pub async fn invoke_before_provider_headers(
+        &self,
+        headers: serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        match &self.lifecycle {
+            Some(hook) => hook.before_provider_headers(headers).await,
+            None => headers,
+        }
+    }
+
+    /// Invoke the registered [`LifecycleHooks::after_provider_response`].
+    pub async fn invoke_after_provider_response(&self, ok: bool) {
+        if let Some(hook) = &self.lifecycle {
+            hook.after_provider_response(ok).await;
         }
     }
 }

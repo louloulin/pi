@@ -194,6 +194,96 @@ pub enum ExtensionEvent {
         #[serde(rename = "retained")]
         retained: usize,
     },
+    /// Upstream `session_before_switch`: a session swap is about to happen.
+    /// A handler may return `{ cancel: true }` to stop it.
+    SessionBeforeSwitch {
+        /// Why the session is being replaced.
+        reason: SessionBeforeSwitchReason,
+        /// Destination session file, when the swap names one.
+        #[serde(
+            rename = "targetSessionFile",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        target_session_file: Option<String>,
+    },
+    /// Upstream `session_before_fork`: a fork is about to happen. A handler
+    /// may return `{ cancel: true }` to stop it.
+    SessionBeforeFork {
+        /// Entry the fork is anchored on.
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        /// Whether the anchor entry itself is included.
+        position: ForkPosition,
+    },
+    /// Upstream `session_before_compact`: context compaction is about to run.
+    /// A handler may return `{ cancel: true }` to stop it.
+    SessionBeforeCompact {
+        /// What triggered the compaction.
+        reason: CompactReason,
+        /// True when the aborted turn is retried after this compaction.
+        #[serde(rename = "willRetry")]
+        will_retry: bool,
+        /// Extra instructions the user attached to `/compact`.
+        #[serde(
+            rename = "customInstructions",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        custom_instructions: Option<String>,
+    },
+    /// Upstream `session_compact_failed`: compaction failed or was aborted.
+    SessionCompactFailed {
+        /// What triggered the compaction attempt.
+        reason: CompactReason,
+        /// Error text when it failed for a non-abort reason.
+        #[serde(
+            rename = "errorMessage",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        error_message: Option<String>,
+        /// True when the attempt was cancelled or aborted.
+        aborted: bool,
+        /// True when the aborted turn would have been retried.
+        #[serde(rename = "willRetry")]
+        will_retry: bool,
+        /// True when the failing compaction content came from an extension.
+        #[serde(rename = "fromExtension")]
+        from_extension: bool,
+    },
+    /// Upstream `session_before_tree`: tree navigation is about to happen.
+    /// A handler may return `{ cancel: true }` to stop it.
+    SessionBeforeTree {
+        /// Entry the navigation targets.
+        #[serde(rename = "targetId")]
+        target_id: String,
+        /// Entry that was the leaf before the navigation.
+        #[serde(rename = "oldLeafId", default, skip_serializing_if = "Option::is_none")]
+        old_leaf_id: Option<String>,
+        /// Whether the user asked for a branch summary.
+        #[serde(rename = "userWantsSummary")]
+        user_wants_summary: bool,
+        /// Custom summarization instructions, when any.
+        #[serde(
+            rename = "customInstructions",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        custom_instructions: Option<String>,
+    },
+    /// Upstream `session_tree`: navigation in the session tree finished.
+    SessionTree {
+        /// Leaf the session now points at.
+        #[serde(rename = "newLeafId")]
+        new_leaf_id: Option<String>,
+        /// Leaf the session pointed at before.
+        #[serde(rename = "oldLeafId")]
+        old_leaf_id: Option<String>,
+        /// True when an extension supplied the branch summary.
+        #[serde(rename = "fromExtension")]
+        from_extension: bool,
+    },
 
     // ------------------------------------------------------------------
     // Upstream parity — agent / turn / message.
@@ -245,6 +335,49 @@ pub enum ExtensionEvent {
         /// The finished message.
         message: Message,
     },
+    /// Upstream `context`: the message list is about to be handed to the
+    /// model. A handler may return `{ messages }` to replace it.
+    Context {
+        /// Messages the request is about to carry.
+        messages: Vec<Message>,
+    },
+    /// Upstream `before_provider_request`: the request payload is about to be
+    /// sent. A handler's return value replaces the payload upstream; the Rust
+    /// port has no wire-payload seam yet, so the value is advisory (see
+    /// `docs/LUM1432_EXTENSION_EVENTS.md`).
+    BeforeProviderRequest {
+        /// Request descriptor the port is about to hand to the provider
+        /// adapter.
+        payload: serde_json::Value,
+    },
+    /// Upstream `before_provider_headers`: request headers were assembled.
+    /// Handlers mutate `headers` in place upstream; the Rust adapters take
+    /// only a credential + base URL, so the map is advisory today.
+    BeforeProviderHeaders {
+        /// Headers the port knows about at this seam.
+        headers: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Upstream `after_provider_response`: a provider response was received.
+    AfterProviderResponse {
+        /// HTTP status. `0` means the Rust adapters did not surface one
+        /// (documented gap); `200` means the stream was established.
+        status: u16,
+        /// Response headers, empty when the adapters did not surface them.
+        headers: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Upstream `before_agent_start`: a user prompt was submitted, the agent
+    /// run has not started yet. A handler may return `{ systemPrompt }` to
+    /// replace the system prompt for the run.
+    BeforeAgentStart {
+        /// Raw user prompt text.
+        prompt: String,
+        /// Assembled system prompt.
+        #[serde(rename = "systemPrompt")]
+        system_prompt: String,
+    },
+    /// Upstream `agent_settled`: the run finished and no retry, compaction or
+    /// queued continuation will follow.
+    AgentSettled,
 
     // ------------------------------------------------------------------
     // Upstream parity — tool execution.
@@ -337,6 +470,33 @@ pub enum ExtensionEvent {
         /// Where the input came from.
         source: InputSource,
     },
+
+    // ------------------------------------------------------------------
+    // Upstream parity — trust and blocking UI prompts.
+    // ------------------------------------------------------------------
+    /// Upstream `project_trust`: the project needs a trust decision and a
+    /// loaded extension may answer it.
+    ProjectTrust {
+        /// Working directory whose trust is undecided.
+        cwd: String,
+    },
+    /// Upstream `ui_prompt_start`: Pi started waiting on a blocking
+    /// extension UI prompt.
+    UiPromptStart {
+        /// Which dialog kind is blocking.
+        kind: UiPromptKind,
+        /// Dialog title, when the caller supplied one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// Upstream `ui_prompt_end`: Pi is no longer waiting on the prompt.
+    UiPromptEnd {
+        /// Which dialog kind was blocking.
+        kind: UiPromptKind,
+        /// Dialog title, when the caller supplied one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
 }
 
 impl ExtensionEvent {
@@ -351,6 +511,12 @@ impl ExtensionEvent {
             Self::SessionShutdown { .. } => "session_shutdown",
             Self::SessionInfoChanged { .. } => "session_info_changed",
             Self::SessionCompact { .. } => "session_compact",
+            Self::SessionBeforeSwitch { .. } => "session_before_switch",
+            Self::SessionBeforeFork { .. } => "session_before_fork",
+            Self::SessionBeforeCompact { .. } => "session_before_compact",
+            Self::SessionCompactFailed { .. } => "session_compact_failed",
+            Self::SessionBeforeTree { .. } => "session_before_tree",
+            Self::SessionTree { .. } => "session_tree",
             Self::AgentStart => "agent_start",
             Self::AgentEnd { .. } => "agent_end",
             Self::TurnStart { .. } => "turn_start",
@@ -358,6 +524,12 @@ impl ExtensionEvent {
             Self::MessageStart { .. } => "message_start",
             Self::MessageUpdate { .. } => "message_update",
             Self::MessageEnd { .. } => "message_end",
+            Self::Context { .. } => "context",
+            Self::BeforeProviderRequest { .. } => "before_provider_request",
+            Self::BeforeProviderHeaders { .. } => "before_provider_headers",
+            Self::AfterProviderResponse { .. } => "after_provider_response",
+            Self::BeforeAgentStart { .. } => "before_agent_start",
+            Self::AgentSettled => "agent_settled",
             Self::ToolExecutionStart { .. } => "tool_execution_start",
             Self::ToolExecutionUpdate { .. } => "tool_execution_update",
             Self::ToolExecutionEnd { .. } => "tool_execution_end",
@@ -365,8 +537,48 @@ impl ExtensionEvent {
             Self::ThinkingLevelSelect { .. } => "thinking_level_select",
             Self::UserBash { .. } => "user_bash",
             Self::Input { .. } => "input",
+            Self::ProjectTrust { .. } => "project_trust",
+            Self::UiPromptStart { .. } => "ui_prompt_start",
+            Self::UiPromptEnd { .. } => "ui_prompt_end",
         }
     }
+}
+
+/// Why a session is being replaced (`session_before_switch.reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBeforeSwitchReason {
+    /// A brand-new session is starting.
+    New,
+    /// A stored session is being resumed.
+    Resume,
+}
+
+/// Where a fork is anchored (`session_before_fork.position`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkPosition {
+    /// Fork before the anchor entry (the entry is not carried over).
+    Before,
+    /// Fork at the anchor entry (it is the new tip).
+    At,
+}
+
+/// Which blocking extension UI prompt is in flight
+/// (`ui_prompt_start.kind` / `ui_prompt_end.kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiPromptKind {
+    /// Single-select dialog.
+    Select,
+    /// Yes/no confirmation.
+    Confirm,
+    /// Free-form text input.
+    Input,
+    /// External editor.
+    Editor,
+    /// Extension-provided custom component.
+    Custom,
 }
 
 /// Why the extension runtime was torn down (`session_shutdown.reason`).

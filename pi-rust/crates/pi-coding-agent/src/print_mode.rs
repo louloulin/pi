@@ -59,6 +59,7 @@ use tokio::io::{AsyncWriteExt, Stdout};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
 
+use crate::extensions::lifecycle::ExtensionLifecycleHooks;
 use crate::extensions::wiring::ExtensionRuntime;
 use crate::file_processor::FileError;
 use crate::tool_executor::default_executor;
@@ -256,6 +257,15 @@ pub async fn run_print_mode(options: PrintModeOptions) -> Result<PrintModeResult
     }
 
     let agent = Arc::new(AsyncMutex::new(build_agent(&options)?));
+    // Extension events that fire inside a run (`before_agent_start`,
+    // `context`, the provider boundary) ride the async lifecycle seam, since
+    // the synchronous fan-out cannot await a plugin's answer. Print mode does
+    // not install the agent-event pump, so this is the only place those events
+    // reach extensions here.
+    {
+        let hooks = Arc::new(ExtensionLifecycleHooks::new(options.extensions.clone()));
+        agent.lock().await.hooks_mut().lifecycle = Some(hooks);
+    }
     // Replay the stored conversation so `--continue` / `--session <id>`
     // resumes with the same context the TUI would load.
     if let Some(handle) = session_writer.as_ref().filter(|h| !h.history.is_empty()) {
