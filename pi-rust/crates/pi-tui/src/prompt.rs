@@ -118,6 +118,12 @@ impl Prompt {
         self.editor.push_history(text);
     }
 
+    /// Push a submitted draft, chips included, so a later `Up` / `Ctrl+R`
+    /// recall restores the attachments as well as the text.
+    pub fn push_history_entry(&mut self, entry: crate::editor::HistoryEntry) {
+        self.editor.push_history_entry(entry);
+    }
+
     /// Reset the prompt — clear buffer and history. Used by `/clear`.
     pub fn reset(&mut self) {
         self.editor.clear();

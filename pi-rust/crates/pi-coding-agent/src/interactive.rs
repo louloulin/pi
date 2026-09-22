@@ -271,6 +271,14 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // budget. `8` matches Martty's `min(h/2, 12)` cap on tall
         // terminals (`src/ui.rs:25-54`).
         composer_max_rows: 8,
+        // Cross-session prompt history (codex `~/.codex/history.jsonl`): what
+        // makes `Ctrl+R` recall survive a restart. `$PI_HISTORY_PATH` wins,
+        // then `$PI_HOME`, then `~/.pi/agent` — the same root the rest of the
+        // port uses for user state.
+        history_path: Some(
+            pi_tui::history_store::default_path()
+                .unwrap_or_else(|| crate::paths::agent_dir_or_default().join("history.jsonl")),
+        ),
     }
 }
 
@@ -975,6 +983,11 @@ async fn handle_input_event(
         && !app.settings_open()
         && !app.custom_open()
         && !app.search_open()
+        // A reverse history search (`Ctrl+R`) owns the composer: codex keeps
+        // its facade chords out for the whole session, otherwise the first
+        // letter of a query could be read as a shortcut. The search's own
+        // keys are routed by `App::step_key_at` before any of this.
+        && !app.history_search_active()
     {
         let keybindings = pi_tui::keybindings::get_keybindings();
         if pi_tui::keybindings::matches_with_fallback(

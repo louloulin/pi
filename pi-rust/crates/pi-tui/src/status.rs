@@ -54,6 +54,12 @@ pub struct StatusData {
     pub context_window: u32,
     /// Free-form trailing hint (e.g. `?` for help).
     pub hint: Option<String>,
+    /// When true, [`StatusData::hint`] is not the usual transient
+    /// acknowledgement (`? for help`) but **live state the user is typing
+    /// into** — the composer's reverse history search. The narrow layout then
+    /// sacrifices it *last*: at 44 columns the query has to stay on screen,
+    /// while the token counters can wait for a wider terminal.
+    pub hint_pinned: bool,
     /// Busy feedback — `Some` exactly while a turn is in flight, so a frozen
     /// screen is distinguishable from a slow model at a glance. `None` hides
     /// the segment entirely (no placeholder, no stray space).
@@ -74,6 +80,7 @@ impl StatusData {
             context_used: 0,
             context_window: 0,
             hint: None,
+            hint_pinned: false,
             busy: None,
         }
     }
@@ -376,6 +383,28 @@ const NARROW_SACRIFICE_ORDER: [Zone; 6] = [
     Zone::Model,
 ];
 
+/// The sacrifice order for this snapshot.
+///
+/// A normal hint is the first thing to go — it is transient acknowledgement
+/// and the startup header already lists the same chords. A
+/// [`StatusData::hint_pinned`] hint is the opposite: it is the query the user
+/// is typing into, so it outlives every counter (only the model name, which
+/// says what an answer will come from, is kept past it).
+fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 6] {
+    if data.hint_pinned {
+        [
+            Zone::Cache,
+            Zone::Session,
+            Zone::Usage,
+            Zone::Gauge,
+            Zone::Model,
+            Zone::Hint,
+        ]
+    } else {
+        NARROW_SACRIFICE_ORDER
+    }
+}
+
 /// The separator drawn in front of a part when it is not the first part left.
 ///
 /// The values add up to the fitted layout's own separators, so a bar that has
@@ -530,7 +559,7 @@ fn line_width(line: &[StyledSpan]) -> usize {
 fn narrow_layout(data: &StatusData, width: usize) -> StyledLine {
     let mut zones = narrow_zones(data);
     let mut dropped = false;
-    for zone in NARROW_SACRIFICE_ORDER {
+    for zone in narrow_sacrifice_order(data) {
         if zones.len() <= 1 {
             break;
         }

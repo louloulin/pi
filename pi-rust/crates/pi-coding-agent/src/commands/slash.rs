@@ -200,6 +200,7 @@ pub fn help_text() -> String {
     out.push_str("  Home / End  jump to the start / end of the chat log\n");
     out.push_str("  Ctrl+A / E  jump to the start / end of the current line\n");
     out.push_str("  Ctrl+K      delete to the end of the line (Ctrl+U: to its start)\n");
+    out.push_str("  Ctrl+R      reverse-search prompt history (Enter accepts, Esc cancels)\n");
     out.push_str(
         "  Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)\n",
     );

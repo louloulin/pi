@@ -275,7 +275,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::component::{Component, CustomHandle, CustomOptions, OverlayAnchor, WidgetPlacement};
 use crate::dialog::{Dialog, DialogAction, DialogKind};
-use crate::editor::EditorAction;
+use crate::editor::{EditorAction, HistoryEntry, HistorySearchStatus};
 use crate::extension_ui::{plan_chrome, ChromeLayout, ExtensionFrame, ExtensionUi};
 use crate::input::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
@@ -534,6 +534,14 @@ pub struct AppConfig {
     /// matches Martty's `min(h/2, 12)` cap for tall terminals
     /// (`src/ui.rs:25-54`). The default is `8`.
     pub composer_max_rows: usize,
+    /// Cross-session composer history file (see [`crate::history_store`]).
+    ///
+    /// `None` — the default — disables persistence, so a headless App or a
+    /// test never reads or writes the user's real history. The interactive
+    /// driver sets this to `~/.pi/agent/history.jsonl` (or `$PI_HOME`), which
+    /// is what makes `Ctrl+R` recall survive a restart and what codex's
+    /// `~/.codex/history.jsonl` does for its composer.
+    pub history_path: Option<std::path::PathBuf>,
 }
 
 /// What the built-in startup header says about loaded extensions.
@@ -573,6 +581,7 @@ impl Default for AppConfig {
             locale: Locale::default(),
             extension_header: ExtensionHeader::Hidden,
             composer_max_rows: 8,
+            history_path: None,
         }
     }
 }
@@ -1257,6 +1266,11 @@ impl App {
         status_data.hint = Some("? for help".to_string());
         let mut prompt = Prompt::new("> ");
         prompt.set_placeholder(config.prompt_placeholder.clone());
+        // Cross-session history is opt-in: the driver hands over a path, and
+        // an App built without one never touches the filesystem.
+        prompt
+            .editor_mut()
+            .set_history_path(config.history_path.clone());
         let event_rx = agent.subscribe();
         let markdown = config.markdown;
         let tool_preview_lines = config.tool_preview_lines;
@@ -1739,12 +1753,49 @@ impl App {
         self.status_flash = Some(text.into());
     }
 
+    /// Whether the composer's reverse history search (`Ctrl+R`) owns the
+    /// keyboard right now.
+    ///
+    /// The driver checks this before claiming its own `app.*` chords: codex's
+    /// composer keeps the keyboard for the whole search session, and a global
+    /// chord firing mid-search would edit the preview `Esc` is there to undo.
+    pub fn history_search_active(&self) -> bool {
+        self.prompt.editor().history_search_active()
+    }
+
+    /// The reverse-search footer text (`reverse-i-search: <query>` plus the
+    /// accept / cancel affordance), or `None` while no search is open.
+    ///
+    /// Rendered through [`StatusData::hint`] — the same single-line trailing
+    /// slot [`App::flash_status`] uses — so the search chrome does not need a
+    /// new row and cannot change the frame's layout mid-search. codex renders
+    /// the identical text on its footer line.
+    pub fn history_search_hint(&self) -> Option<String> {
+        let editor = self.prompt.editor();
+        let query = editor.history_search_query()?;
+        let mut hint = format!("reverse-i-search: {query}");
+        match editor.history_search_status() {
+            Some(HistorySearchStatus::Match) => {
+                hint.push_str("  Enter accept · Esc cancel");
+            }
+            Some(HistorySearchStatus::NoMatch) if !query.is_empty() => {
+                hint.push_str("  no match");
+            }
+            _ => {}
+        }
+        Some(hint)
+    }
+
     /// The status data as it should be painted: [`App::status_data`] with the
     /// transient hint layered on top when a flash is pending. Borrowed in the
     /// common case so the render path does not clone on every frame.
     fn status_for_render(&self) -> Cow<'_, StatusData> {
         let flash = self.status_flash.as_deref();
-        if !self.thinking_supported && flash.is_none() {
+        // A reverse history search outranks a transient flash: the query is
+        // live state the user is typing into, the flash is an acknowledgement
+        // of a chord that already happened.
+        let search = self.history_search_hint();
+        if !self.thinking_supported && flash.is_none() && search.is_none() {
             return Cow::Borrowed(&self.status_data);
         }
         let mut data = self.status_data.clone();
@@ -1757,7 +1808,13 @@ impl App {
                 thinking_level_suffix(self.thinking_level)
             );
         }
-        if let Some(flash) = flash {
+        if let Some(search) = search {
+            data.hint = Some(search);
+            // The query is live input, not an acknowledgement: it must survive
+            // the narrow footer's sacrifice order (see
+            // [`crate::status::StatusData::hint_pinned`]).
+            data.hint_pinned = true;
+        } else if let Some(flash) = flash {
             data.hint = Some(flash.to_string());
         }
         Cow::Owned(data)
@@ -2055,7 +2112,10 @@ impl App {
             }
             self.messages
                 .push_pending(PendingMessageKind::Steer, text.clone());
-            self.prompt.push_history(&text);
+            self.prompt.push_history_entry(HistoryEntry::with_images(
+                text.clone(),
+                submission.images.clone(),
+            ));
             return;
         }
         if self.event_rx.is_none() {
@@ -2065,7 +2125,10 @@ impl App {
             }
         }
         self.messages.push(MessageItem::user(&text));
-        self.prompt.push_history(&text);
+        self.prompt.push_history_entry(HistoryEntry::with_images(
+            text.clone(),
+            submission.images.clone(),
+        ));
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
         self.turn_busy.store(true, Ordering::SeqCst);
@@ -2123,7 +2186,10 @@ impl App {
         if busy {
             self.messages
                 .push_pending(PendingMessageKind::FollowUp, submission.text.clone());
-            self.prompt.push_history(&submission.text);
+            self.prompt.push_history_entry(HistoryEntry::with_images(
+                submission.text.clone(),
+                submission.images.clone(),
+            ));
             FollowUpOutcome::Queued
         } else {
             FollowUpOutcome::Submitted(submission)
@@ -2646,6 +2712,14 @@ impl App {
         // (upstream's `showStatus` clears on a timer; this port has no timer
         // in the App, and a key press is the next thing the reader does).
         self.status_flash = None;
+        // A reverse history search (`Ctrl+R`) owns the composer for the whole
+        // session. codex's `handle_history_search_key` keeps its facade's
+        // chords out for the same reason: a stray `Ctrl+O` / `Alt+V` / `PageUp`
+        // must not fire on a keystroke the user meant as a search query, and
+        // nothing may touch the preview `Esc` is there to undo.
+        if self.history_search_active() {
+            return self.step_composer(key);
+        }
         // A visible custom overlay is the outermost layer; see [`App::step`].
         if self.extension.handle_overlay_input(key) {
             return StepOutcome::Redraw;
@@ -2840,6 +2914,17 @@ impl App {
         // draw it on. `0` (no frame yet) leaves the draft on one row per
         // hard line. The page height is the same story for `PageUp` /
         // `PageDown`, which move the caret by a windowful.
+        self.step_composer(key)
+    }
+
+    /// Hand a key to the composer.
+    ///
+    /// Split out of [`App::step_key_at`] so a reverse history search can route
+    /// here directly: while the search is open it owns the keyboard, and the
+    /// `app.*` chords above (expand tools, paste an image, fold the header,
+    /// page the transcript) must not fire on a keystroke the user means as a
+    /// search query.
+    fn step_composer(&mut self, key: Key) -> StepOutcome {
         let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
         let composer_page = self.composer_window_rows();
         self.prompt.editor_mut().set_visual_width(composer_width);

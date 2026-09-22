@@ -220,6 +220,23 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
             NO_KEYS,
             "Select next prompt history entry",
         ),
+        // Reverse history search. Not an upstream `packages/tui` binding —
+        // upstream leaves `historyPrevious` / `historyNext` unbound and has no
+        // search at all; this is codex's composer chord (`Ctrl+R`, with
+        // `Ctrl+S` as the forward twin), added so the port's composer can be
+        // driven the way codex's is. `app.session.rename` also claims `Ctrl+R`,
+        // but only inside the `/resume` picker, which owns the keyboard while
+        // it is open (see the coding-agent's `chatinput_chord_conflicts`).
+        entry(
+            "tui.editor.historySearch",
+            ["ctrl+r"],
+            "Reverse search prompt history",
+        ),
+        entry(
+            "tui.editor.historySearchNext",
+            ["ctrl+s"],
+            "Search prompt history forward",
+        ),
         entry(
             "tui.editor.cursorLeft",
             ["left", "ctrl+b"],

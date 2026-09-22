@@ -19,6 +19,7 @@ pub mod editor;
 pub mod extension_ui;
 pub mod fuzzy;
 pub mod highlight;
+pub mod history_store;
 pub mod hyperlink;
 pub mod image;
 pub mod input;
@@ -55,7 +56,8 @@ pub use component::{
 };
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{
-    is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, JumpDirection,
+    is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, HistoryEntry,
+    HistorySearchDirection, HistorySearchStatus, JumpDirection,
 };
 pub use extension_ui::ExtensionUi;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
