@@ -4,7 +4,7 @@
   "args": ["--model", "faux/faux-model"],
   "notes": [
     "LUM-1327 — pointer placement in the composer, driven through a real PTY into the real binary (100x20).",
-    "Geometry: the composer is docked above the status bar, so a one-row draft sits on row 18 (0-based) and a two-row draft on rows 17-18; the status bar is row 19. The label '> ' owns columns 0-1, so body column N sits at cell x = 2 + N.",
+    "Geometry: the composer is docked above the status bar and now carries its border (LUM-1328 follow-up): a one-row draft sits on row 17 (0-based) with the rules on rows 16 and 18, a two-row draft on rows 16-17 with the rules on 15 and 18; the status bar is row 19. The label '> ' owns columns 0-1, so body column N sits at cell x = 2 + N.",
     "Every panel asserts on the character grid: the caret is the '▍' glyph the renderer inserts at the cursor offset, so 'where is the caret' is a text assertion rather than a screenshot opinion.",
     "The matching baseline run of the pre-fix binary is lum1327-composer-click-baseline.json — the same gestures with 'the click changed nothing' as the expectation.",
     "Ctrl+C clears the draft (upstream handleCtrlC: the text is dropped, the process stays alive) and Ctrl+J inserts the line break, so both are used to shape the draft between panels."
@@ -13,7 +13,7 @@
   "panels": [
     {
       "label": "1. type a draft, then click in the middle of 'hello world'",
-      "send": "hello world<Click:4,18>",
+      "send": "hello world<Click:4,17>",
       "wait": 1.5,
       "expect": [
         "> he▍llo world",
@@ -26,13 +26,13 @@
     },
     {
       "label": "2. click on the label gutter: the caret goes to column 0",
-      "send": "<Click:1,18>",
+      "send": "<Click:1,17>",
       "wait": 1.0,
       "expect": ["> ▍hello world"]
     },
     {
       "label": "3. Ctrl+E to the line end, Ctrl+J for a second line, then click on 'cond' of that row",
-      "send": "<C-e><C-j>second line<Click:4,18>",
+      "send": "<C-e><C-j>second line<Click:4,17>",
       "wait": 1.5,
       "expect": [
         "> hello world",
@@ -53,7 +53,7 @@
     },
     {
       "label": "5. a click on the last cell of a wrapped row keeps the caret on that row",
-      "send": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww<Click:99,17>",
+      "send": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww<Click:99,16>",
       "wait": 1.8,
       "expect": [
         {

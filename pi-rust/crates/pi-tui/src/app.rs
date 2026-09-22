@@ -525,16 +525,34 @@ pub struct AppConfig {
     /// is [`ExtensionHeader::Hidden`], which keeps the headless and
     /// no-extension header byte-identical to the pre-Stage-71 surface.
     pub extension_header: ExtensionHeader,
-    /// Upper cap on how many rows the composer can grow into when the
-    /// buffer wraps. The composer never shrinks below one row.
+    /// Upper cap on how many **draft** rows the composer can grow into when
+    /// the buffer wraps. The composer never shrinks below one row, and the
+    /// composer border ([`AppConfig::composer_border`]) is chrome on top of
+    /// this cap rather than a cut into it — upstream sizes its editor's
+    /// visible lines and draws the two rules around them
+    /// (`packages/tui/src/components/editor.ts:532-601`).
     ///
     /// The prompt computes the natural row count from the buffer and the
     /// available width (see [`crate::Prompt::line_count`]); this field is
-    /// the upper bound the App hands [`crate::Prompt::render_lines`].
-    /// `1` reproduces the pre-multi-line single-row composer; `8`
-    /// matches Martty's `min(h/2, 12)` cap for tall terminals
-    /// (`src/ui.rs:25-54`). The default is `8`.
+    /// the upper bound on the draft rows the App hands
+    /// [`crate::Prompt::render_frame`]. `1` reproduces the pre-multi-line
+    /// single-row composer; `8` matches Martty's `min(h/2, 12)` cap for tall
+    /// terminals (`src/ui.rs:25-54`). The default is `8`.
     pub composer_max_rows: usize,
+    /// Paint upstream's editor border — one `─` rule above the draft and one
+    /// below it, in the composer's border colour
+    /// (`renderTopBorder` / `renderBottomBorder`,
+    /// `packages/tui/src/components/editor.ts:499-506`).
+    ///
+    /// The two rules are chrome, so they are **not** part of
+    /// [`AppConfig::composer_max_rows`]' budget for the draft; a region too
+    /// short for them falls back to the borderless composer. `false` is the
+    /// default for embedders and headless callers, whose geometry assertions
+    /// pin the pre-border row arithmetic; the interactive driver turns it on,
+    /// which is where the user sees it (`pi-coding-agent`'s
+    /// `interactive_app_config`). Flipping this default is a layout migration
+    /// across the crate — see `docs/LUM1328_COMPOSER_BORDER.md` §6.
+    pub composer_border: bool,
     /// Cross-session prompt-history file (`~/.pi/agent/history.jsonl`).
     ///
     /// `None` (the default) keeps the App's composer history in memory only,
@@ -581,6 +599,7 @@ impl Default for AppConfig {
             locale: Locale::default(),
             extension_header: ExtensionHeader::Hidden,
             composer_max_rows: 8,
+            composer_border: false,
             history_file: None,
         }
     }
@@ -1319,6 +1338,7 @@ impl App {
         status_data.hint = Some("? for help".to_string());
         let mut prompt = Prompt::new("> ");
         prompt.set_placeholder(config.prompt_placeholder.clone());
+        prompt.set_border(config.composer_border);
         if let Some(path) = config.history_file.clone() {
             prompt.set_history_store(crate::history_store::HistoryStore::new(path));
         }
@@ -4182,9 +4202,15 @@ impl App {
             .prompt
             .line_count(width, self.config.composer_max_rows)
             .max(1) as u16;
-        let height_now = rows_now
-            .min(self.config.composer_max_rows.max(1) as u16)
-            .max(1);
+        // The region the draft wants, capped by the cap the config allows:
+        // the draft rows plus the chrome the composer draws around them.
+        let region_cap = self.config.composer_max_rows.max(1) as u16
+            + if self.prompt.border_enabled() {
+                crate::prompt::PROMPT_BORDER_ROWS as u16
+            } else {
+                0
+            };
+        let height_now = rows_now.min(region_cap).max(1);
         let top = bottom.saturating_sub(height_now - 1);
         if y < top || y > bottom {
             return None;
@@ -4198,7 +4224,20 @@ impl App {
         if body_width == 0 {
             return None;
         }
-        let rect_row = (y - top) as usize;
+        // The rows of the frame that are *not* the draft: the top rule, the
+        // optional reverse-search row and the bottom rule — the same
+        // arithmetic [`crate::Prompt::render_frame`] paints with.
+        let bordered = self.prompt.border_visible(height_now as usize);
+        let search_rows = u16::from(self.prompt.editor().history_search_active());
+        let body_top = top
+            .saturating_add(u16::from(bordered))
+            .saturating_add(search_rows);
+        let body_bottom = bottom.saturating_sub(u16::from(bordered));
+        // A click on a rule, or on the search row, has no draft under it.
+        if y < body_top || y > body_bottom {
+            return Some(ComposerHit::Absorbed);
+        }
+        let rect_row = (y - body_top) as usize;
         // An open reverse search owns the composer — the same way it owns the
         // keyboard ([`App::step_key_at`] routes every key to it first) — so no
         // cell of the composer places a caret while it is up.
@@ -4944,10 +4983,11 @@ impl App {
     pub fn composer_window_rows(&self) -> usize {
         let rows = self.composer_window.load(Ordering::Relaxed) as usize;
         if rows == 0 {
-            self.config.composer_max_rows.max(1)
-        } else {
-            rows
+            // Before the first frame: the configured draft cap, which is what
+            // the first frame will grant on a terminal tall enough for it.
+            return self.config.composer_max_rows.max(1);
         }
+        rows
     }
 
     /// True when the composer's draft needs more rows than the composer
@@ -5443,23 +5483,38 @@ impl App {
         self.composer_area.1.store(rect.x, Ordering::Relaxed);
         self.composer_area.2.store(rect.width, Ordering::Relaxed);
         self.composer_area.3.store(rect.height, Ordering::Relaxed);
-        let max_rows = (rect.height as usize).min(self.config.composer_max_rows.max(1));
         // Record the body width the wrap uses, so the next key press measures
         // the draft the same way this frame did (see
         // [`App::composer_body_width`]).
         self.composer_body_width
             .store(self.prompt.body_width(rect.width) as u16, Ordering::Relaxed);
-        self.composer_window
-            .store(max_rows as u16, Ordering::Relaxed);
         let scroll = self.composer_scroll.load(Ordering::Relaxed);
-        let (lines, scroll) = self.prompt.render_lines(rect.width, max_rows, scroll);
-        self.composer_scroll.store(scroll, Ordering::Relaxed);
-        // Upstream paints the editor chrome in `bashMode` while the buffer is
-        // a `!` submission, otherwise in the thinking level's border colour
+        let frame = self.prompt.render_frame(
+            rect.width,
+            self.config.composer_max_rows.max(1),
+            rect.height as usize,
+            scroll,
+        );
+        self.composer_scroll.store(frame.scroll, Ordering::Relaxed);
+        // The window a draft can overflow is the *draft* rows this frame
+        // painted: the two rules and the reverse-search row are chrome, and
+        // counting them as draft capacity would hand `PageUp` to the
+        // transcript while part of the draft is still hidden.
+        let chrome = frame
+            .rows
+            .iter()
+            .filter(|row| row.kind != crate::prompt::PromptRowKind::Body)
+            .count();
+        self.composer_window.store(
+            frame.rows.len().saturating_sub(chrome).max(1) as u16,
+            Ordering::Relaxed,
+        );
+        // Upstream paints the editor *border* in `bashMode` while the buffer
+        // is a `!` submission, otherwise in the thinking level's colour
         // (`updateEditorBorderColor`,
-        // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
-        // the label carries the colour instead: bash mode wins, the thinking
-        // level colours everything else.
+        // `interactive-mode.ts:4166-4174`). The composer's two rules
+        // ([`crate::prompt::PromptRowKind::Border`]) are that chrome; the
+        // label keeps the colour too, so the mode marker and the frame agree.
         let label_slot = if crate::editor::is_bash_mode(&self.prompt.text()) {
             ThemeColor::BashMode
         } else {
@@ -5467,12 +5522,13 @@ impl App {
         };
         let label_style = Some(SpanStyle::fg(label_slot).to_style(&self.theme));
         let label_width = self.prompt.label().chars().count() as u16;
-        for (row, line) in lines.iter().enumerate() {
+        for (row, line) in frame.rows.iter().enumerate() {
             let y = rect.y + row as u16;
             if y >= rect.y + rect.height {
                 break;
             }
-            for (col, ch) in line.chars().enumerate() {
+            let is_border = line.kind == crate::prompt::PromptRowKind::Border;
+            for (col, ch) in line.text.chars().enumerate() {
                 let x = rect.x + col as u16;
                 if x >= rect.x + rect.width {
                     break;
@@ -5480,9 +5536,9 @@ impl App {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     if let Some(style) = label_style {
-                        // Only the first row owns the label; subsequent rows
-                        // are blank-padded with spaces.
-                        if row == 0 && (col as u16) < label_width {
+                        // A rule is chrome end to end; a draft row owns the
+                        // colour only in its label column (row 0).
+                        if is_border || (row == 0 && (col as u16) < label_width) {
                             cell.set_style(style);
                         }
                     }

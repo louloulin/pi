@@ -1,0 +1,180 @@
+# lum1328b-composer-border.png — chars, 76x26 cells
+
+===== LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).  |  [1] 1. idle: rule, placeholder row, rule — the reference design (rule / input row / rule)  (cursor 76,25, frame f32983a12022, px 1e9dd21cb419, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────
+> type a prompt — /help for commands
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e14a8bbcd37      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '──────────'  — the composer rules are painted (this is the whole feature)
+  assert PASS   expect       '> type a prompt'  — the draft row sits between them
+
+===== LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).  |  [2] 2. a short draft keeps the two rules and shows the caret inside them  (cursor 36,23, frame b182a418cc8e, px 373a4148708f, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────
+> hello▍
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e14a8bbcd37      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> hello▍'  — the draft row still carries the label and the caret
+  assert PASS   probe        '──────────'  — the rules are still there with a non-empty draft
+
+===== LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).  |  [3] 3. a draft taller than the window: the top rule reports the hidden rows (upstream ` ↑ N more `)  (cursor 7,23, frame 206b85a31a94, px 20ca35e61bc6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+───────────────────────────────── ↑ 2 more ─────────────────────────────────
+  row03
+  row04
+  row05
+  row06
+  row07
+  row08
+  row09
+  row10▍
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e14a8bbcd37      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '↑ '  — the rule reports the rows hidden above the window
+  assert PASS   probe        'more'  — …with upstream's wording, on the rule instead of in the label gutter
+
+===== LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).  |  [4] 4. Up inside the draft walks the window to the top, so the bottom rule reports the rows below it  (cursor 43,24, frame f87f891f608c, px 76bb10aaaf73, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────
+> hello▍row01
+  row02
+  row03
+  row04
+  row05
+  row06
+  row07
+  row08
+───────────────────────────────── ↓ 2 more ─────────────────────────────────
+Faux test model  session-18d78e14a8bbcd37      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '↓ '  — the bottom rule reports the rows hidden below the window
+
+===== LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).  |  [5] 5. a `!` command turns the whole frame into the bash-mode border colour (text stays the same — the PNG carries the colour)  (cursor 76,24, frame 61d3315b1da6, px 8e349326cbf4, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────
+> !ls▍row01
+  row02
+  row03
+  row04
+  row05
+  row06
+  row07
+  row08
+───────────────────────────────── ↓ 2 more ─────────────────────────────────
+Faux test model  session-18d78e14a8bbcd37      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '!ls'  — bash mode is a draft state; the border colour changes with it
+  assert PASS   probe        '──────────'  — the frame stays painted in bash mode
+
+===== LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).  |  [6] 6. Ctrl+R: the reverse-search row rides inside the box, under the top rule  (cursor 76,24, frame ecfbc03b280f, px 8629e03183a7, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+───────────────────────────────── ↑ 2 more ─────────────────────────────────
+reverse-i-search: hello  no match · Esc cancel
+  row03
+  row04
+  row05
+  row06
+  row07
+  row08
+  row09
+  row10▍
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e14a8bbcd37      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        'reverse-i-search: hello'  — the search row is inside the composer box
+  assert PASS   probe        '──────────'  — the box keeps its shape around the search row

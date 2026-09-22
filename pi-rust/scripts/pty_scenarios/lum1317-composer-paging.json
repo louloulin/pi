@@ -18,14 +18,15 @@
       "wait_for": "insert a new line"
     },
     {
-      "label": "3. a 12-row draft: the composer window shows 8 rows, so 4 are hidden above the caret and `↑4` says so",
+      "label": "3. a 12-row draft: the composer window shows 8 rows, so 4 are hidden above the caret and the top rule says so (` ↑ 4 more `)",
       "send": "row 01<C-j>row 02<C-j>row 03<C-j>row 04<C-j>row 05<C-j>row 06<C-j>row 07<C-j>row 08<C-j>row 09<C-j>row 10<C-j>row 11<C-j>row 12",
       "wait": 1.0,
       "probe": [
         {
-          "text": "↑4row 05",
-          "why": "the window starts on draft row 4 and marks the 4 rows it is hiding above"
+          "text": "↑ 4 more",
+          "why": "the window starts on draft row 4 and the top rule reports the 4 rows it is hiding above (upstream `createScrollBorder`)"
         },
+        { "text": "row 05", "why": "the window's first draft row is visible under the rule" },
         { "text": "row 12▍", "why": "the caret is on the draft's last row, inside the window" }
       ],
       "reject": [
@@ -42,13 +43,14 @@
       "wait": 0.8,
       "probe": [
         {
-          "text": "↑3row 04▍",
-          "why": "page 8 rows up lands the caret on draft row 3, which the marker row also carries"
-        }
+          "text": "↑ 3 more",
+          "why": "page 8 rows up lands the caret on draft row 3 and the top rule reports 3 hidden rows"
+        },
+        { "text": "row 04▍", "why": "the caret's own row is the window's first draft row" }
       ],
       "reject": [
         {
-          "text": "↑4",
+          "text": "↑ 4 more",
           "why": "the window followed the caret instead of staying at the tail"
         },
         {
@@ -63,9 +65,10 @@
       "wait": 0.6,
       "probe": [
         {
-          "text": "↑2row 03▍",
+          "text": "↑ 2 more",
           "why": "one keystroke, one row of scroll — the caret left the window's top row"
-        }
+        },
+        { "text": "row 03▍", "why": "the caret is on draft row 3" }
       ]
     },
     {
@@ -73,8 +76,10 @@
       "send": "<Up>",
       "wait": 0.6,
       "probe": [
-        { "text": "↑1row 02▍", "why": "the caret is on draft row 1" },
-        { "text": "↓3row 09", "why": "draft rows 9..11 are hidden below the window" }
+        { "text": "↑ 1 more", "why": "the caret is on draft row 1" },
+        { "text": "row 02▍", "why": "the caret's row is the window's first draft row" },
+        { "text": "↓ 3 more", "why": "draft rows 9..11 are hidden below the window" },
+        { "text": "row 09", "why": "…the first of them is the window's last draft row" }
       ]
     },
     {
@@ -83,7 +88,8 @@
       "wait": 0.6,
       "probe": [
         { "text": "> row 01▍", "why": "the draft's own first row always keeps the label" },
-        { "text": "↓4row 08", "why": "4 rows are hidden below the window's last row" }
+        { "text": "↓ 4 more", "why": "4 rows are hidden below the window's last row" },
+        { "text": "row 08", "why": "the window's last draft row" }
       ],
       "reject": [{ "text": "↑", "why": "nothing is hidden above the window any more" }]
     },
@@ -92,10 +98,15 @@
       "send": "<PgDn>",
       "wait": 0.6,
       "probe": [
-        { "text": "↑1row 02", "why": "the window starts one row down" },
+        { "text": "↑ 1 more", "why": "the window starts one row down" },
+        { "text": "row 02", "why": "the window's first draft row" },
         {
-          "text": "↓3row 09▍",
-          "why": "the caret is on the window's last row, which is also where the ↓ marker lives"
+          "text": "↓ 3 more",
+          "why": "the bottom rule reports the rows below the window"
+        },
+        {
+          "text": "row 09▍",
+          "why": "the caret is on the window's last draft row"
         }
       ],
       "reject": [

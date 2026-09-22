@@ -1,0 +1,100 @@
+{
+  "cols": 76,
+  "rows": 26,
+  "caption": "LUM-1328 follow-up — composer border: the input area now carries upstream pi's editor chrome, one `─` rule above the draft and one below it, painted in the editor border colour (bash mode / thinking level). Before this round the port had no border at all (`paint_prompt`: 'The Rust prompt has no border, so the label carries the colour instead') and reported a clipped draft in the label gutter; now the rules report it the way upstream's `createScrollBorder` does (` ↑ 3 more `). No side borders — upstream's editor says so in as many words (`components/editor.ts:597`). Every frame is a real PTY at 76x26 driving the debug binary built from this commit (`--model faux/faux-model`).",
+  "args": ["--model", "faux/faux-model"],
+  "final_send": "<C-d>",
+  "panels": [
+    {
+      "label": "1. idle: rule, placeholder row, rule — the reference design (rule / input row / rule)",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "? for help",
+      "expect": [
+        {
+          "text": "──────────",
+          "why": "the composer rules are painted (this is the whole feature)"
+        },
+        {
+          "text": "> type a prompt",
+          "why": "the draft row sits between them"
+        }
+      ]
+    },
+    {
+      "label": "2. a short draft keeps the two rules and shows the caret inside them",
+      "send": "hello",
+      "wait": 0.8,
+      "expect": [
+        {
+          "text": "> hello▍",
+          "why": "the draft row still carries the label and the caret"
+        }
+      ],
+      "probe": [
+        {
+          "text": "──────────",
+          "why": "the rules are still there with a non-empty draft"
+        }
+      ]
+    },
+    {
+      "label": "3. a draft taller than the window: the top rule reports the hidden rows (upstream ` ↑ N more `)",
+      "send": "\u001b[200~row01\nrow02\nrow03\nrow04\nrow05\nrow06\nrow07\nrow08\nrow09\nrow10\u001b[201~",
+      "wait": 1.2,
+      "probe": [
+        {
+          "text": "↑ ",
+          "why": "the rule reports the rows hidden above the window"
+        },
+        {
+          "text": "more",
+          "why": "…with upstream's wording, on the rule instead of in the label gutter"
+        }
+      ]
+    },
+    {
+      "label": "4. Up inside the draft walks the window to the top, so the bottom rule reports the rows below it",
+      "send": "<Up><Up><Up><Up><Up><Up><Up><Up><Up>",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "↓ ",
+          "why": "the bottom rule reports the rows hidden below the window"
+        }
+      ]
+    },
+    {
+      "label": "5. a `!` command turns the whole frame into the bash-mode border colour (text stays the same — the PNG carries the colour)",
+      "send": "<C-u>!ls",
+      "wait": 0.8,
+      "expect": [
+        {
+          "text": "!ls",
+          "why": "bash mode is a draft state; the border colour changes with it"
+        }
+      ],
+      "probe": [
+        {
+          "text": "──────────",
+          "why": "the frame stays painted in bash mode"
+        }
+      ]
+    },
+    {
+      "label": "6. Ctrl+R: the reverse-search row rides inside the box, under the top rule",
+      "send": "<C-u><C-r>hello",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "reverse-i-search: hello",
+          "why": "the search row is inside the composer box"
+        },
+        {
+          "text": "──────────",
+          "why": "the box keeps its shape around the search row"
+        }
+      ]
+    }
+  ]
+}

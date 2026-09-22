@@ -1,0 +1,117 @@
+# lum1267-narrow-composer.png — chars, 120x25 cells
+
+===== LUM-1267 narrow viewport (120x25, was 120x23 before the LUM-1328 composer border cost the transcript two rows): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [1] 1. idle at 120x23: status line is on screen and the composer row is reachable  (cursor 120,24, frame 6fb0e2528107, px 2ea4beb721e8, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> type a prompt — /help for commands
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78ccdbda45738                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Faux test model'
+  assert PASS   expect       '? for help'
+  assert PASS   probe        '> type a prompt'  — LUM-1262 P0-1: before LUM-1261 the 21-row header ate the editor row at this height and the prompt never appeared
+
+===== LUM-1267 narrow viewport (120x25, was 120x23 before the LUM-1328 composer border cost the transcript two rows): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [2] 2. a draft typed at 120x23 is on screen, not typed blind  (cursor 36,22, frame 2e8e641a7f58, px 742d226ed05c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> typed blind▍
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78ccdbda45738                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> typed blind'  — LUM-1262 P0-1: the pre-fix frame has the draft nowhere on the grid (grep -c = 0)
+
+===== LUM-1267 narrow viewport (120x25, was 120x23 before the LUM-1328 composer border cost the transcript two rows): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [3] 3. Alt+H always has an escape hatch: the header folds and the status line says so  (cursor 120,24, frame f63b29c31bcc, px 742ca555c900, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> typed blind▍
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78ccdbda45738                   in 0 out 0 ?/8.2k  Startup header: collapsed (Alt+H to show)
+  assert PASS   expect       'Startup header: collapsed'
+  assert PASS   expect       '> typed blind'
+
+===== LUM-1267 narrow viewport (120x25, was 120x23 before the LUM-1328 composer border cost the transcript two rows): the composer row must survive the startup header. The `probe` rows are the A/B half of LUM-1262's P0-1 — XFAIL on the pre-fix baseline, PASS on a fix that keeps the prompt row.  |  [4] 4. /help still renders its body at 120x25 (the transcript keeps at least a body's worth of rows)  (cursor 120,24, frame ab9d37e4b427, px 0f19023d0437, alive=True) =====
+ ⋯ 15 lines above · Home soning level (/thinking off|minimal|low|medium|high|xhigh|max)                                │
+·   /trust    show or set project trust (/trust yes|no)                                                                │
+·   /compact  summarize the conversation prefix to free context                                                        │
+·   /hotkeys  list the keyboard shortcuts                                                                              │
+·   /extensions list loaded extensions and what they register                                                          │
+·   /reload   re-read keybindings.json and the interface settings                                                      │
+·   /exit     quit the interactive session                                                                             │
+·                                                                                                                      │
+· keys:                                                                                                                │
+·   Enter       submit prompt                                                                                          ┃
+·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)                                            ┃
+·   Up / Down   move within the draft, then prompt history at the top / bottom                                         ┃
+·   PgUp/PgDn   page the chat log, or the draft when it does not fit the box                                           ┃
+·   Home / End  jump to the start / end of the chat log                                                                ┃
+·   Ctrl+A / E  jump to the start / end of the current line                                                            ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)                                                   ┃
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      ┃
+·   Ctrl+D      exit on an empty prompt                                                                                ┃
+·   Ctrl+L      open the model selector                                                                                ┃
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> type a prompt — /help for commands
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78ccdbda45738                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'keys:'
+  assert PASS   expect       'PgUp/PgDn'

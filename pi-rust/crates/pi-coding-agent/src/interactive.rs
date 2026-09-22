@@ -272,6 +272,15 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // budget. `8` matches Martty's `min(h/2, 12)` cap on tall
         // terminals (`src/ui.rs:25-54`).
         composer_max_rows: 8,
+        // Composer border (LUM-1328 follow-up): upstream's editor paints one
+        // `─` rule above the draft and one below it, in the editor's border
+        // colour (`renderTopBorder` / `renderBottomBorder`,
+        // `packages/tui/src/components/editor.ts:499-506`;
+        // `updateEditorBorderColor`, `interactive-mode.ts:4166-4174`). The
+        // port's interactive mode is where that chrome belongs, so the switch
+        // (off by default for embedders and headless callers, whose geometry
+        // assertions pin the pre-border arithmetic) is turned on here.
+        composer_border: true,
         // Cross-session prompt history (LUM-1319): submitted prompts are
         // appended to `~/.pi/agent/history.jsonl` and the tail is read back at
         // startup, so `Up` / `Ctrl+R` reach prompts from earlier processes.

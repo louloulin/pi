@@ -1,7 +1,7 @@
 {
   "cols": 120,
-  "rows": 34,
-  "caption": "LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.",
+  "rows": 36,
+  "caption": "LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. The terminal is 36 rows rather than the original 34 (LUM-1328 follow-up): the composer border costs the transcript two rows, and at 34 rows the /hotkeys panel's keys-section row (`PgUp/PgDn page …`) fell out of the fold. Same harness / parser / binary as LUM-1286/1293/1294.",
   "args": [
     "--model",
     "faux/faux-model"
