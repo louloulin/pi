@@ -78,9 +78,17 @@ impl Prompt {
     }
 
     /// The draft the prompt shows: chip sentinels expanded to their
-    /// `[Image #N]` labels. Use [`Prompt::editor`] for the raw buffer.
+    /// `[Image #N]` labels and paste sentinels to `[paste #N +M lines]`
+    /// markers. Use [`Prompt::editor`] for the raw buffer.
     pub fn text(&self) -> String {
         self.editor.display_text()
+    }
+
+    /// The draft with every folded paste expanded back to its full text —
+    /// what a submission has to carry (`Prompt::text` is what the composer
+    /// draws).
+    pub fn expanded_text(&self) -> String {
+        self.editor.expanded_text()
     }
 
     /// Cursor column within [`Prompt::text`].

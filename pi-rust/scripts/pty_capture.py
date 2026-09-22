@@ -61,6 +61,13 @@ emitting a panel (useful for intermediate keystrokes). `wait_for` (with
 before the frame is frozen, which is how an async panel (a model reply, a
 completed tool call) is captured *after* the thing it claims happened.
 
+A panel may also carry `paste` instead of `send`: its value is sent as one
+**bracketed paste** (`\x1b[200~` … `\x1b[201~`), which is how a real
+terminal hands a paste over once the app has enabled the mode. Use it when
+the point of the panel is what the composer does with a *paste* — a `send`
+with the same text arrives as individual key presses instead, so its
+newlines submit. `send` and `paste` may be combined; `send` goes first.
+
 Panels can also carry `expect` / `reject` / `probe` / `xfail` /
 `xfail_reject` assertions over their frozen grid — see the "panel assertions"
 section below. A failing `expect`/`reject`, or an `xfail` that unexpectedly
@@ -200,6 +207,15 @@ def encode_keys(text: str) -> bytes:
         out.append(text[i])
         i += 1
     return "".join(out).encode("utf-8")
+
+
+def encode_paste(text: str) -> bytes:
+    """Wrap `text` in the bracketed-paste markers a terminal sends.
+
+    The payload is literal (no `<Enter>` expansion): a real paste carries its
+    own newlines, and that is exactly the point of the panel using it.
+    """
+    return b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
 
 
 # ------------------------------------------------------------ palette
@@ -782,6 +798,9 @@ def main() -> int:
             send = panel.get("send", "")
             if send:
                 os.write(master, encode_keys(send))
+            paste = panel.get("paste")
+            if paste:
+                os.write(master, encode_paste(paste))
             wait = float(panel.get("wait", 0.7))
             if wait > 0:
                 pump(master, stream, wait)
