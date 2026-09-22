@@ -289,12 +289,32 @@ pub fn app_default_keybindings(
         // `app.session.fork` / `app.session.resume` unbound
         // (`defaultKeys: []`). Stage 60 required a real chord for `new`
         // so the action is reachable and honestly listed by `/hotkeys`;
-        // Stage 65 does the same for the session branch trio. The chords
-        // are free across all platform tables and unambiguous in the
-        // terminals pi targets.
+        // Stage 65 did the same for the session branch trio, on the stated
+        // premise that the invented `alt+*` chords "are free across all
+        // platform tables".
+        //
+        // That premise was false for `alt+f` (LUM-1360): `alt+f` is
+        // `tui.editor.cursorWordRight` — upstream `keybindings.ts`, codex
+        // `move_word_right` and Martty's `WordRight` all bind it — and this
+        // table is consulted by the coding-agent's global input path
+        // (`interactive.rs::handle_input_event`) *before* the composer, so
+        // `Alt+F` forked the session instead of moving the caret one word
+        // right. Measured in a real PTY on a two-word draft: `Alt+F` produced
+        // `/fork: no session database` and left the caret where it was.
+        //
+        // `fork` therefore goes back to upstream's unbound default; `/fork` is
+        // the documented path, and a user who wants a chord can bind one in
+        // `keybindings.json`. `tests/chatinput_chord_conflicts.rs` keeps the
+        // rest of the trio honest: it fails when any `app.*` default chord
+        // shadows a `tui.editor.*` / `tui.input.*` chord without a documented
+        // dual-use or overlay-scoping justification.
         entry("app.session.new", ["alt+n"], "Start a new session"),
         entry("app.session.tree", ["alt+t"], "Open session tree"),
-        entry("app.session.fork", ["alt+f"], "Fork current session"),
+        entry(
+            "app.session.fork",
+            Vec::<&str>::new(),
+            "Fork current session",
+        ),
         entry("app.session.resume", ["alt+r"], "Resume a session"),
         entry(
             "app.tree.foldOrUp",

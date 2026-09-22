@@ -47,3 +47,6 @@ packages/agent/docs/extensions/pi-server-artifact/index.md
 # Python tooling caches (pi-rust/scripts/*.py)
 __pycache__/
 *.pyc
+
+# Vitest test runner cache
+.vitest/

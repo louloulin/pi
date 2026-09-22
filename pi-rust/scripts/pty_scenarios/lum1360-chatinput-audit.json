@@ -1,0 +1,110 @@
+{
+  "cols": 80,
+  "rows": 26,
+  "caption": "LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle composer at 80x26",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "? for help",
+      "expect": ["> type a prompt"]
+    },
+    {
+      "label": "2. three words typed; caret at the end of the draft",
+      "send": "alpha beta gamma",
+      "wait": 0.6,
+      "probe": [{ "text": "> alpha beta gamma▍", "why": "a plain draft renders with the block caret at the end" }]
+    },
+    {
+      "label": "3. Ctrl+W deletes one word backward (codex, Martty and pi-ts all bind this)",
+      "send": "<C-w>",
+      "wait": 0.6,
+      "probe": [{ "text": "> alpha beta ▍", "why": "`gamma` is gone and the caret sits where it was" }]
+    },
+    {
+      "label": "4. Alt+B hops one word left (esc-b; untouched by the LUM-1360 defect)",
+      "send": "<M-b>",
+      "wait": 0.6,
+      "probe": [{ "text": "> alpha ▍beta", "why": "the caret stops at the start of `beta`; the frame trims the draft's trailing space" }]
+    },
+    {
+      "label": "5. Alt+F hops one word right — the LUM-1360 fix (before: this forked the session)",
+      "send": "<M-f>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "> alpha beta▍", "why": "the caret is back at the end of `beta`, one word right; the frame trims the draft's trailing space" }
+      ],
+      "reject": [
+        {
+          "text": "/fork: no session database",
+          "why": "the fork picker must NOT run: `alt+f` is the editor's forward-word chord, not `app.session.fork` (LUM-1360). This row is a hard FAIL, so the pre-fix binary fails this scenario."
+        }
+      ]
+    },
+    {
+      "label": "6. Ctrl+A / Ctrl+E are line-scoped, not draft-scoped",
+      "send": " gamma<C-a>",
+      "wait": 0.6,
+      "probe": [{ "text": "> ▍alpha beta gamma", "why": "Ctrl+A put the caret at the start of the only line" }]
+    },
+    {
+      "label": "7. Ctrl+K kills to the end of the line and Ctrl+Y yanks it back",
+      "send": "<C-k><C-y>",
+      "wait": 0.6,
+      "probe": [
+        { "text": "> alpha beta gamma", "why": "the kill ring round-trips the whole killed tail" }
+      ]
+    },
+    {
+      "label": "8. Ctrl+J opens a second draft row instead of submitting",
+      "send": "<End><C-j>second line",
+      "wait": 0.8,
+      "probe": [
+        { "text": "> alpha beta gamma", "why": "line 1 keeps its content (Ctrl+J did not submit)" },
+        { "text": "  second line▍", "why": "line 2 is a real draft row with the caret at its end" }
+      ]
+    },
+    {
+      "label": "9. double-click inside the composer selects the word under the pointer",
+      "send": "<MPress:9,23><MRelease:9,23><MPress:9,23><MRelease:9,23>",
+      "wait": 0.8,
+      "probe": [{ "text": "lpha", "why": "the draft is intact after the double click" }],
+      "report_reverse": true
+    },
+    {
+      "label": "10. a drag that starts in the composer extends the selection as the pointer moves left",
+      "send": "<MPress:20,23><MDrag:12,23><MDrag:6,23>",
+      "wait": 0.8,
+      "probe": [{ "text": "lpha", "why": "the draft survives a drag that leaves the composer body" }],
+      "report_reverse": true
+    },
+    {
+      "label": "11. Ctrl+C clears the draft on the first press (no exit)",
+      "send": "<C-c>",
+      "wait": 0.8,
+      "probe": [{ "text": "> type a prompt", "why": "the composer is back to its placeholder and the process is alive" }]
+    },
+    {
+      "label": "12. Enter submits, the transcript echoes the prompt",
+      "send": "hello codex parity<Enter>",
+      "wait": 1.5,
+      "wait_for": "hello codex parity",
+      "probe": [{ "text": "> hello codex parity", "why": "the submitted prompt is echoed in the transcript" }]
+    },
+    {
+      "label": "13. Up on the empty composer recalls it from the prompt history",
+      "send": "<Up>",
+      "wait": 0.8,
+      "probe": [{ "text": "> hello codex parity▍", "why": "history recall puts the prompt back in the composer" }]
+    },
+    {
+      "label": "14. Ctrl+R opens the reverse search over the prompt history",
+      "send": "<C-u><C-r>hel",
+      "wait": 0.8,
+      "probe": [{ "text": "hello codex parity", "why": "the reverse search lists the matching history entry" }]
+    }
+  ],
+  "final_send": "<Esc><C-u><C-d><C-d>"
+}

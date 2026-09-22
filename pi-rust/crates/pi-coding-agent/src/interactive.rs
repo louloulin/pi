@@ -1073,12 +1073,16 @@ async fn handle_input_event(
             return Ok(None);
         }
         // `app.session.fork` — the same picker `/fork` opens.
-        if pi_tui::keybindings::matches_with_fallback(
-            &keybindings,
-            &event,
-            "app.session.fork",
-            &["alt+f"],
-        ) {
+        //
+        // No builtin chord: `alt+f` belongs to `tui.editor.cursorWordRight`
+        // (upstream, codex `move_word_right`, Martty `WordRight`) and this
+        // global path runs before the composer, so binding it here silently
+        // removed forward-word from the TUI (LUM-1360). Upstream leaves
+        // `app.session.fork` unbound; `/fork` is the documented entry point,
+        // and a user binding in `keybindings.json` still takes effect through
+        // `matches_with_fallback`.
+        if pi_tui::keybindings::matches_with_fallback(&keybindings, &event, "app.session.fork", &[])
+        {
             open_fork_selector(app, options);
             return Ok(None);
         }
@@ -6308,9 +6312,27 @@ mod tests {
         assert_eq!(app.selector().map(Selector::title), Some("Session tree"));
         app.close_selector();
 
+        // Alt+F is NOT bound to `app.session.fork` (LUM-1360): it belongs to
+        // the composer's forward-word chord (codex `move_word_right`, Martty
+        // `WordRight`, upstream `cursorWordRight`). Sending Alt+F to the
+        // global handler must therefore NOT open the fork picker — it must
+        // reach the editor.
         handle_input_event(&mut app, &agent, &mut options, &mut bash, alt('f'))
             .await
-            .expect("fork key");
+            .expect("forward-word key");
+        assert!(
+            app.selector().is_none(),
+            "Alt+F must not be consumed globally by app.session.fork (LUM-1360); \
+             `/fork` is the documented entry point"
+        );
+
+        // `app.session.fork` itself is still consumed (the handler is wired);
+        // only the default chord is unbound. Exercise the picker through the
+        // documented `/fork` slash command so the test still pins the full
+        // wiring of the action, not just the (now-empty) default chord.
+        run_slash_command(&mut app, &agent, &mut options, "/fork")
+            .await
+            .expect("fork slash");
         assert_eq!(
             app.selector().map(Selector::title),
             Some("Fork from a user message")

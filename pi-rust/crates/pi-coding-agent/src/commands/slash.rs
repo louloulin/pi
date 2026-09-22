@@ -774,8 +774,15 @@ mod tests {
 
     #[test]
     fn hotkeys_text_lists_the_session_branch_chords() {
-        // Stage 65 wires `app.session.tree` / `fork` / `resume`; the app
-        // group has to advertise them once the actions have consumers.
+        // `app.session.tree` / `fork` / `resume` share the same picker as
+        // `/tree`, `/fork`, `/resume`. Stage 65 gave the trio default chords
+        // (Alt+T, Alt+F, Alt+R); LUM-1360 unbound `alt+f` because it shadowed
+        // the editor's forward-word chord (codex `move_word_right`, Martty
+        // `WordRight`, upstream `cursorWordRight`). The renderer drops rows
+        // with no chords (an unbound action is not a shortcut), so `fork`
+        // leaves `/hotkeys`; `tree` and `resume` keep their chords and stay.
+        // Fork remains reachable via the `/fork` slash command and via a
+        // user `keybindings.json` binding.
         let manager = pi_tui::keybindings::KeybindingsManager::new(
             crate::keybindings::merged_definitions(
                 &crate::keybindings::Platform::Linux,
@@ -784,16 +791,44 @@ mod tests {
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
         let text = hotkeys_text_with(&manager);
-        for label in [
-            "open the session tree",
-            "fork a session from a message",
-            "resume a session",
-        ] {
+        // The remaining session-branch shortcuts are still advertised.
+        for label in ["open the session tree", "resume a session"] {
             assert!(text.contains(label), "{label} missing from:\n{text}");
         }
-        for chord in ["Alt+T", "Alt+F", "Alt+R"] {
+        for chord in ["Alt+T", "Alt+R"] {
             assert!(text.contains(chord), "{chord} missing from:\n{text}");
         }
+        // `app.session.fork` is unbound on purpose.
+        assert!(
+            manager.get_keys("app.session.fork").is_empty(),
+            "LUM-1360: app.session.fork must stay unbound so it cannot shadow \
+             the composer's forward-word chord"
+        );
+        assert!(
+            !text.contains("fork a session from a message"),
+            "fork is unbound, so /hotkeys must drop it (renderer's empty-chord rule):\n{text}"
+        );
+        // Alt+F now belongs to the editor's forward-word chord (the fix's
+        // positive half): it must appear in `navigation:` as part of the
+        // `move by word (right)` cell, and it must NOT appear as a shortcut
+        // cell in the `app:` group (which would mean an `app.*` default is
+        // shadowing it again).
+        assert!(
+            text.contains("Alt+Right / Ctrl+Right / Alt+F move by word (right)"),
+            "Alt+F must be back in navigation as the forward-word chord:\n{text}"
+        );
+        let app_section = text.split("\napp:\n").nth(1).unwrap_or("");
+        // The app group runs until the next blank line or section header.
+        let app_section = app_section
+            .split("\n\n")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('\n');
+        let app_has_alt_f_cell = app_section.lines().any(|line| line.starts_with("  Alt+F"));
+        assert!(
+            !app_has_alt_f_cell,
+            "Alt+F must not appear as an app-group shortcut cell:\n{text}"
+        );
     }
 
     #[test]
