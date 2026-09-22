@@ -28,7 +28,7 @@ cell**——一个全角字（CJK、多数 emoji）占两列。后果不是"排�
 | 光标标记 | 该帧**没有** `▍`（cell 被 wide-glyph 的 skip 吞掉） | `▍` 落在光标所在列、所在行 |
 | 指针点选全角字 | 点在第 2 个 cell 上会落到下一个字 | 落在该字之前（列 → 字符的精确映射） |
 | composer 单元/集成测试 | — | `pi-tui` 969 passed（新增 `composer_wide_chars.rs` 8 条，**修前 7/8 红**） |
-| 全量门禁 | — | `fmt` 干净、`clippy -D warnings` 干净、`cargo test --workspace --locked` **2691 passed / 2 ignored / 0 failed**（172 suites） |
+| 全量门禁 | — | `fmt` 干净、`clippy -D warnings` 干净、`cargo test --workspace --locked` **2709 passed / 2 ignored / 0 failed**（173 suites，**合并树**上复测） |
 
 ## 1. 真实审计：缺陷是什么，为什么
 
@@ -201,7 +201,8 @@ LUM-1318（粘贴折叠）、LUM-1332（composer 拖选+复制）、LUM-1333（�
 |---|---|---|
 | 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | 静态检查 | `cargo clippy --offline --workspace --all-targets --locked -- -D warnings` | ✅ 0 warning（首轮抓出 `clippy::repeat_once`，已按建议改掉） |
-| 全量测试 | `cargo test --offline --workspace --locked --no-fail-fast` | ✅ **2691 passed / 2 ignored / 0 failed**，172 suites |
+| 全量测试（本轮的树） | `cargo test --offline --workspace --locked --no-fail-fast` | ✅ **2691 passed / 2 ignored / 0 failed**，172 suites |
+| 全量测试（**合并 `origin/feature/pi.rs` 后**的树，`e0ba60d5c` + 本轮 + LUM-1318/LUM-1333） | 同上 | ✅ **2709 passed / 2 ignored / 0 failed**，173 suites；`fmt`/`clippy` 同样干净；A/B 帧在合并树上重拍，结果与 §4 逐字一致 |
 | `pi-tui` 单包 | `cargo test --offline -p pi-tui` | ✅ 969 passed / 55 suites（新增 `composer_wide_chars.rs` 8 条） |
 | 锁文件 | `git diff pi-rust/Cargo.lock` | 只多一条依赖边（`pi-tui` → `unicode-width`），**没有版本变化** |
 
@@ -214,6 +215,10 @@ LUM-1318（粘贴折叠）、LUM-1332（composer 拖选+复制）、LUM-1333（�
 修前的失败信息就是缺陷本身，例如
 `left: "> 世你▍" / right: "> 世界你好▍"`、`left: "> ab中中中中中中中中中cd▍" / right: "> ab中…（折行）"`、
 `caret cell: left 6 / right 10`。
+
+合并说明：`origin/feature/pi.rs` 在本轮期间前进到 `4eb70815d`（LUM-1318 粘贴折叠重编号 + LUM-1333 补全下拉指针路由）。
+合并**无冲突**（他们的改动落在 composer 的粘贴/下拉框语义，不涉及宽度口径），合入后按惯例在最终树上复跑了
+`fmt` / `clippy` / 全量测试与真 PTY A/B，数字见上表。
 
 构建环境：`CARGO_TARGET_DIR=/tmp/pi-rust-target-lum1336`（本轮独立 target，避开另外两路的 cargo 锁）、
 `CARGO_PROFILE_DEV_DEBUG=0`、`CARGO_INCREMENTAL=0`、`CARGO_HOME=~/.cargo`、`--offline`。

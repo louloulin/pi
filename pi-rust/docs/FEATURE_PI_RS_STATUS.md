@@ -15403,8 +15403,9 @@ B 侧 **8 PASS**；两侧 scenario 交叉打到对侧二进制上全红。截图
 ### 二、门禁与实测（最终树）
 
 * `cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets --locked -- -D warnings` 0 findings；
-  `cargo test --workspace --locked --no-fail-fast` **2691 passed / 2 ignored / 0 failed**，172 suites；
-  `-p pi-tui` 969 passed / 55 suites。
+  本轮树上 `cargo test --workspace --locked --no-fail-fast` **2691 passed / 2 ignored / 0 failed**（172 suites）；
+  合并 `origin/feature/pi.rs`（`4eb70815d`，含 LUM-1318/LUM-1333）后**在最终树上复测**：**2709 passed /
+  2 ignored / 0 failed**，173 suites，A/B 帧重拍结果逐字一致。
 * Rust↔TS 本轮回测：代码规模 136,071 / 153,106 = **88.9%**；测试规模 2,623 / 5,309 = **49.4%**；
   `app.*` wired **43/44 = 97.7%**（silent 仍只有 `app.tree.editLabel`）；
   扩展事件 **21/36 tag = 58.3%、20/36 发射点 = 55.6%**（本轮未动事件轴）。
