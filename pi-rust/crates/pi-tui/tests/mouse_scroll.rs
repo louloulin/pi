@@ -82,24 +82,15 @@ fn mouse(kind: MouseEventKind, modifiers: KeyModifiers) -> CtEvent {
 fn scroll_up_and_down_translate_to_mouse_events() {
     assert_eq!(
         App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::NONE)),
-        InputEvent::Mouse {
-            up: true,
-            alt: false
-        }
+        InputEvent::wheel(true, false, 1, 1)
     );
     assert_eq!(
         App::translate_event(mouse(MouseEventKind::ScrollDown, KeyModifiers::NONE)),
-        InputEvent::Mouse {
-            up: false,
-            alt: false
-        }
+        InputEvent::wheel(false, false, 1, 1)
     );
     assert_eq!(
         App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::ALT)),
-        InputEvent::Mouse {
-            up: true,
-            alt: true
-        }
+        InputEvent::wheel(true, true, 1, 1)
     );
 }
 
@@ -147,7 +138,7 @@ fn wheel_moves_one_line_per_notch() {
     assert_eq!(top_line(&app), "> line 32");
 
     assert_eq!(
-        app.step(InputEvent::wheel(true, false)),
+        app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 1);
@@ -155,7 +146,7 @@ fn wheel_moves_one_line_per_notch() {
     assert!(!app.messages().is_following());
 
     assert_eq!(
-        app.step(InputEvent::wheel(false, false)),
+        app.step(InputEvent::wheel(false, false, 0, 0)),
         StepOutcome::Redraw
     );
     // Back at the tail the viewport re-attaches to new output.
@@ -168,31 +159,55 @@ fn wheel_moves_one_line_per_notch() {
 fn alt_wheel_multiplies_the_step() {
     let mut app = app_with_lines(40);
 
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 5);
     assert_eq!(top_line(&app), "> line 27");
 
     // A shorter-than-five-line overscroll clamps at the top instead of
     // wrapping.
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 10);
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 15);
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 20);
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 25);
     assert_eq!(top_line(&app), "> line 7");
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 30);
     assert_eq!(top_line(&app), "> line 2");
     // The final notch clamps at the top instead of overshooting.
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Redraw);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(app.messages().scroll_offset(), 32);
     assert_eq!(top_line(&app), "> line 0");
 
     // Already at the top — no redraw.
-    assert_eq!(app.step(InputEvent::wheel(true, true)), StepOutcome::Idle);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, true, 0, 0)),
+        StepOutcome::Idle
+    );
 }
 
 #[test]
@@ -201,28 +216,34 @@ fn wheel_clamps_at_both_ends() {
     let mut app = app_with_lines(10);
 
     assert_eq!(
-        app.step(InputEvent::wheel(true, false)),
+        app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 1);
     assert_eq!(
-        app.step(InputEvent::wheel(true, false)),
+        app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 2);
-    assert_eq!(app.step(InputEvent::wheel(true, false)), StepOutcome::Idle);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, false, 0, 0)),
+        StepOutcome::Idle
+    );
     assert_eq!(top_line(&app), "> line 0");
 
     assert_eq!(
-        app.step(InputEvent::wheel(false, false)),
+        app.step(InputEvent::wheel(false, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(
-        app.step(InputEvent::wheel(false, false)),
+        app.step(InputEvent::wheel(false, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert!(app.messages().is_following());
-    assert_eq!(app.step(InputEvent::wheel(false, false)), StepOutcome::Idle);
+    assert_eq!(
+        app.step(InputEvent::wheel(false, false, 0, 0)),
+        StepOutcome::Idle
+    );
 }
 
 #[test]
@@ -235,7 +256,10 @@ fn an_open_modal_does_not_scroll_the_log_behind_it() {
         vec![SelectorItem::new("model:faux", "faux")],
     ));
 
-    assert_eq!(app.step(InputEvent::wheel(true, false)), StepOutcome::Idle);
+    assert_eq!(
+        app.step(InputEvent::wheel(true, false, 0, 0)),
+        StepOutcome::Idle
+    );
     assert_eq!(app.messages().scroll_offset(), 0);
     assert!(app.messages().is_following());
 }
@@ -246,7 +270,7 @@ fn wheel_moves_multiple_lines_like_page_keys_and_leaves_the_editor_untouched() {
     // unchanged after scrolling.
     let mut app = app_with_lines(40);
     app.prompt_mut().editor_mut().insert_str("hello");
-    app.step(InputEvent::wheel(true, false));
+    app.step(InputEvent::wheel(true, false, 0, 0));
 
     assert_eq!(app.prompt().text(), "hello");
     assert_eq!(app.prompt_mut().editor_mut().cursor(), 5);
@@ -256,7 +280,7 @@ fn wheel_moves_multiple_lines_like_page_keys_and_leaves_the_editor_untouched() {
     // Scrolling one wheel notch at a time reaches the top like `page_up`
     // would, just without the viewport-sized jump.
     for _ in 0..(40 - VIEWPORT) {
-        app.step(InputEvent::wheel(true, false));
+        app.step(InputEvent::wheel(true, false, 0, 0));
     }
     assert_eq!(top_line(&app), "> line 0");
 }
@@ -288,7 +312,7 @@ fn wheel_over_a_tool_block_scrolls_instead_of_toggling_it() {
     assert_eq!(app.messages().scroll_offset(), 0);
     assert!(!app.tools_expanded());
     assert_eq!(
-        app.step(InputEvent::wheel(true, false)),
+        app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 1);

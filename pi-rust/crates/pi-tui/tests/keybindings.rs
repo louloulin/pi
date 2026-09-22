@@ -329,7 +329,10 @@ fn matches_with_case_as_shift_and_symbols_carrying_their_own_shift() {
 fn matches_only_key_events() {
     let kb = KeybindingsManager::tui_defaults();
 
-    assert!(!kb.matches(&InputEvent::wheel(true, false), "tui.altScreen.pageUp"));
+    assert!(!kb.matches(
+        &InputEvent::wheel(true, false, 0, 0),
+        "tui.altScreen.pageUp"
+    ));
     assert!(!kb.matches(
         &InputEvent::gesture(pi_tui::input::MouseGesture::left_press(1, 1)),
         "tui.input.submit"

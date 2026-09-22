@@ -2695,7 +2695,7 @@ impl App {
         // A settings modal owns both the keyboard and the wheel: it is the
         // only interactive surface on screen while it is open.
         if self.settings.is_some() {
-            if let InputEvent::Mouse { up, alt } = event {
+            if let InputEvent::Mouse { up, alt, .. } = event {
                 if let Some(outcome) = self.step_settings_wheel(up, alt) {
                     return outcome;
                 }
@@ -2719,14 +2719,27 @@ impl App {
             }
         }
         let InputEvent::Key(key) = event else {
-            if let InputEvent::Mouse { up, alt } = event {
+            if let InputEvent::Mouse { up, alt, x, y } = event {
+                // The composer's dropdown borrows transcript rows and owns the
+                // pointer there, the wheel included: upstream hands the notch
+                // to `dispatchMouseToLayout` (editor → `SelectList`) *before*
+                // `routeWheel` reaches the chat-log scroll view
+                // (`packages/tui/src/tui-alt-screen.ts:679-694`).
+                if let Some(outcome) = self.step_autocomplete_wheel(up, x, y) {
+                    return outcome;
+                }
                 let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
                 let changed = if up {
                     self.scroll_viewport_up(lines)
                 } else {
                     self.scroll_viewport_down(lines)
                 };
-                return if changed {
+                // An unclaimed notch is a `routeWheel`: the scroll view moves
+                // *and* the scrollbar hover follows the cell the notch came
+                // from (`packages/tui/src/tui-alt-screen.ts:973-984`), so
+                // wheeling over the bar lights it up without a move event.
+                let hover_changed = self.update_scrollbar_hover(x, y);
+                return if changed || hover_changed {
                     StepOutcome::Redraw
                 } else {
                     StepOutcome::Idle
@@ -4701,6 +4714,59 @@ impl App {
         }
     }
 
+    /// Route a wheel notch that landed on the composer's autocomplete
+    /// dropdown: move the highlight one candidate, like the list's own
+    /// `SelectList.handleMouse` wheel branch.
+    ///
+    /// Only the *row* decides ownership, not the column: upstream tests the
+    /// notch against the editor's row range while the editor's layout box
+    /// spans the full width, and the list's wheel branch never reads `x`
+    /// (`packages/tui/src/components/editor.ts:618-638`,
+    /// `packages/tui/src/components/select-list.ts:110-121`).
+    ///
+    /// Upstream's `SelectList.handleMouse` treats a notch as a single step
+    /// regardless of the wheel's magnitude (`delta = wheelDelta < 0 ? -1 : 1`,
+    /// `packages/tui/src/components/select-list.ts:110-121`) and **clamps** at
+    /// the ends, where the keyboard's `tui.select.up` / `down` wrap; the range
+    /// it tests is the painted list block, counter row included, across the
+    /// editor's full width (`packages/tui/src/components/editor.ts:618-638`).
+    /// The window re-centers on the new selection by itself — it is derived
+    /// from `autocomplete_selected` at paint time — so a notch at the edge of
+    /// a long list scrolls the window by exactly the rows it moved.
+    ///
+    /// `None` when there is no dropdown under the notch, which leaves the
+    /// wheel to the chat-log viewport (upstream's `routeWheel`).
+    fn step_autocomplete_wheel(&mut self, up: bool, _x: u16, y: u16) -> Option<StepOutcome> {
+        if !self.prompt.editor().is_showing_autocomplete() {
+            return None;
+        }
+        // The list rectangle, not just a candidate row: upstream tests the
+        // wheel against `renderedAutocompleteHeight`, which includes the
+        // `(n/m)` counter, so a notch on the counter row steers the list too.
+        let height = self.autocomplete_size.1.load(Ordering::Relaxed);
+        if height == 0 {
+            return None;
+        }
+        let origin_y = self.autocomplete_origin.1.load(Ordering::Relaxed);
+        if y < origin_y || y >= origin_y.saturating_add(height) {
+            return None;
+        }
+        let len = self.prompt.editor().autocomplete_items().len();
+        if len == 0 {
+            return None;
+        }
+        let selected = self.prompt.editor().autocomplete_selected();
+        let step = if up { -1i64 } else { 1i64 };
+        let next = (selected as i64 + step).clamp(0, len as i64 - 1) as usize;
+        if next == selected {
+            // Clamped at an end: the notch is still the list's, so the
+            // transcript behind it must not move either.
+            return Some(StepOutcome::Idle);
+        }
+        self.prompt.editor_mut().set_autocomplete_selected(next);
+        Some(StepOutcome::Redraw)
+    }
+
     /// True when the pointer cell is inside the composer rectangle the last
     /// frame painted.
     fn composer_contains(&self, x: u16, y: u16) -> bool {
@@ -5730,14 +5796,18 @@ impl App {
         match event {
             CtEvent::Key(key) => InputEvent::from(key),
             CtEvent::Mouse(mouse) => match mouse.kind {
-                CtMouseEventKind::ScrollUp => InputEvent::Mouse {
-                    up: true,
-                    alt: mouse.modifiers.contains(CtModifiers::ALT),
-                },
-                CtMouseEventKind::ScrollDown => InputEvent::Mouse {
-                    up: false,
-                    alt: mouse.modifiers.contains(CtModifiers::ALT),
-                },
+                CtMouseEventKind::ScrollUp => InputEvent::wheel(
+                    true,
+                    mouse.modifiers.contains(CtModifiers::ALT),
+                    mouse.column,
+                    mouse.row,
+                ),
+                CtMouseEventKind::ScrollDown => InputEvent::wheel(
+                    false,
+                    mouse.modifiers.contains(CtModifiers::ALT),
+                    mouse.column,
+                    mouse.row,
+                ),
                 CtMouseEventKind::Down(button) => InputEvent::MouseGesture(MouseGesture::new(
                     MouseGestureKind::Press(mouse_button(button)),
                     mouse.column,
