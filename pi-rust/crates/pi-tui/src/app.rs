@@ -938,6 +938,39 @@ enum ComposerHit {
     Absorbed,
 }
 
+/// What a pointer cell inside the autocomplete dropdown maps onto.
+///
+/// Private to the crate, like [`ComposerHit`]: the distinction between "not
+/// the dropdown" and "the dropdown, but no candidate under this cell" is
+/// what keeps a click on the `(n/m)` indicator row from either completing a
+/// candidate or falling through to the chat log underneath.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutocompleteHit {
+    /// The candidate painted on that row (an index into
+    /// [`crate::Editor::autocomplete_items`]).
+    Candidate(usize),
+    /// The dropdown's own cell with no candidate under it — the `(n/m)`
+    /// window indicator.
+    Absorbed,
+}
+
+/// A left press on a dropdown row that is waiting for its release.
+///
+/// The candidate is resolved **at press time** on purpose: the press itself
+/// can move the highlight, which re-centres the `SelectList` window, so the
+/// same cell can name a different candidate once the next frame is painted.
+/// Upstream has the same rule (`SelectList` remembers `mousePressedIndex`
+/// and accepts *that*, `select-list.ts:120-140`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutocompletePress {
+    /// Cell the press landed on; a release elsewhere ends the gesture
+    /// without completing.
+    x: u16,
+    y: u16,
+    /// The candidate the press selected, or `None` for the indicator row.
+    index: Option<usize>,
+}
+
 /// Outcome returned by [`App::step`] after each key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -1176,6 +1209,20 @@ pub struct App {
     /// swallowed instead of extending the chat-log selection, so a press
     /// inside the composer can never drag a transcript selection behind it.
     composer_press: Option<(u16, u16)>,
+    /// Rectangle of the autocomplete dropdown as of the last render:
+    /// `(row, column, width, height)`. `height == 0` means no dropdown was on
+    /// screen this frame — none is open, the candidates do not fit, or a
+    /// custom editor component owns the region — and therefore the pointer
+    /// has nothing to hit. Written by every [`App::paint_autocomplete`] call
+    /// (and cleared when the composer is replaced), the same shape as
+    /// [`App::composer_area`].
+    autocomplete_area: (AtomicU16, AtomicU16, AtomicU16, AtomicU16),
+    /// Cell of an in-flight left press on a dropdown row, kept until its
+    /// release: the cell plus the candidate the press selected (`None` for
+    /// the `(n/m)` indicator row, which owns no candidate). While it is set
+    /// the drag / move / release gestures belong to the dropdown instead of
+    /// starting a chat-log selection underneath it.
+    autocomplete_press: Option<AutocompletePress>,
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1366,6 +1413,13 @@ impl App {
                 AtomicU16::new(0),
             ),
             composer_press: None,
+            autocomplete_area: (
+                AtomicU16::new(0),
+                AtomicU16::new(0),
+                AtomicU16::new(0),
+                AtomicU16::new(0),
+            ),
+            autocomplete_press: None,
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -2675,7 +2729,7 @@ impl App {
         // A settings modal owns both the keyboard and the wheel: it is the
         // only interactive surface on screen while it is open.
         if self.settings.is_some() {
-            if let InputEvent::Mouse { up, alt } = event {
+            if let InputEvent::Mouse { up, alt, .. } = event {
                 if let Some(outcome) = self.step_settings_wheel(up, alt) {
                     return outcome;
                 }
@@ -2699,7 +2753,14 @@ impl App {
             }
         }
         let InputEvent::Key(key) = event else {
-            if let InputEvent::Mouse { up, alt } = event {
+            if let InputEvent::Mouse { up, alt, x, y } = event {
+                // No modal is up at this point (the dialog, settings and
+                // selector branches above all answer a wheel themselves), so
+                // a notch inside the composer's dropdown steers the candidate
+                // list instead of the transcript behind it (LUM-1333).
+                if let Some(outcome) = self.step_autocomplete_wheel(up, x, y) {
+                    return outcome;
+                }
                 let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
                 let changed = if up {
                     self.scroll_viewport_up(lines)
@@ -4027,6 +4088,17 @@ impl App {
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
+        // The autocomplete dropdown is painted over the message viewport's
+        // bottom rows, above the composer — and on top of the pill / hint it
+        // may cover. Upstream's editor tests it before its own rows
+        // (`Editor.handleMouse`, `components/editor.ts:620-640`), so a press
+        // on a candidate selects it instead of starting a transcript
+        // selection of the text behind it (LUM-1333).
+        if let Some(outcome) = self.step_autocomplete_mouse_gesture(&gesture) {
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
+            return outcome;
+        }
         // The composer owns the pointer while it is over the composer region.
         // Upstream's editor handles its own clicks
         // (`Editor.handleMouse`'s click branch,
@@ -4173,29 +4245,18 @@ impl App {
     /// [`crate::Prompt::render_body`]'s follow-the-caret rule leaves it, so a
     /// stale offset cannot shift the mapping either.
     fn composer_hit(&self, x: u16, y: u16) -> Option<ComposerHit> {
-        let (row, column, width, height) = self.composer_area();
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let bottom = row.saturating_add(height).saturating_sub(1);
-        let rows_now = self
-            .prompt
-            .line_count(width, self.config.composer_max_rows)
-            .max(1) as u16;
-        let height_now = rows_now
-            .min(self.config.composer_max_rows.max(1) as u16)
-            .max(1);
-        let top = bottom.saturating_sub(height_now - 1);
-        if y < top || y > bottom {
-            return None;
-        }
-        if x < column || x >= column.saturating_add(width) {
-            return None;
-        }
+        let (top, bottom) = self.composer_rows_now()?;
         // The body width the frame wrapped at. `0` only before the first
         // frame, which the rectangle check above already excludes.
         let body_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
         if body_width == 0 {
+            return None;
+        }
+        let (_, column, width, _) = self.composer_area();
+        if y < top || y > bottom {
+            return None;
+        }
+        if x < column || x >= column.saturating_add(width) {
             return None;
         }
         let rect_row = (y - top) as usize;
@@ -4205,6 +4266,11 @@ impl App {
         if self.prompt.editor().history_search_active() {
             return Some(ComposerHit::Absorbed);
         }
+        let rows_now = self
+            .prompt
+            .line_count(self.composer_area().2, self.config.composer_max_rows)
+            .max(1) as u16;
+        let height_now = bottom - top + 1;
         let max_scroll = rows_now.saturating_sub(height_now) as usize;
         let scroll = self.composer_scroll.load(Ordering::Relaxed).min(max_scroll);
         let draft_row = scroll + rect_row;
@@ -4232,6 +4298,197 @@ impl App {
             self.composer_area.2.load(Ordering::Relaxed),
             self.composer_area.3.load(Ordering::Relaxed),
         )
+    }
+
+    /// The composer's current top and bottom rows, or `None` when the prompt
+    /// was not the composer's frame.
+    ///
+    /// The **bottom** comes from that frame — the composer is docked above
+    /// the status bar, so it only moves when the extension chrome below the
+    /// editor changes — while the **top** is derived from the row count the
+    /// *current* draft needs. See [`App::composer_hit`] for why the second
+    /// half cannot come from the frame.
+    fn composer_rows_now(&self) -> Option<(u16, u16)> {
+        let (row, _, width, height) = self.composer_area();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let bottom = row.saturating_add(height).saturating_sub(1);
+        let rows_now = self
+            .prompt
+            .line_count(width, self.config.composer_max_rows)
+            .max(1) as u16;
+        let height_now = rows_now
+            .min(self.config.composer_max_rows.max(1) as u16)
+            .max(1);
+        Some((bottom.saturating_sub(height_now - 1), bottom))
+    }
+
+    /// Route a gesture through the autocomplete dropdown: a left press on a
+    /// candidate row highlights it, and the release on that same cell
+    /// accepts it; the whole press / drag / release belongs to the dropdown
+    /// so it can never start or extend a chat-log selection underneath.
+    ///
+    /// Returns `None` when the gesture does not belong to the dropdown at
+    /// all, so the caller keeps routing (the composer, the pill, the
+    /// scrollbar, the transcript selection).
+    ///
+    /// Upstream's shape is the same: `Editor.handleMouse` maps the event onto
+    /// its `SelectList`, which highlights on `press` and fires `onSelect` on
+    /// the `click` the renderer synthesizes when press and release land on
+    /// one cell (`components/editor.ts:620-640`, `select-list.ts:109-140`).
+    fn step_autocomplete_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                let Some(hit) = self.autocomplete_hit(gesture.x, gesture.y) else {
+                    // A press somewhere else owns nothing: drop a press that
+                    // never saw its release and let the gesture fall through.
+                    self.autocomplete_press = None;
+                    return None;
+                };
+                // A dropdown press is not the start of a transcript
+                // selection, the same rule as a composer press.
+                self.stop_selection_autoscroll();
+                self.selection_dragging = false;
+                self.tool_press = None;
+                let index = match hit {
+                    AutocompleteHit::Candidate(index) => Some(index),
+                    AutocompleteHit::Absorbed => None,
+                };
+                self.autocomplete_press = Some(AutocompletePress {
+                    x: gesture.x,
+                    y: gesture.y,
+                    index,
+                });
+                Some(match index {
+                    Some(index) if self.prompt.editor_mut().select_autocomplete_index(index) => {
+                        StepOutcome::Redraw
+                    }
+                    _ => StepOutcome::Idle,
+                })
+            }
+            // Only a release on the cell its own press landed on completes a
+            // candidate — upstream's `click` (press + release, no movement)
+            // is what `SelectList` accepts on, and a drag away from the row
+            // is not that click.
+            MouseGestureKind::Release(MouseButton::Left) => {
+                let pressed = self.autocomplete_press.take()?;
+                if (pressed.x, pressed.y) != (gesture.x, gesture.y) {
+                    return Some(StepOutcome::Idle);
+                }
+                let Some(index) = pressed.index else {
+                    // The `(n/m)` indicator row owns no candidate, so its
+                    // click completes nothing.
+                    return Some(StepOutcome::Idle);
+                };
+                // Re-assert the candidate the press chose: the window can
+                // re-centre when the highlight moves, so the cell no longer
+                // has to name the same row (see [`AutocompletePress`]).
+                self.prompt.editor_mut().select_autocomplete_index(index);
+                Some(match self.prompt.editor_mut().accept_autocomplete() {
+                    EditorAction::Changed => StepOutcome::Redraw,
+                    _ => StepOutcome::Idle,
+                })
+            }
+            MouseGestureKind::Drag(MouseButton::Left) | MouseGestureKind::Move
+                if self.autocomplete_press.is_some() =>
+            {
+                Some(StepOutcome::Idle)
+            }
+            _ => None,
+        }
+    }
+
+    /// Route a wheel notch that landed on the dropdown: a notch steers the
+    /// highlight instead of scrolling the chat log underneath
+    /// (upstream `SelectList.handleMouse`'s wheel branch,
+    /// `select-list.ts:110-118`).
+    ///
+    /// Returns `None` when the pointer is not over the list, so the caller
+    /// scrolls the viewport as before. A notch that *is* over the list is
+    /// swallowed even when it cannot move the highlight (already at an end),
+    /// the way the modal selectors do not leak a notch out either.
+    fn step_autocomplete_wheel(&mut self, up: bool, x: u16, y: u16) -> Option<StepOutcome> {
+        self.autocomplete_hit(x, y)?;
+        // One row per notch — upstream's `delta = wheelDelta < 0 ? -1 : 1`,
+        // *not* the chat log's `wheelScrollLines` step, and no Alt
+        // multiplier, because the list has no "pages" to skip.
+        let delta = if up { -1 } else { 1 };
+        Some(if self.prompt.editor_mut().scroll_autocomplete(delta) {
+            StepOutcome::Redraw
+        } else {
+            StepOutcome::Idle
+        })
+    }
+
+    /// Map an absolute pointer cell onto the autocomplete dropdown, if it is
+    /// over the list at all.
+    ///
+    /// `None` means "not the dropdown's": the gesture falls through to
+    /// whatever is underneath. [`AutocompleteHit::Absorbed`] means the cell
+    /// *is* the list's but no candidate sits under it (the `(n/m)` row).
+    ///
+    /// Two recorded facts decide whether there is anything to hit: the
+    /// rectangle the last frame painted ([`App::autocomplete_area`]) and the
+    /// dropdown's *current* state. The rectangle is the gate — a click can
+    /// never consume rows the reader did not see, and a dropdown that closed
+    /// (any edit that ends the token, or the `Ctrl+R` reverse search, which
+    /// cancels it when it opens) leaves a stale rectangle that
+    /// `is_showing_autocomplete` rejects. The **rows**, though, are derived
+    /// from the current state, exactly like [`App::composer_hit`] re-derives
+    /// the composer's top: the list hangs directly above the composer, which
+    /// grows with the draft, so a draft that grew between the frame and the
+    /// click moves the whole list with it.
+    fn autocomplete_hit(&self, x: u16, y: u16) -> Option<AutocompleteHit> {
+        let (_, column, width, height) = self.autocomplete_area();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let editor = self.prompt.editor();
+        if !editor.is_showing_autocomplete() {
+            return None;
+        }
+        if x < column || x >= column.saturating_add(width) {
+            return None;
+        }
+        let (top, _) = self.composer_rows_now()?;
+        // Rows the list may borrow: the transcript above the composer's top
+        // row, measured from the viewport the last frame painted.
+        let available = top.saturating_sub(self.viewport_origin().1) as usize;
+        let rows = editor.autocomplete_visible_rows(available);
+        if rows.is_empty() {
+            return None;
+        }
+        let list_top = top.saturating_sub(rows.len() as u16);
+        if y < list_top || y >= top {
+            return None;
+        }
+        Some(match rows[(y - list_top) as usize] {
+            Some(index) => AutocompleteHit::Candidate(index),
+            None => AutocompleteHit::Absorbed,
+        })
+    }
+
+    /// The autocomplete dropdown rectangle recorded by the last frame
+    /// (`(row, column, width, height)`; all zero when no dropdown was painted
+    /// — none open, or a custom editor component owning the region).
+    pub fn autocomplete_area(&self) -> (u16, u16, u16, u16) {
+        (
+            self.autocomplete_area.0.load(Ordering::Relaxed),
+            self.autocomplete_area.1.load(Ordering::Relaxed),
+            self.autocomplete_area.2.load(Ordering::Relaxed),
+            self.autocomplete_area.3.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Forget the painted dropdown, so no pointer cell can reach a list that
+    /// is not on screen (a stale rectangle would keep completing candidates
+    /// behind a custom editor component).
+    fn clear_autocomplete_area(&self) {
+        self.autocomplete_area.0.store(0, Ordering::Relaxed);
+        self.autocomplete_area.1.store(0, Ordering::Relaxed);
+        self.autocomplete_area.2.store(0, Ordering::Relaxed);
+        self.autocomplete_area.3.store(0, Ordering::Relaxed);
     }
 
     /// Route a non-wheel gesture through the chat-log text selection: start,
@@ -5253,11 +5510,13 @@ impl App {
                 // A custom editor component owns the region, and with it the
                 // pointer: forget the prompt's rectangle so a click cannot
                 // reach a composer that is not on screen (a stale rectangle
-                // would keep placing carets in a hidden draft).
+                // would keep placing carets in a hidden draft) — and the
+                // dropdown's, for the same reason.
                 self.composer_area.0.store(0, Ordering::Relaxed);
                 self.composer_area.1.store(0, Ordering::Relaxed);
                 self.composer_area.2.store(0, Ordering::Relaxed);
                 self.composer_area.3.store(0, Ordering::Relaxed);
+                self.clear_autocomplete_area();
                 self.paint_extension_lines(editor_area, lines, buf)
             }
             None => {
@@ -5546,6 +5805,12 @@ impl App {
     /// the highlighted row — instead of the App re-deriving a style from the
     /// text.
     fn paint_autocomplete(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
+        // The pointer path reads this rectangle between renders to map a cell
+        // onto a candidate ([`App::autocomplete_hit`]); recording it here —
+        // and nowhere else — is what keeps the hit-test on the rows that were
+        // actually painted. `clear` first: a frame that paints no dropdown
+        // (no candidates, no room) must leave nothing behind either.
+        self.clear_autocomplete_area();
         let editor = self.prompt.editor();
         if !editor.is_showing_autocomplete() || editor_area.width == 0 {
             return;
@@ -5558,17 +5823,25 @@ impl App {
             return;
         }
         let width = editor_area.width as usize;
-        let mut rows = editor.autocomplete_render_styled_lines(width);
+        // The rows are already clipped to the room above the composer — the
+        // editor drops the *top* rows, keeping the candidates nearest the
+        // prompt — and it is the same list
+        // [`Editor::autocomplete_visible_rows`] reports to the pointer.
+        let rows = editor.autocomplete_render_styled_lines(width, available);
         if rows.is_empty() {
             return;
         }
-        // On a short terminal keep the candidates nearest the prompt. The
-        // list is already windowed around the selection, so the tail is the
-        // part the user is actually steering.
-        if rows.len() > available {
-            rows.drain(..rows.len() - available);
-        }
         let first_row = editor_area.y - rows.len() as u16;
+        self.autocomplete_area.0.store(first_row, Ordering::Relaxed);
+        self.autocomplete_area
+            .1
+            .store(editor_area.x, Ordering::Relaxed);
+        self.autocomplete_area
+            .2
+            .store(editor_area.width, Ordering::Relaxed);
+        self.autocomplete_area
+            .3
+            .store(rows.len() as u16, Ordering::Relaxed);
         for (offset, line) in rows.iter().enumerate() {
             let y = first_row + offset as u16;
             // Blank the borrowed row first: a candidate is shorter than the
@@ -5688,10 +5961,14 @@ impl App {
                 CtMouseEventKind::ScrollUp => InputEvent::Mouse {
                     up: true,
                     alt: mouse.modifiers.contains(CtModifiers::ALT),
+                    x: mouse.column,
+                    y: mouse.row,
                 },
                 CtMouseEventKind::ScrollDown => InputEvent::Mouse {
                     up: false,
                     alt: mouse.modifiers.contains(CtModifiers::ALT),
+                    x: mouse.column,
+                    y: mouse.row,
                 },
                 CtMouseEventKind::Down(button) => InputEvent::MouseGesture(MouseGesture::new(
                     MouseGestureKind::Press(mouse_button(button)),

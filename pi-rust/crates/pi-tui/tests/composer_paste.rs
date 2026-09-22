@@ -424,6 +424,121 @@ fn undo_restores_a_deleted_marker_with_its_content() {
     assert_eq!(editor.expanded_text(), paste);
 }
 
+// ---------------------------------------------------------------------------
+// 5b. Deleting a marker renumbers the ones after it (upstream `higherIds`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deleting_the_first_marker_renumbers_the_survivor_and_keeps_its_content() {
+    let mut editor = Editor::new();
+    editor.insert_paste(&block(11));
+    editor.insert_paste(" and ");
+    editor.insert_paste(&block(12));
+    assert_eq!(editor.paste_marker_ids(), vec![1, 2]);
+
+    // Delete the first marker from the front, so the survivor is the one
+    // renumbered rather than the one removed.
+    editor.move_home();
+    assert_eq!(editor.delete(), EditorAction::Changed);
+    assert_eq!(editor.display_text(), " and [paste #1 +12 lines]");
+    assert_eq!(editor.paste_marker_ids(), vec![1]);
+    assert_eq!(
+        editor.paste_content(1),
+        Some(block(12).as_str()),
+        "the label moved down with its own content, not across to the removed one"
+    );
+    assert_eq!(editor.expanded_text(), format!(" and {}", block(12)));
+}
+
+#[test]
+fn deleting_a_middle_marker_keeps_the_numbering_contiguous() {
+    let mut editor = Editor::new();
+    editor.insert_paste(&block(11));
+    editor.insert_paste(" one ");
+    editor.insert_paste(&block(12));
+    editor.insert_paste(" two ");
+    editor.insert_paste(&block(13));
+    assert_eq!(editor.paste_marker_ids(), vec![1, 2, 3]);
+
+    // Park the caret just before the middle marker: one `move_right` steps
+    // over the whole first marker, then the five separator characters.
+    editor.move_home();
+    editor.move_right();
+    for _ in 0.." one ".len() {
+        editor.move_right();
+    }
+    assert_eq!(editor.delete(), EditorAction::Changed);
+
+    assert_eq!(
+        editor.display_text(),
+        "[paste #1 +11 lines] one  two [paste #2 +13 lines]"
+    );
+    assert_eq!(editor.paste_marker_ids(), vec![1, 2]);
+    assert_eq!(editor.paste_content(1), Some(block(11).as_str()));
+    assert_eq!(
+        editor.paste_content(2),
+        Some(block(13).as_str()),
+        "the third paste slid down to #2 with its own content"
+    );
+}
+
+#[test]
+fn renumbering_moves_the_caret_with_the_shorter_label() {
+    let mut editor = Editor::new();
+    // Eleven markers, so the last label is two digits wide and the rewrite
+    // (`#11` -> `#10`) genuinely shrinks the buffer. The single-space pastes
+    // between them are too small to fold, so they take no id.
+    for _ in 0..11 {
+        editor.insert_paste(&block(11));
+        editor.insert_paste(" ");
+    }
+    assert_eq!(editor.paste_marker_ids(), (1..=11).collect::<Vec<u32>>());
+    assert_eq!(editor.cursor(), editor.text().len());
+
+    // Delete the whole first marker.
+    editor.move_home();
+    assert_eq!(editor.delete(), EditorAction::Changed);
+
+    assert_eq!(editor.paste_marker_ids(), (1..=10).collect::<Vec<u32>>());
+    assert!(
+        !editor.display_text().contains("#11"),
+        "every label above the removed id moved down: {}",
+        editor.display_text()
+    );
+    // Every surviving label still expands to its own paste, and the last one
+    // is the ninth paste (the tenth was removed).
+    assert!(editor.display_text().ends_with("[paste #10 +11 lines] "));
+    let mut expected = String::from(" ");
+    for _ in 0..10 {
+        expected.push_str(&block(11));
+        expected.push(' ');
+    }
+    assert_eq!(
+        editor.expanded_text(),
+        expected,
+        "the separator that stood before the removed marker is still there"
+    );
+    assert_eq!(editor.cursor(), 0, "the caret stayed where it was deleted");
+}
+
+#[test]
+fn a_new_paste_after_a_deletion_takes_the_counter_on() {
+    // Upstream never decrements `pasteCounter`, so the *next* paste takes a
+    // number above the survivors even though the removed id was handed
+    // down — what stays contiguous is the draft, not the counter.
+    let mut editor = Editor::new();
+    editor.insert_paste(&block(11));
+    editor.insert_paste(&block(12));
+    editor.move_home();
+    editor.delete();
+    assert_eq!(editor.paste_marker_ids(), vec![1]);
+
+    editor.insert_paste(&block(13));
+    assert_eq!(editor.paste_marker_ids(), vec![1, 3]);
+    assert_eq!(editor.paste_content(3), Some(block(13).as_str()));
+    assert_eq!(editor.paste_content(1), Some(block(12).as_str()));
+}
+
 #[test]
 fn a_partial_marker_left_in_the_draft_is_never_expanded() {
     // Text that merely looks like a marker (no registry entry) stays literal:
