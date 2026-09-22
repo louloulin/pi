@@ -1,0 +1,46 @@
+{
+  "cols": 44,
+  "rows": 14,
+  "caption": "LUM-1412 chrome clip affordance: a real 44x14 PTY against the real release binary. The startup header folds to one row at this height (`locale::header_folded_line`), and that row is 51 characters for 44 columns. Before LUM-1412 the shared writer stopped at the edge and painted `hints hidden on a short terminal — Alt+H sho` — a fragment indistinguishable from a sentence that ends there. After LUM-1412 the row gives up the last partial word whole and marks the cut: `hints hidden on a short terminal — Alt+H…`. The `probe` rows are the post-fix behaviour (an unmet probe is an XFAIL, not a failure, so a pre-fix binary can run this same scenario as the A side of an A/B); the `reject` rows are the pre-fix fragment and must stay absent. Row 1 is the header row (row 0 is `pi v0.1.0`).",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle at 44x14 — the folded header row is marked, not cut",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "type a prompt",
+      "probe": [
+        {
+          "text": "hints hidden on a short terminal — Alt+H…",
+          "why": "post-fix: the row drops the trailing ` shows them` and marks the cut with `…` in the cell it stopped at"
+        },
+        {
+          "text": "> type a prompt",
+          "why": "the composer keeps its row on a 14-row terminal"
+        }
+      ],
+      "reject": [
+        {
+          "regex": "terminal\\s+—\\s+Alt\\+H\\s+[a-z]{1,6}\\s*$",
+          "why": "the pre-fix silent clip: any partial word after `Alt+H` (the measured frame read `Alt+H sho`) means the writer is cutting mid-word again with no mark"
+        },
+        {
+          "regex": "Alt\\+H sho\\s*$",
+          "why": "the exact pre-fix ending measured on the LUM-1367 binary, kept as a literal so a regression cannot hide behind the looser regex above"
+        }
+      ]
+    },
+    {
+      "label": "2. a draft still edits under the marked header",
+      "send": "hi",
+      "wait": 0.6,
+      "probe": [
+        {
+          "text": "> hi",
+          "why": "the composer is unaffected by the header's clip"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

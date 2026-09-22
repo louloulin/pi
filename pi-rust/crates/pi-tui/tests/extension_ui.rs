@@ -559,3 +559,57 @@ fn full_chrome_order_is_header_message_widgets_prompt_status_footer() {
         "the footer is the very last row"
     );
 }
+
+/// LUM-1412: an extension region narrower than the line it has to paint marks
+/// the cut instead of dropping the tail silently.
+///
+/// The header row is the real case: the driver's startup header is a
+/// [`TextComponent`], whose `render` ignores `width`, so on a 44-column
+/// terminal the 51-character folded-hint row (`locale::header_folded_line`)
+/// reached the shared writer intact and used to be clipped mid-word to
+/// `hints hidden on a short terminal — Alt+H sho`.
+#[test]
+fn an_overlong_extension_row_is_marked_not_silently_cut() {
+    let mut app = message_app();
+    app.set_header(Some(Box::new(TextComponent::new([
+        "hints hidden on a short terminal — Alt+H shows them",
+    ]))));
+
+    let snapshot = app.render_snapshot(44, 14);
+    assert_eq!(
+        snapshot.lines[0], "hints hidden on a short terminal — Alt+H…",
+        "the header row must say that it is showing a prefix"
+    );
+    assert_eq!(
+        snapshot.lines[0].chars().count(),
+        41,
+        "a whole word is given up, so the marked row is shorter than the region"
+    );
+
+    // Same region one column wider than the row: untouched, no mark.
+    app.set_header(Some(Box::new(TextComponent::new(["a row that fits"]))));
+    assert_eq!(app.render_snapshot(44, 14).lines[0], "a row that fits");
+}
+
+/// The `custom` overlay goes through the same writer, so its rows obey the
+/// same rule — the region is a box the overlay author drew, and a silent cut
+/// inside it is the same lie.
+#[test]
+fn an_overlong_overlay_row_is_marked_too() {
+    let mut app = message_app();
+    // Margin 0 makes the box the full width, so the row under test is exactly
+    // the overlay's own line.
+    let _handle = app.open_custom(
+        Box::new(TextComponent::new([
+            "0123456789 abcdefghij klmnopqrst uvwxyz",
+        ])),
+        CustomOptions::overlay().margin(0),
+    );
+
+    let snapshot = app.render_snapshot(24, 10);
+    assert_eq!(
+        snapshot.lines[4], "0123456789 abcdefghij…",
+        "the overlay row drops a whole word and marks it: {:?}",
+        snapshot.lines
+    );
+}

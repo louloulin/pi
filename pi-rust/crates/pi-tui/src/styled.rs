@@ -209,9 +209,33 @@ impl StyledSpan {
 /// A rendered line: one or more [`StyledSpan`]s in visual order.
 pub type StyledLine = Vec<StyledSpan>;
 
+/// The one-column mark a clipped line ends with (see
+/// [`write_styled_line_ellipsized`]).
+///
+/// `…` (U+2026) rather than the three-column `"..."` upstream's
+/// `truncateToWidth` appends: a chrome row is one row per line, so three
+/// columns are 7% of a 44-column terminal. The rest of the frame already
+/// speaks this dialect — the transcript marks a collapsed block with
+/// `* … (+6 lines, Ctrl+O to expand)` and the status bar's zone budget marks
+/// a dropped part with the same character (`status.rs::ELLIPSIS`).
+///
+/// Deliberate deviation from upstream, documented here so the next reader
+/// does not "fix" it back to `...`.
+pub const CLIP_MARK: char = '\u{2026}';
+
 /// Concatenate a line's text, dropping all styling.
 pub fn plain_text(line: &[StyledSpan]) -> String {
     line.iter().map(|span| span.text.as_str()).collect()
+}
+
+/// The rendered width of a line in columns.
+///
+/// Follows the crate-wide convention (see `visual_text.rs` and
+/// [`crate::hyperlink::visible_width`]): one column per character, wide glyphs
+/// included. Keeping this identical to [`write_styled_line_hyperlinked`]'s
+/// `col` counter is what makes the clip arithmetic below exact.
+fn line_width(line: &[StyledSpan]) -> usize {
+    line.iter().map(|span| span.text.chars().count()).sum()
 }
 
 /// Render a line as an ANSI string using each span's slot.
@@ -270,19 +294,117 @@ pub fn write_styled_line_hyperlinked(
     theme: &Theme,
     hyperlinks: bool,
 ) {
-    let mut col = 0u16;
-    for span in line {
+    write_styled_line_inner(
+        buf,
+        x0,
+        y,
+        max_width,
+        line,
+        theme,
+        WriteMode {
+            hyperlinks,
+            tail: Tail::Cut,
+        },
+    );
+}
+
+/// [`write_styled_line`] that says so when it has to drop a line's tail.
+///
+/// The plain writer stops writing at `max_width` and leaves the rest of the
+/// row blank, which renders "this line ends here" and "this line was cut"
+/// identically. That is how a 44-column terminal ended up painting the
+/// startup header as `hints hidden on a short terminal — Alt+H sho`: the
+/// reader cannot tell whether the sentence was over or the terminal too
+/// narrow.
+///
+/// This variant: the tail is dropped and the last written cell becomes
+/// [`CLIP_MARK`]. The mark is placed at the **last word boundary** at or
+/// before the budget when one is close, so a word is dropped whole instead of
+/// being left as a fragment (`sho`) — the same whole-semantic-unit rule the
+/// status bar's zone budget follows (`status.rs::NARROW_SACRIFICE_ORDER`).
+/// The remaining cells stay blank, so a shortened line never trails stale
+/// text from an earlier frame (the live path renders into ratatui's freshly
+/// reset back buffer).
+///
+/// A line that fits is written exactly like [`write_styled_line`] writes it,
+/// down to the cells; callers that pin golden frames at wide widths are not
+/// affected.
+pub fn write_styled_line_ellipsized(
+    buf: &mut Buffer,
+    x0: u16,
+    y: u16,
+    max_width: u16,
+    line: &[StyledSpan],
+    theme: &Theme,
+) {
+    write_styled_line_inner(
+        buf,
+        x0,
+        y,
+        max_width,
+        line,
+        theme,
+        WriteMode {
+            hyperlinks: false,
+            tail: Tail::Mark(CLIP_MARK),
+        },
+    );
+}
+
+/// What the writer does with a line wider than its region.
+#[derive(Debug, Clone, Copy)]
+enum Tail {
+    /// Stop at the region's edge — upstream's clip, and the pre-LUM-1412
+    /// behaviour of every caller.
+    Cut,
+    /// Give up the trailing partial word and put `mark` in the cell the cut
+    /// starts at.
+    Mark(char),
+}
+
+/// The two orthogonal switches the writers set: hyperlink emission, and how
+/// an overflowing line ends.
+#[derive(Debug, Clone, Copy)]
+struct WriteMode {
+    hyperlinks: bool,
+    tail: Tail,
+}
+
+/// The shared body of the two writers above.
+///
+/// `tail` decides whether an overflowing line is marked; the mark is only ever
+/// written when the line actually overflows, so the fitting path is
+/// byte-for-byte the plain one.
+fn write_styled_line_inner(
+    buf: &mut Buffer,
+    x0: u16,
+    y: u16,
+    max_width: u16,
+    line: &[StyledSpan],
+    theme: &Theme,
+    mode: WriteMode,
+) {
+    if max_width == 0 {
+        return;
+    }
+    let overflow = line_width(line) > max_width as usize;
+    let limit = match mode.tail {
+        Tail::Mark(_) if overflow => clip_keep(line, max_width as usize),
+        _ => max_width as usize,
+    };
+    let mut col = 0usize;
+    'spans: for span in line {
         let style = span.style.to_style(theme);
-        let link = if hyperlinks {
+        let link = if mode.hyperlinks {
             span.link.as_deref()
         } else {
             None
         };
         for ch in span.text.chars() {
-            if col >= max_width {
-                return;
+            if col >= limit {
+                break 'spans;
             }
-            if let Some(cell) = buf.cell_mut((x0 + col, y)) {
+            if let Some(cell) = buf.cell_mut((x0 + col as u16, y)) {
                 match link {
                     Some(url) => {
                         cell.set_symbol(&hyperlink(&ch.to_string(), url));
@@ -296,6 +418,60 @@ pub fn write_styled_line_hyperlinked(
             col += 1;
         }
     }
+    if overflow {
+        if let Tail::Mark(mark) = mode.tail {
+            // `clip_keep` always leaves the last column for the mark, so
+            // `col` is a cell the row owns even after a word-boundary cut.
+            if let Some(cell) = buf.cell_mut((x0 + col as u16, y)) {
+                cell.set_char(mark);
+                cell.set_style(style_at(line, limit, theme));
+            }
+        }
+    }
+}
+
+/// How many characters of `line` survive a marked clip at `max_width`
+/// columns.
+///
+/// Always leaves the last column for [`CLIP_MARK`]. Prefers the last
+/// whitespace boundary at or before that budget, so a word is dropped whole
+/// rather than left as a fragment. A boundary that would throw away more than
+/// half of the available columns (one long token after an early space) is not
+/// an affordance, it is a different bug: the caller then keeps every column
+/// and the word is cut — still marked.
+fn clip_keep(line: &[StyledSpan], max_width: usize) -> usize {
+    let budget = max_width.saturating_sub(1);
+    if budget == 0 {
+        return 0;
+    }
+    // `line` is strictly wider than `max_width` at every call site, so a
+    // character always exists at `budget`.
+    let mut boundary = None;
+    for (index, ch) in plain_text(line).chars().enumerate().take(budget + 1) {
+        if index > 0 && ch.is_whitespace() {
+            boundary = Some(index);
+        }
+    }
+    match boundary {
+        Some(index) if index * 2 >= budget => index,
+        _ => budget,
+    }
+}
+
+/// The style of the character at `index` in `line` — the cell the mark takes
+/// over inherits the colour of the text it replaced. Past the end, the last
+/// span's style.
+fn style_at(line: &[StyledSpan], index: usize, theme: &Theme) -> ratatui::style::Style {
+    let mut start = 0usize;
+    for span in line {
+        let end = start + span.text.chars().count();
+        if index < end {
+            return span.style.to_style(theme);
+        }
+        start = end;
+    }
+    line.last()
+        .map_or_else(Style::default, |span| span.style.to_style(theme))
 }
 
 /// Resolve a foreground slot to a backend colour.
@@ -330,6 +506,40 @@ fn value_to_color(value: Option<&ColorValue>, mode: ColorMode) -> Option<Color> 
 mod tests {
     use super::*;
     use crate::theme::builtin_theme;
+    use ratatui::layout::Rect;
+
+    /// The 51-character startup-header line LUM-1412 measured in a real
+    /// 44-column PTY (see `locale::header_folded_line`).
+    const FOLDED_HINT: &str = "hints hidden on a short terminal — Alt+H shows them";
+
+    fn plain_line(text: &str) -> StyledLine {
+        vec![StyledSpan::new(text, SpanStyle::PLAIN)]
+    }
+
+    /// Render `line` through the marked writer at `width` and return the whole
+    /// row (padding included).
+    fn marked_row(line: &[StyledSpan], width: u16, mode: ColorMode) -> (String, Buffer) {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 1,
+        };
+        let mut buf = Buffer::empty(area);
+        let theme = builtin_theme("dark", mode).expect("dark theme");
+        write_styled_line_ellipsized(&mut buf, 0, 0, width, line, &theme);
+        let row = (0..width)
+            .map(|x| buf.cell((x, 0)).expect("cell").symbol().to_string())
+            .collect();
+        (row, buf)
+    }
+
+    fn marked(line: &[StyledSpan], width: u16) -> String {
+        marked_row(line, width, ColorMode::None)
+            .0
+            .trim_end()
+            .to_string()
+    }
 
     #[test]
     fn ansi_wrapping_order_matches_upstream() {
@@ -375,5 +585,160 @@ mod tests {
         let theme = builtin_theme("dark", ColorMode::None).expect("plain theme");
         let style = SpanStyle::fg(ThemeColor::Accent).bold().to_style(&theme);
         assert_eq!(style, Style::default());
+    }
+
+    // ---- LUM-1412: the marked writer -------------------------------------
+
+    /// A line that fits is written exactly like the plain writer writes it,
+    /// padding included — the wide-terminal golden frames must not move.
+    #[test]
+    fn a_fitting_line_is_written_exactly_like_the_plain_writer() {
+        let line = plain_line("Faux test model  in 0 out 0");
+        let theme = builtin_theme("dark", ColorMode::None).expect("plain theme");
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 1,
+        };
+        let (mut marked_buf, mut plain_buf) = (Buffer::empty(area), Buffer::empty(area));
+        write_styled_line_ellipsized(&mut marked_buf, 0, 0, 40, &line, &theme);
+        write_styled_line(&mut plain_buf, 0, 0, 40, &line, &theme);
+        assert_eq!(marked_buf, plain_buf);
+        assert!(!marked(&line, 40).contains(CLIP_MARK));
+    }
+
+    /// The defect this round fixes, at the exact width it was measured at:
+    /// 44 columns of a 51-column startup-header line used to read
+    /// `… — Alt+H sho`, a fragment that says nothing about being cut.
+    #[test]
+    fn an_overlong_chrome_row_drops_a_whole_word_and_marks_it() {
+        let line = plain_line(FOLDED_HINT);
+        assert_eq!(
+            marked(&line, 44),
+            "hints hidden on a short terminal — Alt+H\u{2026}"
+        );
+        // The row is still exactly the region's width, so nothing else on
+        // the row is overwritten and the mark is the row's last cell.
+        let (row, _) = marked_row(&line, 44, ColorMode::None);
+        assert_eq!(row.chars().count(), 44);
+        assert_eq!(row.chars().nth(40), Some(CLIP_MARK));
+        assert!(row.chars().skip(41).all(|ch| ch == ' '), "{row:?}");
+    }
+
+    /// The narrower the row, the more the boundary rule has to give up — but
+    /// it always gives up a whole word where one is available, and only cuts
+    /// inside a word once the first two words no longer fit (12 columns).
+    #[test]
+    fn a_narrow_row_gives_up_whole_words_before_it_cuts_inside_one() {
+        let line = plain_line(FOLDED_HINT);
+        assert_eq!(
+            marked(&line, 50),
+            "hints hidden on a short terminal — Alt+H shows\u{2026}"
+        );
+        assert_eq!(
+            marked(&line, 40),
+            "hints hidden on a short terminal —\u{2026}"
+        );
+        assert_eq!(marked(&line, 30), "hints hidden on a short\u{2026}");
+        assert_eq!(marked(&line, 20), "hints hidden on a\u{2026}");
+        assert_eq!(marked(&line, 12), "hints hidde\u{2026}");
+    }
+
+    /// Every width from 1 to 120: the row is exactly as wide as the region,
+    /// every overflow is marked, and a whole-word cut never leaves the
+    /// fragments a hard clip produced on the header line before this round.
+    #[test]
+    fn a_marked_row_never_overruns_and_never_ends_in_a_fragment() {
+        let line = plain_line(FOLDED_HINT);
+        let fragments = ["sho", "sh"];
+        for width in 1..=120u16 {
+            let (row, _) = marked_row(&line, width, ColorMode::None);
+            assert_eq!(row.chars().count(), width as usize);
+            let visible = row.trim_end();
+            if (width as usize) < FOLDED_HINT.chars().count() {
+                assert!(
+                    visible.ends_with(CLIP_MARK),
+                    "width {width} was cut without a mark: {visible:?}"
+                );
+                for fragment in fragments {
+                    assert!(
+                        !visible.trim_end_matches(CLIP_MARK).ends_with(fragment),
+                        "width {width} left the fragment {fragment:?}: {visible:?}"
+                    );
+                }
+            } else {
+                assert_eq!(visible, FOLDED_HINT, "width {width}");
+            }
+        }
+    }
+
+    /// A single long token has no usable boundary before the budget, so the
+    /// word is cut at the edge — but still marked, and the row still fits.
+    #[test]
+    fn a_single_long_token_is_cut_at_the_edge_and_still_marked() {
+        let line = plain_line(&format!("a {}", "a".repeat(60)));
+        assert_eq!(marked(&line, 20), "a aaaaaaaaaaaaaaaaa\u{2026}");
+        // The boundary at index 1 exists but would throw away 38 of the 39
+        // usable columns, which is not an affordance: fall back to the edge.
+        assert_eq!(
+            marked(&line, 40),
+            "a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{2026}"
+        );
+    }
+
+    /// The mark takes over the cell of the character it replaced, so a clipped
+    /// themed span keeps its colour instead of turning into an unstyled cell.
+    #[test]
+    fn the_mark_inherits_the_style_of_the_text_it_replaces() {
+        let line: StyledLine = vec![
+            StyledSpan::new("hello wor", SpanStyle::fg(ThemeColor::Accent)),
+            StyledSpan::new("ld more text", SpanStyle::fg(ThemeColor::Error)),
+        ];
+        let (_, buf) = marked_row(&line, 12, ColorMode::TrueColor);
+        let accent = SpanStyle::fg(ThemeColor::Accent)
+            .to_style(&builtin_theme("dark", ColorMode::TrueColor).expect("dark theme"));
+        let error = SpanStyle::fg(ThemeColor::Error)
+            .to_style(&builtin_theme("dark", ColorMode::TrueColor).expect("dark theme"));
+        assert_eq!(buf.cell((0, 0)).expect("cell").style().fg, accent.fg);
+        assert_eq!(
+            buf.cell((11, 0)).expect("cell").symbol(),
+            CLIP_MARK.to_string()
+        );
+        assert_eq!(buf.cell((11, 0)).expect("cell").style().fg, error.fg);
+    }
+
+    /// Degenerate budgets: one column is the mark and nothing else, zero
+    /// columns writes nothing at all.
+    #[test]
+    fn a_one_column_row_is_just_the_mark_and_zero_columns_write_nothing() {
+        let line = plain_line(FOLDED_HINT);
+        assert_eq!(marked(&line, 1), "\u{2026}");
+        let (row, buf) = marked_row(&line, 0, ColorMode::TrueColor);
+        assert!(row.is_empty());
+        assert!(buf.content().iter().all(|cell| cell.symbol() == " "));
+    }
+
+    /// The plain writer keeps its old behaviour: a hard clip with no mark, so a
+    /// caller that wants the pre-LUM-1412 frame still has one.
+    #[test]
+    fn the_plain_writer_still_clips_without_a_mark() {
+        let line = plain_line(FOLDED_HINT);
+        let theme = builtin_theme("dark", ColorMode::None).expect("plain theme");
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 44,
+            height: 1,
+        };
+        let mut buf = Buffer::empty(area);
+        write_styled_line(&mut buf, 0, 0, 44, &line, &theme);
+        let row: String = (0..44)
+            .map(|x| buf.cell((x, 0)).expect("cell").symbol().to_string())
+            .collect();
+        assert_eq!(
+            row.trim_end(),
+            "hints hidden on a short terminal — Alt+H sho"
+        );
     }
 }

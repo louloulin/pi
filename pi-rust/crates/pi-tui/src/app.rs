@@ -296,7 +296,9 @@ use crate::search::{
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
-use crate::styled::{plain_text, write_styled_line, SpanStyle, StyledLine, StyledSpan};
+use crate::styled::{
+    plain_text, write_styled_line, write_styled_line_ellipsized, SpanStyle, StyledLine, StyledSpan,
+};
 use crate::theme::{
     builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
@@ -3484,7 +3486,7 @@ impl App {
             }
         }
         let line = [label];
-        write_styled_line(buf, column, row, width, &line, &self.theme);
+        write_styled_line_ellipsized(buf, column, row, width, &line, &self.theme);
         self.scroll_to_end.0.store(row, Ordering::Relaxed);
         self.scroll_to_end.1.store(column, Ordering::Relaxed);
         self.scroll_to_end.2.store(width, Ordering::Relaxed);
@@ -3606,7 +3608,7 @@ impl App {
             }
         }
         let line = [label];
-        write_styled_line(buf, column, row, width, &line, &self.theme);
+        write_styled_line_ellipsized(buf, column, row, width, &line, &self.theme);
         self.truncated_above.0.store(row, Ordering::Relaxed);
         self.truncated_above.1.store(column, Ordering::Relaxed);
         self.truncated_above.2.store(width, Ordering::Relaxed);
@@ -5055,6 +5057,17 @@ impl App {
     /// Paint a region's styled lines, resolving each [`SpanStyle`] through the
     /// live theme and truncating both the lines' width and a too-tall block's
     /// tail to the region.
+    ///
+    /// Width truncation is *marked* (`…`), never silent: every extension
+    /// widget — the startup header, the above/below-editor widgets, the
+    /// footer, and a `custom` overlay — goes through here, and a row that is
+    /// wider than the terminal is the normal case on a 44-column window. A
+    /// silent clip made `hints hidden on a short terminal — Alt+H sho`
+    /// indistinguishable from a line whose author wrote exactly that
+    /// (LUM-1412). Height truncation stays silent by design: a block with a
+    /// taller tail than the region is already summarised by the caller's own
+    /// content, and a mark on the region's last row would be confusable with
+    /// a width clip.
     fn paint_extension_lines(&self, rect: Rect, lines: &[StyledLine], buf: &mut Buffer) {
         if rect.width == 0 || rect.height == 0 {
             return;
@@ -5063,7 +5076,7 @@ impl App {
             if row as u16 >= rect.height {
                 break;
             }
-            write_styled_line(
+            write_styled_line_ellipsized(
                 buf,
                 rect.x,
                 rect.y + row as u16,

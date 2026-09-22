@@ -1,0 +1,26 @@
+# LUM-1412 — 44x14 frame, AFTER the fix (marked clip)
+
+Source: `cargo test -p pi-tui --test lum1412_chrome_clip -- --nocapture`
+(`frame_dump_for_the_screenshot`) on `work/LUM-1412`.
+This is `App::render_snapshot(44, 14)` — the frame buffer the driver hands to
+ratatui, not a PTY capture (the round's runner is a Windows box with no `pty`
+module). Row 1 is the folded startup-header row:
+  `hints hidden on a short terminal — Alt+H…`
+— a whole word given up (`shows`), the cut marked with `…`.
+
+FRAME DUMP cols=44 rows=14
+|pi v0.1.0                                   |
+|hints hidden on a short terminal — Alt+H…   |
+|> hello                                     |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|> type a prompt — /help for commands        |
+|Faux  lum1412-chrome-clip  in 0 out 0 ?/1.0k|
+END FRAME DUMP
