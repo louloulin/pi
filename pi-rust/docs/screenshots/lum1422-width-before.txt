@@ -1,0 +1,46 @@
+FRAME DUMP cols=88 rows=44
+|-- 1. CJK draft, 44x9 — wraps at the column edge, not the character count --------------|
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|> 把整个 tui 的宽度按终端列数计算，宽字符占两列▍                                        |
+|Faux  lum1422-narrow  in 0 out 0 ?/2.0k…                                                |
+|                                                                                        |
+|-- 2. mixed CJK/ASCII draft, 40x9 — the caret sits after the glyph it follows ----------|
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|> 宽度 width 计算 by columns▍                                                           |
+|Faux  lum1422-mixed  in 0 out 0 ?/2.0k…                                                 |
+|                                                                                        |
+|-- 3. transcript with CJK markdown + a wide-glyph table, 88x20 -------------------------|
+|> 用中文解释一下表格对齐                                                                |
+|  列宽对齐                                                                              |
+|                                                                                        |
+|  - 宽字符占两列                                                                        |
+|  - 表格边框按列数对齐                                                                  |
+|                                                                                        |
+|  ┌────┬─────────┐                                                                      |
+|  │ 名称 │ 说明      │                                                                  |
+|  ├────┼─────────┤                                                                      |
+|  │ 宽度 │ 按终端列数计算 │                                                             |
+|  ├────┼─────────┤                                                                      |
+|  │ 光标 │ 落在宽字符之后 │                                                             |
+|  └────┴─────────┘                                                                      |
+|* read · pi-rust/crates/pi-tui/src/visual_text.rs                                       |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|                                                                                        |
+|> type a prompt — /help for commands                                                    |
+|Faux  lum1422-transcript                                   in 0 out 0 ?/2.0k  ? for help|
+|                                                                                        |
+END FRAME DUMP

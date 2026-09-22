@@ -802,6 +802,16 @@ fn selection_end_column(end: &SelectionPoint, len: usize) -> usize {
     }
 }
 
+/// The first `count` characters of `text`, as an owned string.
+///
+/// The transcript search corpus records **character** offsets into a row
+/// (`SearchSegment::start_col`), while a buffer cell is a **column**: measuring
+/// the prefix with [`crate::width::columns`] is what turns one into the other
+/// once a wide glyph has spent two columns (LUM-1422).
+fn prefix_chars(text: &str, count: usize) -> String {
+    text.chars().take(count).collect()
+}
+
 /// Open transcript search state (upstream `ActiveSearch`,
 /// `packages/tui/src/tui-alt-screen.ts:500-511`).
 ///
@@ -3342,8 +3352,16 @@ impl App {
                 let row = segment.row - visible_start;
                 let text = plain_text(&lines[row]);
                 let len = text.chars().count();
-                let to = segment.end_col.min(len);
-                let from = segment.start_col.min(to);
+                // The corpus records character offsets into the row's text
+                // (`SearchSegment::start_col`), but a cell is a *column*: a
+                // wide glyph owns two. Highlighting `start_col..end_col` as
+                // cells put a Chinese match's marker several columns to the
+                // left — over whatever text happened to sit there (LUM-1422).
+                // Map the character range onto the display columns it covers.
+                let char_to = segment.end_col.min(len);
+                let char_from = segment.start_col.min(char_to);
+                let from = columns(&prefix_chars(&text, char_from));
+                let to = columns(&prefix_chars(&text, char_to));
                 let y = area.y + row as u16;
                 for col in from..to {
                     let x = area.x + col as u16;
