@@ -4330,7 +4330,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![big_paste('c'), first.clone(), second.clone()]
         );
-        assert!(ed.display_text().starts_with("[Image #1][paste #1 +11 lines]"));
+        assert!(ed
+            .display_text()
+            .starts_with("[Image #1][paste #1 +11 lines]"));
 
         // Killing a range that spans both kinds drops both payloads.
         ed.move_end();

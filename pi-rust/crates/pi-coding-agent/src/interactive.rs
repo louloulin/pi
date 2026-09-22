@@ -4123,7 +4123,12 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     // own selection + copy-on-select (`:1343-1379`, `:1449-1462`), which the
     // App mirrors. Text selection by the terminal itself is therefore
     // unavailable, matching upstream.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     request_keyboard_enhancement(&mut stdout);
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;

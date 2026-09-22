@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use pi_agent_core::{Agent, AgentOptions};
 use pi_ai::providers::faux::FauxProvider;
-use pi_protocol::{Api, Model, ProviderId};
+use pi_protocol::{Api, ImageContent, Model, ProviderId};
 use pi_tui::app::{App, AppConfig, StepOutcome};
 use pi_tui::input::{
     InputEvent, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
@@ -61,6 +61,13 @@ fn app() -> App {
         "you are pi",
     ));
     App::new(&agent, AppConfig::default())
+}
+
+fn image(data: &str) -> ImageContent {
+    ImageContent {
+        mime_type: "image/png".into(),
+        data: data.into(),
+    }
 }
 
 fn frame(app: &mut App) -> Buffer {
@@ -271,6 +278,73 @@ fn the_click_does_not_edit_the_draft() {
         "> he▍llo world",
         "the click moved the caret and changed nothing else"
     );
+}
+
+/// A folded paste renders as a multi-column `[paste #N +M lines]` marker, so
+/// the grid ↔ draft mapping has to measure it exactly like a chip label —
+/// otherwise a click anywhere after the marker would land somewhere else in
+/// the draft (LUM-1318 folded pastes, LUM-1327 pointer placement).
+#[test]
+fn a_click_after_a_folded_paste_marker_lands_on_the_clicked_character() {
+    let mut app = app();
+    let pasted = (1..=200)
+        .map(|row| format!("pasted line {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.paste_text(&pasted);
+    // Typed after the marker through the ordinary insert path, so the folded
+    // paste stays folded (`set_editor_text` is a programmatic write and drops
+    // stale payloads by design).
+    app.paste_text(" tail");
+    // The 200-line paste is one marker, so the draft is `[paste #1 +200
+    // lines] tail` on a single row.
+    assert_eq!(app.prompt().editor().paste_count(), 1);
+    let buf = frame(&mut app);
+    let (tail_x, tail_y) = cell_of(&buf, "tail");
+    let (marker_x, marker_y) = cell_of(&buf, "[paste");
+
+    assert_eq!(click(&mut app, tail_x, tail_y), StepOutcome::Redraw);
+    assert_eq!(caret_cell(&frame(&mut app)), Some((tail_x, tail_y)));
+
+    // A click *inside* the label resolves to the marker's own byte, never to
+    // a byte in the middle of its label text — the caret lands on the marker
+    // boundary just past it (the same rule a chip label follows).
+    let label_width = "[paste #1 +200 lines]".chars().count() as u16;
+    let (inside_x, inside_y) = cell_of(&frame(&mut app), "+200 lines");
+    assert_ne!(inside_x, marker_x, "the click is inside the label");
+    assert_eq!(click(&mut app, inside_x, inside_y), StepOutcome::Redraw);
+    assert_eq!(
+        caret_cell(&frame(&mut app)),
+        Some((marker_x + label_width, marker_y)),
+        "a click inside the label snaps onto the marker's own byte"
+    );
+
+    // Same rule for the other attachment kind: a chip is one sentinel that
+    // renders ten columns wide.
+    let agent = Agent::new(AgentOptions::new(
+        faux_model(),
+        Arc::new(FauxProvider::default()),
+        "you are pi",
+    ));
+    let mut chips = App::new(&agent, AppConfig::default());
+    chips.paste_image(image("one"));
+    chips.paste_text(" tail");
+    let chip_x = cell_of(&frame(&mut chips), "[Image").0;
+    let (chip_inside_x, chip_inside_y) = cell_of(&frame(&mut chips), "mage");
+    assert_eq!(
+        click(&mut chips, chip_inside_x, chip_inside_y),
+        StepOutcome::Redraw
+    );
+    assert_eq!(
+        caret_cell(&frame(&mut chips)),
+        Some((chip_x + "[Image #1]".chars().count() as u16, chip_inside_y)),
+        "the marker rule is the chip rule"
+    );
+    assert_eq!(chips.editor_text(), "[Image #1] tail");
+
+    // Neither click edited the draft: the marker still carries all 200 lines.
+    assert_eq!(app.prompt().editor().paste_count(), 1);
+    assert_eq!(app.editor_text(), format!("{pasted} tail"));
 }
 
 #[test]

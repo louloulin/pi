@@ -127,7 +127,10 @@ fn a_200_line_paste_keeps_the_composer_short() {
         composer_rows.len()
     );
     assert!(
-        snapshot.lines.iter().any(|line| line.contains("[paste #1 +200 lines]")),
+        snapshot
+            .lines
+            .iter()
+            .any(|line| line.contains("[paste #1 +200 lines]")),
         "the marker is what the pane shows: {:?}",
         snapshot.lines
     );
@@ -194,7 +197,10 @@ fn small_pastes_stay_literal() {
     app.paste_text(&thousand_chars);
     assert_eq!(app.prompt().editor().paste_count(), 0);
     assert!(!app.prompt().editor().text().contains(PASTE_CHAR));
-    assert_eq!(app.prompt().text(), format!("{ten_lines}\n{thousand_chars}"));
+    assert_eq!(
+        app.prompt().text(),
+        format!("{ten_lines}\n{thousand_chars}")
+    );
 
     // One row/length past either threshold folds.
     let mut folded = App::new(
@@ -245,9 +251,7 @@ fn a_folded_paste_and_image_chips_keep_their_own_payloads() {
     let submission = submit_with_enter(&mut app);
     assert_eq!(
         submission.text,
-        format!(
-            "before [Image #1] middle {first} after [Image #2]{second}"
-        )
+        format!("before [Image #1] middle {first} after [Image #2]{second}")
     );
     assert_eq!(submission.images, vec![image("one"), image("two")]);
     assert_eq!(submission.content_blocks().len(), 3);
@@ -264,7 +268,10 @@ fn backspace_takes_a_folded_paste_out_as_one_unit_and_renumbers() {
     let second = paste(30);
     app.paste_text(&first);
     app.paste_text(&second);
-    assert_eq!(app.prompt().text(), "[paste #1 +20 lines][paste #2 +30 lines]");
+    assert_eq!(
+        app.prompt().text(),
+        "[paste #1 +20 lines][paste #2 +30 lines]"
+    );
 
     // The cursor is at the end of the draft: one Backspace removes the whole
     // second marker, not one character of its label.
@@ -280,10 +287,7 @@ fn backspace_takes_a_folded_paste_out_as_one_unit_and_renumbers() {
         app.prompt().text(),
         "[paste #1 +20 lines][paste #2 +30 lines]"
     );
-    assert_eq!(
-        app.prompt().editor().paste_attachments()[1].text(),
-        second
-    );
+    assert_eq!(app.prompt().editor().paste_attachments()[1].text(), second);
 }
 
 #[tokio::test]
@@ -326,7 +330,10 @@ fn follow_up_submits_the_expanded_text() {
     match app.follow_up_from_editor() {
         pi_tui::app::FollowUpOutcome::Submitted(submission) => {
             assert_eq!(submission.text, pasted);
-            assert_eq!(submission.raw_text.as_deref(), Some(PASTE_CHAR.to_string().as_str()));
+            assert_eq!(
+                submission.raw_text.as_deref(),
+                Some(PASTE_CHAR.to_string().as_str())
+            );
         }
         other => panic!("an idle App submits the follow-up, got {other:?}"),
     }
