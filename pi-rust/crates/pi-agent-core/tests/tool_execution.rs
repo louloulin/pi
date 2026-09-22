@@ -25,7 +25,8 @@ use pi_ai::types::SimpleStreamOptions;
 use pi_ai::StreamError;
 use pi_protocol::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context as AgentContext, Message, Model,
-    ProviderId, Role, StopReason, TextContent, ToolCall, ToolDefinition, ToolResult, Usage,
+    ProviderId, Role, StopReason, TextContent, ToolCall, ToolDefinition, ToolExecutionMode,
+    ToolResult, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -137,6 +138,9 @@ impl StreamFn for ScriptedStream {
 struct MockToolExecutor {
     calls: Mutex<Vec<ToolCall>>,
     definitions: Vec<ToolDefinition>,
+    /// Whether the mock advertises `Parallel` for every tool, so a test can
+    /// drive the parallel batch path (the default is `Sequential`).
+    parallel: bool,
 }
 
 impl MockToolExecutor {
@@ -154,7 +158,14 @@ impl MockToolExecutor {
         Self {
             calls: Mutex::new(Vec::new()),
             definitions,
+            parallel: false,
         }
+    }
+
+    /// Same mock, advertising `Parallel` so the batch fans out.
+    fn with_parallel(mut self) -> Self {
+        self.parallel = true;
+        self
     }
 
     fn calls(&self) -> Vec<ToolCall> {
@@ -170,6 +181,14 @@ impl MockToolExecutor {
 impl ToolExecutor for MockToolExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         self.definitions.clone()
+    }
+
+    fn execution_mode(&self, _tool_name: &str) -> ToolExecutionMode {
+        if self.parallel {
+            ToolExecutionMode::Parallel
+        } else {
+            ToolExecutionMode::Sequential
+        }
     }
 
     async fn execute(
@@ -212,6 +231,20 @@ impl BeforeToolCall for BlockAlpha {
         } else {
             BeforeToolCallDecision::allow()
         }
+    }
+}
+
+/// `BeforeToolCall` hook that rewrites every call's arguments — upstream's
+/// "mutate `event.input` in place" contract, surfaced as a decision field.
+struct PatchArguments {
+    /// Value each call's arguments are replaced with.
+    patched: serde_json::Value,
+}
+
+#[async_trait]
+impl BeforeToolCall for PatchArguments {
+    async fn before_tool_call(&self, _call: &ToolCall) -> BeforeToolCallDecision {
+        BeforeToolCallDecision::allow().with_input(self.patched.clone())
     }
 }
 
@@ -323,6 +356,75 @@ async fn before_tool_call_block_skips_execution() {
         2,
         "the loop continues so the model can react to the block"
     );
+}
+
+#[tokio::test]
+async fn before_tool_call_can_patch_the_arguments_the_executor_runs() {
+    let executor = Arc::new(MockToolExecutor::new());
+    let stream = Arc::new(ScriptedStream::new(vec![
+        tool_call_message(&[("alpha", "call-a"), ("beta", "call-b")]),
+        text_reply("done"),
+    ]));
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model(), stream.clone(), "you are pi")
+            .with_tool_executor(executor.clone()),
+    );
+    agent.hooks_mut().before_tool_call = Some(Arc::new(PatchArguments {
+        patched: serde_json::json!({"patched": true}),
+    }));
+
+    agent
+        .loop_mut()
+        .run(vec![text_message("go")], |_| {})
+        .await
+        .expect("loop runs");
+
+    let calls = executor.calls();
+    assert_eq!(calls.len(), 2, "both calls still run");
+    for call in &calls {
+        assert_eq!(
+            call.arguments,
+            serde_json::json!({"patched": true}),
+            "the executor must receive the patched arguments for {}",
+            call.name
+        );
+    }
+    assert_eq!(
+        calls[0].id, "call-a",
+        "patching arguments must not disturb the call identity"
+    );
+}
+
+#[tokio::test]
+async fn patched_arguments_also_apply_in_parallel_batches() {
+    let executor = Arc::new(MockToolExecutor::new().with_parallel());
+    let stream = Arc::new(ScriptedStream::new(vec![
+        tool_call_message(&[("alpha", "call-a"), ("beta", "call-b")]),
+        text_reply("done"),
+    ]));
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model(), stream.clone(), "you are pi")
+            .with_tool_executor(executor.clone()),
+    );
+    agent.hooks_mut().before_tool_call = Some(Arc::new(PatchArguments {
+        patched: serde_json::json!({"patched": "parallel"}),
+    }));
+
+    agent
+        .loop_mut()
+        .run(vec![text_message("go")], |_| {})
+        .await
+        .expect("loop runs");
+
+    let calls = executor.calls();
+    assert_eq!(calls.len(), 2);
+    for call in &calls {
+        assert_eq!(call.arguments, serde_json::json!({"patched": "parallel"}));
+    }
+    let results = tool_results(&agent);
+    assert_eq!(results.len(), 2, "results stay in source order");
+    assert_eq!(results[0].tool_call_id, "call-a");
+    assert_eq!(results[1].tool_call_id, "call-b");
 }
 
 #[tokio::test]
