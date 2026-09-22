@@ -50,10 +50,21 @@
 //!   codex#21833). On a single-line draft that is the whole buffer, which
 //!   is the port's historical behaviour.
 //! * `Enter` returns [`EditorAction::Submit`] with the draft text (chips
-//!   expanded to their `[Image #N]` labels), except when the character
-//!   before the cursor is a backslash: then the backslash is deleted and a
-//!   newline is inserted instead (upstream's fallback for terminals that
-//!   cannot report `Shift+Enter`).
+//!   expanded to their `[Image #N]` labels, paste markers expanded to the
+//!   text they stand for), except when the character before the cursor is a
+//!   backslash: then the backslash is deleted and a newline is inserted
+//!   instead (upstream's fallback for terminals that cannot report
+//!   `Shift+Enter`).
+//! * A bracketed paste ([`InputEvent::Paste`], enabled by the driver) goes
+//!   through [`Editor::insert_paste`]: one undo unit, line endings
+//!   normalized, control bytes dropped, and nothing larger than
+//!   [`PASTE_MARKER_LINE_THRESHOLD`] lines / [`PASTE_MARKER_CHAR_THRESHOLD`]
+//!   characters is inserted inline — a bigger paste is stored behind a
+//!   `[paste #N +L lines]` marker whose content [`Editor::expanded_text`]
+//!   puts back for the model. `Backspace` / `Delete` remove a whole marker,
+//!   and `Left` / `Right` step over one, so a marker can never be torn in
+//!   half. Mirrors upstream `handlePaste`
+//!   (`packages/tui/src/components/editor.ts:1248`).
 //! * `tui.input.newLine` (`shift+enter`, `ctrl+j`) inserts a newline at the
 //!   cursor, so the composer grows instead of submitting. `tui.input.submit`
 //!   (`enter`) is resolved first, so rebinding it changes the submit chord.
@@ -194,7 +205,7 @@
 //! [`Prompt`]: crate::Prompt
 //! [`ImageContent`]: pi_protocol::ImageContent
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -331,6 +342,20 @@ impl HistorySearch {
     }
 }
 
+/// Opening of a paste marker, `[paste #`. The marker scan
+/// ([`expand_paste_markers`]) and [`Editor::expanded_text`] both look for
+/// this literal.
+pub const PASTE_MARKER_PREFIX: &str = "[paste #";
+
+/// A paste with more lines than this is replaced by a `[paste #N +L lines]`
+/// marker instead of being inserted inline (upstream `handlePaste`,
+/// `packages/tui/src/components/editor.ts:1316`).
+pub const PASTE_MARKER_LINE_THRESHOLD: usize = 10;
+
+/// A paste with more characters than this is replaced by a
+/// `[paste #N C chars]` marker (same upstream rule, the single-line half).
+pub const PASTE_MARKER_CHAR_THRESHOLD: usize = 1000;
+
 /// Sentinel standing in for one composer image chip in the buffer.
 ///
 /// U+FFFC OBJECT REPLACEMENT CHARACTER is Unicode's "object embedded in
@@ -406,6 +431,20 @@ pub fn parse_bash_command(text: &str) -> Option<BashCommand> {
     })
 }
 
+/// Result of [`Editor::insert_paste`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteInsertOutcome {
+    /// The paste carried no printable character at all; the draft is
+    /// untouched.
+    Ignored,
+    /// The text was inserted at the cursor.
+    Inserted,
+    /// The paste was larger than the marker thresholds; it is kept in the
+    /// registry and stands in the draft as a `[paste #N …]` marker with
+    /// this id.
+    Marker(u32),
+}
+
 /// Result of [`Editor::insert_image`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageInsertOutcome {
@@ -478,6 +517,12 @@ struct EditorSnapshot {
     /// Chip attachments at capture time, aligned with the buffer's
     /// [`CHIP_CHAR`] occurrences.
     images: Vec<ImageContent>,
+    /// Paste registry at capture time. Upstream's undo snapshot carries the
+    /// same map (`EditorSnapshot`, `components/editor.ts:222-226`), so
+    /// undoing away a marker also puts its content back.
+    pastes: BTreeMap<u32, String>,
+    /// Id counter at capture time, for the same reason.
+    paste_counter: u32,
 }
 
 /// Multi-line text editor with prompt history and an Emacs-style kill
@@ -543,6 +588,15 @@ pub struct Editor {
     /// Pasted image chips, aligned with the buffer's [`CHIP_CHAR`]
     /// occurrences: the n-th sentinel carries `images[n]`.
     images: Vec<ImageContent>,
+    /// Content of every paste that stands in the draft as a `[paste #N …]`
+    /// marker, keyed by the id the marker spells.
+    ///
+    /// Deliberately **not** dropped by [`Editor::clear`]: a prompt-history
+    /// recall restores the marker text, and expanding it again has to find
+    /// the content (upstream keeps its `pastes` map alive the same way).
+    pastes: BTreeMap<u32, String>,
+    /// Id handed to the next paste marker; monotonic per editor instance.
+    paste_counter: u32,
 }
 
 impl Default for Editor {
@@ -578,6 +632,8 @@ impl Editor {
             autocomplete_force: false,
             autocomplete_max_visible: DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
             images: Vec::new(),
+            pastes: BTreeMap::new(),
+            paste_counter: 0,
         }
     }
 
@@ -621,6 +677,11 @@ impl Editor {
     /// stack. Upstream clears its stack the same way when a prompt is
     /// submitted, so `Ctrl+-` cannot resurrect an already-sent prompt.
     /// Pasted images go with the text.
+    ///
+    /// The paste registry ([`Editor::pastes`]) deliberately survives: a
+    /// history recall puts the marker text back, and expanding it again has
+    /// to find the content. Upstream's `clear()` leaves its `pastes` map
+    /// alone for the same reason.
     ///
     /// An open reverse search is dropped too: the composer it previewed into
     /// no longer exists, and leaving the mode armed would trap the next keys
@@ -870,10 +931,23 @@ impl Editor {
             return;
         }
         let raw = match raw.or_else(|| rebuild_raw(trimmed, &images)) {
-            Some(raw) if raw.matches(CHIP_CHAR).count() == images.len() && !images.is_empty() => {
-                Some(raw)
+            // Chip entry: the sentinels must line up with the attachments one
+            // for one.
+            Some(raw) if !images.is_empty() => {
+                (raw.matches(CHIP_CHAR).count() == images.len()).then_some(raw)
             }
-            _ => None,
+            // Paste entry: the raw buffer has to carry at least one marker
+            // whose content is still known, so a recall can redraw the compact
+            // draft the user submitted instead of flattening the paste.
+            // Upstream stores the marker form in its history for the same
+            // reason (`pushHistoryEntry` keeps `getText()`).
+            Some(raw) => {
+                let spans = paste_marker_spans(&raw);
+                let explainable = !spans.is_empty()
+                    && spans.iter().all(|span| self.pastes.contains_key(&span.id));
+                explainable.then_some(raw)
+            }
+            None => None,
         };
         let entry = HistoryEntry {
             text: trimmed.to_string(),
@@ -979,15 +1053,16 @@ impl Editor {
         }
     }
 
-    /// Put `entry` into the composer, chips and all.
+    /// Put `entry` into the composer, chips and paste markers alike.
     ///
     /// A text-only (or persistent) entry lands as a plain text draft; an entry
-    /// captured in this process restores its attachments too, so
-    /// `image_count()` is back to what it was when the prompt was submitted.
+    /// captured in this process restores its raw buffer, so `image_count()` is
+    /// back to what it was when the prompt was submitted and a paste marker is
+    /// a marker again rather than the lines it stands for.
     fn restore_history_entry(&mut self, entry: &HistoryEntry) {
-        match (&entry.raw, entry.images.is_empty()) {
-            (Some(raw), false) => self.set_buffer_and_images(raw, entry.images.clone()),
-            _ => self.set_text_internal(entry.text.as_str()),
+        match &entry.raw {
+            Some(raw) => self.set_buffer_and_images(raw, entry.images.clone()),
+            None => self.set_text_internal(entry.text.as_str()),
         }
     }
 
@@ -1226,17 +1301,152 @@ impl Editor {
         EditorAction::Changed
     }
 
+    /// Insert a bracketed paste — the terminal's own paste, or the
+    /// `app.clipboard.pasteImage` text fallback — the way upstream
+    /// `handlePaste` does (`packages/tui/src/components/editor.ts:1248`).
+    ///
+    /// The whole paste is **one undo unit**, it closes the autocomplete
+    /// dropdown, it leaves history browsing, and it never triggers a
+    /// completion mid-text. The content is decoded (some terminals re-encode
+    /// control bytes inside a paste as CSI-u), line endings are normalized
+    /// (`\r\n` / `\r` → `\n`, tabs → four spaces — upstream
+    /// `normalizeText`), and every control character except `\n` is dropped.
+    ///
+    /// A paste larger than [`PASTE_MARKER_LINE_THRESHOLD`] lines or
+    /// [`PASTE_MARKER_CHAR_THRESHOLD`] characters is not inserted inline: it
+    /// is kept in the registry and the draft carries a
+    /// `[paste #N +L lines]` / `[paste #N C chars]` marker instead, so
+    /// dropping a log file into the composer still leaves a readable draft.
+    /// [`Editor::expanded_text`] puts the real content back for the model,
+    /// and `Backspace` over a marker removes marker *and* content in one
+    /// press.
+    pub fn insert_paste(&mut self, pasted: &str) -> PasteInsertOutcome {
+        if pasted.is_empty() {
+            return PasteInsertOutcome::Ignored;
+        }
+        self.cancel_autocomplete();
+        self.reset_history_navigation();
+        let decoded = decode_csi_u_control(pasted);
+        let normalized = normalize_pasted_text(&decoded);
+        let mut text: String = normalized
+            .chars()
+            .filter(|c| *c == '\n' || *c >= ' ')
+            .collect();
+        if text.is_empty() {
+            return PasteInsertOutcome::Ignored;
+        }
+        // A pasted path landing right after a word gets a separating space
+        // (upstream's `/^[/~.]/` rule): `see/src/main.rs` is never what the
+        // reader meant to say.
+        if needs_path_separator(&text, self.char_before_cursor()) {
+            text.insert(0, ' ');
+        }
+        self.push_undo_snapshot();
+        self.last_action = LastAction::Other;
+        let lines = text.split('\n').count();
+        let chars = text.chars().count();
+        if lines > PASTE_MARKER_LINE_THRESHOLD || chars > PASTE_MARKER_CHAR_THRESHOLD {
+            self.paste_counter += 1;
+            let id = self.paste_counter;
+            self.pastes.insert(id, text);
+            let marker = paste_marker_text(id, lines, chars);
+            self.insert_raw_at_cursor(&marker);
+            return PasteInsertOutcome::Marker(id);
+        }
+        self.insert_raw_at_cursor(&text);
+        PasteInsertOutcome::Inserted
+    }
+
+    /// Insert `text` at the cursor without touching the undo stack, the
+    /// history or the autocomplete dropdown — the inner step of a paste and
+    /// of a marker insertion (upstream `insertTextAtCursorInternal`).
+    fn insert_raw_at_cursor(&mut self, text: &str) {
+        self.buffer.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    /// The character immediately before the cursor, `None` at offset 0.
+    fn char_before_cursor(&self) -> Option<char> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.buffer[..self.cursor.min(self.buffer.len())]
+            .chars()
+            .next_back()
+    }
+
+    /// Content standing behind a paste marker, if it is still known.
+    pub fn paste_content(&self, id: u32) -> Option<&str> {
+        self.pastes.get(&id).map(String::as_str)
+    }
+
+    /// Ids of the known paste markers, ascending. Empty means the draft has
+    /// no paste standing behind a marker.
+    pub fn paste_marker_ids(&self) -> Vec<u32> {
+        self.pastes.keys().copied().collect()
+    }
+
+    /// The draft with every paste marker replaced by the text it stands
+    /// for: [`Editor::display_text`] with the pastes put back.
+    ///
+    /// This is what a submission carries — the model never sees
+    /// `[paste #1 +42 lines]` — and what the external editor is handed
+    /// (upstream `getExpandedText`, `components/editor.ts:1086`).
+    pub fn expanded_text(&self) -> String {
+        expand_paste_markers(&self.display_text(), &self.pastes)
+    }
+
+    /// The paste marker that ends exactly at `end`, when its content is
+    /// still known.
+    fn paste_marker_ending_at(&self, end: usize) -> Option<PasteMarkerSpan> {
+        paste_marker_spans(&self.buffer)
+            .into_iter()
+            .find(|span| span.end == end && self.pastes.contains_key(&span.id))
+    }
+
+    /// The paste marker that starts exactly at `start`, same condition.
+    fn paste_marker_starting_at(&self, start: usize) -> Option<PasteMarkerSpan> {
+        paste_marker_spans(&self.buffer)
+            .into_iter()
+            .find(|span| span.start == start && self.pastes.contains_key(&span.id))
+    }
+
+    /// Remove a whole marker and forget its content, keeping the cursor on
+    /// the side it was already on.
+    ///
+    /// Marker ids are **not** renumbered afterwards: upstream shifts the
+    /// registry down so the labels stay `#1, #2, …`, this port leaves the
+    /// gap (`[paste #2 +12 lines]` survives `#1` being deleted). The
+    /// content still expands correctly; only the label numbering carries the
+    /// gap. See `docs/LUM1328_PASTE.md` for why the shift was left out.
+    fn remove_paste_marker(&mut self, span: PasteMarkerSpan) {
+        self.remove_images_in_range(span.start..span.end);
+        self.buffer.replace_range(span.start..span.end, "");
+        if self.cursor > span.end {
+            self.cursor -= span.end - span.start;
+        } else if self.cursor > span.start {
+            self.cursor = span.start;
+        }
+        self.pastes.remove(&span.id);
+    }
+
     /// Delete the character before the cursor (`Backspace`).
     pub fn backspace(&mut self) -> EditorAction {
         if self.cursor == 0 {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
-        // Walk back one UTF-8 character.
-        let prev = self.prev_char_boundary(self.cursor);
-        self.remove_images_in_range(prev..self.cursor);
-        self.buffer.replace_range(prev..self.cursor, "");
-        self.cursor = prev;
+        // A whole paste marker goes in one press: deleting half of
+        // `[paste #1 +12 lines]` would leave text that no longer expands.
+        if let Some(span) = self.paste_marker_ending_at(self.cursor) {
+            self.remove_paste_marker(span);
+        } else {
+            // Walk back one UTF-8 character.
+            let prev = self.prev_char_boundary(self.cursor);
+            self.remove_images_in_range(prev..self.cursor);
+            self.buffer.replace_range(prev..self.cursor, "");
+            self.cursor = prev;
+        }
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
         self.update_autocomplete_after_edit(None);
@@ -1249,9 +1459,15 @@ impl Editor {
             return EditorAction::None;
         }
         self.push_undo_snapshot();
-        let next = self.next_char_boundary(self.cursor);
-        self.remove_images_in_range(self.cursor..next);
-        self.buffer.replace_range(self.cursor..next, "");
+        // Forward through a marker is atomic too (upstream segments graphemes
+        // with marker awareness in both directions).
+        if let Some(span) = self.paste_marker_starting_at(self.cursor) {
+            self.remove_paste_marker(span);
+        } else {
+            let next = self.next_char_boundary(self.cursor);
+            self.remove_images_in_range(self.cursor..next);
+            self.buffer.replace_range(self.cursor..next, "");
+        }
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
         self.update_autocomplete_after_edit(None);
@@ -1259,11 +1475,18 @@ impl Editor {
     }
 
     /// Move the cursor one character to the left.
+    ///
+    /// A paste marker is one character from the reader's point of view
+    /// (upstream's `isAtomicSegment`), so the cursor steps over the whole
+    /// `[paste #1 +12 lines]` instead of into the middle of it.
     pub fn move_left(&mut self) -> EditorAction {
         if self.cursor == 0 {
             return EditorAction::None;
         }
-        self.cursor = self.prev_char_boundary(self.cursor);
+        self.cursor = match self.paste_marker_ending_at(self.cursor) {
+            Some(span) => span.start,
+            None => self.prev_char_boundary(self.cursor),
+        };
         self.last_action = LastAction::Other;
         self.refresh_autocomplete_if_open();
         EditorAction::Changed
@@ -1274,7 +1497,10 @@ impl Editor {
         if self.cursor >= self.buffer.len() {
             return EditorAction::None;
         }
-        self.cursor = self.next_char_boundary(self.cursor);
+        self.cursor = match self.paste_marker_starting_at(self.cursor) {
+            Some(span) => span.end,
+            None => self.next_char_boundary(self.cursor),
+        };
         self.last_action = LastAction::Other;
         self.refresh_autocomplete_if_open();
         EditorAction::Changed
@@ -1758,6 +1984,8 @@ impl Editor {
         self.buffer = snapshot.buffer;
         self.cursor = snapshot.cursor.min(self.buffer.len());
         self.images = snapshot.images;
+        self.pastes = snapshot.pastes;
+        self.paste_counter = snapshot.paste_counter;
         self.preferred_col = None;
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
@@ -2227,6 +2455,8 @@ impl Editor {
             buffer: self.buffer.clone(),
             cursor: self.cursor,
             images: self.images.clone(),
+            pastes: self.pastes.clone(),
+            paste_counter: self.paste_counter,
         });
     }
 
@@ -2398,7 +2628,7 @@ impl Editor {
                 // through to the normal Enter handling when the
                 // prefix starts with `/`.
                 if prefix.starts_with('/') {
-                    return EditorAction::Submit(self.display_text());
+                    return EditorAction::Submit(self.expanded_text());
                 }
                 return applied;
             }
@@ -2503,7 +2733,7 @@ impl Editor {
                 self.backspace();
                 return self.insert_newline();
             }
-            return EditorAction::Submit(self.display_text());
+            return EditorAction::Submit(self.expanded_text());
         }
 
         // Meta chords are not part of the default table; ignore them
@@ -2648,6 +2878,180 @@ impl Editor {
 /// The visible label for the n-th composer image chip (1-based).
 fn chip_label(index: usize) -> String {
     format!("[Image #{index}]")
+}
+
+/// One `[paste #N …]` marker found in a draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PasteMarkerSpan {
+    /// Byte offset of the opening `[`.
+    start: usize,
+    /// Byte offset just past the closing `]`.
+    end: usize,
+    /// Id the marker spells.
+    id: u32,
+}
+
+/// The marker text one large paste is replaced with (upstream
+/// `handlePaste`: more than ten lines reports the line count, a long
+/// single-line paste reports the character count).
+fn paste_marker_text(id: u32, lines: usize, chars: usize) -> String {
+    if lines > PASTE_MARKER_LINE_THRESHOLD {
+        format!("{PASTE_MARKER_PREFIX}{id} +{lines} lines]")
+    } else {
+        format!("{PASTE_MARKER_PREFIX}{id} {chars} chars]")
+    }
+}
+
+/// Every paste marker in `text`, in buffer order.
+fn paste_marker_spans(text: &str) -> Vec<PasteMarkerSpan> {
+    let mut spans = Vec::new();
+    if !text.contains(PASTE_MARKER_PREFIX) {
+        return spans;
+    }
+    let mut search_from = 0usize;
+    while let Some(offset) = text[search_from..].find(PASTE_MARKER_PREFIX) {
+        let start = search_from + offset;
+        match parse_paste_marker(text, start) {
+            Some((end, id)) => {
+                spans.push(PasteMarkerSpan { start, end, id });
+                search_from = end;
+            }
+            // Not a marker after all — step past the prefix and keep
+            // looking, so literal text that merely starts the same way is
+            // never treated as one.
+            None => search_from = start + PASTE_MARKER_PREFIX.len(),
+        }
+    }
+    spans
+}
+
+/// Parse the marker that starts at `start`, returning `(end, id)`.
+///
+/// Accepts the three shapes upstream's `PASTE_MARKER_REGEX` accepts:
+/// `[paste #1]`, `[paste #1 +12 lines]`, `[paste #1 1234 chars]`.
+fn parse_paste_marker(text: &str, start: usize) -> Option<(usize, u32)> {
+    let rest = text.get(start + PASTE_MARKER_PREFIX.len()..)?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+    if digits == 0 {
+        return None;
+    }
+    let id: u32 = rest[..digits].parse().ok()?;
+    let tail = &rest[digits..];
+    let after = if let Some(r) = tail.strip_prefix(']') {
+        r
+    } else if let Some(r) = tail.strip_prefix(" +") {
+        let count = r.find(|c: char| !c.is_ascii_digit())?;
+        if count == 0 {
+            return None;
+        }
+        r[count..].strip_prefix(" lines]")?
+    } else if let Some(r) = tail.strip_prefix(' ') {
+        let count = r.find(|c: char| !c.is_ascii_digit())?;
+        if count == 0 {
+            return None;
+        }
+        r[count..].strip_prefix(" chars]")?
+    } else {
+        return None;
+    };
+    Some((text.len() - after.len(), id))
+}
+
+/// Replace every marker whose content is still known with that content.
+///
+/// An id nobody knows stays literal — the same tolerance upstream's
+/// `expandPasteMarkers` has for a marker it has no entry for.
+fn expand_paste_markers(text: &str, pastes: &BTreeMap<u32, String>) -> String {
+    let spans = paste_marker_spans(text);
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    for span in spans {
+        if let Some(content) = pastes.get(&span.id) {
+            out.push_str(&text[last..span.start]);
+            out.push_str(content);
+            last = span.end;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Decode the CSI-u spelling of a control byte some terminals produce
+/// *inside* a bracketed paste.
+///
+/// A tmux popup with `extended-keys-format=csi-u` re-encodes `\x0a` as
+/// `ESC [ 106 ; 5 u`, so the newline arrives as printable tail text and the
+/// paste stops being multi-line. Upstream decodes the same escapes back to
+/// their byte (`handlePaste`, `components/editor.ts:1257-1265`); the ASCII
+/// letters are the only ones it rewrites, and so is this.
+fn decode_csi_u_control(text: &str) -> String {
+    if !text.contains("\u{1b}[") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(rest) = rest.strip_prefix("\u{1b}[") {
+            let digits = rest.find(|c: char| !c.is_ascii_digit());
+            if let Some(width) = digits {
+                if width > 0 && rest[width..].starts_with(";5u") {
+                    if let Ok(code) = rest[..width].parse::<u32>() {
+                        let mapped = match code {
+                            97..=122 => Some(code - 96),
+                            65..=90 => Some(code - 64),
+                            _ => None,
+                        };
+                        if let Some(byte) = mapped.and_then(char::from_u32) {
+                            out.push(byte);
+                            index += 1 + 1 + width + 3;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        let ch = rest.chars().next().expect("index is inside the string");
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+/// Upstream `normalizeText`: CRLF / CR become LF, a tab becomes four
+/// spaces (the composer has no tab stops, and a literal tab is one column
+/// wide in [`crate::visual_text`]).
+fn normalize_pasted_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            }
+            '\t' => out.push_str("    "),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// True when a pasted path has to be separated from the word before the
+/// cursor (upstream's `if (/^[/~.]/.test(filteredText))` rule).
+fn needs_path_separator(text: &str, before: Option<char>) -> bool {
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if !matches!(first, '/' | '~' | '.') {
+        return false;
+    }
+    before.is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Remove every chip sentinel from `text`.

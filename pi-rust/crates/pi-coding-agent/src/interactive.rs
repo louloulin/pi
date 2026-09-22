@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    self as ct_event, DisableMouseCapture, EnableMouseCapture, Event as CtEvent,
+    self as ct_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+    EnableMouseCapture, Event as CtEvent,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -603,6 +604,17 @@ async fn run_loop(
         // (see `drain_ready_events`).
         if ct_event::poll(config.event_poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
+                // Bracketed paste is not expressible as an `InputEvent` (that
+                // enum is `Copy` and the payload is owned), so the driver
+                // routes it straight to the composer. Without this branch the
+                // payload was translated to `Ignored` and the paste was
+                // dropped entirely; with bracketed paste disabled, the same
+                // bytes used to arrive as keystrokes and every newline in a
+                // pasted block submitted the draft.
+                if let CtEvent::Paste(text) = &event {
+                    app.step_paste(text);
+                    continue;
+                }
                 let translated = App::translate_event(event);
                 if let Some(action) =
                     handle_input_event(&mut app, &agent, &mut options, &mut bash, translated)
@@ -4109,7 +4121,12 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     // own selection + copy-on-select (`:1343-1379`, `:1449-1462`), which the
     // App mirrors. Text selection by the terminal itself is therefore
     // unavailable, matching upstream.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     request_keyboard_enhancement(&mut stdout);
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -4160,6 +4177,7 @@ fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Res
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -4177,7 +4195,8 @@ fn resume_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resu
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableMouseCapture
+        EnableMouseCapture,
+        EnableBracketedPaste
     )?;
     request_keyboard_enhancement(terminal.backend_mut());
     terminal.hide_cursor()?;
@@ -4196,7 +4215,7 @@ fn run_external_editor(
     app: &mut App,
     command: &str,
 ) {
-    let draft = app.editor_text();
+    let draft = app.expanded_editor_text();
     let suspended = suspend_tui(terminal);
     let result = if suspended.is_ok() {
         crate::external_editor::edit_in_external_editor(

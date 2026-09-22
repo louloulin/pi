@@ -193,6 +193,24 @@ TUI 轴的其余未达项（7 个 silent `app.*`、`/settings` 剩余的 31 行�
 但上游就是 `label: entryName` + `description: displayPath`，**这不是 port 的错**（同条里的
 `#` 触发符缺口成立，保留为 P1）。
 
+### 0.8 LUM-1328 复测：composer 粘贴通道（tip `feature/pi.rs` + 本轮）
+
+本轮只改了 composer 的**粘贴**这条子轴，没有重测其它轴的测量输入，所以 §0.7 的
+聚合数字（加权 80.4%、TUI 模块 78.6%、`app.*` 43/44）**本轮不变**，本节只登记**实测的增量**，
+不凭空改写聚合值：
+
+| 轴 | 上轮公开值 | 本轮（实测） | 依据 |
+|---|---|---|---|
+| composer 粘贴通道 | 无（驱动不请求 bracketed paste；`CtEvent::Paste` → `Ignored`） | 已接通：上游 `handlePaste` 的 marker 模型 + 原子删除/移动 + 提交展开 + 历史回放 | `pi-rust/docs/LUM1328_PASTE.md` §1/§2 |
+| 真 PTY 断言（composer 粘贴场景） | — | 基线 `6a5a2faf2` **10 PASS / 7 XFAIL**，本轮 **17 PASS / 0 FAIL / 0 XFAIL** | `lum1328-paste{,-baseline}.png(.txt)` |
+| Rust `#[test]`（pi-tui 用例数） | — | `composer_paste` 新增 **23** 条；`cargo test -p pi-tui` 单 crate 949 passed | `crates/pi-tui/tests/composer_paste.rs` |
+| 上游 chatinput 对照面 | 编辑语义已对齐（LUM-1312/LUM-1317/LUM-1319） | 通道与折叠对齐；剩 5 条偏差（id 不重排、按词移动不原子、无 `paste_burst`、宽度口径 1 字符=1 列、`#` 触发符无 provider） | `LUM1328_PASTE.md` §6 |
+
+**未测项（诚实条目）**：本轮最终代码状态的全量 `cargo test -p pi-tui` 复跑因共享 50G overlay
+被并发 run 打满（ENOSPC）未完成 —— 改后状态是用 4 个相关 suite（含新增的 `composer_paste`）
+复测的，`fmt` 与 `pi-tui` / `pi-coding-agent` 两边 `clippy -D warnings` 全绿；全量复跑需在
+磁盘有余量的窗口补一次。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
