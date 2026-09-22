@@ -5552,13 +5552,15 @@ mod selection_tests {
                 (3, 5, true, false),
             ]
         );
-        // A wide glyph is two columns, so the word after it starts two columns
-        // later than its character index would suggest — the pointer column the
-        // hit-test uses is a cell column (LUM-1422).
+        // A wide glyph is two columns, so `ab` starts two columns later than
+        // its character index would suggest — the pointer column the hit-test
+        // uses is a cell column (LUM-1422). Word bounds split the two
+        // ideographs, each of which is its own selectable segment.
         assert_eq!(
             plain_segments("中文 ab"),
             vec![
-                (0, 4, true, false),
+                (0, 2, true, false),
+                (2, 4, true, false),
                 (4, 5, false, false),
                 (5, 7, true, false),
             ]
