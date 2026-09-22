@@ -4,7 +4,8 @@
 > `pi-rust/crates/pi-coding-agent/src/interactive.rs`,
 > `pi-rust/crates/pi-tui/tests/{composer_pastes,composer_paging}.rs`,
 > `pi-rust/scripts/{pty_capture.py,pty_scenarios/lum1318-paste-fold.json}`
-> branch: `work/LUM-1318` → `feature/pi.rs`
+> branch: `work/LUM-1318` → `feature/pi.rs`（基线 = `origin/feature/pi.rs` @ `3e7af2761`，
+> 即已含 LUM-1327 指针定位的 tip；§3 的真 PTY 与 §6.1 的门禁都在这条合并树上复拍/复跑）
 > reference: 上游 `packages/tui/src/components/editor.ts` 的 `handlePaste` /
 > `PASTE_MARKER_REGEX` / `pastes` 表 / `higherIds` 重编号 / `expandPasteMarkers`，
 > 以及 `packages/tui/src/terminal.ts:184` 的 `\x1b[?2004h`（bracketed paste 开关）
@@ -22,8 +23,8 @@
 
 | 行为 | 本轮之前（`6a5a2faf2` 树，真 PTY/单测实测） | 本轮之后（真 PTY 实测） |
 |---|---|---|
-| 200 行粘贴 | 整段 3091 字节内联进 buffer：composer 按 `composer_max_rows` 长到满窗，`↑` 上方还有 61+ 行 | 一个哨兵字符 → 一行 `> [paste #1 +200 lines]`（截图面板 2/6，帧 `d79f4804d0ef`/`76dc1686a82c`） |
-| 终端粘贴的送达方式 | 驱动从未开启 bracketed paste：`grep -rn 'EnableBracketedPaste\|Event::Paste'` 全仓 0 命中，粘贴按字节变成一串按键事件（连 `\n` 都按 `Ctrl+J` 逐字重放） | `setup_terminal`/`resume_tui` 开 `EnableBracketedPaste`、`suspend_tui` 关；`CtEvent::Paste` 走 `App::paste_text` → 折叠（`interactive.rs:4126,4176,4195,616`） |
+| 200 行粘贴 | 整段 3091 字节内联进 buffer：composer 按 `composer_max_rows` 长到满窗，`↑` 上方还有 61+ 行 | 一个哨兵字符 → 一行 `> [paste #1 +200 lines]`（截图面板 2/6，帧 `3818b6e2b45e`/`6925b8b04d10`，合并树复拍） |
+| 终端粘贴的送达方式 | 驱动从未开启 bracketed paste：`grep -rn 'EnableBracketedPaste\|Event::Paste'` 全仓 0 命中，粘贴按字节变成一串按键事件（连 `\n` 都按 `Ctrl+J` 逐字重放） | `setup_terminal`/`resume_tui` 开 `EnableBracketedPaste`、`suspend_tui` 关；`CtEvent::Paste` 走 `App::paste_text` → 折叠（`interactive.rs:4130,4201,4182,616`） |
 | 提交文本 | `EditorAction::Submit(self.display_text())`，buffer 里就是全文，模型收到全文 | `Submit(self.expanded_text())`：标记展开回原文，模型收到的仍是原文，**不会**收到 `[paste #N …]` |
 | 删除 | 粘贴的文本是普通字符：删一个字符只删一个字符，`Ctrl+U` 杀掉整行几百字符 | 哨兵是单字符：`Backspace`/`Delete` 一次删整块，kill 命中后剩余标记自动重编号（面板 9：`[paste #2 +11 lines]` 删掉 `#1` 后变 `[paste #1 +11 lines]`，且**载荷跟着标记走**） |
 | kill ring / yank | 无标记可复活 | 被 kill 的文本先 `strip_sentinels`，yank 不会插回一个没有载荷的标记（与图片 chip 同规则） |
@@ -52,6 +53,21 @@
 读路径使用（id 由位置推出），保留就只是死状态，因此没有引入；上游需要它，是因为它要把 id
 写进 buffer 文本再靠正则找回来。
 
+### 2.1 与 LUM-1327 指针定位的合入面
+
+`feature/pi.rs` 上已有 LUM-1327 的“点击 → 草稿光标”映射
+（`Editor::place_display_cursor` → `raw_byte_for_display_offset`）。网格 → 草稿的换算
+必须把标记当成它渲染出来的**整条宽度**，否则标记之后的每一个格子都会偏：
+
+* `raw_byte_for_display_offset` 的分支从 `CHIP_CHAR => 10 列` 扩成
+  `CHIP_CHAR => chip_label 宽度，PASTE_CHAR => self.paste_label_width(n)`；
+  `display_cursor` 同样按 `paste_label_width` 计数（chip 固定十列，标记宽度随摘要变）。
+* 回退面：只多一个 match 分支，标记宽度查表失败时是 `0` 列（不会 panic）。
+* 证据：`composer_click.rs` 新增
+  `a_click_after_a_folded_paste_marker_lands_on_the_clicked_character`——200 行粘贴 +` tail` 后，
+  点 `tail` 落在 `tail` 上（若把标记当成 1 列，会落到 `+200 lines` 里），点标记内部落在标记边界，
+  且点前后草稿逐字节不变、载荷仍是 200 行；同一用例用图片 chip 走了同一断言（“标记规则 == chip 规则”）。
+
 ## 3. 真 PTY 证据
 
 场景 `scripts/pty_scenarios/lum1318-paste-fold.json`（100×30，`--model faux/faux-model`，
@@ -65,21 +81,22 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
   --text-out docs/screenshots/lum1318-paste-fold.png.txt
 ```
 
-**断言 22/22 PASS**（`assert` 行也在 `.txt` 里，逐条可查）：
+**断言 22/22 PASS**（`assert` 行也在 `.txt` 里，逐条可查；下面这组哈希/帧号在合并树
+`3e7af2761` + 本轮提交上**重拍**过，与上一轮基于 `6a5a2faf2` 的那次是同一条 scenario）：
 
 | 面板 | 结论 | 关键帧 |
 |---|---|---|
-| 1 | idle，composer 一行 | `af8a48851164` |
-| 2 | 200 行 bracketed paste → **一行** `> [paste #1 +200 lines]▍`；`reject 'pasted line 1' / 'pasted line 200' / '  pasted line'` 全过（正文没进屏幕、transcript 也没多出东西） | `d79f4804d0ef` |
-| 3 | `Enter` 提交：transcript 出现 `pasted line 200`，且 `reject '[paste #'` → 模型拿到的是全文、不是标记 | `af599f364c35` |
-| 4 | `Up` 召回：草稿回到全文（history 存的是展开后的 prompt，见 §5.1），仍然 `reject '[paste #'` | `54a5a87e62d7` |
-| 5 | `Ctrl+C` 清空召回的大草稿，网格与面板 3 **逐字节相同**（帧哈希同为 `af599f364c35`）= 空 composer + 未动的 transcript | `af599f364c35` |
-| 6 | 再粘一次：又折叠成 `#1` | `76dc1686a82c` |
-| 7 | 标记就是普通草稿字符：` summary` 打在它旁边 | `43e0fb1cc7ce` |
-| 8 | 第二个 11 行粘贴 → `[paste #2 +11 lines]` | `fab9c86b9eb5` |
-| 9 | `Ctrl+A`+`Del` 删掉**第一个**标记：剩下的被重编号为 `#1` 且显示自己的 `+11 lines`（`reject '+200 lines'` 通过） | `e7afd30c6716` |
-| 10 | 紧接着 `Enter`：transcript 出现 `second paste row 11` → 重编号后**载荷没有串位**（若串位这里会送出 200 行那份） | `f99267f80883` |
-| 11 | 同一进程内的 A/B：同样的 200 行**按键重放**（无 bracketed paste 标记）→ 不折叠、草稿堆满窗口（`↑` 上方 61 行） | `c6325e9af5bd` |
+| 1 | idle，composer 一行 | `cafabf37f53e` |
+| 2 | 200 行 bracketed paste → **一行** `> [paste #1 +200 lines]▍`；`reject 'pasted line 1' / 'pasted line 200' / '  pasted line'` 全过（正文没进屏幕、transcript 也没多出东西） | `3818b6e2b45e` |
+| 3 | `Enter` 提交：transcript 出现 `pasted line 200`，且 `reject '[paste #'` → 模型拿到的是全文、不是标记 | `f1767c01ea16` |
+| 4 | `Up` 召回：草稿回到全文（history 存的是展开后的 prompt，见 §5.1），仍然 `reject '[paste #'` | `c9ac66dd1c38` |
+| 5 | `Ctrl+C` 清空召回的大草稿，网格与面板 3 **逐字节相同**（帧哈希同为 `f1767c01ea16`）= 空 composer + 未动的 transcript | `f1767c01ea16` |
+| 6 | 再粘一次：又折叠成 `#1` | `6925b8b04d10` |
+| 7 | 标记就是普通草稿字符：` summary` 打在它旁边 | `015fb7f35b2f` |
+| 8 | 第二个 11 行粘贴 → `[paste #2 +11 lines]` | `9c6c18324ae2` |
+| 9 | `Ctrl+A`+`Del` 删掉**第一个**标记：剩下的被重编号为 `#1` 且显示自己的 `+11 lines`（`reject '+200 lines'` 通过） | `e79cc503eb92` |
+| 10 | 紧接着 `Enter`：transcript 出现 `second paste row 11` → 重编号后**载荷没有串位**（若串位这里会送出 200 行那份） | `f0e60c3e9347` |
+| 11 | 同一进程内的 A/B：同样的 200 行**按键重放**（无 bracketed paste 标记）→ 不折叠、草稿堆满窗口（`↑` 上方 61 行） | `f0b6c4f42aac` |
 
 实测数字（同一组 run，字符网格逐帧可复算）：
 
@@ -88,6 +105,8 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
   `pasted line 6▍`，约等于 crossterm 一次 1024 字节读的量）。
 - 折叠判定边界：10 行 / 1000 字符**不折叠**，11 行 / 1001 字符折叠（`fold_thresholds_match_upstream`，
   真 PTY 侧由面板 2（200 行）与面板 8（11 行）覆盖）。
+- 网格→草稿映射（合入 LUM-1327 后新增，`composer_click` 用例）：点标记**之后**的字符落在该字符上、
+  点标记内部落在标记边界、点前后草稿不变——标记按整条渲染宽度参与换算。
 - 断言/截图之外没有“人工描述的成功”：22 条断言全部由 pyte 网格判定，`frame`/`px` 哈希写在 `.txt` 里。
 
 ## 4. 单元 / 集成测试
@@ -106,7 +125,11 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
 
 既有测试只改了一处：`composer_paging.rs:140` 用 `insert_str(&draft(12))` 造一个 12 行草稿，
 12 行 > 10 行阈值，现在会被折叠——该测试要的是“高草稿”而不是“折叠粘贴”，因此改成
-`set_text(draft(12))`（程序化写入路径，语义不变）。其余 400+ 条未改动、全绿。
+`set_text(draft(12))`（程序化写入路径，语义不变）。
+
+合入后另加一条指针侧的合入面用例（`composer_click.rs`，与 LUM-1327 的指针定位对齐）：
+`a_click_after_a_folded_paste_marker_lands_on_the_clicked_character`（见 §2.1）。其余未改动、全绿：
+全量 `cargo test --workspace --locked` **2651 passed / 0 failed / 2 ignored，169 suites，exit 0**（§6.1）。
 
 ## 5. 已知偏差与限制（真实，不粉饰）
 
@@ -130,7 +153,9 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
    仍在写帧），但之后的按键（包括 `Ctrl+C`）都不再被消费，20 秒后仍停在同一帧。
    60 行按键（890 B）可以正常走完，200 行（3091 B）停在 68 行（≈1023 B）。
    这与折叠无关：在同一台机器上用**不含本轮改动**的二进制
-   （`work/LUM-1327` 的 `/tmp/pi-ab/pi-baseline`）复现出完全相同的 68 行停顿。
+   （`work/LUM-1327` 树上构建的基线，`/tmp/pi-ab/pi-baseline`；该临时目录已在本轮的共享盘清理中
+   随 `work/LUM-1327` 的 `target/` 一并删除——两者都是可重建的构建产物，结论由当时记录的冻结帧
+   哈希（`c6325e9af5bd`，合并树复拍为 `f0b6c4f42aac`）支撑）复现出完全相同的 68 行停顿。
    本轮接上 bracketed paste 之后，真实粘贴不再走这条路径（一个 `Event::Paste`），
    但“大块按键字节”这条路径的问题仍在，建议单独立项（根因在 crossterm 读取/`poll(ZERO)` 层，
    不在编辑器）。
@@ -141,13 +166,16 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
 
 | 文件 | 改动 |
 |---|---|
-| `crates/pi-tui/src/editor.rs` | `PASTE_CHAR`(381) / `PASTE_FOLD_LINE_THRESHOLD`,`PASTE_FOLD_CHAR_THRESHOLD`(387,391) / `Paste`(463) / `should_fold_paste`(507) / `expanded_text`+`render`(840,846) / `paste_label_width`(913) / `paste_attachments`,`paste_count`(920,925) / `remove_pastes_in_range`,`remove_attachments_in_range`(996,1015) / `insert_folded_paste`(1497) / `strip_sentinels`(2838)；`display_text`/`display_cursor`/`kill_range`/`yank`/`yank_pop`/`undo`/`clear`/`set_text_internal`/`set_buffer_and_images`/`push_history_entry` 相应接线 |
+| `crates/pi-tui/src/editor.rs` | `PASTE_CHAR`(383) / `PASTE_FOLD_LINE_THRESHOLD`,`PASTE_FOLD_CHAR_THRESHOLD`(389,393) / `Paste`(465) / `should_fold_paste`(509) / `expanded_text`+`render`(842,848) / `paste_label_width`(915) / `paste_attachments`,`paste_count`(922,927) / `remove_pastes_in_range`,`remove_attachments_in_range`(1001,1020) / `insert_str` 折叠(1472) / `insert_folded_paste`(1501) / `strip_sentinels`(2878)；`display_text`(832)/`display_cursor`(886)/`raw_byte_for_display_offset`/`kill_range`/`yank`/`yank_pop`/`undo`/`clear`/`set_text_internal`/`set_buffer_and_images`/`push_history_entry` 相应接线 |
 | `crates/pi-tui/src/prompt.rs` | `Prompt::expanded_text`(90) |
-| `crates/pi-tui/src/app.rs` | `editor_text` 走展开文本(2544) / `follow_up_from_editor` 提交展开文本(2161) / `CtEvent::Paste` 显式归为 `Ignored`(5446) / `paste_text` 文档(4639) |
-| `crates/pi-coding-agent/src/interactive.rs` | `EnableBracketedPaste`(4126,4195) + `DisableBracketedPaste`(4177) + `Event::Paste` → `App::paste_text`(616) |
+| `crates/pi-tui/src/app.rs` | `editor_text` 走展开文本(2580) / `follow_up_from_editor` 提交展开文本(2197) / `CtEvent::Paste` 显式归为 `Ignored`(5649) / `paste_text` 文档(4824) |
+| `crates/pi-coding-agent/src/interactive.rs` | `EnableBracketedPaste`(4130,4201) + `DisableBracketedPaste`(4182) + `Event::Paste` → `App::paste_text`(616) |
 | `crates/pi-tui/tests/composer_pastes.rs` | 新增 8 条 App 级测试 |
-| `scripts/pty_capture.py` | 新增 `encode_paste`(179) 与 panel 的 `paste` 字段(768)：把面板内容当成一次 bracketed paste 发送 |
+| `crates/pi-tui/tests/composer_click.rs` | 新增 1 条：粘贴标记参与网格→草稿换算（与 LUM-1327 的合入面） |
+| `scripts/pty_capture.py` | 新增 `encode_paste` 与 panel 的 `paste` 字段：把面板内容当成一次 bracketed paste 发送 |
 | `scripts/pty_scenarios/lum1318-paste-fold.json`, `docs/screenshots/lum1318-paste-fold.png{,.txt}` | 11 面板 / 22 断言的实拍证据 |
+
+> 行号是**合并树**（`origin/feature/pi.rs` @ `3e7af2761` + 本轮提交）上的位置。
 
 门禁命令（本沙箱同一卷上同时跑 3 个 agent，按 LUM-1224 记录的磁盘缓解前缀执行）：
 
@@ -165,4 +193,34 @@ $ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO
 
 ### 6.1 门禁实测结果
 
-<!-- GATE-RESULTS -->
+全部在**最终树**（`origin/feature/pi.rs` @ `3e7af2761` + 本轮提交，工作树干净）上跑，
+rustc `1.85.0 (4d91de4e4 2025-02-17)`、`--locked`、`CARGO_PROFILE_{DEV,TEST}_DEBUG=0
+CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`：
+
+```console
+$ cargo fmt --all -- --check
+FMT-OK                                    # 无 diff
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+Finished `dev` profile [unoptimized] target(s) in 2m 17s
+CLIPPY-EXIT=0                             # 0 warnings / 0 errors
+$ cargo test --workspace --locked -- --test-threads=1
+TEST-EXIT=0
+# 169 suites：2651 passed / 0 failed / 2 ignored
+```
+
+实测数字：**169 suites、2651 passed、0 failed、2 ignored、exit 0**。用例数相对 `feature/pi.rs` tip
+（`2650 passed`，含 LUM-1327）多 19 条：`editor.rs` 折叠组 10 条 + `composer_pastes.rs` 8 条 +
+`composer_click.rs` 1 条。
+
+门禁之外的环境事实（不粉饰）：这台机器的 `/` 是 50G overlay，被 4~6 路并发 run 共用、
+每路都在编译同一套 Rust workspace（观测到单路 `target/` 长到 20G）。本轮因此出现过**与代码无关**的
+红：
+
+* 一次 `cargo test --workspace` 在 0 字节可用时挂掉 `pi-coding-agent` 的 `interactive::*` 77 条
+  （panic 全是一句 `tempdir: Custom { kind: StorageFull, ... }`）；
+* 一次 `history_file::clear_history_deletes_the_file_and_reports_the_path` 报
+  "pi --clear-history did not exit promptly: 41.387373805s"（当时 `df` 可用 0），
+  单独重跑 3/3 全绿（0.00s）。
+
+上述两次之后在磁盘回落（可用 ≥ 3G）重跑**同一条** `cargo test --workspace --locked` 得到
+上文 exit 0 的结果，因此把红归因于共享盘耗尽，而不是本轮改动。

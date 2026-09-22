@@ -1,6 +1,6 @@
 # lum1318-paste-fold.png — chars, 100x30 cells
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [1] 1. idle: one composer row  (cursor 100,29, frame af8a48851164, px a9538809e865, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [1] 1. idle: one composer row  (cursor 100,29, frame cafabf37f53e, px 5c510125177a, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -30,10 +30,10 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > type a prompt — /help for commands
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> type a prompt'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [2] 2. a 200-line bracketed paste folds into ONE marker — the composer is still one row and nothing was inlined  (cursor 36,28, frame d79f4804d0ef, px 89c0a63d11d3, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [2] 2. a 200-line bracketed paste folds into ONE marker — the composer is still one row and nothing was inlined  (cursor 36,28, frame 3818b6e2b45e, px a93634728567, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -63,13 +63,13 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 
 
 > [paste #1 +200 lines]▍
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> [paste #1 +200 lines]'
   assert PASS   reject       'pasted line 1'
   assert PASS   reject       'pasted line 200'
   assert PASS   reject       '  pasted line'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [3] 3. Enter hands the model the whole pasted text: `pasted line 200` is in the transcript, no marker ever is  (cursor 36,28, frame af599f364c35, px 7589ac1f8748, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [3] 3. Enter hands the model the whole pasted text: `pasted line 200` is in the transcript, no marker ever is  (cursor 36,28, frame f1767c01ea16, px 20a1a79bf5db, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -99,12 +99,12 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > pasted line 200                                                                                  ┃
   faux-model (faux) hello                                                                          ┃
 > type a prompt — /help for commands
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'pasted line 200'
   assert PASS   expect       '> type a prompt'
   assert PASS   reject       '[paste #'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [4] 4. Up recalls the submitted prompt: history keeps the expanded prompt (upstream `addToHistory` parity), so the draft returns full-size — no marker with nothing behind it  (cursor 36,28, frame 54a5a87e62d7, px f3ff5083c521, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [4] 4. Up recalls the submitted prompt: history keeps the expanded prompt (upstream `addToHistory` parity), so the draft returns full-size — no marker with nothing behind it  (cursor 36,28, frame c9ac66dd1c38, px e6cc65fac300, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -134,11 +134,11 @@ pi v0.1.0
   pasted line 198
   pasted line 199
   pasted line 200▍
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'pasted line 200'
   assert PASS   reject       '[paste #'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [5] 5. Ctrl+C clears that recalled draft (`Clear` is the whole-draft chord; `Ctrl+U` is line-scoped since LUM-1312) — the grid is byte-identical to panel 3, which is the point: an empty composer and an untouched transcript  (cursor 36,28, frame af599f364c35, px 7589ac1f8748, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [5] 5. Ctrl+C clears that recalled draft (`Clear` is the whole-draft chord; `Ctrl+U` is line-scoped since LUM-1312) — the grid is byte-identical to panel 3, which is the point: an empty composer and an untouched transcript  (cursor 36,28, frame f1767c01ea16, px 20a1a79bf5db, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -168,10 +168,10 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > pasted line 200                                                                                  ┃
   faux-model (faux) hello                                                                          ┃
 > type a prompt — /help for commands
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> type a prompt'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [6] 6. paste again: the 200-line text folds to #1 for this draft  (cursor 36,28, frame 76dc1686a82c, px 43c91b892738, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [6] 6. paste again: the 200-line text folds to #1 for this draft  (cursor 36,28, frame 6925b8b04d10, px b96af23f8b34, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -201,10 +201,10 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > pasted line 200                                                                                  ┃
   faux-model (faux) hello                                                                          ┃
 > [paste #1 +200 lines]▍
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> [paste #1 +200 lines]'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [7] 7. the marker is an ordinary draft character: text typed around it lands next to the label  (cursor 32,28, frame 43e0fb1cc7ce, px a5929af7b47c, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [7] 7. the marker is an ordinary draft character: text typed around it lands next to the label  (cursor 32,28, frame 015fb7f35b2f, px 0028e763d5cb, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -234,10 +234,10 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > pasted line 200                                                                                  ┃
   faux-model (faux) hello                                                                          ┃
 > [paste #1 +200 lines] summary▍
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> [paste #1 +200 lines] summary'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [8] 8. a second, 11-line paste folds as #2  (cursor 52,28, frame fab9c86b9eb5, px 8f27a84d319b, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [8] 8. a second, 11-line paste folds as #2  (cursor 52,28, frame 9c6c18324ae2, px abb5c84d9aee, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -267,10 +267,10 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > pasted line 200                                                                                  ┃
   faux-model (faux) hello                                                                          ┃
 > [paste #1 +200 lines] summary[paste #2 +11 lines]▍
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> [paste #1 +200 lines] summary[paste #2 +11 lines]'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [9] 9. Ctrl+A + Del removes the FIRST marker whole: the survivor is renumbered to #1 and shows its own `+11 lines` summary, not the 200-line one  (cursor 52,28, frame e7afd30c6716, px 42a529840275, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [9] 9. Ctrl+A + Del removes the FIRST marker whole: the survivor is renumbered to #1 and shows its own `+11 lines` summary, not the 200-line one  (cursor 52,28, frame e79cc503eb92, px 9a9035fc3669, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -300,11 +300,11 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > pasted line 200                                                                                  ┃
   faux-model (faux) hello                                                                          ┃
 > ▍ summary[paste #1 +11 lines]
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> ▍ summary[paste #1 +11 lines]'
   assert PASS   reject       '+200 lines'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [10] 10. Enter submits that survivor's payload: the 11-line text reaches the transcript (a marker would have sent the wrong text)  (cursor 36,28, frame f99267f80883, px 753ef6a15269, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [10] 10. Enter submits that survivor's payload: the 11-line text reaches the transcript (a marker would have sent the wrong text)  (cursor 36,28, frame f0e60c3e9347, px 66b5284772b6, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -334,11 +334,11 @@ Pi can explain its own features and look up its docs. Ask it how to use or exten
 > second paste row 11                                                                              ┃
   faux-model (faux) hello                                                                          ┃
 > type a prompt — /help for commands
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'second paste row 11'
   assert PASS   reject       '[paste #'
 
-===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [11] 11. A/B in the same binary: the same 200 lines sent WITHOUT bracketed-paste markers arrive as key presses — no fold, and the draft piles up past the composer window (↑ = hidden rows above)  (cursor 36,28, frame c6325e9af5bd, px 662a614aeb7e, alive=True) =====
+===== LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.  |  [11] 11. A/B in the same binary: the same 200 lines sent WITHOUT bracketed-paste markers arrive as key presses — no fold, and the draft piles up past the composer window (↑ = hidden rows above)  (cursor 36,28, frame f0b6c4f42aac, px 19afff5a19c6, alive=True) =====
 pi v0.1.0
   Esc to interrupt
   Ctrl+C to clear
@@ -368,7 +368,7 @@ pi v0.1.0
   pasted line 67
   pasted line 68
   pasted line ▍
-Faux test model  session-18d77cc66f0e473b                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d784243be8504d                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '↑'
   assert PASS   expect       'pasted line'
   assert PASS   expect       '  pasted line'
