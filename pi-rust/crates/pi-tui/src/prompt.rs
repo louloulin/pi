@@ -40,7 +40,7 @@
 
 use crate::editor::{Editor, EditorAction, HistorySearchStatus};
 use crate::input::{InputEvent, Key, KeyCode};
-use crate::visual_text::VisualLayout;
+use crate::visual_text::{cell_width, cells, VisualLayout};
 
 /// Rows the composer border costs: one rule above the draft, one below it.
 ///
@@ -290,8 +290,8 @@ impl Prompt {
             HistorySearchStatus::NoMatch => line.push_str("  no match · Esc cancel"),
         }
         let width = width as usize;
-        let mut row = char_truncate(&line, width);
-        while row.chars().count() < width {
+        let mut row = column_truncate(&line, width);
+        while cells(&row) < width {
             row.push(' ');
         }
         Some(row)
@@ -307,7 +307,7 @@ impl Prompt {
     /// is responsible for selecting the area.
     pub fn render_line(&self, width: u16) -> String {
         let label = self.label.as_str();
-        let label_width = label.chars().count();
+        let label_width = cells(label);
         let available = (width as usize).saturating_sub(label_width);
         let text = self.editor.display_text();
         let cursor = self.editor.display_cursor();
@@ -317,7 +317,7 @@ impl Prompt {
         if text.is_empty() && !self.placeholder.is_empty() {
             // Placeholder is truncated to `available` columns so we do
             // not overflow the line.
-            let placeholder = char_truncate(&self.placeholder, available);
+            let placeholder = column_truncate(&self.placeholder, available);
             line.push_str(&placeholder);
         } else {
             line.push_str(before);
@@ -325,10 +325,8 @@ impl Prompt {
             line.push_str(after);
         }
         // Pad to width.
-        if line.chars().count() < width as usize {
-            for _ in 0..(width as usize - line.chars().count()) {
-                line.push(' ');
-            }
+        while cells(&line) < width as usize {
+            line.push(' ');
         }
         line
     }
@@ -382,7 +380,7 @@ impl Prompt {
     /// does, so callers can reserve the row count ahead of time and the
     /// resulting layout does not jump when the buffer is typed into.
     pub fn body_width(&self, width: u16) -> usize {
-        wrap_available(width as usize, self.label.chars().count()).max(1)
+        wrap_available(width as usize, cells(&self.label)).max(1)
     }
 
     /// Columns of `width` the draft itself may use (the label takes the
@@ -518,7 +516,7 @@ impl Prompt {
         scroll: usize,
         markers: bool,
     ) -> (Vec<String>, usize) {
-        let label_width = self.label.chars().count();
+        let label_width = cells(&self.label);
         let available = self.body_width(width as u16);
         let text = self.editor.display_text();
 
@@ -617,7 +615,7 @@ impl Prompt {
             // The border carries `↑ N more` / `↓ N more` instead.
             return indent.to_string();
         }
-        let gutter = self.label.chars().count();
+        let gutter = cells(&self.label);
         // A one-row window has no room for two separate markers: it is both
         // the first and the last visible row, so it reports both sides.
         if show_rows == 1 && hidden_above > 0 && hidden_below > 0 {
@@ -637,9 +635,9 @@ impl Prompt {
         let mut line = String::with_capacity(width);
         line.push_str(&self.label);
         if !self.placeholder.is_empty() {
-            line.push_str(&char_truncate(&self.placeholder, available));
+            line.push_str(&column_truncate(&self.placeholder, available));
         }
-        while line.chars().count() < width {
+        while cells(&line) < width {
             line.push(' ');
         }
         line
@@ -675,7 +673,8 @@ struct WindowView {
 /// * otherwise the label truncated to whatever fits and closed with `...`.
 ///
 /// `hidden == 0` returns `"─".repeat(width)` — the plain rule upstream
-/// draws when nothing is scrolled away.
+/// draws when nothing is scrolled away. Every width here is **columns**
+/// (`cells`), like the rest of this module.
 fn border_row(direction: char, hidden: usize, width: usize) -> String {
     if hidden == 0 {
         return "─".repeat(width);
@@ -684,9 +683,16 @@ fn border_row(direction: char, hidden: usize, width: usize) -> String {
 }
 
 /// Upstream `createScrollBorder`.
+///
+/// Upstream's middle branch (the left-aligned `─── ↑ N more ` form) is
+/// unreachable in practice: the centred branch's gate is `label_width + 2 <=
+/// width` while the short form needs `width >= label_width + 3`, so the third
+/// branch is what a too-narrow rule falls into. It is ported anyway, and
+/// documented here instead of being silently dropped, because the two
+/// reachable forms are what the tests assert.
 fn scroll_border(direction: char, hidden: usize, width: usize) -> String {
     let label = format!(" {direction} {hidden} more ");
-    let label_width = label.chars().count();
+    let label_width = cells(&label);
     if label_width + 2 <= width {
         let left = (width - label_width) / 2;
         let mut out = "─".repeat(left);
@@ -695,17 +701,18 @@ fn scroll_border(direction: char, hidden: usize, width: usize) -> String {
         return out;
     }
     let indicator = format!("─── {direction} {hidden} more ");
-    let indicator_width = indicator.chars().count();
+    let indicator_width = cells(&indicator);
     if indicator_width <= width {
         let mut out = indicator;
         out.push_str(&"─".repeat(width - indicator_width));
         return out;
     }
     // Even the short form is too wide: keep its head and close with `...`,
-    // exactly like upstream's `sliceByColumn(indicator, 0, w, true) + "..."`.
-    let ellipsis = char_truncate("...", width);
-    let head = width.saturating_sub(ellipsis.chars().count());
-    let mut out = char_truncate(&indicator, head);
+    // exactly like upstream's `sliceByColumn(indicator, 0, w, true) + "..."`
+    // [`column_truncate`] is the column-aware equivalent of that slice.
+    let ellipsis = column_truncate("...", width);
+    let head = width.saturating_sub(cells(&ellipsis));
+    let mut out = column_truncate(&indicator, head);
     out.push_str(&ellipsis);
     out
 }
@@ -720,7 +727,7 @@ fn wrap_available(width: usize, label_width: usize) -> usize {
 fn blank_row(prefix: &str, width: usize) -> String {
     let mut line = String::with_capacity(width);
     line.push_str(prefix);
-    while line.chars().count() < width {
+    while cells(&line) < width {
         line.push(' ');
     }
     line
@@ -728,8 +735,14 @@ fn blank_row(prefix: &str, width: usize) -> String {
 
 /// Build a single prompt row (label + body + cursor + padding) padded to
 /// `width` columns. `cursor_in_row == usize::MAX` means "no cursor on
-/// this row"; any smaller value is the absolute column inside the body
+/// this row"; any smaller value is the absolute **column** inside the body
 /// where the `▍` marker should appear.
+///
+/// The marker is inserted between two characters, so its column has to be
+/// turned back into a character index: it goes before the first character
+/// whose cell range starts past `cursor_in_row`. Under an all-ASCII draft
+/// that is the same index the layout's column reports; for a CJK draft it
+/// keeps the marker on the same cell the layout measured (LUM-1336).
 fn build_prompt_row(
     prefix: &str,
     body: &str,
@@ -741,12 +754,20 @@ fn build_prompt_row(
     line.push_str(prefix);
     let body_chars: Vec<char> = body.chars().collect();
     if draw_cursor {
-        let col = cursor_in_row.min(body_chars.len());
-        for ch in &body_chars[..col] {
+        let mut col = 0usize;
+        let mut at = body_chars.len();
+        for (index, ch) in body_chars.iter().enumerate() {
+            if col >= cursor_in_row {
+                at = index;
+                break;
+            }
+            col += cell_width(*ch);
+        }
+        for ch in &body_chars[..at] {
             line.push(*ch);
         }
         line.push('▍');
-        for ch in &body_chars[col..] {
+        for ch in &body_chars[at..] {
             line.push(*ch);
         }
     } else {
@@ -754,7 +775,7 @@ fn build_prompt_row(
             line.push(*ch);
         }
     }
-    while line.chars().count() < width {
+    while cells(&line) < width {
         line.push(' ');
     }
     line
@@ -824,11 +845,20 @@ fn split_at_char(text: &str, idx: usize) -> (&str, &str) {
     (text, "")
 }
 
-fn char_truncate(text: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
+/// Truncate `text` to at most `max` **columns**, keeping whole characters
+/// (a wide glyph is never cut in half).
+fn column_truncate(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let width = cell_width(ch);
+        if used + width > max {
+            break;
+        }
+        used += width;
+        out.push(ch);
     }
-    text.chars().take(max).collect()
+    out
 }
 
 #[cfg(test)]

@@ -1,0 +1,100 @@
+{
+  "cols": 100,
+  "rows": 20,
+  "args": ["--model", "faux/faux-model"],
+  "notes": [
+    "LUM-1333 baseline — the *pre-fix* binary (`origin/feature/pi.rs` = 3e7af2761, built from the same tree) driven through the same real PTY with the same gestures as lum1333-autocomplete-pointer.json.",
+    "This scenario asserts the DEFECT, so it passes on the binary without the pointer routing: the press on a candidate row, the release that should accept it and the wheel notch inside the list all leave the dropdown exactly as it was, because none of them belonged to any layer — the press started a chat-log selection and the wheel went to the transcript viewport.",
+    "The fix turns every one of those assertions into the opposite (see lum1333-autocomplete-pointer.json, 20/20 PASS), which is what makes the pair an A/B rather than two unrelated screenshots."
+  ],
+  "caption": "LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.",
+  "panels": [
+    {
+      "label": "1. type `/`: the command dropdown is painted above the composer",
+      "send": "/",
+      "wait": 1.2,
+      "expect": ["❯ help", "(1/21)", {"regex": "^> /▍\\s*$"}]
+    },
+    {
+      "label": "2. press row 14 (`new`): the pre-fix binary does not react at all",
+      "send": "<MPress:6,14>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "text": "❯ help",
+          "why": "the highlight is still on the first candidate — the press went to the chat log"
+        },
+        {
+          "text": "❯ new",
+          "count": 0,
+          "why": "the pressed row was not selected"
+        },
+        {
+          "text": "(1/21)",
+          "why": "and the window indicator never moved"
+        }
+      ]
+    },
+    {
+      "label": "3. release on that same cell: nothing is completed",
+      "send": "<MRelease:6,14>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "regex": "^> /▍\\s*$",
+          "why": "the draft is still the bare trigger"
+        },
+        {
+          "text": "❯",
+          "why": "the dropdown is still up — no candidate was accepted"
+        }
+      ]
+    },
+    {
+      "label": "4. Ctrl+C clears the draft and `/` reopens the menu",
+      "send": "<C-c>/",
+      "wait": 1.2,
+      "expect": ["❯ help", "(1/21)"]
+    },
+    {
+      "label": "5. one wheel notch down inside the list: the highlight does not move",
+      "send": "<WheelDown:6,15>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "text": "❯ help",
+          "why": "the notch was not the list's: the highlight is untouched"
+        },
+        {
+          "text": "❯ clear",
+          "count": 0,
+          "why": "no candidate became the selection"
+        },
+        {
+          "text": "(1/21)",
+          "why": "and the window indicator never moved"
+        }
+      ]
+    },
+    {
+      "label": "6. one notch back up",
+      "send": "<WheelUp:6,15>",
+      "wait": 1.0,
+      "expect": ["❯ help", "(1/21)"]
+    },
+    {
+      "label": "7. a click on a transcript row above the list",
+      "send": "<Click:6,3>",
+      "wait": 1.0,
+      "expect": [
+        "❯ help",
+        "(1/21)",
+        {
+          "regex": "^> /▍\\s*$",
+          "why": "this path is unchanged by the fix"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-c><C-d>"
+}

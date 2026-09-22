@@ -23,20 +23,26 @@
 //!   cursor cannot address. Combining marks and ZWJ sequences therefore
 //!   contribute their own `unicode-width` (usually 0 for a combining
 //!   mark), exactly like [`crate::word_navigation`]'s char-level port.
-//! * Width counts characters, not terminal columns: this module follows
-//!   `pi-tui`'s documented crate-wide width convention
+//! * Width counts terminal **columns**, not characters: a frame buffer
+//!   cell is one column, so a wide glyph (CJK, most emoji) is two of them
+//!   and a combining mark is none. Measuring per character placed the
+//!   second half of every wide glyph on top of its neighbour, let a CJK
+//!   draft wrap at twice the composer's width, and made the `▍` marker
+//!   land on the wrong cell — the LUM-1336 defect, measured on a real PTY.
+//!   Upstream TS `wordWrapLine` and Martty's `visual_cursor` both measure
+//!   columns (`wcwidth`), so this is the parity direction.
+//!
+//!   The rest of the crate still measures one column per character
 //!   (`markdown.rs` "Width convention", `hyperlink::visible_width`,
-//!   `message::display_width`) where a wide glyph counts as one column,
-//!   rather than introducing a second convention the rest of the renderer
-//!   does not share. A CJK draft therefore wraps on character count, the
-//!   same way the transcript and the selector already measure it
-//!   (upstream TS `wordWrapLine` measures columns instead — tracked as a
-//!   crate-wide follow-up, not a composer-local one).
-//! * Break opportunities are whitespace runs only, upstream's first rule.
-//!   Upstream's second rule (break between two CJK characters) cannot
-//!   fire under a one-column-per-character measure: a wide glyph is
-//!   already one column here, so the force-break below is what upstream's
-//!   CJK rule would have reached.
+//!   `message::display_width`, `settings.rs`, `selector.rs`); those are the
+//!   *output* surfaces and are tracked separately in
+//!   `docs/LUM1336_COMPOSER_WIDTH.md`. Within the composer — layout, caret,
+//!   pointer mapping and paint — the column rule below is the only one.
+//! * Break opportunities are whitespace runs only, upstream's first rule,
+//!   plus the force-break at the row edge. Upstream's second rule (break
+//!   between two CJK characters) is subsumed: under a column measure two
+//!   wide glyphs are four columns, so the force-break fires exactly where
+//!   upstream's CJK rule would.
 //! * A row wider than the available columns still force-breaks at the
 //!   row edge, so a single long word is never clipped off-screen.
 
@@ -56,6 +62,11 @@ impl VisualRow {
     /// Number of characters the row renders.
     fn len(&self) -> usize {
         self.source.len()
+    }
+
+    /// Columns the row occupies on screen (see [`cell_width`]).
+    pub(crate) fn width(&self) -> usize {
+        self.text.chars().map(cell_width).sum()
     }
 }
 
@@ -153,27 +164,41 @@ impl VisualLayout {
     /// `(row, column)` of a cursor at `cursor` — the pair the renderer
     /// draws the `▍` marker at.
     ///
-    /// The column counts the row's rendered characters that start before
-    /// the cursor.
+    /// The column counts the **columns** of the row's rendered characters
+    /// that start before the cursor, so a wide glyph moves the marker by
+    /// two cells and a combining mark by none. Under an all-ASCII draft
+    /// this is the same number as the character count.
     pub(crate) fn caret(&self, cursor: usize) -> (usize, usize) {
         let row = self.row_of(cursor);
         let column = self
             .rows
             .get(row)
-            .map(|row| row.source.iter().take_while(|s| **s < cursor).count())
+            .map(|row| {
+                row.text
+                    .chars()
+                    .zip(&row.source)
+                    .take_while(|(_, source)| **source < cursor)
+                    .map(|(ch, _)| cell_width(ch))
+                    .sum()
+            })
             .unwrap_or(0);
         (row, column)
     }
 
-    /// Character offset a cursor should take to sit at `column` of `row`.
+    /// Character offset a cursor should take to sit at `column` — a
+    /// **column** of `row` per [`VisualLayout::caret`] — of that row.
     ///
-    /// Columns past the row's content land just after its last rendered
-    /// character, which is where the caret is drawn for "end of row".
+    /// The cursor sits before the first character whose cell range starts
+    /// past `column`, which is the largest character index whose prefix
+    /// width is still `<= column`. Columns past the row's content land just
+    /// after its last rendered character, which is where the caret is drawn
+    /// for "end of row".
     pub(crate) fn cursor_at(&self, row: usize, column: usize) -> usize {
         let Some(row) = self.rows.get(row) else {
             return 0;
         };
-        if let Some(offset) = row.source.get(column) {
+        let index = char_index_at_column(row, column);
+        if let Some(offset) = row.source.get(index) {
             return *offset;
         }
         row.source
@@ -182,13 +207,13 @@ impl VisualLayout {
             .unwrap_or(row.start)
     }
 
-    /// Characters the row renders.
-    pub(crate) fn row_len(&self, row: usize) -> usize {
-        self.rows.get(row).map(VisualRow::len).unwrap_or(0)
+    /// Columns the row occupies on screen.
+    pub(crate) fn row_width(&self, row: usize) -> usize {
+        self.rows.get(row).map(VisualRow::width).unwrap_or(0)
     }
 
     /// Character offset a **pointer click** on `column` of `row` places the
-    /// caret at.
+    /// caret at. `column` is a terminal column, like the click's `x`.
     ///
     /// Upstream `Editor.handleMouse`
     /// (`packages/tui/src/components/editor.ts:615-670`): the caret goes to
@@ -207,11 +232,27 @@ impl VisualLayout {
             return 0;
         };
         let is_last_of_line = self.last_of_line.get(row).copied().unwrap_or(true);
-        if !is_last_of_line && column >= line.len() && line.len() > 0 {
+        if !is_last_of_line && column >= line.width() && line.len() > 0 {
             return line.source.last().copied().unwrap_or(line.start);
         }
         self.cursor_at(row, column)
     }
+}
+
+/// Character index of the cursor that sits at cell `column` of `row`:
+/// the largest index whose prefix width is `<= column`.
+fn char_index_at_column(row: &VisualRow, column: usize) -> usize {
+    let mut index = 0usize;
+    let mut acc = 0usize;
+    for ch in row.text.chars() {
+        let width = cell_width(ch);
+        if acc + width > column {
+            break;
+        }
+        acc += width;
+        index += 1;
+    }
+    index
 }
 
 /// Character-offset ranges of the hard lines in `chars`, excluding the
@@ -244,7 +285,7 @@ fn wrap_line(chars: &[char], start: usize, end: usize, width: usize, rows: &mut 
     }
 
     let line = &chars[start..end];
-    let line_width: usize = line.iter().copied().map(display_width).sum();
+    let line_width: usize = line.iter().copied().map(cell_width).sum();
     if line_width <= width {
         rows.push(row_from(chars, start, end));
         return;
@@ -258,7 +299,7 @@ fn wrap_line(chars: &[char], start: usize, end: usize, width: usize, rows: &mut 
 
     for index in 0..line.len() {
         let ch = line[index];
-        let glyph_width = display_width(ch);
+        let glyph_width = cell_width(ch);
 
         if current_width + glyph_width > width {
             match wrap_at {
@@ -316,20 +357,33 @@ fn row_from(chars: &[char], from: usize, to: usize) -> VisualRow {
     }
 }
 
-/// Columns one character occupies, under the crate's width convention
-/// (see the module docs): every character is one column, except `\r` in a
-/// CRLF paste, which is invisible and must not consume one.
-fn display_width(ch: char) -> usize {
-    usize::from(ch != '\r')
+/// Columns one character occupies on screen.
+///
+/// A frame buffer cell is one terminal column, and [`ratatui`] measures a
+/// cell's symbol with `unicode-width` when it diffs the frame, so the
+/// composer has to lay its draft out with the same measure or the two
+/// disagree by one cell per wide glyph (LUM-1336). Concretely:
+///
+/// * a wide glyph (CJK, most emoji) is 2 columns,
+/// * a combining mark is 0,
+/// * a tab counts as 1 column, the pre-LUM-1336 convention — a paste is
+///   never re-entered as a tab and the composer's own insert paths have no
+///   tab key, so this only keeps a pasted tab from collapsing to nothing,
+/// * any other control character (`\r` in a CRLF paste, for example) is 0:
+///   it is invisible and must not consume a cell.
+pub(crate) fn cell_width(ch: char) -> usize {
+    if ch == '\t' {
+        return 1;
+    }
+    if ch.is_control() {
+        return 0;
+    }
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
-/// Columns a string occupies, under the crate's width convention.
-///
-/// Only the layout tests need the standalone form; production code
-/// measures per character while it wraps.
-#[cfg(test)]
-pub(crate) fn display_width_of(text: &str) -> usize {
-    text.chars().map(display_width).sum()
+/// Columns a string occupies on screen (see [`cell_width`]).
+pub(crate) fn cells(text: &str) -> usize {
+    text.chars().map(cell_width).sum()
 }
 
 #[cfg(test)]
@@ -341,7 +395,7 @@ mod tests {
         // "hello world" at width 6 wraps to "hello " / "world".
         let layout = VisualLayout::new("hello world", 6);
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.row_len(0), 6);
+        assert_eq!(layout.row_width(0), 6);
         // Any column past the first row's content stops at its last
         // character (the space at offset 5) instead of landing on 'w'
         // (offset 6).
@@ -396,13 +450,55 @@ mod tests {
     }
 
     #[test]
-    fn wide_glyphs_wrap_by_the_crate_width_convention() {
-        // `pi-tui` counts one column per character (see the module docs),
-        // so this is *not* an error: 8 CJK characters are 8 columns here,
-        // exactly how `message::display_width` / `hyperlink::visible_width`
-        // measure them.
-        assert_eq!(texts("你好世界你好世界", 8), vec!["你好世界你好世界"]);
-        assert_eq!(texts("你好世界你好世界", 4), vec!["你好世界", "你好世界"]);
+    fn wide_glyphs_wrap_by_columns_not_by_characters() {
+        // LUM-1336: four CJK characters are eight terminal columns, so they
+        // fill a width-8 row exactly and do *not* wrap at four of them like
+        // the pre-fix char measure did.
+        assert_eq!(texts("你好世界", 8), vec!["你好世界"]);
+        assert_eq!(texts("你好世界你好世界", 8), vec!["你好世界", "你好世界"]);
+        // 6 columns cannot hold 世(2)+界(2) after 你好(4): the force break
+        // lands between two wide glyphs, which is upstream's CJK rule.
+        assert_eq!(texts("你好世界", 6), vec!["你好世", "界"]);
+        // Mixed widths fill the row by columns: 3 ASCII (3) + 一 (2) = 5,
+        // 好 (2) would be 7 > 6.
+        assert_eq!(texts("abc你好世界", 6), vec!["abc你", "好世界"]);
+    }
+
+    #[test]
+    fn caret_and_pointer_map_columns_not_characters() {
+        let layout = VisualLayout::new("你好世界", 8);
+        assert_eq!(layout.rows()[0].text.chars().count(), 4, "four characters");
+        assert_eq!(layout.row_width(0), 8, "eight columns");
+        // Caret before each character, in columns: 2 per wide glyph.
+        assert_eq!(layout.caret(0), (0, 0));
+        assert_eq!(layout.caret(1), (0, 2));
+        assert_eq!(layout.caret(2), (0, 4));
+        assert_eq!(layout.caret(4), (0, 8));
+        // A pointer on column 5 — the second cell of 世, whose two cells are
+        // 4 and 5 — still lands before 世, i.e. at character offset 2;
+        // column 4 is the boundary where 世 starts.
+        assert_eq!(layout.cursor_at(0, 4), 2);
+        assert_eq!(layout.click_offset(0, 5), 2);
+        assert_eq!(layout.click_offset(0, 3), 1, "the second cell of 好");
+        assert_eq!(layout.click_offset(0, 0), 0);
+        // Past the row end: the trailing position of a single hard line.
+        assert_eq!(layout.click_offset(0, 9), 4);
+    }
+
+    #[test]
+    fn caret_columns_agree_with_the_rows_a_wrapped_cjk_draft_produces() {
+        // "你好世界你好世界" at width 8 wraps into two 4-character rows; a
+        // cursor in the middle of the *second* row is 12 columns in, which
+        // the renderer turns back into 4 columns on that row.
+        let layout = VisualLayout::new("你好世界你好世界", 8);
+        assert_eq!(layout.rows().len(), 2);
+        assert_eq!(layout.caret(4), (1, 0));
+        assert_eq!(layout.caret(6), (1, 4));
+        assert_eq!(layout.caret(8), (1, 8));
+        // The two halves are addressable as draft rows, so vertical motion
+        // keeps a column the row can hold.
+        assert_eq!(layout.cursor_at(1, 4), 6);
+        assert_eq!(layout.row_width(1), 8);
     }
 
     #[test]
@@ -501,7 +597,7 @@ mod tests {
         let layout = VisualLayout::new("abc\ndef", 10);
         assert_eq!(layout.cursor_at(0, 99), 3);
         assert_eq!(layout.cursor_at(1, 99), 7);
-        assert_eq!(layout.row_len(0), 3);
+        assert_eq!(layout.row_width(0), 3);
     }
 
     #[test]
@@ -511,10 +607,12 @@ mod tests {
     }
 
     #[test]
-    fn display_width_of_counts_characters_like_the_crate_does() {
-        assert_eq!(display_width_of("你好"), 2);
-        assert_eq!(display_width_of("ab"), 2);
-        assert_eq!(display_width_of("a\tb"), 3);
-        assert_eq!(display_width_of("a\rb"), 2, "a CRLF paste stays invisible");
+    fn cells_count_columns_like_the_terminal_does() {
+        assert_eq!(cells("你好"), 4, "each CJK glyph is two columns");
+        assert_eq!(cells("ab"), 2);
+        assert_eq!(cells("a	b"), 3, "a tab keeps the pre-fix one-column rule");
+        assert_eq!(cells("a\rb"), 2, "a CRLF paste stays invisible");
+        assert_eq!(cells("e\u{301}"), 1, "a combining accent occupies none");
+        assert_eq!(cells("界"), 2);
     }
 }

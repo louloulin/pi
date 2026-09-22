@@ -1,0 +1,81 @@
+{
+  "cols": 60,
+  "rows": 24,
+  "caption": "LUM-1336 CJK composer, A side: the pre-change binary at 60x24 lays a draft out one cell per *character*, so a wide glyph (2 terminal columns) shifts every following cell by one and ratatui's diff — which skips the cell after a wide symbol (`Buffer::diff` keeps `to_skip = symbol_width - 1`) — leaves the previous frame's cell on screen. Two glyphs render as `世C`; a 45-glyph draft (90 columns) renders as a single row showing only its first glyph plus that stale cell, i.e. the draft past the first character is invisible.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "final_send": "<C-d>",
+  "panels": [
+    {
+      "label": "1. idle at 60x24: single-row prompt placeholder",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "Faux test model",
+      "expect": [
+        "> type a prompt"
+      ]
+    },
+    {
+      "label": "2. control: 40 half-width characters stay on one row",
+      "send": "<C-u>ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN",
+          "why": "half-width characters are one column each, which is why the defect needs wide glyphs to show up"
+        }
+      ]
+    },
+    {
+      "label": "3. two wide glyphs: the cell after 世 is left as the previous frame's `C` (the diff skipped it)",
+      "send": "<C-u>世界",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> 世C",
+          "why": "the stale cell the pre-change build leaves behind"
+        },
+        {
+          "text": "> 世界",
+          "count": "<=0",
+          "why": "the second glyph is never painted: its cell is skipped as 'covered' by the wide glyph before it"
+        }
+      ]
+    },
+    {
+      "label": "4. 45 wide glyphs (90 columns) do not wrap: the row shows the first glyph and a stale cell, the rest is off-screen",
+      "send": "<C-u>中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> 中C",
+          "why": "one 45-cell row for a 90-column draft, with the stale cell from the previous frame"
+        },
+        {
+          "text": "  宽字符折行验证中文宽字符折行验证",
+          "count": "<=0",
+          "why": "no continuation row exists, so 91% of the draft is not on screen"
+        }
+      ]
+    },
+    {
+      "label": "5. same frame as 4: the caret marker is not on screen at all - it is placed by character count and its cell is skipped like every other cell after a wide glyph",
+      "send": "",
+      "wait": 0.4,
+      "probe": [
+        {
+          "text": "▍",
+          "count": "<=0",
+          "why": "no caret is painted anywhere on the composer row"
+        },
+        {
+          "text": "宽字符折行验证中文宽字符折行验证▍",
+          "count": "<=0",
+          "why": "and certainly not at the end of the draft the user is typing into"
+        }
+      ]
+    }
+  ]
+}

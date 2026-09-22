@@ -1,6 +1,6 @@
 # lum1327-composer-click.png — chars, 100x20 cells
 
-===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [1] 1. type a draft, then click in the middle of 'hello world'  (cursor 36,17, frame 7affc37e15c4, px e1d34b341c12, alive=True) =====
+===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [1] 1. type a draft, then click in the middle of 'hello world'  (cursor 36,17, frame 0ada6d4aac48, px 3be22278df81, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -20,11 +20,11 @@ hints hidden on a short terminal — Alt+H shows them
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > he▍llo world
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-Faux test model  session-18d78e23a82d91cb                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78e842ecdf053                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> he▍llo world'
   assert PASS   expect       'hello world▍' (x0)  — the caret left the end of the draft
 
-===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [2] 2. click on the label gutter: the caret goes to column 0  (cursor 5,17, frame 8c62f92ce6fe, px 4c871feadb65, alive=True) =====
+===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [2] 2. click on the label gutter: the caret goes to column 0  (cursor 5,17, frame f24458e93d5d, px 674b7ff28a7c, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -44,10 +44,10 @@ hints hidden on a short terminal — Alt+H shows them
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > ▍hello world
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-Faux test model  session-18d78e23a82d91cb                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78e842ecdf053                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> ▍hello world'
 
-===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [3] 3. Ctrl+E to the line end, Ctrl+J for a second line, then click on 'cond' of that row  (cursor 14,17, frame 71f572bb3767, px 9923a7620d58, alive=True) =====
+===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [3] 3. Ctrl+E to the line end, Ctrl+J for a second line, then click on 'cond' of that row  (cursor 14,17, frame b83060ac69ac, px 93c028d99d2b, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -67,12 +67,12 @@ hints hidden on a short terminal — Alt+H shows them
 > hello world
   se▍cond line
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-Faux test model  session-18d78e23a82d91cb                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78e842ecdf053                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> hello world'
   assert PASS   expect       '  se▍cond line'
   assert PASS   expect       '  second line▍' (x0)  — the caret moved onto the clicked character of the second row
 
-===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [4] 4. Ctrl+C clears the draft (the process stays alive)  (cursor 36,17, frame 3bf3c77c78c2, px 739958772e7b, alive=True) =====
+===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [4] 4. Ctrl+C clears the draft (the process stays alive)  (cursor 36,17, frame e5c663fa329d, px 8b4618412d50, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -92,11 +92,11 @@ hints hidden on a short terminal — Alt+H shows them
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 > type a prompt — /help for commands
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-Faux test model  session-18d78e23a82d91cb                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78e842ecdf053                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'type a prompt'
   assert PASS   reject       '  second line'
 
-===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [5] 5. a click on the last cell of a wrapped row keeps the caret on that row  (cursor 36,17, frame c286f9c6b804, px 7584a11a931f, alive=True) =====
+===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [5] 5. a click on the last cell of a wrapped row keeps the caret on that row  (cursor 36,17, frame cbfb9b50407e, px 293e4fa7414d, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -116,11 +116,11 @@ hints hidden on a short terminal — Alt+H shows them
 > wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww▍
   wwwwwwwwwwwwwwwwwwwwww
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-Faux test model  session-18d78e23a82d91cb                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78e842ecdf053                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '^> w{97}▍'  — the caret is on the first visual row's last character, not on the next visual row
   assert PASS   expect       '^> w{97}▍w' (x0)  — and it did not spill onto the row below
 
-===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [6] 6. a click on the status bar (outside the composer) moves nothing  (cursor 36,17, frame c286f9c6b804, px 7584a11a931f, alive=True) =====
+===== LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.  |  [6] 6. a click on the status bar (outside the composer) moves nothing  (cursor 36,17, frame cbfb9b50407e, px 293e4fa7414d, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -140,7 +140,7 @@ hints hidden on a short terminal — Alt+H shows them
 > wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww▍
   wwwwwwwwwwwwwwwwwwwwww
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-Faux test model  session-18d78e23a82d91cb                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78e842ecdf053                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       'Faux test model'
   assert PASS   expect       '^> w{97}▍' (x1)  — exactly one caret, still on the row the previous click placed it on
   assert PASS   expect       '▍Faux test model' (x0)  — a click below the composer never places a caret in the status bar
