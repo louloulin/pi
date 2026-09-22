@@ -289,7 +289,8 @@ use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsMana
 use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
 use crate::locale::{
     format_chord, HeaderKey, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH,
-    HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, STARTUP_HINTS,
+    HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, SHORTCUT_OVERLAY_CLOSE_EN,
+    SHORTCUT_OVERLAY_CLOSE_ZH, SHORTCUT_OVERLAY_TITLE_EN, SHORTCUT_OVERLAY_TITLE_ZH, STARTUP_HINTS,
 };
 use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
 use crate::mouse_region::{MouseRegion, MouseRegionPoint};
@@ -310,7 +311,7 @@ use crate::theme::{
     ThemeError,
 };
 use crate::visual_text::VisualLayout;
-use crate::width::{char_columns, columns};
+use crate::width::{char_columns, columns, truncate_columns};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -320,6 +321,64 @@ const WHEEL_SCROLL_LINES: usize = 1;
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
 const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+
+/// Chords are left-aligned into at least this many columns on a `?` overlay
+/// row, so the descriptions line up (codex draws the same table in
+/// `bottom_pane/footer.rs`). The actual column is the widest chord in the set
+/// when that is wider (`Ctrl+P/Shift+Ctrl+P`), so no entry pushes its own
+/// description out of the table's alignment.
+const SHORTCUT_CHORD_COLUMN: usize = 16;
+
+/// Minimum width of one column before the `?` overlay splits into two; below
+/// it a single column keeps every description whole (LUM-1464).
+const SHORTCUT_COLUMN_MIN: usize = 36;
+
+/// Longest rule the `?` overlay's title row draws, so a wide terminal does not
+/// get a 200-column line of `─`.
+const SHORTCUT_RULE_MAX: usize = 40;
+
+/// Append one `<chord> <description>` cell to a shortcut-overlay row: the
+/// chord padded to `chord_column`, the description, then blanks out to
+/// `cell_width` so a second column lands on the same edge every row.
+///
+/// Every measurement is in terminal columns, not characters: the Chinese
+/// descriptions are full-width, and a char-counted pad shifts the second
+/// column left by one cell per CJK glyph (the LUM-1418 / LUM-1426 class of
+/// defect). A description wider than its cell is marked with `…` rather than
+/// silently cut (LUM-1412), and trailing blanks are skipped on a
+/// single-column row where they would only make the frame look trimmed.
+fn push_shortcut_cell(
+    row: &mut StyledLine,
+    entry: &(String, String),
+    cell_width: usize,
+    chord_column: usize,
+) {
+    let (chord, description) = entry;
+    let label = format!("  {chord} ");
+    let label_width = columns(&label);
+    let padded_width = label_width.max(chord_column);
+    row.push(StyledSpan::new(
+        format!("{label}{}", " ".repeat(padded_width - label_width)),
+        SpanStyle::fg(ThemeColor::Accent),
+    ));
+    let budget = cell_width.saturating_sub(padded_width);
+    let (text, text_width) = if budget == 0 {
+        (String::new(), 0)
+    } else if columns(description) > budget {
+        let trimmed = truncate_columns(description, budget - 1);
+        (format!("{trimmed}…"), columns(trimmed) + 1)
+    } else {
+        (description.clone(), columns(description))
+    };
+    row.push(StyledSpan::new(text, SpanStyle::fg(ThemeColor::Muted)));
+    let used = padded_width + text_width;
+    if used < cell_width {
+        row.push(StyledSpan::new(
+            " ".repeat(cell_width - used),
+            SpanStyle::PLAIN,
+        ));
+    }
+}
 
 /// Which modal list the last frame painted, for the pointer hit test.
 ///
@@ -1320,6 +1379,13 @@ pub struct App {
     /// to acknowledge a chord that changes no visible text on its own, e.g.
     /// `app.thinking.toggle`.
     status_flash: Option<String>,
+    /// `?` shortcut overlay (codex `FooterMode::ShortcutOverlay`,
+    /// `bottom_pane/chat_composer.rs:3149`): the cheat sheet of chords the
+    /// startup header already advertises, toggled by typing `?` into an empty
+    /// composer. Any other key closes it and is handled normally, which is
+    /// codex's `reset_mode_after_activity`. See
+    /// [`App::shortcut_overlay_open`].
+    shortcut_overlay: bool,
     /// Driver-supplied rich renderer for tool blocks.
     ///
     /// `pi-tui` cannot depend on the crate that owns the tool renderers, so
@@ -1457,6 +1523,7 @@ impl App {
             extension: ExtensionUi::new(),
             custom_saved_editor: None,
             status_flash: None,
+            shortcut_overlay: false,
             tool_block_renderer: None,
             tool_press: None,
             spinner: Spinner::new(),
@@ -1757,14 +1824,40 @@ impl App {
     /// The expanded header's tail: one row per resolvable hint, a blank row
     /// and the onboarding line.
     fn header_hint_lines(&self) -> Vec<StyledLine> {
+        let entries = self.hint_entries();
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(entries.len() + 2);
+        for (keys, description) in entries {
+            lines.push(vec![
+                StyledSpan::new(format!("  {keys} "), SpanStyle::fg(ThemeColor::Accent)),
+                StyledSpan::new(description, SpanStyle::fg(ThemeColor::Muted)),
+            ]);
+        }
+        if lines.is_empty() {
+            return lines;
+        }
+        lines.push(Vec::new());
+        lines.push(vec![StyledSpan::new(
+            self.config
+                .locale
+                .tr(HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH)
+                .to_string(),
+            SpanStyle::fg(ThemeColor::Dim),
+        )]);
+        lines
+    }
+
+    /// The `<chord> <description>` pairs the hint surfaces share: the startup
+    /// header, `/hotkeys`, and the `?` shortcut overlay.
+    ///
+    /// Two filters: the id must resolve to a chord in the live table *and*
+    /// name an action this port consumes. The second is what keeps a
+    /// bound-but-unimplemented `app.*` id out of the header
+    /// (`CONSUMED_APP_ACTIONS`, LUM-1240/LUM-1245).
+    fn hint_entries(&self) -> Vec<(String, String)> {
         let kb = get_keybindings();
         let locale = self.config.locale;
-        let mut lines: Vec<StyledLine> = Vec::with_capacity(STARTUP_HINTS.len() + 2);
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(STARTUP_HINTS.len());
         for hint in STARTUP_HINTS {
-            // Two filters: the id must resolve to a chord in the live table
-            // *and* name an action this port consumes. The second is what
-            // keeps a bound-but-unimplemented `app.*` id out of the header
-            // (`CONSUMED_APP_ACTIONS`, LUM-1240/LUM-1245).
             if !hint.is_wired() {
                 continue;
             }
@@ -1772,16 +1865,70 @@ impl App {
                 // Unbound in this table: an unbound action is not a hint.
                 continue;
             };
-            lines.push(vec![
-                StyledSpan::new(format!("  {keys} "), SpanStyle::fg(ThemeColor::Accent)),
-                StyledSpan::new(
-                    hint.description(locale).to_string(),
-                    SpanStyle::fg(ThemeColor::Muted),
-                ),
-            ]);
+            entries.push((keys, hint.description(locale).to_string()));
         }
-        if lines.is_empty() {
-            return lines;
+        entries
+    }
+
+    /// The rows the `?` shortcut overlay paints.
+    ///
+    /// A title row, a rule, then [`App::hint_entries`] in one or two columns,
+    /// and the header's onboarding line last. The entry set is the same one
+    /// the startup header and `/hotkeys` list, so the overlay cannot drift
+    /// from them; only the layout is new. Empty when every hint is unbound or
+    /// unimplemented — the caller then paints nothing.
+    fn shortcut_overlay_lines(&self, width: usize) -> Vec<StyledLine> {
+        let entries = self.hint_entries();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        let locale = self.config.locale;
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(entries.len() + 3);
+        lines.push(vec![
+            StyledSpan::new(
+                format!(
+                    "  {}",
+                    locale.tr(SHORTCUT_OVERLAY_TITLE_EN, SHORTCUT_OVERLAY_TITLE_ZH)
+                ),
+                SpanStyle::fg(ThemeColor::Accent).bold(),
+            ),
+            StyledSpan::new(
+                format!(
+                    "  {}",
+                    locale.tr(SHORTCUT_OVERLAY_CLOSE_EN, SHORTCUT_OVERLAY_CLOSE_ZH)
+                ),
+                SpanStyle::fg(ThemeColor::Dim),
+            ),
+        ]);
+        lines.push(vec![StyledSpan::new(
+            "─".repeat(width.min(SHORTCUT_RULE_MAX)),
+            SpanStyle::fg(ThemeColor::Dim),
+        )]);
+        // Two columns only when each one can hold a cell; a second column
+        // whose descriptions wrap mid-word reads worse than one long list.
+        let chord_column = entries
+            .iter()
+            .map(|(chord, _)| columns(chord) + 3)
+            .max()
+            .unwrap_or(0)
+            .max(SHORTCUT_CHORD_COLUMN);
+        let cell_width = width / 2;
+        if cell_width >= SHORTCUT_COLUMN_MIN {
+            let half = entries.len().div_ceil(2);
+            for index in 0..half {
+                let mut row: StyledLine = Vec::new();
+                push_shortcut_cell(&mut row, &entries[index], cell_width, chord_column);
+                if let Some(entry) = entries.get(index + half) {
+                    push_shortcut_cell(&mut row, entry, cell_width, chord_column);
+                }
+                lines.push(row);
+            }
+        } else {
+            for entry in &entries {
+                let mut row: StyledLine = Vec::new();
+                push_shortcut_cell(&mut row, entry, width, chord_column);
+                lines.push(row);
+            }
         }
         lines.push(Vec::new());
         lines.push(vec![StyledSpan::new(
@@ -1884,6 +2031,29 @@ impl App {
         self.status_flash = Some(text.into());
     }
 
+    /// Whether the `?` shortcut overlay is on screen.
+    ///
+    /// The overlay is a *view* of the same table the startup header and
+    /// `/hotkeys` read ([`App::hint_entries`]); nothing else about the session
+    /// changes while it is open, and a driver that wants to render its own
+    /// help can leave this closed.
+    pub fn shortcut_overlay_open(&self) -> bool {
+        self.shortcut_overlay
+    }
+
+    /// Toggle the `?` overlay, returning its new state.
+    pub fn toggle_shortcut_overlay(&mut self) -> bool {
+        self.shortcut_overlay = !self.shortcut_overlay;
+        self.shortcut_overlay
+    }
+
+    /// Close the `?` overlay if it is open, returning whether it was.
+    pub fn close_shortcut_overlay(&mut self) -> bool {
+        let was_open = self.shortcut_overlay;
+        self.shortcut_overlay = false;
+        was_open
+    }
+
     /// Whether the composer's reverse history search (`Ctrl+R`) owns the
     /// keyboard right now.
     ///
@@ -1934,7 +2104,8 @@ impl App {
         // live state the user is typing into, the flash is an acknowledgement
         // of a chord that already happened.
         let search = self.history_search_hint();
-        if !self.thinking_supported && flash.is_none() && search.is_none() {
+        if !self.thinking_supported && flash.is_none() && search.is_none() && !self.shortcut_overlay
+        {
             return Cow::Borrowed(&self.status_data);
         }
         let mut data = self.status_data.clone();
@@ -1955,6 +2126,17 @@ impl App {
             data.hint_pinned = true;
         } else if let Some(flash) = flash {
             data.hint = Some(flash.to_string());
+        } else if self.shortcut_overlay {
+            // The overlay repeats the close affordance on its title row; the
+            // status bar carries it too so the reader who cannot see the
+            // overlay's top edge (a short terminal truncates it) still knows
+            // how to get out.
+            data.hint = Some(
+                self.config
+                    .locale
+                    .tr(SHORTCUT_OVERLAY_CLOSE_EN, SHORTCUT_OVERLAY_CLOSE_ZH)
+                    .to_string(),
+            );
         }
         Cow::Owned(data)
     }
@@ -2947,6 +3129,33 @@ impl App {
         // The settings modal is the next-outermost layer.
         if self.settings.is_some() {
             return self.step_settings(key);
+        }
+        // `?` on an empty composer toggles the shortcut overlay (codex
+        // `ChatComposer::handle_shortcut_overlay_key`,
+        // `bottom_pane/chat_composer.rs:3149`); any other key closes it and is
+        // handled normally below (codex's `reset_mode_after_activity`), so a
+        // reader who opened help by reflex and then types is not stuck. The
+        // gates mirror the layers above — the transcript search overlay and an
+        // extension-owned input surface (`custom`, in either placement) keep
+        // the keyboard, and a draft (or an attached image) means `?` is text,
+        // not a chord.
+        let plain_question = key.code == KeyCode::Char('?') && key.modifiers.is_empty();
+        if self.shortcut_overlay {
+            if plain_question || key.code == KeyCode::Esc {
+                self.shortcut_overlay = false;
+                return StepOutcome::Redraw;
+            }
+            self.shortcut_overlay = false;
+        } else if plain_question
+            && self.search.is_none()
+            && !self.extension.custom_visible()
+            && !self.extension.has_editor_component()
+            && !self.prompt.editor().is_showing_autocomplete()
+            && self.prompt.is_empty()
+            && self.prompt.images().is_empty()
+        {
+            self.shortcut_overlay = true;
+            return StepOutcome::Redraw;
         }
         // Global keys. Resolved through the keybinding registry so an
         // installed override reaches the App; with nothing installed the
@@ -5757,6 +5966,7 @@ impl App {
                 self.paint_autocomplete(message_area, editor_area, buf);
             }
         }
+        self.paint_shortcut_overlay(message_area, editor_area, buf);
 
         // Below-editor widgets.
         self.paint_extension_lines(below_area, &frame.below, buf);
@@ -6115,6 +6325,46 @@ impl App {
             // through on the right of the dropdown. `reset` also drops the
             // covered cell's colours, so the row behind cannot tint the one on
             // top. Same rule as the selector overlay below.
+            for col in 0..editor_area.width {
+                if let Some(cell) = buf.cell_mut((editor_area.x + col, y)) {
+                    cell.reset();
+                }
+            }
+            write_styled_line(buf, editor_area.x, y, editor_area.width, line, &self.theme);
+        }
+    }
+
+    /// Paint the `?` shortcut overlay directly above the composer.
+    ///
+    /// Bottom-anchored to the editor row and clipped to the message viewport,
+    /// so the startup header above and the composer / status rows below are
+    /// untouched (the rule the selector overlay follows). The panel borrows
+    /// transcript rows instead of claiming a chrome row: opening help must not
+    /// reflow the conversation the reader was looking at, and closing it
+    /// restores the same frame.
+    fn paint_shortcut_overlay(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
+        if !self.shortcut_overlay || editor_area.width == 0 {
+            return;
+        }
+        let available = editor_area.y.saturating_sub(message_area.y) as usize;
+        if available == 0 {
+            return;
+        }
+        let mut lines = self.shortcut_overlay_lines(editor_area.width as usize);
+        if lines.is_empty() {
+            return;
+        }
+        // A short terminal keeps the head (title + the first chords); the tail
+        // is the `…`-free part a reader can reach with a taller window, and
+        // `/hotkeys` remains the exhaustive list.
+        lines.truncate(available);
+        let first_row = editor_area.y - lines.len() as u16;
+        for (offset, line) in lines.iter().enumerate() {
+            let y = first_row + offset as u16;
+            // Blank the borrowed row first: overlay rows are shorter than the
+            // transcript lines they cover, and ratatui only emits the cells
+            // this buffer changed — an unblanked row leaves the transcript
+            // bleeding through (same rule as the dropdown and the modals).
             for col in 0..editor_area.width {
                 if let Some(cell) = buf.cell_mut((editor_area.x + col, y)) {
                     cell.reset();

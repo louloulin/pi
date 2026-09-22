@@ -1,0 +1,18 @@
+FRAME DUMP cols=56 rows=16
+|  Keyboard shortcuts  ? / Esc to close                  |
+|────────────────────────────────────────                |
+|  Esc                 to interrupt                      |
+|  Ctrl+C              to clear                          |
+|  Ctrl+C twice        to exit                           |
+|  Ctrl+D              to exit (empty)                   |
+|  Ctrl+Z              to suspend                        |
+|  Ctrl+K              to delete to end                  |
+|  Shift+Tab           to cycle thinking level           |
+|  Ctrl+P/Shift+Ctrl+P to cycle models                   |
+|  Ctrl+L              to select model                   |
+|  Ctrl+O              to expand tools                   |
+|  Alt+H               to hide this header               |
+|  Ctrl+T              to expand thinking                |
+|> type a prompt — /help for commands                    |
+|Faux  lum1464-hints  in 0 out 0 ?/8.2k  ? / Esc to close|
+END FRAME DUMP
