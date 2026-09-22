@@ -238,13 +238,17 @@ impl MouseGesture {
 pub enum InputEvent {
     /// A key event.
     Key(Key),
-    /// A mouse-wheel notch.
+    /// A mouse-wheel notch at an absolute terminal cell.
     ///
-    /// The wheel has its own variant (upstream routes it through
-    /// `routeWheel`, not through the component mouse dispatch): the
-    /// alternate-screen [`App`](crate::App) maps it onto the chat-log
-    /// viewport, one line per notch with an Alt multiplier of five
-    /// (`packages/tui/src/tui-alt-screen.ts:968-984`).
+    /// The wheel has its own variant because upstream dispatches it in two
+    /// stages: `dispatchMouseToOverlay` → `dispatchMouseToLayout` get the
+    /// notch first — that is how the composer's `SelectList` scrolls its own
+    /// candidates (`packages/tui/src/components/select-list.ts:110-121`) —
+    /// and only an unclaimed notch reaches `routeWheel`, which scrolls the
+    /// scroll view under the pointer and refreshes the scrollbar hover
+    /// (`packages/tui/src/tui-alt-screen.ts:679-694,973-984`). Both stages
+    /// need the cell, so the wheel carries it exactly like
+    /// [`MouseGesture`] does.
     Mouse {
         /// True when the wheel moved towards older output (up), false when
         /// it moved towards the tail (down).
@@ -253,6 +257,10 @@ pub enum InputEvent {
         /// alt-wheel multiplier in that case
         /// (`packages/tui/src/tui-alt-screen.ts:968-971`).
         alt: bool,
+        /// Column, from the left edge of the terminal (0-based cells).
+        x: u16,
+        /// Row, from the top edge of the terminal (0-based cells).
+        y: u16,
     },
     /// A non-wheel mouse gesture (press / release / drag / move) at an
     /// absolute terminal cell.
@@ -322,9 +330,9 @@ impl InputEvent {
         InputEvent::Key(Key::char(c))
     }
 
-    /// Convenience constructor for a wheel notch.
-    pub const fn wheel(up: bool, alt: bool) -> Self {
-        InputEvent::Mouse { up, alt }
+    /// Convenience constructor for a wheel notch at `(x, y)`.
+    pub const fn wheel(up: bool, alt: bool, x: u16, y: u16) -> Self {
+        InputEvent::Mouse { up, alt, x, y }
     }
 
     /// Convenience constructor for a non-wheel mouse gesture.
@@ -474,8 +482,8 @@ fn decode_mouse_report(cb: u8, x: u16, y: u16, release: bool) -> InputEvent {
     // like upstream's `routeWheel`
     // (`packages/tui/src/tui-alt-screen.ts:952-967`).
     match (button_number, motion) {
-        (4, false) => return InputEvent::Mouse { up: true, alt },
-        (5, false) => return InputEvent::Mouse { up: false, alt },
+        (4, false) => return InputEvent::wheel(true, alt, x, y),
+        (5, false) => return InputEvent::wheel(false, alt, x, y),
         _ => {}
     }
     let kind = match (button_number, motion) {
@@ -531,19 +539,23 @@ mod tests {
     }
 
     #[test]
-    fn wheel_constructor_sets_direction_and_modifier() {
+    fn wheel_constructor_sets_direction_modifier_and_cell() {
         assert_eq!(
-            InputEvent::wheel(true, false),
+            InputEvent::wheel(true, false, 4, 9),
             InputEvent::Mouse {
                 up: true,
-                alt: false
+                alt: false,
+                x: 4,
+                y: 9,
             }
         );
         assert_eq!(
-            InputEvent::wheel(false, true),
+            InputEvent::wheel(false, true, 0, 0),
             InputEvent::Mouse {
                 up: false,
-                alt: true
+                alt: true,
+                x: 0,
+                y: 0,
             }
         );
     }
@@ -630,26 +642,19 @@ mod tests {
 
     #[test]
     fn sgr_wheel_reports_become_wheel_events_and_horizontal_is_ignored() {
+        // SGR coordinates are 1-based: `5;5` is cell (4, 4), so the notch
+        // carries the same cell a gesture report would.
         assert_eq!(
             parse_mouse_sequence(b"\x1b[<64;5;5M"),
-            Some(InputEvent::Mouse {
-                up: true,
-                alt: false
-            })
+            Some(InputEvent::wheel(true, false, 4, 4))
         );
         assert_eq!(
             parse_mouse_sequence(b"\x1b[<65;5;5M"),
-            Some(InputEvent::Mouse {
-                up: false,
-                alt: false
-            })
+            Some(InputEvent::wheel(false, false, 4, 4))
         );
         assert_eq!(
             parse_mouse_sequence(b"\x1b[<72;5;5M"),
-            Some(InputEvent::Mouse {
-                up: true,
-                alt: true
-            })
+            Some(InputEvent::wheel(true, true, 4, 4))
         );
         // Scroll left / right have no consumer in the App.
         assert_eq!(
@@ -702,24 +707,15 @@ mod tests {
         // Wheel family: 0x40 is a notch up, 0x41 down, 0x48 up + Alt.
         assert_eq!(
             parse_mouse_sequence(b"\x1b[M\x60\x2b\x26"),
-            Some(InputEvent::Mouse {
-                up: true,
-                alt: false
-            })
+            Some(InputEvent::wheel(true, false, 10, 5))
         );
         assert_eq!(
             parse_mouse_sequence(b"\x1b[M\x61\x2b\x26"),
-            Some(InputEvent::Mouse {
-                up: false,
-                alt: false
-            })
+            Some(InputEvent::wheel(false, false, 10, 5))
         );
         assert_eq!(
             parse_mouse_sequence(b"\x1b[M\x68\x2b\x26"),
-            Some(InputEvent::Mouse {
-                up: true,
-                alt: true
-            })
+            Some(InputEvent::wheel(true, true, 10, 5))
         );
         // Coordinates are raw bytes, so they are not limited to ASCII: byte
         // 200 is column 167.

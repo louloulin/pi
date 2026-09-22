@@ -63,8 +63,7 @@ fn app(commands: Vec<SlashCommand>) -> App {
         "iota kappa lambda mu nu xi omicron pi rho sigma",
         "tau upsilon phi chi psi omega",
     ] {
-        app.messages_mut()
-            .push(MessageItem::user(line.to_string()));
+        app.messages_mut().push(MessageItem::user(line.to_string()));
     }
     app.prompt_mut()
         .editor_mut()
@@ -180,8 +179,15 @@ fn frame_dump_for_the_dropdown_press_screenshot() {
         row(&frame(&mut app), model_row).starts_with("❯ model"),
         "the press should have moved the highlight onto `model`"
     );
-    assert_eq!(app.editor_text(), "/", "a press must not apply the candidate");
-    dump(&mut app, "press on `model`: highlight moved, nothing applied");
+    assert_eq!(
+        app.editor_text(),
+        "/",
+        "a press must not apply the candidate"
+    );
+    dump(
+        &mut app,
+        "press on `model`: highlight moved, nothing applied",
+    );
 }
 
 #[test]
@@ -191,7 +197,10 @@ fn frame_dump_for_the_dropdown_counter_screenshot() {
     app.step(InputEvent::Key(Key::char('/')));
     let buf = frame(&mut app);
     assert!(row_text(&buf, row_with(&buf, "(1/6)")).contains("(1/6)"));
-    dump(&mut app, "six commands in a three-row window: `(1/6)` is not clickable");
+    dump(
+        &mut app,
+        "six commands in a three-row window: `(1/6)` is not clickable",
+    );
 }
 
 #[test]
@@ -204,5 +213,8 @@ fn frame_dump_for_the_dropdown_click_screenshot() {
     release(&mut app, 1, model_row);
     assert_eq!(app.editor_text(), "/model ");
     assert!(!app.prompt().editor().is_showing_autocomplete());
-    dump(&mut app, "click on `model`: completion applied, list closed");
+    dump(
+        &mut app,
+        "click on `model`: completion applied, list closed",
+    );
 }

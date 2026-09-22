@@ -15526,3 +15526,60 @@ LUM-1426 在 `app.rs` 的选择模型上正面冲突。处置：保留 LUM-1426 
 代码面（指针路由 + 列表几何）。下一轮起手清单已单子化在 `docs/LUM1431_AUTOCOMPLETE_MOUSE.md` §7：
 ① 下拉框**滚轮**（需先给 `InputEvent::Mouse` 补 x/y，上游 `select-list.ts:111-121`）、② `#` 触发符空转、
 ③ 扩展生命周期事件 +15、④ CLI flag 面。
+
+## LUM-1436 round — 滚轮带坐标 + 下拉框认领滚轮（composer 鼠标面收口 3/3）；`pi-tui` 1007/0，workspace 2629/39（失败集合与前几轮逐条相同）；派发 LUM-1432 扩展事件轴
+
+### 一、本轮交付（`pi-tui` 单模块，无新依赖）
+
+LUM-1431 §7 的第一顺位：**滚轮没有坐标**，所以 `App` 只能把滚轮丢给聊天日志视口——下拉框虽然是鼠标目标
+（LUM-1431 补了点选），指针落在它上面滚轮时吃事件的仍是背后的 transcript。上游把滚轮当成带坐标的鼠标事件
+走完整派发链（`tui-alt-screen.ts:679-694`：overlay → `dispatchMouseToLayout`（编辑器 → `SelectList`）→
+`routeWheel`），列表的滚轮分支只看方向、钳制不回绕（`select-list.ts:110-121`）。
+
+落地：`InputEvent::Mouse`（滚轮）新增终端格 `x`/`y`（SGR 与 X10 两条解码路径把已解出的坐标一起带上）、
+`InputEvent::wheel(up, alt, x, y)`、`App::step_autocomplete_wheel`（列表矩形内一档一格、两端钳制、只判行
+不判列，与上游"编辑器布局盒整行宽"一致）、未认领的滚轮才滚视口并 `update_scrollbar_hover(x, y)`
+（上游 `routeWheel` 尾部）。
+`crates/pi-tui/tests/autocomplete_wheel.rs` 新增 7 条行为断言，`lum1436_autocomplete_wheel_frames.rs` 出 2 帧。
+
+**反向验证**（本机实做）：把 `App::step` 里的认领调用换成 `None::<StepOutcome>`，其中 4 条立刻红——
+这批断言真的钉住了改动。
+
+### 二、审计更正（两条，都是"上一轮写错/写松"）
+
+1. **`#` 触发符是伪缺口**：上游 `DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS = ["@", "#"]`
+   （`editor.ts:251`）是**扩展注入点**，基础 `CombinedAutocompleteProvider` 无 `#` 分支、`getSuggestions`
+   返回 `null`，上游因此**不开**下拉框；Rust 逐字同构（`editor.rs:1913` 的 `None` → `cancel_autocomplete()`）。
+   LUM-1431 §7 把扩展点当成了未实现功能，该条从缺口清单移出。
+2. **LUM-1431 §5 的「fmt 干净」在基线复现不出来**：`b0c9f89a1` 的 `lum1431_autocomplete_frames.rs`
+   有 4 处 rustfmt 差异（cargo 1.97.1）。本轮 `cargo fmt --all` 修绿，并在文档里记明不是本轮引入。
+
+### 三、门禁
+
+* `cargo fmt --all -- --check` 干净（含上述基线遗留）；`cargo clippy -p pi-tui --all-targets -- -D warnings`
+  0 warning。
+* `cargo test -p pi-tui`：**1007 passed / 0 failed**（基线 `b0c9f89a1` = 998/0 → **+9**）。
+* `cargo test --workspace --locked --no-fail-fast`：**2629 passed / 39 failed / 2 ignored**
+  （基线 2620/39/2 → +9 通过、失败条数不变）；38 个唯一失败名逐条落在
+  `pi-coding-agent` / `pi-extensions` 的 Windows 环境类（真 `bash`、绝对路径、node fs、trust），
+  `pi-tui` 零失败。
+* `app_action_coverage.py --check-consumed` → 43/43 `in sync`。
+* **运行器约束**：本机磁盘跑 workspace 门禁时写满（`0` 可用 → `rustc: IO failure … no space on device`
+  → 残留损坏 `.pdb` 让链接器报 `LNK1285`）。处置：删掉三个**已完成 run 的 rebuildable** `pi-rust/target`
+  （约 90G，非交付物）+ 删损坏 pdb，复跑通过。
+
+### 四、证据与文档
+
+* `docs/LUM1436_AUTOCOMPLETE_WHEEL.md`（滚轮派发优先级逐条对照 + 两条审计更正 + 缺口清单）。
+* 两张真帧截图 `docs/screenshots/lum1436-autocomplete-wheel-{before,after}-76x16.png`(+`.txt`)；
+  本机 Windows 无 `pty`，走 frame-buffer 通道，**证明几何与高亮，不证明滚轮时序**。
+* Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.11）：规模 **88.8%**、测试 **49.7%**、
+  TUI 模块 **35/42**、`app.*` **43/44**、**composer 鼠标面 3/3 = 100%**、加权 **83.6%**。
+
+### 五、槽位 / 派发
+
+**1 件派发 + 1 件自做**（上限 3）：自做＝下拉框滚轮（全在 `pi-tui` 内）；派发＝**LUM-1432**
+（扩展生命周期事件 20/36 → 36/36，backlog/high，验收标准写全）指派给 **编程助手-devbox1**
+（`22e8b20d`，LUM-1330 / LUM-1244 的既定写者）——与本轮文件面零重叠。不派第三条：
+`docs/LUM1431_AUTOCOMPLETE_MOUSE.md` §7 的第 3、4 条与派发线共享 `pi-coding-agent`，再派会重演
+「同一缺陷两条并发线各修一次」（LUM-1431 §3 刚清过一次）。

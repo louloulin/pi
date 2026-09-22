@@ -129,10 +129,7 @@ fn selection_survives_scrolling_and_follows_the_viewport() {
     // The selection is anchored to log lines, not screen rows: scrolling
     // keeps the text and carries the highlight along with the content.
     assert_eq!(
-        app.step(InputEvent::Mouse {
-            up: true,
-            alt: false
-        }),
+        app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.selection_text().as_deref(), Some("line 33"));

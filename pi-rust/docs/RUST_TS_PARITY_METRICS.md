@@ -293,6 +293,43 @@ CJK 断点    "你好世界" @6 列 → ["你好世", "界"]（两条断行规�
 不含该分项）——它的价值是「轴 6 视觉/交互保真的前提」，所以本轮**不重估**任何轴的取值，只把分项从
 1/2 记到 2/2。这与 LUM-1418「列宽根治也不动加权」的处理一致。
 
+### 0.11 LUM-1436 复测：滚轮带坐标、下拉框认领滚轮（composer 鼠标面 3/3）；`#` 触发符伪缺口更正
+
+本轮领 LUM-1431 §7 的第一顺位，并把该节其余三条逐条复核。全部口径本机重测
+（Windows / cargo 1.97.1 / `--offline`，从仓库根跑脚本）。
+
+| 量 | 本轮实测 | LUM-1431 | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **88.8%**（136,016 / 153,106） | 88.8%（135,950） | `python pi-rust/scripts/measure_loc.py`；+66 行 src（`input.rs` 的滚轮坐标 + `app.rs` 的认领分支） |
+| 测试规模 | **49.7%**（2,637 / 5,309） | 49.5%（2,628） | +9 = `autocomplete_wheel.rs`（7 条）+ `lum1436_autocomplete_wheel_frames.rs`（2 帧） |
+| TUI 模块面 | **35 / 42 = 83.3%** | 35/42 | 本轮无新 src 模块 |
+| `app.*` 接线 | **43 / 44 = 97.7%**，silent 1（`app.tree.editLabel`） | 同 | `python pi-rust/scripts/app_action_coverage.py --check-consumed` → `43 entries; measured wired: 43 / in sync` |
+| **composer 鼠标面** | **3 / 3 = 100%** | 2 / 2 = 100% | 点击定位光标（LUM-1426）+ 下拉框点选（LUM-1431）+ **下拉框滚轮（本轮）**；口径由「点选」扩到「指针全部」 |
+| 指针映射面 | **3 / 3 = 100%** | 3/3 | 本轮无回退 |
+| slash 内置命令 | 18 / 23 = 78.3%（字面 17/23，`exit`≡`quit`） | 同 | 本轮未动 |
+| 扩展生命周期事件 | **21/36 声明 = 58.3%**；**20/36 生产构造点 = 55.6%** | 同 | `python pi-rust/scripts/extension_event_coverage.py`；15 个缺失变体逐条列出，已作为独立 issue LUM-1432 派发 |
+
+**加权完成度（权重表见 §4.1，公式公开）**：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×0.556 + 9×0.85 + 5×0.497 + 3×0.95 = 83.6%
+```
+
+只有测试轴从 0.495 走到 0.497（+0.01pt），加权仍落在 **83.6%**。
+
+**口径对账 / 更正**：
+
+1. 「composer 鼠标面」与 LUM-1431 一样**不单独进公式**（公式里的 TUI 轴是模块率与接线率的均值），
+   本轮只更新可复算的分项，不重估任何轴；
+2. LUM-1431 §7 第 2 条「`#` 触发符空转」**实测为伪缺口**：上游
+   `DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS = ["@", "#"]`（`packages/tui/src/components/editor.ts:251`）
+   是扩展注入点，基础 `CombinedAutocompleteProvider` 无 `#` 分支且返回 `null` → 上游**不开**下拉框；
+   Rust 逐字同构（`editor.rs:1913` 的 `None` → `cancel_autocomplete()`）。故该条从缺口清单移出，
+   真正的 `#` 面属 provider 侧的技能/工具引用（见 `docs/LUM1436_AUTOCOMPLETE_WHEEL.md` §1.2）；
+3. LUM-1431 §5 的「`cargo fmt --all -- --check` 干净」在基线 `b0c9f89a1` 上**复现不出来**
+   （`lum1431_autocomplete_frames.rs` 有 4 处 rustfmt 差异，cargo 1.97.1）；本轮已修绿。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
