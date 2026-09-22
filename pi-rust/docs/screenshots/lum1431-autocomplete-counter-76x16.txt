@@ -1,0 +1,18 @@
+FRAME DUMP cols=76 rows=16
+|> Show me how the composer completes a slash command.                       |
+|> The dropdown is painted over the transcript, so it owns the pointer.      |
+|> alpha beta gamma delta epsilon zeta eta theta                             |
+|> iota kappa lambda mu nu xi omicron pi rho sigma                           |
+|> tau upsilon phi chi psi omega                                             |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|❯ help        Show this help text                                           |
+|  model       Choose a model                                                |
+|  clear       Clear the transcript                                          |
+|  (1/6)                                                                     |
+|> /▍                                                                        |
+|Faux  lum1431-autocomplete-frames              in 0 out 0 ?/2.0k  ? for help|
+END FRAME DUMP

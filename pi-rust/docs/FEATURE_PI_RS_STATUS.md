@@ -15477,3 +15477,51 @@ issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉�
 `pi-tui` / `pi-agent-core`，并发写者会把「哪一层坏了」拆散。下一轮第一顺位已在
 `docs/LUM1426_POINTER_COLUMNS.md` §8 单子化：先做下拉框点选（本轮的直接续集，`pi-tui` 单模块），
 再单独一轮做扩展事件的 15 个缺口。
+
+## LUM-1431 round — autocomplete 下拉框鼠标点选（chatinput 补完）+ LUM-1422 未合并产物抢救合并；`pi-tui` 995/0，workspace 2620/39（全为已知 Windows 环境类）
+
+### 一、本轮交付（`pi-tui` 单模块，无新依赖）
+
+issue 口径里的「chatinput 与 codex / Martty 差距很大」在本轮收敛到最后一格可见缺口：**composer 的
+autocomplete 下拉框没有任何鼠标目标**。上游把列表矩形判在编辑器 `handleMouse` 里、且判在屏幕级文本选择
+之前（`packages/tui/src/components/editor.ts:618-638` → `select-list.ts:109-140`）；Rust 端口画了列表
+（LUM-1236）、键盘能选（Up/Down/Tab），但点下去会落到列表**背后的 transcript 选择路径**——点候选等于
+替聊天记录起一段选区。
+
+落地：`App` 记录每帧列表矩形与候选窗口（`autocomplete_origin/size/first_item/item_rows`，含短视口丢弃行数）、
+`Editor::autocomplete_window` / `set_autocomplete_selected`、`Prompt::accept_autocomplete`、
+`App::autocomplete_mouse_gesture`（press 高亮并夺走指针 / click 用**按下时**的候选应用 / 异格释放丢弃 /
+计数行不可点 / 关闭即清命中框），并把分支插在滚动条与 transcript 选择**之前**。
+`crates/pi-tui/tests/autocomplete_mouse.rs` 新增 7 条行为断言（驱动真实 `step_mouse_gesture`）。
+
+### 二、LUM-1422 抢救（本轮第二件有价值的事）
+
+`work/LUM-1422`（`88a0552bb` / `0edbc16b8` / `c954a9fa9`）是并行 worker 的**未合并**产物，与已合入的
+LUM-1426 在 `app.rs` 的选择模型上正面冲突。处置：保留 LUM-1426 的**字符下标模型**（已在树上、带
+`pointer_columns.rs` 14 条），保留 LUM-1422 的 **`search.rs` 搜索栏列宽预算**（LUM-1426 未覆盖），
+丢弃 LUM-1422 的 `app.rs` 选择/高亮改动（避免 `columns_before(列)` 双重换算），**留下它的全部 4 个测试
+文件**——15 条在合并后的树上全绿，成为跨模型回归门（两套模型可观察行为一致）。
+
+### 三、门禁
+
+* `cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui --all-targets -- -D warnings` 0 warning。
+* `cargo test -p pi-tui`：**995 passed / 0 failed**（基线 `c093196be` = 973/0 → **+22**）。
+* `cargo test --workspace --locked --no-fail-fast`：**2620 passed / 39 failed / 2 ignored**；
+  39 条全在 `pi-coding-agent` / `pi-extensions` 的 Windows 环境类（真 `bash`、绝对路径、`/tmp`、node fs、
+  trust），条数与 LUM-1426 基线相同，`pi-tui` 零失败。
+* `app_action_coverage.py --check-consumed` → 43/43 `in sync`。
+
+### 四、证据与文档
+
+* `docs/LUM1431_AUTOCOMPLETE_MOUSE.md`（本轮审计 + 取舍依据 + 缺口清单）。
+* 三张真帧截图 `docs/screenshots/lum1431-autocomplete-{press,click,counter}-76x16.png`(+`.txt`)。
+  本机 Windows 无 `pty`，走 frame-buffer 通道，**证明几何与高亮，不证明按键时序**。
+* Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.10）：规模 **88.8%**、测试 **49.5%**、
+  TUI 模块 **35/42**、`app.*` **43/44**、**composer 鼠标面 2/2 = 100%**、加权 **83.6%**。
+
+### 五、槽位 / 派发
+
+**零派发**：抢救合并 + 缺口实现 + 门禁 + 截图 + 审计在同一 run 内完成，且三件事全落在 `pi-tui` 的同一块
+代码面（指针路由 + 列表几何）。下一轮起手清单已单子化在 `docs/LUM1431_AUTOCOMPLETE_MOUSE.md` §7：
+① 下拉框**滚轮**（需先给 `InputEvent::Mouse` 补 x/y，上游 `select-list.ts:111-121`）、② `#` 触发符空转、
+③ 扩展生命周期事件 +15、④ CLI flag 面。

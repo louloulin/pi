@@ -1147,6 +1147,23 @@ pub struct App {
     /// custom editor component replaced it).
     composer_origin: (AtomicU16, AtomicU16),
     composer_size: (AtomicU16, AtomicU16),
+    /// Rectangle of the composer's autocomplete dropdown as of the last
+    /// render, as `(x, y)` and `(width, height)`. The rows are borrowed from
+    /// the transcript above the editor, so this is the only record of where
+    /// the list actually landed; `width == 0` means the last frame painted
+    /// none. Upstream keeps the same rectangle inside the editor
+    /// (`renderedAutocompleteHeight`,
+    /// `packages/tui/src/components/editor.ts:605-616`).
+    autocomplete_origin: (AtomicU16, AtomicU16),
+    autocomplete_size: (AtomicU16, AtomicU16),
+    /// Index of the first candidate the dropdown painted and how many
+    /// candidate rows followed it (the trailing `(n/m)` counter row is not a
+    /// candidate and is excluded). Together with
+    /// [`App::autocomplete_origin`] this maps a pointer cell back onto a
+    /// candidate — upstream `SelectList.handleMouse` maps `event.y` through
+    /// `getVisibleRange()`.
+    autocomplete_first_item: AtomicUsize,
+    autocomplete_item_rows: AtomicUsize,
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1176,6 +1193,12 @@ pub struct App {
     /// until its release so only a click that starts and ends on the same
     /// cell moves the caret (upstream's `isClick` gate).
     prompt_mouse_press: Option<(u16, u16)>,
+    /// Absolute cell and candidate index of a left press that landed on an
+    /// autocomplete row, kept until its release so only a click that starts
+    /// and ends on the same cell applies the completion (upstream's
+    /// `mousePressTarget` / synthesised `click`,
+    /// `packages/tui/src/tui-alt-screen.ts:876-903`).
+    autocomplete_mouse_press: Option<(u16, u16, usize)>,
     /// True between a left-button press and its release, so drags extend
     /// the selection without requiring the terminal to report the button.
     selection_dragging: bool,
@@ -1338,6 +1361,10 @@ impl App {
             composer_window: AtomicU16::new(0),
             composer_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             composer_size: (AtomicU16::new(0), AtomicU16::new(0)),
+            autocomplete_origin: (AtomicU16::new(0), AtomicU16::new(0)),
+            autocomplete_size: (AtomicU16::new(0), AtomicU16::new(0)),
+            autocomplete_first_item: AtomicUsize::new(0),
+            autocomplete_item_rows: AtomicUsize::new(0),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
@@ -1345,6 +1372,7 @@ impl App {
             search: None,
             modal_mouse_press: None,
             prompt_mouse_press: None,
+            autocomplete_mouse_press: None,
             selection_dragging: false,
             last_click: None,
             selection_autoscroll_direction: 0,
@@ -3977,6 +4005,17 @@ impl App {
         }
         // No modal is up, so a modal click cannot still be pending.
         self.modal_mouse_press = None;
+        // The composer's autocomplete dropdown is painted over the transcript
+        // rows directly above the editor, so it owns the pointer there —
+        // upstream hit-tests the list rectangle inside the editor's own
+        // `handleMouse` before the screen-level text selection
+        // (`packages/tui/src/components/editor.ts:618-638`). Without this a
+        // click on a candidate selected the transcript text behind it.
+        if let Some(outcome) = self.autocomplete_mouse_gesture(&gesture) {
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
+            return outcome;
+        }
         // The pill is the first thing on the transcript to get the pointer
         // (upstream `handleScrollToEndIndicatorMouseEvent`, tested before the
         // scrollbar and the selection, `packages/tui/src/tui-alt-screen.ts:1017-1024`):
@@ -4552,6 +4591,113 @@ impl App {
                 self.composer_size.1.store(rect.height, Ordering::Relaxed);
             }
             None => self.composer_size.0.store(0, Ordering::Relaxed),
+        }
+    }
+
+    /// Record the autocomplete dropdown rectangle and the candidate window it
+    /// painted, or clear both when the frame painted no dropdown.
+    ///
+    /// `first_item` is the index of the first candidate row drawn and
+    /// `item_rows` how many candidate rows followed; the trailing `(n/m)`
+    /// counter row is excluded because it is not clickable. Clearing is not
+    /// optional: a stale rectangle would keep swallowing clicks meant for the
+    /// transcript after the dropdown closed.
+    fn record_autocomplete_area(&self, rect: Option<Rect>, first_item: usize, item_rows: usize) {
+        match rect {
+            Some(rect) => {
+                self.autocomplete_origin.0.store(rect.x, Ordering::Relaxed);
+                self.autocomplete_origin.1.store(rect.y, Ordering::Relaxed);
+                self.autocomplete_size
+                    .0
+                    .store(rect.width, Ordering::Relaxed);
+                self.autocomplete_size
+                    .1
+                    .store(rect.height, Ordering::Relaxed);
+                self.autocomplete_first_item
+                    .store(first_item, Ordering::Relaxed);
+                self.autocomplete_item_rows
+                    .store(item_rows, Ordering::Relaxed);
+            }
+            None => {
+                self.autocomplete_size.0.store(0, Ordering::Relaxed);
+                self.autocomplete_size.1.store(0, Ordering::Relaxed);
+                self.autocomplete_item_rows.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Candidate index under a screen cell, or `None` for a cell that is not
+    /// a dropdown candidate row (outside the list, or on its `(n/m)` counter).
+    fn autocomplete_item_at(&self, x: u16, y: u16) -> Option<usize> {
+        let width = self.autocomplete_size.0.load(Ordering::Relaxed);
+        let height = self.autocomplete_size.1.load(Ordering::Relaxed);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let ox = self.autocomplete_origin.0.load(Ordering::Relaxed);
+        let oy = self.autocomplete_origin.1.load(Ordering::Relaxed);
+        if x < ox || x >= ox.saturating_add(width) || y < oy || y >= oy.saturating_add(height) {
+            return None;
+        }
+        let row = (y - oy) as usize;
+        if row >= self.autocomplete_item_rows.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.autocomplete_first_item.load(Ordering::Relaxed) + row)
+    }
+
+    /// Route a gesture that landed on the composer's autocomplete dropdown.
+    ///
+    /// Upstream checks the list rectangle **before** the editor body and
+    /// before the screen-level text selection
+    /// (`packages/tui/src/components/editor.ts:618-638` →
+    /// `SelectList.handleMouse`), so a click on a candidate must not start a
+    /// selection of the transcript text the list is painted over. Semantics
+    /// follow the `SelectList`: a press highlights the row, a click (same-cell
+    /// release) selects it and applies the completion, and a release anywhere
+    /// else drops the pending press without applying.
+    ///
+    /// `None` leaves the gesture to the rest of the pointer path.
+    fn autocomplete_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                let index = self.autocomplete_item_at(gesture.x, gesture.y)?;
+                // The press takes the pointer exactly like the pill / the
+                // scrollbar do: the transcript selection behind the list is
+                // dropped, and the cell is remembered so only a release on it
+                // commits (`clearTextSelection` + `mousePressTarget`).
+                self.stop_selection_autoscroll();
+                self.selection = None;
+                self.selection_dragging = false;
+                self.scrollbar_hover = false;
+                self.scrollbar_drag = None;
+                self.prompt_mouse_press = None;
+                self.autocomplete_mouse_press = Some((gesture.x, gesture.y, index));
+                self.prompt.editor_mut().set_autocomplete_selected(index);
+                Some(StepOutcome::Redraw)
+            }
+            MouseGestureKind::Release(MouseButton::Left) => {
+                let pressed = self.autocomplete_mouse_press.take()?;
+                if pressed.0 != gesture.x || pressed.1 != gesture.y {
+                    // The pointer moved off the pressed row: upstream drops the
+                    // gesture (and with it the click) instead of applying a
+                    // candidate the reader never released on.
+                    return Some(StepOutcome::Idle);
+                }
+                self.prompt
+                    .editor_mut()
+                    .set_autocomplete_selected(pressed.2);
+                Some(match self.prompt.accept_autocomplete() {
+                    crate::prompt::PromptAction::Changed => StepOutcome::Redraw,
+                    _ => StepOutcome::Idle,
+                })
+            }
+            MouseGestureKind::Drag(_) | MouseGestureKind::Move
+                if self.autocomplete_mouse_press.is_some() =>
+            {
+                Some(StepOutcome::Idle)
+            }
+            _ => None,
         }
     }
 
@@ -5167,8 +5313,10 @@ impl App {
         match &frame.editor {
             Some(lines) => {
                 // A custom editor component replaces the prompt entirely, so
-                // there is no composer for a click to place a caret in.
+                // there is no composer for a click to place a caret in — and
+                // no dropdown either.
                 self.record_composer_area(None);
+                self.record_autocomplete_area(None, 0, 0);
                 self.paint_extension_lines(editor_area, lines, buf);
             }
             None => {
@@ -5437,6 +5585,9 @@ impl App {
     fn paint_autocomplete(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
         let editor = self.prompt.editor();
         if !editor.is_showing_autocomplete() || editor_area.width == 0 {
+            // No dropdown (or no editor row to anchor it to): clear the hit
+            // box so the pointer cannot land on a rectangle no longer drawn.
+            self.record_autocomplete_area(None, 0, 0);
             return;
         }
         // The dropdown borrows rows from the transcript viewport: never
@@ -5444,20 +5595,39 @@ impl App {
         // editor row itself.
         let available = editor_area.y.saturating_sub(message_area.y) as usize;
         if available == 0 {
+            self.record_autocomplete_area(None, 0, 0);
             return;
         }
         let width = editor_area.width as usize;
+        // The candidate window the renderer is about to draw, so the pointer
+        // hit test reads the same arithmetic the paint did. The `(n/m)`
+        // counter row is not a candidate: it is excluded from `item_rows`.
+        let (window_start, window_end) = editor.autocomplete_window();
+        let candidate_rows = window_end.saturating_sub(window_start);
         let mut rows = editor.autocomplete_render_styled_lines(width);
         if rows.is_empty() {
+            self.record_autocomplete_area(None, 0, 0);
             return;
         }
         // On a short terminal keep the candidates nearest the prompt. The
         // list is already windowed around the selection, so the tail is the
-        // part the user is actually steering.
-        if rows.len() > available {
-            rows.drain(..rows.len() - available);
+        // part the user is actually steering — the rows dropped here shift
+        // the first painted candidate, which the hit test has to know.
+        let dropped = rows.len().saturating_sub(available);
+        if dropped > 0 {
+            rows.drain(..dropped);
         }
         let first_row = editor_area.y - rows.len() as u16;
+        self.record_autocomplete_area(
+            Some(Rect {
+                x: editor_area.x,
+                y: first_row,
+                width: editor_area.width,
+                height: rows.len() as u16,
+            }),
+            window_start + dropped,
+            candidate_rows.saturating_sub(dropped),
+        );
         for (offset, line) in rows.iter().enumerate() {
             let y = first_row + offset as u16;
             // Blank the borrowed row first: a candidate is shorter than the

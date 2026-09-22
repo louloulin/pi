@@ -249,14 +249,18 @@ issue 允许「最多开启 3 个任务同时运行」并要我选最佳方式�
 1. **P0 · 扩展生命周期事件**（+5.6pt）——插件生态兼容的头号阻塞；`tool_call` / `tool_result` /
    `tool_execution_start|end` / `turn_start` / `message_*` / `session_shutdown` 在 Rust 下是死代码变体。
 2. **P1 · 下拉框鼠标点选**（上游 `editor.ts:622-638`）——本轮把渲染统一了，鼠标是同一组件剩下的另一半。
+   **已关闭（LUM-1431）**：press 高亮 / click 应用 / 异格释放丢弃 / 计数行不可点 /
+   关闭即清命中框；见 `docs/LUM1431_AUTOCOMPLETE_MOUSE.md`。
 3. **P1 · `#` 触发符**——`DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS` 声明了但无 provider 响应，
-   属于「广告了不干活」，与 LUM-1308 消灭的 `app.*` 假广告同类。
+   属于「广告了不干活」，与 LUM-1308 消灭的 `app.*` 假广告同类。**仍开放**（LUM-1431 §7 复核）。
 
 ## 7. 已知限制
 
 1. **列宽按 `char` 计数**，与 `pi-tui` 其余部分（`message` / `prompt` / `Selector`）一致；
    宽字形（CJK、emoji）仍按 1 列计。上游用 `visibleWidth`（wcwidth 语义），这是**既有**的偏差，
    不在本轮范围内。
+   **已在 LUM-1418 修复**：全 TUI 13 个渲染模块 71 处测量/写入切到终端列口径
+   （`crate::width`），本文件下文描述的是该轮之前的状态。
 2. **下拉框借用转录行时会连滚动条那列一起抹平**（`selector`/`settings` 浮层同样如此）。
    下拉框存在期间该几行的滚动条缺一列，关闭后立即恢复。
 3. `@` 文件菜单首行的「label 与 description 文本相同」不是缺陷：上游

@@ -181,7 +181,17 @@ impl Prompt {
         self.handle_key(key)
     }
 
-    /// Place the composer caret at character offset `display` of
+    /// Apply the highlighted autocomplete candidate and close the dropdown —
+    /// the click half of the dropdown's mouse handling (upstream
+    /// `SelectList.onSelect`). A no-op when the dropdown is closed.
+    pub fn accept_autocomplete(&mut self) -> PromptAction {
+        match self.editor.accept_autocomplete() {
+            EditorAction::Changed => PromptAction::Changed,
+            _ => PromptAction::None,
+        }
+    }
+
+    /// Place the caret at the given *display* offset — an index into
     /// [`Prompt::text`] — the mouse-click path.
     ///
     /// See [`Editor::place_display_cursor`]; the App resolves the clicked

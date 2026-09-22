@@ -1813,6 +1813,39 @@ impl Editor {
             rows.clamp(MIN_AUTOCOMPLETE_MAX_VISIBLE, MAX_AUTOCOMPLETE_MAX_VISIBLE);
     }
 
+    /// Visible window of the dropdown as `(start, end)` candidate indices —
+    /// `end` exclusive, exactly the range
+    /// [`Editor::autocomplete_render_styled_lines`] paints (the trailing
+    /// `(n/m)` counter row is not a candidate).
+    ///
+    /// The App needs it to turn a pointer row back into a candidate
+    /// (upstream `SelectList.handleMouse` maps `event.y` through
+    /// `getVisibleRange()`), so it must come from the same windowing call the
+    /// renderer uses rather than a second copy of the arithmetic.
+    pub fn autocomplete_window(&self) -> (usize, usize) {
+        let len = self.autocomplete_items.len();
+        if len == 0 {
+            return (0, 0);
+        }
+        select_list_visible_range(
+            len,
+            self.autocomplete_selected,
+            Some(self.autocomplete_max_visible),
+        )
+    }
+
+    /// Highlight a candidate by index without applying it and without
+    /// scrolling it into view beyond the shared windowing — the press half of
+    /// a dropdown click (upstream `SelectList.handleMouse`'s `press` branch
+    /// sets `selectedIndex` and notifies). Out-of-range indices are clamped to
+    /// the last candidate so a stale row cannot select nothing.
+    pub fn set_autocomplete_selected(&mut self, index: usize) {
+        if self.autocomplete_items.is_empty() {
+            return;
+        }
+        self.autocomplete_selected = index.min(self.autocomplete_items.len() - 1);
+    }
+
     /// Move the highlighted candidate by `delta` rows, wrapping around —
     /// upstream's ArrowUp / ArrowDown handling.
     pub fn move_autocomplete(&mut self, delta: i32) {
