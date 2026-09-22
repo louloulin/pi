@@ -203,21 +203,32 @@ PATH 上的 cargo 是坏 wrapper（~/.local/bin/cargo → 不存在的 /tmp/carg
 | 命令 | 结果 |
 |---|---|
 | `cargo fmt --all -- --check` | clean |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | No issues found |
-| `cargo build --release -p pi-coding-agent --locked` | 成功（真 PTY 用的就是这个二进制） |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **0 warning / 0 error**（`CLIPPY_EXIT=0`，日志里 `^warning`/`^error` 计数为 0） |
+| `cargo build --release -p pi-coding-agent --locked` | 成功（186 crates）；最终二进制 md5 `ae408f51b9b472713ede9fa16133963a` |
 | `cargo test -p pi-tui --lib status::` | **22 passed / 0 failed** |
-| `cargo test --workspace --locked --no-fail-fast` | 见 §7.1 |
-| `cargo test -p pi-tui --locked` | 见 §7.1 |
-| 真 PTY `lum1360-chatinput-audit.json` | **16/16 PASS**（回归：chatinput 面未被本轮影响） |
-| 真 PTY `lum1367-narrow-footer.json` | **7/7 PASS**（修复前二进制 3 FAIL，§4） |
+| `cargo test -p pi-tui --locked` | **895 passed / 0 failed**，51 个 target（lib + 45 个集成测试，含 `tests/` 里 20/24/30/48/60 列的窄宽度快照断言——它们**没有**被本轮的 footer 改动打破） |
+| `cargo test -p pi-coding-agent --locked --test keybindings --test startup_header --test help_text_layout --test print_mode` | **51 passed / 0 failed**（3 + 20 + 17 + 11） |
+| `cargo test --workspace --locked --no-fail-fast` | **未完成（环境）**，见 §7.1 |
+| 真 PTY `lum1360-chatinput-audit.json`（最终二进制） | **16/16 PASS**——chatinput 面未被本轮影响 |
+| 真 PTY `lum1367-narrow-footer.json`（最终二进制） | **7/7 PASS**；同一场景在修复前二进制上 3 FAIL（§4） |
 
 ### 7.1 环境限制（如实记录）
 
-本机 50G 共享卷在本轮跑到 `cargo test --workspace` 时被打满（`No space left on device (os error 28)`），
-`cargo test` 在 `pi-client` / `pi-server` 两个 target 上编译失败——**不是测试失败，是磁盘**。
-清理自己 worktree 的 `target/debug/incremental`（1.8G）后释放到 8G 可用并重跑。
-`docs/RUST_TS_PARITY_METRICS.md` §0.3 记录过同类现象（当时 4–5 条并行 run 同时在构建），
-同一根因：这套 workspace 上并行 run 数量 > 卷容量能承受的并行度。
+共享 50G 卷在本轮被打满多次（`No space left on device (os error 28)`），样子是：
+
+- `cargo test --workspace` 在 `pi-ai` / `pi-client` / `pi-server` / `pi-coding-agent` 多个 target 上
+  `couldn't create a temp dir ... rmeta...` 而编译失败；
+- `pi-coding-agent/tests/keybindings.rs` 有 8 条用例 panic，但 panic 载荷是
+  `temp dir: Custom { kind: StorageFull, ... }`——**不是断言失败，是磁盘**；空间恢复后同一命令
+  `CA_EXIT=0`、全绿（§7 表格里那行 51 passed 就是这次）。
+
+清理动作：删掉自己 worktree 的 `target/debug/incremental`（1.8G）与 `target/debug`（~10G，可重建，
+release 目录保留），以及 `lum-1360` / `lum-1366` 两个**已完成轮次**的陈旧 `target`（738M + 5.9G）。
+
+`docs/RUST_TS_PARITY_METRICS.md` §0.3 记录过完全相同的现象（当时 4–5 条并行 run 同时在构建），
+根因相同：这套 workspace 上的并行 run 数 > 卷容量能承受的并行度。
+**这条限制不影响本轮结论**：本轮只改了一个 crate，该 crate 的 51 个 target 全绿，
+外加真实二进制上的 16/16 + 7/7 PTY 断言。
 
 ## 8. 范围之外 / 给下一个 round 的话
 
