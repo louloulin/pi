@@ -337,6 +337,16 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     );
     let agent = Arc::new(AsyncMutex::new(agent));
 
+    // Extensions that subscribed to `tool_call` / `tool_result` get the
+    // agent loop's tool hooks, so they can block a call, patch its
+    // arguments, or replace what the model sees (LUM-1330). Installed here,
+    // before the loop starts, because the hooks must exist for the very
+    // first tool call.
+    crate::extensions::hook::install_tool_hooks(
+        &mut *agent.lock().await,
+        options.extensions.as_ref(),
+    );
+
     let config = interactive_app_config(&options);
 
     let mut terminal = match setup_terminal() {
@@ -604,17 +614,15 @@ async fn run_loop(
         // (see `drain_ready_events`).
         if ct_event::poll(config.event_poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
-                // Bracketed paste (`\x1b[200~ … \x1b[201~`): the terminal hands
-                // the whole paste over as one event, which is what lets the
-                // composer fold it. Without `EnableBracketedPaste` a paste
-                // arrives as its individual key presses, so a newline inside
-                // it submits and a 200-line paste becomes 200 typed lines —
-                // upstream enables the mode for the same reason
-                // (`packages/tui/src/terminal.ts:184`,
-                // `process.stdout.write("\x1b[?2004h")`) and routes the event
-                // through the editor's paste path (`handlePaste`).
+                // Bracketed paste is not expressible as an `InputEvent` (that
+                // enum is `Copy` and the payload is owned), so the driver
+                // routes it straight to the composer. Without this branch the
+                // payload was translated to `Ignored` and the paste was
+                // dropped entirely; with bracketed paste disabled, the same
+                // bytes used to arrive as keystrokes and every newline in a
+                // pasted block submitted the draft.
                 if let CtEvent::Paste(text) = &event {
-                    app.paste_text(text);
+                    app.step_paste(text);
                     continue;
                 }
                 let translated = App::translate_event(event);
@@ -4217,7 +4225,7 @@ fn run_external_editor(
     app: &mut App,
     command: &str,
 ) {
-    let draft = app.editor_text();
+    let draft = app.expanded_editor_text();
     let suspended = suspend_tui(terminal);
     let result = if suspended.is_ok() {
         crate::external_editor::edit_in_external_editor(
