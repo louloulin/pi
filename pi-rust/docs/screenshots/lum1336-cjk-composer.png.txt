@@ -1,0 +1,139 @@
+# lum1336-cjk-composer.png — chars, 60x24 cells
+
+===== LUM-1336 CJK composer: a draft of wide (2-cell) glyphs has to wrap at the terminal's *column* budget, not at one column per character. Pre-fix the composer measured every character as one cell, so a 45-glyph CJK draft was laid out as one 45-cell row while the terminal draws it as 90 columns: the tail fell past the composer's right edge, and because ratatui's diff skips the cell after each wide symbol the row also kept stale placeholder cells (`世界` rendered as `世p`).  |  [1] 1. idle at 60x24: single-row prompt placeholder  (cursor 60,23, frame b4c71f678237, px 255918fbf361, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d78c8c7f08388c  in 0 out 0 ?/8.2k
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1336 CJK composer: a draft of wide (2-cell) glyphs has to wrap at the terminal's *column* budget, not at one column per character. Pre-fix the composer measured every character as one cell, so a 45-glyph CJK draft was laid out as one 45-cell row while the terminal draws it as 90 columns: the tail fell past the composer's right edge, and because ratatui's diff skips the cell after each wide symbol the row also kept stale placeholder cells (`世界` rendered as `世p`).  |  [2] 2. control: 40 half-width characters stay on one row (40 of the 58 body columns)  (cursor 43,22, frame 5eba2ba44db0, px e89eecaf48cd, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN▍
+Faux test model  session-18d78c8c7f08388c  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN'  — 40 columns of ASCII fit the 58-column composer body
+
+===== LUM-1336 CJK composer: a draft of wide (2-cell) glyphs has to wrap at the terminal's *column* budget, not at one column per character. Pre-fix the composer measured every character as one cell, so a 45-glyph CJK draft was laid out as one 45-cell row while the terminal draws it as 90 columns: the tail fell past the composer's right edge, and because ratatui's diff skips the cell after each wide symbol the row also kept stale placeholder cells (`世界` rendered as `世p`).  |  [3] 3. no ghost: two wide glyphs typed as one burst leave nothing of the placeholder on the row  (cursor 43,22, frame de5938687610, px 9b3909382d4f, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 世界▍
+Faux test model  session-18d78c8c7f08388c  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> 世界'  — the row is exactly label + the two glyphs
+  assert PASS   probe        '> 世p' (x0)  — pre-fix the diff skipped the cell after each wide symbol and the placeholder's `p` survived
+
+===== LUM-1336 CJK composer: a draft of wide (2-cell) glyphs has to wrap at the terminal's *column* budget, not at one column per character. Pre-fix the composer measured every character as one cell, so a 45-glyph CJK draft was laid out as one 45-cell row while the terminal draws it as 90 columns: the tail fell past the composer's right edge, and because ratatui's diff skips the cell after each wide symbol the row also kept stale placeholder cells (`世界` rendered as `世p`).  |  [4] 4. wide glyphs wrap on columns: 45 glyphs = 90 columns fill two rows of 29 and 16 glyphs  (cursor 35,22, frame 0a0626854b2f, px 2a4c58f580e1, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文
+  宽字符折行验证中文宽字符折行验证▍
+Faux test model  session-18d78c8c7f08388c  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> 中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文'  — 29 wide glyphs = 58 columns fill the first composer row exactly
+  assert PASS   probe        '  宽字符折行验证中文宽字符折行验证'  — the remaining 16 glyphs (32 columns) continue on an indented row and stay visible
+  assert PASS   probe        '验证中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文宽字符折' (x0)  — pre-fix the whole 90-column draft was painted as one 45-cell row, so no second row existed
+
+===== LUM-1336 CJK composer: a draft of wide (2-cell) glyphs has to wrap at the terminal's *column* budget, not at one column per character. Pre-fix the composer measured every character as one cell, so a 45-glyph CJK draft was laid out as one 45-cell row while the terminal draws it as 90 columns: the tail fell past the composer's right edge, and because ratatui's diff skips the cell after each wide symbol the row also kept stale placeholder cells (`世界` rendered as `世p`).  |  [5] 5. caret is drawn at the cursor's column, on the row being typed into  (cursor 35,22, frame 0a0626854b2f, px 2a4c58f580e1, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文
+  宽字符折行验证中文宽字符折行验证▍
+Faux test model  session-18d78c8c7f08388c  in 0 out 0 ?/8.2k
+  assert PASS   expect       '  宽字符折行验证中文宽字符折行验证▍'

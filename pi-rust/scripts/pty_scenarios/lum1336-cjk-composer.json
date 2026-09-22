@@ -1,0 +1,76 @@
+{
+  "cols": 60,
+  "rows": 24,
+  "caption": "LUM-1336 CJK composer: a draft of wide (2-cell) glyphs has to wrap at the terminal's *column* budget, not at one column per character. Pre-fix the composer measured every character as one cell, so a 45-glyph CJK draft was laid out as one 45-cell row while the terminal draws it as 90 columns: the tail fell past the composer's right edge, and because ratatui's diff skips the cell after each wide symbol the row also kept stale placeholder cells (`世界` rendered as `世p`).",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "panels": [
+    {
+      "label": "1. idle at 60x24: single-row prompt placeholder",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "Faux test model",
+      "expect": [
+        "> type a prompt"
+      ]
+    },
+    {
+      "label": "2. control: 40 half-width characters stay on one row (40 of the 58 body columns)",
+      "send": "<C-u>ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN",
+          "why": "40 columns of ASCII fit the 58-column composer body"
+        }
+      ]
+    },
+    {
+      "label": "3. no ghost: two wide glyphs typed as one burst leave nothing of the placeholder on the row",
+      "send": "<C-u>世界",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> 世界",
+          "why": "the row is exactly label + the two glyphs"
+        },
+        {
+          "text": "> 世p",
+          "count": "<=0",
+          "why": "pre-fix the diff skipped the cell after each wide symbol and the placeholder's `p` survived"
+        }
+      ]
+    },
+    {
+      "label": "4. wide glyphs wrap on columns: 45 glyphs = 90 columns fill two rows of 29 and 16 glyphs",
+      "send": "<C-u>中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证",
+      "wait": 0.8,
+      "probe": [
+        {
+          "text": "> 中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文",
+          "why": "29 wide glyphs = 58 columns fill the first composer row exactly"
+        },
+        {
+          "text": "  宽字符折行验证中文宽字符折行验证",
+          "why": "the remaining 16 glyphs (32 columns) continue on an indented row and stay visible"
+        },
+        {
+          "text": "验证中文宽字符折行验证中文宽字符折行验证中文宽字符折行验证中文宽字符折",
+          "count": "<=0",
+          "why": "pre-fix the whole 90-column draft was painted as one 45-cell row, so no second row existed"
+        }
+      ]
+    },
+    {
+      "label": "5. caret is drawn at the cursor's column, on the row being typed into",
+      "send": "",
+      "wait": 0.4,
+      "expect": [
+        "  宽字符折行验证中文宽字符折行验证▍"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

@@ -301,7 +301,7 @@ use crate::theme::{
     builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
 };
-use crate::visual_text::VisualLayout;
+use crate::visual_text::{cell_width, cells, VisualLayout};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -5466,27 +5466,64 @@ impl App {
             thinking_border_color(self.thinking_level)
         };
         let label_style = Some(SpanStyle::fg(label_slot).to_style(&self.theme));
-        let label_width = self.prompt.label().chars().count() as u16;
+        let label_width = cells(self.prompt.label()) as u16;
         for (row, line) in lines.iter().enumerate() {
             let y = rect.y + row as u16;
             if y >= rect.y + rect.height {
                 break;
             }
-            for (col, ch) in line.chars().enumerate() {
-                let x = rect.x + col as u16;
-                if x >= rect.x + rect.width {
+            // Paint by **columns**, not by characters: a buffer cell is one
+            // terminal column, so a wide glyph (CJK, most emoji) moves the
+            // cursor two cells. Painting one cell per character put the
+            // second half of every wide glyph on top of its neighbour and,
+            // worse, made `ratatui`'s diff skip the cell *after* it
+            // (`Buffer::diff` keeps `to_skip = symbol_width - 1`), so the
+            // row kept stale cells from the previous frame — the LUM-1336
+            // ghost. Cells the glyph covers beyond its own are blanked for
+            // the same reason: the buffer has to match the terminal grid the
+            // diff is computed against.
+            let mut col = 0u16;
+            let mut last_col: Option<u16> = None;
+            for ch in line.chars() {
+                let width = cell_width(ch);
+                if width == 0 {
+                    // Invisible on its own (a combining mark, a `\r` from a
+                    // CRLF paste). Append it to the cell it composes with
+                    // instead of consuming a column the layout did not
+                    // budget for.
+                    if let Some(prev) = last_col {
+                        if let Some(cell) = buf.cell_mut((rect.x + prev, y)) {
+                            let combined = format!("{}{}", cell.symbol(), ch);
+                            cell.set_symbol(&combined);
+                        }
+                    }
+                    continue;
+                }
+                if col + width as u16 > rect.width {
                     break;
                 }
+                let x = rect.x + col;
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     if let Some(style) = label_style {
                         // Only the first row owns the label; subsequent rows
                         // are blank-padded with spaces.
-                        if row == 0 && (col as u16) < label_width {
+                        if row == 0 && col < label_width {
                             cell.set_style(style);
                         }
                     }
                 }
+                for extra in 1..width as u16 {
+                    let covered = x + extra;
+                    if covered >= rect.x + rect.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((covered, y)) {
+                        cell.set_char(' ');
+                    }
+                }
+                last_col = Some(col);
+                col += width as u16;
             }
         }
     }

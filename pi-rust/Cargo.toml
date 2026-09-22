@@ -90,6 +90,14 @@ getrandom = { version = "0.2", features = ["js"] }
 # via `unicode-truncate`), so pinning it directly adds no new package to
 # the lockfile and keeps `--offline` builds working.
 unicode-segmentation = "=1.13.3"
+# Terminal cell width — the composer lays a draft out in *columns*, not
+# characters: a wide glyph (CJK, most emoji) occupies two terminal cells, and
+# a frame buffer cell is one column. Measuring per character painted the
+# second half of every wide glyph over its neighbour and let a CJK draft wrap
+# at twice the composer's width (LUM-1336). Already in the graph via
+# `ratatui` -> `unicode-truncate`, so pinning it directly adds no new package
+# to the lockfile and keeps `--offline` builds working.
+unicode-width = "=0.1.14"
 # NFKC normalization — the `edit` tool's fuzzy matcher (`normalizeForFuzzyMatch`)
 # applies `String.prototype.normalize("NFKC")` before its smart-quote / dash /
 # space folding. Already in the graph transitively via `idna_adapter`, so
