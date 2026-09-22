@@ -84,21 +84,27 @@ fn scroll_up_and_down_translate_to_mouse_events() {
         App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::NONE)),
         InputEvent::Mouse {
             up: true,
-            alt: false
+            alt: false,
+            x: 1,
+            y: 1,
         }
     );
     assert_eq!(
         App::translate_event(mouse(MouseEventKind::ScrollDown, KeyModifiers::NONE)),
         InputEvent::Mouse {
             up: false,
-            alt: false
+            alt: false,
+            x: 1,
+            y: 1,
         }
     );
     assert_eq!(
         App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::ALT)),
         InputEvent::Mouse {
             up: true,
-            alt: true
+            alt: true,
+            x: 1,
+            y: 1,
         }
     );
 }

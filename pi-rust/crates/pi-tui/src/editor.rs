@@ -2206,9 +2206,92 @@ impl Editor {
         true
     }
 
-    /// Render the dropdown rows for a widget `width`, one entry per
-    /// candidate (already windowed to the configured height). The
-    /// highlighted row is marked with `❯`.
+    /// Move the highlight by `delta` rows, clamped at both ends — upstream
+    /// `SelectList.handleMouse`'s wheel branch
+    /// (`Math.max(0, Math.min(len - 1, selectedIndex + delta))`,
+    /// `select-list.ts:110-118`).
+    ///
+    /// The clamp is deliberately **not** the arrow keys' wrap
+    /// ([`Editor::move_autocomplete`]): a wheel notch is a scroll, so
+    /// holding it at the end of the list is the expected behaviour, while
+    /// `Up` / `Down` are documented to wrap.
+    ///
+    /// Returns `true` when the highlight moved, so a caller can tell a real
+    /// change from a notch that hit the list's end.
+    pub fn scroll_autocomplete(&mut self, delta: i32) -> bool {
+        let len = self.autocomplete_items.len();
+        if len == 0 {
+            return false;
+        }
+        let last = len as i64 - 1;
+        let next = (self.autocomplete_selected as i64 + i64::from(delta)).clamp(0, last) as usize;
+        if next == self.autocomplete_selected {
+            return false;
+        }
+        self.autocomplete_selected = next;
+        true
+    }
+
+    /// Highlight the candidate at `index` — upstream `SelectList`'s press
+    /// branch (`this.selectedIndex = itemIndex`, `select-list.ts:120-127`),
+    /// which is how a click on a dropdown row works there.
+    ///
+    /// Unlike [`Editor::scroll_autocomplete`] and
+    /// [`Editor::move_autocomplete`] the index is named, not a direction, so
+    /// an out-of-range index is ignored rather than clamped (the pointer can
+    /// only name a row the renderer painted). Returns `true` when the
+    /// highlight moved.
+    pub fn select_autocomplete_index(&mut self, index: usize) -> bool {
+        if index >= self.autocomplete_items.len() || index == self.autocomplete_selected {
+            return false;
+        }
+        self.autocomplete_selected = index;
+        true
+    }
+
+    /// The candidate each painted dropdown row shows for a row budget of
+    /// `max_rows`, top to bottom.
+    ///
+    /// `Some(index)` is a candidate ([`Editor::autocomplete_items`]), `None`
+    /// is the `(n/m)` window indicator — the list's own cell, with no
+    /// candidate under it. Fewer candidates than `max_rows` yield fewer rows.
+    ///
+    /// This is the same window [`Editor::autocomplete_render_styled_lines`]
+    /// paints, clipped by the same rule (drop the *top* rows when the list
+    /// does not fit, so the candidates nearest the prompt survive), because
+    /// both are built from [`Editor::autocomplete_window_rows`]. The pointer
+    /// path (`App::autocomplete_hit`) maps a cell back onto a candidate
+    /// through this, so the hit test cannot drift from the painted rows.
+    pub fn autocomplete_visible_rows(&self, max_rows: usize) -> Vec<Option<usize>> {
+        let rows = self.autocomplete_window_rows();
+        let drop_rows = rows.len().saturating_sub(max_rows);
+        rows.into_iter().skip(drop_rows).collect()
+    }
+
+    /// The dropdown's rows *before* the painted-row budget clips them: one
+    /// entry per candidate of the `SelectList` window
+    /// ([`select_list_visible_range`]) plus the `(n/m)` indicator row when
+    /// that window is a strict subset of the candidates.
+    fn autocomplete_window_rows(&self) -> Vec<Option<usize>> {
+        let len = self.autocomplete_items.len();
+        if len == 0 {
+            return Vec::new();
+        }
+        let (start, end) = select_list_visible_range(
+            len,
+            self.autocomplete_selected,
+            Some(self.autocomplete_max_visible),
+        );
+        let mut rows: Vec<Option<usize>> = (start..end).map(Some).collect();
+        if start > 0 || end < len {
+            rows.push(None);
+        }
+        rows
+    }
+
+    /// Render the dropdown rows for a widget `width` and a budget of
+    /// `max_rows` painted rows, one entry per candidate. The highlighted row
+    /// is marked with `❯`.
     ///
     /// The layout is the shared `SelectList` one
     /// ([`select_list_row_spans`], upstream `SelectList::renderItem`) — the
@@ -2221,7 +2304,16 @@ impl Editor {
     /// The selected row is wrapped whole (`accent` over `selectedBg`), a
     /// plain row's description is `muted` — upstream's `selectList` theme
     /// roles. A plain-text render is [`Editor::autocomplete_render_lines`].
-    pub fn autocomplete_render_styled_lines(&self, width: usize) -> Vec<StyledLine> {
+    ///
+    /// `max_rows` is the number of rows the caller can paint (the App's
+    /// budget above the composer); `usize::MAX` renders the whole window.
+    /// The rows returned are exactly
+    /// [`Editor::autocomplete_visible_rows`]'s, in the same order.
+    pub fn autocomplete_render_styled_lines(
+        &self,
+        width: usize,
+        max_rows: usize,
+    ) -> Vec<StyledLine> {
         let len = self.autocomplete_items.len();
         if len == 0 || width == 0 {
             return Vec::new();
@@ -2232,34 +2324,28 @@ impl Editor {
         let primary_column_width = self
             .autocomplete_layout()
             .primary_column_width(self.autocomplete_items.iter());
-        let (start, end) = select_list_visible_range(
-            len,
-            self.autocomplete_selected,
-            Some(self.autocomplete_max_visible),
-        );
-        let mut rows = Vec::with_capacity(end - start + 1);
-        for index in start..end {
-            rows.push(select_list_row_spans(
-                &self.autocomplete_items[index],
-                index == self.autocomplete_selected,
-                width,
-                primary_column_width,
-            ));
-        }
-        if start > 0 || end < len {
-            rows.push(vec![StyledSpan::new(
-                format!("  ({}/{len})", self.autocomplete_selected + 1),
-                SpanStyle::fg(ThemeColor::Muted),
-            )]);
-        }
-        rows
+        self.autocomplete_visible_rows(max_rows)
+            .into_iter()
+            .map(|row| match row {
+                Some(index) => select_list_row_spans(
+                    &self.autocomplete_items[index],
+                    index == self.autocomplete_selected,
+                    width,
+                    primary_column_width,
+                ),
+                None => vec![StyledSpan::new(
+                    format!("  ({}/{len})", self.autocomplete_selected + 1),
+                    SpanStyle::fg(ThemeColor::Muted),
+                )],
+            })
+            .collect()
     }
 
     /// Render the dropdown rows as plain text (the styling of
     /// [`Editor::autocomplete_render_styled_lines`] dropped, the layout
     /// kept).
-    pub fn autocomplete_render_lines(&self, width: usize) -> Vec<String> {
-        self.autocomplete_render_styled_lines(width)
+    pub fn autocomplete_render_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
+        self.autocomplete_render_styled_lines(width, max_rows)
             .iter()
             .map(|line| plain_text(line))
             .collect()

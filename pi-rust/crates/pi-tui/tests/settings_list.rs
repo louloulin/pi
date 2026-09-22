@@ -247,10 +247,7 @@ fn the_wheel_scrolls_the_list_not_the_log() {
     assert!(before[2].starts_with("→ Auto-compact"), "{before:?}");
 
     assert_eq!(
-        app.step(InputEvent::Mouse {
-            up: false,
-            alt: false
-        }),
+        app.step(InputEvent::wheel(false, false)),
         StepOutcome::Redraw
     );
     let after = app.render_snapshot(60, 12).settings_lines;
