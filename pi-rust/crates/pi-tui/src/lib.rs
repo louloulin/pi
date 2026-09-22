@@ -48,8 +48,9 @@ pub mod word_navigation;
 
 pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot, ScrollbarGeometry};
 pub use autocomplete::{
-    ArgumentCompletions, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
-    CombinedAutocompleteProvider, CompletionResult, SlashCommand,
+    compose_autocomplete_providers, ArgumentCompletions, AutocompleteItem, AutocompleteProvider,
+    AutocompleteProviderFactory, AutocompleteSuggestions, CombinedAutocompleteProvider,
+    CompletionResult, SlashCommand, TriggeredAutocompleteProvider,
 };
 pub use clipboard::{base64_encode, osc52_sequence};
 pub use component::{

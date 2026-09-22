@@ -1,0 +1,15 @@
+FRAME DUMP cols=78 rows=14
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|❯ #2983                           [open] Extension API for autocomplete       |
+|> #29▍                                                                        |
+|Faux  lum1448-autocomplete-provider              in 0 out 0 ?/2.0k  ? for help|
