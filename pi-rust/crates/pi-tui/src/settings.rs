@@ -320,23 +320,49 @@ impl SettingsList {
 
     /// Process one key event.
     pub fn handle_key(&mut self, key: Key) -> SettingsAction {
+        let kb = crate::keybindings::get_keybindings();
+        self.handle_key_with(&kb, key)
+    }
+
+    /// [`SettingsList::handle_key`] against an explicit table.
+    ///
+    /// Upstream `SettingsList::handleInput` reads all four list chords off the
+    /// registry (`components/settings-list.ts:231-246`); the Rust list used to
+    /// hardcode `Enter` / `Esc` / arrows, so a `keybindings.json` override was
+    /// advertised by `/hotkeys` but never reached the list.
+    pub fn handle_key_with(
+        &mut self,
+        kb: &crate::keybindings::KeybindingsManager,
+        key: Key,
+    ) -> SettingsAction {
+        let event = crate::input::InputEvent::Key(key);
+        // Upstream's order: up, down, confirm, cancel — before the modifier
+        // guard, because `tui.select.cancel` ships as `escape` + `ctrl+c`.
+        if kb.matches(&event, "tui.select.up") {
+            return self.prev();
+        }
+        if kb.matches(&event, "tui.select.down") {
+            return self.next();
+        }
+        if kb.matches(&event, "tui.select.confirm") {
+            return self.activate();
+        }
+        if kb.matches(&event, "tui.select.cancel") {
+            return SettingsAction::Cancelled;
+        }
         if key.modifiers.control || key.modifiers.alt || key.modifiers.meta {
-            // Ctrl+C and friends belong to the App, not to the list.
+            // Every other modified chord belongs to the App, not to the list.
             return SettingsAction::None;
         }
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') if !self.searchable => self.prev(),
-            KeyCode::Down | KeyCode::Char('j') if !self.searchable => self.next(),
-            KeyCode::Up => self.prev(),
-            KeyCode::Down => self.next(),
+            KeyCode::Char('k') if !self.searchable => self.prev(),
+            KeyCode::Char('j') if !self.searchable => self.next(),
             KeyCode::Home => self.set_cursor(0),
             KeyCode::End => self.set_cursor(self.filtered.len().saturating_sub(1)),
-            KeyCode::Enter => self.activate(),
             // Space only activates while the search box is empty: once the
             // user is typing a query, a space is a query character
             // (upstream `data === " " && searchInput.getValue().length === 0`).
             KeyCode::Char(' ') if !self.searchable || self.filter.is_empty() => self.activate(),
-            KeyCode::Esc => SettingsAction::Cancelled,
             KeyCode::Backspace if self.searchable => {
                 let mut filter = self.filter.clone();
                 filter.pop();
@@ -704,10 +730,19 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_modified_keys_are_left_to_the_app() {
+    fn non_list_ctrl_chords_are_left_to_the_app() {
         let mut list = SettingsList::new(items(), 10).searchable(true);
-        let ctrl_c = Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(list.handle_key(ctrl_c), SettingsAction::None);
+        // `tui.select.cancel` ships as `escape` + `ctrl+c` and upstream
+        // `SettingsList` answers it itself (`settings-list.ts:244-246`); every
+        // other modified chord still belongs to the app.
+        assert_eq!(
+            list.handle_key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            SettingsAction::Cancelled
+        );
+        assert_eq!(
+            list.handle_key(Key::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            SettingsAction::None
+        );
         assert_eq!(list.filter(), "");
     }
 

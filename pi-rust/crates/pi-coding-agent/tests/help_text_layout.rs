@@ -71,12 +71,21 @@ fn the_real_hotkey_legend_keeps_one_row_per_source_row() {
 
 /// A narrow terminal wraps instead of losing rows or overflowing the viewport.
 ///
-/// `help_text()` has two rows wider than the 78-column body at 80 columns:
-/// `/thinking …` (85) and the `Ctrl+C` key row (79). Both therefore go through
-/// the word-wrap, which collapses whitespace runs to one space — and that is why
-/// the block grows by **one** row rather than two: after collapsing, the
-/// `Ctrl+C` row is 70 columns and fits again. Growth is bounded by the number of
-/// over-long rows, and the aliased rows keep their columns.
+/// Three rows are wider than the 78-column body at 80 columns: `/thinking …`
+/// (85) in the command section, plus two legend rows — `Up / Down` (81) and
+/// `PgUp / PgDn` (79). The count moved from 2 to 3 in LUM-1450: the `keys:`
+/// legend now pads its chord column to the widest *effective* chord
+/// (`Ctrl+A / Ctrl+E`, 15 columns) instead of a hand-tuned 10-column literal,
+/// so the two legend rows that were already near the limit crossed it. The
+/// old third row (`Ctrl+C abort the current turn…`) disappeared because the
+/// legend now names `app.interrupt` (`Esc`) and `app.clear` (`Ctrl+C`) as the
+/// two separate actions they are. Wrapping is the intended behaviour — a
+/// wrapped row costs a line, an overflowing one costs the row.
+///
+/// Both therefore go through the word-wrap, which collapses whitespace runs to
+/// one space — and that is why the block grows by **fewer** rows than the
+/// over-long count: after collapsing, some rows fit again. Growth is bounded by
+/// the number of over-long rows, and the aliased rows keep their columns.
 #[test]
 fn an_eighty_column_terminal_wraps_instead_of_overflowing() {
     let help = help_text();
@@ -85,7 +94,7 @@ fn an_eighty_column_terminal_wraps_instead_of_overflowing() {
         .iter()
         .filter(|row| row.chars().count() > 78)
         .count();
-    assert_eq!(over_long, 2, "the fixture changed: {source_rows:#?}");
+    assert_eq!(over_long, 3, "the fixture changed: {source_rows:#?}");
 
     let mut view = MessageView::new();
     view.push_info_block(&help);

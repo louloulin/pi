@@ -455,6 +455,44 @@ wire-payload / header 缝，**handler 返回值目前不生效**、`after_provid
 `/help` 的 `keys:` 段与 dialog/settings 页脚仍是硬编码 chord，**本轮不算已修**，
 列为下一轮第 2、3 条。
 
+### 0.15 LUM-1450 复测：模态列表与提示面统一按生效键位；提示面硬编码 chord **19 → 0**
+
+本轮改 `pi-tui`（selector / settings / dialog / app / prompt）+ `pi-coding-agent`
+（`commands/slash.rs` / `interactive.rs` / `text_fallback.rs`），细节、反向验证与帧截图见
+`docs/LUM1450_HINT_CHORDS.md`。
+
+| 量 | 本轮实测 | LUM-1447 | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **90.5%**（138,635 / 153,106） | 90.2%（138,153） | `python pi-rust/scripts/measure_loc.py`；+482 行 src |
+| 测试规模 | **50.6%**（2,684 / 5,309） | 50.3%（2,670） | +14 = `select_list_keybindings` 9 + `lum1450_dialog_frames` 2 + `lum1450_help_legend_frames` 2 + slash 1 |
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 本轮无新 src 模块 |
+| `app.*` 接线 | 43 / 44 = 97.7%（silent 1：`app.tree.editLabel`） | 同 | 未动 |
+| `tui.*` 消费面 | 49 / 49 = 100% | 同 | 未动。**本轮发现该口径漏报**：`Selector` 写死 `KeyCode::Enter` 时 `tui.select.confirm` 也算「已消费」，因为它只数「字面量消费者」。见 §6 与 LUM-1450 §7 第 2 条 |
+| 扩展生命周期事件 | 36/36 | 同 | 未动 |
+| **提示面硬编码 chord（新登记）** | **0 硬编码 / 5 知会**（基线 **19 / 5**） | ——（未测） | `python pi-rust/scripts/hint_chord_literals.py pi-rust --check`；双向 `--check`（新硬编码报错 + 知会项失效也报错） |
+| **模态列表键位来源（新登记）** | **2 / 2 组件 + 3 / 3 页脚** | 0 / 2 + 0 / 3（全部写死 `KeyCode`） | `Selector`、`SettingsList` 的 up/down/confirm/cancel/pageUp/pageDown 全走 `kb.matches`；Confirm/Input/Select 三处页脚全由 `key_text_or` 生成 |
+
+**加权完成度（权重表见 §4.1，公式公开）**：13 个轴里只有第 12 轴动了，
+`2,670/5,309 = 0.5029` → `2,684/5,309 = 0.5056`：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.5056 + 3×0.95 = 86.8%
+```
+
+一位小数不变。**这不是「本轮没事干」**，而是说：本轮关掉的是「广告的键位不生效」这类
+缺陷，它不在 §4.1 那 13 个轴的任何一个里——轴 5 用的是「模块率与 `app.*` 接线率的均值」，
+而 `app.*` 一列一动没动。所以本轮的价值落在两个**新登记、可反证**的轴上（提示面 0/19；
+模态列表键位来源 2/2 + 3/3）。若把「提示面」当成一条轴（权重 5%），它会从 0/19 = 0%
+走到 0 硬编码 = 100%（+5.0pt），但**本轮不这么算**：
+一条新轴要先进 §4.1 的权重表、说清权重怎么来的，再进公式；
+先把测量做实，下一轮再谈加权。
+
+**TUI 交互+视觉轴**：`(14×0.905 + 8×0.90) / 22 = 90.3%`。
+
+本轮的门禁与三条反向验证（均在 stash 掉源码后的基线上复现失败）见
+`docs/LUM1450_HINT_CHORDS.md` §4。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

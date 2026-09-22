@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+| ⋯ 10 lines above · Home evious session                                                            │|
+|·   /tree     navigate the session tree and switch branches                                        │|
+|·   /fork     branch a new session from a user message                                             │|
+|·   /clone    copy the current session into a new session file                                     │|
+|·   /settings show or change interface settings                                                    │|
+|·   /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)            │|
+|·   /trust    show or set project trust (/trust yes|no)                                            │|
+|·   /compact  summarize the conversation prefix to free context                                    ┃|
+|·   /hotkeys  list the keyboard shortcuts                                                          ┃|
+|·   /extensions list loaded extensions and what they register                                      ┃|
+|·   /reload   re-read keybindings.json and the interface settings                                  ┃|
+|·   /exit     quit the interactive session                                                         ┃|
+|·                                                                                                  ┃|
+|· keys:                                                                                            ┃|
+|·   Enter            submit prompt                                                                 ┃|
+|·   Ctrl+J           insert a new line (Shift+Enter on kitty-protocol terminals)                   ┃|
+|·   Up / Down        move within the draft, then prompt history at the top / bottom                ┃|
+|·   PgUp / PgDn      page the chat log, or the draft when it does not fit the box                  ┃|
+|·   Home / End       jump to the start / end of the chat log                                       ┃|
+|·   Ctrl+A / Ctrl+E  jump to the start / end of the current line                                   ┃|
+|·   Ctrl+K           delete to the end of the line (Ctrl+U: to its start)                          ┃|
+|·   Ctrl+R           reverse-search prompt history (Enter accepts, Esc cancels)                    ┃|
+|·   Esc              abort the current turn                                                        ┃|
+|·   Ctrl+C           clear the prompt on idle (twice exits)                                        ┃|
+|·   Ctrl+D           exit on an empty prompt                                                       ┃|
+|·   Ctrl+L           open the model selector                                                       ┃|
+|·   Esc              close selector / cancel turn                                                  ┃|
+|·                                                                                                  ┃|
+|> type a prompt — /help for commands                                                                |
+|Faux  lum1450-help-frames                                              in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP

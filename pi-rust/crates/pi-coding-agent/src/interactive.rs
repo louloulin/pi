@@ -1240,7 +1240,10 @@ async fn handle_submitted(
             // to the editor and the user is told (upstream `editor.setText`
             // + `showWarning`).
             app.set_editor_text(&text);
-            app.flash_status("A bash command is already running. Press Esc to cancel it first.");
+            app.flash_status(format!(
+                "A bash command is already running. Press {} to cancel it first.",
+                pi_tui::keybindings::key_text_or("app.interrupt", "Esc")
+            ));
             return Ok(());
         }
         // Upstream memoises the raw line including its prefix.
@@ -3574,9 +3577,10 @@ fn open_settings(app: &mut App, options: &InteractiveOptions, sources: &ConfigSo
             .with_description("Automatically compact context when it gets too large")
             .with_values(["true", "false"], boolean(options.compaction.enabled)),
         SettingItem::new("fullscreen-copy-on-select", "Fullscreen copy on select")
-            .with_description(
-                "Automatically copy selected text; disable to copy selections with Ctrl+X",
-            )
+            .with_description(format!(
+                "Automatically copy selected text; disable to copy selections with {}",
+                pi_tui::keybindings::key_text_or("app.message.copy", "Ctrl+X")
+            ))
             .with_values(["true", "false"], boolean(app.copy_on_select())),
         SettingItem::new("theme", "Theme")
             .with_description("Color theme for the interface")

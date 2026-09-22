@@ -74,6 +74,7 @@
 //! [`Editor::autocomplete_render_styled_lines`]: crate::Editor::autocomplete_render_styled_lines
 
 use crate::input::{InputEvent, Key, KeyCode};
+use crate::keybindings::KeybindingsManager;
 use crate::styled::{plain_text, themed_text, SpanStyle, StyledLine, StyledSpan};
 use crate::styles::SelectListStyles;
 use crate::theme::{ThemeBg, ThemeColor};
@@ -695,21 +696,36 @@ impl Selector {
     /// characters into the filter; a plain selector keeps the vim-style
     /// `j`/`k`/`g`/`G` navigation and ignores them.
     pub fn handle_key(&mut self, key: Key) -> SelectorAction {
+        let kb = crate::keybindings::get_keybindings();
+        self.handle_key_with(&kb, key)
+    }
+
+    /// Process a key against an explicit keybindings table.
+    ///
+    /// The split exists for the same reason
+    /// [`Editor::handle_key_with`](crate::Editor::handle_key_with) has one: a
+    /// test can exercise a *user override* without mutating the process-wide
+    /// manager every other test shares.
+    pub fn handle_key_with(&mut self, kb: &KeybindingsManager, key: Key) -> SelectorAction {
         if self.searchable {
-            return self.handle_search_key(key);
+            return self.handle_search_key_with(kb, key);
         }
+        // The five list chords come from the registry (upstream
+        // `SelectList::handleInput`, `components/select-list.ts:144-175`).
+        // With the shipped defaults this is exactly the old hardcoded set, but
+        // a `keybindings.json` override now moves the selection with the chord
+        // the user chose instead of only advertising it.
+        if let Some(action) = self.select_list_action(kb, &key) {
+            return action;
+        }
+        // Rust-only extras with no upstream id: vim keys and the jump-to-end
+        // pair. `Home` / `End` on the *chat log* are `tui.altScreen.top` /
+        // `bottom`; inside a list they stay unbound literals.
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.prev(),
-            KeyCode::Down | KeyCode::Char('j') => self.next(),
+            KeyCode::Char('k') => self.prev(),
+            KeyCode::Char('j') => self.next(),
             KeyCode::Home | KeyCode::Char('g') => self.first(),
             KeyCode::End | KeyCode::Char('G') => self.last(),
-            KeyCode::PageUp => self.page_up(),
-            KeyCode::PageDown => self.page_down(),
-            KeyCode::Enter => match self.selected_value() {
-                Some(value) => SelectorAction::Selected(value.to_string()),
-                None => SelectorAction::None,
-            },
-            KeyCode::Esc => SelectorAction::Cancelled,
             _ => SelectorAction::None,
         }
     }
@@ -723,25 +739,68 @@ impl Selector {
     /// `session-selector`, which forward everything that is not
     /// navigation to their search input.
     pub fn handle_search_key(&mut self, key: Key) -> SelectorAction {
+        let kb = crate::keybindings::get_keybindings();
+        self.handle_search_key_with(&kb, key)
+    }
+
+    /// [`Selector::handle_search_key`] against an explicit table.
+    pub fn handle_search_key_with(&mut self, kb: &KeybindingsManager, key: Key) -> SelectorAction {
+        // The list chords are judged *before* the modifier guard below: they
+        // are the one group a user may rebind onto a modified key, and
+        // `tui.select.cancel` ships as `escape` **and** `ctrl+c` — upstream
+        // `SelectList` answers `ctrl+c` too, it does not defer to the app while
+        // a list is up.
+        if let Some(action) = self.select_list_action(kb, &key) {
+            return action;
+        }
         if key.modifiers.control || key.modifiers.alt || key.modifiers.meta {
-            // Ctrl+C and friends belong to the App, not to the filter.
+            // Every other modified chord belongs to the App, not to the filter.
             return SelectorAction::None;
         }
         match key.code {
-            KeyCode::Up => self.prev(),
-            KeyCode::Down => self.next(),
             KeyCode::Home => self.first(),
             KeyCode::End => self.last(),
-            KeyCode::PageUp => self.page_up(),
-            KeyCode::PageDown => self.page_down(),
-            KeyCode::Enter => match self.selected_value() {
-                Some(value) => SelectorAction::Selected(value.to_string()),
-                None => SelectorAction::None,
-            },
-            KeyCode::Esc => SelectorAction::Cancelled,
             KeyCode::Backspace => self.pop_filter_char(),
             KeyCode::Char(ch) if !ch.is_control() => self.push_filter_char(ch),
             _ => SelectorAction::None,
+        }
+    }
+
+    /// The `tui.select.*` chords, or `None` when the key is not one of them.
+    ///
+    /// Judged in upstream `SelectList::handleInput` order (`up`, `down`,
+    /// `confirm`, `cancel`) so a user who binds one chord to two actions gets
+    /// the same winner upstream would pick. `pageUp` / `pageDown` are the
+    /// Rust component's own ids — upstream's plain `SelectList` has no paging,
+    /// but the ids exist in the registry, so a rebind has to reach them.
+    fn select_list_action(&mut self, kb: &KeybindingsManager, key: &Key) -> Option<SelectorAction> {
+        let event = InputEvent::Key(*key);
+        if kb.matches(&event, "tui.select.up") {
+            return Some(self.prev());
+        }
+        if kb.matches(&event, "tui.select.down") {
+            return Some(self.next());
+        }
+        if kb.matches(&event, "tui.select.confirm") {
+            return Some(self.confirm());
+        }
+        if kb.matches(&event, "tui.select.cancel") {
+            return Some(SelectorAction::Cancelled);
+        }
+        if kb.matches(&event, "tui.select.pageUp") {
+            return Some(self.page_up());
+        }
+        if kb.matches(&event, "tui.select.pageDown") {
+            return Some(self.page_down());
+        }
+        None
+    }
+
+    /// Pick the highlighted row — upstream `SelectList::onSelect`.
+    pub fn confirm(&self) -> SelectorAction {
+        match self.selected_value() {
+            Some(value) => SelectorAction::Selected(value.to_string()),
+            None => SelectorAction::None,
         }
     }
 
@@ -1255,10 +1314,18 @@ mod tests {
     }
 
     #[test]
-    fn searchable_selector_ignores_ctrl_chords() {
+    fn searchable_selector_ignores_non_list_ctrl_chords() {
         let mut sel = Selector::new("Pick", items()).searchable(true);
+        // `tui.select.cancel` ships as `escape` **and** `ctrl+c`, and upstream
+        // `SelectList` answers it itself, so `ctrl+c` closes the list rather
+        // than reaching the app (it used to be swallowed silently). Every
+        // *other* modified chord still belongs to the app.
         assert_eq!(
             sel.handle_key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            SelectorAction::Cancelled,
+        );
+        assert_eq!(
+            sel.handle_key(Key::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             SelectorAction::None,
         );
         assert_eq!(sel.filter(), "");

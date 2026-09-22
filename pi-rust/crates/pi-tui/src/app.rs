@@ -1887,7 +1887,15 @@ impl App {
         let mut hint = format!("reverse-i-search: {query}");
         match editor.history_search_status() {
             Some(HistorySearchStatus::Match) => {
-                hint.push_str("  Enter accept · Esc cancel");
+                // The same two ids `Editor::handle_history_search_key` matches:
+                // `tui.input.submit` accepts the preview, `tui.select.cancel`
+                // restores the pre-search draft (codex prints the identical
+                // affordance on its footer line).
+                hint.push_str(&format!(
+                    "  {} accept · {} cancel",
+                    crate::keybindings::key_text_or("tui.input.submit", "Enter"),
+                    crate::keybindings::key_text_or("tui.select.cancel", "Esc"),
+                ));
             }
             Some(HistorySearchStatus::NoMatch) if !query.is_empty() => {
                 hint.push_str("  no match");

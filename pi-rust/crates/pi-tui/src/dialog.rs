@@ -25,6 +25,7 @@ use pi_protocol::{UiLevel, UiRequest, UiResponse};
 use tokio::sync::oneshot;
 
 use crate::input::{Key, KeyCode};
+use crate::keybindings::KeybindingsManager;
 use crate::prompt::{Prompt, PromptAction};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::width::columns;
@@ -228,9 +229,23 @@ impl Dialog {
 
     /// Process a key while this dialog is open.
     pub fn handle_key(&mut self, key: Key) -> DialogAction {
+        let kb = crate::keybindings::get_keybindings();
+        self.handle_key_with(&kb, key)
+    }
+
+    /// [`Dialog::handle_key`] against an explicit keybindings table.
+    ///
+    /// The accept / cancel chords are the registry's list chords, exactly as
+    /// upstream reaches them: `showExtensionConfirm` is a Yes/No `SelectList`
+    /// and `ExtensionInputComponent` matches
+    /// `keyHint("tui.select.confirm", "submit")` /
+    /// `keyHint("tui.select.cancel", "cancel")`
+    /// (`components/extension-input.ts:67,75-77`).
+    pub fn handle_key_with(&mut self, kb: &KeybindingsManager, key: Key) -> DialogAction {
         if self.resolved.is_some() {
             return DialogAction::None;
         }
+        let event = crate::input::InputEvent::Key(key);
         // Ctrl+C is "cancel" for every dialog; unlike the prompt it
         // must never fall through to "exit the app" while a modal is
         // waiting for an answer.
@@ -244,25 +259,42 @@ impl Dialog {
                 }
                 _ => DialogAction::None,
             },
-            DialogKind::Confirm => match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.resolve(Some(UiResponse::Confirm { accepted: true }))
+            DialogKind::Confirm => {
+                if kb.matches(&event, "tui.select.confirm")
+                    || matches!(
+                        key.code,
+                        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y')
+                    )
+                {
+                    return self.resolve(Some(UiResponse::Confirm { accepted: true }));
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.cancel(),
-                _ => DialogAction::None,
-            },
-            DialogKind::Input => match self.input.handle_key(key) {
+                if kb.matches(&event, "tui.select.cancel")
+                    || matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
+                {
+                    return self.cancel();
+                }
+                DialogAction::None
+            }
+            DialogKind::Input => match self.input.handle_key_with(kb, key) {
                 PromptAction::Submit(value) => self.resolve(Some(UiResponse::Input { value })),
                 PromptAction::Changed => DialogAction::Changed,
                 PromptAction::Interrupt | PromptAction::Eof => self.cancel(),
-                PromptAction::None => match key.code {
-                    // `Esc` is not a prompt action but is the dialog's
-                    // cancel key.
-                    KeyCode::Esc => self.cancel(),
-                    _ => DialogAction::None,
-                },
+                PromptAction::None => {
+                    // Upstream's input dialog accepts the *list* confirm chord
+                    // as well as its own editor submit (and `Esc` is not a
+                    // prompt action but is the dialog's cancel key).
+                    if kb.matches(&event, "tui.select.confirm") {
+                        return self.resolve(Some(UiResponse::Input {
+                            value: self.input.text(),
+                        }));
+                    }
+                    if kb.matches(&event, "tui.select.cancel") {
+                        return self.cancel();
+                    }
+                    DialogAction::None
+                }
             },
-            DialogKind::Select => match self.selector.handle_key(key) {
+            DialogKind::Select => match self.selector.handle_key_with(kb, key) {
                 SelectorAction::Selected(value) => self.resolve(Some(UiResponse::Select { value })),
                 SelectorAction::Cancelled => self.cancel(),
                 SelectorAction::Changed => DialogAction::Changed,
@@ -281,7 +313,23 @@ impl Dialog {
                 lines.push("─".repeat(width.min(40)));
                 lines.extend(wrap(body, width));
                 lines.push(String::new());
-                lines.push("[Enter/y] accept    [n/Esc] deny".to_string());
+                lines.push(format!(
+                    "{}    {}",
+                    dialog_hint(
+                        &[
+                            crate::keybindings::key_text_or("tui.select.confirm", "Enter"),
+                            "y".to_string(),
+                        ],
+                        "accept",
+                    ),
+                    dialog_hint(
+                        &[
+                            "n".to_string(),
+                            crate::keybindings::key_text_or("tui.select.cancel", "Esc"),
+                        ],
+                        "deny",
+                    ),
+                ));
             }
             UiRequest::Input { title, .. } => {
                 lines.push(format!("Input: {title}"));
@@ -291,18 +339,69 @@ impl Dialog {
                 }
                 lines.push(self.input.render_line(width as u16));
                 lines.push(String::new());
-                lines.push("[Enter] submit    [Esc] cancel".to_string());
+                lines.push(format!(
+                    "{}    {}",
+                    dialog_hint(
+                        &[crate::keybindings::key_text_or("tui.input.submit", "Enter")],
+                        "submit",
+                    ),
+                    dialog_hint(
+                        &[crate::keybindings::key_text_or("tui.select.cancel", "Esc")],
+                        "cancel",
+                    ),
+                ));
             }
             UiRequest::Select { .. } => {
                 lines.extend(self.selector.render_lines(width as u16));
                 lines.push(String::new());
-                lines.push("[Enter] choose    [↑/↓] move    [Esc] cancel".to_string());
+                lines.push(format!(
+                    "{}    {}    {}",
+                    dialog_hint(
+                        &[crate::keybindings::key_text_or(
+                            "tui.select.confirm",
+                            "Enter"
+                        )],
+                        "choose",
+                    ),
+                    dialog_hint(
+                        &[
+                            crate::keybindings::key_text_or("tui.select.up", "Up"),
+                            crate::keybindings::key_text_or("tui.select.down", "Down"),
+                        ],
+                        "move",
+                    ),
+                    dialog_hint(
+                        &[crate::keybindings::key_text_or("tui.select.cancel", "Esc")],
+                        "cancel",
+                    ),
+                ));
             }
             UiRequest::Notify { message, level } => {
                 lines.push(format!("[{level:?}] {message}"));
             }
         }
         lines
+    }
+}
+
+/// Render one footer affordance: `[Enter/y] accept`.
+///
+/// The chord half is whatever the *effective* table binds ([`chord_or`]), so a
+/// `keybindings.json` override moves the footer with the behaviour. A chord the
+/// user deliberately unbound renders as an empty string and is dropped from the
+/// `/`-joined group (the rule `key_hint_or` uses); a footer whose every chord is
+/// gone keeps the label alone rather than printing empty brackets.
+fn dialog_hint(chords: &[String], label: &str) -> String {
+    let joined = chords
+        .iter()
+        .filter(|chord| !chord.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("/");
+    if joined.is_empty() {
+        label.to_string()
+    } else {
+        format!("[{joined}] {label}")
     }
 }
 

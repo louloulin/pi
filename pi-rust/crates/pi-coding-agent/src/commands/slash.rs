@@ -166,7 +166,18 @@ fn strip_quotes(args: &str) -> String {
 
 /// Slash-command help text rendered by `/help` and the App's status
 /// bar hint.
+///
+/// The `keys:` legend resolves every chord through the installed keybindings
+/// table, so a `keybindings.json` override moves the legend with the behaviour
+/// (the same rule the startup header and `/hotkeys` follow). See
+/// [`key_legend`] for the resolution rules.
 pub fn help_text() -> String {
+    help_text_with(&pi_tui::keybindings::get_keybindings())
+}
+
+/// [`help_text`] against an explicit keybindings table (the injectable form
+/// used by tests).
+pub fn help_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) -> String {
     let mut out = String::new();
     out.push_str("slash commands:\n");
     out.push_str("  /help     show this help text\n");
@@ -175,7 +186,10 @@ pub fn help_text() -> String {
     out.push_str("  /copy     copy the last assistant message to the clipboard\n");
     out.push_str("  /name [name] show or set the session display name\n");
     out.push_str("  /model    pick a model (opens selector)\n");
-    out.push_str("  /scoped-models configure which models Ctrl+P cycles\n");
+    out.push_str(&format!(
+        "  /scoped-models configure which models {} cycles\n",
+        pi_tui::keybindings::key_text_preferring(keybindings, "app.model.cycleForward", "ctrl+p")
+    ));
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /export [path] export the session (HTML, or JSONL for a .jsonl path)\n");
     out.push_str("  /resume   resume a previous session\n");
@@ -192,21 +206,141 @@ pub fn help_text() -> String {
     out.push_str("  /extensions list loaded extensions and what they register\n");
     out.push_str("  /reload   re-read keybindings.json and the interface settings\n");
     out.push_str("  /exit     quit the interactive session\n");
-    out.push_str("\nkeys:\n");
-    out.push_str("  Enter       submit prompt\n");
-    out.push_str("  Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)\n");
-    out.push_str("  Up / Down   move within the draft, then prompt history at the top / bottom\n");
-    out.push_str("  PgUp/PgDn   page the chat log, or the draft when it does not fit the box\n");
-    out.push_str("  Home / End  jump to the start / end of the chat log\n");
-    out.push_str("  Ctrl+A / E  jump to the start / end of the current line\n");
-    out.push_str("  Ctrl+K      delete to the end of the line (Ctrl+U: to its start)\n");
-    out.push_str("  Ctrl+R      reverse-search prompt history (Enter accepts, Esc cancels)\n");
-    out.push_str(
-        "  Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)\n",
-    );
-    out.push_str("  Ctrl+D      exit on an empty prompt\n");
-    out.push_str("  Ctrl+L      open the model selector\n");
-    out.push_str("  Esc         close selector / cancel turn\n");
+    out.push('\n');
+    out.push_str("keys:\n");
+    out.push_str(&key_legend(keybindings));
+    out
+}
+
+/// The `/help` key legend, rendered from the effective chords.
+///
+/// Upstream has no `keys:` block in `/help` — this legend is the port's own
+/// (pi-ts puts the same list in `/hotkeys`). It used to be a literal string,
+/// which meant the header and `/hotkeys` moved to a rebound chord while `/help`
+/// kept advertising the shipped one (LUM-1447 fixed the same defect class in
+/// the transcript's fold hint).
+///
+/// Resolution is [`pi_tui::keybindings::key_text_preferring`]'s, per id:
+///
+/// * the table still binds the shipped chord → that chord (`Ctrl+A`, not
+///   `Home/Ctrl+Home/Ctrl+A`: the registry's default sets are redundant, and
+///   `/help` is the one-line legend — `/hotkeys` is the exhaustive list);
+/// * the id is bound but *not* to the shipped chord → the effective chords;
+/// * the table has no opinion (a bare `pi-tui` registry cannot resolve the
+///   `app.*` ids, which live in [`crate::keybindings`]) → the shipped default
+///   named here;
+/// * the id exists but is unbound → an empty string, and the row is dropped,
+///   because a legend row without a chord advertises nothing.
+fn key_legend(keybindings: &pi_tui::keybindings::KeybindingsManager) -> String {
+    use pi_tui::keybindings::key_text_preferring;
+
+    /// One legend row: `(id, shipped chord)` pairs sharing the first column,
+    /// plus the description.
+    struct Row {
+        ids: &'static [(&'static str, &'static str)],
+        label: String,
+    }
+
+    let rows = vec![
+        Row {
+            ids: &[("tui.input.submit", "enter")],
+            label: "submit prompt".to_string(),
+        },
+        Row {
+            ids: &[("tui.input.newLine", "ctrl+j")],
+            label: "insert a new line (Shift+Enter on kitty-protocol terminals)".to_string(),
+        },
+        Row {
+            ids: &[
+                ("tui.editor.cursorUp", "up"),
+                ("tui.editor.cursorDown", "down"),
+            ],
+            label: "move within the draft, then prompt history at the top / bottom".to_string(),
+        },
+        Row {
+            ids: &[
+                ("tui.editor.pageUp", "pageUp"),
+                ("tui.editor.pageDown", "pageDown"),
+            ],
+            label: "page the chat log, or the draft when it does not fit the box".to_string(),
+        },
+        Row {
+            ids: &[
+                ("tui.altScreen.top", "home"),
+                ("tui.altScreen.bottom", "end"),
+            ],
+            label: "jump to the start / end of the chat log".to_string(),
+        },
+        Row {
+            ids: &[
+                ("tui.editor.cursorLineStart", "ctrl+a"),
+                ("tui.editor.cursorLineEnd", "ctrl+e"),
+            ],
+            label: "jump to the start / end of the current line".to_string(),
+        },
+        Row {
+            ids: &[("tui.editor.deleteToLineEnd", "ctrl+k")],
+            label: format!(
+                "delete to the end of the line ({}: to its start)",
+                key_text_preferring(keybindings, "tui.editor.deleteToLineStart", "ctrl+u")
+            ),
+        },
+        Row {
+            ids: &[("tui.editor.historySearch", "ctrl+r")],
+            label: format!(
+                "reverse-search prompt history ({} accepts, {} cancels)",
+                key_text_preferring(keybindings, "tui.input.submit", "enter"),
+                key_text_preferring(keybindings, "tui.select.cancel", "escape")
+            ),
+        },
+        Row {
+            ids: &[("app.interrupt", "escape")],
+            label: "abort the current turn".to_string(),
+        },
+        Row {
+            ids: &[("app.clear", "ctrl+c")],
+            label: "clear the prompt on idle (twice exits)".to_string(),
+        },
+        Row {
+            ids: &[("app.exit", "ctrl+d")],
+            label: "exit on an empty prompt".to_string(),
+        },
+        Row {
+            ids: &[("app.model.select", "ctrl+l")],
+            label: "open the model selector".to_string(),
+        },
+        Row {
+            ids: &[("tui.select.cancel", "escape")],
+            label: "close selector / cancel turn".to_string(),
+        },
+    ];
+
+    // Resolve every row first: the chord column is as wide as the widest
+    // resolved chord, so the description column stays aligned no matter what
+    // the user bound (the shipped defaults are not the widest case).
+    let resolved: Vec<(String, String)> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let chords = row
+                .ids
+                .iter()
+                .map(|(id, preferred)| key_text_preferring(keybindings, id, preferred))
+                .filter(|chord| !chord.is_empty())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            (!chords.is_empty()).then_some((chords, row.label))
+        })
+        .collect();
+    let column = resolved
+        .iter()
+        .map(|(chords, _)| chords.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut out = String::new();
+    for (chords, label) in resolved {
+        out.push_str(&format!("  {chords:<column$}  {label}\n"));
+    }
     out
 }
 
@@ -566,8 +700,35 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
     }
     out.push_str("\ncommands:\n");
     out.push_str("  /               slash commands (/help, /model, /hotkeys, …)\n");
-    out.push_str("  Esc             close the selector / overlay first\n");
+    // The cancel chord, not a literal `Esc`: this row is the tail of the same
+    // legend the groups above read from the table.
+    out.push_str(&format!(
+        "  {:<15} close the selector / overlay first\n",
+        format_keys(keybindings, "tui.select.cancel", "escape")
+    ));
     out
+}
+
+/// The effective chords of `id` through the local [`format_chord`], or the
+/// shipped `fallback` when the table does not define it.
+///
+/// `/hotkeys` resolves with the crate-local formatter rather than
+/// `pi_tui::keybindings::key_text_preferring` because it *also* has to title-case
+/// the shipped defaults for a bare registry; `the_two_chord_formatters_agree`
+/// keeps the two spellings identical.
+fn format_keys(
+    keybindings: &pi_tui::keybindings::KeybindingsManager,
+    id: &str,
+    fallback: &str,
+) -> String {
+    let keys = keybindings.get_keys(id);
+    if keys.is_empty() {
+        return format_chord(fallback);
+    }
+    keys.iter()
+        .map(|chord| format_chord(chord))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Title-case a chord id for display (`ctrl+p` → `Ctrl+P`, `pageUp` →
@@ -910,24 +1071,49 @@ mod tests {
         }
     }
 
+    /// The chord column of the `/help` legend row whose label contains
+    /// `label`, trimmed — the column the reader sees, not the source row.
+    fn help_legend_chords(text: &str, label: &str) -> String {
+        let keys = text
+            .split("\nkeys:\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no keys: section:\n{text}"));
+        let row = keys
+            .lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("no legend row for {label:?}:\n{keys}"));
+        // Two leading spaces, then the chord column padded to the widest
+        // chord, then two spaces and the label. Splitting on the first run of
+        // two spaces after the indent recovers exactly the chord column.
+        let body = row.trim_start();
+        body.split("  ")
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
     #[test]
     fn help_text_documents_scroll_keys() {
         // The fullscreen App owns the scrollback (alternate screen), so the
         // legend has to name the scroll bindings
         // (`tui.altScreen.pageUp` / `pageDown` / `top` / `bottom`).
         let text = help_text();
-        assert!(text.contains("PgUp/PgDn"), "{text}");
-        assert!(text.contains("Home / End"), "{text}");
+        assert_eq!(
+            help_legend_chords(&text, "or the draft when it does not fit"),
+            "PgUp / PgDn",
+            "{text}"
+        );
+        assert_eq!(
+            help_legend_chords(&text, "jump to the start / end of the chat log"),
+            "Home / End",
+            "{text}"
+        );
         // LUM-1317: the same chords page the composer while its draft
         // overflows the composer window, so the legend must not promise the
         // chat log alone (the PTY scenario
         // `lum1317-composer-paging.json` shows both owners).
         assert!(text.contains("or the draft when it does not fit"), "{text}");
-    }
-
-    #[test]
-    fn help_text_lists_hotkeys_command() {
-        assert!(help_text().contains("/hotkeys"), "{}", help_text());
     }
 
     #[test]
@@ -938,14 +1124,75 @@ mod tests {
         // selector — the chord the shipped header advertises.
         // `interactive.rs::ctrl_l_opens_the_model_selector` pins the behavior
         // this legend describes; this test pins the legend.
+        //
+        // The assertion is on the *resolved* chord rather than the old
+        // literal `"Ctrl+L      open the model selector"`: the legend now
+        // pads its column to the widest effective chord (LUM-1450), so
+        // pinning spaces would pin the padding width, not the binding.
         let text = help_text();
-        assert!(
-            text.contains("Ctrl+L      open the model selector"),
+        assert_eq!(
+            help_legend_chords(&text, "open the model selector"),
+            "Ctrl+L",
             "the /help legend must describe app.model.select, not a screen wipe:\n{text}"
         );
         assert!(
             !text.contains("clear the screen"),
             "no legend row may still advertise the removed clear-the-transcript chord:\n{text}"
+        );
+    }
+
+    #[test]
+    fn help_text_lists_hotkeys_command() {
+        assert!(help_text().contains("/hotkeys"), "{}", help_text());
+    }
+
+    #[test]
+    fn the_help_legend_tracks_the_effective_chords() {
+        // The defect this round closes: the `keys:` block was a literal
+        // string, so a `keybindings.json` override moved the header, the
+        // transcript hint and `/hotkeys` while `/help` kept advertising the
+        // shipped chord.
+        let mut config = pi_tui::keybindings::KeybindingsConfig::default();
+        config.set("tui.editor.historySearch", ["ctrl+p"]);
+        config.set("app.model.select", ["ctrl+m"]);
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            config,
+        );
+        let text = help_text_with(&manager);
+        assert_eq!(
+            help_legend_chords(&text, "reverse-search prompt history"),
+            "Ctrl+P",
+            "{text}"
+        );
+        assert_eq!(
+            help_legend_chords(&text, "open the model selector"),
+            "Ctrl+M",
+            "{text}"
+        );
+        // The chords that are *inside* a description follow the table too.
+        assert!(
+            text.contains("delete to the end of the line (Ctrl+U: to its start)"),
+            "{text}"
+        );
+        // ... and an unbound action loses its row instead of advertising a
+        // chord that does nothing.
+        let mut config = pi_tui::keybindings::KeybindingsConfig::default();
+        config.set("tui.editor.historySearch", Vec::<String>::new());
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            config,
+        );
+        let text = help_text_with(&manager);
+        assert!(
+            !text.contains("reverse-search prompt history"),
+            "an unbound action must lose its legend row:\n{text}"
         );
     }
 

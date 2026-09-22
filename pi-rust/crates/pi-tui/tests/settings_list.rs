@@ -93,15 +93,19 @@ fn the_modal_owns_the_keyboard() {
         "the keys must not reach the prompt"
     );
 
-    // Ctrl+C is not a filter character and does not exit the App.
+    // `Ctrl+C` is the second chord of `tui.select.cancel`, and upstream
+    // `SettingsList::handleInput` answers that chord itself
+    // (`settings-list.ts:244-246` → `onCancel()`), so it closes the modal —
+    // it is still *not* a filter character and must not exit the App.
     assert_eq!(
         app.step(InputEvent::Key(Key::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL
         ))),
-        StepOutcome::Idle
+        StepOutcome::Redraw
     );
-    assert!(app.settings_open());
+    assert!(!app.settings_open());
+    assert!(!app.is_exit_requested());
 }
 
 #[test]

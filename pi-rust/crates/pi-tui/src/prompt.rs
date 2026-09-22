@@ -173,6 +173,25 @@ impl Prompt {
         }
     }
 
+    /// [`Prompt::handle_key`] against an explicit keybindings table.
+    ///
+    /// Exists so a caller that already holds a table (an [`crate::Dialog`]
+    /// resolved from a `ctx.ui.*` request, or a test) does not fall back to the
+    /// process-wide registry halfway through the key.
+    pub fn handle_key_with(
+        &mut self,
+        kb: &crate::keybindings::KeybindingsManager,
+        key: Key,
+    ) -> PromptAction {
+        match self.editor.handle_key_with(kb, key) {
+            EditorAction::None => PromptAction::None,
+            EditorAction::Changed => PromptAction::Changed,
+            EditorAction::Submit(text) => PromptAction::Submit(text),
+            EditorAction::Interrupt => PromptAction::Interrupt,
+            EditorAction::Eof => PromptAction::Eof,
+        }
+    }
+
     /// Process an input event.
     pub fn handle_event(&mut self, event: InputEvent) -> PromptAction {
         let InputEvent::Key(key) = event else {

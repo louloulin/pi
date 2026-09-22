@@ -86,9 +86,18 @@ fn the_footer_carries_the_reverse_search_query_and_preview() {
     for ch in "deploy".chars() {
         app.step_key(plain(ch));
     }
+    // The accept / cancel chords are the ones the editor actually matches
+    // (`tui.input.submit` / `tui.select.cancel`), so the footer moves with a
+    // `keybindings.json` override instead of freezing `Esc`.
+    let cancel = pi_tui::keybindings::key_text_or("tui.select.cancel", "Esc");
+    let expected = format!("reverse-i-search: deploy  Enter accept · {cancel} cancel");
     assert_eq!(
         app.history_search_hint().as_deref(),
-        Some("reverse-i-search: deploy  Enter accept · Esc cancel")
+        Some(expected.as_str())
+    );
+    assert_eq!(
+        cancel, "Esc/Ctrl+C",
+        "`tui.select.cancel` ships as both chords in the bare pi-tui table"
     );
     assert_eq!(app.prompt().text(), "deploy the release");
     let frame = hint_row(&app, 80, 24);

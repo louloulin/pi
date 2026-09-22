@@ -43,7 +43,10 @@ pub async fn run_text_fallback(agent: &mut Agent, reason: FallbackReason) -> any
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut buffer = String::new();
-    eprintln!("> type a prompt (Ctrl+D to exit):");
+    eprintln!(
+        "> type a prompt ({} to exit):",
+        pi_tui::keybindings::key_text_or("app.exit", "Ctrl+D")
+    );
     loop {
         buffer.clear();
         let read = stdin.read_line(&mut buffer)?;
@@ -85,7 +88,10 @@ pub async fn run_text_fallback(agent: &mut Agent, reason: FallbackReason) -> any
             }
         }
         writeln!(stdout)?;
-        eprintln!("> next prompt (Ctrl+D to exit):");
+        eprintln!(
+            "> next prompt ({} to exit):",
+            pi_tui::keybindings::key_text_or("app.exit", "Ctrl+D")
+        );
     }
     Ok(())
 }

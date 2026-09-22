@@ -818,10 +818,52 @@ pub fn key_text_or(keybinding: &str, fallback: &str) -> String {
     let Some(manager) = guard.as_ref() else {
         return fallback.to_string();
     };
+    key_text_in(manager, keybinding, fallback)
+}
+
+/// [`key_text_or`] against an explicit table.
+///
+/// The injectable half exists for the same reason
+/// [`Editor::handle_key_with`](crate::editor::Editor::handle_key_with) does:
+/// a test can render a legend under a *user override* without mutating the
+/// process-wide manager that every other test in the process shares. The
+/// resolution rules are identical — unknown id means "the table has no
+/// opinion" and yields `fallback`; known-but-unbound yields an empty string.
+pub fn key_text_in(manager: &KeybindingsManager, keybinding: &str, fallback: &str) -> String {
     if manager.get_definition(keybinding).is_none() {
         return fallback.to_string();
     }
     format_keys(&manager.get_keys(keybinding))
+}
+
+/// [`key_text_in`] with a preference for one specific chord: the shipped
+/// `preferred` chord is rendered when the table still binds it, and the full
+/// effective set otherwise.
+///
+/// This is the rule the compact legends need (`/help`'s `keys:` block,
+/// upstream's own hand-written legend rows). The registry's default set is
+/// deliberately redundant — `tui.editor.cursorLineStart` ships as
+/// `home` **and** `ctrl+home` **and** `ctrl+a` — so rendering every chord
+/// turns a one-line legend into a 46-column wall. The compact legend names
+/// the one chord a reader is expected to learn; `/hotkeys` remains the
+/// exhaustive list. The moment the user drops `preferred`, the legend shows
+/// what is actually bound rather than a dead chord.
+///
+/// Miss cases follow [`key_text_in`]: an id the table does not define renders
+/// `preferred`, and a deliberately unbound id renders nothing.
+pub fn key_text_preferring(
+    manager: &KeybindingsManager,
+    keybinding: &str,
+    preferred: &str,
+) -> String {
+    if manager.get_definition(keybinding).is_none() {
+        return crate::locale::format_chord(preferred);
+    }
+    let keys = manager.get_keys(keybinding);
+    if keys.iter().any(|chord| chord == preferred) {
+        return crate::locale::format_chord(preferred);
+    }
+    format_keys(&keys)
 }
 
 /// Upstream `keyHint(keybinding, description)` with a shipped-default
