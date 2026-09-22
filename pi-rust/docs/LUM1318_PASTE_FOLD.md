@@ -118,23 +118,26 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
 | | 断言 | 失败项 |
 |---|---|---|
 | 改动前（`/tmp/pi-prefix-1318`，= LUM-1328 的实现） | **20 PASS / 1 FAIL** | 面板 9：删掉第一个标记后幸存者仍是 `#3` |
-| 改动后（本轮 `target/debug/pi`） | **21 PASS / 0 FAIL**（`PY-EXIT=0`） | — |
+| 改动后（本轮 `target/debug/pi`，已合并 `origin/feature/pi.rs` 的 LUM-1333 tip） | **21 PASS / 0 FAIL**（`PY-EXIT=0`） | — |
 
 关键帧（字符网格与 `frame`/`px` 哈希都在 `.png.txt` 里逐条可查）：
 
 | 面板 | 结论 | 关键帧 |
 |---|---|---|
-| 1 | idle，composer 一行 | `676c29a93a8b` |
-| 2 | 200 行 bracketed paste → **一行** `> [paste #1 +200 lines]▍`；正文一个字都没进屏幕 | `11d1f46db215` |
-| 3 | `Enter` 提交：transcript 出现 `pasted line 200`，且 `reject '[paste #'` → 模型拿到全文 | `bebf837a591a` |
-| 4 | `Up` 召回：草稿又是标记本身（注册表跟着 history 条目走），草稿仍然只有一行 | `f0e950128e3e` |
-| 5 | `Ctrl+C` 清空召回的大草稿，网格与面板 3 **逐字节相同**（帧哈希同为 `bebf837a591a`） | `bebf837a591a` |
-| 6 | 清空后再粘一次：id 来自单调计数器 → `#2`（上游不重置 `pasteCounter`） | `f69c7692dc3d` |
-| 7 | 标记就是普通草稿文本：` summary` 打在它旁边 | `c1f7afddb0c3` |
-| 8 | 第二个 11 行粘贴 → `#3` | `2bddbf478e1b` |
-| 9 | `Ctrl+A`+`Del` 删掉第一个标记 → 幸存者**重编号为 `#2`**，且显示自己的 `+11 lines`（`reject '+200 lines'`） | `c87e4700e697` |
-| 10 | 紧接着 `Enter`：transcript 出现 `second paste row 11` → 重编号后**载荷没串位** | `4b1491bede18` |
-| 11 | 同进程内 A/B：同样 200 行**按键重放**（无 bracketed paste）→ 不折叠、草稿堆满窗口（`↑` 上方 61 行） | `f9f2af3f0294` |
+| 1 | idle，composer 一行 | `9d3eb86a2a56` |
+| 2 | 200 行 bracketed paste → **一行** `> [paste #1 +200 lines]▍`；正文一个字都没进屏幕 | `fdeb25de7e07` |
+| 3 | `Enter` 提交：transcript 出现 `pasted line 200`，且 `reject '[paste #'` → 模型拿到全文 | `ca50d8e58d08` |
+| 4 | `Up` 召回：草稿又是标记本身（注册表跟着 history 条目走），草稿仍然只有一行 | `38bd9bbc025b` |
+| 5 | `Ctrl+C` 清空召回的大草稿，网格与面板 3 **逐字节相同**（帧哈希同为 `ca50d8e58d08`） | `ca50d8e58d08` |
+| 6 | 清空后再粘一次：id 来自单调计数器 → `#2`（上游不重置 `pasteCounter`） | `f4bc7a9c20d9` |
+| 7 | 标记就是普通草稿文本：` summary` 打在它旁边 | `fd1260af8260` |
+| 8 | 第二个 11 行粘贴 → `#3` | `557a38a367cd` |
+| 9 | `Ctrl+A`+`Del` 删掉第一个标记 → 幸存者**重编号为 `#2`**，且显示自己的 `+11 lines`（`reject '+200 lines'`） | `b65ecf54a884` |
+| 10 | 紧接着 `Enter`：transcript 出现 `second paste row 11` → 重编号后**载荷没串位** | `7e5d6c76b546` |
+| 11 | 同进程内 A/B：同样 200 行**按键重放**（无 bracketed paste）→ 不折叠、草稿堆满窗口（`↑` 上方 61 行） | `f78f7bdfcf2e` |
+
+> 面板 1/2/3/7/8/9 与上一次拍摄的帧哈希不同：每轮的 session id 会进页脚，所以只有“面板 5 == 面板 3”
+> 这种**同一进程内**的对比能逐字节比哈希；跨 run 的对比看 `.png.txt` 里的网格。
 
 实测数字：折叠后 composer **1 行**；面板 11 的按键重放 6 秒内只推进到 `pasted line 68`（≈1023 B，
 与 LUM-1328 记录的同一条既有读取缺陷一致，见 §6）；本次 21 条断言全部由 pyte 网格判定，
@@ -148,11 +151,11 @@ $ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO
     cargo fmt --all -- --check
 FMT-OK
 $ ... cargo clippy --workspace --all-targets --locked -- -D warnings
-Finished `dev` profile [unoptimized] target(s) in 32.22s
+Finished `dev` profile [unoptimized] target(s) in 3m 26s
 CLIPPY-EXIT=0
-$ ... cargo test --workspace --locked -- --test-threads=2
+$ ... cargo test --workspace --locked -- --test-threads=1
 TEST-EXIT=0
-# 171 suites：2685 passed / 0 failed / 2 ignored（9m08s）
+# 172 suites：2699 passed / 0 failed / 2 ignored
 ```
 
 环境事实（共享盘，不粉饰）：`/` 是 50G overlay、4~6 路并发 run 共用，本轮开工时曾 0 字节可用，
