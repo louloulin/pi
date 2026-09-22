@@ -9,14 +9,17 @@
 > 参照实现：上游 pi `packages/tui/src/components/editor.ts:620-640`（`handleMouse` 的下拉分支）、
 > `packages/tui/src/components/select-list.ts:109-140`（`SelectList.handleMouse`）
 > 基线：`origin/feature/pi.rs` = `4f9817cd1`（LUM-1328 的 tip，已含 LUM-1327）；
-> 本分支 `work/LUM-1333` 从 `3e7af2761` 起，已合并 `4f9817cd1` 后再测。
+> 本分支 `work/LUM-1333` 从 `3e7af2761` 起，合并 `4f9817cd1`（LUM-1328）与 `e0ba60d5c`（LUM-1330）
+> 后在最终合并树 `9a9fff9db` 上复测并重跑真 PTY。
+> 修前/修后的两个二进制：修前 = `4f9817cd1`（`git checkout origin/feature/pi.rs -- pi-rust/crates` 后构建，
+> 不含本轮改动），修后 = 最终合并树 `9a9fff9db`。
 
 一句话结论：**补全下拉的指针路径原本没人接**——下拉由 App 画在消息视口底部（composer 之上），
 于是「点一行下拉」就是「聊天视口内的一次点击」：既不选中候选、也不接受候选，滚轮滚的是聊天。
 本轮按上游语义把它接通（press 选中该行 / release 同格接受 / 列表内滚轮 ±1 步进并吞掉 / 列表外一律
 fall through），新增 **14 条 App 级集成测试**（全部读渲染帧），真 PTY A/B 在修前二进制上
 **18/18 断言「指针什么都没做」**、修后 **20/20 断言「press 选中、release 接受、滚轮步进」**，
-全量门禁 `2669 passed / 0 failed / 2 ignored`（170 suites）。
+全量门禁 `2695 passed / 0 failed / 2 ignored`（172 suites，最终合并树）。
 
 ---
 
@@ -56,7 +59,8 @@ assertions: 18 checks over 7 panels — 18 PASS, 0 FAIL, 0 XFAIL, 0 XPASS   (修
 ```
 
 修前/修后各 7 面板合成图与字符网格 dump：
-`docs/screenshots/lum1333-autocomplete-pointer{,-baseline}.png(.txt)`。
+`docs/screenshots/lum1333-autocomplete-pointer{,-baseline}.png(.txt)`；
+修后那一次是在**最终合并树** `9a9fff9db` 上重跑的（20/20 PASS 与上表一致）。
 
 ---
 
@@ -149,14 +153,14 @@ crossterm 的 `column/row` 传下去。滚轮分支在 modal 守卫之后、聊�
 ### 4.2 真 PTY A/B（不是设计意图）
 
 ```bash
-# 修后（本分支，含 LUM-1328 的合并树）
+# 修后（本分支，最终合并树 9a9fff9db：含 LUM-1328 / LUM-1330）
 python3 pi-rust/scripts/pty_capture.py --bin target/debug/pi \
   --steps pi-rust/scripts/pty_scenarios/lum1333-autocomplete-pointer.json \
   --out pi-rust/docs/screenshots/lum1333-autocomplete-pointer.png \
   --text-out pi-rust/docs/screenshots/lum1333-autocomplete-pointer.png.txt
 # => assertions: 20 checks over 7 panels — 20 PASS, 0 FAIL
 
-# 修前：git checkout origin/feature/pi.rs -- pi-rust/crates && cargo build -p pi-coding-agent --bin pi
+# 修前：git checkout 4f9817cd1 -- pi-rust/crates && cargo build -p pi-coding-agent --bin pi
 python3 pi-rust/scripts/pty_capture.py --bin target/debug/pi \
   --steps pi-rust/scripts/pty_scenarios/lum1333-autocomplete-pointer-baseline.json \
   --out pi-rust/docs/screenshots/lum1333-autocomplete-pointer-baseline.png \
@@ -171,9 +175,9 @@ composer 在第 18 行，状态栏第 19 行。`(k/21)` 是「谁被选中」的
 
 ```
 cargo fmt --all -- --check                                     干净
-cargo clippy --workspace --all-targets --locked -- -D warnings  No issues found
-cargo test --workspace --locked --no-fail-fast                  2669 passed / 0 failed / 2 ignored（170 suites）
-cargo test -p pi-tui -p pi-coding-agent --locked --no-fail-fast  1810 passed / 0 failed（85 suites，连跑 4 次一致）
+cargo clippy --workspace --all-targets --locked -- -D warnings  No issues found（0 warning / 0 error）
+cargo test --workspace --locked --no-fail-fast                  2695 passed / 0 failed / 2 ignored（172 suites）
+cargo test -p pi-tui -p pi-coding-agent --locked --no-fail-fast  1813 passed / 0 failed（86 suites，合并前连跑 4 次 1810/85 一致）
 ```
 
 - 本机必须 `. pi-rust/scripts/toolchain.sh` 钉 1.85.0（`~/.local/bin/cargo` 是没默认 toolchain 的 shim）。
@@ -181,8 +185,8 @@ cargo test -p pi-tui -p pi-coding-agent --locked --no-fail-fast  1810 passed / 0
   其中一条的 `target/` 一度到 20G）。为此全量门禁用
   `CARGO_INCREMENTAL=0 CARGO_PROFILE_{DEV,TEST}_DEBUG=0` 跑（关调试信息不改测试语义），
   并在可用空间不足时重试。
-- **一次未复现的 flake**：早期有一次全量运行出现单个 suite `6 passed / 3 failed`，随后连续 4 次
-  全量运行都是 `1810 passed / 0 failed`；当时捕获的输出里没有该 suite 名，不能断言与本轮改动有关。
+- **一次未复现的 flake**：早期有一次 `-p pi-tui -p pi-coding-agent` 的全量运行出现单个 suite `6 passed / 3 failed`，
+  随后连续 4 次同样范围的全量运行都是 `1810 passed / 0 failed`；当时捕获的输出里没有该 suite 名，不能断言与本轮改动有关。
 
 ---
 
