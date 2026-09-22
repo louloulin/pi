@@ -1363,6 +1363,42 @@ impl Editor {
         EditorAction::Changed
     }
 
+    /// Place the caret at a character offset in [`Editor::display_text`]
+    /// — the pointer path.
+    ///
+    /// Upstream `Editor.handleMouse`'s click branch
+    /// (`packages/tui/src/components/editor.ts:615-670`) and codex's
+    /// `chat_composer/mouse.rs` both treat a click as **cursor placement,
+    /// not an edit**: no undo snapshot is pushed, the draft is left
+    /// byte-for-byte alone, and the click ends history browsing
+    /// (`exitHistoryBrowsing`) and any typing / kill chain (`lastAction =
+    /// null`) so the next `Up` cannot recall over the character the user
+    /// just clicked. `display` is measured like [`Editor::display_cursor`]
+    /// — a chip counts as its whole `[Image #N]` label, and an offset
+    /// landing inside one snaps onto the chip's own byte.
+    ///
+    /// Returns [`EditorAction::None`] when the caret was already there, so
+    /// a click on the current cell costs no repaint.
+    pub fn place_display_cursor(&mut self, display: usize) -> EditorAction {
+        // An open reverse search owns the keyboard *and* the caret: its
+        // preview is a different draft from the one the pointer measured, so
+        // a click while it is up is ignored rather than dropping the preview
+        // (the App does not route one there — this is the defence in depth).
+        if self.history_search_active() {
+            return EditorAction::None;
+        }
+        let target = self.raw_byte_for_display_offset(display);
+        self.preferred_col = None;
+        self.reset_history_navigation();
+        self.last_action = LastAction::Other;
+        if self.cursor == target {
+            return EditorAction::None;
+        }
+        self.cursor = target;
+        self.refresh_autocomplete_if_open();
+        EditorAction::Changed
+    }
+
     /// Insert a hard line break at the cursor (`tui.input.newLine`:
     /// `Shift+Enter` / `Ctrl+J`). Upstream `addNewLine`.
     pub fn insert_newline(&mut self) -> EditorAction {
