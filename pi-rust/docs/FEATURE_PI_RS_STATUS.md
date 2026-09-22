@@ -15375,3 +15375,50 @@ issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉�
 **零派发**：「最多 3 个任务」是上限，本 issue 的交付在同一 run 内完成并过全量门，再派子任务只会把同一块
 代码面（`pi-tui` 行布局）拆成并发写者。下一轮序列（扩展生命周期事件 P0 +5.6pt、下拉框鼠标点选、`#` 触发起）
 列在 `docs/LUM1305_AUTOCOMPLETE_SELECT_LIST.md` §6.2，不新增 stage。
+
+## LUM-1336 round — composer 宽度口径从「一个字符一列」改成「一个终端列」；真 PTY A/B；全量门 2691 passed / 0 failed
+
+### 一、本轮交付
+
+**输入面（composer）的宽度口径**：一个 frame buffer cell 就是一个终端列，全角字占两列。
+端口按 `chars().enumerate()` 一个字符写一个 cell，于是 ① 宽字后面的 cell 被
+`ratatui::Buffer::diff` 的 `to_skip = symbol_width - 1` 跳过 → 上一帧字符残留在 composer 行上
+（`世界` 渲染成 `世C`）；② 折行按字符数 → 45 个全角字（90 列）排成一行，屏幕上只有第一个字；
+③ `▍` 按字符下标插入，叠加 ① 后**整帧没有光标**。
+
+落地（`pi-tui`）：`visual_text` 新增 `cell_width`/`cells`（`unicode-width`，tab=1、控制字符=0），
+`wrap_line`/`caret`/`cursor_at`/`click_offset` 全部改列口径（新增 `char_index_at_column` 做列→字符映射，
+`row_width` 取代 `row_len`）；`prompt::build_prompt_row` 把光标列换算成字符下标再插 `▍`，
+padding/截断改走 `column_truncate`；`app::paint_prompt` 按列绘制并清掉宽字覆盖的 cell、
+零宽字符追加到前一 cell；`editor::move_vertical`/`page_scroll` 的粘列夹取改用 `row_width`。
+新增 `crates/pi-tui/tests/composer_wide_chars.rs`（8 条读渲染帧的用例，**修前 7/8 红**）。
+`unicode-width` 只在锁文件里多一条依赖边（已在图中，无版本变化）。
+
+真 PTY A/B（60×24，5 panel / 8 断言）：A 侧断言缺陷本身（`> 世C`、`> 中C`、无 `▍`）**8 PASS**，
+B 侧 **8 PASS**；两侧 scenario 交叉打到对侧二进制上全红。截图
+`docs/screenshots/lum1336-cjk-composer{,-baseline}.png(.txt)`。
+另用直接读 PTY 主端的探针拿到字节流，把"被跳过的 cell"钉到坐标上：
+`\x1b[9;3H世` 之后第一个被清的 cell 是 5，cell 3、4 被跳过。
+
+### 二、门禁与实测（最终树）
+
+* `cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets --locked -- -D warnings` 0 findings；
+  `cargo test --workspace --locked --no-fail-fast` **2691 passed / 2 ignored / 0 failed**，172 suites；
+  `-p pi-tui` 969 passed / 55 suites。
+* Rust↔TS 本轮回测：代码规模 136,071 / 153,106 = **88.9%**；测试规模 2,623 / 5,309 = **49.4%**；
+  `app.*` wired **43/44 = 97.7%**（silent 仍只有 `app.tree.editLabel`）；
+  扩展事件 **21/36 tag = 58.3%、20/36 发射点 = 55.6%**（本轮未动事件轴）。
+
+### 三、本轮**不做**（明确、可复现）
+
+输出面仍是字符口径，逐条列在 `docs/LUM1336_COMPOSER_WIDTH.md` §5：
+`styled.rs::write_styled_line_hyperlinked`（转写/面板/下拉框/设置页共用）、
+`message.rs`+`markdown.rs` 折行、`status.rs` footer 分片、`selector.rs`/`settings.rs` 的
+`display_width`、`hyperlink.rs`/`latex.rs` 的 `visible_width`、`dialog.rs` 的内联计数。
+这些是同一个 crate 级约定的 6 个副本，一次性改会动到 markdown/highlight/message 的折行语义与大量既有断言，
+属于独立一轮；composer 的绘制走自己的 `paint_prompt`，因此可以单独收敛、单独取证。
+
+### 四、槽位 / 派发
+
+**零派发**：盘点时 `in_progress` 恰为 3（LUM-1318 粘贴折叠 / LUM-1332 拖选+复制 / LUM-1333 下拉框指针路由），
+都已占满"最多 3 个任务"的上限，且都在 composer 面但都不改宽度口径；本轮不碰它们的语义，也不新增子 issue。
