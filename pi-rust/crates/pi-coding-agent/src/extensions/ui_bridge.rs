@@ -31,24 +31,34 @@
 //! [`App::poll_ui_dialogs`]: pi_tui::App::poll_ui_dialogs
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use pi_extensions::{
     JsComponent, UiCustomAnchor, UiCustomOptions, UiHandler, UiRegionHost, UiWidgetPlacement,
 };
-use pi_protocol::{UiLevel, UiRequest, UiResponse};
+use pi_protocol::{UiLevel, UiPromptKind, UiRequest, UiResponse};
 use pi_tui::dialog::Dialog;
 use pi_tui::input::KeyCode;
 use pi_tui::styled::{SpanStyle, StyledLine, StyledSpan};
 use pi_tui::{App, Component, CustomHandle, CustomOptions, Key, OverlayAnchor, WidgetPlacement};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::extensions::lifecycle::UiPromptObserver;
 use crate::extensions::wiring::StderrUiHandler;
 
 /// Receiver half of the bridge — the App drains it every tick.
 pub type TuiUiReceiver = mpsc::UnboundedReceiver<Dialog>;
+
+/// Slot holding the observer that is told when a blocking prompt opens and
+/// closes.
+///
+/// The bridge is built before the extension runtime (the host needs the
+/// handler, the runtime needs the host), so the observer is installed
+/// afterwards — before the interactive loop can show a prompt. A `Weak` keeps
+/// the runtime-to-handler-to-observer chain from forming a cycle.
+pub type PromptObserverSlot = Arc<parking_lot::Mutex<Option<Weak<dyn UiPromptObserver>>>>;
 
 /// Sender half of the bridge.
 ///
@@ -59,6 +69,7 @@ pub struct TuiUiBridge {
     tx: mpsc::UnboundedSender<Dialog>,
     ready: Arc<AtomicBool>,
     handler: Arc<dyn UiHandler>,
+    prompt_observer: PromptObserverSlot,
 }
 
 impl std::fmt::Debug for TuiUiBridge {
@@ -75,12 +86,31 @@ impl TuiUiBridge {
     pub fn channel() -> (Self, TuiUiReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
         let ready = Arc::new(AtomicBool::new(false));
+        let prompt_observer: PromptObserverSlot = Arc::new(parking_lot::Mutex::new(None));
         let handler: Arc<dyn UiHandler> = Arc::new(TuiUiHandler {
             tx: tx.clone(),
             ready: ready.clone(),
             fallback: StderrUiHandler,
+            prompt_observer: prompt_observer.clone(),
         });
-        (Self { tx, ready, handler }, rx)
+        (
+            Self {
+                tx,
+                ready,
+                handler,
+                prompt_observer,
+            },
+            rx,
+        )
+    }
+
+    /// Install the observer told about `ui_prompt_start` / `ui_prompt_end`.
+    ///
+    /// Called once the extension runtime exists. Passing a `Weak` means a
+    /// dropped runtime silently stops the notifications instead of keeping it
+    /// alive through the UI handler.
+    pub fn set_prompt_observer(&self, observer: Weak<dyn UiPromptObserver>) {
+        *self.prompt_observer.lock() = Some(observer);
     }
 
     /// The handler to install on the extension host.
@@ -179,9 +209,26 @@ struct TuiUiHandler {
     /// Used while the TUI is not pumping dialogs (load-time
     /// `session_start`, after the loop exited).
     fallback: StderrUiHandler,
+    /// Told when a blocking prompt opens / closes (upstream
+    /// `ui_prompt_start` / `ui_prompt_end`). Empty until the extension
+    /// runtime exists, and `Weak` so it cannot pin the runtime.
+    prompt_observer: PromptObserverSlot,
 }
 
 impl TuiUiHandler {
+    /// Forward a prompt edge to the observer, when one is installed.
+    async fn notify_prompt(&self, kind: UiPromptKind, title: Option<&str>, started: bool) {
+        let observer = self.prompt_observer.lock().as_ref().and_then(Weak::upgrade);
+        let Some(observer) = observer else {
+            return;
+        };
+        if started {
+            observer.prompt_started(kind, title).await;
+        } else {
+            observer.prompt_finished(kind, title).await;
+        }
+    }
+
     /// Send one request to the App and wait for the user.
     ///
     /// Returns `None` when the App is gone or answers "cancelled" —
@@ -202,7 +249,9 @@ impl UiHandler for TuiUiHandler {
         if !self.ready.load(Ordering::SeqCst) {
             return self.fallback.confirm(title, body).await;
         }
-        match self
+        self.notify_prompt(UiPromptKind::Confirm, Some(title), true)
+            .await;
+        let answer = match self
             .ask(UiRequest::Confirm {
                 title: title.to_string(),
                 body: body.to_string(),
@@ -211,14 +260,19 @@ impl UiHandler for TuiUiHandler {
         {
             Some(UiResponse::Confirm { accepted }) => accepted,
             _ => false,
-        }
+        };
+        self.notify_prompt(UiPromptKind::Confirm, Some(title), false)
+            .await;
+        answer
     }
 
     async fn input(&self, title: &str, placeholder: Option<&str>) -> Option<String> {
         if !self.ready.load(Ordering::SeqCst) {
             return self.fallback.input(title, placeholder).await;
         }
-        match self
+        self.notify_prompt(UiPromptKind::Input, Some(title), true)
+            .await;
+        let answer = match self
             .ask(UiRequest::Input {
                 title: title.to_string(),
                 placeholder: placeholder.map(str::to_string),
@@ -227,14 +281,19 @@ impl UiHandler for TuiUiHandler {
         {
             Some(UiResponse::Input { value }) => Some(value),
             _ => None,
-        }
+        };
+        self.notify_prompt(UiPromptKind::Input, Some(title), false)
+            .await;
+        answer
     }
 
     async fn select(&self, title: &str, options: &[String]) -> Option<String> {
         if !self.ready.load(Ordering::SeqCst) {
             return self.fallback.select(title, options).await;
         }
-        match self
+        self.notify_prompt(UiPromptKind::Select, Some(title), true)
+            .await;
+        let answer = match self
             .ask(UiRequest::Select {
                 title: title.to_string(),
                 options: options.to_vec(),
@@ -243,7 +302,10 @@ impl UiHandler for TuiUiHandler {
         {
             Some(UiResponse::Select { value }) => Some(value),
             _ => None,
-        }
+        };
+        self.notify_prompt(UiPromptKind::Select, Some(title), false)
+            .await;
+        answer
     }
 
     async fn notify(&self, message: &str, level: UiLevel) {

@@ -444,3 +444,172 @@ async fn should_stop_after_turn_fires_with_owned_context() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// LifecycleHooks (LUM-1432) — the async seam for `context` /
+// `before_agent_start` / `agent_settled` / the provider boundary.
+// ---------------------------------------------------------------------------
+
+/// Records every lifecycle call and rewrites the two request/response ones.
+#[derive(Default)]
+struct RecordingLifecycle {
+    before_agent_start: Mutex<Vec<(String, String)>>,
+    context: Mutex<Vec<usize>>,
+    provider_requests: Mutex<Vec<serde_json::Value>>,
+    provider_headers: AtomicUsize,
+    provider_responses: Mutex<Vec<bool>>,
+    settled: AtomicUsize,
+}
+
+#[async_trait]
+impl pi_agent_core::LifecycleHooks for RecordingLifecycle {
+    async fn before_agent_start(&self, prompt: &str, system_prompt: &str) -> Option<String> {
+        self.before_agent_start
+            .lock()
+            .expect("lock")
+            .push((prompt.to_string(), system_prompt.to_string()));
+        Some(format!("overridden::{system_prompt}"))
+    }
+
+    async fn context(&self, messages: Vec<Message>) -> Vec<Message> {
+        self.context.lock().expect("lock").push(messages.len());
+        let mut messages = messages;
+        messages.push(text_message("CONTEXT-INJECTED"));
+        messages
+    }
+
+    async fn agent_settled(&self) {
+        self.settled.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn before_provider_request(&self, payload: serde_json::Value) -> serde_json::Value {
+        self.provider_requests.lock().expect("lock").push(payload);
+        serde_json::Value::Null
+    }
+
+    async fn before_provider_headers(
+        &self,
+        headers: serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        self.provider_headers.fetch_add(1, Ordering::SeqCst);
+        headers
+    }
+
+    async fn after_provider_response(&self, ok: bool) {
+        self.provider_responses.lock().expect("lock").push(ok);
+    }
+}
+
+/// Stream that records the context it was handed, so the test can see the
+/// `context` rewrite the loop applied.
+struct ContextCapturingStream {
+    inner: FauxishStream,
+    seen: Arc<Mutex<Vec<AgentContext>>>,
+}
+
+#[async_trait]
+impl StreamFn for ContextCapturingStream {
+    async fn stream_simple(
+        &self,
+        model: &Model,
+        ctx: &AgentContext,
+        options: &SimpleStreamOptions,
+    ) -> Result<AssistantMessageEventStream, StreamError> {
+        self.seen.lock().expect("lock").push(ctx.clone());
+        self.inner.stream_simple(model, ctx, options).await
+    }
+}
+
+/// Minimal inner stream: one text reply per call.
+struct FauxishStream;
+
+#[async_trait]
+impl StreamFn for FauxishStream {
+    async fn stream_simple(
+        &self,
+        _model: &Model,
+        _ctx: &AgentContext,
+        _options: &SimpleStreamOptions,
+    ) -> Result<AssistantMessageEventStream, StreamError> {
+        let message = text_reply("done");
+        let events = vec![
+            Ok(AssistantMessageEvent::Start {
+                model: message.model.clone(),
+            }),
+            Ok(AssistantMessageEvent::Done {
+                content: message.content,
+                stop_reason: message.stop_reason,
+                usage: message.usage,
+            }),
+        ];
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lifecycle_hooks_fire_at_the_run_boundaries() {
+    let lifecycle = Arc::new(RecordingLifecycle::default());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ContextCapturingStream {
+        inner: FauxishStream,
+        seen: seen.clone(),
+    });
+
+    let mut agent = Agent::new(
+        AgentOptions::new(faux_model("faux-model"), stream, "you are pi")
+            .with_lifecycle(lifecycle.clone()),
+    );
+    agent.prompt("hello").await.expect("prompt");
+
+    // `before_agent_start` saw the expanded prompt and the base system prompt,
+    // and its override became the run's system prompt.
+    let starts = lifecycle.before_agent_start.lock().expect("lock").clone();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].0, "hello");
+    assert_eq!(starts[0].1, "you are pi");
+
+    // `context` ran before the provider call and its rewrite is what the
+    // provider saw.
+    assert_eq!(lifecycle.context.lock().expect("lock").len(), 1);
+    let contexts = seen.lock().expect("lock").clone();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].system_prompt, "overridden::you are pi");
+    assert!(
+        contexts[0]
+            .messages
+            .iter()
+            .any(|message| message.content.iter().any(
+                |block| matches!(block, Content::Text(text) if text.text == "CONTEXT-INJECTED")
+            )),
+        "the context rewrite must reach the provider: {:?}",
+        contexts[0].messages
+    );
+
+    // The provider-boundary hooks saw the request the loop was about to make
+    // and the response edge.
+    let requests = lifecycle.provider_requests.lock().expect("lock").clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["model"]["id"], "faux-model");
+    assert_eq!(lifecycle.provider_headers.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        lifecycle.provider_responses.lock().expect("lock").clone(),
+        vec![true]
+    );
+
+    // `agent_settled` closed the run.
+    assert_eq!(lifecycle.settled.load(Ordering::SeqCst), 1);
+}
+
+/// A host with no lifecycle hook behaves exactly as before: every seam is a
+/// no-op and the run still completes.
+#[tokio::test(flavor = "current_thread")]
+async fn runs_without_lifecycle_hooks_are_unchanged() {
+    let stream = Arc::new(FauxishStream);
+    let mut agent = Agent::new(AgentOptions::new(
+        faux_model("faux-model"),
+        stream,
+        "you are pi",
+    ));
+    agent.prompt("hello").await.expect("prompt");
+    assert_eq!(agent.state().system_prompt, "you are pi");
+}

@@ -367,6 +367,14 @@ impl AgentLoop {
                 if current_context.tools.is_empty() {
                     current_context.tools = self.config.tool_definitions();
                 }
+                // Upstream `context`: fired before each provider call so a
+                // plugin can rewrite the message list the request carries
+                // (`agent-session.ts` `transformContext` →
+                // `ExtensionRunner.emitContext`). The rewrite is applied to
+                // the live context, so a handler can also drop messages the
+                // model must not see.
+                let messages = std::mem::take(&mut current_context.messages);
+                current_context.messages = self.hooks.invoke_context(messages).await;
                 let batch = match root.as_ref() {
                     None => {
                         run_turn_batch(
@@ -574,7 +582,8 @@ async fn run_turn_batch(
     sinks: TurnSinks<'_>,
 ) -> Result<TurnBatch, AgentError> {
     let assistant_message =
-        stream_assistant_response_with_retry(stream_fn, context, config, signal, sinks).await?;
+        stream_assistant_response_with_retry(stream_fn, context, config, hooks, signal, sinks)
+            .await?;
     let (tool_results, continue_loop) = execute_tool_calls(
         executor,
         hooks,
@@ -604,15 +613,16 @@ async fn stream_assistant_response_with_retry(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
     config: &LoopConfig,
+    hooks: &AgentHookAdapter,
     signal: &CancellationToken,
     sinks: TurnSinks<'_>,
 ) -> Result<AssistantMessage, AgentError> {
     let policy = config.retry;
     if !policy.enabled {
-        return stream_assistant_response(stream_fn, context, config, sinks).await;
+        return stream_assistant_response(stream_fn, context, config, hooks, sinks).await;
     }
     retry_assistant_call(
-        || stream_assistant_response(stream_fn, context, config, sinks),
+        || stream_assistant_response(stream_fn, context, config, hooks, sinks),
         Some(&policy),
         &config.model.id,
         signal,
@@ -627,10 +637,11 @@ async fn stream_assistant_response(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
     config: &LoopConfig,
+    hooks: &AgentHookAdapter,
     sinks: TurnSinks<'_>,
 ) -> Result<AssistantMessage, AgentError> {
     let Some(parent) = sinks.telemetry else {
-        return stream_assistant_events(stream_fn, context, config, sinks.observer).await;
+        return stream_assistant_events(stream_fn, context, config, hooks, sinks.observer).await;
     };
     let options = SpanOptions::new(span_name::AI_REQUEST)
         .with_attribute(attribute_name::AI_OPERATION, "stream")
@@ -646,7 +657,7 @@ async fn stream_assistant_response(
         .with_attribute(attribute_name::AI_STREAMING, true);
     parent
         .start_span_with(options, |span| async move {
-            match stream_assistant_events(stream_fn, context, config, sinks.observer).await {
+            match stream_assistant_events(stream_fn, context, config, hooks, sinks.observer).await {
                 Ok(message) => {
                     span.set_attributes(response_attributes(&message));
                     Ok(message)
@@ -678,6 +689,7 @@ async fn stream_assistant_events(
     stream_fn: &SharedStreamFn,
     context: &AgentContext,
     config: &LoopConfig,
+    hooks: &AgentHookAdapter,
     observer: Option<&EventObserver>,
 ) -> Result<AssistantMessage, AgentError> {
     let mut options = pi_ai::SimpleStreamOptions::default();
@@ -698,10 +710,44 @@ async fn stream_assistant_events(
     {
         options.temperature = None;
     }
-    let mut stream = stream_fn
+    // Upstream `before_provider_request` / `before_provider_headers`: fired
+    // around the provider call so a plugin can rewrite the wire payload or
+    // inject headers (`packages/coding-agent/src/core/sdk.ts:320-360`).
+    //
+    // Fidelity gap (documented in `docs/LUM1432_EXTENSION_EVENTS.md`): the
+    // Rust `StreamFn` takes a typed `Context`, and the `pi-ai` adapters build
+    // their own HTTP request from a credential + base URL, so there is no
+    // seam to hand a rewritten payload or header map back to. The events are
+    // therefore constructed and delivered with the data this port actually
+    // has — the request descriptor the adapter receives and an empty header
+    // map — and the returned values are intentionally ignored at this seam.
+    let payload = serde_json::json!({
+        "model": {
+            "id": config.model.id,
+            "provider": config.model.provider.to_string(),
+        },
+        "systemPrompt": context.system_prompt,
+        "messages": serde_json::to_value(&context.messages).unwrap_or(serde_json::Value::Null),
+        "temperature": options.temperature,
+        "maxTokens": options.max_tokens,
+    });
+    let _ = hooks.invoke_before_provider_request(payload).await;
+    let _ = hooks
+        .invoke_before_provider_headers(serde_json::Map::new())
+        .await;
+    let mut stream = match stream_fn
         .stream_simple(&config.model, context, &options)
         .await
-        .map_err(|err| AgentError::Stream(err.to_string()))?;
+    {
+        Ok(stream) => {
+            hooks.invoke_after_provider_response(true).await;
+            stream
+        }
+        Err(err) => {
+            hooks.invoke_after_provider_response(false).await;
+            return Err(AgentError::Stream(err.to_string()));
+        }
+    };
 
     let mut final_message: Option<AssistantMessage> = None;
     // `Done` closes the message; a stream that ends without one (e.g. after

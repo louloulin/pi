@@ -34,8 +34,9 @@ use pi_ai::models::Models;
 use pi_ai::providers::faux::FauxProvider;
 use pi_ai::stream::SharedStreamFn;
 use pi_protocol::{
-    CompactReason, Content, ExtensionEvent, Message, Model, ProviderId, SessionEntry,
-    SessionShutdownReason, ToolCall, ToolResult,
+    CompactReason, Content, ExtensionEvent, ForkPosition, Message, Model, ModelSelectSource,
+    ProviderId, SessionBeforeSwitchReason, SessionEntry, SessionShutdownReason, ToolCall,
+    ToolResult,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -57,6 +58,7 @@ use crate::compaction::{
 };
 use crate::config::{self, ConfigSources};
 use crate::extensions::events::ExtensionEventMapper;
+use crate::extensions::lifecycle::{ExtensionLifecycleHooks, UiPromptObserver};
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
 use crate::extensions::wiring::{ExtensionReport, ExtensionRuntime};
 use crate::prompt_templates::PromptTemplate;
@@ -504,6 +506,21 @@ async fn run_loop(
     // event into the host on its own task, so a slow plugin cannot stall
     // rendering. Skipped entirely when no loaded extension subscribed.
     let extension_pump = start_extension_event_pump(&agent, options.extensions.as_ref()).await;
+    // The events that fire *inside* a run (`context`, `before_agent_start`, …)
+    // need an async answer, so they ride [`LifecycleHooks`] instead of the
+    // synchronous fan-out above. Installed before the first prompt, and only
+    // when extensions actually loaded.
+    if let Some(runtime) = options.extensions.as_ref() {
+        let hooks = Arc::new(ExtensionLifecycleHooks::new(runtime.clone()));
+        agent.lock().await.hooks_mut().lifecycle = Some(hooks.clone());
+        // Upstream `ui_prompt_start` / `ui_prompt_end` bracket every blocking
+        // `ctx.ui.*` dialog. The TUI dialog handler forwards those edges; the
+        // `Weak` keeps the runtime from being pinned by the handler.
+        if let Some(ui) = options.extension_ui.as_ref() {
+            let observer: Arc<dyn UiPromptObserver> = hooks.clone();
+            ui.bridge().set_prompt_observer(Arc::downgrade(&observer));
+        }
+    }
 
     // Local `!` / `!!` commands: one at a time, run off the render loop so
     // `Esc` can cancel them.
@@ -1784,10 +1801,25 @@ async fn apply_selector_choice(
             }
         }
         if let Some((_, model)) = found {
+            let previous = {
+                let guard = agent.lock().await;
+                guard.model().id.clone()
+            };
             let mut agent_guard = agent.lock().await;
             app.queue_model_switch(&mut agent_guard, model);
             sync_thinking_for_model(app, &mut agent_guard);
             drop(agent_guard);
+            // Upstream `model_select` (`AgentSession._emitModelSelect`),
+            // fired from the one place that changes the active model.
+            deliver_extension_event(
+                options.extensions.as_ref(),
+                ExtensionEvent::ModelSelect {
+                    model: id.to_string(),
+                    previous_model: Some(previous),
+                    source: ModelSelectSource::Set,
+                },
+            )
+            .await;
             app.info(format!("model → {}", id));
         }
     } else if value.starts_with("thinking:") {
@@ -1836,6 +1868,20 @@ async fn resume_session(
             return;
         }
     };
+    // Upstream `session_before_switch` for a resume (`reason: "resume"`),
+    // fired once the target exists so a handler sees its file.
+    if extension_veto(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionBeforeSwitch {
+            reason: SessionBeforeSwitchReason::Resume,
+            target_session_file: Some(reference.database.display().to_string()),
+        },
+    )
+    .await
+    {
+        app.info("/resume: cancelled by an extension".to_string());
+        return;
+    }
     match attach_session(app, agent, options, reference.database, session_id, &reader).await {
         Ok(Some(name)) => app.info(format!("Resumed session {session_id} ({name})")),
         Ok(None) => app.info(format!("Resumed session {session_id}")),
@@ -2768,6 +2814,23 @@ async fn handle_tree_selection(
         return;
     };
     let session_id = options.session_id.clone();
+    // Upstream `session_before_tree`: a handler may veto navigating away from
+    // the current leaf (`session_before_tree`).
+    let previous_leaf = options.session_leaf.clone();
+    if extension_veto(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionBeforeTree {
+            target_id: entry_id.to_string(),
+            old_leaf_id: previous_leaf.clone(),
+            user_wants_summary: false,
+            custom_instructions: None,
+        },
+    )
+    .await
+    {
+        app.info("/tree: cancelled by an extension".to_string());
+        return;
+    }
     let writer = match SessionWriter::open(&database) {
         Ok(writer) => writer,
         Err(err) => {
@@ -2806,6 +2869,16 @@ async fn handle_tree_selection(
     }
     agent.lock().await.state_mut().messages = messages;
     options.session_leaf = Some(entry_id.to_string());
+    // Upstream `session_tree`: the navigation landed.
+    deliver_extension_event(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionTree {
+            new_leaf_id: Some(entry_id.to_string()),
+            old_leaf_id: previous_leaf,
+            from_extension: false,
+        },
+    )
+    .await;
     app.info("Navigated to selected point".to_string());
 }
 
@@ -2824,6 +2897,20 @@ async fn handle_fork_selection(
     let Some((_, reader)) = open_current_session(app, options, "/fork") else {
         return;
     };
+    // Upstream `session_before_fork`: a handler may veto the fork
+    // (`session_before_fork`).
+    if extension_veto(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionBeforeFork {
+            entry_id: entry_id.to_string(),
+            position: ForkPosition::At,
+        },
+    )
+    .await
+    {
+        app.info("/fork: cancelled by an extension".to_string());
+        return;
+    }
     match fork_session(&directory, &reader, &options.session_id, entry_id) {
         Ok(created) => {
             clone_into_new_session(app, agent, options, created).await;
@@ -2875,6 +2962,20 @@ async fn start_new_session(
     agent: &Arc<AsyncMutex<Agent>>,
     options: &mut InteractiveOptions,
 ) {
+    // Upstream `session_before_switch`: fired before the current session is
+    // replaced, and a handler may veto it (`session_before_switch`).
+    if extension_veto(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionBeforeSwitch {
+            reason: SessionBeforeSwitchReason::New,
+            target_session_file: None,
+        },
+    )
+    .await
+    {
+        app.info("/new: cancelled by an extension".to_string());
+        return;
+    }
     let Some(directory) = options
         .session_log
         .as_ref()
@@ -3682,6 +3783,22 @@ async fn run_compact(
 
     // Manual compaction uses the configured token thresholds but ignores
     // the auto-compaction toggle, matching upstream.
+    //
+    // Upstream `session_before_compact`: a handler may veto the compaction or
+    // supply its own summary (`session_before_compact`).
+    if extension_veto(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionBeforeCompact {
+            reason: CompactReason::Manual,
+            will_retry: false,
+            custom_instructions: instructions.map(str::to_string),
+        },
+    )
+    .await
+    {
+        app.info("/compact: cancelled by an extension".to_string());
+        return;
+    }
     let compaction = match compact(
         &history,
         &model,
@@ -3694,6 +3811,18 @@ async fn run_compact(
     {
         Ok(compaction) => compaction,
         Err(err) => {
+            // Upstream `session_compact_failed`.
+            deliver_extension_event(
+                options.extensions.as_ref(),
+                ExtensionEvent::SessionCompactFailed {
+                    reason: CompactReason::Manual,
+                    error_message: Some(err.to_string()),
+                    aborted: false,
+                    will_retry: false,
+                    from_extension: false,
+                },
+            )
+            .await;
             app.info(format!("/compact: {err}"));
             return;
         }
@@ -3798,6 +3927,21 @@ async fn maybe_auto_compact(
     } else {
         CompactReason::Threshold
     };
+    // Upstream `session_before_compact`: a handler may veto the automatic
+    // compaction too (`session_before_compact`).
+    if extension_veto(
+        options.extensions.as_ref(),
+        ExtensionEvent::SessionBeforeCompact {
+            reason: compact_reason,
+            will_retry: false,
+            custom_instructions: None,
+        },
+    )
+    .await
+    {
+        app.info("auto-compact: cancelled by an extension".to_string());
+        return false;
+    }
 
     let compaction = match compact(
         &history,
@@ -3813,6 +3957,18 @@ async fn maybe_auto_compact(
         // The conversation already fits the retained window — nothing to do.
         Err(CompactionError::NothingToCompact) => return false,
         Err(err) => {
+            // Upstream `session_compact_failed`.
+            deliver_extension_event(
+                options.extensions.as_ref(),
+                ExtensionEvent::SessionCompactFailed {
+                    reason: compact_reason,
+                    error_message: Some(err.to_string()),
+                    aborted: false,
+                    will_retry: false,
+                    from_extension: false,
+                },
+            )
+            .await;
             app.info(format!("auto-compact: {err}"));
             return false;
         }
@@ -4043,6 +4199,30 @@ async fn deliver_extension_event(
     if let Some(runtime) = extensions {
         runtime.deliver_event(&event).await;
     }
+}
+
+/// True when a `session_before_*` handler returned `{ cancel: true }`.
+///
+/// Upstream's cancellation contract is shared by `session_before_switch`,
+/// `session_before_fork`, `session_before_compact` and `session_before_tree`
+/// (`packages/coding-agent/src/core/extensions/runner.ts`); a failed or
+/// timed-out dispatch yields `None` and is never treated as a cancel, so a
+/// broken plugin cannot wedge the session.
+fn extension_cancelled(outcome: &Option<pi_extensions::DispatchOutcome>) -> bool {
+    outcome.as_ref().is_some_and(|outcome| {
+        outcome
+            .results
+            .iter()
+            .any(|result| result.get("cancel").and_then(serde_json::Value::as_bool) == Some(true))
+    })
+}
+
+/// Dispatch one `session_before_*` event and report whether a handler vetoed.
+async fn extension_veto(extensions: Option<&Arc<ExtensionRuntime>>, event: ExtensionEvent) -> bool {
+    let Some(runtime) = extensions else {
+        return false;
+    };
+    extension_cancelled(&runtime.dispatch_event(&event).await)
 }
 
 fn persist_extension_side_effects(app: &mut App, options: &InteractiveOptions) {
@@ -7859,5 +8039,137 @@ mod tests {
         );
         assert_eq!(host.log().entries.len(), 1);
         assert_eq!(host.log().entries[0].custom_type, "turn_start");
+    }
+
+    // -----------------------------------------------------------------------
+    // `session_before_*` veto contract (LUM-1432)
+    // -----------------------------------------------------------------------
+
+    /// A `session_before_*` handler that answers `{ cancel: true }` really
+    /// stops the operation the host was about to run.
+    #[tokio::test]
+    async fn a_session_before_handler_can_veto() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_before_compact", () => ({ cancel: true }));
+            };
+        "#;
+        let (runtime, _host) =
+            extension_runtime("veto-compact", source, &["session_before_compact"]).await;
+        let runtime = Arc::new(runtime);
+
+        assert!(
+            extension_veto(
+                Some(&runtime),
+                ExtensionEvent::SessionBeforeCompact {
+                    reason: CompactReason::Manual,
+                    will_retry: false,
+                    custom_instructions: None,
+                },
+            )
+            .await
+        );
+        // Same runtime, an event nobody subscribed to: no dispatch, no veto.
+        assert!(
+            !extension_veto(
+                Some(&runtime),
+                ExtensionEvent::SessionBeforeSwitch {
+                    reason: SessionBeforeSwitchReason::New,
+                    target_session_file: None,
+                },
+            )
+            .await
+        );
+    }
+
+    /// A handler that returns anything else (or nothing) must not veto.
+    #[tokio::test]
+    async fn a_non_cancelling_handler_does_not_veto() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_before_tree", () => ({ summary: "kept going" }));
+            };
+        "#;
+        let (runtime, _host) =
+            extension_runtime("no-veto-tree", source, &["session_before_tree"]).await;
+        let runtime = Arc::new(runtime);
+
+        assert!(
+            !extension_veto(
+                Some(&runtime),
+                ExtensionEvent::SessionBeforeTree {
+                    target_id: "e1".into(),
+                    old_leaf_id: None,
+                    user_wants_summary: false,
+                    custom_instructions: None,
+                },
+            )
+            .await
+        );
+    }
+
+    /// `session_before_fork` and `session_before_switch` carry their
+    /// upstream payload fields into JS.
+    #[tokio::test]
+    async fn session_before_payloads_reach_the_handler() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_before_fork", (event) => {
+                    pi.appendEntry("fork-seen", { entryId: event.entryId, position: event.position });
+                    return { cancel: true };
+                });
+                pi.on("session_before_switch", (event) => {
+                    pi.appendEntry("switch-seen", {
+                        reason: event.reason,
+                        target: event.targetSessionFile || null,
+                    });
+                    return { cancel: true };
+                });
+            };
+        "#;
+        let (runtime, host) = extension_runtime(
+            "session-before-payloads",
+            source,
+            &["session_before_fork", "session_before_switch"],
+        )
+        .await;
+        let runtime = Arc::new(runtime);
+
+        assert!(
+            extension_veto(
+                Some(&runtime),
+                ExtensionEvent::SessionBeforeFork {
+                    entry_id: "e7".into(),
+                    position: ForkPosition::At,
+                },
+            )
+            .await
+        );
+        assert!(
+            extension_veto(
+                Some(&runtime),
+                ExtensionEvent::SessionBeforeSwitch {
+                    reason: SessionBeforeSwitchReason::Resume,
+                    target_session_file: Some("/tmp/session.sqlite".into()),
+                },
+            )
+            .await
+        );
+
+        let log = host.log();
+        let fork = log
+            .entries
+            .iter()
+            .find(|entry| entry.custom_type == "fork-seen")
+            .expect("fork payload");
+        assert_eq!(fork.data["entryId"], "e7");
+        assert_eq!(fork.data["position"], "at");
+        let switch = log
+            .entries
+            .iter()
+            .find(|entry| entry.custom_type == "switch-seen")
+            .expect("switch payload");
+        assert_eq!(switch.data["reason"], "resume");
+        assert_eq!(switch.data["target"], "/tmp/session.sqlite");
     }
 }

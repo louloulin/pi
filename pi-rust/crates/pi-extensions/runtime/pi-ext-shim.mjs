@@ -762,6 +762,58 @@ const EVENT_ALIASES = Object.freeze({
 });
 
 /**
+ * Every upstream event name `pi.on` may be given, in upstream declaration
+ * order (`packages/coding-agent/src/core/extensions/types.ts:1257-1301`).
+ *
+ * The Rust host keeps the same list in
+ * `crates/pi-extensions/src/events.rs`; a unit test asserts the two agree, so
+ * this array is the JS-side half of the alias table rather than documentation
+ * that can drift.
+ *
+ * `pi.on` stays permissive (an unknown name registers and simply never
+ * fires), matching upstream, where the name is a compile-time type rather
+ * than a runtime check.
+ */
+const UPSTREAM_EVENT_NAMES = Object.freeze([
+  "project_trust",
+  "resources_discover",
+  "session_start",
+  "session_info_changed",
+  "session_before_switch",
+  "session_before_fork",
+  "session_before_compact",
+  "session_compact",
+  "session_compact_failed",
+  "session_shutdown",
+  "session_before_tree",
+  "session_tree",
+  "context",
+  "before_provider_request",
+  "before_provider_headers",
+  "after_provider_response",
+  "before_agent_start",
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+  "ui_prompt_start",
+  "ui_prompt_end",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "model_select",
+  "thinking_level_select",
+  "tool_call",
+  "tool_result",
+  "user_bash",
+  "input",
+]);
+
+/**
  * Resolve an event name to the canonical one the host emits.
  *
  * Both `pi.on` and `_pi_dispatch` go through this, so a subscription and a

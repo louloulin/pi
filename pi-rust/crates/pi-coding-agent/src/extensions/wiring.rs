@@ -22,9 +22,10 @@ use pi_ai::models::Models;
 use pi_ai::providers::registry::BUILTIN_PROVIDERS;
 use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
 use pi_extensions::{
-    CommandExecutionOutcome, DiscoveredResources, ExtensionBridge, ExtensionError,
-    ExtensionSideEffects, HostOptions, JsExtensionHost, RegisteredCommand,
-    RegisteredProviderConfig, RegisteredProviders, RegisteredToolPrompt, ToolContext, UiHandler,
+    canonical_event_name, CommandExecutionOutcome, DiscoveredResources, DispatchOutcome,
+    ExtensionBridge, ExtensionError, ExtensionSearchPaths, ExtensionSideEffects, HostOptions,
+    JsExtensionHost, RegisteredCommand, RegisteredProviderConfig, RegisteredProviders,
+    RegisteredToolPrompt, ToolContext, UiHandler,
 };
 use pi_protocol::{
     Api, AssistantMessageEvent, Content, Context, ExtensionEvent, Message, Model, ProviderId,
@@ -373,8 +374,12 @@ impl ExtensionRuntime {
 
     /// Whether any extension wants `name` (an [`ExtensionEvent`] wire tag,
     /// see [`ExtensionEvent::name`]).
+    ///
+    /// The name is normalized through the shim's alias table first
+    /// ([`canonical_event_name`]): a plugin that wrote `session_end` registers
+    /// under `session_shutdown`, so a lookup by either spelling finds it.
     pub fn has_subscriber_for(&self, name: &str) -> bool {
-        self.subscribed_events.contains(name)
+        self.subscribed_events.contains(canonical_event_name(name))
     }
 
     /// Whether at least one extension subscribed to any event at all.
@@ -393,16 +398,32 @@ impl ExtensionRuntime {
     /// caller can also pre-filter with [`Self::has_subscriber_for`] when
     /// building an expensive payload.
     pub async fn deliver_event(&self, event: &ExtensionEvent) -> bool {
-        let Some(host) = self.host.as_ref() else {
-            return false;
-        };
-        if !self.has_subscriber_for(event.name()) {
-            return false;
-        }
-        host.emit_event_with(event, Some(&self.mode), self.has_ui, &self.cwd)
+        self.dispatch_event(event)
             .await
             .map(|outcome| outcome.handled)
             .unwrap_or(false)
+    }
+
+    /// Deliver one lifecycle event and return the full dispatch summary.
+    ///
+    /// [`Self::deliver_event`] is the observational shorthand; this is the
+    /// request/response form the *hookable* events need (`context`,
+    /// `before_agent_start`, `session_before_*`), because their handlers'
+    /// return values decide what happens next.
+    ///
+    /// `None` means nothing ran: no host, or no loaded extension subscribed
+    /// to the event. A dispatch that crossed into JS but timed out or threw
+    /// also yields `None` — a broken plugin must not change the host's
+    /// behaviour, and every caller's fallback (keep the current messages,
+    /// do not cancel, …) is the safe one.
+    pub async fn dispatch_event(&self, event: &ExtensionEvent) -> Option<DispatchOutcome> {
+        let host = self.host.as_ref()?;
+        if !self.has_subscriber_for(event.name()) {
+            return None;
+        }
+        host.emit_event_with(event, Some(&self.mode), self.has_ui, &self.cwd)
+            .await
+            .ok()
     }
 
     /// Deliver `session_shutdown` before the runtime goes away.
@@ -512,7 +533,7 @@ pub fn load(
 
     let result = runtime.block_on(async {
         let host = JsExtensionHost::with_options(host_options).await?;
-        let outcome = js_loader::load_configured_extensions(
+        let mut outcome = js_loader::load_configured_extensions(
             host.clone(),
             &request,
             &options.mode,
@@ -520,6 +541,43 @@ pub fn load(
             &cwd,
         )
         .await;
+        // Upstream `project_trust` (`core/project-trust.ts`): when the project
+        // has trust-requiring resources and no decision is saved, the
+        // already-loaded global / explicit extensions may answer before the
+        // project's own extensions are evaluated. Until LUM-1432 the Rust port
+        // skipped the event entirely (see the `main.rs` note this replaces),
+        // which is why a plugin could not implement the trust prompt.
+        if !options.project_trusted
+            && crate::trust::has_trust_requiring_project_resources(&options.cwd)
+        {
+            if let Some(trusted) =
+                ask_project_trust(&host, &options.cwd, &options.mode, has_ui).await
+            {
+                if trusted {
+                    // Second pass: the project root the first pass deliberately
+                    // left out. Same host, so handlers registered by global /
+                    // explicit extensions stay live and see `session_start`
+                    // below together with the project's own.
+                    let project_request = ExtensionLoadRequest {
+                        search: ExtensionSearchPaths {
+                            global: None,
+                            project: Some(options.cwd.join(".pi").join("extensions")),
+                        },
+                        explicit: Vec::new(),
+                    };
+                    let project = js_loader::load_configured_extensions(
+                        host.clone(),
+                        &project_request,
+                        &options.mode,
+                        has_ui,
+                        &cwd,
+                    )
+                    .await;
+                    outcome.entries.extend(project.entries);
+                    outcome.errors.extend(project.errors);
+                }
+            }
+        }
         // Lifecycle event: extensions register their event handlers before
         // this fires, so `pi.on("session_start", …)` runs for every mode.
         let _ = outcome.bridge.deliver(&ExtensionEvent::SessionStart).await;
@@ -605,6 +663,64 @@ pub fn load(
             )],
         },
     }
+}
+
+/// Ask the loaded extensions whether an otherwise-untrusted project may load.
+///
+/// Returns `Some(true / false)` when a handler answered, `None` when nobody
+/// subscribed, every handler was `undecided`, or the dispatch failed. The
+/// first `yes` / `no` wins and later handlers are ignored, matching
+/// `ExtensionRunner.emitProjectTrust` in
+/// `packages/coding-agent/src/core/extensions/runner.ts:212`.
+///
+/// `remember: true` persists the answer through the project trust store
+/// (`project-trust.ts:66-70`); a failed write is ignored — the in-memory
+/// decision still governs this process.
+async fn ask_project_trust(
+    host: &JsExtensionHost,
+    cwd: &std::path::Path,
+    mode: &str,
+    has_ui: bool,
+) -> Option<bool> {
+    if !host
+        .known_event_names()
+        .await
+        .iter()
+        .any(|name| name == "project_trust")
+    {
+        return None;
+    }
+    let cwd_text = cwd.display().to_string();
+    let event = ExtensionEvent::ProjectTrust {
+        cwd: cwd_text.clone(),
+    };
+    let outcome = host
+        .emit_event_with(&event, Some(mode), has_ui, &cwd_text)
+        .await
+        .ok()?;
+    let mut decision = None;
+    let mut remember = false;
+    for result in &outcome.results {
+        let answer = match result.get("trusted").and_then(|value| value.as_str()) {
+            Some("yes") => Some(true),
+            Some("no") => Some(false),
+            // `undecided` (and anything unrecognised) falls through.
+            _ => None,
+        };
+        let Some(answer) = answer else {
+            continue;
+        };
+        decision = Some(answer);
+        remember = result.get("remember").and_then(|value| value.as_bool()) == Some(true);
+        break;
+    }
+    if remember {
+        if let Some(value) = decision {
+            let store = crate::trust::ProjectTrustStore::new(&crate::paths::agent_dir_or_default());
+            let _ = store.set(cwd, Some(value));
+        }
+    }
+    decision
 }
 
 /// Resolve the paths named on the command line.

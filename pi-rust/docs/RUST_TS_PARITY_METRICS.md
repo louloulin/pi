@@ -330,7 +330,44 @@ CJK 断点    "你好世界" @6 列 → ["你好世", "界"]（两条断行规�
 3. LUM-1431 §5 的「`cargo fmt --all -- --check` 干净」在基线 `b0c9f89a1` 上**复现不出来**
    （`lum1431_autocomplete_frames.rs` 有 4 处 rustfmt 差异，cargo 1.97.1）；本轮已修绿。
 
-### 0.12 LUM-1445 复测：模态列表认领指针（picker / `ctx.ui.select` 滚轮+点选，`/settings` 点选）；TUI 指针面 6/6
+### 0.12 LUM-1432 复测：扩展生命周期事件 **20/36 → 36/36**；加权 **86.7%**
+
+本轮只动一条轴：**扩展生命周期事件**（LUM-1431 §7 列为待办的 P0）。
+细节、逐事件构造点与保真度缺口见 `docs/LUM1432_EXTENSION_EVENTS.md`。
+
+| 量 | 本轮实测 | LUM-1431 | 说明 |
+|---|---|---|---|
+| 扩展事件声明面 | **36 / 36 = 100%** | 21/36 = 58.3% | `ExtensionEvent::name()` 的 wire tag 与上游 36 个名字逐一相等 |
+| 扩展事件生产构造点 | **36 / 36 = 100%** | 20/36 = 55.6% | `python pi-rust/scripts/extension_event_coverage.py pi-rust` → `production emit sites: 36/36 (100.0%)` |
+| 其中真钩子（返回值影响后续行为） | **10 / 36** | 0 | `context`、`before_agent_start`、`agent_settled`、`project_trust`、`session_before_{switch,fork,compact,tree}`、`session_tree`、`model_select` |
+
+**加权完成度（权重表见 §4.1，公式公开）**：只有第 10 轴从 0.556 走到 1.000：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.497 + 3×0.95 = 86.7%
+```
+
+比 §0.11 的 83.6% 高 **+3.1pt**，正是 `7×(1.000−0.556) = +3.108`——没有夹带任何其他轴的改动。
+
+**本轮新增证据（可复跑）**：
+
+| 证据 | 命令 / 文件 | 结果 |
+|---|---|---|
+| 覆盖率 | `python pi-rust/scripts/extension_event_coverage.py pi-rust` | 36/36（声明 + 生产构造点），0 缺失变体 |
+| 文档对账 | `python pi-rust/scripts/extension_event_coverage.py pi-rust --check-doc` | EXIT=0（§3.6 的 36 名清单与代码同步） |
+| 端到端（真事件 → 真回调 → 真行为） | `crates/pi-coding-agent/tests/extension_lifecycle_hooks.rs` | 4/4 绿：`before_agent_start` 换 system prompt、`context` 改消息、`project_trust` 决定项目扩展是否加载 |
+| agent-core 缝 | `crates/pi-agent-core/tests/hooks.rs` | 2 条新增绿（6 个缝全触发 + 未装钩子时行为不变） |
+| `session_before_*` veto | `crates/pi-coding-agent/src/interactive.rs` 单测 | 3 条新增绿（真 QuickJS：veto / 非 veto / 载荷字段） |
+| 门禁 | `cargo test --workspace --locked --no-fail-fast` | **2646 passed / 39 failed**（基线同机 2620 / 39，失败集合相同） |
+| 格式 / lint | `cargo fmt --all -- --check`、`cargo clippy … --all-targets` | fmt EXIT=0；本仓库 0 告警 |
+
+**诚实说明**：provider 三个事件（`before_provider_request` / `before_provider_headers` /
+`after_provider_response`）已按宿主真实拥有的数据构造并投递，但 `pi-ai` 的 adapter 没有
+wire-payload / header 缝，**handler 返回值目前不生效**、`after_provider_response.status`
+是推导值（流建立 200 / 失败 0）。逐条列在 `docs/LUM1432_EXTENSION_EVENTS.md` §3。
+
+### 0.13 LUM-1445 复测：模态列表认领指针（picker / `ctx.ui.select` 滚轮+点选，`/settings` 点选）；TUI 指针面 6/6
 
 本轮接 LUM-1436 §7 的第 4 条（modal 打开时滚轮归属），做下去发现是**半边**：模态列表不仅不认领滚轮，
 **连点选行都不认领**（`step_modal_mouse_gesture` 只把 press/release 当"点到了模态"用于清日志选区）。
@@ -346,16 +383,25 @@ CJK 断点    "你好世界" @6 列 → ["你好世", "界"]（两条断行规�
 | `app.*` 接线 | **43 / 44 = 97.7%**，silent 1（`app.tree.editLabel`） | 同 | `python pi-rust/scripts/app_action_coverage.py --check-consumed` → `43 entries; measured wired: 43 / in sync` |
 | composer 鼠标面 | **3 / 3 = 100%** | 3 / 3 | 本轮无回退 |
 | **模态列表指针面** | **3 / 3 = 100%** | 0 / 3 | picker（滚轮+点选）/ `ctx.ui.select`（滚轮+点选）/ settings（点选；滚轮此前已有） |
-| 扩展生命周期事件 | **21/36 声明 = 58.3%**；**20/36 生产构造点 = 55.6%** | 同 | `python pi-rust/scripts/extension_event_coverage.py`；LUM-1432 在办 |
+| 扩展生命周期事件 | **21/36 声明 = 58.3%**；**20/36 生产构造点 = 55.6%** | 同 | 本轮自做面不含此轴；同一条 tip 上 §0.12 的 LUM-1432 已把它推到 36/36，合并后以 §0.12 为准 |
 
 **加权完成度（权重表见 §4.1，公式公开）**：
+
+本轮**自己**的增量只有测试轴（0.497 → 2,651/5,309 = 0.499）：
 
 ```text
 5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
   + 8×0.95 + 7×0.556 + 9×0.85 + 5×0.499 + 3×0.95 = 83.6%
 ```
 
-只有测试轴从 0.497 走到 0.499（+0.01pt），加权仍落在 **83.6%**。
+单看本轮：**83.6%**（与 §0.11 同一位小数，+0.01pt）。但本轮同时把 §0.12 的 LUM-1432 并入了
+`feature/pi.rs`，所以**分支 tip 的合计值是 86.7%**（扩展轴 0.556 → 1.000，`+7×0.444 = +3.108pt`；
+测试轴再 +0.01pt）：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.499 + 3×0.95 = 86.7%
+```
 
 **口径对账**：
 
@@ -363,7 +409,7 @@ CJK 断点    "你好世界" @6 列 → ["你好世", "界"]（两条断行规�
    它与「composer 鼠标面」合起来是本轮可复算的 **TUI 指针面 6 / 6 = 100%**；
 2. 上游的 `shouldDeferViewportInputToOverlay`（`packages/tui/src/tui-alt-screen.ts:645-694`）语义是
    "命中 overlay 但组件没处理 → 归还未消费"；`pi-tui` 无下游传播链路，等价实现是**丢弃**，
-   两条分支的观感一致（日得不动），已在代码注释里写明；
+   两条分支的观感一致（日志不动），已在代码注释里写明；
 3. settings 的滚轮仍是**全局认领**（`step_settings_wheel`），与上游的矩形前提不同 —— 这是本轮
    **明确保留**的偏差（改动会碰既有 3 条测试），记入 `docs/LUM1445_MODAL_POINTER.md` §8 第 5 条。
 
@@ -486,6 +532,11 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 > 声明 **21/35 = 60%**、运行期构造 **20/35 = 57.1%**，本审计取 **57%**。新枚举在
 > `pi-protocol/src/events.rs`（含上游 paritiy 变体，字段名带显式 `rename` 对齐 `types.ts`）。
 > 复测与剩余缺口清单见 **§0.1**。
+>
+> **已关闭（LUM-1432）**：该轴**已补满**——上游 36 个事件名全部有 Rust 变体且全部有生产构造点
+> （`production emit sites: 36/36`），其中 10 个是返回值真影响后续行为的钩子。
+> 逐事件构造点表、别名表、端到端证据与 6 条保真度缺口见 `docs/LUM1432_EXTENSION_EVENTS.md`；
+> 本轮数字见 **§0.12**。
 
 ### 3.7 TUI 组件与交互面
 
@@ -521,7 +572,7 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 | 7 | slash 命令面 | 7% | 74% | 17/23 |
 | 8 | CLI / 模式 / 子命令面 | 7% | 70% | §3.4（字面 45%、能力入口 57% 之间的取中） |
 | 9 | 扩展宿主能力 | 8% | 95% | §3.6 上 |
-| 10 | 扩展生命周期事件 | 7% | 20% | 7/36 声明、2/36 运行期 |
+| 10 | 扩展生命周期事件 | 7% | 100% | LUM-1432：36/36 声明 + 36/36 生产构造点（`scripts/extension_event_coverage.py`）；10 个为真钩子，见 §0.12 |
 | 11 | 会话 / 存储 / 导入导出兼容 | 9% | 85% | 读兼容、写待补 |
 | 12 | 测试与门禁强度 | 5% | 45% | 用例 2,232 vs 5,309 |
 | 13 | 子包完整度（server/client/chord/telemetry/evals/protocol） | 3% | 95% | §3.10 |
@@ -531,6 +582,7 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 ### 4.2 敏感性（诚实说明）
 
 - 把扩展事件轴从 20% 提到 100%（即补完 36 个事件）：总分为 **81.7%**——**这是全表最大的单一摆动项**，说明"扩展生态兼容"是当前性价比最高的攻坚方向。
+  > **已兑现（LUM-1432）**：该轴已补到 100%，实测总分 **86.7%**（§0.12）；本条保留为当时的敏感性估计。
 - 把 TUI 快捷键接线从 47.7% 提到 100%：总分 +4.1pt → **80.2%**。（同样按 §0.2 作废：79.5% 起点下只余 +2.9pt，且其中大半是缺组件）
 - 权重整体由我给定；若把"规模"口径直接当完成度则是 82.5%，若只看测试则是 42.0%。**三个数字都对，取决于你问的是"代码搬了多少""测了多少""功能能用多少"。**
 
@@ -547,7 +599,7 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 
 ## 6. 未达项清单（按性价比排序）
 
-1. **P0 · 扩展生命周期事件**：7/36 声明、2/36 运行期。上游插件最常用的 `tool_call`、`tool_result`、`tool_execution_start/end`、`turn_start`、`message_*`、`session_shutdown` 在 Rust 下是死代码变体或不存在。**这是"兼容 pi 插件生态"这条目标的头号阻塞**。
+1. **已关闭（LUM-1432）· 扩展生命周期事件**：原 P0「7/36 声明、2/36 运行期」已补到 **36/36 声明 + 36/36 生产构造点**（§0.12）；剩余是 6 条保真度缺口（provider 三个事件返回值不生效、`context` 不链式、`session_before_*` 的 `willRetry`/摘要语义缺），见 `docs/LUM1432_EXTENSION_EVENTS.md` §3。
 2. **P1 · TUI 快捷键接线**：23 个 `app.*` action 未在全局表消费（`models.*` 6 个、`session.*` 6 个、`tree.*` 11 个）。用户可感知的是 `/models` 批量启停、会话重命名/删除、树过滤器走不到键盘。
 3. **P1 · CLI flag 面**：`--theme/--thinking/--tools/--provider/--api-key/--verbose/--offline` 等 22 个 TS flag 无字面等价物（部分有替代入口）。
 4. **P2 · slash 命令 8 个**：`thinking, scoped-models, import, share, changelog, login, logout, reload`。
@@ -562,7 +614,7 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 
 ## 7. 建议的推进顺序
 
-1. 把 `ExtensionEvent` 补齐到上游 36 个事件名（含别名兼容 `session_shutdown`），在 `agent_loop` 的 observer 上直接转发 ——> 单项 +5.6pt，且直接决定"插件生态兼容"成败。
-2. 补 `models.* / session.* / tree.*` 快捷键接线（+4.1pt），顺手修 `@` 补全首行重复。
+1. 给 `pi-ai` adapter 加 `on_payload` / `transform_headers` / `on_response` 回调，让 provider 三个事件的返回值真生效（§6.1 的保真度缺口）——这是扩展事件轴剩下的最后一截。
+2. 补 `models.* / session.* / tree.*` 快捷键接线（+2.9pt），顺手修 `@` 补全首行重复。
 3. 补 CLI 的 `--theme/--thinking/--tools/--provider/--offline` 与 4 个高价值 slash 命令。
 4. 补测试：把 Rust 用例数从 2,232 往 5,309 靠（当前 42%，是最大的"隐藏债务"）。
