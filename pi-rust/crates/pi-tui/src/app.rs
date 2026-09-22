@@ -770,7 +770,12 @@ fn word_segments(line: &str) -> Vec<WordSegment> {
     let mut segments = Vec::new();
     let mut start = 0usize;
     for segment in line.split_word_bounds() {
-        let end = start + segment.chars().count();
+        // Columns, like upstream (`getWordSelection`,
+        // `packages/tui/src/tui-alt-screen.ts:1160-1165`): `end` is
+        // `start + visibleWidth(segment.segment)`, and the mouse's `point.col`
+        // it is matched against is a **cell column**. Counting characters made
+        // a word after a wide glyph start several cells too early (LUM-1422).
+        let end = start + columns(segment);
         let joiner = TERMINAL_WORD_SELECTION_JOINERS.contains(&segment);
         let selectable = crate::word_navigation::is_word_like(segment) || joiner;
         segments.push(WordSegment {
@@ -810,6 +815,23 @@ fn selection_end_column(end: &SelectionPoint, len: usize) -> usize {
 /// once a wide glyph has spent two columns (LUM-1422).
 fn prefix_chars(text: &str, count: usize) -> String {
     text.chars().take(count).collect()
+}
+
+/// Character index a cursor at display `column` sits before.
+///
+/// The inverse of [`prefix_chars`]: a column inside a wide glyph resolves to
+/// that glyph's own index, because a character is the smallest unit a selection
+/// can slice (LUM-1422).
+fn char_index_at_column(text: &str, column: usize) -> usize {
+    let mut used = 0usize;
+    for (index, ch) in text.chars().enumerate() {
+        let glyph = char_columns(ch);
+        if used + glyph > column {
+            return index;
+        }
+        used += glyph;
+    }
+    text.chars().count()
 }
 
 /// Open transcript search state (upstream `ActiveSearch`,
@@ -4373,7 +4395,10 @@ impl App {
     /// (`packages/tui/src/tui-alt-screen.ts:1193-1203`).
     fn line_selection(&self, point: (usize, usize)) -> Option<(SelectionPoint, SelectionPoint)> {
         let line = self.selection_line(point.0)?;
-        let width = line.chars().count();
+        // A line selection spans **columns** — upstream
+        // `getLineSelection` ends at `visibleWidth(line)`
+        // (`packages/tui/src/tui-alt-screen.ts:1193-1198`).
+        let width = columns(&line);
         Some((
             SelectionPoint::cell(point.0, 0),
             SelectionPoint::boundary(point.0, width),
@@ -4545,17 +4570,22 @@ impl App {
         let mut out: Vec<String> = Vec::new();
         for (idx, line) in lines.iter().enumerate().take(end_line + 1).skip(start.line) {
             let text = crate::styled::plain_text(line);
-            let len = text.chars().count();
-            let from = if idx == start.line {
+            // Columns in, characters out: the selection is recorded in display
+            // columns, the string is sliced by character index (LUM-1422).
+            let len = columns(&text);
+            let from_col = if idx == start.line {
                 start.col.min(len)
             } else {
                 0
             };
-            let to = if idx == end.line {
+            let to_col = if idx == end.line {
                 selection_end_column(&end, len)
             } else {
                 len
             };
+            let chars = text.chars().count();
+            let from = char_index_at_column(&text, from_col).min(chars);
+            let to = char_index_at_column(&text, to_col).min(chars);
             let segment: String = text
                 .chars()
                 .skip(from)
@@ -4687,7 +4717,10 @@ impl App {
             let row = (line_idx - visible_start) as u16;
             let y = area.y + row;
             let text = crate::styled::plain_text(&lines[row as usize]);
-            let len = text.chars().count();
+            // Selection columns are display columns (`word_segments`,
+            // `line_selection`, and the mouse's own cell column), so the cell
+            // range is the column range: a wide glyph owns two cells (LUM-1422).
+            let len = columns(&text);
             let from = if line_idx == start.line {
                 start.col.min(len)
             } else {
@@ -5510,13 +5543,24 @@ mod selection_tests {
     }
 
     #[test]
-    fn word_segments_measure_character_columns() {
+    fn word_segments_measure_display_columns() {
         assert_eq!(
             plain_segments("ab cd"),
             vec![
                 (0, 2, true, false),
                 (2, 3, false, false),
                 (3, 5, true, false),
+            ]
+        );
+        // A wide glyph is two columns, so the word after it starts two columns
+        // later than its character index would suggest — the pointer column the
+        // hit-test uses is a cell column (LUM-1422).
+        assert_eq!(
+            plain_segments("中文 ab"),
+            vec![
+                (0, 4, true, false),
+                (4, 5, false, false),
+                (5, 7, true, false),
             ]
         );
     }

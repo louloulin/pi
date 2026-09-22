@@ -1,12 +1,12 @@
-//! LUM-1422 — wide-glyph column accounting, rendered.
+//! LUM-1422 — wide-glyph column accounting, rendered (independent verification
+//! of the merged LUM-1418 fix, plus the tip's current look).
 //!
-//! This file is the **frame source** for
-//! `docs/screenshots/lum1422-*.png`: `cargo test -- --nocapture` prints the
-//! cell grid the real [`pi_tui::App::render_snapshot`] built (the same grid the
-//! driver hands to `ratatui`), and `scripts/frame_to_png.py` paints it. It also
-//! prints a machine-readable width report (`PANEL … max_row_columns=…`) that the
-//! audit doc quotes, so "before" and "after" are compared with a number instead
-//! of with an impression.
+//! LUM-1418 (`f2516b31b`, merged into `feature/pi.rs` as `1e2977238`) moved the
+//! crate's layout from "one column per character" to terminal columns. This file
+//! is the **independent check** of that on the merged tree: it renders the real
+//! [`pi_tui::App::render_snapshot`] grid and prints a machine-readable report, so
+//! "the merged fix works" is a number and not a claim. It is also the frame
+//! source for `docs/screenshots/lum1422-tui-overview-120x30.png`.
 //!
 //! Why not `scripts/pty_capture.py`: that is the repo's evidence of record and
 //! needs a real PTY (`pty`, `fcntl`, `termios`) plus `pyte`; this round ran on
@@ -91,12 +91,13 @@ fn columns(row: &str) -> usize {
 /// The three width panels.
 ///
 /// Panel 1 is the case the issue is about: a CJK draft in a narrow terminal.
-/// Before the fix the draft wrapped after 42 *characters* (84 columns) and the
-/// painted row was twice as wide as the terminal, so the terminal re-flowed it
-/// and every row below it moved. Panel 2 shows the mixed CJK/ASCII draft and
-/// the caret. Panel 3 is the transcript: a CJK prompt and a markdown reply with
-/// a wide-glyph table, which is where the same defect made ratatui's
-/// `Buffer::diff` skip the rest of the row.
+/// On the pre-LUM-1418 base (`86eda1804`, the `lum1422-width-before` frame) the
+/// draft wrapped after 42 *characters* (84 columns) and the painted row was
+/// twice as wide as the terminal, so the terminal re-flowed it and every row
+/// below it moved. Panel 2 shows the mixed CJK/ASCII draft and the caret.
+/// Panel 3 is the transcript: a CJK prompt and a markdown reply with a
+/// wide-glyph table, where the same defect made ratatui's `Buffer::diff` skip
+/// the rest of the row.
 fn panels() -> Vec<Panel> {
     let mut narrow = app("lum1422-narrow");
     type_text(&mut narrow, "把整个 tui 的宽度按终端列数计算，宽字符占两列");

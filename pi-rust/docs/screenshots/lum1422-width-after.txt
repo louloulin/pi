@@ -6,8 +6,8 @@ FRAME DUMP cols=88 rows=44
 |                                                                                        |
 |                                                                                        |
 |                                                                                        |
-|> 把整个 tui                                                                            |
-|  的宽度按终端列数计算，宽字符占两列▍                                                   |
+|> 把整个 tui 的宽度按终端列数计算，宽字符占                                             |
+|  两列▍                                                                                 |
 |Faux  lum1422-narrow  in 0 out 0 ?/2.0k…                                                |
 |                                                                                        |
 |-- 2. mixed CJK/ASCII draft, 40x9 — the caret sits after the glyph it follows ----------|
