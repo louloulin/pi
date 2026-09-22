@@ -45,6 +45,7 @@ use crate::input::{Key, KeyCode, KeyModifiers};
 use crate::keybindings::get_keybindings;
 use crate::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::ThemeColor;
+use crate::width::{columns, truncate_columns};
 use ratatui::layout::Rect;
 
 /// One highlighted run of a match on a single transcript row.
@@ -713,6 +714,15 @@ fn first_key_label(keybinding: &str) -> String {
 /// buttons right-aligned when they fit, collapsing to bare arrows when they do
 /// not. The recorded button spans are what [`SearchBar::navigation_direction_at`]
 /// hit-tests against.
+/// The bar is laid out in **terminal columns** ([`crate::width`]): the key
+/// labels, the result counter and the user's query all pass through
+/// [`columns`] / [`truncate_columns`]. A query is user text, so it can be CJK —
+/// budgeting it by character count let a 15-character Chinese query paint a
+/// 30-column row inside a 20-column bar, which the renderer then clipped
+/// mid-match (LUM-1422).
+///
+/// Upstream's `render` truncates the query against a column budget too
+/// (`packages/tui/src/components/alt-screen-search.ts:274-278`).
 pub fn render_search_bar(bar: &SearchBar, width: u16) -> SearchBarLayout {
     let safe_width = width.max(1);
     let inner_width = safe_width.saturating_sub(2);
@@ -725,15 +735,12 @@ pub fn render_search_bar(bar: &SearchBar, width: u16) -> SearchBarLayout {
     let mut separator = " · ";
     let outer_gap_width = 1usize;
     let available_controls_width = inner.saturating_sub(outer_gap_width * 2 + 1);
-    let mut controls_width =
-        previous_button.chars().count() + separator.chars().count() + next_button.chars().count();
+    let mut controls_width = columns(&previous_button) + columns(separator) + columns(&next_button);
     if controls_width > available_controls_width {
         previous_button = "↑".to_string();
         next_button = "↓".to_string();
         separator = " ";
-        controls_width = previous_button.chars().count()
-            + separator.chars().count()
-            + next_button.chars().count();
+        controls_width = columns(&previous_button) + columns(separator) + columns(&next_button);
     }
     let show_buttons = controls_width <= available_controls_width;
     let outer_gaps_width = if show_buttons { outer_gap_width * 2 } else { 0 };
@@ -750,11 +757,11 @@ pub fn render_search_bar(bar: &SearchBar, width: u16) -> SearchBarLayout {
 
     let result_label = bar.result_label();
     let result_space = inner.saturating_sub(3);
-    let visible_result: String = result_label.chars().take(result_space).collect();
+    let visible_result: String = truncate_columns(&result_label, result_space).to_string();
     let result_text_width = if visible_result.is_empty() {
         0
     } else {
-        visible_result.chars().count() + 2
+        columns(&visible_result) + 2
     };
     let input_width = inner.saturating_sub(result_text_width);
     // Upstream renders the query through an `Input` whose prompt is a single
@@ -763,19 +770,16 @@ pub fn render_search_bar(bar: &SearchBar, width: u16) -> SearchBarLayout {
     let text_budget = input_width.saturating_sub(1);
     let (text, text_style) = if bar.query().is_empty() {
         (
-            SEARCH_PLACEHOLDER
-                .chars()
-                .take(text_budget)
-                .collect::<String>(),
+            truncate_columns(SEARCH_PLACEHOLDER, text_budget).to_string(),
             SpanStyle::fg(ThemeColor::Dim),
         )
     } else {
         (
-            bar.query().chars().take(text_budget).collect::<String>(),
+            truncate_columns(bar.query(), text_budget).to_string(),
             SpanStyle::fg(ThemeColor::Text),
         )
     };
-    let padding = " ".repeat(input_width.saturating_sub(1 + text.chars().count()));
+    let padding = " ".repeat(input_width.saturating_sub(1 + columns(&text)));
 
     let border_style = SpanStyle::fg(ThemeColor::BorderMuted);
     let mut lines: Vec<StyledLine> = Vec::with_capacity(3);
