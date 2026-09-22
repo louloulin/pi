@@ -786,6 +786,85 @@ fn normalize_keys(keys: &[String]) -> Vec<String> {
     normalized
 }
 
+/// The effective chords of `keybinding`, formatted for display
+/// (`ctrl+o` → `Ctrl+O`), or `None` when the id is unknown or deliberately
+/// unbound.
+///
+/// Upstream `keyText`, but read off the process-wide manager without cloning
+/// it: render paths call this once per hint per frame. A multi-chord binding
+/// is joined with `/`, exactly like the startup header and `/hotkeys`.
+pub fn key_text(keybinding: &str) -> Option<String> {
+    let keys = resolved_keys(keybinding)?;
+    Some(format_keys(&keys))
+}
+
+/// The effective chords of `keybinding`, or `fallback` when the installed
+/// table does not contain the id **at all**.
+///
+/// The two miss cases are deliberately different:
+///
+/// * unknown id — the table has no opinion (the `app.*` ids live in the
+///   coding-agent's table, so a bare `pi-tui` registry cannot resolve
+///   `app.tools.expand`): render the shipped `fallback` chord. This is the
+///   same rule as `Editor::matches_app_exit`'s hardcoded `ctrl+d`.
+/// * known but unbound — the user deliberately removed the chord, so return
+///   an empty string and let the caller drop it instead of advertising a key
+///   that does nothing.
+pub fn key_text_or(keybinding: &str, fallback: &str) -> String {
+    let mut guard = lock_global();
+    if guard.is_none() {
+        *guard = Some(KeybindingsManager::tui_defaults());
+    }
+    let Some(manager) = guard.as_ref() else {
+        return fallback.to_string();
+    };
+    if manager.get_definition(keybinding).is_none() {
+        return fallback.to_string();
+    }
+    format_keys(&manager.get_keys(keybinding))
+}
+
+/// Upstream `keyHint(keybinding, description)` with a shipped-default
+/// `fallback` for ids the installed table does not define
+/// ([`key_text_or`]): `Ctrl+O to expand`.
+///
+/// An unbound id renders the description alone (`to expand`) rather than a
+/// dead chord — the rule the startup header already uses for an unbound hint
+/// row.
+pub fn key_hint_or(keybinding: &str, fallback: &str, description: &str) -> String {
+    let keys = key_text_or(keybinding, fallback);
+    if keys.is_empty() {
+        description.to_string()
+    } else {
+        format!("{keys} {description}")
+    }
+}
+
+/// Render resolved chords the way every other surface spells them.
+fn format_keys(keys: &[String]) -> String {
+    keys.iter()
+        .map(|chord| crate::locale::format_chord(chord))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The chords currently bound to `keybinding`, or `None` when the id is
+/// unknown or unbound. Never fails: an uninitialised slot gets the defaults,
+/// exactly like [`get_keybindings`].
+fn resolved_keys(keybinding: &str) -> Option<Vec<String>> {
+    let mut guard = lock_global();
+    if guard.is_none() {
+        *guard = Some(KeybindingsManager::tui_defaults());
+    }
+    let manager = guard.as_ref()?;
+    let keys = manager.get_keys(keybinding);
+    if keys.is_empty() {
+        None
+    } else {
+        Some(keys)
+    }
+}
+
 fn global_keybindings() -> &'static Mutex<Option<KeybindingsManager>> {
     static GLOBAL: OnceLock<Mutex<Option<KeybindingsManager>>> = OnceLock::new();
     GLOBAL.get_or_init(|| Mutex::new(None))

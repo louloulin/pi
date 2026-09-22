@@ -1,0 +1,28 @@
+
+running 1 test
+PANEL LUM-1447 `app.tools.expand` unbound: no chord, the affordance stays
+FRAME DUMP cols=80 rows=20
+|* bash run-call-1                                                               |
+|* … (+6 lines, to expand)                                                       |
+|* bash-line-6                                                                   |
+|* bash-line-7                                                                   |
+|* bash-line-8                                                                   |
+|* bash-line-9                                                                   |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|> type a prompt — /help for commands                                            |
+|Faux  lum1447-binding-hints                        in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
