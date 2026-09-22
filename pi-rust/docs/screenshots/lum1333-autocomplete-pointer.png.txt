@@ -1,0 +1,175 @@
+# lum1333-autocomplete-pointer.png — chars, 100x20 cells
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [1] 1. type `/`: the command dropdown is painted above the composer  (cursor 36,18, frame dfbfe2375029, px 482a2aad8b63, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       '(1/21)'
+  assert PASS   expect       '^> /▍\\s*$'  — the draft is just the trigger
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [2] 2. press row 14 (`new`): the highlight moves to that candidate  (cursor 4,17, frame 6908e865c78c, px 76a1e6d32d5f, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+  help           Show this help text
+  clear          Clear the message view
+❯ new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (3/21)
+> /▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ new'
+  assert PASS   expect       '(3/21)'  — the third candidate is highlighted
+  assert PASS   expect       '(1/21)' (x0)  — the highlight left the first candidate
+  assert PASS   expect       '^> /▍\\s*$'  — a press is not an edit
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [3] 3. release on that same cell: the candidate is accepted  (cursor 8,18, frame 728dac9c5b46, px cc7116fe629a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> /new ▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '^> /new ▍\\s*$'  — the composer holds the completed command
+  assert PASS   expect       '❯' (x0)  — the dropdown is gone
+  assert PASS   expect       '(3/21)' (x0)  — and with it the window indicator
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [4] 4. Ctrl+C clears the draft and `/` reopens the menu  (cursor 8,18, frame dfbfe2375029, px 482a2aad8b63, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       '(1/21)'  — the menu opens on its best match again
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [5] 5. one wheel notch down inside the list: the highlight steps down one candidate  (cursor 4,17, frame f660f8f9faa2, px 4048087f4530, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+  help           Show this help text
+❯ clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (2/21)
+> /▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ clear'  — one notch down steps the highlight onto the second candidate
+  assert PASS   expect       '(2/21)'  — the indicator moved with it
+  assert PASS   expect       '^> /▍\\s*$'  — the draft is untouched by a wheel notch
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [6] 6. one notch back up inside the list  (cursor 4,17, frame dfbfe2375029, px 482a2aad8b63, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'  — up steps the highlight back
+  assert PASS   expect       '(1/21)'  — and the indicator follows
+
+===== LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.  |  [7] 7. a click on a transcript row above the list is not the dropdown's  (cursor 4,17, frame dfbfe2375029, px 482a2aad8b63, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d7849210a28a07                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'  — the dropdown keeps its highlight: the click fell through to the transcript
+  assert PASS   expect       '(1/21)'
+  assert PASS   expect       '^> /▍\\s*$'  — and nothing was completed

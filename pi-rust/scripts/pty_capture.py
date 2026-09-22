@@ -52,8 +52,9 @@ the process runs its shutdown path (extension `session_shutdown`).
 `send` is literal text plus key tokens: `<Enter> <Esc> <Tab> <BS> <Up>
 <Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>
 <M-a>..<M-z> <M-Up> <M-Down> <M-Left> <M-Right>` and the pointer gestures
-`<Click:x,y> <MPress:x,y> <MRelease:x,y> <MDrag:x,y>` (0-based cell
-coordinates, SGR encoding, exactly what crossterm reports).
+`<Click:x,y> <MPress:x,y> <MRelease:x,y> <MDrag:x,y>` plus the wheel notches
+`<WheelUp:x,y> <WheelDown:x,y>` (0-based cell coordinates, SGR encoding,
+exactly what crossterm reports).
 Every panel is fed into the *same* process, so panels are cumulative
 frames of one interactive session. `skip_capture` drives the UI without
 emitting a panel (useful for intermediate keystrokes). `wait_for` (with
@@ -153,7 +154,7 @@ for _c in "abcdefghijklmnopqrstuvwxyz":
 _KEY_TOKENS["<C-[>"] = "\x1b"
 
 
-_MOUSE_TOKEN = re.compile(r"^<(Click|MPress|MRelease|MDrag):(\d+),(\d+)>$")
+_MOUSE_TOKEN = re.compile(r"^<(Click|MPress|MRelease|MDrag|WheelUp|WheelDown):(\d+),(\d+)>$")
 
 
 def mouse_sequence(token: str) -> str | None:
@@ -162,8 +163,14 @@ def mouse_sequence(token: str) -> str | None:
     Cells are 0-based in the token (the same space scenarios already use for
     everything else) and 1-based on the wire, which is the SGR mouse encoding
     (`ESC [ < b ; x ; y M/m`) crossterm decodes and the App consumes as
-    `InputEvent::MouseGesture`. `<Click>` is the press/release pair on one
-    cell, i.e. the gesture both reference TUIs treat as "put the caret here".
+    `InputEvent::MouseGesture`.
+
+    `<Click>` is the press/release pair on one cell, i.e. the gesture both
+    reference TUIs treat as "put the caret here". `<WheelUp>` / `<WheelDown>`
+    use SGR's wheel button numbers (64 / 65, no motion bit) at the cell the
+    pointer was over: the App needs the position for that one, because a
+    dropdown whose rows the notch lands on steers its own highlight instead of
+    scrolling the log behind it (`App::step_autocomplete_wheel`, LUM-1333).
     """
     match = _MOUSE_TOKEN.match(token)
     if match is None:
@@ -175,6 +182,10 @@ def mouse_sequence(token: str) -> str | None:
         return f"\x1b[<0;{x};{y}M"
     if kind == "MRelease":
         return f"\x1b[<0;{x};{y}m"
+    if kind == "WheelUp":
+        return f"\x1b[<64;{x};{y}M"
+    if kind == "WheelDown":
+        return f"\x1b[<65;{x};{y}M"
     # Motion with the left button held: button bits + the 32 motion flag.
     return f"\x1b[<32;{x};{y}M"
 
