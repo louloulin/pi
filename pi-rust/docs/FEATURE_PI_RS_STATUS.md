@@ -15418,6 +15418,8 @@ B 侧 **8 PASS**；两侧 scenario 交叉打到对侧二进制上全红。截图
 `display_width`、`hyperlink.rs`/`latex.rs` 的 `visible_width`、`dialog.rs` 的内联计数。
 这些是同一个 crate 级约定的 6 个副本，一次性改会动到 markdown/highlight/message 的折行语义与大量既有断言，
 属于独立一轮；composer 的绘制走自己的 `paint_prompt`，因此可以单独收敛、单独取证。
+实测一条：`MessageView::render_lines(40)` 对一段中文 body 返回的行最宽 **69 cell**（字符数 37），
+即每行约 29 列在区域外。
 
 ### 四、槽位 / 派发
 

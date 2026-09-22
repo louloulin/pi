@@ -165,6 +165,11 @@ A 侧 scenario 打 B 侧二进制同样全红——两侧断言互斥，说明�
 | 5 | 超链接 / LaTeX | `hyperlink.rs:215 visible_width`、`latex.rs` 同名函数 | 字符数 | OSC 8 链接的 cell 记账在宽字符上错位 |
 | 6 | 对话框 | `dialog.rs:300` 内联字符计数 | 字符数 | 中文按钮/正文折行错 |
 
+上表是**读码定位 + 一处实测**（不是逐条实测）：实测的那条是转写区——把一段中文 body
+交给 `MessageView::render_lines(40)`，返回的行**最宽 69 个 cell**（`chars` 37），
+即请求 40 列时每行有 29 列在区域外被裁掉（`cargo test -p pi-tui --test <scratch> -- --nocapture`
+的一次性探针，未提交）。其余 5 条给了 `file:line`，下一轮的第一件事就是把它们变成真 PTY 断言。
+
 **为什么本轮不顺手改**：这 6 处不是"再改几个 `chars().count()`"——它们是**同一个 crate 级约定**的
 多个副本（6 个同名 `display_width`/`visible_width` + markdown 自己的规则），一次性改动会动到
 `markdown.rs`(1950 行)/`highlight.rs`(2574 行)/`message.rs`(1941 行) 的折行语义与大量既有断言，
