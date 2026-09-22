@@ -15478,7 +15478,7 @@ issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉�
 `docs/LUM1426_POINTER_COLUMNS.md` §8 单子化：先做下拉框点选（本轮的直接续集，`pi-tui` 单模块），
 再单独一轮做扩展事件的 15 个缺口。
 
-## LUM-1431 round — autocomplete 下拉框鼠标点选（chatinput 补完）+ LUM-1422 未合并产物抢救合并；`pi-tui` 995/0，workspace 2620/39（全为已知 Windows 环境类）
+## LUM-1431 round — autocomplete 下拉框鼠标点选（chatinput 补完）+ LUM-1422 未合并产物抢救合并；`pi-tui` 998/0，workspace 2620/39（全为已知 Windows 环境类）
 
 ### 一、本轮交付（`pi-tui` 单模块，无新依赖）
 
@@ -15505,7 +15505,8 @@ LUM-1426 在 `app.rs` 的选择模型上正面冲突。处置：保留 LUM-1426 
 ### 三、门禁
 
 * `cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui --all-targets -- -D warnings` 0 warning。
-* `cargo test -p pi-tui`：**995 passed / 0 failed**（基线 `c093196be` = 973/0 → **+22**）。
+* `cargo test -p pi-tui`：**998 passed / 0 failed**（基线 `c093196be` = 973/0 → **+25**；
+  `autocomplete_mouse.rs` 7 条 + `lum1431_autocomplete_frames.rs` 3 条）。
 * `cargo test --workspace --locked --no-fail-fast`：**2620 passed / 39 failed / 2 ignored**；
   39 条全在 `pi-coding-agent` / `pi-extensions` 的 Windows 环境类（真 `bash`、绝对路径、`/tmp`、node fs、
   trust），条数与 LUM-1426 基线相同，`pi-tui` 零失败。

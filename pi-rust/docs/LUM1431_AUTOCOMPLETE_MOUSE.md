@@ -21,7 +21,8 @@
   `pointer_columns.rs` 14 条），**保留 LUM-1422 的 `search.rs` 列宽预算**（LUM-1426 没覆盖），
   **丢弃 LUM-1422 在 `app.rs` 上的选择/高亮改动**，并把它的 4 个测试文件全部留下作回归门 —— 15 条在
   合并后的树上**全绿**，等于对两套模型的可观察行为做了一次交叉验证（见 §3）。
-- **实测**：`pi-tui` **995 passed / 0 failed**（基线 973 / 0 → **+22** = LUM-1422 的 15 + 本轮 7）；
+- **实测**：`pi-tui` **998 passed / 0 failed**（基线 973 / 0 → **+25** = LUM-1422 的 15 + 本轮 10：
+  `autocomplete_mouse.rs` 7 条 + 帧 dump 3 条）；
   `--workspace` **2620 passed / 39 failed / 2 ignored**，失败**全部落在 `pi-coding-agent` /
   `pi-extensions` 的已知 Windows 环境类**（真 `bash`、绝对路径断言、`/tmp`、node fs、trust），
   条数与 LUM-1426 基线逐字相同（39），`pi-tui` 零失败。
@@ -112,7 +113,7 @@ $ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo
 $ … cargo clippy --offline -p pi-tui --all-targets -- -D warnings
   Finished `dev` profile …（0 warning）
 $ … cargo test --offline -p pi-tui
-  995 passed / 0 failed            （基线 origin/feature/pi.rs tip c093196be = 973 / 0 → +22）
+  998 passed / 0 failed            （基线 origin/feature/pi.rs tip c093196be = 973 / 0 → +25）
 $ … cargo test --offline --locked --workspace --no-fail-fast
   178 个 test-result 行；2620 passed / 39 failed / 2 ignored
 $ … 失败分布（逐 target 统计）

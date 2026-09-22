@@ -272,7 +272,7 @@ CJK 断点    "你好世界" @6 列 → ["你好世", "界"]（两条断行规�
 | 量 | 本轮实测 | LUM-1426 | 说明 |
 |---|---|---|---|
 | 纯代码规模（src↔src） | **88.8%**（135,950 / 153,106） | 88.7%（135,733） | `python pi-rust/scripts/measure_loc.py`；本轮 +217 行 src（`app.rs` 指针路由 + `search.rs` 列宽预算） |
-| 测试规模 | **49.5%**（2,628 / 5,309） | 49.0%（2,603） | Rust `#[test]`/`#[tokio::test]` 与 TS `*.test.ts` 的 `it(`/`test(` 重数；+25 = LUM-1422 的 4 个新测试文件 + 本轮 2 个 |
+| 测试规模 | **49.5%**（2,628 / 5,309） | 49.0%（2,603） | Rust `#[test]`/`#[tokio::test]` 与 TS `*.test.ts` 的 `it(`/`test(` 重数；+25 = LUM-1422 的 4 个新测试文件（15 条）+ 本轮 2 个新测试文件（10 条：行为 7 + 帧 3） |
 | TUI 模块面 | **35 / 42 = 83.3%** | 35/42 | 本轮无新 src 模块（改动落在既有 `app.rs` / `editor.rs` / `prompt.rs` / `search.rs`） |
 | `app.*` 接线 | **43 / 44 = 97.7%**，silent 1（`app.tree.editLabel`） | 同 | `python pi-rust/scripts/app_action_coverage.py --check-consumed` → `43 entries; measured wired: 43 / in sync` |
 | **composer 鼠标面** | **2 / 2 = 100%** | 1 / 2 = 50% | 点击定位光标（LUM-1426）+ 下拉框点选（本轮）；上游 `editor.ts:618-666` |
