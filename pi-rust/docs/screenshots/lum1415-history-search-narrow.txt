@@ -1,0 +1,17 @@
+FRAME DUMP cols=44 rows=15
+|-- 44x14: the live query stays on screen; th|
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|> deploy the release▍                       |
+|reverse-i-search: deploy  Enter accept · Es…|
+END FRAME DUMP

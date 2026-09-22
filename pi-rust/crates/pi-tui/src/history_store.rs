@@ -35,6 +35,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::editor::HISTORY_LIMIT;
 
+/// Longest single record read from the file.
+///
+/// A pathological row (a pasted megabyte) is skipped rather than allowed to
+/// balloon memory; the writer never produces one, so this only ever fires on
+/// a hand-edited file.
+const MAX_LINE_BYTES: usize = 256 * 1024;
+
 /// One persisted history record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Record {
@@ -73,20 +80,34 @@ fn home_dir() -> Option<PathBuf> {
 /// A missing file yields an empty list; unparsable lines are skipped. The
 /// cap keeps only the tail, because the newest entries are the ones a user
 /// recalls.
+///
+/// The file is append-only, so this also **compacts** it: once it has grown
+/// past the cap it is rewritten with just the entries returned (via a
+/// temporary file + rename, so a crash mid-compaction leaves the old file
+/// intact). Without that, a session a day would grow the file without bound
+/// while the composer only ever offered the last [`HISTORY_LIMIT`] prompts.
+/// Compaction is best-effort: a failure is ignored, because a read-only or
+/// locked file must not stop the TUI from starting.
 pub fn load(path: &Path) -> VecDeque<String> {
     let Ok(file) = fs::File::open(path) else {
         return VecDeque::new();
     };
     let mut lines: VecDeque<String> = VecDeque::new();
+    let mut dropped = false;
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { break };
         let Some(text) = parse_line(&line) else {
             continue;
         };
         lines.push_back(text);
-        while lines.len() > HISTORY_LIMIT {
+        if lines.len() > HISTORY_LIMIT {
             lines.pop_front();
+            dropped = true;
         }
+    }
+    if dropped {
+        let texts: Vec<String> = lines.iter().cloned().collect();
+        let _ = rewrite(path, &texts);
     }
     lines
 }
@@ -94,7 +115,7 @@ pub fn load(path: &Path) -> VecDeque<String> {
 /// Parse one JSONL record, returning the prompt text it carries.
 fn parse_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.len() > MAX_LINE_BYTES {
         return None;
     }
     let record: Record = serde_json::from_str(trimmed).ok()?;
@@ -112,6 +133,10 @@ fn parse_line(line: &str) -> Option<String> {
 /// being written and never rewrites earlier history. An I/O failure is
 /// returned to the caller rather than swallowed — but the caller treats it
 /// as best-effort, because losing persistence must not lose the prompt.
+///
+/// On Unix the file is created — and, if it already existed, re-chmodded —
+/// `0600`: it holds everything the user typed, so it must not be
+/// world-readable even when the process umask would allow it.
 pub fn append(path: &Path, text: &str) -> std::io::Result<()> {
     let text = text.trim();
     if text.is_empty() {
@@ -131,8 +156,26 @@ pub fn append(path: &Path, text: &str) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .open(path)?;
+    restrict_permissions(&file)?;
     file.write_all(line.as_bytes())?;
     file.flush()
+}
+
+/// Force `0600` on an already-open file (Unix).
+///
+/// A no-op elsewhere: Windows inherits the directory's ACL and the port has
+/// no cross-platform ACL helper. Doing this on every append also repairs a
+/// file that arrived world-readable, instead of only fixing it when it is
+/// first created.
+#[cfg(unix)]
+fn restrict_permissions(file: &fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_file: &fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Rewrite the file with exactly `texts` (oldest first).
@@ -149,6 +192,7 @@ pub fn rewrite(path: &Path, texts: &[String]) -> std::io::Result<()> {
     let tmp = path.with_extension("jsonl.tmp");
     {
         let mut file = fs::File::create(&tmp)?;
+        restrict_permissions(&file)?;
         for text in texts {
             let record = Record { text: text.clone() };
             let mut line = serde_json::to_string(&record).map_err(std::io::Error::other)?;
@@ -202,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn load_keeps_only_the_newest_entries() {
+    fn load_keeps_only_the_newest_entries_and_compacts_the_file() {
         let dir =
             std::env::temp_dir().join(format!("pi-history-cap-{}-{}", std::process::id(), line!()));
         let path = dir.join("history.jsonl");
@@ -216,6 +260,31 @@ mod tests {
             loaded.back().map(String::as_str),
             Some(format!("p{}", HISTORY_LIMIT + 9).as_str())
         );
+        // The load compacted the file instead of leaving it unbounded.
+        let on_disk = fs::read_to_string(&path).unwrap().lines().count();
+        assert_eq!(on_disk, HISTORY_LIMIT, "the file is rewritten to the cap");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_file_is_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "pi-history-perm-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let path = dir.join("history.jsonl");
+        let _ = fs::remove_dir_all(&dir);
+        append(&path, "secret prompt").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "history holds everything the user typed");
+        // A world-readable file is repaired on the next append.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        append(&path, "second").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = fs::remove_dir_all(&dir);
     }
 }
