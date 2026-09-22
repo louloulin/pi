@@ -950,11 +950,138 @@ impl From<&str> for Submission {
 /// rows from falling through to the chat-log selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComposerHit {
-    /// A character offset into the draft (the click's caret target).
-    Offset(usize),
+    /// A draft position: the press's caret target, and the drag's endpoint.
+    At(ComposerPoint),
     /// The composer's own cell, with no draft position under it: the
     /// padding rows below a short draft, or the reverse-search row.
     Absorbed,
+}
+
+/// Where a pointer cell inside the composer sits in the draft: the character
+/// the pointer covers, plus whether it covered one at all.
+///
+/// The pair is upstream's `getGraphemeCellRange`
+/// (`packages/tui/src/tui-alt-screen.ts:1399-1417`) folded into one value: a
+/// selection start takes the covered character's own offset, a selection end
+/// takes one past it, and a pointer that landed *past* a row's content
+/// contributes that row's end boundary instead. "Was there a character under
+/// the pointer?" therefore cannot be derived from
+/// [`ComposerPoint::offset`] alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ComposerPoint {
+    /// Character offset into the draft ([`Prompt::text`]).
+    offset: usize,
+    /// Whether the pointer covered the character at [`ComposerPoint::offset`].
+    on_char: bool,
+}
+
+/// A drag selection inside the composer.
+///
+/// Both ends are character offsets into the draft the frame painted
+/// ([`Prompt::text`], chips already expanded to their `[Image #N]` labels),
+/// never screen cells: the highlight is re-derived from the current layout on
+/// every frame, so a resize re-wraps the draft without moving the selection.
+/// The chat log's [`Selection`] stores absolute rendered lines for the same
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ComposerSelection {
+    /// Where the press landed.
+    anchor: ComposerPoint,
+    /// Where the pointer is now — the drag's end.
+    focus: ComposerPoint,
+}
+
+impl ComposerSelection {
+    /// Start / end in reading order as `start..end` (the end exclusive), or
+    /// `None` when both ends sit on the same character.
+    ///
+    /// Equal offsets are the "no selection" case, which a press and a
+    /// release on one cell share with a drag that returned to where it
+    /// started — upstream requires `anchor !== focus`
+    /// (`packages/tui/src/tui-alt-screen.ts:1381-1397`).
+    fn bounds(&self) -> Option<(usize, usize)> {
+        if self.anchor.offset == self.focus.offset {
+            return None;
+        }
+        let (first, last) = if self.anchor.offset < self.focus.offset {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        };
+        let end = if last.on_char {
+            last.offset + 1
+        } else {
+            last.offset
+        };
+        Some((first.offset, end))
+    }
+}
+
+/// The composer's geometry as of the last frame, resolved against the draft
+/// the App is holding right now.
+///
+/// The composer is docked: its **bottom** row comes from the frame that
+/// painted it (the row above the status bar, which only moves when the
+/// extension chrome below the editor changes), while its **top** row is
+/// derived from the row count the *current* draft needs. The second half
+/// matters because a frame rectangle is only as fresh as the last paint:
+/// when several events arrive in one poll drain — typing a long draft and
+/// clicking it, which is exactly what a terminal paste-and-click looks
+/// like — the recorded rectangle still describes the one-row composer from
+/// before the draft grew, and trusting it would drop the click on a row the
+/// user can plainly see. The window offset is clamped the same way
+/// [`crate::Prompt::render_body`]'s follow-the-caret rule leaves it, so a
+/// stale offset cannot shift the mapping either.
+#[derive(Debug, Clone, Copy)]
+struct ComposerGeometry {
+    /// First row of the composer (inclusive).
+    top: u16,
+    /// Last row of the composer (inclusive).
+    bottom: u16,
+    /// First row of the **draft** (inclusive): inside the composer border's
+    /// top rule and, while `Ctrl+R` is open, below its search row.
+    draft_top: u16,
+    /// Last row of the draft (inclusive): above the bottom rule.
+    draft_bottom: u16,
+    /// First column of the composer (inclusive).
+    left: u16,
+    /// Last column of the composer (inclusive).
+    right: u16,
+    /// Draft rows the window is scrolled up by.
+    scroll: usize,
+    /// Columns of a composer row the draft body may use (the label gutter
+    /// already subtracted).
+    body_width: usize,
+    /// Columns the label gutter occupies.
+    gutter: usize,
+}
+
+impl ComposerGeometry {
+    /// The draft cell a pointer is over — `(layout_row, body_column)`, the
+    /// gutter subtracted — or `None` when the pointer is outside the
+    /// composer.
+    fn cell(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        if y < self.top || y > self.bottom || x < self.left || x > self.right {
+            return None;
+        }
+        Some(self.clamped_cell(x, y))
+    }
+
+    /// The draft cell a pointer is over, clamped into the composer: the
+    /// nearest cell to a pointer that left the rectangle.
+    ///
+    /// The rows are clamped into the **draft**, not the whole composer, so a
+    /// pointer on the border's rule (or on the reverse-search row) lands on
+    /// the nearest draft row — the same idea as clamping a click on the label
+    /// gutter to column 0.
+    fn clamped_cell(&self, x: u16, y: u16) -> (usize, usize) {
+        let x = x.clamp(self.left, self.right);
+        let y = y.clamp(self.draft_top, self.draft_bottom);
+        (
+            self.scroll + (y - self.draft_top) as usize,
+            ((x - self.left) as usize).saturating_sub(self.gutter),
+        )
+    }
 }
 
 /// What a pointer cell inside the autocomplete dropdown maps onto.
@@ -1228,6 +1355,17 @@ pub struct App {
     /// swallowed instead of extending the chat-log selection, so a press
     /// inside the composer can never drag a transcript selection behind it.
     composer_press: Option<(u16, u16)>,
+    /// True once an in-flight composer press has actually moved the pointer
+    /// off the cell it started on (upstream's `selectionDragged`,
+    /// `packages/tui/src/tui-alt-screen.ts:1203,1338`). A press and a release
+    /// on one cell without it is a *click*, which places the caret and copies
+    /// nothing (LUM-1327 acceptance 3).
+    composer_dragged: bool,
+    /// Active drag selection inside the composer, if any. Lives here rather
+    /// than in [`crate::Editor`]: the editor owns the draft and the caret, but
+    /// the pointer path (and therefore the anchor / focus model upstream keeps
+    /// in its screen-level selection) is the [`App`]'s.
+    composer_selection: Option<ComposerSelection>,
     /// Rectangle of the autocomplete dropdown as of the last render:
     /// `(row, column, width, height)`. `height == 0` means no dropdown was on
     /// screen this frame — none is open, the candidates do not fit, or a
@@ -1433,6 +1571,8 @@ impl App {
                 AtomicU16::new(0),
             ),
             composer_press: None,
+            composer_dragged: false,
+            composer_selection: None,
             autocomplete_area: (
                 AtomicU16::new(0),
                 AtomicU16::new(0),
@@ -2282,6 +2422,7 @@ impl App {
             raw_text: Some(self.prompt.editor().text().to_string()),
         };
         self.prompt.clear();
+        self.clear_composer_selection();
         if busy {
             self.messages
                 .push_pending(PendingMessageKind::FollowUp, submission.text.clone());
@@ -2325,6 +2466,8 @@ impl App {
             parts.push(current);
         }
         self.prompt.editor_mut().set_text(parts.join("\n\n"));
+        // The draft the selection measured is gone.
+        self.clear_composer_selection();
         restored
     }
 
@@ -2640,6 +2783,7 @@ impl App {
     /// text: this writes the same buffer, so a session that closes restores
     /// what was there when it opened.
     pub fn set_editor_text(&mut self, text: &str) {
+        self.clear_composer_selection();
         self.prompt.editor_mut().set_text(text);
     }
 
@@ -2702,6 +2846,8 @@ impl App {
         if closed {
             if let Some(text) = self.custom_saved_editor.take() {
                 self.prompt.editor_mut().set_text(text);
+                // The restore replaces the draft an active selection measured.
+                self.clear_composer_selection();
             }
         }
         closed
@@ -2947,6 +3093,7 @@ impl App {
             }
             self.last_clear_at = Some(now);
             self.prompt.clear();
+            self.clear_composer_selection();
             return StepOutcome::Redraw;
         }
         // `app.model.select` (`Ctrl+L`) is **not** claimed here. Upstream's
@@ -3088,7 +3235,12 @@ impl App {
     /// Split out of [`App::step_key_at`] so the reverse-search guard can hand
     /// the composer the keyboard without duplicating the arm below.
     fn step_prompt(&mut self, key: Key) -> StepOutcome {
-        match self.prompt.handle_key(key) {
+        // Both ends of a composer selection are draft offsets, so a key press
+        // that moves the caret or changes the draft invalidates it: the text
+        // under the highlight may no longer be the text that was selected.
+        let draft_before = self.prompt.text();
+        let cursor_before = self.prompt.cursor();
+        let outcome = match self.prompt.handle_key(key) {
             PromptAction::None => StepOutcome::Idle,
             PromptAction::Changed => StepOutcome::Redraw,
             PromptAction::Submit(text) => {
@@ -3125,7 +3277,11 @@ impl App {
                 self.exit_requested = true;
                 StepOutcome::Exit
             }
+        };
+        if self.prompt.text() != draft_before || self.prompt.cursor() != cursor_before {
+            self.clear_composer_selection();
         }
+        outcome
     }
 
     /// Route a key to the open dialog.
@@ -4191,8 +4347,11 @@ impl App {
     }
 
     /// Route a gesture through the composer: a left press inside the composer
-    /// region places the caret, and its press / drag / release are swallowed
-    /// so they can never start or extend a chat-log selection.
+    /// region places the caret, a drag selects draft text, and a release hands
+    /// that selection to the clipboard when
+    /// [copy-on-select](AppConfig::copy_on_select) is on. Its press / drag /
+    /// release are all swallowed here so they can never start or extend a
+    /// chat-log selection.
     ///
     /// Returns `None` when the gesture does not belong to the composer at all
     /// (outside its rectangle, a non-left button, or a wheel — the wheel stays
@@ -4207,10 +4366,41 @@ impl App {
     /// row, is absorbed without moving the caret — upstream answers
     /// `{ handled: true }` and leaves the cursor alone for a click that lands
     /// on no visual line.
+    ///
+    /// The drag half is the part upstream leaves to its renderer's
+    /// screen-level selection (`packages/tui/src/components/editor.ts:634-638`
+    /// deliberately does not handle press / drag / release) and codex keeps
+    /// inside the composer (`chat_composer/mouse.rs` → textarea's
+    /// `handle_mouse` → `copy_selection`). This port has no screen-level
+    /// selection, so the selection is clamped to the composer's own rectangle:
+    /// a drag that leaves it keeps extending the selection towards the nearest
+    /// edge instead of ending — upstream clamps to the whole screen, which here
+    /// is the transcript this gesture must not touch.
+    ///
+    /// A press and a release on the *same* cell without movement is a click,
+    /// not a selection: it leaves the caret the press placed, copies nothing
+    /// and clears any previous composer selection. Nothing on this path edits
+    /// the draft or pushes undo.
+    ///
+    /// A left press *outside* the composer drops the composer's selection and
+    /// lets the gesture go: upstream re-anchors its single screen selection on
+    /// every press (`packages/tui/src/tui-alt-screen.ts:1354-1362`), and a
+    /// highlight the pointer has moved away from would be a stale one. This is
+    /// also why a press on the composer does *not* touch the transcript's
+    /// selection: the two are separate highlights over separate text, and the
+    /// gesture that does not belong to one leaves the other alone.
     fn step_composer_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        let hit = match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => self.composer_hit(gesture.x, gesture.y),
+            _ => None,
+        };
+        if matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)) && hit.is_none() {
+            self.clear_composer_selection();
+            return None;
+        }
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
-                let hit = self.composer_hit(gesture.x, gesture.y)?;
+                let hit = hit?;
                 // A composer press never extends the transcript selection;
                 // any selection already on screen stays where the user left
                 // it (it is not being dragged further).
@@ -4218,27 +4408,87 @@ impl App {
                 self.selection_dragging = false;
                 self.tool_press = None;
                 self.composer_press = Some((gesture.x, gesture.y));
-                let ComposerHit::Offset(display) = hit else {
+                self.composer_dragged = false;
+                // A fresh press re-anchors the composer selection: the old one
+                // goes away and the new one starts empty under this cell
+                // (upstream re-anchors on every press,
+                // `packages/tui/src/tui-alt-screen.ts:1354-1362`).
+                self.composer_selection = None;
+                let ComposerHit::At(point) = hit else {
                     return Some(StepOutcome::Idle);
                 };
-                Some(match self.prompt.place_cursor(display) {
+                self.composer_selection = Some(ComposerSelection {
+                    anchor: point,
+                    focus: point,
+                });
+                Some(match self.prompt.place_cursor(point.offset) {
                     EditorAction::Changed => StepOutcome::Redraw,
                     _ => StepOutcome::Idle,
                 })
             }
-            // A release only belongs to the composer when its press did; the
-            // cell it lands on does not matter, because a composer drag is not
-            // a selection (upstream's editor has no drag-select of its own —
-            // the renderer's screen-level selection does that job).
-            MouseGestureKind::Release(MouseButton::Left)
-                if self.composer_press.take().is_some() =>
-            {
-                Some(StepOutcome::Idle)
-            }
+            // A drag extends the selection, and the caret follows the drag's
+            // end the way codex's textarea does — so what the user types next
+            // lands where the drag finished rather than where it started.
             MouseGestureKind::Drag(MouseButton::Left) | MouseGestureKind::Move
                 if self.composer_press.is_some() =>
             {
-                Some(StepOutcome::Idle)
+                let Some(point) = self.composer_point(gesture.x, gesture.y, true) else {
+                    return Some(StepOutcome::Idle);
+                };
+                let Some(selection) = self.composer_selection.as_mut() else {
+                    // The press was absorbed (a padding row, or the reverse
+                    // search): there is no draft position to extend from.
+                    return Some(StepOutcome::Idle);
+                };
+                if selection.focus == point {
+                    return Some(StepOutcome::Idle);
+                }
+                selection.focus = point;
+                // Only real movement turns the press into a drag: a terminal
+                // that reports motion for the cell the pointer is already on
+                // must not cost the user the click semantics of a release.
+                self.composer_dragged = true;
+                let _ = self.prompt.place_cursor(point.offset);
+                Some(StepOutcome::Redraw)
+            }
+            // A release only belongs to the composer when its press did; the
+            // cell it lands on does not matter, because the drag is clamped
+            // into the composer (see the method docs).
+            MouseGestureKind::Release(MouseButton::Left)
+                if self.composer_press.take().is_some() =>
+            {
+                let dragged = std::mem::take(&mut self.composer_dragged);
+                if !dragged {
+                    // Press and release on one cell: a click. The caret is
+                    // already where the press put it and nothing is copied —
+                    // a click is not an edit and not a selection.
+                    self.composer_selection = None;
+                    return Some(StepOutcome::Idle);
+                }
+                // The release is the drag's last sample, and it can differ
+                // from the last motion event (terminals coalesce them): it
+                // extends the selection *and* takes the caret with it, the
+                // same way a drag event does.
+                let mut redraw = false;
+                if let Some(point) = self.composer_point(gesture.x, gesture.y, true) {
+                    if let Some(selection) = self.composer_selection.as_mut() {
+                        if selection.focus != point {
+                            selection.focus = point;
+                            let _ = self.prompt.place_cursor(point.offset);
+                            redraw = true;
+                        }
+                    }
+                }
+                if self.config.copy_on_select {
+                    if let Some(text) = self.composer_selection_text() {
+                        self.pending_clipboard = Some(text);
+                    }
+                }
+                Some(if redraw {
+                    StepOutcome::Redraw
+                } else {
+                    StepOutcome::Idle
+                })
             }
             _ => None,
         }
@@ -4252,73 +4502,185 @@ impl App {
     /// composer's but no draft position exists under it (a padding row below a
     /// short draft, or the composer while an open `Ctrl+R` owns it).
     ///
-    /// The composer is docked: its **bottom** row comes from the frame that
-    /// painted it (the row above the status bar, which only moves when the
-    /// extension chrome below the editor changes), while its **top** row is
-    /// derived from the row count the *current* draft needs. The second half
-    /// matters because a frame rectangle is only as fresh as the last paint:
-    /// when several events arrive in one poll drain — typing a long draft and
-    /// clicking it, which is exactly what a terminal paste-and-click looks
-    /// like — the recorded rectangle still describes the one-row composer from
-    /// before the draft grew, and trusting it would drop the click on a row the
-    /// user can plainly see. The window offset is clamped the same way
-    /// [`crate::Prompt::render_body`]'s follow-the-caret rule leaves it, so a
-    /// stale offset cannot shift the mapping either.
+    /// The geometry is [`App::composer_geometry`]'s — the frame's rectangle
+    /// with the top row re-derived from the current draft — and the cell is
+    /// mapped through the layout that geometry wrapped.
     fn composer_hit(&self, x: u16, y: u16) -> Option<ComposerHit> {
-        let (top, bottom) = self.composer_rows_now()?;
+        let geometry = self.composer_geometry()?;
+        let cell = geometry.cell(x, y)?;
+        // An open reverse search owns the composer — the same way it owns the
+        // keyboard ([`App::step_key_at`] routes every key to it first) — so no
+        // cell of the composer places a caret while it is up. It draws its own
+        // row above the draft, so the cells below it are not the draft's
+        // either.
+        if self.prompt.editor().history_search_active() {
+            return Some(ComposerHit::Absorbed);
+        }
+        let (text, layout) = self.composer_layout(&geometry);
+        if cell.0 >= layout.len() {
+            // The padding rows below a short draft: the composer owns the
+            // cell, but there is no draft position under it.
+            return Some(ComposerHit::Absorbed);
+        }
+        Some(ComposerHit::At(self.composer_point_at(
+            &layout,
+            cell,
+            text.chars().count(),
+        )))
+    }
+
+    /// The composer's geometry as of the last frame, or `None` when no frame
+    /// has painted the prompt (or a custom editor component replaced it, which
+    /// is also how the pointer path knows the composer is not on screen).
+    fn composer_geometry(&self) -> Option<ComposerGeometry> {
+        let (row, column, width, height) = self.composer_area();
+        if width == 0 || height == 0 {
+            return None;
+        }
         // The body width the frame wrapped at. `0` only before the first
         // frame, which the rectangle check above already excludes.
         let body_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
         if body_width == 0 {
             return None;
         }
-        let (_, column, width, _) = self.composer_area();
-        if y < top || y > bottom {
-            return None;
-        }
-        if x < column || x >= column.saturating_add(width) {
-            return None;
-        }
-        // The rows of the frame that are *not* the draft: the top rule, the
-        // optional reverse-search row and the bottom rule — the same
-        // arithmetic [`crate::Prompt::render_frame`] paints with.
-        let bordered = self.prompt.border_visible((bottom - top + 1) as usize);
-        let search_rows = u16::from(self.prompt.editor().history_search_active());
-        let body_top = top
-            .saturating_add(u16::from(bordered))
-            .saturating_add(search_rows);
-        let body_bottom = bottom.saturating_sub(u16::from(bordered));
-        // A click on a rule, or on the search row, has no draft under it.
-        if y < body_top || y > body_bottom {
-            return Some(ComposerHit::Absorbed);
-        }
-        let rect_row = (y - body_top) as usize;
-        // An open reverse search owns the composer — the same way it owns the
-        // keyboard ([`App::step_key_at`] routes every key to it first) — so no
-        // cell of the composer places a caret while it is up.
-        if self.prompt.editor().history_search_active() {
-            return Some(ComposerHit::Absorbed);
-        }
         let rows_now = self
             .prompt
-            .line_count(self.composer_area().2, self.config.composer_max_rows)
-            .max(1) as u16;
-        let height_now = bottom - top + 1;
-        let max_scroll = rows_now.saturating_sub(height_now) as usize;
-        let scroll = self.composer_scroll.load(Ordering::Relaxed).min(max_scroll);
-        let draft_row = scroll + rect_row;
-        // The label is the composer's gutter: a click on it belongs to the
-        // draft's first column, like upstream clamping a click inside the left
-        // padding.
-        let gutter = self.prompt.label().chars().count();
-        let body_column = ((x - column) as usize).saturating_sub(gutter);
-        let layout = VisualLayout::new(&self.prompt.text(), body_width);
-        if draft_row >= layout.len() {
-            return Some(ComposerHit::Absorbed);
+            .line_count(width, self.config.composer_max_rows)
+            .max(1);
+        // The region is the draft plus the chrome drawn around it: the two
+        // rules of `AppConfig::composer_border` (chrome, never draft —
+        // `composer_max_rows` caps the draft) and, while `Ctrl+R` is open,
+        // the search row between the top rule and the draft.
+        let region_cap = self.config.composer_max_rows.max(1)
+            + if self.prompt.border_enabled() {
+                crate::prompt::PROMPT_BORDER_ROWS
+            } else {
+                0
+            };
+        let height_now = rows_now.min(region_cap).max(1);
+        let bottom = row.saturating_add(height).saturating_sub(1);
+        let top = bottom.saturating_sub(height_now as u16 - 1);
+        let max_scroll = rows_now.saturating_sub(height_now);
+        // The rows a click can place a caret on: inside the rules, below the
+        // reverse-search row — the same arithmetic
+        // [`crate::Prompt::render_frame`] paints with.
+        let bordered = self.prompt.border_visible(height_now);
+        let search_rows = u16::from(self.prompt.editor().history_search_active());
+        let draft_top = top
+            .saturating_add(u16::from(bordered))
+            .saturating_add(search_rows);
+        let draft_bottom = bottom.saturating_sub(u16::from(bordered));
+        Some(ComposerGeometry {
+            top,
+            bottom,
+            draft_top,
+            draft_bottom,
+            left: column,
+            right: column.saturating_add(width).saturating_sub(1),
+            scroll: self.composer_scroll.load(Ordering::Relaxed).min(max_scroll),
+            body_width,
+            // The label is the composer's gutter: a click on it belongs to the
+            // draft's first column, like upstream clamping a click inside the
+            // left padding.
+            gutter: cells(self.prompt.label()),
+        })
+    }
+
+    /// The draft text and its wrapped layout at the width the last frame
+    /// wrapped it at — the geometry the pointer path maps its cells through.
+    fn composer_layout(&self, geometry: &ComposerGeometry) -> (String, VisualLayout) {
+        let text = self.prompt.text();
+        let layout = VisualLayout::new(&text, geometry.body_width);
+        (text, layout)
+    }
+
+    /// The draft position a pointer maps onto, clamped into the composer when
+    /// `clamp` is set.
+    ///
+    /// `None` when the composer is not on screen, or while an open reverse
+    /// search owns it: the search row sits on top of the draft and its preview
+    /// is a different draft from the one the pointer measured, so no cell of
+    /// the composer maps onto a position in the visible one.
+    fn composer_point(&self, x: u16, y: u16, clamp: bool) -> Option<ComposerPoint> {
+        let geometry = self.composer_geometry()?;
+        if self.prompt.editor().history_search_active() {
+            return None;
         }
-        Some(ComposerHit::Offset(
-            layout.click_offset(draft_row, body_column),
-        ))
+        let cell = if clamp {
+            Some(geometry.clamped_cell(x, y))
+        } else {
+            geometry.cell(x, y)
+        }?;
+        let (text, layout) = self.composer_layout(&geometry);
+        Some(self.composer_point_at(&layout, cell, text.chars().count()))
+    }
+
+    /// The draft position under a composer cell: the character the pointer
+    /// covers, or — past the end of a row — that row's end boundary.
+    ///
+    /// A cell below the draft's last row resolves to the end of the draft,
+    /// which is where a drag past the bottom of the composer lands.
+    fn composer_point_at(
+        &self,
+        layout: &VisualLayout,
+        cell: (usize, usize),
+        draft_chars: usize,
+    ) -> ComposerPoint {
+        let (draft_row, body_column) = cell;
+        if draft_row >= layout.len() {
+            return ComposerPoint {
+                offset: draft_chars,
+                on_char: false,
+            };
+        }
+        match layout.click_char(draft_row, body_column) {
+            Some(offset) => ComposerPoint {
+                offset,
+                on_char: true,
+            },
+            // No character under the pointer: the row's end boundary is the
+            // position, which is also where [`VisualLayout::click_offset`]
+            // would put the caret (the wrapped-row snap-back is a *character*
+            // and is therefore the `Some` case above).
+            None => ComposerPoint {
+                offset: layout.click_offset(draft_row, body_column),
+                on_char: false,
+            },
+        }
+    }
+
+    /// The draft text the composer's drag selection covers, or `None` when the
+    /// composer has none.
+    ///
+    /// The composer counterpart of [`App::selection_text`], and the text a
+    /// copy-on-select release hands to the driver. It is a verbatim slice of
+    /// [`crate::Prompt::text`] — chips appear as the `[Image #N]` labels the
+    /// frame painted — with no trailing-whitespace trim: the transcript trims
+    /// because its rows are space-padded screen lines, while a composer
+    /// selection is measured against the draft itself, so spaces the user can
+    /// see highlighted stay in the copy.
+    pub fn composer_selection_text(&self) -> Option<String> {
+        let (start, end) = self.composer_selection?.bounds()?;
+        let text = self.prompt.text();
+        let slice: String = text
+            .chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect();
+        if slice.is_empty() {
+            None
+        } else {
+            Some(slice)
+        }
+    }
+
+    /// Drop the composer's drag selection (and the highlight it produced).
+    ///
+    /// Called whenever the draft or the caret changes underneath it: both ends
+    /// are draft offsets, so an edit would leave them pointing at text that
+    /// moved.
+    fn clear_composer_selection(&mut self) {
+        self.composer_selection = None;
     }
 
     /// The composer rectangle recorded by the last frame
@@ -4342,26 +4704,10 @@ impl App {
     /// *current* draft needs. See [`App::composer_hit`] for why the second
     /// half cannot come from the frame.
     fn composer_rows_now(&self) -> Option<(u16, u16)> {
-        let (row, _, width, height) = self.composer_area();
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let bottom = row.saturating_add(height).saturating_sub(1);
-        let rows_now = self
-            .prompt
-            .line_count(width, self.config.composer_max_rows)
-            .max(1) as u16;
-        // The region the draft wants, capped by the cap the config allows:
-        // the draft rows plus the chrome the composer draws around them (the
-        // two rules of `AppConfig::composer_border`).
-        let region_cap = self.config.composer_max_rows.max(1) as u16
-            + if self.prompt.border_enabled() {
-                crate::prompt::PROMPT_BORDER_ROWS as u16
-            } else {
-                0
-            };
-        let height_now = rows_now.min(region_cap).max(1);
-        Some((bottom.saturating_sub(height_now - 1), bottom))
+        // The chrome (the two rules, and the reverse-search row) is already
+        // part of [`App::composer_geometry`]'s arithmetic.
+        let geometry = self.composer_geometry()?;
+        Some((geometry.top, geometry.bottom))
     }
 
     /// Route a gesture through the autocomplete dropdown: a left press on a
@@ -4387,10 +4733,14 @@ impl App {
                     return None;
                 };
                 // A dropdown press is not the start of a transcript
-                // selection, the same rule as a composer press.
+                // selection, the same rule as a composer press. It also
+                // dismisses a composer drag selection: the press is a new
+                // gesture, and accepting a candidate rewrites the draft the
+                // selection's offsets were measured in (LUM-1332).
                 self.stop_selection_autoscroll();
                 self.selection_dragging = false;
                 self.tool_press = None;
+                self.clear_composer_selection();
                 let index = match hit {
                     AutocompleteHit::Candidate(index) => Some(index),
                     AutocompleteHit::Absorbed => None,
@@ -5144,6 +5494,9 @@ impl App {
     /// chips are already attached; the caller surfaces the refusal. The
     /// draft text is left untouched either way.
     pub fn paste_image(&mut self, image: pi_protocol::ImageContent) -> bool {
+        // Chips are draft characters: inserting one shifts the offsets an
+        // active selection was measured in.
+        self.clear_composer_selection();
         match self.prompt.editor_mut().insert_image(image) {
             crate::editor::ImageInsertOutcome::Inserted => true,
             crate::editor::ImageInsertOutcome::AtCapacity => {
@@ -5166,6 +5519,7 @@ impl App {
     /// marker / undo treatment as a terminal paste; the port calls the same
     /// entry point directly.
     pub fn paste_text(&mut self, text: &str) {
+        self.clear_composer_selection();
         self.prompt.editor_mut().insert_paste(text);
     }
 
@@ -5174,6 +5528,7 @@ impl App {
     /// `app.session.new` call this so a new session never inherits a draft.
     pub fn clear_composer(&mut self) {
         self.prompt.clear();
+        self.clear_composer_selection();
     }
 
     /// Number of image chips currently attached to the draft.
@@ -5840,6 +6195,131 @@ impl App {
                 }
                 last_col = Some(col);
                 col += width as u16;
+            }
+        }
+        // The drag selection goes on top of the composer's own cells, the way
+        // the transcript's does on top of the message cells
+        // ([`App::apply_selection_highlight`]). Only rebuilt when there is one:
+        // the layout is already the wrap `Prompt::render_lines` just used, and
+        // re-deriving it is the price of knowing which draft character sits in
+        // each painted cell (the `▍` marker is inserted mid-row).
+        if self.composer_selection.is_some() {
+            let body_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+            let text = self.prompt.text();
+            let layout = VisualLayout::new(&text, body_width);
+            // The rows this frame actually painted (rules included), so the
+            // overlay can line its cells up with them.
+            let painted: Vec<String> = frame.rows.iter().map(|row| row.text.clone()).collect();
+            self.apply_composer_selection_highlight(
+                rect,
+                &painted,
+                scroll,
+                &layout,
+                self.prompt.cursor(),
+                buf,
+            );
+        }
+    }
+
+    /// Paint the composer's drag selection by adding the reversed-video
+    /// modifier to the selected cells — the same rule
+    /// [`App::apply_selection_highlight`] uses for the transcript, so a
+    /// selection reads identically in both places.
+    ///
+    /// The cells are derived from the [`VisualLayout`] the frame wrapped rather
+    /// than from the painted strings: a row is the label gutter, then the draft
+    /// characters, with the `▍` caret marker *inserted* in the middle of the
+    /// row (`Prompt::render_body` + `build_prompt_row`), so which draft
+    /// character a cell holds depends on whether the marker sits to its left.
+    /// Walking the layout's per-character source offsets keeps the highlight on
+    /// the characters the user dragged over, marker or not, and on the rows the
+    /// window actually painted — `lines` may also carry the reverse-search row,
+    /// which is not the draft's.
+    ///
+    /// Columns are terminal cells, not characters (LUM-1336): a wide glyph owns
+    /// two of them and a combining mark none, and the caret's own column comes
+    /// from the layout (`VisualLayout::caret`), not from a character count.
+    /// [`VisualLayout::click_char`] is the same convention read the other way —
+    /// cells in, draft character out.
+    ///
+    /// The marker's own cell joins the highlight when the caret sits strictly
+    /// inside the selection (a drag that ends on the far side of the caret's
+    /// start): the marker is a caret *between* two draft characters, so leaving
+    /// it out would punch a one-cell hole into the middle of a highlighted
+    /// run. At either end of the selection it stays unhighlighted, where it
+    /// reads as the caret that is about to extend the selection.
+    fn apply_composer_selection_highlight(
+        &self,
+        rect: Rect,
+        lines: &[String],
+        scroll: usize,
+        layout: &VisualLayout,
+        caret: usize,
+        buf: &mut Buffer,
+    ) {
+        let Some((start, end)) = self.composer_selection.and_then(|s| s.bounds()) else {
+            return;
+        };
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let cursor = layout.caret(caret);
+        let marker_selected = start < caret && caret < end;
+        let gutter = cells(self.prompt.label());
+        // While the reverse search is open it owns a row above the draft, and
+        // the composer border owns one above that: the draft starts that many
+        // rows lower.
+        let chrome_rows = usize::from(self.prompt.border_visible(rect.height as usize))
+            + usize::from(self.prompt.editor().history_search_active());
+        for (row, _) in lines.iter().enumerate() {
+            let y = rect.y + row as u16;
+            if y >= rect.y + rect.height {
+                break;
+            }
+            let Some(draft_index) = row.checked_sub(chrome_rows).map(|index| scroll + index) else {
+                continue;
+            };
+            let Some(draft_row) = layout.rows().get(draft_index) else {
+                continue;
+            };
+            let draw_cursor = draft_index == cursor.0;
+            let mark = |buf: &mut Buffer, column: usize| {
+                let x = rect.x + column as u16;
+                if x >= rect.x + rect.width {
+                    return;
+                }
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.modifier |= Modifier::REVERSED;
+                }
+            };
+            let mut column = gutter;
+            // The caret's column is body-relative (the layout's own
+            // coordinate), while `column` is the cell inside the painted row.
+            let mut body_column = 0usize;
+            for (index, ch) in draft_row.text.chars().enumerate() {
+                // The marker is painted *instead of* moving the character
+                // under it: it consumes one cell and no draft character.
+                if draw_cursor && body_column == cursor.1 {
+                    if marker_selected {
+                        mark(buf, column);
+                    }
+                    column += 1;
+                }
+                let width = cell_width(ch);
+                if let Some(offset) = draft_row.source.get(index).copied() {
+                    if offset >= start && offset < end {
+                        for extra in 0..width {
+                            mark(buf, column + extra);
+                        }
+                    }
+                }
+                column += width;
+                body_column += width;
+            }
+            // The marker at the end of the row's content — where the caret is
+            // when it sits past the last character.
+            if draw_cursor && body_column == cursor.1 && marker_selected {
+                mark(buf, column);
             }
         }
     }

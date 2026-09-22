@@ -226,16 +226,38 @@ impl VisualLayout {
     ///
     /// Unlike [`VisualLayout::cursor_at`] — shared with the keyboard's
     /// vertical motion, where "past the end of the row" must mean the row's
-    /// end — this is the pointer's own rule, so the two are kept apart.
+    /// end — this is the pointer's own rule, so the two are kept apart. It is
+    /// [`VisualLayout::click_char`] where a character exists and the row's end
+    /// boundary where none does, which is the split a *selection* needs.
     pub(crate) fn click_offset(&self, row: usize, column: usize) -> usize {
-        let Some(line) = self.rows.get(row) else {
-            return 0;
-        };
-        let is_last_of_line = self.last_of_line.get(row).copied().unwrap_or(true);
-        if !is_last_of_line && column >= line.width() && line.len() > 0 {
-            return line.source.last().copied().unwrap_or(line.start);
+        self.click_char(row, column)
+            .unwrap_or_else(|| self.cursor_at(row, column))
+    }
+
+    /// The character a **pointer** cell covers, or `None` when the pointer
+    /// landed past the end of the row's content.
+    ///
+    /// The selection counterpart of [`VisualLayout::click_offset`]: a
+    /// selection takes the character under its *start* and one past the
+    /// character under its *end*, so "is there a character under this cell?"
+    /// has to be answerable on its own. A column inside a wide glyph's cell
+    /// range covers that glyph — the same cell range `cursor_at` walks — and
+    /// past the end of a soft-wrapped row the snap-back rule above puts the
+    /// caret on the row's last character, which is a character too; past the
+    /// end of a row that ends its hard line the caret offset is a boundary
+    /// (the row's end, or the offset of the `\n` that separates it from the
+    /// next one), which no cell covers and therefore answers `None`.
+    pub(crate) fn click_char(&self, row: usize, column: usize) -> Option<usize> {
+        let line = self.rows.get(row)?;
+        let index = char_index_at_column(line, column);
+        if let Some(offset) = line.source.get(index) {
+            return Some(*offset);
         }
-        self.cursor_at(row, column)
+        let is_last_of_line = self.last_of_line.get(row).copied().unwrap_or(true);
+        if !is_last_of_line && line.len() > 0 {
+            return line.source.last().copied();
+        }
+        None
     }
 }
 
@@ -414,6 +436,50 @@ mod tests {
         assert_eq!(layout.rows().len(), 2);
         assert_eq!(layout.click_offset(0, 5), 2, "end of the first line");
         assert_eq!(layout.click_offset(1, 5), 8, "end of the draft");
+    }
+
+    #[test]
+    fn a_pointer_cell_reports_the_character_it_covers() {
+        // "hello world" at width 6 wraps to "hello " / "world".
+        let layout = VisualLayout::new("hello world", 6);
+        assert_eq!(layout.click_char(0, 1), Some(1), "the character under it");
+        assert_eq!(layout.click_char(1, 3), Some(9), "and on the second row");
+        // Past the end of the *soft-wrapped* row the snap-back rule puts the
+        // caret on the row's last character, which a selection must include.
+        assert_eq!(layout.click_char(0, 6), Some(5));
+        assert_eq!(layout.click_char(0, 99), Some(5));
+    }
+
+    #[test]
+    fn a_pointer_past_a_hard_line_boundary_covers_no_character() {
+        // `click_offset` reports a *boundary* there (the end of `hi`, or the
+        // offset of the `\n`), which a selection end must not widen past.
+        let layout = VisualLayout::new("hi\nthere", 6);
+        assert_eq!(layout.click_offset(0, 5), 2);
+        assert_eq!(layout.click_char(0, 5), None);
+        assert_eq!(layout.click_offset(1, 5), 8);
+        assert_eq!(layout.click_char(1, 5), None);
+        // An empty row covers no character either.
+        let blank = VisualLayout::new("a\n\nb", 6);
+        assert_eq!(blank.click_char(1, 0), None);
+    }
+
+    #[test]
+    fn a_wide_character_covers_both_of_its_cells() {
+        // "你好a": '你' owns columns 0-1, '好' 2-3, 'a' 4 (LUM-1336's column
+        // measure), so a pointer on either half of a glyph covers that glyph.
+        let layout = VisualLayout::new("你好a", 10);
+        assert_eq!(layout.click_char(0, 0), Some(0));
+        assert_eq!(layout.click_char(0, 1), Some(0), "the second half of 你");
+        assert_eq!(layout.click_char(0, 2), Some(1));
+        assert_eq!(layout.click_char(0, 3), Some(1), "the second half of 好");
+        assert_eq!(layout.click_char(0, 4), Some(2));
+        assert_eq!(layout.click_char(0, 5), None, "one past the row's content");
+        // The caret rule agrees with it: a click on either half of a glyph
+        // puts the caret *before* that glyph.
+        assert_eq!(layout.click_offset(0, 1), 0);
+        assert_eq!(layout.click_offset(0, 3), 1);
+        assert_eq!(layout.click_offset(0, 4), 2);
     }
 
     fn texts(text: &str, width: usize) -> Vec<String> {
