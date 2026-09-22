@@ -1,0 +1,185 @@
+{
+  "cols": 100,
+  "rows": 20,
+  "args": ["--model", "faux/faux-model"],
+  "report_reverse": true,
+  "notes": [
+    "LUM-1332 — drag-select and copy-on-select inside the composer, driven through a real PTY into the real binary (100x20).",
+    "Geometry: the composer is docked above the status bar. A one-row draft sits on row 18, a two-row draft on rows 17-18; the status bar is row 19. The label '> ' owns columns 0-1, so draft body column N sits at cell x = 2 + N, and continuation rows are indented by the same two columns.",
+    "Two things a character grid cannot show are asserted through the harness' extra evidence lines: '# reverse y=<row> x=<first>-<last> <cells>' (the reversed-video highlight a selection paints; enabled by \"report_reverse\": true) and '# clipboard: <text>' (an OSC 52 write the app sent the terminal during that panel, i.e. copy-on-select actually reached the clipboard channel).",
+    "The caret is the '\\u258d' glyph the renderer inserts at the cursor offset, so 'where is the caret' stays a text assertion. The marker is inserted *mid-row*: cells to its right are shifted one column, which is why a reversed run can be one cell wider than the selected text and why a row text is matched with `.` where the caret sits.",
+    "Panels 2, 5 and 7 are pixel-identical to their predecessors on purpose: a copy is not an edit and a click outside the composer changes nothing. Their evidence is the '# clipboard' line, which the grid cannot show.",
+    "Panels 1-2 are the drag itself and its release; 3 re-checks LUM-1327's click semantics (caret placed, nothing copied); 4-5 drag across a line break; 6-7 clamp a drag that leaves the composer and prove the transcript underneath is untouched."
+  ],
+  "caption": "LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\\ns'), while a click on the status bar changes nothing. Nothing mocked.",
+  "panels": [
+    {
+      "label": "1. drag from 'llo' to the 'o' of 'world': the fragment is highlighted",
+      "send": "hello world<MPress:4,18><MDrag:9,18>",
+      "wait": 1.5,
+      "expect": [
+        {
+          "regex": "^# reverse y=18 x=4-10 ",
+          "why": "the reversed cells start on the pressed 'l' and end on the dragged 'o' (the run is one cell wider: the caret marker is inserted inside it)"
+        },
+        {
+          "text": "llo w\u258do",
+          "why": "and they spell exactly the dragged characters"
+        },
+        {
+          "text": "> hello w\u258dorld",
+          "why": "the caret followed the drag's end"
+        },
+        {
+          "text": "> hello world\u258d",
+          "count": 0,
+          "why": "it left the end of the draft"
+        },
+        {
+          "text": "# clipboard",
+          "count": 0,
+          "why": "nothing is copied while the button is still down"
+        }
+      ]
+    },
+    {
+      "label": "2. release: the selection reaches the clipboard channel",
+      "send": "<MRelease:9,18>",
+      "wait": 1.5,
+      "expect": [
+        {
+          "text": "# clipboard: 'llo wo'",
+          "why": "copy-on-select handed exactly the highlighted text to the terminal (OSC 52)"
+        },
+        {
+          "regex": "^# reverse y=18 x=4-10 ",
+          "why": "the highlight stays after the release"
+        },
+        {
+          "text": "> hello w\u258dorld",
+          "count": 1,
+          "why": "the draft and the caret are unchanged by the copy — a selection is not an edit"
+        }
+      ]
+    },
+    {
+      "label": "3. a click still places the caret and copies nothing (LUM-1327)",
+      "send": "<Click:4,18>",
+      "wait": 1.2,
+      "expect": [
+        "> he\u258dllo world",
+        {
+          "text": "# reverse",
+          "count": 0,
+          "why": "a click leaves no selection behind"
+        },
+        {
+          "text": "# clipboard",
+          "count": 0,
+          "why": "and queues no clipboard write of its own"
+        },
+        {
+          "regex": "^> he.llo world$",
+          "why": "the draft kept every character — the click only moved the caret"
+        }
+      ]
+    },
+    {
+      "label": "4. drag across the line break: both rows highlight",
+      "send": "<C-c>first line<C-j>second line<MPress:3,17><MDrag:5,18>",
+      "wait": 1.8,
+      "expect": [
+        "> first line",
+        "  sec\u258dond line",
+        {
+          "regex": "^# reverse y=17 x=3-11 ",
+          "why": "the first row's selected tail is highlighted"
+        },
+        {
+          "regex": "^# reverse y=18 x=2-6 ",
+          "why": "and the second row's selected head, caret marker included"
+        },
+        {
+          "text": "# clipboard",
+          "count": 0,
+          "why": "still nothing copied while dragging"
+        }
+      ]
+    },
+    {
+      "label": "5. release: a cross-row selection copies with its newline",
+      "send": "<MRelease:5,18>",
+      "wait": 1.5,
+      "expect": [
+        {
+          "text": "# clipboard: 'irst line\\nseco'",
+          "why": "the copied text is the draft fragment, newline and all"
+        },
+        {
+          "text": "# reverse y=17 x=3-11 'irst line'",
+          "why": "the highlight survives the release on both rows"
+        }
+      ]
+    },
+    {
+      "label": "6. a drag that leaves the composer clamps into it",
+      "send": "<MPress:8,17><MDrag:0,0>",
+      "wait": 1.5,
+      "expect": [
+        {
+          "text": "> \u258dfirst line",
+          "why": "the drag past the composer's left edge clamped to the draft's first column"
+        },
+        {
+          "regex": "^# reverse y=17 x=3-9 ",
+          "why": "the selection runs from the draft's start to the pressed 'l'"
+        },
+        {
+          "regex": "^# reverse y=[0-9] ",
+          "count": 0,
+          "why": "no transcript row above the composer is highlighted"
+        },
+        {
+          "regex": "^# reverse y=1[0-6] ",
+          "count": 0,
+          "why": "the drag never reached the chat log"
+        },
+        {
+          "text": "# clipboard",
+          "count": 0,
+          "why": "an unfinished drag copies nothing"
+        }
+      ]
+    },
+    {
+      "label": "7. the clamped drag's release copies; a click below changes nothing",
+      "send": "<MRelease:0,19><Click:20,19>",
+      "wait": 1.2,
+      "expect": [
+        {
+          "text": "  \u258dsecond line",
+          "why": "the release carried the pointer to the composer's bottom row, and the caret finished the drag there"
+        },
+        {
+          "text": "# clipboard: 'line\\ns'",
+          "why": "releasing the clamped drag copies the clamped fragment"
+        },
+        {
+          "regex": "^# reverse y=17 x=8-11 ",
+          "why": "the first row's run is now its own cells: the caret left that row"
+        },
+        {
+          "regex": "^# reverse y=18 x=2-3 ",
+          "why": "and the second row's run covers the caret and the character it landed on"
+        },
+        "Faux test model",
+        {
+          "text": "# clipboard",
+          "count": 1,
+          "why": "one copy, from the release — the status-bar click that followed queued nothing"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

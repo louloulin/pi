@@ -1,0 +1,174 @@
+# lum1332-baseline.png — chars, 100x20 cells
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [1] 1. a drag across 'llo wo' highlights nothing (pre-fix)  (cursor 36,18, frame 9e7f29942d9f, px bd51604db58c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> he▍llo world
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> he▍llo world' (x1)  — the drag moved nothing: the caret is still on the character LUM-1327's press placed it on
+  assert PASS   expect       '> hello world▍' (x0)  — and it did not follow the drag to the end either
+  assert PASS   expect       '# reverse' (x0)  — no cell of the frame is highlighted
+  assert PASS   expect       '# clipboard' (x0)  — and nothing was copied
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [2] 2. the release copies nothing (pre-fix)  (cursor 36,18, frame 9e7f29942d9f, px bd51604db58c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> he▍llo world
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '# clipboard' (x0)  — the release of a drag that never selected has nothing to copy
+  assert PASS   expect       '> he▍llo world' (x1)  — one caret, exactly where the press left it
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [3] 3. the click still places the caret — LUM-1327, already fixed  (cursor 36,18, frame 9e7f29942d9f, px bd51604db58c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> he▍llo world
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> he▍llo world'
+  assert PASS   expect       '# reverse' (x0)  — and the click still starts no selection
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [4] 4. a drag across a line break highlights nothing (pre-fix)  (cursor 14,18, frame 9a39213b9806, px b45507c965d0, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> f▍irst line
+  second line
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> f▍irst line'
+  assert PASS   expect       '  second line' (x1)  — the second row is unhighlighted and carries no caret
+  assert PASS   expect       '# reverse' (x0)  — no row is highlighted
+  assert PASS   expect       '# clipboard' (x0)  — and nothing is copied while dragging
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [5] 5. the release copies nothing (pre-fix)  (cursor 14,18, frame 9a39213b9806, px b45507c965d0, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> f▍irst line
+  second line
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '# clipboard' (x0)  — a cross-row drag selects nothing to copy
+  assert PASS   expect       '> f▍irst line' (x1)  — the caret is still on the pressed character
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [6] 6. a drag that leaves the composer highlights nothing (pre-fix)  (cursor 9,17, frame a82e60e9c29f, px 2a0c035b726d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> first ▍line
+  second line
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '# reverse' (x0)  — neither the composer nor the transcript is highlighted
+  assert PASS   expect       '> first ▍line' (x1)  — the caret is where the press put it
+
+===== LUM-1332 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-2: dragging across 'llo wo' highlights nothing, moves nothing and copies nothing — the composer consumed the drag and the release and threw both away, leaving only the caret LUM-1327's press placed on the pressed character. Panel 3: the same cell clicked — the click (LUM-1327) is what places the caret, so this panel is byte-identical to panels 1-2 on purpose. Panels 4-5: a drag across a line break likewise selects nothing and copies nothing. Panels 6-7: a drag that leaves the composer selects nothing, and its release copies nothing. The '# reverse' / '# clipboard' evidence lines the harness would print for a selection are absent from every panel. This is the state lum1332-composer-drag-select.json fixes.  |  [7] 7. the release and a status-bar click change nothing (pre-fix)  (cursor 9,17, frame a82e60e9c29f, px 2a0c035b726d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> first ▍line
+  second line
+Faux test model  session-18d78b9f08c74ec5                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '# clipboard' (x0)  — no release ever queues a clipboard write
+  assert PASS   expect       '> first ▍line' (x1)  — and the caret still has not moved
+  assert PASS   expect       'Faux test model'

@@ -21,6 +21,10 @@
 //! * a click on the composer never starts or extends a chat-log selection;
 //! * the click is not an edit: the draft is byte-for-byte unchanged.
 //!
+//! The other half of the pointer contract — dragging the draft to select it,
+//! and the copy-on-select release (LUM-1332) — lives in
+//! `tests/composer_drag_select.rs`.
+//!
 //! Every assertion reads the **rendered frame**, not internal state: the
 //! `▍` marker is placed where the user sees it, and the click coordinates are
 //! computed from the same frame, so the gutter width and the windowing are the
@@ -238,7 +242,7 @@ fn an_open_reverse_search_absorbs_the_composer_pointer() {
 }
 
 #[test]
-fn a_click_on_the_composer_never_starts_a_selection() {
+fn a_drag_on_the_composer_never_starts_a_chat_log_selection() {
     let mut app = app();
     for i in 0..20 {
         app.info(format!("line {i}"));
@@ -246,13 +250,20 @@ fn a_click_on_the_composer_never_starts_a_selection() {
     app.set_editor_text("hello world");
     let (x, y) = cell_of(&frame(&mut app), "world");
     app.step(gesture(MouseGestureKind::Press(MouseButton::Left), x, y));
-    // A drag while the composer press is in flight must not extend a
-    // transcript selection (the composer has no drag-select of its own).
+    // A drag while the composer press is in flight belongs to the composer:
+    // it extends the composer's own drag selection (LUM-1332) and is clamped
+    // into the composer, so it can never drag a transcript selection behind
+    // it even though the pointer leaves the composer's rectangle.
     assert_eq!(
         app.step(gesture(MouseGestureKind::Drag(MouseButton::Left), 20, 1)),
-        StepOutcome::Idle
+        StepOutcome::Redraw
     );
-    assert_eq!(app.selection_text(), None);
+    assert_eq!(
+        app.selection_text(),
+        None,
+        "the transcript selected nothing"
+    );
+    assert_eq!(app.composer_selection_text().as_deref(), Some("world"));
     app.step(gesture(MouseGestureKind::Release(MouseButton::Left), 20, 1));
     assert_eq!(app.selection_text(), None);
 }

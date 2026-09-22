@@ -78,11 +78,22 @@ evidence — and `wait_for` does the same per panel. Set
 `"distinct_panels": true` to turn "two adjacent panels are byte-identical"
 into a hard failure; the harness then exits non-zero instead of shipping a
 collage whose captions claim interaction the images do not show.
+
+Two things a text grid cannot show are surfaced as extra body lines, so a
+panel can assert them like any other text (see the "terminal write
+evidence" section below):
+
+* `"report_reverse": true` appends one `# reverse y=<row> x=<first>-<last>
+  '<cells>'` line per reversed-video run of the frozen frame — the highlight
+  a mouse selection paints, whose characters do not change;
+* clipboard writes the child sent the terminal (OSC 52, i.e. copy-on-select)
+  are appended as `# clipboard: '<text>'`, one per write *during that panel*.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import fcntl
 import hashlib
@@ -346,11 +357,15 @@ class Renderer:
                     else parse_color(cell.bg, DEFAULT_BG)
                 )
                 # pyte's `Char` is a namedtuple of flags (0.8.x), not an
-                # attribute set — read the flags directly.
+                # attribute set — read the flags directly. Reversed video is a
+                # foreground/background *swap*, so the two resolved channels
+                # trade places. (The previous rule only swapped when channel
+                # values differed from the defaults, which is a no-op on the
+                # default-on-default cell a text selection actually paints:
+                # every highlight was invisible in the screenshots while the
+                # grid and the text dump could not show it either.)
                 if getattr(cell, "reverse", False):
-                    fg, bg = (bg if bg != DEFAULT_BG else DEFAULT_FG), (
-                        fg if fg != DEFAULT_FG else DEFAULT_BG
-                    )
+                    fg, bg = bg, fg
                 px = 1 + x * self.cell_w
                 py = top + y * self.cell_h
                 if bg != DEFAULT_BG:
@@ -414,8 +429,8 @@ def spawn(binary, args, cwd, env, cols, rows):
     return master, pid
 
 
-def pump(master, stream, seconds, chunk=1 << 16):
-    """Feed PTY output into the VT emulator for `seconds`."""
+def pump(master, stream, seconds, chunk=1 << 16, clipboard=None):
+    """Feed PTY output into the VT emulator for `seconds`. """
     deadline = time.time() + seconds
     got = bytearray()
     while True:
@@ -432,11 +447,13 @@ def pump(master, stream, seconds, chunk=1 << 16):
         if not data:
             break
         got += data
+        if clipboard is not None:
+            clipboard.feed(data)
         stream.feed(data.decode("utf-8", "replace"))
     return bytes(got)
 
 
-def drain(master, stream, idle=0.35, hard_timeout=3.0):
+def drain(master, stream, idle=0.35, hard_timeout=3.0, clipboard=None):
     """Read until the child has been quiet for `idle` seconds."""
     last = time.time()
     start = last
@@ -451,6 +468,8 @@ def drain(master, stream, idle=0.35, hard_timeout=3.0):
         if not data:
             break
         last = time.time()
+        if clipboard is not None:
+            clipboard.feed(data)
         stream.feed(data.decode("utf-8", "replace"))
 
 
@@ -460,6 +479,83 @@ def snapshot(screen) -> str:
         lines.pop()
     body = "\n".join(lines)
     return body
+
+
+# ------------------------------------------------- terminal write evidence
+#
+# A text grid carries characters, not modifiers, and the TUI's clipboard
+# writes never reach the grid at all. Both are load-bearing claims a pointer
+# scenario has to make:
+#
+# * a drag selection is painted as a *reversed-video* modifier on cells whose
+#   characters do not change — visible in the screenshot, invisible in the
+#   text dump, and therefore unassertable without help;
+# * copy-on-select leaves as an OSC 52 sequence
+#   (`pi-tui/src/clipboard.rs`), which `pyte` consumes and drops.
+#
+# So this section gives the panels two more greppable evidence lines:
+#
+#   # reverse y=12 x=4-9 'llo wo'      (scenario: "report_reverse": true)
+#   # clipboard: 'llo wo'              (whenever the child wrote one)
+#
+# `report_reverse` is opt-in because it adds text to the panel body other
+# scenarios already assert `count`-exactly against; the clipboard section only
+# ever appears for a panel during which the app actually copied something.
+
+_OSC52 = re.compile(rb"\x1b\]52;[^;]*;([A-Za-z0-9+/=]*)(?:\x07|\x1b\\)")
+
+
+class ClipboardWrites:
+    """OSC 52 payloads the child sent the terminal, in order.
+
+    Fed every raw byte the harness reads, because the sequence can straddle
+    two reads: the unscanned tail stays buffered until its terminator arrives.
+    """
+
+    def __init__(self):
+        self._buffer = b""
+        self._scanned = 0
+        self.payloads: list[str] = []
+
+    def feed(self, data: bytes) -> None:
+        self._buffer += data
+        for match in _OSC52.finditer(self._buffer, self._scanned):
+            payload = match.group(1)
+            try:
+                decoded = base64.b64decode(payload).decode("utf-8", "replace")
+            except Exception:  # pragma: no cover - malformed base64
+                decoded = payload.decode("ascii", "replace")
+            self.payloads.append(decoded)
+            self._scanned = match.end()
+        keep_from = max(self._scanned, len(self._buffer) - (1 << 16))
+        self._buffer = self._buffer[keep_from:]
+        self._scanned -= keep_from
+
+
+def reverse_runs(frame, row: int, cols: int) -> list[tuple[int, int, str]]:
+    """Reversed-video cell runs on one row, as `(first_x, last_x, text)`."""
+    runs: list[tuple[int, int, str]] = []
+    x = 0
+    while x < cols:
+        if not getattr(frame.buffer[row][x], "reverse", False):
+            x += 1
+            continue
+        start = x
+        text = []
+        while x < cols and getattr(frame.buffer[row][x], "reverse", False):
+            text.append(frame.buffer[row][x].data)
+            x += 1
+        runs.append((start, x - 1, "".join(text)))
+    return runs
+
+
+def reverse_report(frame, cols: int, rows: int) -> str:
+    """One line per reversed run in a frozen frame."""
+    return "\n".join(
+        f"# reverse y={y} x={start}-{end} {text!r}"
+        for y in range(rows)
+        for start, end, text in reverse_runs(frame, y, cols)
+    )
 
 
 # ------------------------------------------------------- panel assertions
@@ -600,7 +696,9 @@ def summarize_assertions(rows: list[dict], allow_xpass: bool) -> tuple[bool, lis
     return bool(failures), report + failures
 
 
-def pump_until(master, stream, predicate, timeout: float, slice_s: float = 0.25) -> bool:
+def pump_until(
+    master, stream, predicate, timeout: float, slice_s: float = 0.25, clipboard=None
+) -> bool:
     """Pump the PTY until `predicate()` holds or `timeout` elapses.
 
     Startup timing is not constant: the app loads models and extensions before
@@ -614,7 +712,7 @@ def pump_until(master, stream, predicate, timeout: float, slice_s: float = 0.25)
             return True
         if time.time() >= deadline:
             return False
-        pump(master, stream, slice_s)
+        pump(master, stream, slice_s, clipboard=clipboard)
 
 
 def child_alive(pid) -> bool:
@@ -763,15 +861,20 @@ def main() -> int:
     screen = pyte.Screen(cols, rows)
     screen.set_mode(pyte.modes.LNM)  # CRLF semantics like a real terminal
     stream = pyte.Stream(screen)
+    clipboard = ClipboardWrites()
     master, pid = spawn(os.path.abspath(args.bin), scenario.get("args", []), cwd, env, cols, rows)
 
     cards = []
     assertion_rows: list[tuple[str, list[dict]]] = []
     text_sections = []
     try:
-        drain(master, stream, idle=0.6, hard_timeout=8.0)
+        drain(master, stream, idle=0.6, hard_timeout=8.0, clipboard=clipboard)
         if not pump_until(
-            master, stream, lambda: bool(snapshot(screen).strip()), timeout=12.0
+            master,
+            stream,
+            lambda: bool(snapshot(screen).strip()),
+            timeout=12.0,
+            clipboard=clipboard,
         ):
             print(
                 "WARN: the app painted nothing within 12s of startup — the first "
@@ -780,11 +883,12 @@ def main() -> int:
             )
         for index, panel in enumerate(panels, start=1):
             send = panel.get("send", "")
+            clipboard_before = len(clipboard.payloads)
             if send:
                 os.write(master, encode_keys(send))
             wait = float(panel.get("wait", 0.7))
             if wait > 0:
-                pump(master, stream, wait)
+                pump(master, stream, wait, clipboard=clipboard)
             # Optional synchronization: `"wait_for": "text"` keeps pumping
             # until that text is on the grid (or `wait_timeout` expires), so a
             # panel that claims "the reply landed" cannot silently capture the
@@ -793,7 +897,11 @@ def main() -> int:
             if wait_for and wait_for not in snapshot(screen):
                 timeout = float(panel.get("wait_timeout", max(wait, 8.0)))
                 if not pump_until(
-                    master, stream, lambda: wait_for in snapshot(screen), timeout
+                    master,
+                    stream,
+                    lambda: wait_for in snapshot(screen),
+                    timeout,
+                    clipboard=clipboard,
                 ):
                     print(
                         f"WARN: panel {index} waited {timeout:.1f}s for "
@@ -810,6 +918,15 @@ def main() -> int:
             # paint every panel with the *last* frame (the bug this fixes).
             frame = copy.deepcopy(screen)
             body = snapshot(frame)
+            # Evidence the grid cannot carry: the reversed-video runs of a
+            # selection (opt-in, since it appends lines) and the clipboard
+            # writes this panel produced.
+            if scenario.get("report_reverse"):
+                report = reverse_report(frame, cols, rows)
+                if report:
+                    body = f"{body}\n{report}"
+            for payload in clipboard.payloads[clipboard_before:]:
+                body = f"{body}\n# clipboard: {payload!r}"
             cards.append(
                 (
                     head,
@@ -828,7 +945,7 @@ def main() -> int:
         if send:
             try:
                 os.write(master, encode_keys(send))
-                drain(master, stream, idle=0.6, hard_timeout=10.0)
+                drain(master, stream, idle=0.6, hard_timeout=10.0, clipboard=clipboard)
             except OSError:
                 pass  # the child may already be gone; the kill path below decides
             # Give the graceful path a moment to finish (shutdown hooks,
