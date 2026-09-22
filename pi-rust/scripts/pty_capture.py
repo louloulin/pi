@@ -52,14 +52,22 @@ the process runs its shutdown path (extension `session_shutdown`).
 `send` is literal text plus key tokens: `<Enter> <Esc> <Tab> <BS> <Up>
 <Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>
 <M-a>..<M-z> <M-Up> <M-Down> <M-Left> <M-Right>` and the pointer gestures
-`<Click:x,y> <MPress:x,y> <MRelease:x,y> <MDrag:x,y>` (0-based cell
-coordinates, SGR encoding, exactly what crossterm reports).
+`<Click:x,y> <MPress:x,y> <MRelease:x,y> <MDrag:x,y>` plus the wheel notches
+`<WheelUp:x,y> <WheelDown:x,y>` (0-based cell coordinates, SGR encoding,
+exactly what crossterm reports).
 Every panel is fed into the *same* process, so panels are cumulative
 frames of one interactive session. `skip_capture` drives the UI without
 emitting a panel (useful for intermediate keystrokes). `wait_for` (with
 `wait_timeout`, default 8s) keeps pumping until that text is on the grid
 before the frame is frozen, which is how an async panel (a model reply, a
 completed tool call) is captured *after* the thing it claims happened.
+
+A panel may also carry `paste` instead of `send`: its value is sent as one
+**bracketed paste** (`\x1b[200~` … `\x1b[201~`), which is how a real
+terminal hands a paste over once the app has enabled the mode. Use it when
+the point of the panel is what the composer does with a *paste* — a `send`
+with the same text arrives as individual key presses instead, so its
+newlines submit. `send` and `paste` may be combined; `send` goes first.
 
 Panels can also carry `expect` / `reject` / `probe` / `xfail` /
 `xfail_reject` assertions over their frozen grid — see the "panel assertions"
@@ -164,7 +172,7 @@ for _c in "abcdefghijklmnopqrstuvwxyz":
 _KEY_TOKENS["<C-[>"] = "\x1b"
 
 
-_MOUSE_TOKEN = re.compile(r"^<(Click|MPress|MRelease|MDrag):(\d+),(\d+)>$")
+_MOUSE_TOKEN = re.compile(r"^<(Click|MPress|MRelease|MDrag|WheelUp|WheelDown):(\d+),(\d+)>$")
 
 
 def mouse_sequence(token: str) -> str | None:
@@ -173,8 +181,14 @@ def mouse_sequence(token: str) -> str | None:
     Cells are 0-based in the token (the same space scenarios already use for
     everything else) and 1-based on the wire, which is the SGR mouse encoding
     (`ESC [ < b ; x ; y M/m`) crossterm decodes and the App consumes as
-    `InputEvent::MouseGesture`. `<Click>` is the press/release pair on one
-    cell, i.e. the gesture both reference TUIs treat as "put the caret here".
+    `InputEvent::MouseGesture`.
+
+    `<Click>` is the press/release pair on one cell, i.e. the gesture both
+    reference TUIs treat as "put the caret here". `<WheelUp>` / `<WheelDown>`
+    use SGR's wheel button numbers (64 / 65, no motion bit) at the cell the
+    pointer was over: the App needs the position for that one, because a
+    dropdown whose rows the notch lands on steers its own highlight instead of
+    scrolling the log behind it (`App::step_autocomplete_wheel`, LUM-1333).
     """
     match = _MOUSE_TOKEN.match(token)
     if match is None:
@@ -186,6 +200,10 @@ def mouse_sequence(token: str) -> str | None:
         return f"\x1b[<0;{x};{y}M"
     if kind == "MRelease":
         return f"\x1b[<0;{x};{y}m"
+    if kind == "WheelUp":
+        return f"\x1b[<64;{x};{y}M"
+    if kind == "WheelDown":
+        return f"\x1b[<65;{x};{y}M"
     # Motion with the left button held: button bits + the 32 motion flag.
     return f"\x1b[<32;{x};{y}M"
 
@@ -211,6 +229,15 @@ def encode_keys(text: str) -> bytes:
         out.append(text[i])
         i += 1
     return "".join(out).encode("utf-8")
+
+
+def encode_paste(text: str) -> bytes:
+    """Wrap `text` in the bracketed-paste markers a terminal sends.
+
+    The payload is literal (no `<Enter>` expansion): a real paste carries its
+    own newlines, and that is exactly the point of the panel using it.
+    """
+    return b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
 
 
 # ------------------------------------------------------------ palette
@@ -886,6 +913,9 @@ def main() -> int:
             clipboard_before = len(clipboard.payloads)
             if send:
                 os.write(master, encode_keys(send))
+            paste = panel.get("paste")
+            if paste:
+                os.write(master, encode_paste(paste))
             wait = float(panel.get("wait", 0.7))
             if wait > 0:
                 pump(master, stream, wait, clipboard=clipboard)

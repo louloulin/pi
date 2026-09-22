@@ -24,11 +24,13 @@ use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, Strea
 use pi_extensions::{
     CommandExecutionOutcome, DiscoveredResources, ExtensionBridge, ExtensionError,
     ExtensionSideEffects, HostOptions, JsExtensionHost, RegisteredCommand,
-    RegisteredProviderConfig, RegisteredProviders, RegisteredToolPrompt, ToolContext, UiHandler,
+    RegisteredProviderConfig, RegisteredProviders, RegisteredToolPrompt, ToolCallHookOutcome,
+    ToolContext, ToolResultHookOutcome, UiHandler,
 };
 use pi_protocol::{
     Api, AssistantMessageEvent, Content, Context, ExtensionEvent, Message, Model, ProviderId,
-    ResourcesDiscoverReason, Role, SessionShutdownReason, StopReason, UiLevel, Usage,
+    ResourcesDiscoverReason, Role, SessionShutdownReason, StopReason, ToolCall, ToolResult,
+    UiLevel, Usage,
 };
 
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
@@ -417,6 +419,72 @@ impl ExtensionRuntime {
             target_session_file: None,
         })
         .await
+    }
+
+    /// Ask the `tool_call` handlers about one call (LUM-1330).
+    ///
+    /// This is the hook path, not the fan-out: it runs **before** the tool
+    /// executes and folds the handlers' return values, so a plugin can block
+    /// the call, patch its arguments, or ask the loop to stop afterwards.
+    /// A runtime with no `tool_call` subscriber short-circuits without
+    /// crossing into JS.
+    pub async fn dispatch_tool_call(&self, call: &ToolCall) -> ToolCallHookOutcome {
+        let Some(host) = self.host.as_ref() else {
+            return ToolCallHookOutcome::allow();
+        };
+        if !self.has_subscriber_for("tool_call") {
+            return ToolCallHookOutcome::allow();
+        }
+        let event = ExtensionEvent::ToolCall {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            input: call.arguments.clone(),
+        };
+        match host
+            .emit_event_with(&event, Some(&self.mode), self.has_ui, &self.cwd)
+            .await
+        {
+            Ok(outcome) => ToolCallHookOutcome::from_dispatch(&outcome, &call.arguments),
+            Err(err) => {
+                tracing::warn!(target: "pi_extension", error = %err, "tool_call hook failed");
+                ToolCallHookOutcome::allow()
+            }
+        }
+    }
+
+    /// Offer one finished tool result to the `tool_result` handlers
+    /// (LUM-1330).
+    ///
+    /// Returns the replacement to apply, or `None` when every handler left
+    /// the result alone (upstream returns `undefined` in that case).
+    pub async fn dispatch_tool_result(
+        &self,
+        call: &ToolCall,
+        result: &ToolResult,
+    ) -> Option<ToolResultHookOutcome> {
+        let host = self.host.as_ref()?;
+        if !self.has_subscriber_for("tool_result") {
+            return None;
+        }
+        let event = ExtensionEvent::ToolResult {
+            tool_call_id: result.tool_call_id.clone(),
+            tool_name: call.name.clone(),
+            input: call.arguments.clone(),
+            content: vec![(*result.content).clone()],
+            is_error: result.is_error,
+            details: result.details.clone(),
+        };
+        let base = serde_json::to_value(&event).ok()?;
+        match host
+            .emit_event_with(&event, Some(&self.mode), self.has_ui, &self.cwd)
+            .await
+        {
+            Ok(outcome) => ToolResultHookOutcome::from_dispatch(&base, &outcome),
+            Err(err) => {
+                tracing::warn!(target: "pi_extension", error = %err, "tool_result hook failed");
+                None
+            }
+        }
     }
 }
 

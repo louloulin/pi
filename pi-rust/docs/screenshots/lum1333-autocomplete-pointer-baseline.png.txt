@@ -1,0 +1,173 @@
+# lum1333-autocomplete-pointer-baseline.png — chars, 100x20 cells
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [1] 1. type `/`: the command dropdown is painted above the composer  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       '(1/21)'
+  assert PASS   expect       '^> /▍\\s*$'
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [2] 2. press row 14 (`new`): the pre-fix binary does not react at all  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'  — the highlight is still on the first candidate — the press went to the chat log
+  assert PASS   expect       '❯ new' (x0)  — the pressed row was not selected
+  assert PASS   expect       '(1/21)'  — and the window indicator never moved
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [3] 3. release on that same cell: nothing is completed  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '^> /▍\\s*$'  — the draft is still the bare trigger
+  assert PASS   expect       '❯'  — the dropdown is still up — no candidate was accepted
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [4] 4. Ctrl+C clears the draft and `/` reopens the menu  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       '(1/21)'
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [5] 5. one wheel notch down inside the list: the highlight does not move  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'  — the notch was not the list's: the highlight is untouched
+  assert PASS   expect       '❯ clear' (x0)  — no candidate became the selection
+  assert PASS   expect       '(1/21)'  — and the window indicator never moved
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [6] 6. one notch back up  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       '(1/21)'
+
+===== LUM-1333 baseline — the same gestures as the fixed run, on the pre-fix binary, and the same real PTY. Panel 1: `/` opens the menu (this much worked: the dropdown was painted before this round). Panel 2: the press on row 14 does nothing to the list — no '❯' on `new`, the window indicator stays at '(1/21)'. Panel 3: the release completes nothing: the composer still holds the bare `/` and the list is still up. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: the wheel notch over row 15 does not move the highlight — it was routed to the chat log, which has nothing to scroll here. Panel 6/7: same. Everything the fixed run does with the pointer is missing here, and nothing else changed.  |  [7] 7. a click on a transcript row above the list  (cursor 36,18, frame 9d9a0cb1c8bc, px f8b977c511f6, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+❯ help           Show this help text
+  clear          Clear the message view
+  new            Start a new session
+  copy           Copy last agent message to clipboard
+  name           <name> — Set session display name
+  (1/21)
+> /▍
+Faux test model  session-18d78559d0ff6c24                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       '(1/21)'
+  assert PASS   expect       '^> /▍\\s*$'  — this path is unchanged by the fix

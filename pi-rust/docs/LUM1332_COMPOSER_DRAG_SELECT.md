@@ -16,8 +16,8 @@
 本轮把拖拽变成 composer 内的字符选择（REVERSED 高亮，与聊天选择同一套语义），
 release 走同一条剪贴板通道（`App::pending_clipboard` → OSC 52），
 拖出 composer 时**夹紧到 composer 边界**并在文档写明；LUM-1327 的两条语义（单击定位、点击不是编辑）逐条复测保留。
-真 PTY A/B：同一组手势打给修前 / 修后二进制，修前 19/19 断言“什么都没发生”，
-修后 30/30 断言“高亮 + 复制 + 光标跟随”（7 面板、真终端、pyte）；
+真 PTY A/B：同一组手势打给修前 / 修后二进制，修前 23/23 断言“什么都没发生”，
+修后 32/32 断言“高亮 + 复制 + 光标跟随”（8 面板、真终端、pyte）；
 全量门禁在 rustc 1.85.0 下 `2648 passed / 0 failed / 2 ignored`（169 suites）。
 
 ---
@@ -26,10 +26,10 @@ release 走同一条剪贴板通道（`App::pending_clipboard` → OSC 52），
 
 | 口径 | 本轮实测 | 上一轮（LUM-1327 文，同口径） | 说明 |
 | --- | --- | --- | --- |
-| `cargo test --workspace --locked --no-fail-fast` | **2648 passed / 0 failed / 2 ignored**（169 suites） | 2632 passed / 0 failed / 2 ignored（168 suites） | 本轮 +16 条测试、+1 suite，全部真跑完 |
-| 新增测试 | **14 条帧级集成**（`composer_drag_select.rs`）+ **2 条 `VisualLayout` 单测** | +10（8 集成 + 2 单测） | 计数一致：2632 + 16 = 2648 |
-| 真 PTY 断言 | **30 checks / 7 panels，30 PASS**（修后） | 13 checks / 6 panels | 本轮的断言含高亮区间与 OSC 52 内容 |
-| 真 PTY A/B（修前） | **19 checks / 7 panels，19 PASS**（断言“没发生”） | 13 checks / 6 panels | 修前基线把缺陷正面断言下来 |
+| `cargo test --workspace --locked --no-fail-fast` | 本 tip **2648 passed / 0 failed / 2 ignored**（169 suites）；**合并 `origin/feature/pi.rs`（LUM-1318/1328/1330/1333）后 2715 passed / 0 failed / 2 ignored（173 suites）** | 2632 passed / 0 failed / 2 ignored（168 suites） | 本轮 +16 条测试（合入他轮后 +83）；两棵树都真跑完 |
+| 新增测试 | **14 条帧级集成**（`composer_drag_select.rs`）+ **2 条 `VisualLayout` 单测** | +10（8 集成 + 2 单测） | 计数一致：2632 + 16 = 2648（合并树上 2715 = 他轮新增 + 本地 +16） |
+| 真 PTY 断言 | **32 checks / 8 panels，32 PASS**（修后，合并树上的二进制） | 13 checks / 6 panels | 本轮的断言含高亮区间与 OSC 52 内容 |
+| 真 PTY A/B（修前） | **23 checks / 8 panels，23 PASS**（断言“没发生”） | 13 checks / 6 panels | 修前基线把缺陷正面断言下来 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **No issues found** | 通过 | 见 §6 的 profile 说明 |
 | `cargo fmt --all -- --check` | **clean** | 通过 | — |
 | 渲染层高亮（截图） | **修前不可见 → 修后可见**（实测像素，见 §2.3） | 未覆盖 | 本轮修掉 `pty_capture.py` 的 reverse 交换 bug |
@@ -86,9 +86,9 @@ python3 pi-rust/scripts/pty_capture.py --bin pi-rust/target/debug/pi \
   --out pi-rust/docs/screenshots/lum1332-composer-drag-select.png
 ```
 
-（100×20 真终端、真二进制、pyte 仿真；`<MPress:x,y> <MDrag:x,y> <MRelease:x,y>` 是 LUM-1327 加进 harness 的 SGR 编码 token。）
+（100×20 真终端、真二进制、pyte 仿真；8 面板；`<MPress:x,y> <MDrag:x,y> <MRelease:x,y>` 是 LUM-1327 加进 harness 的 SGR 编码 token。）
 
-| 手势（草稿 `hello world`，composer 行 18，body 列 N = 格 2+N） | 修前（19/19 断言“没发生”） | 修后（30/30 断言） |
+| 手势（草稿 `hello world`，composer 行 18，body 列 N = 格 2+N） | 修前（23/23 断言“没发生”） | 修后（32/32 断言） |
 | --- | --- | --- |
 | 从 `llo` 的 `l`（格 4,18）拖到 `world` 的 `o`（格 9,18） | `> he▍llo world`（只有 press 的定位；**拖拽没有移动光标**，无高亮，无复制） | `> hello w▍orld` + `# reverse y=18 x=4-10 'llo w▍o'`（高亮正好覆盖拖动区间，光标跟到拖拽终点） |
 | 松开（格 9,18） | 无 `# clipboard` | `# clipboard: 'llo wo'`（OSC 52 base64 解码后的载荷） |
@@ -96,23 +96,28 @@ python3 pi-rust/scripts/pty_capture.py --bin pi-rust/target/debug/pi \
 | 两行草稿，`first line` 的 `i`（3,17）拖到 `second line` 的 `o`（5,18） | `> f▍irst line` + `  second line`（拖拽无效果） | `  sec▍ond line` + `y=17 x=3-11 'irst line'`、`y=18 x=2-6 'sec▍o'` |
 | 上一步松开 | 无 `# clipboard` | `# clipboard: 'irst line\nseco'`（跨行选择带换行） |
 | 从（8,17）拖到（0,0）：指针离开 composer | 无高亮（聊天区也没有） | `> ▍first line` + `y=17 x=3-9 'first l'`（夹紧到 composer 左边界），**聊天区 0 条 `# reverse`** |
-| `MRelease:0,19` + 点状态栏（20,19） | 无复制 | `# clipboard: 'line\ns'`（release 夹紧到 composer 底行后复制），状态栏点击不产生复制 |
+| `MRelease:0,19`：release 夹紧到 composer 底行 | 无复制 | `# clipboard: 'line\ns'` + `y=17 x=8-11`、`y=18 x=2-3`（夹紧后的区间被复制、被高亮） |
+| 再点状态栏（20,19） | 无高亮可取消 | 高亮消失（press 在 composer 之外 = 新手势），且不产生新的复制 |
 
-截图：`docs/screenshots/lum1332-composer-drag-select.png`（修后，7 面板）、
+截图：`docs/screenshots/lum1332-composer-drag-select.png`（修后，8 面板）、
 `...-baseline.png`（修前，同一组手势）。文本 dump（`.png.txt`）里每个面板带
 `frame <hash>`（冻结网格哈希）、`px <hash>`（渲染像素哈希）以及断言行，可逐条核对。
 
-修后 7 个面板的网格 / 像素哈希（`.png.txt` 实测）：
+修后 8 个面板的网格 / 像素哈希（`.png.txt` 实测）：
 
 ```
-frame  2129654e8fb4  px 52d55b1e021b   panel 1 拖选
-frame  d78e972c3962  px 52d55b1e021b   panel 2 松开并复制（像素与 1 相同：复制不是编辑）
-frame  eadf8e5a7b54  px ca735382c67a   panel 3 单击（无选择）
-frame  7829139f219c  px a55cb16987d8   panel 4 跨行拖选
-frame  6687859a6ed2  px a55cb16987d8   panel 5 松开并复制
-frame  5e58214aae3a  px 5c7148682668   panel 6 拖出 composer（夹紧）
-frame  bc32ac484365  px 517a7d7b4cb8   panel 7 release 夹紧后复制 + 状态栏点击
+frame  9b294f92e301  px bb7a06fdcfa7   panel 1 拖选
+frame  3297ebcf01ac  px bb7a06fdcfa7   panel 2 松开并复制（像素与 1 相同：复制不是编辑）
+frame  fd2f4f5d42f2  px f00e3745fae5   panel 3 单击（无选择）
+frame  d7952fe22078  px 7cc32ba65285   panel 4 跨行拖选
+frame  bb9f7238b863  px 7cc32ba65285   panel 5 松开并复制
+frame  b4ad88b290ae  px cac32a71c256   panel 6 拖出 composer（夹紧）
+frame  7dcd6f4b7775  px f6b4b60162cc   panel 7 release 夹紧后复制
+frame  1c0ff4e0b3e3  px 1cb7b791fbd1   panel 8 点状态栏：高亮被取消、无新复制
 ```
+
+修前基线 8 个面板只有 3 组不同的 frame / px 哈希（`f39a6693fffe` / `f6d6d7554640` / `bb19b94b9c88`）——
+“拖拽之后帧没变”正是缺陷本身。
 
 ### 2.3 审计中发现的第二个缺陷：截图根本画不出高亮
 
@@ -136,6 +141,7 @@ if getattr(cell, "reverse", False):
 | 4 跨行 5 松开 | `y=17 x=3-11`、`y=18 x=2-6` | row 17: `(3,11)`，row 18: `(2,6)` |
 | 6 夹紧 | `y=17 x=3-9` | row 17: `(3,9)` |
 | 7 release 夹紧 | `y=17 x=8-11`、`y=18 x=2-3` | row 17: `(8,11)`，row 18: `(2,3)` |
+| 8 点状态栏 | 无 | 无（高亮被取消，光标仍在） |
 
 复核用的采样脚本（面板高 20 行、caption 26px、cell 18×36、面板间距 10）：
 
@@ -214,7 +220,8 @@ App 仍然不碰终端剪贴板。文本是草稿的**逐字切片**，不做行
 两端都是草稿偏移，草稿一变偏移就指向别的文字，所以这些入口显式清空：
 `step_prompt`（按键后草稿或光标真的变了才清）、`paste_text`、`paste_image`、`set_editor_text`、
 `clear_composer`、`restore_pending_to_editor`、`follow_up_from_editor`、`close_custom` 的草稿恢复、
-`Ctrl+C` 的清稿路径，以及 §3.1 的“press 在 composer 之外”。
+`Ctrl+C` 的清稿路径，§3.1 的“press 在 composer 之外”，以及 **autocomplete 下拉上的 press**
+（LUM-1333 的 `step_autocomplete_mouse_gesture`：接受候选会重写草稿，press 本身就是新手势）。
 
 ---
 
@@ -237,7 +244,7 @@ App 仍然不碰终端剪贴板。文本是草稿的**逐字切片**，不做行
 11. 光标在选区左侧时高亮整体右移一格（marker 插入规则）；
 12. composer 拖拽永不产生聊天选择（LUM-1327 语义）；
 13. release 落在与最后一次 drag 不同的格子：区间与光标都按 release 自己的格子收尾；
-14. press 在 composer 之外：清掉 composer 高亮。
+14. press 在 composer 之外：清掉 composer 高亮（光标不动）。
 
 ### 4.2 单元测试（`visual_text.rs`，+2 条）
 
@@ -275,11 +282,12 @@ cd pi-rust
 cargo fmt --all -- --check                       # clean
 cargo clippy --workspace --all-targets --locked -- -D warnings   # No issues found
 cargo test --workspace --locked --no-fail-fast   # 2648 passed / 0 failed / 2 ignored (169 suites)
+                                                 # 合并 origin/feature/pi.rs 后：2715 passed / 0 failed / 2 ignored (173 suites)
 
 # 真 PTY（修后）
 python3 scripts/pty_capture.py --bin target/debug/pi \
   --steps scripts/pty_scenarios/lum1332-composer-drag-select.json \
-  --out docs/screenshots/lum1332-composer-drag-select.png        # 30 checks, 30 PASS
+  --out docs/screenshots/lum1332-composer-drag-select.png        # 32 checks / 8 panels, 32 PASS
 ```
 
 **门禁的 profile 说明（必须写明）**：本机 overlay 盘被多个并行 run 的 target 目录占满，
@@ -298,7 +306,7 @@ cargo build -p pi-coding-agent --bin pi
 cp target/debug/pi /tmp/pi-pre && git stash pop
 python3 scripts/pty_capture.py --bin /tmp/pi-pre \
   --steps scripts/pty_scenarios/lum1332-composer-drag-select-baseline.json \
-  --out docs/screenshots/lum1332-composer-drag-select-baseline.png   # 19 checks, 19 PASS
+  --out docs/screenshots/lum1332-composer-drag-select-baseline.png   # 23 checks / 8 panels, 23 PASS
 ```
 
 ---

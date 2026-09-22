@@ -1,6 +1,6 @@
-# lum1332.png — chars, 100x20 cells
+# lum1332-composer-drag-select.png — chars, 100x20 cells
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [1] 1. drag from 'llo' to the 'o' of 'world': the fragment is highlighted  (cursor 36,18, frame 2129654e8fb4, px 52d55b1e021b, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [1] 1. drag from 'llo' to the 'o' of 'world': the fragment is highlighted  (cursor 36,18, frame 9b294f92e301, px bb7a06fdcfa7, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -20,7 +20,7 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > hello w▍orld
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
 # reverse y=18 x=4-10 'llo w▍o'
   assert PASS   expect       '^# reverse y=18 x=4-10 '  — the reversed cells start on the pressed 'l' and end on the dragged 'o' (the run is one cell wider: the caret marker is inserted inside it)
   assert PASS   expect       'llo w▍o'  — and they spell exactly the dragged characters
@@ -28,7 +28,7 @@ Faux test model  session-18d78adf12b55155                              in 0 out 
   assert PASS   expect       '> hello world▍' (x0)  — it left the end of the draft
   assert PASS   expect       '# clipboard' (x0)  — nothing is copied while the button is still down
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [2] 2. release: the selection reaches the clipboard channel  (cursor 36,18, frame d78e972c3962, px 52d55b1e021b, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [2] 2. release: the selection reaches the clipboard channel  (cursor 36,18, frame 3297ebcf01ac, px bb7a06fdcfa7, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -48,14 +48,14 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > hello w▍orld
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
 # reverse y=18 x=4-10 'llo w▍o'
 # clipboard: 'llo wo'
   assert PASS   expect       "# clipboard: 'llo wo'"  — copy-on-select handed exactly the highlighted text to the terminal (OSC 52)
   assert PASS   expect       '^# reverse y=18 x=4-10 '  — the highlight stays after the release
   assert PASS   expect       '> hello w▍orld' (x1)  — the draft and the caret are unchanged by the copy — a selection is not an edit
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [3] 3. a click still places the caret and copies nothing (LUM-1327)  (cursor 11,18, frame eadf8e5a7b54, px ca735382c67a, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [3] 3. a click still places the caret and copies nothing (LUM-1327)  (cursor 11,18, frame fd2f4f5d42f2, px f00e3745fae5, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -75,13 +75,13 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 > he▍llo world
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> he▍llo world'
   assert PASS   expect       '# reverse' (x0)  — a click leaves no selection behind
   assert PASS   expect       '# clipboard' (x0)  — and queues no clipboard write of its own
   assert PASS   expect       '^> he.llo world$'  — the draft kept every character — the click only moved the caret
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [4] 4. drag across the line break: both rows highlight  (cursor 14,18, frame 7829139f219c, px a55cb16987d8, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [4] 4. drag across the line break: both rows highlight  (cursor 14,18, frame d7952fe22078, px 7cc32ba65285, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -101,7 +101,7 @@ hints hidden on a short terminal — Alt+H shows them
 
 > first line
   sec▍ond line
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
 # reverse y=17 x=3-11 'irst line'
 # reverse y=18 x=2-6 'sec▍o'
   assert PASS   expect       '> first line'
@@ -110,7 +110,7 @@ Faux test model  session-18d78adf12b55155                              in 0 out 
   assert PASS   expect       '^# reverse y=18 x=2-6 '  — and the second row's selected head, caret marker included
   assert PASS   expect       '# clipboard' (x0)  — still nothing copied while dragging
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [5] 5. release: a cross-row selection copies with its newline  (cursor 14,18, frame 6687859a6ed2, px a55cb16987d8, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [5] 5. release: a cross-row selection copies with its newline  (cursor 14,18, frame bb9f7238b863, px 7cc32ba65285, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -130,14 +130,14 @@ hints hidden on a short terminal — Alt+H shows them
 
 > first line
   sec▍ond line
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
 # reverse y=17 x=3-11 'irst line'
 # reverse y=18 x=2-6 'sec▍o'
 # clipboard: 'irst line\nseco'
   assert PASS   expect       "# clipboard: 'irst line\\nseco'"  — the copied text is the draft fragment, newline and all
   assert PASS   expect       "# reverse y=17 x=3-11 'irst line'"  — the highlight survives the release on both rows
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [6] 6. a drag that leaves the composer clamps into it  (cursor 14,18, frame 5e58214aae3a, px 5c7148682668, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [6] 6. a drag that leaves the composer clamps into it  (cursor 14,18, frame b4ad88b290ae, px cac32a71c256, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -157,7 +157,7 @@ hints hidden on a short terminal — Alt+H shows them
 
 > ▍first line
   second line
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
 # reverse y=17 x=3-9 'first l'
   assert PASS   expect       '> ▍first line'  — the drag past the composer's left edge clamped to the draft's first column
   assert PASS   expect       '^# reverse y=17 x=3-9 '  — the selection runs from the draft's start to the pressed 'l'
@@ -165,7 +165,7 @@ Faux test model  session-18d78adf12b55155                              in 0 out 
   assert PASS   expect       '^# reverse y=1[0-6] ' (x0)  — the drag never reached the chat log
   assert PASS   expect       '# clipboard' (x0)  — an unfinished drag copies nothing
 
-===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — and its release copies the clamped fragment ('line\ns'), while a click on the status bar changes nothing. Nothing mocked.  |  [7] 7. the clamped drag's release copies; a click below changes nothing  (cursor 14,18, frame bc32ac484365, px 517a7d7b4cb8, alive=True) =====
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [7] 7. the clamped drag's release copies the clamped fragment  (cursor 14,18, frame 7dcd6f4b7775, px f6b4b60162cc, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -185,7 +185,7 @@ hints hidden on a short terminal — Alt+H shows them
 
 > first line
   ▍second line
-Faux test model  session-18d78adf12b55155                              in 0 out 0 ?/8.2k  ? for help
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
 # reverse y=17 x=8-11 'line'
 # reverse y=18 x=2-3 '▍s'
 # clipboard: 'line\ns'
@@ -193,5 +193,29 @@ Faux test model  session-18d78adf12b55155                              in 0 out 
   assert PASS   expect       "# clipboard: 'line\\ns'"  — releasing the clamped drag copies the clamped fragment
   assert PASS   expect       '^# reverse y=17 x=8-11 '  — the first row's run is now its own cells: the caret left that row
   assert PASS   expect       '^# reverse y=18 x=2-3 '  — and the second row's run covers the caret and the character it landed on
+
+===== LUM-1332 — composer drag-select + copy-on-select (codex chat_composer/mouse.rs `copy_selection`, upstream pi-ts screen selection semantics), real binary + real PTY + pyte. Panel 1: dragging from the first 'l' of 'llo' to the 'o' of 'world' highlights exactly those characters (reversed video) and moves the caret to the drag's end. Panel 2: the release copies exactly that text — the '# clipboard' line is the OSC 52 payload the terminal received, and the frame is unchanged because a copy is not an edit. Panel 3: a plain click still places the caret and copies nothing (LUM-1327, unchanged). Panels 4-5: a drag across the line break selects through it and copies 'irst line\nseco'. Panels 6-7: a drag that leaves the composer clamps to the composer's edge — the transcript above shows no highlight at all — its release copies the clamped fragment ('line\ns'), and a click on the status bar dismisses the highlight without copying anything (a press elsewhere is a new gesture). Nothing mocked.  |  [8] 8. a press outside the composer dismisses the highlight  (cursor 4,18, frame 1c0ff4e0b3e3, px 1cb7b791fbd1, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> first line
+  ▍second line
+Faux test model  session-18d78d847d46104c                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '  ▍second line'  — the caret is not the selection's: it stays where the drag finished
+  assert PASS   expect       '# reverse' (x0)  — the status-bar press is a new gesture, so the stale composer highlight is gone
+  assert PASS   expect       '# clipboard' (x0)  — and the click copies nothing of its own
   assert PASS   expect       'Faux test model'
-  assert PASS   expect       '# clipboard' (x1)  — one copy, from the release — the status-bar click that followed queued nothing

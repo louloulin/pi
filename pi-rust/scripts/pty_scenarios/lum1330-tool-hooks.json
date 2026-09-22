@@ -1,0 +1,50 @@
+{
+  "cols": 110,
+  "rows": 34,
+  "args": [
+    "--model",
+    "openai/gpt-4o-mini"
+  ],
+  "env": {
+    "OPENAI_API_KEY": "test-key",
+    "OPENAI_BASE_URL": "http://127.0.0.1:8137"
+  },
+  "extensions": {
+    "hooks.js": "module.exports = function (pi) {\n  pi.on(\"tool_call\", function (event) {\n    if (event.toolName === \"bash\") {\n      return { block: true, reason: \"blocked-by-extension\" };\n    }\n    return null;\n  });\n\n  pi.on(\"tool_result\", function (event) {\n    if (event.toolName === \"read\") {\n      return { content: [{ type: \"text\", text: \"REDACTED-BY-EXTENSION\" }], details: { redacted: true } };\n    }\n    return undefined;\n  });\n};\n"
+  },
+  "notes": [
+    "Model: a loopback OpenAI-compatible server (scripts/fake_model_server.py), because faux/faux-model only ever replies with text and a tool hook needs a real tool call.",
+    "Panel 1 is the load-bearing claim: the extension's `tool_call` handler blocked the call, so the transcript carries the loop's error tool result with the handler's own reason — and the command's output never appears.",
+    "The command is `printf %s%s RUNAWAY _MARKER`; the marker is assembled by the shell at run time, so `RUNAWAY_MARKER` can only be in the transcript if the shell ran. The paired baseline is lum1330-tool-hooks-baseline.json, where the same command runs and the marker *does* appear (that is the point of the `reject` assertions here).",
+    "Run it with: python3 pi-rust/scripts/fake_model_server.py --port 8137 --tool bash --arguments '{\"command\": \"printf %s%s RUNAWAY _MARKER\"}'"
+  ],
+  "caption": "LUM-1330 tool hooks: a real `pi` TUI run against a loopback model that asks for `bash {command: \"printf %s%s RUNAWAY _MARKER\"}`. The loaded extension's `tool_call` handler returns `{ block: true, reason: \"blocked-by-extension\" }`; the transcript shows the error tool result with that reason, the shell never ran (the run-time marker `RUNAWAY_MARKER` that the baseline frame shows is absent), and the session keeps answering. Real binary, real PTY, pyte VT emulator.",
+  "panels": [
+    {
+      "label": "1. the extension blocks the tool call and its reason reaches the transcript",
+      "send": "please run it<Enter>",
+      "wait_for": "blocked-by-extension",
+      "wait_timeout": 20,
+      "expect": [
+        "blocked-by-extension",
+        "tool call blocked"
+      ],
+      "reject": [
+        "RUNAWAY_MARKER"
+      ]
+    },
+    {
+      "label": "2. the session survives the block: the next turn is a normal text reply",
+      "send": "and now something harmless<Enter>",
+      "wait_for": "finished",
+      "wait_timeout": 20,
+      "expect": [
+        "finished"
+      ],
+      "reject": [
+        "RUNAWAY_MARKER"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}
