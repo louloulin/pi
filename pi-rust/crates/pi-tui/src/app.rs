@@ -902,10 +902,21 @@ enum SearchKeyOutcome {
 /// the pasted path becomes an image part).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Submission {
-    /// The draft's visible text (chip labels expanded).
+    /// The draft's visible text (chip labels expanded, paste markers
+    /// expanded to the lines they stand for).
     pub text: String,
     /// Pasted images attached to the draft, in buffer order.
     pub images: Vec<pi_protocol::ImageContent>,
+    /// The composer buffer the submission was built from, when it came from
+    /// the App's own composer: [`CHIP_CHAR`](crate::editor::CHIP_CHAR)
+    /// sentinels and `[paste #N …]` markers included.
+    ///
+    /// The prompt history stores this form, not [`Submission::text`], for the
+    /// same reason upstream's `pushHistoryEntry` keeps `getText()`: a recalled
+    /// paste has to come back as the compact marker rather than the lines it
+    /// stands for. `None` for a programmatic submission
+    /// ([`Submission::new`] / `From<String>`), where there is no draft.
+    pub draft: Option<String>,
 }
 
 impl Submission {
@@ -914,7 +925,16 @@ impl Submission {
         Self {
             text: text.into(),
             images: Vec::new(),
+            draft: None,
         }
+    }
+
+    /// The buffer to record in the prompt history.
+    ///
+    /// The raw draft when there is one (markers and chips intact), otherwise
+    /// the expanded text — a programmatic submission has no separate draft.
+    pub fn history_text(&self) -> &str {
+        self.draft.as_deref().unwrap_or(&self.text)
     }
 
     /// The `UserMessage` content blocks for this draft: the text first,
@@ -2232,7 +2252,7 @@ impl App {
             self.messages
                 .push_pending(PendingMessageKind::Steer, text.clone());
             self.prompt.push_history_entry(HistoryEntry::with_images(
-                text.clone(),
+                submission.history_text().to_string(),
                 submission.images.clone(),
             ));
             return;
@@ -2245,7 +2265,7 @@ impl App {
         }
         self.messages.push(MessageItem::user(&text));
         self.prompt.push_history_entry(HistoryEntry::with_images(
-            text.clone(),
+            submission.history_text().to_string(),
             submission.images.clone(),
         ));
         let cancel = CancellationToken::new();
@@ -2298,15 +2318,16 @@ impl App {
             return FollowUpOutcome::RefusedImages;
         }
         let submission = Submission {
-            text: self.prompt.text(),
+            text: self.prompt.expanded_text(),
             images: self.prompt.images().to_vec(),
+            draft: Some(self.prompt.editor().text().to_string()),
         };
         self.prompt.clear();
         if busy {
             self.messages
                 .push_pending(PendingMessageKind::FollowUp, submission.text.clone());
             self.prompt.push_history_entry(HistoryEntry::with_images(
-                submission.text.clone(),
+                submission.history_text().to_string(),
                 submission.images.clone(),
             ));
             FollowUpOutcome::Queued
@@ -2669,6 +2690,19 @@ impl App {
         self.prompt.text()
     }
 
+    /// The draft with paste markers expanded to the text they stand for —
+    /// what a submission and the external editor get (upstream
+    /// `getExpandedText`, `interactive-mode.ts:4247`).
+    pub fn expanded_editor_text(&self) -> String {
+        self.prompt.expanded_text()
+    }
+
+    /// Number of paste markers standing in the draft; `0` when the draft
+    /// was typed rather than pasted in bulk.
+    pub fn paste_marker_count(&self) -> usize {
+        self.prompt.editor().paste_marker_ids().len()
+    }
+
     /// Show a custom component with keyboard focus (upstream
     /// `ctx.ui.custom`), returning the handle that controls its visibility
     /// and carries the close result.
@@ -2820,6 +2854,43 @@ impl App {
             return StepOutcome::Idle;
         };
         self.step_key(key)
+    }
+
+    /// Route a bracketed paste into the composer.
+    ///
+    /// The driver calls this for `crossterm`'s [`CtEvent::Paste`], which the
+    /// terminal only ever sends while the driver has bracketed paste enabled
+    /// (`pi-coding-agent`'s `setup_terminal`, upstream
+    /// `packages/tui/src/terminal.ts:184`). The payload arrives as **one**
+    /// event instead of a burst of keys, which is the whole point: a pasted
+    /// block used to reach the composer as individual characters and every
+    /// newline in it was an `Enter`, so pasting three lines submitted the
+    /// draft three times.
+    ///
+    /// Paste is a separate entry point rather than an
+    /// [`InputEvent`](crate::input::InputEvent) variant because that enum is
+    /// `Copy` by construction — [`App::step`] matches it by value and still
+    /// uses it afterwards — and a heap payload cannot ride in a `Copy` type.
+    ///
+    /// The modal layers keep their priority: while a dialog, the settings
+    /// modal or a selector owns the keyboard, a paste is dropped instead of
+    /// editing the frozen composer underneath it.
+    pub fn step_paste(&mut self, text: &str) -> StepOutcome {
+        if self.exit_requested {
+            return StepOutcome::Exit;
+        }
+        if self.dialog.is_some()
+            || self.settings.is_some()
+            || self.selector.is_some()
+            || self.custom_open()
+        {
+            return StepOutcome::Idle;
+        }
+        match self.prompt.editor_mut().insert_paste(text) {
+            crate::editor::PasteInsertOutcome::Ignored => StepOutcome::Idle,
+            crate::editor::PasteInsertOutcome::Inserted
+            | crate::editor::PasteInsertOutcome::Marker(_) => StepOutcome::Redraw,
+        }
     }
 
     /// True when `key` triggers an `app.*` id.
@@ -3092,7 +3163,11 @@ impl App {
                     self.flash_status("Cannot attach images while a turn is running");
                     return StepOutcome::Redraw;
                 }
-                let submitted = Submission { text, images };
+                let submitted = Submission {
+                    text,
+                    images,
+                    draft: Some(self.prompt.editor().text().to_string()),
+                };
                 self.prompt.clear();
                 StepOutcome::Submitted(submitted)
             }
@@ -5285,8 +5360,14 @@ impl App {
     /// Insert clipboard *text* at the cursor — the fallback
     /// `app.clipboard.pasteImage` takes when the clipboard holds no image
     /// (upstream `handleClipboardPaste`'s else branch).
+    ///
+    /// Upstream wraps the clipboard text in the bracketed-paste markers and
+    /// feeds it back through `editor.handleInput`
+    /// (`interactive-mode.ts:2445`, `:2927`), so a pasted log gets the same
+    /// marker / undo treatment as a terminal paste; the port calls the same
+    /// entry point directly.
     pub fn paste_text(&mut self, text: &str) {
-        self.prompt.editor_mut().insert_str(text);
+        self.prompt.editor_mut().insert_paste(text);
     }
 
     /// Clear the composer: buffer text, pasted chips and the history
@@ -6173,6 +6254,11 @@ impl App {
                 width: w,
                 height: h,
             },
+            // Bracketed paste has no `InputEvent` counterpart (the enum is
+            // `Copy`, and the payload is owned): the driver recognises
+            // `CtEvent::Paste` itself and calls [`App::step_paste`]. Mapping
+            // it to `Ignored` here is what keeps a byte-level paste from
+            // being replayed as a burst of key events.
             _ => InputEvent::Ignored,
         }
     }

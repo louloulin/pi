@@ -1,0 +1,298 @@
+# lum1328-paste.png — chars, 76x26 cells
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [1] 1. idle: header hint + one composer row  (cursor 76,25, frame 45401c4629fd, px aa8e8a2d331a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '? for help'
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [2] 2. a one-line bracketed paste lands as text at the cursor  (cursor 36,24, frame 5e7007db1fcf, px cfe8678d43d0, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> one-line paste▍
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        'one-line paste'  — the paste payload reached the composer as one insertion (pre-fix the CSI bytes were replayed as keys)
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [3] 3. Ctrl+U empties the composer again, so the next demo starts clean  (cursor 36,24, frame 45401c4629fd, px aa8e8a2d331a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        'type a prompt'  — the composer is empty again (placeholder back)
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [4] 4. a three-line paste is a three-row draft — no turn started (the reject row is the pre-fix defect: three submissions)  (cursor 36,24, frame 42ff79980cf2, px 9d409b7d6b72, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> line one
+  line two
+  line three▍
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   reject       '(faux) hello'  — no turn ran: pre-fix every newline of the block submitted, so the pasted draft produced three of them
+  assert PASS   probe        'line three▍'  — the third pasted line sits in the composer with the caret after it (the transcript never draws `▍`)
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [5] 5. Enter sends the whole three-line draft as ONE turn  (cursor 36,24, frame 29e5d2fa2e4d, px 82240e326e40, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> line one
+> line two
+> line three
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '(faux) hello'  — exactly one turn ran for the whole draft
+  assert PASS   probe        'line three'  — the third line travelled with the same submission
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [6] 6. a twelve-line paste becomes a [paste #1 +12 lines] marker instead of twelve rows  (cursor 36,24, frame 1f4e5fe45a34, px 1984f02395c2, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> line one
+> line two
+> line three
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> [paste #1 +12 lines]▍
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '[paste #1 +12 lines]'  — the large paste was collapsed into a marker (only the fixed binary can draw this)
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [7] 7. Backspace takes the whole marker back out in one press  (cursor 36,24, frame 29e5d2fa2e4d, px 82240e326e40, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> line one
+> line two
+> line three
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   reject       '[paste #'  — a deleted marker must not leave half its label behind
+  assert PASS   probe        'type a prompt'  — the 21-character marker went as one unit and left an empty composer
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [8] 8. Enter on a marker hands the model the twelve lines it stands for, not the label  (cursor 36,24, frame 7a2f0c0275dc, px a6f199dfbd6b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> line one
+> line two
+> line three
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> [paste #2 +12 lines]▍
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '[paste #2 +12 lines]'  — a second large paste gets its own id
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [9] 9. Enter expands the marker: the transcript shows the twelve pasted lines and no label  (cursor 36,24, frame 17980246f0ee, px f050a910b80e, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> line one
+> line two
+> line three
+  faux-model (faux) hello
+> row01
+> row02
+> row03
+> row04
+> row05
+> row06
+> row07
+> row08
+> row09
+> row10
+> row11
+> row12
+  faux-model (faux) hello
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   reject       '[paste #2'  — the marker itself is never sent to the model — the composer was cleared by the submit
+  assert PASS   probe        'row12'  — the model view is the expanded content (the last pasted line)
+  assert PASS   probe        'row01'  — …and the first one, so the whole block arrived
+
+===== LUM-1328 composer paste: a bracketed paste (the byte sequence a terminal sends once the app enables the mode, `ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~`) lands in the composer as ONE insertion — three lines stay a three-row draft with no turn started, twelve lines become a `[paste #1 +12 lines]` marker, Backspace removes the whole marker, and Enter hands the model the twelve lines the marker stands for. Before this round the mode was never requested (`pi-coding-agent`'s `setup_terminal`) and `CtEvent::Paste` had no consumer, so the same bytes were replayed as keystrokes: every newline in the block was an `Enter` and the draft was submitted line by line. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `probe` rows name behaviour only the fixed binary can show (they XFAIL on the `6a5a2faf2` baseline of the same scenario).  |  [10] 10. the other half of the story: the byte form a terminal sends with the mode OFF is plain keystrokes, so `raw two` was submitted as its own turn (both binaries behave this way — it is why the mode has to be requested)  (cursor 36,24, frame ad79b4714071, px 2aaa143fa84b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> line one
+> line two
+> line three
+  faux-model (faux) hello
+> row01
+> row02
+> row03
+> row04
+> row05
+> row06
+> row07
+> row08
+> row09
+> row10
+> row11
+> row12
+  faux-model (faux) hello
+> raw one
+> raw two
+  faux-model (faux) hello
+  faux-model (faux) hello
+
+> raw three▍
+Faux test model  session-18d782e17b896993      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'raw one'  — the first raw chunk was submitted on its own — one turn per newline
+  assert PASS   expect       'raw two'  — and the second, which is the pre-fix paste symptom in byte form
+  assert PASS   probe        'raw three▍'  — only the last chunk (no trailing newline) is left in the composer

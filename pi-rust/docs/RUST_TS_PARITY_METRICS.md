@@ -571,6 +571,58 @@ bash 忙提示与 `/settings` 描述），无丢失。
 差额来自 §0.15 自己就记过的**同一命令在不同轮次给出 ±51** 的口径差（它当时只在 2,670 上加增量，
 没有重估历史轴）。本轮同样**不重估** §0.14/§0.15 的旧值，只把合并后实测量登记在这里。
 
+### 0.17 LUM-1460 复测：抢救 LUM-1328/LUM-1318 的 composer 粘贴通道（`pi-rust/crates` 里此前 **0 命中**）；加权仍 **86.8%**
+
+本轮**不是新功能**，是把一条已写完却从未进入 `feature/pi.rs` 的交付救回来
+（提交 `6631b8c77` / `9c20bd8f1` 只存在于 `origin/work/LUM-1328` 与 `origin/work/LUM-1318`，
+`git merge-base --is-ancestor` 两条都是 NOT），并适配当前 tip 的
+`HistoryEntry` / `Submission` 模型。根因是上一轮收编检查的**假阳性**
+（`git grep 'paste #'` 不限路径 → 命中上游 `packages/tui/src/components/editor.ts`
+与 pi-rust 的 md 文档，`-- pi-rust/crates` 是 **0**）。细节、逐行对照、偏差清单与
+frame-buffer 截图见 `docs/LUM1460_PASTE_RESCUE.md`。
+
+| 量 | 本轮实测 | 基线 `815b21d13` | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **91.8%**（140,615 / 153,106） | 91.5%（140,032） | `python pi-rust/scripts/measure_loc.py`；+583 行 src |
+| 测试规模 | **51.6%**（2,740 / 5,309） | 51.1%（2,711） | `grep -rhoE '#\[(tokio::)?test\]' pi-rust/crates --include=*.rs \| wc -l`，基线在同一命令下于 `lum-1457` worktree（tip `815b21d13`）复测 |
+| `pi-tui` 全量 | **1075 passed / 0 failed** | 1045 / 0 | `cargo test --offline -p pi-tui`（57 target），+30 = `composer_paste`（27）+ `lum1460_paste_frames`（3）|
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 无新模块 |
+| `app.*` 接线 | 43 / 44 = 97.7%（silent 1：`app.tree.editLabel`） | 同 | 未动 |
+| `tui.*` 消费面 | 49 / 49 = 100% | 同 | 未动 |
+| 扩展生命周期事件 | 36 / 36 | 同 | 未动 |
+| **composer 粘贴能力面（本期新登记轴）** | **7 / 7 = 100%** | **0 / 7 = 0%** | 7 行逐条挂在 `tests/composer_paste.rs` 的用例上，见交付文档 §4 |
+
+**加权完成度（权重表见 §4.1，公式公开）**：13 条轴里只有第 12 轴动了，
+`2711/5309 = 0.5107` → `2740/5309 = 0.5161`：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×(2740/5309) + 3×0.95 = 86.83% → **86.8%**
+```
+
+即一位小数不变（86.80 → 86.83，**+0.03pt**）。**粘贴通道不单独进公式**：它是轴 5
+（TUI 交互面）内部的一格，而轴 5 的输入是"模块率与 `app.*` 接线率的均值"，两条都没动。
+按 LUM-1450 立下的规矩（"新轴要先说清权重来源再进 §4.1"），本轮只把它作为
+**新登记、可反证的量**公开（0/7 → 7/7）。
+
+**本轮的门禁与证据（可复跑）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 粘贴行为 | `cargo test --offline -p pi-tui --test composer_paste` | **27 / 0**（含删除重编号 3 条、原子编辑 3 条、撤销/历史 3 条） |
+| 帧 | `cargo test --offline -p pi-tui --test lum1460_paste_frames` | **3 / 0** |
+| 全仓编译 | `cargo check --offline --workspace --all-targets` | exit 0（只剩 `rquickjs-core`(vendor) 与 `pi-extensions` 的既有告警） |
+| 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；`pi-tui` / `pi-coding-agent` **0 告警**（老分支带来的 `question_mark` 1 条已修） |
+| 帧截图 | `docs/screenshots/lum1460-paste-{marker,two-markers,submitted}-100x24.png`(+`.txt`) | 3 帧，100×24，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 丢失证据 | `git grep -c 'paste #' origin/feature/pi.rs -- pi-rust/crates \| wc -l` | **0**（整树 12 文件全是上游 TS 与 md 文档） |
+
+**诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，
+证明"画出来的东西"（composer 只有一行 marker；提交后 transcript 是 12 行正文），
+**不证明按键/字节时序**——时序由 27 条 `App`/`Editor` 级驱动用例覆盖。
+老分支的真 PTY 场景（`lum1328-paste.json` / `lum1318-paste-fold.json`）与基线截图
+**没有带进本轮**（在本机跑不了）；`docs/screenshots/lum1328-paste*.png` 是那条分支的历史实拍，
+不是在本轮代码上拍的。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

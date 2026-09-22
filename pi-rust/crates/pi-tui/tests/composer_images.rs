@@ -173,6 +173,7 @@ fn submission_orders_text_before_images() {
     let submission = Submission {
         text: "describe this".into(),
         images: vec![image("one"), image("two")],
+        draft: None,
     };
     let blocks = submission.content_blocks();
     assert_eq!(blocks.len(), 3);
@@ -206,6 +207,7 @@ async fn interleaved_draft_reaches_the_agent_in_order() {
     let submitted = Submission {
         text: app.editor_text(),
         images: app.prompt().images().to_vec(),
+        draft: None,
     };
     app.clear_composer();
     app.submit(agent.clone(), submitted);
