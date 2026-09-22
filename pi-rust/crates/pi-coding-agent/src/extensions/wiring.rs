@@ -32,6 +32,7 @@ use pi_protocol::{
     ResourcesDiscoverReason, Role, SessionShutdownReason, StopReason, UiLevel, Usage,
 };
 
+use crate::extensions::autocomplete::SessionAutocompleteBase;
 use crate::extensions::js_loader::{self, ExtensionLoadRequest};
 use crate::extensions::pi_ai_runner::BuiltinPiAiStreamRunner;
 use crate::extensions::ui_bridge::{TuiRegionHost, TuiUiBridge};
@@ -262,6 +263,11 @@ pub struct ExtensionRuntime {
     /// `message_update` traffic, which is the hottest event in the
     /// system.
     subscribed_events: BTreeSet<String>,
+    /// Built-in autocomplete provider slot the extension wrapper chain
+    /// delegates to. Shared with the host (see
+    /// [`SessionAutocompleteBase`]); the interactive loop publishes the
+    /// `CombinedAutocompleteProvider` into it once the `App` exists.
+    autocomplete_base: Arc<SessionAutocompleteBase>,
 }
 
 impl std::fmt::Debug for ExtensionRuntime {
@@ -275,6 +281,7 @@ impl std::fmt::Debug for ExtensionRuntime {
             .field("mode", &self.mode)
             .field("has_ui", &self.has_ui)
             .field("subscribed_events", &self.subscribed_events.len())
+            .field("autocomplete_base", &self.autocomplete_base)
             .finish_non_exhaustive()
     }
 }
@@ -304,6 +311,38 @@ impl ExtensionRuntime {
     /// Commands registered by every loaded extension, in load order.
     pub fn commands(&self) -> &[RegisteredCommand] {
         &self.commands
+    }
+
+    /// The built-in autocomplete provider slot the extension chain delegates
+    /// to (see [`SessionAutocompleteBase`]).
+    pub fn autocomplete_base(&self) -> &Arc<SessionAutocompleteBase> {
+        &self.autocomplete_base
+    }
+
+    /// The live extension host, when extensions are enabled.
+    pub fn host(&self) -> Option<&JsExtensionHost> {
+        self.host.as_ref()
+    }
+
+    /// Whether the host gathered an autocomplete wrapper chain that the
+    /// editor should route through. `false` when there is no host, no
+    /// registered wrapper, or the rebuild failed.
+    pub async fn rebuild_autocomplete(&self) -> Option<Vec<char>> {
+        let host = self.host.as_ref()?;
+        match host.autocomplete_rebuild().await {
+            Ok(triggers) => Some(triggers),
+            Err(error) => {
+                tracing::warn!(target: "pi_extension", "autocomplete rebuild failed: {error}");
+                None
+            }
+        }
+    }
+
+    /// Whether the JS side registered at least one autocomplete wrapper.
+    pub fn has_autocomplete_wrapper(&self) -> bool {
+        self.host
+            .as_ref()
+            .is_some_and(|host| host.autocomplete_generation() > 0)
     }
 
     /// `promptSnippet` / `promptGuidelines` contributions declared by
@@ -503,6 +542,13 @@ pub fn load(
     // `options.apiKey` wins, then the provider's env vars.
     let pi_ai_runner: Arc<dyn pi_extensions::PiAiStreamRunner> =
         Arc::new(BuiltinPiAiStreamRunner::from_env());
+    // The built-in autocomplete provider is published *after* the load pass
+    // (the interactive loop owns it, and it needs the registered extension
+    // commands), so the host gets an empty slot here and the same handle
+    // travels back out through [`ExtensionRuntime`].
+    let autocomplete_base = Arc::new(SessionAutocompleteBase::new());
+    let autocomplete_base_host: Arc<dyn pi_extensions::AutocompleteBaseProvider> =
+        autocomplete_base.clone();
     let host_options = match &options.ui {
         Some(ui) => {
             let mut host_options = HostOptions::default()
@@ -514,7 +560,8 @@ pub fn load(
                     cwd: cwd.clone(),
                 })
                 .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone())))
-                .with_pi_ai_stream_runner(pi_ai_runner.clone());
+                .with_pi_ai_stream_runner(pi_ai_runner.clone())
+                .with_autocomplete_base(autocomplete_base_host.clone());
             if let Some(region_host) = options.ui_region_host.clone() {
                 host_options = host_options.with_ui_region_host(region_host);
             }
@@ -528,7 +575,8 @@ pub fn load(
                 cwd: cwd.clone(),
             })
             .with_builtin_tool_runner(Arc::new(BuiltinToolBridge::new(builtin.clone())))
-            .with_pi_ai_stream_runner(pi_ai_runner),
+            .with_pi_ai_stream_runner(pi_ai_runner)
+            .with_autocomplete_base(autocomplete_base_host),
     };
 
     let result = runtime.block_on(async {
@@ -644,6 +692,7 @@ pub fn load(
                     has_ui,
                     cwd,
                     subscribed_events,
+                    autocomplete_base,
                 },
                 loaded,
                 tools,

@@ -213,11 +213,16 @@ diff <(sed -n '16,30p' docs/screenshots/lum1450-help-legend-default-100x30.txt) 
 **当前进度一句话**：纯代码规模 **90.5%**、测试规模 **50.6%**、13 轴加权 **86.8%**、
 TUI 交互+视觉轴 `(14×0.905 + 8×0.90)/22 = 90.3%`。
 
+**合并后复测**：本轮到分支时 `origin/feature/pi.rs` 已被 LUM-1448（扩展 autocomplete
+provider）推进，合并后的实测数字（规模 **91.5%**、测试 **51.1%**、`pi-tui` **1045/0**、
+`pi-coding-agent --lib` **584/8**、加权仍 **86.8%**）与两份数字的分工见
+`RUST_TS_PARITY_METRICS.md` §0.16.1。
+
 ## 7. 剩余缺口（供下一轮起手）
 
 | 顺位 | 项 | 范围 | 说明 |
 |---|---|---|---|
-| 1 | `hint_chord_literals.py` 的 5 条知会项里，3 条是**真**缺口 | `pi-coding-agent` | ① `AUTOCOMPLETE_COMMANDS` 的 `Configure which models Ctrl+P cycles`（`const` 表，需 provider 侧格式化）；② `/help` 的 `/new` 行文案里的 `Shift+Enter`（kitty 协议条件，需改成渲染 `tui.input.newLine` 的全部 chord，列宽 +3）；③ `/hotkeys` 的 `(Ctrl+O by default)` / `(Alt+H by default)`（说的是出货值，不是生效值）。三者都已写进脚本注释的理由 |
+| 1 | `hint_chord_literals.py` 的 5 条知会项里，3 条是**真**缺口 → **已立 LUM-1453（backlog，指派 devbox1）** | `pi-coding-agent` | ① `AUTOCOMPLETE_COMMANDS` 的 `Configure which models Ctrl+P cycles`（`const` 表，需 provider 侧格式化）；② `/help` 的 `/new` 行文案里的 `Shift+Enter`（kitty 协议条件，需改成渲染 `tui.input.newLine` 的全部 chord，列宽 +3）；③ `/hotkeys` 的 `(Ctrl+O by default)` / `(Alt+H by default)`（说的是出货值，不是生效值）。三者都已写进脚本注释的理由与 LUM-1453 正文 |
 | 2 | `keybinding_coverage.py` 的口径缺陷 | `pi-rust/scripts` | 它把「非定义文件里出现过这个 id 字面量」当作「已消费」，于是 `Selector` 写死 `Enter` 时 `tui.select.confirm` 仍算 100%。本轮靠人工发现；下一轮应加一条**组件级**断言：`Selector`/`SettingsList`/`Dialog` 的 `handle_key` 轨迹里必须出现 `kb.matches` 调用（可用 `--check-components` 反证） |
 | 3 | `app.tree.editLabel`（唯一 silent `app.*`） | `pi-coding-agent` + `pi-tui` | 需要 tree 改名 UI（组件不存在），补齐后 `app.*` 44/44 = 100% |
 | 4 | `/help` 的 `keys:` 段与 `/hotkeys` 仍是两套行表 | `pi-coding-agent` | 两处都读 registry，但行集合与分组不同（`/help` 12 行紧凑图例、`/hotkeys` 5 组穷举）。合并会让 `/help` 变长；可考虑让 `/help` 只留 `keys:` 标题 + 指向 `/hotkeys` |
@@ -230,7 +235,8 @@ TUI 交互+视觉轴 `(14×0.905 + 8×0.90)/22 = 90.3%`。
   `pi-coding-agent/src/extensions/`）、待办的 LUM-1434（CLI flag 面，
   `pi-coding-agent/src/cli/`）**文件面零重叠**。
 * **新派（1 件，入库 backlog 不启动）**：§7 第 1 条（提示面剩余 3 处硬编码 chord）
-  单独立 issue 并指派 `编程助手-devbox1`（`22e8b20d`），但状态写 **backlog**
+  立为 [LUM-1453](mention://issue/01a0cb0d-d7b2-7a5e-88fb-c0204eeb4b00) 并指派
+  `编程助手-devbox1`（`22e8b20d`），但状态写 **backlog**
   —— 平台语义是「todo 会立刻起一轮 run，backlog 只入库待提升」。
   验收标准写在该 issue 正文里（含「`AUTOCOMPLETE_COMMANDS` 是 `const` 表，
   需要 provider 侧格式化」这条必须先决策的前提）。

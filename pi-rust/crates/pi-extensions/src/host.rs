@@ -35,6 +35,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::api::{ExtensionCapabilities, ExtensionEntry};
+use crate::autocomplete::{AutocompleteBaseProvider, AutocompleteItem, AutocompleteRequest};
 use crate::deflate::{self, crc32};
 use crate::error::ExtensionError;
 use crate::pi_ai::{PiAiStreamBridge, PiAiStreamRunner};
@@ -732,6 +733,17 @@ pub struct HostOptions {
     /// dedicated worker task. Without it the methods degrade to the
     /// non-interactive behaviour (no region is installed).
     pub ui_region_host: Option<Arc<dyn UiRegionHost>>,
+    /// Optional built-in autocomplete provider behind
+    /// `ctx.ui.addAutocompleteProvider`.
+    ///
+    /// Same shape of injection as [`HostOptions::ui_region_host`]: the
+    /// interactive adapter owns the concrete
+    /// `CombinedAutocompleteProvider` and implements
+    /// [`AutocompleteBaseProvider`] over it, and the shim's wrapper chain
+    /// reaches it through the synchronous `host_ui_autocomplete` import.
+    /// Without it the chain still loads, but a wrapper that delegates
+    /// receives `None` and the built-in completion is unchanged.
+    pub autocomplete_base: Option<Arc<dyn AutocompleteBaseProvider>>,
 }
 
 /// The session context an extension tool sees as its second argument.
@@ -788,6 +800,13 @@ impl std::fmt::Debug for HostOptions {
                 "ui_region_host",
                 &self.ui_region_host.as_ref().map(|_| "<dyn UiRegionHost>"),
             )
+            .field(
+                "autocomplete_base",
+                &self
+                    .autocomplete_base
+                    .as_ref()
+                    .map(|_| "<dyn AutocompleteBaseProvider>"),
+            )
             .finish()
     }
 }
@@ -823,6 +842,12 @@ impl HostOptions {
     /// `setEditorComponent` / `custom`.
     pub fn with_ui_region_host(mut self, host: Arc<dyn UiRegionHost>) -> Self {
         self.ui_region_host = Some(host);
+        self
+    }
+    /// Install the built-in autocomplete provider behind
+    /// `ctx.ui.addAutocompleteProvider`.
+    pub fn with_autocomplete_base(mut self, base: Arc<dyn AutocompleteBaseProvider>) -> Self {
+        self.autocomplete_base = Some(base);
         self
     }
 }
@@ -1389,7 +1414,9 @@ fn wake_async_driver(ctx: &Ctx<'_>) {
     ctx.spawn(async {});
 }
 
-/// Render the `host_ui_region` envelope, merging `extra`'s object fields in.
+/// Render a JSON envelope for one synchronous host import, merging
+/// `extra`'s object fields in. Used by `host_ui_region` and
+/// `host_ui_autocomplete`.
 fn region_envelope(ok: bool, extra: serde_json::Value) -> String {
     let mut value = serde_json::json!({"ok": ok});
     if let (Some(map), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
@@ -1398,6 +1425,124 @@ fn region_envelope(ok: bool, extra: serde_json::Value) -> String {
         }
     }
     value.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Autocomplete provider surface (`ctx.ui.addAutocompleteProvider`).
+//
+// The shim owns the wrapper chain (each factory receives the provider it
+// stacks on, upstream `interactive-mode.ts:734-745`) and the host owns the
+// built-in provider the chain delegates to. Two directions cross the ABI:
+//
+// * JS → Rust, synchronous: `host_ui_autocomplete(op, payloadJson)` answers a
+//   delegation to the built-in provider and records a (re-)registration. It
+//   has to be synchronous because the wrapper calls `current.getSuggestions`
+//   from inside a plain function call — there is nothing to await.
+// * Rust → JS, driven by the host: `_pi_autocomplete_call(op, payloadJson)`
+//   invokes the chain. The shim answers with a JSON string in the same turn
+//   (see the `apply` contract in `pi-ext-shim.mjs`), so the call completes in
+//   one poll and can be reached from the editor's synchronous provider
+//   without deadlocking.
+// ---------------------------------------------------------------------------
+
+/// Body of the synchronous `host_ui_autocomplete(op, payloadJson)` import.
+///
+/// Returns a JSON envelope (`{"ok":true,…}` / `{"ok":false,"error":…}`);
+/// the shim turns `ok:false` into a delegation that reports "nothing to
+/// complete" so a host without an interactive adapter behaves exactly like
+/// the built-in provider alone.
+fn handle_autocomplete_call(
+    op: &str,
+    payload_json: &str,
+    base: Option<&Arc<dyn AutocompleteBaseProvider>>,
+    generation: &AtomicU64,
+) -> String {
+    let payload: serde_json::Value =
+        serde_json::from_str(payload_json).unwrap_or(serde_json::Value::Null);
+    let base_missing = || {
+        region_envelope(
+            false,
+            serde_json::json!({"error": "no built-in autocomplete provider is installed"}),
+        )
+    };
+    match op {
+        // `ctx.ui.addAutocompleteProvider` pushed a factory. The chain itself
+        // lives in JS; the host only needs to know that it changed so the
+        // interactive loop can rebuild the trigger table.
+        "register" => {
+            generation.fetch_add(1, Ordering::Relaxed);
+            region_envelope(true, serde_json::Value::Null)
+        }
+        "baseGetSuggestions" => {
+            let Some(base) = base else {
+                return base_missing();
+            };
+            let request: AutocompleteRequest = match serde_json::from_value(payload) {
+                Ok(request) => request,
+                Err(error) => {
+                    return region_envelope(
+                        false,
+                        serde_json::json!({"error": format!("invalid request: {error}")}),
+                    )
+                }
+            };
+            let suggestions = base.get_suggestions(&request);
+            region_envelope(
+                true,
+                serde_json::json!({"suggestions": serde_json::to_value(suggestions).unwrap_or(serde_json::Value::Null)}),
+            )
+        }
+        "baseApplyCompletion" => {
+            let Some(base) = base else {
+                return base_missing();
+            };
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct ApplyPayload {
+                #[serde(flatten)]
+                request: AutocompleteRequest,
+                item: AutocompleteItem,
+                #[serde(default)]
+                prefix: String,
+            }
+            let parsed: ApplyPayload = match serde_json::from_value(payload) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return region_envelope(
+                        false,
+                        serde_json::json!({"error": format!("invalid apply payload: {error}")}),
+                    )
+                }
+            };
+            let completion = base.apply_completion(&parsed.request, &parsed.item, &parsed.prefix);
+            region_envelope(
+                true,
+                serde_json::json!({"completion": serde_json::to_value(completion).unwrap_or(serde_json::Value::Null)}),
+            )
+        }
+        "baseShouldTriggerFileCompletion" => {
+            let Some(base) = base else {
+                return base_missing();
+            };
+            let request: AutocompleteRequest = match serde_json::from_value(payload) {
+                Ok(request) => request,
+                Err(error) => {
+                    return region_envelope(
+                        false,
+                        serde_json::json!({"error": format!("invalid request: {error}")}),
+                    )
+                }
+            };
+            region_envelope(
+                true,
+                serde_json::json!({"value": base.should_trigger_file_completion(&request)}),
+            )
+        }
+        other => region_envelope(
+            false,
+            serde_json::json!({"error": format!("unknown autocomplete op `{other}`")}),
+        ),
+    }
 }
 
 /// Embedded QuickJS host. Cloning shares the underlying runtime +
@@ -1450,6 +1595,15 @@ struct Inner {
     region_tx: Option<mpsc::UnboundedSender<RegionCommand>>,
     /// Allocates the session tokens `ctx.ui.custom` hands back to the shim.
     next_ui_session: Arc<AtomicU64>,
+    /// Built-in provider the extension's autocomplete wrapper chain
+    /// delegates to (see [`AutocompleteBaseProvider`]). `None` when no
+    /// interactive adapter was injected.
+    autocomplete_base: Option<Arc<dyn AutocompleteBaseProvider>>,
+    /// Bumped every time the shim registers an autocomplete wrapper
+    /// (`ctx.ui.addAutocompleteProvider`). The interactive loop compares it
+    /// per tick to decide whether the chain — and therefore the editor's
+    /// trigger table — has to be rebuilt.
+    autocomplete_generation: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -1621,6 +1775,8 @@ impl JsExtensionHost {
             execs,
             region_tx,
             next_ui_session: Arc::new(AtomicU64::new(1)),
+            autocomplete_base: opts.autocomplete_base.clone(),
+            autocomplete_generation: Arc::new(AtomicU64::new(0)),
         });
 
         // Install host imports + shim.
@@ -2110,6 +2266,89 @@ impl JsExtensionHost {
             Ok(Err(e)) => Err(ExtensionError::Runtime(e.to_string())),
             Err(()) => Err(ExtensionError::Timeout(timeout)),
         }
+    }
+
+    /// The autocomplete registration generation.
+    ///
+    /// Bumped by the shim's `ctx.ui.addAutocompleteProvider` (through the
+    /// synchronous `host_ui_autocomplete` import). An interactive loop that
+    /// installed the composed provider caches the value it last saw and
+    /// rebuilds when it changes, so a wrapper registered *after* startup is
+    /// still reflected in the editor's trigger table.
+    pub fn autocomplete_generation(&self) -> u64 {
+        self.inner.autocomplete_generation.load(Ordering::Relaxed)
+    }
+
+    /// Whether a built-in provider was injected (see
+    /// [`HostOptions::autocomplete_base`]).
+    pub fn has_autocomplete_base(&self) -> bool {
+        self.inner.autocomplete_base.is_some()
+    }
+
+    /// Invoke the extension autocomplete chain.
+    ///
+    /// `op` is one of `rebuild` / `getSuggestions` / `applyCompletion` /
+    /// `shouldTriggerFileCompletion`; the returned string is the shim's JSON
+    /// envelope. The JS side answers in the *same* turn (its callbacks are
+    /// synchronous — see the module note in `pi-ext-shim.mjs`), so the call
+    /// completes in a single poll and never parks the host while a caller
+    /// waits on it.
+    pub async fn autocomplete_call(
+        &self,
+        op: &str,
+        payload_json: &str,
+    ) -> Result<String, ExtensionError> {
+        let context = self.inner.context.clone();
+        let timeout = self.inner.timeout;
+        let op = op.to_string();
+        let payload = payload_json.to_string();
+        let base_deadline = self.inner.arm_deadline();
+        let result = drive_call(
+            &self.inner,
+            base_deadline,
+            async_with!(context => |ctx| {
+                let call: Function = ctx
+                    .globals()
+                    .get("_pi_autocomplete_call")
+                    .map_err(ExtensionError::from)?;
+                let raw: String = call
+                    .call::<_, String>((op, payload))
+                    .catch(&ctx)
+                    .map_err(|e| ExtensionError::Runtime(e.to_string()))?;
+                Ok::<_, ExtensionError>(raw)
+            }),
+        )
+        .await;
+        self.inner.disarm_deadline();
+        match result {
+            Ok(Ok(raw)) => Ok(raw),
+            Ok(Err(e)) => Err(e),
+            Err(()) => Err(ExtensionError::Timeout(timeout)),
+        }
+    }
+
+    /// Rebuild the JS-side wrapper chain against the installed base provider
+    /// and report the chain's deduplicated trigger characters — upstream
+    /// `setupAutocompleteProvider`'s `[...new Set(triggerCharacters)]`
+    /// (`interactive-mode.ts:736-743`).
+    ///
+    /// An empty vector means "no wrapper contributed a trigger character",
+    /// which is also the answer when no wrapper is registered at all.
+    pub async fn autocomplete_rebuild(&self) -> Result<Vec<char>, ExtensionError> {
+        let raw = self.autocomplete_call("rebuild", "{}").await?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(ExtensionError::from)?;
+        let triggers = parsed
+            .get("triggerCharacters")
+            .and_then(|value| value.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .filter_map(|value| value.chars().next())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(triggers)
     }
 
     /// List the names of every tool registered so far.
@@ -4064,6 +4303,22 @@ fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<(
         },
     );
     globals.set("host_ui_region", region_fn)?;
+
+    // host_ui_autocomplete(op, payloadJson) -> JSON string — the synchronous
+    // bridge behind `ctx.ui.addAutocompleteProvider`. Synchronous because the
+    // wrapper chain calls `current.getSuggestions(...)` from inside a plain
+    // function call; nothing in the path can await.
+    let autocomplete_base = inner.autocomplete_base.clone();
+    let autocomplete_generation = inner.autocomplete_generation.clone();
+    let autocomplete_fn = Func::from(move |op: String, payload_json: String| -> String {
+        handle_autocomplete_call(
+            &op,
+            &payload_json,
+            autocomplete_base.as_ref(),
+            &autocomplete_generation,
+        )
+    });
+    globals.set("host_ui_autocomplete", autocomplete_fn)?;
 
     Ok(())
 }

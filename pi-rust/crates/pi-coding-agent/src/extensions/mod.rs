@@ -5,6 +5,7 @@
 //! host from [`pi_extensions`]. Both paths coexist; the file extension
 //! on disk decides which one runs.
 
+pub mod autocomplete;
 pub mod events;
 pub mod js_loader;
 pub mod lifecycle;
