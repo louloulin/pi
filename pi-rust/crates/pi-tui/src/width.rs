@@ -74,6 +74,46 @@ pub fn columns(text: &str) -> usize {
     text.chars().map(char_columns).sum()
 }
 
+/// Terminal column at which the character at `char_index` starts.
+///
+/// This is the cell-column half of the pointer mapping: a selection column
+/// produced by the layout (a character offset) is turned into the cell range
+/// it covers by [`columns_before`]`(text, from)..`[`columns_before`]`(text, to)`.
+/// An index past the end of `text` measures the whole string, so a caller can
+/// clamp first and convert afterwards without a second bounds check.
+///
+/// `columns_before("a你", 1) == 1`, `columns_before("a你", 2) == 3`.
+pub fn columns_before(text: &str, char_index: usize) -> usize {
+    text.chars().take(char_index).map(char_columns).sum()
+}
+
+/// Character index of the glyph occupying terminal column `column`.
+///
+/// The cell-column half of the pointer mapping — upstream's
+/// `getGraphemeCellRange(line, column).start`
+/// (`packages/tui/src/utils.ts:320`), which snaps a pointer cell to the
+/// **whole** glyph drawn there rather than to a character offset that could
+/// land in the middle of a wide glyph. A column in the second cell of a wide
+/// glyph therefore resolves to that glyph's index, and a column past the end
+/// of `text` resolves to its character count.
+///
+/// Zero-width characters (combining marks, joiners) own no cell, so a pointer
+/// never resolves to them; they follow the glyph they attach to.
+///
+/// `char_index_at_column("a你", 1) == 1`, `char_index_at_column("a你", 2) == 1`,
+/// `char_index_at_column("你", 1) == 0`, `char_index_at_column("你", 2) == 1`.
+pub fn char_index_at_column(text: &str, column: usize) -> usize {
+    let mut used = 0usize;
+    for (index, ch) in text.chars().enumerate() {
+        let width = char_columns(ch);
+        if width > 0 && column < used + width {
+            return index;
+        }
+        used += width;
+    }
+    text.chars().count()
+}
+
 /// The longest prefix of `text` whose column width does not exceed `max`.
 ///
 /// Returns the prefix and the columns it occupies, so a caller that also
@@ -211,6 +251,51 @@ mod tests {
         assert_eq!(prefix_columns("abc", 99), ("abc", 3));
         assert_eq!(prefix_columns("你好", 0), ("", 0));
         assert_eq!(prefix_columns("a中", 1), ("a", 1));
+    }
+
+    #[test]
+    fn columns_before_counts_the_cells_a_prefix_covers() {
+        assert_eq!(columns_before("a你b", 0), 0);
+        assert_eq!(columns_before("a你b", 1), 1);
+        assert_eq!(columns_before("a你b", 2), 3);
+        assert_eq!(columns_before("a你b", 3), 4);
+        // Past the end measures the whole string, so a caller can clamp in
+        // character offsets and convert afterwards.
+        assert_eq!(columns_before("a你b", 99), 4);
+        assert_eq!(columns_before("", 0), 0);
+    }
+
+    #[test]
+    fn char_index_at_column_snaps_into_the_glyph_under_the_cell() {
+        // Both cells of a wide glyph resolve to the glyph itself, which is
+        // what makes a click on the right half select the whole character.
+        assert_eq!(char_index_at_column("你好", 0), 0);
+        assert_eq!(char_index_at_column("你好", 1), 0);
+        assert_eq!(char_index_at_column("你好", 2), 1);
+        assert_eq!(char_index_at_column("你好", 3), 1);
+        // Past the end is the character count.
+        assert_eq!(char_index_at_column("你好", 4), 2);
+        assert_eq!(char_index_at_column("你好", 99), 2);
+        // ASCII is the identity mapping.
+        assert_eq!(char_index_at_column("abc", 1), 1);
+        // A zero-width mark owns no cell: `e` + U+0301 + `x` puts `x` at 1.
+        assert_eq!(char_index_at_column("e\u{301}x", 0), 0);
+        assert_eq!(char_index_at_column("e\u{301}x", 1), 2);
+        // An orphan combining mark is skipped rather than matched.
+        assert_eq!(char_index_at_column("\u{301}x", 0), 1);
+        assert_eq!(char_index_at_column("", 0), 0);
+    }
+
+    #[test]
+    fn the_pointer_mapping_round_trips_over_a_mixed_line() {
+        let line = "a你b好c";
+        for (index, ch) in line.chars().enumerate() {
+            let at = columns_before(line, index);
+            if char_columns(ch) > 0 {
+                assert_eq!(char_index_at_column(line, at), index);
+            }
+            assert_eq!(columns_before(line, char_index_at_column(line, at)), at);
+        }
     }
 
     #[test]

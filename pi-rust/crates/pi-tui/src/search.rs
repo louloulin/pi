@@ -18,12 +18,13 @@
 //!
 //! # Deliberate deviations
 //!
-//! * **Columns are character offsets, not display cells.** The whole port
-//!   tracks transcript columns as character indices (see `app.rs`'s
-//!   `# Text selection` notes and [`crate::app::App::selection_text`]);
-//!   upstream's `visibleWidth` / `getGraphemeCellRange` cell arithmetic has no
-//!   equivalent here. The corpus layout is otherwise identical, so a match on a
-//!   wide grapheme still lands on that grapheme's starting column.
+//! * **Columns are terminal cells.** Upstream addresses a search hit by the
+//!   cell span it covers (`getGraphemeCellRange` / `visibleWidth`), and so
+//!   does the port: [`SourceSpan`] records the cell range of the graphemes it
+//!   holds, so [`crate::app::App`] can paint the highlight straight into the
+//!   buffer without a per-character conversion. The printable-ASCII fast path
+//!   keeps a 1:1 character↔cell column (the [`SourceSpan::linear_columns`]
+//!   flag) because there the two agree by construction.
 //! * **Case-insensitive matching is per-character lowercasing**, not the
 //!   `regex` `iu` full case folding: each corpus character is mapped to its
 //!   simple lowercase form (`char::to_lowercase`'s first scalar) so corpus
@@ -48,9 +49,10 @@ use ratatui::layout::Rect;
 
 /// One highlighted run of a match on a single transcript row.
 ///
-/// `start_col` is inclusive and `end_col` exclusive, in transcript
-/// character-offset columns — the same convention as upstream's
-/// `AltScreenSearchSegment` (`alt-screen-search.ts:22-27`).
+/// `start_col` is inclusive and `end_col` exclusive, in transcript **terminal
+/// cell** columns — the same convention as upstream's
+/// `AltScreenSearchSegment` (`alt-screen-search.ts:22-27`), whose columns are
+/// consumed by cell-addressed highlighting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchSegment {
     /// Rendered transcript row (0-based, over the full log).
@@ -120,6 +122,8 @@ pub fn normalize_query(query: &str) -> String {
 }
 
 /// A single span in the search corpus (upstream `SearchSourceSpan`).
+///
+/// `start_col` / `end_col` are terminal cell columns on the source row.
 #[derive(Debug, Clone, Copy)]
 struct SourceSpan {
     text_start: usize,
@@ -127,6 +131,9 @@ struct SourceSpan {
     row: usize,
     start_col: usize,
     end_col: usize,
+    /// True when the span holds printable ASCII, so its columns are linear in
+    /// the character offsets (`end_col - start_col == text_end - text_start`)
+    /// and a partial match can be offset arithmetically.
     linear_columns: bool,
 }
 
@@ -164,6 +171,9 @@ fn build_corpus(lines: &[String]) -> SearchCorpus {
         let mut column = 0usize;
 
         if is_printable_ascii(&line) {
+            // Printable ASCII: one character is one cell, so the span table's
+            // columns are the character offsets and a partial match inside a
+            // span is a plain offset (`linear_columns: true`).
             let mut index = 0usize;
             while index < chars.len() {
                 if chars[index] == ' ' {
@@ -198,13 +208,17 @@ fn build_corpus(lines: &[String]) -> SearchCorpus {
                 index = end;
             }
         } else {
+            // Non-ASCII (or control-bearing) lines are measured one grapheme at
+            // a time and the columns counted in terminal cells, so a wide glyph
+            // advances the span table by the two columns it will paint.
             for (offset, grapheme) in line.grapheme_indices_for_search() {
                 let _ = offset;
+                let width = crate::width::columns(grapheme);
                 if grapheme.chars().all(char::is_whitespace) {
                     if !text.is_empty() {
                         pending_separator = true;
                     }
-                    column += grapheme.chars().count();
+                    column += width;
                     continue;
                 }
                 if pending_separator {
@@ -219,10 +233,10 @@ fn build_corpus(lines: &[String]) -> SearchCorpus {
                     text_end,
                     row,
                     start_col: column,
-                    end_col: column + grapheme.chars().count(),
+                    end_col: column + width,
                     linear_columns: false,
                 });
-                column += grapheme.chars().count();
+                column += width;
             }
         }
         if !text.is_empty() {
@@ -978,7 +992,26 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].segments[0].row, 0);
         assert_eq!(matches[0].segments[0].start_col, 0);
-        assert_eq!(matches[0].segments[0].end_col, 2);
+        // Two Han glyphs are four *terminal cells*, not two characters: the
+        // segment table is cell-addressed so the App can paint it directly.
+        assert_eq!(matches[0].segments[0].end_col, 4);
+    }
+
+    #[test]
+    fn non_ascii_columns_count_cells_not_characters() {
+        // "a你 世界": character offsets put 世 at 3, but the wide glyph and the
+        // space before it occupy four cells, so the highlight starts at 4.
+        let matches = find_matches(&lines(&["a你 世界"]), "世界");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].segments[0].row, 0);
+        assert_eq!(matches[0].segments[0].start_col, 4);
+        assert_eq!(matches[0].segments[0].end_col, 8);
+
+        // An emoji match is two cells wide too.
+        let emoji = find_matches(&lines(&["ok 😀 done"]), "😀");
+        assert_eq!(emoji.len(), 1);
+        assert_eq!(emoji[0].segments[0].start_col, 3);
+        assert_eq!(emoji[0].segments[0].end_col, 5);
     }
 
     #[test]

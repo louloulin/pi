@@ -1325,6 +1325,33 @@ impl Editor {
         self.refresh_autocomplete_if_open();
     }
 
+    /// Whether the cursor sits at display-text character offset `display`.
+    pub fn is_at_display_offset(&self, display: usize) -> bool {
+        self.display_cursor() == display
+    }
+
+    /// Place the caret at a character offset in [`Editor::display_text`] —
+    /// the mouse-click path.
+    ///
+    /// Upstream's `Editor.handleMouse` click branch
+    /// (`packages/tui/src/components/editor.ts:620-666`) sets the caret from
+    /// the clicked visual cell and clears the sticky column / history
+    /// browsing so the next `Up` / `Down` measures from the new position.
+    /// This is that move expressed as an offset in the displayed draft;
+    /// the caller resolves the cell to a row and a character column (see
+    /// [`crate::visual_text::VisualLayout::cursor_at`]).
+    pub fn place_display_cursor(&mut self, display: usize) -> EditorAction {
+        self.preferred_col = None;
+        self.reset_history_navigation();
+        let before = self.cursor;
+        self.set_display_cursor(display);
+        if self.cursor == before {
+            EditorAction::None
+        } else {
+            EditorAction::Changed
+        }
+    }
+
     /// Move the cursor to the start of the logical line it is on
     /// (`Home` / `Ctrl+A`, `tui.editor.cursorLineStart`). Upstream
     /// `moveToLineStart`.
@@ -3612,6 +3639,40 @@ mod tests {
         assert_eq!(ed.cursor(), 2);
         ed.move_right();
         assert_eq!(ed.cursor(), 2 + CHIP_CHAR.len_utf8());
+    }
+
+    #[test]
+    fn place_display_cursor_moves_the_caret_to_the_character_offset() {
+        let mut ed = Editor::new();
+        ed.insert_str("你好世界");
+        assert_eq!(ed.place_display_cursor(2), EditorAction::Changed);
+        assert_eq!(ed.display_cursor(), 2);
+        assert_eq!(
+            ed.cursor(),
+            "你好".len(),
+            "the cursor is a byte offset, not a character count"
+        );
+        // The offset the caret already sits at is a no-op.
+        assert_eq!(ed.place_display_cursor(2), EditorAction::None);
+    }
+
+    #[test]
+    fn place_display_cursor_snaps_out_of_a_chip_label() {
+        let mut ed = Editor::new();
+        ed.insert_str("ab");
+        ed.insert_image(image("one"));
+        let label = chip_label(1).chars().count();
+        assert_eq!(ed.display_cursor(), 2 + label);
+
+        // The chip's own display offset puts the caret in front of it.
+        ed.place_display_cursor(2);
+        assert_eq!(ed.cursor(), 2, "the caret sits before the chip");
+        // An offset inside the `[Image #1]` label clamps out of it.
+        ed.place_display_cursor(2 + label - 1);
+        assert_eq!(ed.display_cursor(), 2 + label);
+        // Past the end clamps to the end of the draft.
+        ed.place_display_cursor(99);
+        assert_eq!(ed.display_cursor(), 2 + label);
     }
 
     #[test]

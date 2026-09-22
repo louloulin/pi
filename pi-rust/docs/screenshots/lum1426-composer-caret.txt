@@ -1,0 +1,14 @@
+FRAME DUMP cols=72 rows=12
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|                                                                        [0m|
+|> 你好世界，▍按列宽定位光标                                             [0m|
+|Faux  lum1426-pointer-columns              in 0 out 0 ?/1.0k  ? for help[0m|
+END FRAME DUMP

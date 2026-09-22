@@ -15426,3 +15426,54 @@ issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉�
 再派并发写者只会撞车。下一轮第一顺位已在 `docs/LUM1418_COLUMN_WIDTH.md` §6 单子化：
 指针映射的列↔字符换算（`app.rs:764/3259/4273/4445/4587`、`search.rs:207-225`），
 需要同时改 `mouse_region` / `selection_granularity` / `alt_screen_search` 三套测试，单独一轮更安全。
+
+## LUM-1426 round — 指针/高亮改按终端列（选择 / 双击选词 / 搜索高亮三面）+ chatinput 补上 composer 点击定位光标；真帧截图 + Rust↔TS 复测 **83.6%**
+
+### 一、本轮交付
+
+* **根因**：LUM-1418 把**排版**口径从字符改成终端列，但**指针/高亮**的「屏幕列 ↔ 字符下标」换算还是字符口径。
+  `> 你好世界` 里 `好` 占第 4–5 格，而字符 4 是 `世`、字符 5 是 `界` —— 点在 `好` 上解析成相邻汉字；
+  高亮按「一字符一格」写 buffer，只点亮宽字左半格；搜索 span 表按 grapheme 计数，中文行高亮左移约一半。
+* 新增 `width::char_index_at_column`（格子→整字形，上游 `getGraphemeCellRange`）与 `width::columns_before`
+  （字符区间→格子区间）两个纯函数，接到 `app::selection_point_clamped`、`app::apply_selection_highlight`、
+  `app::apply_search_highlight`；`search::build_corpus` 的非 ASCII 路径改按 `width::columns` 累加终端列。
+* **chatinput（issue 点名项）**：上游 pi-ts `editor.ts:620-666`、codex、Martty 都支持点击 composer 定位光标，
+  Rust 端口此前**没有任何 composer 鼠标目标**。本轮记录 composer 矩形 + 按下/同格释放才算 click +
+  `VisualLayout` 行映射 + 字形吸附 + 上游 `isLastSegment` 修正（点在折行行尾不跳下一行）；
+  `editor::place_display_cursor` / `prompt::place_cursor` 为公开入口，chip 标签内的偏移夹出标签外。
+* 新增 `crates/pi-tui/tests/pointer_columns.rs`（**14 条**）与 4 条单测（`width` 3 + `editor` 2 + `search` 新增 1 改 1）。
+* `scripts/frame_to_png.py` 支持 dump 里的 SGR（`7`/`1`/`4`），把高亮画进 PNG（此前 dump 是纯文本，看不到反显）。
+
+### 二、门禁与实测（最终树）
+
+* `cargo fmt --all -- --check` 干净；`cargo clippy --offline -p pi-tui --all-targets` 0 warning；
+  `cargo check --offline -p pi-tui --all-targets` OK。
+* `cargo test --offline -p pi-tui`：**973 passed / 0 failed**，57 个 target（基线 `origin/feature/pi.rs` = `1e2977238`
+  同机同工具链 **953 / 0** → **+20**）。
+* `cargo test --offline --workspace --no-fail-fast`：**passed 2595 / failed 39 / 2 ignored**，172 个 target。
+  失败项名字集合与基线**逐条相同**（`comm -3` 前后各 38 条具名 + 1 条 doc-test 编译 → 空集），
+  全是本机 Windows 环境问题（无 `/tmp`、真 `bash` 工具、绝对路径断言、node fs/SDK、`pi-client` doc-test）。
+* 真帧截图两张（+ 可 grep 的 `.txt` SGR dump）：`docs/screenshots/lum1426-pointer-columns.png`（100×30，
+  中文选择 `好世` + 中文搜索命中 `世界`）、`docs/screenshots/lum1426-composer-caret.png`（72×12，
+  点击中文草稿后 `▍` 恰好落在 `按` 之前）。**诚实说明**：本机无 `pty`，是 frame-buffer 冻结帧
+  （证明「高亮落在哪一格」，不证明鼠标/按键时序；时序由 14 条 App 级测试覆盖）。
+
+### 三、Rust↔TS 口径复测
+
+* 纯代码规模 **88.7%**（135,733 / 153,106）；测试规模 **49.0%**（2,603 / 5,309）；
+  `app.*` 接线 **43/44 = 97.7%**（silent 仅 `app.tree.editLabel`）；扩展事件 **20/36 = 55.6%**（按上游 36 个名字重算分母）；
+  TUI 模块面 **35/42 = 83.3%**；slash **18/23 = 78.3%**。
+* **加权完成度 83.6%（主口径：轴 5 = 模块率与接线率均值）/ 84.6%（与上轮同口径：轴 5 只取接线率）**。
+  上轮公开 81.4% 按其输入逐项复算实为 82.1%，所以同口径差额是 **+2.5pt**，且可逐项对账
+  （接线 0.795→0.977、测试 0.46→0.490、事件 0.57→0.556 为纯口径修正）。
+* 新增两条以前没人量过的度量：**指针映射面 0/3 → 3/3 = 100%**；**composer 鼠标面 0/2 → 1/2 = 50%**。
+* 口径陷阱（写进流程）：`find … | xargs wc -l | tail -1` 在文件多时 xargs 会分批，`tail` 只看到**最后一批**；
+  本轮全部改用 python 逐文件求和，并把 TS 分母重测为 153,106 与上轮一致。
+
+### 四、槽位 / 派发
+
+**零派发**。issue 的「最多 3 个任务同时运行」是上限不是配额；本轮交付在同一 run 内完成并全量过门，
+而 §8 的三条顺位中第 1 条（autocomplete 下拉框鼠标点选）与第 2 条（扩展生命周期事件 +15）都要改
+`pi-tui` / `pi-agent-core`，并发写者会把「哪一层坏了」拆散。下一轮第一顺位已在
+`docs/LUM1426_POINTER_COLUMNS.md` §8 单子化：先做下拉框点选（本轮的直接续集，`pi-tui` 单模块），
+再单独一轮做扩展事件的 15 个缺口。

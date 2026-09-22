@@ -38,11 +38,16 @@
 //!   `word_navigation` already documents: ICU's dictionary keeps `你好`
 //!   together, UAX #29 splits each ideograph, so double-click selects one
 //!   ideograph per hop.
-//! * **Columns are characters, not display cells.** The whole port tracks
-//!   selection columns as character offsets (see [`App::selection_text`]),
-//!   so word / line ranges are measured with `chars().count()` rather than
-//!   upstream's `visibleWidth`. Wide glyphs keep the existing behaviour of
-//!   the character-granularity path.
+//! * **Columns are characters in the selection model, cells at the edges.**
+//!   The selection is stored as character offsets (see
+//!   [`App::selection_text`]), which is what makes slicing the text exact. A
+//!   pointer cell is snapped to the glyph drawn there on the way in
+//!   ([`crate::width::char_index_at_column`], upstream's
+//!   `getGraphemeCellRange`), and the character range is turned back into the
+//!   cell span it covers on the way out
+//!   ([`crate::width::columns_before`]) so the highlight and the search marks
+//!   land on the cells a terminal actually paints. Wide glyphs therefore
+//!   select as one unit from either half of the character.
 //! * **Autoscroll beat.** There is no `setInterval` in Rust and this crate
 //!   must not spawn a timer thread, so the drag autoscroll advances one
 //!   line **per draw**. The driver redraws on a 50 ms interval
@@ -304,6 +309,7 @@ use crate::theme::{
     builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
 };
+use crate::visual_text::VisualLayout;
 use crate::width::{char_columns, columns};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
@@ -750,6 +756,10 @@ struct ClickTarget {
 }
 
 /// One UAX #29 segment of a rendered line, in character columns.
+///
+/// Character columns, not cells: the segment table is compared against the
+/// character-offset pointer the App resolves (see `word_selection`), and the
+/// cell span is computed once when the highlight is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WordSegment {
     /// First column of the segment (inclusive).
@@ -765,7 +775,8 @@ struct WordSegment {
 /// Split a rendered line into the segments upstream's `getWordSelection`
 /// walks (`packages/tui/src/tui-alt-screen.ts:1156-1197`).
 ///
-/// Columns are character offsets, not terminal cells — see the module docs.
+/// Columns are character offsets, not terminal cells — the pointer is
+/// converted to a character offset before this table is consulted.
 fn word_segments(line: &str) -> Vec<WordSegment> {
     let mut segments = Vec::new();
     let mut start = 0usize;
@@ -1127,6 +1138,15 @@ pub struct App {
     /// overflows, and therefore the capacity that hands `PageUp` /
     /// `PageDown` to the editor (see [`App::composer_overflows`]).
     composer_window: AtomicU16,
+    /// Rectangle of the composer (prompt) area as of the last render, as
+    /// `(x, y)` and `(width, height)`. A click inside it places the caret
+    /// (upstream's `Editor.handleMouse` click branch,
+    /// `packages/tui/src/components/editor.ts:620-666`), and the pointer
+    /// arrives between renders, so the geometry is recorded rather than
+    /// recomputed. `width == 0` means the last frame had no composer (a
+    /// custom editor component replaced it).
+    composer_origin: (AtomicU16, AtomicU16),
+    composer_size: (AtomicU16, AtomicU16),
     /// Top-left cell of the message viewport as of the last render. Pointer
     /// coordinates are absolute, so selection has to map them back into the
     /// viewport the reader was actually looking at.
@@ -1152,6 +1172,10 @@ pub struct App {
     /// `packages/tui/src/tui-alt-screen.ts:1312-1315`). `None` whenever no
     /// modal is on screen.
     modal_mouse_press: Option<MouseRegionPoint>,
+    /// Absolute cell of a left press that landed inside the composer, kept
+    /// until its release so only a click that starts and ends on the same
+    /// cell moves the caret (upstream's `isClick` gate).
+    prompt_mouse_press: Option<(u16, u16)>,
     /// True between a left-button press and its release, so drags extend
     /// the selection without requiring the terminal to report the button.
     selection_dragging: bool,
@@ -1312,12 +1336,15 @@ impl App {
             composer_body_width: AtomicU16::new(0),
             composer_scroll: AtomicUsize::new(0),
             composer_window: AtomicU16::new(0),
+            composer_origin: (AtomicU16::new(0), AtomicU16::new(0)),
+            composer_size: (AtomicU16::new(0), AtomicU16::new(0)),
             viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
             scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             selection: None,
             search: None,
             modal_mouse_press: None,
+            prompt_mouse_press: None,
             selection_dragging: false,
             last_click: None,
             selection_autoscroll_direction: 0,
@@ -3341,7 +3368,10 @@ impl App {
                 }
                 let row = segment.row - visible_start;
                 let text = plain_text(&lines[row]);
-                let len = text.chars().count();
+                // Search segments are terminal-cell spans (see
+                // [`crate::search`]); the buffer is addressed in cells too, so
+                // the clamp is a cell width, not a character count.
+                let len = crate::width::columns(&text);
                 let to = segment.end_col.min(len);
                 let from = segment.start_col.min(to);
                 let y = area.y + row as u16;
@@ -3996,7 +4026,10 @@ impl App {
         };
         let outcome = match handled {
             Some(outcome) => outcome,
-            None => self.step_selection_mouse_gesture(&gesture),
+            None => match self.prompt_mouse_gesture(&gesture) {
+                Some(outcome) => outcome,
+                None => self.step_selection_mouse_gesture(&gesture),
+            },
         };
         if matches!(outcome, StepOutcome::Idle) && hover_changed {
             StepOutcome::Redraw
@@ -4490,8 +4523,134 @@ impl App {
         // Below the last rendered line (a short log): clamp to the last
         // line so a drag past the end still selects to the end of the text.
         let row = row.min(lines.len().saturating_sub(1));
-        let col = x.saturating_sub(origin_x) as usize;
+        // The pointer arrives in **terminal cells** while every selection
+        // column below is a **character offset**; snap the cell to the glyph
+        // drawn there (upstream `getGraphemeCellRange`,
+        // `packages/tui/src/utils.ts:320`). Without this a click on a CJK
+        // line resolves to a character index past the text — the line is
+        // half as many characters as it is cells — so the selection landed
+        // to the right of the pointer and copied the wrong text.
+        let cell = x.saturating_sub(origin_x) as usize;
+        let col = match lines.get(row) {
+            Some(line) => {
+                let text = crate::styled::plain_text(line);
+                crate::width::char_index_at_column(&text, cell)
+            }
+            None => 0,
+        };
         Some((start + row, col))
+    }
+
+    /// Record the composer rectangle for the pointer hit test, or clear it
+    /// when the frame painted no composer (`None`).
+    fn record_composer_area(&self, rect: Option<Rect>) {
+        match rect {
+            Some(rect) => {
+                self.composer_origin.0.store(rect.x, Ordering::Relaxed);
+                self.composer_origin.1.store(rect.y, Ordering::Relaxed);
+                self.composer_size.0.store(rect.width, Ordering::Relaxed);
+                self.composer_size.1.store(rect.height, Ordering::Relaxed);
+            }
+            None => self.composer_size.0.store(0, Ordering::Relaxed),
+        }
+    }
+
+    /// True when the pointer cell is inside the composer rectangle the last
+    /// frame painted.
+    fn composer_contains(&self, x: u16, y: u16) -> bool {
+        let width = self.composer_size.0.load(Ordering::Relaxed);
+        let height = self.composer_size.1.load(Ordering::Relaxed);
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let ox = self.composer_origin.0.load(Ordering::Relaxed);
+        let oy = self.composer_origin.1.load(Ordering::Relaxed);
+        x >= ox && y >= oy && x < ox.saturating_add(width) && y < oy.saturating_add(height)
+    }
+
+    /// Resolve a cell inside the composer to a character offset in
+    /// [`Prompt::text`], or `None` when the cell holds no draft text.
+    ///
+    /// Upstream's `Editor.handleMouse` click branch
+    /// (`packages/tui/src/components/editor.ts:620-666`): the click row is
+    /// mapped through the same visual-line map the renderer used, the cell
+    /// column is snapped to the glyph drawn there, and one correction keeps
+    /// a click past the end of a soft-wrapped row on that row instead of
+    /// letting it jump to the start of the next one.
+    fn composer_cursor_offset(&self, x: u16, y: u16) -> Option<usize> {
+        if !self.composer_contains(x, y) {
+            return None;
+        }
+        let ox = self.composer_origin.0.load(Ordering::Relaxed) as usize;
+        let oy = self.composer_origin.1.load(Ordering::Relaxed) as usize;
+        let label = columns(self.prompt.label());
+        let body_col = (x as usize).saturating_sub(ox);
+        let row_in_window = (y as usize).saturating_sub(oy);
+        let text = self.prompt.text();
+        let width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+        let layout = VisualLayout::new(&text, width);
+        let row = self.composer_scroll.load(Ordering::Relaxed) + row_in_window;
+        let rows = layout.rows();
+        let visual = rows.get(row)?;
+        // A click on the label column reads as column 0 of the draft row.
+        let cell = body_col.saturating_sub(label);
+        let mut column = crate::width::char_index_at_column(&visual.text, cell);
+        if column == visual.text.chars().count() && !visual.text.is_empty() && row + 1 < rows.len()
+        {
+            // Past the end of a row that is not the last row of the draft:
+            // park the caret on the row the pointer actually landed on
+            // (upstream's `isLastSegment` correction).
+            column -= 1;
+        }
+        Some(layout.cursor_at(row, column))
+    }
+
+    /// Place the composer caret at the clicked cell.
+    fn place_prompt_cursor(&mut self, x: u16, y: u16) -> StepOutcome {
+        let Some(offset) = self.composer_cursor_offset(x, y) else {
+            return StepOutcome::Idle;
+        };
+        match self.prompt.place_cursor(offset) {
+            crate::prompt::PromptAction::Changed => StepOutcome::Redraw,
+            _ => StepOutcome::Idle,
+        }
+    }
+
+    /// Route a gesture that landed on the composer.
+    ///
+    /// `Some` means the composer owns the gesture — a left press inside it is
+    /// remembered and a release on the same cell places the caret (upstream
+    /// synthesises that click in the editor's `handleMouse`); a drag from it
+    /// is swallowed so the transcript behind cannot start a text selection
+    /// through the composer. `None` leaves the gesture to the transcript
+    /// path, which is what a release that left the composer needs.
+    fn prompt_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                if !self.composer_contains(gesture.x, gesture.y) {
+                    return None;
+                }
+                self.prompt_mouse_press = Some((gesture.x, gesture.y));
+                Some(StepOutcome::Idle)
+            }
+            MouseGestureKind::Release(MouseButton::Left) => {
+                let pressed = self.prompt_mouse_press.take();
+                if !self.composer_contains(gesture.x, gesture.y) {
+                    return None;
+                }
+                if pressed == Some((gesture.x, gesture.y)) {
+                    Some(self.place_prompt_cursor(gesture.x, gesture.y))
+                } else {
+                    Some(StepOutcome::Idle)
+                }
+            }
+            MouseGestureKind::Drag(_) | MouseGestureKind::Move
+                if self.prompt_mouse_press.is_some() =>
+            {
+                Some(StepOutcome::Idle)
+            }
+            _ => None,
+        }
     }
 
     /// Start / end of the active selection in rendered-log coordinates, or
@@ -4680,6 +4839,12 @@ impl App {
             } else {
                 len
             };
+            // `from` / `to` are character offsets; the buffer is addressed in
+            // terminal cells. A wide glyph covers two cells, so painting one
+            // reversed cell per character would leave the right half of every
+            // CJK glyph unhighlighted and drift left of the text.
+            let from = crate::width::columns_before(&text, from);
+            let to = crate::width::columns_before(&text, to);
             for col in from..to {
                 let x = area.x + col as u16;
                 if x >= area.x + area.width {
@@ -5000,7 +5165,12 @@ impl App {
         // session or `set_editor_component`) replaces the prompt line
         // entirely.
         match &frame.editor {
-            Some(lines) => self.paint_extension_lines(editor_area, lines, buf),
+            Some(lines) => {
+                // A custom editor component replaces the prompt entirely, so
+                // there is no composer for a click to place a caret in.
+                self.record_composer_area(None);
+                self.paint_extension_lines(editor_area, lines, buf);
+            }
             None => {
                 self.paint_prompt(editor_area, buf);
                 self.paint_autocomplete(message_area, editor_area, buf);
@@ -5179,6 +5349,10 @@ impl App {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
+        // The composer's rectangle is the pointer's click target for the
+        // caret (see [`App::prompt_mouse_gesture`]), and the pointer arrives
+        // between renders.
+        self.record_composer_area(Some(rect));
         let max_rows = (rect.height as usize).min(self.config.composer_max_rows.max(1));
         // Record the body width the wrap uses, so the next key press measures
         // the draft the same way this frame did (see

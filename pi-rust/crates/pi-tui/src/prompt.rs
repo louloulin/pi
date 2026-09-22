@@ -181,6 +181,21 @@ impl Prompt {
         self.handle_key(key)
     }
 
+    /// Place the composer caret at character offset `display` of
+    /// [`Prompt::text`] — the mouse-click path.
+    ///
+    /// See [`Editor::place_display_cursor`]; the App resolves the clicked
+    /// cell to this offset.
+    pub fn place_cursor(&mut self, display: usize) -> PromptAction {
+        match self.editor.place_display_cursor(display) {
+            EditorAction::None => PromptAction::None,
+            EditorAction::Changed => PromptAction::Changed,
+            EditorAction::Submit(text) => PromptAction::Submit(text),
+            EditorAction::Interrupt => PromptAction::Interrupt,
+            EditorAction::Eof => PromptAction::Eof,
+        }
+    }
+
     /// Whether the prompt currently has any buffer text.
     pub fn is_empty(&self) -> bool {
         self.editor.is_empty()

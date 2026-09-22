@@ -23,6 +23,12 @@ Dump format (what `tests/lum1412_chrome_clip.rs` prints):
     ...
     END FRAME DUMP
 
+A dump may also carry SGR codes (`7` reverse, `1` bold, `4` underline) inside
+the cells — `tests/pointer_columns.rs` emits them for a text selection and a
+search match. Lines with codes are drawn run by run (reverse = filled cell,
+underline = a rule under the run); lines without keep the plain path. Codes
+are ignored when measuring columns.
+
 Usage:
     python3 pi-rust/scripts/frame_to_png.py \
         --text pi-rust/docs/screenshots/lum1412-chrome-clip-44x14.txt \
@@ -54,6 +60,11 @@ except ImportError:  # pragma: no cover
 BG = (10, 10, 12)
 CAPTION_BG = (42, 44, 54)
 FG = (238, 238, 240)
+# Reverse-video cells (a text selection, the current search match) and the
+# underline of a non-current search match; kept readable on the dark frame.
+REVERSE_BG = (206, 212, 222)
+REVERSE_FG = (10, 10, 12)
+UNDERLINE_FG = (140, 148, 162)
 
 _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -132,8 +143,42 @@ def _pad_to_columns(line: str, cols: int) -> str:
     return line + " " * max(0, cols - width)
 
 
+# SGR codes the frame dump may carry: `0` reset, `1` bold, `4` underline,
+# `7` reverse (and the `2x` codes that turn each off). A dump that carries
+# them is drawn run by run so a selection or a search match is visible in the
+# PNG; a plain-text dump keeps the original single-pass path.
+_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def split_runs(line: str) -> list[tuple[str, frozenset[int]]]:
+    """Split a dump line into `(text, active SGR codes)` runs."""
+    runs: list[tuple[str, frozenset[int]]] = []
+    style: set[int] = set()
+    pos = 0
+    for match in _SGR.finditer(line):
+        if match.start() > pos:
+            runs.append((line[pos : match.start()], frozenset(style)))
+        for code in filter(None, match.group(1).split(";")):
+            value = int(code)
+            if value == 0:
+                style = set()
+            elif value in (1, 4, 7):
+                style.add(value)
+            elif value == 22:
+                style.discard(1)
+            elif value == 24:
+                style.discard(4)
+            elif value == 27:
+                style.discard(7)
+        pos = match.end()
+    if pos < len(line):
+        runs.append((line[pos:], frozenset(style)))
+    return runs
+
+
 def render(cols: int, rows: int, lines: list[str], caption: str) -> Image.Image:
-    font = load_font(32, "".join(lines) + caption)
+    joined = "".join(_SGR.sub("", line) for line in lines)
+    font = load_font(32, joined + caption)
     caption_font = load_font(13)
     adv = font.getlength("M")
     cell_w = int(round(adv))
@@ -147,7 +192,25 @@ def render(cols: int, rows: int, lines: list[str], caption: str) -> Image.Image:
     draw.rectangle([0, 0, width, caption_h], fill=CAPTION_BG)
     draw.text((8, 6), caption, font=caption_font, fill=FG)
     for y, line in enumerate(lines[:rows]):
-        draw.text((1, caption_h + 1 + y * cell_h), _pad_to_columns(line, cols), font=font, fill=FG)
+        top = caption_h + 1 + y * cell_h
+        if "\x1b[" not in line:
+            draw.text((1, top), _pad_to_columns(line, cols), font=font, fill=FG)
+            continue
+        x = 1
+        for text, style in split_runs(line):
+            if not text:
+                continue
+            cells = sum(max(wcwidth(ch), 0) for ch in text)
+            run_w = cells * cell_w
+            fill = FG
+            if 7 in style:
+                draw.rectangle([x, top, x + run_w - 1, top + cell_h - 1], fill=REVERSE_BG)
+                fill = REVERSE_FG
+            draw.text((x, top), text, font=font, fill=fill)
+            if 4 in style:
+                underline_y = top + ascent + 2
+                draw.rectangle([x, underline_y, x + run_w - 1, underline_y], fill=UNDERLINE_FG)
+            x += run_w
     return img
 
 
