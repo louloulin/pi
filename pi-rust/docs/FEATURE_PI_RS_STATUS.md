@@ -15402,6 +15402,10 @@ issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉�
 * `cargo test --offline --workspace --no-fail-fast`：passed 2547 / failed 40 / ignored 2；
   **失败集合与基线逐条相同**（`before 53 行 FAILED` vs `after 53 行 FAILED`，只有耗时不同），
   全是本机 Windows 环境问题（无 `/tmp`、真 `bash` 工具、绝对路径断言、node fs、trust）。
+* **合并树复测**（与并行 LUM-1415 在 `feature/pi.rs` tip `169dcb372` 汇合，LUM-1415 也改了
+  `app.rs` / `status.rs` / `prompt.rs`）：`pi-tui` **953 passed / 0 failed**；
+  workspace passed 2575 / failed **39**；**新增回归 0 条**（失败集合逐条比对，
+  `merged - baseline = ∅`），另有 1 条基线失败被 LUM-1415 顺带修好。
 * 真帧截图 `docs/screenshots/lum1418-column-width.png`（+ `.txt` 可 grep dump），100×30 真 `App` 帧：
   中文会话 / 中文 markdown（标题·列表·行内 code·引用块·GFM 表格）/ 24 行中文草稿 + `▍` / 状态栏。
   **诚实说明**：本机无 `pty`，走的是 LUM-1412 建立的 frame-buffer 通道（冻结帧），证明排版、不证明交互时序。

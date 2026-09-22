@@ -82,7 +82,25 @@ workspace 失败项：before 53 行 FAILED、after 53 行 FAILED，逐条名字�
 > （`unicode-width 0.1.14` / `unicode-width 0.2.2`）。本机离线缓存没有 `rustix 1.1.5`，cargo 曾顺手把它降到
 > 1.1.4 —— 手工还原成 1.1.5（与基线一致），还原后 `--locked` 全绿。
 
-### 4.2 既有失败（**早于本轮**，不要误判为本轮回归）
+### 4.2 合并树复测（`feature/pi.rs` tip `169dcb372`）
+
+本轮与并行的 **LUM-1415**（历史搜索，改了 `editor.rs` / `app.rs` / `status.rs` / `prompt.rs` 等**同一批文件**）
+在 `feature/pi.rs` 上汇合，按「合并后必须重测」的规矩在同一棵合并树上复跑：
+
+| 命令 | 合并树结果 | 本轮分支结果 |
+|---|---|---|
+| `cargo test --offline --locked -p pi-tui` | **953 passed / 0 failed** | 926 / 0（分支上还没带 LUM-1415 的 27 条） |
+| `cargo test --offline --workspace --no-fail-fast` | passed 2575 / failed **39** / ignored 2 | passed 2547 / failed 40 |
+| `cargo fmt --all -- --check` / `clippy -p pi-tui --all-targets -- -D warnings` | 干净 / 干净 | 干净 / 干净 |
+| `cargo check --offline --locked --workspace` | OK | OK |
+
+失败集合逐条比对：**新增回归 0 条**（`merged - baseline = ∅`），另有 1 条基线失败被 LUM-1415 顺带修好
+（`chatinput_chord_conflicts::the_allowlist_names_ids_that_exist_and_actually_overlap`）。
+
+> 合并是 git 自动合并，没有冲突；但 LUM-1415 也改了 `app.rs` / `status.rs` / `prompt.rs`，
+> 所以**没有**把「无冲突」当成「无需重测」——上表就是重测结果。
+
+### 4.3 既有失败（**早于本轮**，不要误判为本轮回归）
 
 40 条 workspace 失败全部与列宽无关，都是这台 Windows 机器的环境问题：
 `paths/trust/mod_ignore/js_loader/resource_loader/export/session_file` 的绝对路径与错误文案断言、
