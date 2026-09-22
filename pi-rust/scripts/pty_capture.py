@@ -51,7 +51,9 @@ the process runs its shutdown path (extension `session_shutdown`).
 
 `send` is literal text plus key tokens: `<Enter> <Esc> <Tab> <BS> <Up>
 <Down> <Left> <Right> <PgUp> <PgDn> <Home> <End> <C-a>..<C-z> <Del>
-<M-a>..<M-z> <M-Up> <M-Down> <M-Left> <M-Right>`.
+<M-a>..<M-z> <M-Up> <M-Down> <M-Left> <M-Right>` and the pointer gestures
+`<Click:x,y> <MPress:x,y> <MRelease:x,y> <MDrag:x,y>` (0-based cell
+coordinates, SGR encoding, exactly what crossterm reports).
 Every panel is fed into the *same* process, so panels are cumulative
 frames of one interactive session. `skip_capture` drives the UI without
 emitting a panel (useful for intermediate keystrokes). `wait_for` (with
@@ -151,6 +153,32 @@ for _c in "abcdefghijklmnopqrstuvwxyz":
 _KEY_TOKENS["<C-[>"] = "\x1b"
 
 
+_MOUSE_TOKEN = re.compile(r"^<(Click|MPress|MRelease|MDrag):(\d+),(\d+)>$")
+
+
+def mouse_sequence(token: str) -> str | None:
+    """Raw bytes for a `<Click:x,y>`-style pointer token, or `None`.
+
+    Cells are 0-based in the token (the same space scenarios already use for
+    everything else) and 1-based on the wire, which is the SGR mouse encoding
+    (`ESC [ < b ; x ; y M/m`) crossterm decodes and the App consumes as
+    `InputEvent::MouseGesture`. `<Click>` is the press/release pair on one
+    cell, i.e. the gesture both reference TUIs treat as "put the caret here".
+    """
+    match = _MOUSE_TOKEN.match(token)
+    if match is None:
+        return None
+    kind, x, y = match.group(1), int(match.group(2)) + 1, int(match.group(3)) + 1
+    if kind == "Click":
+        return f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m"
+    if kind == "MPress":
+        return f"\x1b[<0;{x};{y}M"
+    if kind == "MRelease":
+        return f"\x1b[<0;{x};{y}m"
+    # Motion with the left button held: button bits + the 32 motion flag.
+    return f"\x1b[<32;{x};{y}M"
+
+
 def encode_keys(text: str) -> bytes:
     """Expand `<Enter>`-style tokens in `text` into raw terminal bytes."""
     out = []
@@ -162,6 +190,11 @@ def encode_keys(text: str) -> bytes:
                 token = text[i : end + 1]
                 if token in _KEY_TOKENS:
                     out.append(_KEY_TOKENS[token])
+                    i = end + 1
+                    continue
+                pointer = mouse_sequence(token)
+                if pointer is not None:
+                    out.append(pointer)
                     i = end + 1
                     continue
         out.append(text[i])
