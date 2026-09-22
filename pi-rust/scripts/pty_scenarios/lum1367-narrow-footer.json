@@ -1,0 +1,54 @@
+{
+  "cols": 44,
+  "rows": 14,
+  "caption": "LUM-1367 narrow-footer budget: a real 44x14 PTY against the real release binary. The whole footer is 72 columns (model 15 + session 26 + usage 12 + gauge 7 + hint 12), so at 44 the budgeted layout has to give parts up. Before LUM-1367 the positional clip stranded the first character of `in 0 out 0` at the right edge — this frame read `Faux test model  session-<id>  i`. The `reject` rows below are that orphan and its 46/52/70-column siblings; the `expect` rows are the whole parts that replace them. Footer row is the last row (y=13).",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle at 44x14 — the budgeted footer",
+      "send": "",
+      "wait": 1.5,
+      "wait_for": "type a prompt",
+      "expect": [
+        {
+          "text": "> type a prompt",
+          "why": "the composer keeps its row on a 14-row terminal"
+        },
+        {
+          "text": "Faux test model  in 0 out 0 ?/8.2k…",
+          "why": "dropping the session id (26 columns) buys back the complete usage total and context gauge, and the trailing `…` says the bar is showing a subset"
+        }
+      ],
+      "reject": [
+        {
+          "regex": "  (i|in|in 0 out)\\s*$",
+          "why": "the pre-fix orphan endings measured in a real PTY: `  i` at 44, `  in` at 46, `  in 0 out` at 52. A hard FAIL if the positional clip comes back."
+        },
+        {
+          "regex": "\\? for h?e?\\s*$",
+          "why": "the 70-column orphan (`  ? for he`): a hint cut after two characters is worse than no hint plus a marker."
+        },
+        {
+          "regex": "session-[0-9a-f]{16}",
+          "why": "at 44 columns the widest part (the session id) is the one the budget gives up; if it reappears here the budget stopped working"
+        }
+      ]
+    },
+    {
+      "label": "2. a draft still edits after the footer gave parts up",
+      "send": "hello",
+      "wait": 0.6,
+      "expect": [
+        {
+          "text": "> hello",
+          "why": "the composer is unaffected by the footer's budget"
+        },
+        {
+          "text": "Faux test model  in 0 out 0 ?/8.2k…",
+          "why": "the footer is stable across frames: only the draft changed"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

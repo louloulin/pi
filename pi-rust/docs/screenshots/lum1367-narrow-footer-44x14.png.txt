@@ -1,0 +1,40 @@
+# lum1367-after-44.png — chars, 44x14 cells
+
+===== LUM-1367 narrow-footer budget: a real 44x14 PTY against the real release binary. The whole footer is 72 columns (model 15 + session 26 + usage 12 + gauge 7 + hint 12), so at 44 the budgeted layout has to give parts up. Before LUM-1367 the positional clip stranded the first character of `in 0 out 0` at the right edge — this frame read `Faux test model  session-<id>  i`. The `reject` rows below are that orphan and its 46/52/70-column siblings; the `expect` rows are the whole parts that replace them. Footer row is the last row (y=13).  |  [1] 1. idle at 44x14 — the budgeted footer  (cursor 35,13, frame 707d744e6911, px 9d3a5fd67f98, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H sho
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  in 0 out 0 ?/8.2k…
+  assert PASS   expect       '> type a prompt'  — the composer keeps its row on a 14-row terminal
+  assert PASS   expect       'Faux test model  in 0 out 0 ?/8.2k…'  — dropping the session id (26 columns) buys back the complete usage total and context gauge, and the trailing `…` says the bar is showing a subset
+  assert PASS   reject       '  (i|in|in 0 out)\\s*$'  — the pre-fix orphan endings measured in a real PTY: `  i` at 44, `  in` at 46, `  in 0 out` at 52. A hard FAIL if the positional clip comes back.
+  assert PASS   reject       '\\? for h?e?\\s*$'  — the 70-column orphan (`  ? for he`): a hint cut after two characters is worse than no hint plus a marker.
+  assert PASS   reject       'session-[0-9a-f]{16}'  — at 44 columns the widest part (the session id) is the one the budget gives up; if it reappears here the budget stopped working
+
+===== LUM-1367 narrow-footer budget: a real 44x14 PTY against the real release binary. The whole footer is 72 columns (model 15 + session 26 + usage 12 + gauge 7 + hint 12), so at 44 the budgeted layout has to give parts up. Before LUM-1367 the positional clip stranded the first character of `in 0 out 0` at the right edge — this frame read `Faux test model  session-<id>  i`. The `reject` rows below are that orphan and its 46/52/70-column siblings; the `expect` rows are the whole parts that replace them. Footer row is the last row (y=13).  |  [2] 2. a draft still edits after the footer gave parts up  (cursor 36,12, frame 670abe4cda4e, px a47f0a87d009, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H sho
+
+
+
+
+
+
+
+
+
+
+> hello▍
+Faux test model  in 0 out 0 ?/8.2k…
+  assert PASS   expect       '> hello'  — the composer is unaffected by the footer's budget
+  assert PASS   expect       'Faux test model  in 0 out 0 ?/8.2k…'  — the footer is stable across frames: only the draft changed
