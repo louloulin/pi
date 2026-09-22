@@ -15583,3 +15583,69 @@ LUM-1431 §7 的第一顺位：**滚轮没有坐标**，所以 `App` 只能把�
 （`22e8b20d`，LUM-1330 / LUM-1244 的既定写者）——与本轮文件面零重叠。不派第三条：
 `docs/LUM1431_AUTOCOMPLETE_MOUSE.md` §7 的第 3、4 条与派发线共享 `pi-coding-agent`，再派会重演
 「同一缺陷两条并发线各修一次」（LUM-1431 §3 刚清过一次）。
+
+## LUM-1445 round — 模态列表认领指针（picker / `ctx.ui.select` 滚轮+点选，`/settings` 点选）；`pi-tui` 1020/0，`pi-coding-agent --lib` 571/8（8 条经 stash 对账为基线同集）
+
+### 一、本轮交付（`pi-tui` + 驱动侧 3 处事件放行）
+
+LUM-1436 §7 第 4 条是「modal 打开时滚轮归属」，做下去发现是**半边**：模态列表不仅不认领滚轮，
+连**点选行都不认领**——`step_modal_mouse_gesture` 只把 press/release 当作"点到了模态"
+（用来清聊天日志选区），从不把行映射回条目。上游不是这样：
+`dispatchMouseToOverlay`（`packages/tui/src/tui.ts:824-847`）把事件翻译成 overlay 局部坐标后交给组件，
+`SelectList::handleMouse`（`components/select-list.ts:110-148`）滚轮一档一格（钳制不回绕）、
+press 高亮、click 激活；`SettingsList::handleMouse`（`components/settings-list.ts:179-210`）同构且要跳过
+搜索行（`rowOffset = searchEnabled ? 2 : 0`）。`pi-tui` 没有组件树（模态由 `App` 直接画进 cell buffer），
+所以这半边一直缺着。
+
+落地：
+
+- `App` 新增 4 个 geometry 原子量（`modal_list_kind/first_row/first_item/rows`），三处绘制块按各自布局
+  记录**条目**窗口（selector：标题+分割线 2 行；settings：可搜索时 2 行头；dialog：仅 `Select` 有列表，
+  其余把记录清空）——与 LUM-1436 的 `record_autocomplete_area` 同一套 seam；
+- `step_modal_list_wheel` / `modal_list_press` / `modal_list_click` / `modal_list_hit`：
+  只判行不判列，非条目行（标题/分割线/`(n/m)`/脚注）同样归模态且**不滚日志**；
+- 三处"激活"**复用键盘已有路径**：dialog → `step_dialog(Enter)`（应答走 oneshot）；
+  settings → `step_settings(Enter)`（驱动 `drain_settings_changes` 本来在轮询）；
+  picker → `App::take_selector_commit()` + 驱动 `apply_selector_choice`（与 `Enter` 同一落点）；
+- **驱动侧 3 处放行**（关键修复）：selector 与改名对话框分支此前对非键事件 `return Ok(None)`，
+  指针根本到不了 `app.step`；现在只截键，滚轮/点击放行。
+
+`tests/modal_pointer.rs`（11 条行为断言）+ `lum1445_modal_pointer_frames.rs`（2 帧）
++ 驱动用例 `the_picker_takes_the_pointer_while_it_owns_the_keyboard`。
+
+**反向验证**（本机实做）：① `record_modal_list` 存成 `NONE`（回到旧行为）→ 11 条里 **5 条立刻红**；
+② 去掉 selector 分支的 `matches!(event, InputEvent::Key(_))` → 驱动用例**立刻红**。
+
+### 二、chatinput ↔ codex / Martty 第一手对照
+
+本轮 checkout `https://github.com/louloulin/Martty`（tip `93e9231 release: v0.2.17`）自己核对，
+不再转述：Martty 的 composer（`src/input/editor.rs` 394 行）有软换行与 display-column 记忆、
+word/kill 动作，但**没有**撤销栈、**没有**历史反查 `Ctrl+R`、**没有**粘贴折叠、**没有** kill-ring，
+且 `handle_mouse`（`src/app.rs:2284`）只覆盖聊天面板选择/滚轮/工具块/slot——**输入框不是鼠标目标**。
+即：issue 正文「chatinput 与 codex/Martty 差距很大」在 composer 面已不成立，pi-rust 是更强的一方
+（详见 `docs/LUM1445_MODAL_POINTER.md` §7 对照表）。
+
+### 三、门禁与数字
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo test -p pi-tui` | **1020 passed / 0 failed**（基线 1007，+13） |
+| `cargo test -p pi-coding-agent --lib` | **571 / 8**（`stash` 实测基线 570/8，**同一批 8 个** Windows 环境类） |
+| `cargo fmt --all -- --check` | 干净 |
+| `cargo clippy -p pi-tui --all-targets -- -D warnings` | 干净 |
+| clippy `-p pi-coding-agent -D warnings` | 卡在**既存** `pi-extensions/src/host.rs:3144 fn signal_name` 未使用（本轮未改该文件；本轮改动文件在非 `-D` 下零告警） |
+
+Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.12）：规模 **89.1%**（136,469 / 153,106）、
+测试 **49.9%**（2,651 / 5,309）、TUI 模块 **35/42 = 83.3%**、`app.*` **43/44 = 97.7%**、
+扩展事件 **20/36 = 55.6%**（LUM-1432 在办）、**TUI 指针面 6/6 = 100%**（composer 3 + 模态列表 3）、
+加权 **83.6%**。
+
+两张真帧截图 `docs/screenshots/lum1445-modal-pointer-{before,after}-76x18.png`(+`.txt`)；
+本机 Windows 无 `pty`，走 frame-buffer 通道，**证明几何/高亮与"谁动了"，不证明点击时序**。
+
+### 四、槽位 / 派发
+
+**0 新派发 + 1 件自做 + 1 件在办**（上限 3）：自做＝模态指针面（`pi-tui` + 驱动 3 处放行）；
+在办＝**LUM-1432**（扩展事件 20/36 → 36/36），run `01a0caaf-e464` 状态 `running`、尚无评论，
+其文件面（`pi-protocol`/`pi-agent-core`/`pi-extensions`）与本轮**零重叠**，故不重复派发、不抢文件。
+不派第三条：`docs/LUM1445_MODAL_POINTER.md` §8 的 2、3 条与 LUM-1432 共享 `pi-coding-agent`。

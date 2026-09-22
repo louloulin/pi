@@ -762,7 +762,13 @@ impl Selector {
     /// Visible row range `(start, end)` — upstream `getVisibleRange`,
     /// shared with the composer's autocomplete dropdown through
     /// [`select_list_visible_range`].
-    fn visible_range(&self) -> (usize, usize) {
+    ///
+    /// Public because the App maps a pointer row back onto a list row with
+    /// it: the modal pickers paint their own title and rule above the
+    /// window, so `start` is the index the first painted *item* row carries
+    /// (upstream `SelectList::handleMouse` does the same arithmetic on its
+    /// own `getVisibleRange()`, `components/select-list.ts:124-130`).
+    pub fn visible_range(&self) -> (usize, usize) {
         select_list_visible_range(self.filtered.len(), self.cursor, self.max_visible)
     }
 
