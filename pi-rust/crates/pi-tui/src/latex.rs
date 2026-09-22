@@ -24,6 +24,8 @@
 
 use std::iter;
 
+use crate::width::columns;
+
 /// Map a LaTeX symbol command to its Unicode glyph.
 #[rustfmt::skip]
 fn symbol(key: &str) -> Option<&'static str> {
@@ -518,9 +520,9 @@ fn is_plain_wrapper(key: &str) -> bool {
 // Small text helpers
 // ---------------------------------------------------------------------------
 
-/// Width of `text` in the crate's character-count convention.
+/// Width of `text` in terminal columns ([`crate::width`]).
 fn visible_width(text: &str) -> usize {
-    text.chars().count()
+    columns(text)
 }
 
 /// Replace every character of `value`, or return `None` if any is missing.

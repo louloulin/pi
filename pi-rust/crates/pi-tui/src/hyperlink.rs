@@ -19,6 +19,8 @@
 
 use std::sync::OnceLock;
 
+use crate::width::columns;
+
 /// The 8-bit C1 "string terminator" (ST) OSC 8 uses to close a sequence.
 pub const OSC8_ST: &str = "\u{1b}\\";
 
@@ -43,7 +45,7 @@ pub fn close_hyperlink() -> String {
 /// Upstream's `hyperlink(text, url)` (`packages/tui/src/terminal-image.ts:665`)
 /// is byte-for-byte this sequence. The returned string is wider than `text`
 /// on the wire but exactly as wide on screen: [`visible_width`] agrees with
-/// `text.chars().count()`.
+/// `text.chars().count()` (and with the two columns a wide glyph costs).
 pub fn hyperlink(text: &str, url: &str) -> String {
     let mut out = open_hyperlink(url);
     out.push_str(text);
@@ -208,11 +210,11 @@ pub fn strip_ansi(text: &str) -> String {
 
 /// Display width of `text` with all ANSI / OSC sequences removed.
 ///
-/// Counts characters, matching `pi-tui`'s crate-wide width convention
-/// (`message.rs` / `selector.rs` / `markdown.rs`): a wide glyph counts as
-/// one column.
+/// Escape sequences occupy no cells; everything else is measured by the
+/// crate's width rule ([`crate::width`]), where a CJK ideograph or an emoji
+/// costs two columns and a combining mark costs none.
 pub fn visible_width(text: &str) -> usize {
-    strip_ansi(text).chars().count()
+    columns(&strip_ansi(text))
 }
 
 #[cfg(test)]

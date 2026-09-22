@@ -297,12 +297,14 @@ use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::{
-    plain_text, write_styled_line, write_styled_line_ellipsized, SpanStyle, StyledLine, StyledSpan,
+    buffer_row_text, plain_text, write_plain_row, write_styled_line, write_styled_line_ellipsized,
+    SpanStyle, StyledLine, StyledSpan,
 };
 use crate::theme::{
     builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
 };
+use crate::width::{char_columns, columns};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -5089,15 +5091,7 @@ impl App {
                         cell.set_char(' ');
                     }
                 }
-                for (col, ch) in line.chars().enumerate() {
-                    let x = area.x + col as u16;
-                    if x >= area.x + area.width {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_char(ch);
-                    }
-                }
+                write_plain_row(buf, area.x, y, area.width, line);
             }
         }
 
@@ -5208,27 +5202,43 @@ impl App {
             thinking_border_color(self.thinking_level)
         };
         let label_style = Some(SpanStyle::fg(label_slot).to_style(&self.theme));
-        let label_width = self.prompt.label().chars().count() as u16;
+        let label_width = columns(self.prompt.label()) as u16;
         for (row, line) in lines.iter().enumerate() {
             let y = rect.y + row as u16;
             if y >= rect.y + rect.height {
                 break;
             }
-            for (col, ch) in line.chars().enumerate() {
-                let x = rect.x + col as u16;
-                if x >= rect.x + rect.width {
+            // This loop paints cells directly (the label owns a style of its
+            // own, so it cannot go through `write_styled_line`), which means
+            // it has to advance by **columns**: a CJK or emoji glyph occupies
+            // two cells, and the cell its second column covers must be
+            // blanked so a stale glyph from the previous frame cannot show
+            // through. Without this a Chinese draft was written one cell per
+            // character and the row collapsed to a fraction of the draft
+            // (`> 中` for a 44-column draft, LUM-1418).
+            let mut col = 0usize;
+            for ch in line.chars() {
+                let glyph_width = char_columns(ch);
+                if col + glyph_width > rect.width as usize {
                     break;
                 }
+                let x = rect.x + col as u16;
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     if let Some(style) = label_style {
                         // Only the first row owns the label; subsequent rows
                         // are blank-padded with spaces.
-                        if row == 0 && (col as u16) < label_width {
+                        if row == 0 && col < label_width as usize {
                             cell.set_style(style);
                         }
                     }
                 }
+                for offset in 1..glyph_width {
+                    if let Some(cell) = buf.cell_mut((rect.x + (col + offset) as u16, y)) {
+                        cell.reset();
+                    }
+                }
+                col += glyph_width;
             }
         }
     }
@@ -5320,13 +5330,7 @@ impl App {
         let lines = buf
             .content()
             .chunks(width as usize)
-            .map(|row| {
-                row.iter()
-                    .map(|cell| cell.symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
+            .map(|row| buffer_row_text(row).trim_end().to_string())
             .collect::<Vec<_>>();
         RenderSnapshot {
             width,

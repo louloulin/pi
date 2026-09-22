@@ -77,6 +77,7 @@ use crate::input::{InputEvent, Key, KeyCode};
 use crate::styled::{plain_text, themed_text, SpanStyle, StyledLine, StyledSpan};
 use crate::styles::SelectListStyles;
 use crate::theme::{ThemeBg, ThemeColor};
+use crate::width::{columns, truncate_columns};
 
 /// Default primary (label) column width, upstream
 /// `DEFAULT_PRIMARY_COLUMN_WIDTH`.
@@ -889,19 +890,16 @@ impl Selector {
     }
 }
 
-/// Layout width of a string: this crate counts `char`s (see `message` /
-/// `prompt`), so a wide glyph still counts as one column.
+/// Layout width of a string in terminal columns ([`crate::width`]): a CJK
+/// ideograph is two columns, an emoji two, a combining mark none.
 fn display_width(text: &str) -> usize {
-    text.chars().count()
+    columns(text)
 }
 
 /// Truncate `text` to at most `max` columns, dropping the tail — upstream
 /// `truncateToWidth(text, max, "")`.
 fn truncate_to_width(text: &str, max: usize) -> String {
-    if display_width(text) <= max {
-        return text.to_string();
-    }
-    text.chars().take(max).collect()
+    truncate_columns(text, max).to_string()
 }
 
 /// Upstream `SelectList::getDisplayValue`: the label, falling back to the

@@ -24,6 +24,7 @@ tokio-util.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 pi-ai = { path = "../pi-ai" }

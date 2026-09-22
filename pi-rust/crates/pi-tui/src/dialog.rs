@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 use crate::input::{Key, KeyCode};
 use crate::prompt::{Prompt, PromptAction};
 use crate::selector::{Selector, SelectorAction, SelectorItem};
+use crate::width::columns;
 
 /// Which flavour of dialog is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,7 +289,8 @@ impl Dialog {
 }
 
 /// Greedy word wrap so a long confirmation body stays inside the
-/// dialog. Newlines in the input are honoured as hard breaks.
+/// dialog. Newlines in the input are honoured as hard breaks. Widths are
+/// terminal columns ([`crate::width`]).
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return Vec::new();
@@ -297,10 +299,10 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     for paragraph in text.split('\n') {
         let mut line = String::new();
         for word in paragraph.split_whitespace() {
-            let word_len = word.chars().count();
+            let word_width = columns(word);
             if line.is_empty() {
                 line.push_str(word);
-            } else if line.chars().count() + 1 + word_len <= width {
+            } else if columns(&line) + 1 + word_width <= width {
                 line.push(' ');
                 line.push_str(word);
             } else {
