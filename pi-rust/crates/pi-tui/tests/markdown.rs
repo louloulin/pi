@@ -8,6 +8,7 @@ use pi_tui::markdown::{render_markdown, render_markdown_with_theme};
 use pi_tui::message::{MessageItem, MessageView, Role};
 use pi_tui::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
 use pi_tui::theme::{builtin_theme, ColorMode, ThemeColor};
+use pi_tui::width::columns;
 
 fn texts(lines: &[StyledLine]) -> Vec<String> {
     lines.iter().map(|line| plain_text(line)).collect()
@@ -252,21 +253,23 @@ fn malformed_link_degrades_to_text() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn wide_glyphs_count_one_column_like_display_width() {
-    let lines = render_markdown("你好世界", 2);
+fn wide_glyphs_count_two_columns() {
+    // LUM-1418: a CJK ideograph is two terminal columns, matching upstream's
+    // `visibleWidth`. Before this round the port counted characters, so the
+    // rows below were twice as wide as the terminal and the terminal
+    // hard-wrapped them again.
+    let lines = render_markdown("你好世界", 4);
     assert_eq!(texts(&lines), vec!["你好", "世界"]);
 
     let lines = render_markdown("ab你c", 3);
-    assert_eq!(texts(&lines), vec!["ab你", "c"]);
+    assert_eq!(texts(&lines), vec!["ab", "你c"]);
 }
 
 #[test]
 fn mixed_cjk_and_ascii_wrap_without_panicking() {
     let lines = render_markdown("中文 mixed 中文字符", 6);
-    assert_eq!(texts(&lines), vec!["中文", "mixed", "中文字符"]);
-    assert!(lines
-        .iter()
-        .all(|line| plain_text(line).chars().count() <= 6));
+    assert_eq!(texts(&lines), vec!["中文", "mixed", "中文字", "符"]);
+    assert!(lines.iter().all(|line| columns(&plain_text(line)) <= 6));
 }
 
 #[test]
@@ -836,8 +839,13 @@ fn table_ends_the_document_without_a_trailing_blank() {
     assert_eq!(texts(&lines)[6], "after");
 }
 
-/// Wide glyphs count one column (this crate's single width convention), so a
-/// CJK table never overflows or panics.
+/// Wide glyphs count two columns, so a CJK table never overflows or panics
+/// (LUM-1418; before this round the rows were twice the real width).
+///
+/// At 20 columns the width negotiation gives column 0 the ten columns
+/// `あいうえお` needs and leaves column 1 exactly three, so the four-column
+/// header `年齢` wraps onto two rows — that is the negotiation working, not a
+/// defect, and the grid stays square either way.
 #[test]
 fn table_with_wide_glyphs_stays_within_the_width() {
     let lines = texts(&render_markdown(
@@ -845,16 +853,15 @@ fn table_with_wide_glyphs_stays_within_the_width() {
         20,
     ));
     for line in &lines {
-        assert!(line.chars().count() <= 20, "{line:?}");
+        assert!(columns(line) <= 20, "{line:?}");
     }
-    assert!(lines[1].contains("名前"));
-    assert!(lines[3].contains("あいうえお"));
-    let grid_width = lines[0].chars().count();
+    assert!(lines.iter().any(|line| line.contains("名前")), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.contains("あいうえお")),
+        "{lines:?}"
+    );
+    let grid_width = columns(&lines[0]);
     for line in lines.iter().filter(|line| line.starts_with('│')) {
-        assert_eq!(
-            line.chars().count(),
-            grid_width,
-            "uneven grid line {line:?}"
-        );
+        assert_eq!(columns(line), grid_width, "uneven grid line {line:?}");
     }
 }

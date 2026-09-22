@@ -45,6 +45,7 @@ use crate::terminal_image::{
     allocate_image_id, get_capabilities, get_cell_dimensions, get_image_dimensions, image_fallback,
     render_image, CellDimensions, ImageDimensions, ImageProtocol, ImageRenderOptions,
 };
+use crate::width::{char_columns, columns};
 
 /// The default ellipsis [`truncate_to_width`] appends.
 const ELLIPSIS: &str = "...";
@@ -85,12 +86,12 @@ pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     if visible_width(text) <= max_width {
         return text.to_string();
     }
-    if max_width <= ELLIPSIS.len() {
+    if max_width <= columns(ELLIPSIS) {
         // Upstream clips the ellipsis itself when it does not fit.
-        return ELLIPSIS[..max_width].to_string();
+        return ELLIPSIS.chars().take(max_width).collect();
     }
 
-    let target = max_width - ELLIPSIS.len();
+    let target = max_width - columns(ELLIPSIS);
     let (mut kept, link_open) = copy_prefix_to_width(text, target);
     kept.push_str(ELLIPSIS);
     if link_open {
@@ -114,7 +115,7 @@ fn copy_prefix_to_width(text: &str, target: usize) -> (String, bool) {
         if bytes[i] != 0x1b {
             let ch = text[i..].chars().next().expect("index is a char boundary");
             out.push(ch);
-            visible += 1;
+            visible += char_columns(ch);
             i += ch.len_utf8();
             continue;
         }

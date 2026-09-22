@@ -22,6 +22,7 @@
 use crate::editor::{Editor, EditorAction};
 use crate::input::{InputEvent, Key, KeyCode};
 use crate::visual_text::VisualLayout;
+use crate::width::{columns, truncate_columns};
 
 /// Action returned from [`Prompt::handle_event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +129,7 @@ impl Prompt {
     /// is responsible for selecting the area.
     pub fn render_line(&self, width: u16) -> String {
         let label = self.label.as_str();
-        let label_width = label.chars().count();
+        let label_width = columns(label);
         let available = (width as usize).saturating_sub(label_width);
         let text = self.editor.display_text();
         let cursor = self.editor.display_cursor();
@@ -146,8 +147,9 @@ impl Prompt {
             line.push_str(after);
         }
         // Pad to width.
-        if line.chars().count() < width as usize {
-            for _ in 0..(width as usize - line.chars().count()) {
+        let used = columns(&line);
+        if used < width as usize {
+            for _ in 0..(width as usize - used) {
                 line.push(' ');
             }
         }
@@ -203,7 +205,7 @@ impl Prompt {
     /// does, so callers can reserve the row count ahead of time and the
     /// resulting layout does not jump when the buffer is typed into.
     pub fn body_width(&self, width: u16) -> usize {
-        wrap_available(width as usize, self.label.chars().count()).max(1)
+        wrap_available(width as usize, columns(&self.label)).max(1)
     }
 
     /// Columns of `width` the draft itself may use (the label takes the
@@ -262,7 +264,7 @@ impl Prompt {
         if width == 0 {
             return (vec![String::new()], 0);
         }
-        let label_width = self.label.chars().count();
+        let label_width = columns(&self.label);
         let available = self.body_width(width as u16);
         let text = self.editor.display_text();
 
@@ -349,7 +351,7 @@ impl Prompt {
         if index == 0 {
             return self.label.clone();
         }
-        let gutter = self.label.chars().count();
+        let gutter = columns(&self.label);
         // A one-row window has no room for two separate markers: it is both
         // the first and the last visible row, so it reports both sides.
         if show_rows == 1 && hidden_above > 0 && hidden_below > 0 {
@@ -371,7 +373,7 @@ impl Prompt {
         if !self.placeholder.is_empty() {
             line.push_str(&char_truncate(&self.placeholder, available));
         }
-        while line.chars().count() < width {
+        while columns(&line) < width {
             line.push(' ');
         }
         line
@@ -388,7 +390,7 @@ fn wrap_available(width: usize, label_width: usize) -> usize {
 fn blank_row(prefix: &str, width: usize) -> String {
     let mut line = String::with_capacity(width);
     line.push_str(prefix);
-    while line.chars().count() < width {
+    while columns(&line) < width {
         line.push(' ');
     }
     line
@@ -422,7 +424,7 @@ fn build_prompt_row(
             line.push(*ch);
         }
     }
-    while line.chars().count() < width {
+    while columns(&line) < width {
         line.push(' ');
     }
     line
@@ -492,11 +494,9 @@ fn split_at_char(text: &str, idx: usize) -> (&str, &str) {
     (text, "")
 }
 
+/// Truncate `text` to at most `max` terminal columns (see [`crate::width`]).
 fn char_truncate(text: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    text.chars().take(max).collect()
+    truncate_columns(text, max).to_string()
 }
 
 #[cfg(test)]

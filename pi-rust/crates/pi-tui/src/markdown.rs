@@ -89,6 +89,7 @@
 use crate::latex::{render_latex, render_latex_with};
 use crate::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::{Theme, ThemeColor};
+use crate::width::{char_columns, columns};
 
 /// Indentation applied to the body of a fenced code block (upstream
 /// `theme.codeBlockIndent ?? "  "`).
@@ -1150,7 +1151,7 @@ fn render_list(list: &ListBlock, width: usize) -> Vec<StyledLine> {
         } else {
             "- ".to_string()
         };
-        let marker_w = marker.chars().count();
+        let marker_w = columns(&marker);
         let content_width = width.saturating_sub(marker_w).max(1);
         let mut item_lines = render_blocks(&item.blocks, content_width, SpanStyle::PLAIN);
         if item_lines.is_empty() {
@@ -1278,17 +1279,23 @@ fn measure_cell(
     min_words[column] = min_words[column].max(longest.max(1));
 }
 
-/// Visible width of a styled run under this module's character-counting
-/// convention.
+/// Visible width of a styled run in terminal columns ([`crate::width`]).
 fn styled_width(line: &[StyledSpan]) -> usize {
-    line.iter().map(|span| span.text.chars().count()).sum()
+    line.iter().map(|span| columns(&span.text)).sum()
 }
 
-/// Width of the longest whitespace-delimited word in `text`, capped at
+/// Width of the longest unbreakable run in `text`, in columns, capped at
 /// [`MAX_UNBROKEN_WORD_WIDTH`].
+///
+/// A CJK character is its own unbreakable run (a break is legal on either
+/// side of it), so a CJK sentence does not force its whole width into the
+/// table's minimum-column negotiation the way one whitespace-delimited word
+/// would.
 fn longest_word_width(text: &str) -> usize {
     text.split_whitespace()
-        .map(|word| word.chars().count())
+        .flat_map(str::chars)
+        .map(char_columns)
+        .chain(std::iter::once(0))
         .max()
         .unwrap_or(0)
         .min(MAX_UNBROKEN_WORD_WIDTH)
@@ -1867,8 +1874,12 @@ fn push_linked_span(out: &mut StyledLine, text: impl Into<String>, style: SpanSt
 /// Wrap a styled line at `width` columns.
 ///
 /// Breaks at the last space that fits, hard-breaks a run that is wider than the
-/// whole line, and honours embedded `\n` as a hard break. Character counting
-/// matches the crate's `display_width` convention (see the module docs).
+/// whole line, and honours embedded `\n` as a hard break. Columns are terminal
+/// columns ([`crate::width::char_columns`]): a CJK ideograph or an emoji costs
+/// two, a combining mark costs none. Counting characters instead — which is
+/// what this loop did before LUM-1418 — made every CJK paragraph in the
+/// transcript twice as wide as the terminal, so the terminal hard-wrapped the
+/// overflow onto rows the message view had not accounted for.
 fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
     if width == 0 {
         return vec![line.to_vec()];
@@ -1904,7 +1915,14 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
         if ch == ' ' && i >= start {
             last_space = Some(i);
         }
-        if col >= width {
+        // Break *before* the glyph that would overflow, so a row can never be
+        // wider than `width` (upstream checks `currentVisibleLength +
+        // tokenVisibleLength > width` before advancing). For one-column glyphs
+        // this is the same condition as `col >= width`; for a two-column glyph
+        // at the last free column it is what stops the row from overflowing.
+        // `i > start` keeps a glyph wider than the whole row on a row of its
+        // own instead of looping forever.
+        if col + char_columns(ch) > width && i > start {
             match last_space.filter(|b| *b > start) {
                 Some(b) => {
                     out.push(build_line(&chars[start..b]));
@@ -1917,7 +1935,13 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
                             }
                         }
                     }
-                    col = i.saturating_sub(start);
+                    // `b` can be the character being measured (`i`) when the
+                    // overflowing glyph *is* a blank, which makes `start > i`;
+                    // an empty range contributes no columns.
+                    col = chars
+                        .get(start..i)
+                        .map(|tail| tail.iter().map(|(c, _, _)| char_columns(*c)).sum())
+                        .unwrap_or(0);
                     continue;
                 }
                 None => {
@@ -1929,7 +1953,7 @@ fn wrap_line(line: &[StyledSpan], width: usize) -> Vec<StyledLine> {
                 }
             }
         }
-        col += 1;
+        col += char_columns(ch);
         i += 1;
     }
 

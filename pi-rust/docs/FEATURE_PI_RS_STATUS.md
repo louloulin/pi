@@ -15375,3 +15375,50 @@ issue 的口径是「补全下拉框改走 SelectList 描述列对齐（清掉�
 **零派发**：「最多 3 个任务」是上限，本 issue 的交付在同一 run 内完成并过全量门，再派子任务只会把同一块
 代码面（`pi-tui` 行布局）拆成并发写者。下一轮序列（扩展生命周期事件 P0 +5.6pt、下拉框鼠标点选、`#` 触发起）
 列在 `docs/LUM1305_AUTOCOMPLETE_SELECT_LIST.md` §6.2，不新增 stage。
+
+## LUM-1418 round — 终端列宽根治：一个汉字 = 两列，全 TUI 按列排版（10 个渲染面 71 处引用）；真帧截图 + Rust↔TS 复测
+
+### 一、本轮交付
+
+* **根因**：整个 Rust TUI 用**字符数**当终端列宽（`message::display_width`、`markdown::styled_width`、
+  `visual_text::display_width`、`selector` / `settings` / `status` / `latex` / `dialog` / `hyperlink`）。
+  ASCII 下两者相等，所以 900+ 个测试、20+ 张截图都没暴露它；中文下差 2 倍 —— 排出的行宽是终端的两倍，
+  终端再硬折一次，折线以下每一行都比排版以为的位置低一行，滚动条 / PgUp / 鼠标行 / 搜索高亮全部错位。
+* 新增 `crates/pi-tui/src/width.rs`（列宽唯一实现：`\t`=3、控制符=0、Wide/Fullwidth=2、Ambiguous=1、
+  emoji=2、组合符=0；CJK 断行脚本表对齐上游 `cjkBreakRegex`），依赖 `unicode-width = "=0.2.2"`（锁版本）。
+* 13 个渲染模块的 **71 处**测量/写入引用切到列口径，包括：
+  `visual_text`（composer 换行 + 上游第二条 CJK 断行规则）、`prompt`、`message`（含 `wrap_words` 的
+  CJK token 切分）、`markdown`（含**溢出前判定**与表格列宽协商）、`styled`（写入按列推进 + 宽字形覆盖格
+  `reset()`、`clip_keep` 双口径）、`app`（`paint_prompt` / 对话框 overlay / `render_snapshot` 的
+  `buffer_row_text`）、`status`、`selector`、`settings`、`dialog`、`latex`、`hyperlink`、`image`。
+* 修复前实测的极端表现：44 列纯中文草稿只画出 `> 中`（`paint_prompt` 一次只写一格）；本轮后为完整一行 + `▍`。
+
+### 二、门禁与实测（最终树）
+
+* `cargo fmt --all -- --check` 干净；`cargo clippy --offline -p pi-tui --all-targets -- -D warnings` 干净；
+  `cargo check --offline --locked --workspace` OK。
+* `cargo test --offline --locked -p pi-tui`：**926 passed / 0 failed**，52 个 target
+  （基线 `origin/feature/pi.rs` 同机同工具链 **907 / 0** → +19）。
+* `cargo test --offline --workspace --no-fail-fast`：passed 2547 / failed 40 / ignored 2；
+  **失败集合与基线逐条相同**（`before 53 行 FAILED` vs `after 53 行 FAILED`，只有耗时不同），
+  全是本机 Windows 环境问题（无 `/tmp`、真 `bash` 工具、绝对路径断言、node fs、trust）。
+* 真帧截图 `docs/screenshots/lum1418-column-width.png`（+ `.txt` 可 grep dump），100×30 真 `App` 帧：
+  中文会话 / 中文 markdown（标题·列表·行内 code·引用块·GFM 表格）/ 24 行中文草稿 + `▍` / 状态栏。
+  **诚实说明**：本机无 `pty`，走的是 LUM-1412 建立的 frame-buffer 通道（冻结帧），证明排版、不证明交互时序。
+
+### 三、Rust↔TS 口径复测
+
+* 纯代码规模 **87.6%**（134,062 → 134,449 / 153,106，本轮 +387 行 src）；测试规模 **47.0%**（2,555 / 5,439）。
+* 新增两条以前**没人量过**的度量：列宽口径面 **13 模块 / 71 处 = 100%**（本轮前 0）；
+  指针映射面（鼠标选择 / 双击选词 / 搜索高亮列的「屏幕列 ↔ 字符下标」）**0/3 = 0%，未做**。
+* 加权总分**不动**（仍 81.4%）：这条缺陷不落在任何轴的「有没有这个能力」上，而是落在轴 6（视觉保真 90%）
+  的前提里，而历史审计全部用 ASCII 样本，没有机会看到它。重估轴 6 为 95% 只 +0.4pt，不值得改口径。
+* 测试标记数「2,570 → 2,555」不是测试变少：旧口径用 `grep -c` 逐文件求和（重复行计两次），
+  本轮改用 `re.findall` 重数，并把基线一并重数为 2,536。两个口径都不是本轮引入的。
+
+### 四、槽位 / 派发
+
+**零派发**：本 issue 的交付在同一 run 内完成并过门，且改动集中在同一块代码面（`pi-tui` 宽度/换行），
+再派并发写者只会撞车。下一轮第一顺位已在 `docs/LUM1418_COLUMN_WIDTH.md` §6 单子化：
+指针映射的列↔字符换算（`app.rs:764/3259/4273/4445/4587`、`search.rs:207-225`），
+需要同时改 `mouse_region` / `selection_granularity` / `alt_screen_search` 三套测试，单独一轮更安全。

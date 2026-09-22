@@ -14,10 +14,12 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use pi_protocol::{ToolCall, ToolResult};
 
 use crate::styled::{
-    plain_text, themed_text, write_styled_line_hyperlinked, SpanStyle, StyledLine, StyledSpan,
+    plain_text, themed_text, write_plain_row, write_styled_line_hyperlinked, SpanStyle, StyledLine,
+    StyledSpan,
 };
 use crate::styles::SelectListStyles;
 use crate::theme::{Theme, ThemeColor};
+use crate::width::{char_columns, columns, is_cjk_break};
 
 /// Logical role — drives the visual prefix and the message-view
 /// rendering. Mirrors the `user` / `assistant` / `tool` distinction the
@@ -1294,15 +1296,7 @@ impl MessageView {
                     buf, area.x, y, area.width, line, theme, hyperlinks,
                 ),
                 None => {
-                    for (col, ch) in plain_text(line).chars().enumerate() {
-                        let x = area.x + col as u16;
-                        if x >= area.x + area.width {
-                            break;
-                        }
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(ch);
-                        }
-                    }
+                    write_plain_row(buf, area.x, y, area.width, &plain_text(line));
                 }
             }
         }
@@ -1618,9 +1612,16 @@ fn wrap_single_line(line: &str, width: usize) -> Vec<String> {
     }
 }
 
-/// The word-wrap itself: greedily fill rows up to `width`, collapsing
-/// whitespace runs to a single space, with a hard break for a word that is
-/// wider than the row.
+/// The word-wrap itself: greedily fill rows up to `width` **columns**
+/// ([`crate::width`]), collapsing whitespace runs to a single space, with a
+/// hard break for a word that is wider than the row.
+///
+/// Every CJK character is its own wrap token and carries no separator: a
+/// script without inter-word spaces allows a break between any two adjacent
+/// characters (upstream's second wrap-opportunity rule,
+/// `splitIntoTokensWithAnsi` in `packages/tui/src/utils.ts:786`). Without it a
+/// whole CJK sentence is one "word", so it could only ever be force-broken
+/// instead of filling each row to the column budget.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let text = text.trim_start();
     let mut lines = Vec::new();
@@ -1628,30 +1629,34 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut current_width = 0usize;
 
     for word in split_words(text) {
-        let word_width = display_width(word);
-        if word_width > width {
-            // Flush whatever we have, then hard-wrap the long word.
-            if !current.is_empty() {
+        for (token, glue) in word_tokens(word) {
+            let token_width = display_width(token);
+            if token_width > width && !glue {
+                // Flush whatever we have, then hard-wrap the long word.
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+                for chunk in hard_wrap(token, width) {
+                    lines.push(chunk);
+                }
+                continue;
+            }
+            // A CJK token is glued to its neighbours; everything else is a
+            // fresh word and takes one separating space.
+            let sep = if current.is_empty() || glue { 0 } else { 1 };
+            if current_width + sep + token_width > width && !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
-                current_width = 0;
+                current.push_str(token);
+                current_width = token_width;
+            } else {
+                if sep == 1 {
+                    current.push(' ');
+                    current_width += 1;
+                }
+                current.push_str(token);
+                current_width += token_width;
             }
-            for chunk in hard_wrap(word, width) {
-                lines.push(chunk);
-            }
-            continue;
-        }
-        let sep = if current.is_empty() { 0 } else { 1 };
-        if current_width + sep + word_width > width {
-            lines.push(std::mem::take(&mut current));
-            current.push_str(word);
-            current_width = word_width;
-        } else {
-            if sep == 1 {
-                current.push(' ');
-                current_width += 1;
-            }
-            current.push_str(word);
-            current_width += word_width;
         }
     }
 
@@ -1662,6 +1667,32 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
         lines.push(String::new());
     }
     lines
+}
+
+/// Split one whitespace-delimited word into `(token, is_cjk_char)` wrap
+/// tokens.
+///
+/// Every CJK character becomes a token of its own — its boundary is a legal
+/// break — while a run of non-CJK characters stays a single token, exactly
+/// like upstream's `splitIntoTokensWithAnsi` (`packages/tui/src/utils.ts:786`)
+/// flushes its pending word when it meets a CJK grapheme.
+fn word_tokens(word: &str) -> Vec<(&str, bool)> {
+    let mut out: Vec<(&str, bool)> = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in word.char_indices() {
+        if !is_cjk_break(ch) {
+            continue;
+        }
+        if start < idx {
+            out.push((&word[start..idx], false));
+        }
+        out.push((&word[idx..idx + ch.len_utf8()], true));
+        start = idx + ch.len_utf8();
+    }
+    if start < word.len() {
+        out.push((&word[start..], false));
+    }
+    out
 }
 
 /// Split text into non-whitespace runs. The wrap function joins the
@@ -1693,8 +1724,11 @@ fn split_words(text: &str) -> Vec<&str> {
     out
 }
 
+/// Columns a string occupies — the crate-wide width rule
+/// ([`crate::width`]). A CJK ideograph is two columns, an emoji two, a
+/// combining mark none.
 fn display_width(s: &str) -> usize {
-    s.chars().count()
+    columns(s)
 }
 
 fn hard_wrap(word: &str, width: usize) -> Vec<String> {
@@ -1702,12 +1736,17 @@ fn hard_wrap(word: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
     let mut current_width = 0usize;
     for ch in word.chars() {
-        if current_width + 1 > width {
+        let glyph_width = char_columns(ch);
+        // A single glyph wider than the row is emitted on its own row rather
+        // than preceded by an empty one (upstream's `breakLongWord` does the
+        // same: a 2-column glyph in a 1-column row overflows by one and is
+        // still drawn, because no terminal can render it any narrower).
+        if !current.is_empty() && current_width + glyph_width > width {
             out.push(std::mem::take(&mut current));
             current_width = 0;
         }
         current.push(ch);
-        current_width += 1;
+        current_width += glyph_width;
     }
     if !current.is_empty() {
         out.push(current);

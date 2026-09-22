@@ -42,6 +42,7 @@ pub mod theme;
 pub mod tree;
 pub mod undo_stack;
 pub(crate) mod visual_text;
+pub mod width;
 pub mod word_navigation;
 
 pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot, ScrollbarGeometry};
@@ -115,6 +116,7 @@ pub use theme::{
 };
 pub use tree::{flatten_tree, tree_selector_items, TreeItem, TreeRow};
 pub use undo_stack::UndoStack;
+pub use width::{char_columns, columns, prefix_columns, truncate_columns};
 pub use word_navigation::{find_word_backward, find_word_forward};
 
 /// Re-export of the underlying terminal backend so binaries can pin a

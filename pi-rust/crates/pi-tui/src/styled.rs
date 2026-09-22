@@ -8,11 +8,12 @@
 //! text. The legacy `*_themed` string renderers build the same spans and
 //! convert them to ANSI for callers that compare strings.
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::hyperlink::hyperlink;
 use crate::theme::{hex_to_256, hex_to_rgb, ColorMode, ColorValue, Theme, ThemeBg, ThemeColor};
+use crate::width::{char_columns, columns};
 
 /// The theme slot(s) a [`StyledSpan`] renders with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -235,7 +236,7 @@ pub fn plain_text(line: &[StyledSpan]) -> String {
 /// included. Keeping this identical to [`write_styled_line_hyperlinked`]'s
 /// `col` counter is what makes the clip arithmetic below exact.
 fn line_width(line: &[StyledSpan]) -> usize {
-    line.iter().map(|span| span.text.chars().count()).sum()
+    line.iter().map(|span| columns(&span.text)).sum()
 }
 
 /// Render a line as an ANSI string using each span's slot.
@@ -388,9 +389,9 @@ fn write_styled_line_inner(
         return;
     }
     let overflow = line_width(line) > max_width as usize;
-    let limit = match mode.tail {
+    let (limit_cols, limit_chars) = match mode.tail {
         Tail::Mark(_) if overflow => clip_keep(line, max_width as usize),
-        _ => max_width as usize,
+        _ => (max_width as usize, usize::MAX),
     };
     let mut col = 0usize;
     'spans: for span in line {
@@ -401,7 +402,8 @@ fn write_styled_line_inner(
             None
         };
         for ch in span.text.chars() {
-            if col >= limit {
+            let glyph_width = char_columns(ch);
+            if col + glyph_width > limit_cols {
                 break 'spans;
             }
             if let Some(cell) = buf.cell_mut((x0 + col as u16, y)) {
@@ -415,7 +417,18 @@ fn write_styled_line_inner(
                 }
                 cell.set_style(style);
             }
-            col += 1;
+            // A wide glyph owns the cell it was written into **and** the
+            // cells its second column covers. `ratatui`'s `set_stringn`
+            // resets the latter so a grapheme is never hidden behind stale
+            // content from an earlier frame; do the same here, because a
+            // neighbouring wide glyph could otherwise leave its right half
+            // visible under the left half of this one.
+            for offset in 1..glyph_width {
+                if let Some(cell) = buf.cell_mut((x0 + (col + offset) as u16, y)) {
+                    cell.reset();
+                }
+            }
+            col += glyph_width;
         }
     }
     if overflow {
@@ -424,14 +437,14 @@ fn write_styled_line_inner(
             // `col` is a cell the row owns even after a word-boundary cut.
             if let Some(cell) = buf.cell_mut((x0 + col as u16, y)) {
                 cell.set_char(mark);
-                cell.set_style(style_at(line, limit, theme));
+                cell.set_style(style_at(line, limit_chars, theme));
             }
         }
     }
 }
 
-/// How many characters of `line` survive a marked clip at `max_width`
-/// columns.
+/// How much of `line` survives a marked clip at `max_width` columns, as
+/// `(columns kept, characters consumed)`.
 ///
 /// Always leaves the last column for [`CLIP_MARK`]. Prefers the last
 /// whitespace boundary at or before that budget, so a word is dropped whole
@@ -439,23 +452,89 @@ fn write_styled_line_inner(
 /// half of the available columns (one long token after an early space) is not
 /// an affordance, it is a different bug: the caller then keeps every column
 /// and the word is cut — still marked.
-fn clip_keep(line: &[StyledSpan], max_width: usize) -> usize {
+///
+/// The two numbers differ once a wide glyph is on the line: the writer budgets
+/// in **columns** while the clip mark takes over the style of the
+/// **character** it replaced ([`style_at`]), so the caller needs both.
+fn clip_keep(line: &[StyledSpan], max_width: usize) -> (usize, usize) {
     let budget = max_width.saturating_sub(1);
     if budget == 0 {
-        return 0;
+        return (0, 0);
     }
-    // `line` is strictly wider than `max_width` at every call site, so a
-    // character always exists at `budget`.
-    let mut boundary = None;
-    for (index, ch) in plain_text(line).chars().enumerate().take(budget + 1) {
-        if index > 0 && ch.is_whitespace() {
-            boundary = Some(index);
+    let mut used = 0usize;
+    let mut chars = 0usize;
+    let mut boundary: Option<(usize, usize)> = None;
+    for ch in plain_text(line).chars() {
+        let glyph_width = char_columns(ch);
+        if used + glyph_width > budget {
+            break;
         }
+        // Recorded *before* the blank is consumed, so the blank itself stays
+        // out of the kept prefix — upstream's boundary index is "characters
+        // before the whitespace".
+        if chars > 0 && ch.is_whitespace() {
+            boundary = Some((used, chars));
+        }
+        used += glyph_width;
+        chars += 1;
     }
     match boundary {
-        Some(index) if index * 2 >= budget => index,
-        _ => budget,
+        Some((cols, count)) if cols * 2 >= budget => (cols, count),
+        _ => (used, chars),
     }
+}
+
+/// Write a plain (unstyled) string into one buffer row, advancing by terminal
+/// **columns**.
+///
+/// The per-cell painters in the App (`paint_prompt`, the dialog overlay), the
+/// status bar's plain renderer and [`MessageView`](crate::MessageView)'s plain
+/// `render_to_buffer` path all need the same three rules, so they live here
+/// once:
+///
+/// * a glyph occupies [`char_columns`] cells, not one;
+/// * the cells a wide glyph's second column covers are reset, so a stale glyph
+///   from an earlier frame can never show through;
+/// * nothing is written past `max_width` columns, so a row can never bleed into
+///   the region next to it.
+pub fn write_plain_row(buf: &mut Buffer, x0: u16, y: u16, max_width: u16, text: &str) {
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let glyph_width = char_columns(ch);
+        if col + glyph_width > max_width as usize {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((x0 + col as u16, y)) {
+            cell.set_char(ch);
+        }
+        for offset in 1..glyph_width {
+            if let Some(cell) = buf.cell_mut((x0 + (col + offset) as u16, y)) {
+                cell.reset();
+            }
+        }
+        col += glyph_width;
+    }
+}
+
+/// The text content of one buffer row, **skipping the continuation cells a
+/// wide glyph covers**.
+///
+/// A `ratatui::Buffer` stores a double-width glyph in one cell and leaves the
+/// cell it covers blank (`Buffer::set_stringn` resets it). Joining the cell
+/// symbols naively therefore reads a CJK row as `你 好` instead of `你好`.
+/// This is the same rule `ratatui`'s own `Debug` impl uses
+/// (`skip = max(skip, cell.symbol().width()) - 1`), and it is how a terminal
+/// reads the same row back.
+pub fn buffer_row_text(row: &[Cell]) -> String {
+    let mut out = String::new();
+    let mut skip = 0usize;
+    for cell in row {
+        if skip == 0 {
+            out.push_str(cell.symbol());
+        }
+        skip = skip.max(columns(cell.symbol())).saturating_sub(1);
+    }
+    out
 }
 
 /// The style of the character at `index` in `line` — the cell the mark takes

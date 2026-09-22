@@ -23,22 +23,23 @@
 //!   cursor cannot address. Combining marks and ZWJ sequences therefore
 //!   contribute their own `unicode-width` (usually 0 for a combining
 //!   mark), exactly like [`crate::word_navigation`]'s char-level port.
-//! * Width counts characters, not terminal columns: this module follows
-//!   `pi-tui`'s documented crate-wide width convention
-//!   (`markdown.rs` "Width convention", `hyperlink::visible_width`,
-//!   `message::display_width`) where a wide glyph counts as one column,
-//!   rather than introducing a second convention the rest of the renderer
-//!   does not share. A CJK draft therefore wraps on character count, the
-//!   same way the transcript and the selector already measure it
-//!   (upstream TS `wordWrapLine` measures columns instead — tracked as a
-//!   crate-wide follow-up, not a composer-local one).
-//! * Break opportunities are whitespace runs only, upstream's first rule.
-//!   Upstream's second rule (break between two CJK characters) cannot
-//!   fire under a one-column-per-character measure: a wide glyph is
-//!   already one column here, so the force-break below is what upstream's
-//!   CJK rule would have reached.
+//! * Width counts **terminal columns**, via [`crate::width`]: one CJK
+//!   ideograph is two columns, an emoji is two, a combining mark is none.
+//!   Until LUM-1418 this module counted characters (one column per char),
+//!   which agreed with upstream for ASCII and doubled the real width of any
+//!   CJK draft — the composer then wrapped one row too late and the terminal
+//!   hard-wrapped the overflow onto a line the caret geometry did not know
+//!   about. The row bookkeeping below (source offsets, `caret`,
+//!   `cursor_at`, `preferred_col`) stays in **characters**, exactly like
+//!   upstream's `buildVisualLineMap`, whose `startCol` / `length` are also
+//!   character columns; only the wrap decision measures columns.
+//! * Break opportunities are upstream's two rules: after a whitespace run
+//!   followed by a non-blank, and between two adjacent characters when
+//!   either is CJK ([`crate::width::is_cjk_break`]).
 //! * A row wider than the available columns still force-breaks at the
 //!   row edge, so a single long word is never clipped off-screen.
+
+use crate::width::{char_columns, is_cjk_break};
 
 /// One rendered row of the composer body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +191,9 @@ fn hard_lines(chars: &[char]) -> Vec<(usize, usize)> {
 ///
 /// Upstream's `wordWrapLine` loop: accumulate until the row would
 /// overflow, then backtrack to the last break opportunity if that still
-/// fits, otherwise force-break at the row edge.
+/// fits, otherwise force-break at the row edge. Widths are terminal
+/// columns ([`crate::width::char_columns`]); positions stay in character
+/// offsets.
 fn wrap_line(chars: &[char], start: usize, end: usize, width: usize, rows: &mut Vec<VisualRow>) {
     if width == 0 {
         rows.push(row_from(chars, start, end));
@@ -201,7 +204,7 @@ fn wrap_line(chars: &[char], start: usize, end: usize, width: usize, rows: &mut 
     }
 
     let line = &chars[start..end];
-    let line_width: usize = line.iter().copied().map(display_width).sum();
+    let line_width: usize = line.iter().copied().map(char_columns).sum();
     if line_width <= width {
         rows.push(row_from(chars, start, end));
         return;
@@ -215,7 +218,7 @@ fn wrap_line(chars: &[char], start: usize, end: usize, width: usize, rows: &mut 
 
     for index in 0..line.len() {
         let ch = line[index];
-        let glyph_width = display_width(ch);
+        let glyph_width = char_columns(ch);
 
         if current_width + glyph_width > width {
             match wrap_at {
@@ -236,12 +239,15 @@ fn wrap_line(chars: &[char], start: usize, end: usize, width: usize, rows: &mut 
 
         current_width += glyph_width;
 
-        // A break is allowed after a whitespace run when a non-whitespace
-        // character follows (upstream's first wrap-opportunity rule).
+        // Upstream's two wrap-opportunity rules: a break is allowed after a
+        // whitespace run when a non-whitespace character follows, and
+        // between two adjacent characters when either side is CJK.
         let next = line.get(index + 1).copied();
         if let Some(next) = next {
             let next_is_blank = next.is_whitespace() && next != '\n';
-            if ch.is_whitespace() && !next_is_blank {
+            let after_a_blank = ch.is_whitespace();
+            let cjk_boundary = is_cjk_break(ch) || is_cjk_break(next);
+            if !next_is_blank && (after_a_blank || cjk_boundary) {
                 wrap_at = Some((index + 1, current_width));
             }
         }
@@ -273,21 +279,9 @@ fn row_from(chars: &[char], from: usize, to: usize) -> VisualRow {
     }
 }
 
-/// Columns one character occupies, under the crate's width convention
-/// (see the module docs): every character is one column, except `\r` in a
-/// CRLF paste, which is invisible and must not consume one.
-fn display_width(ch: char) -> usize {
-    usize::from(ch != '\r')
-}
-
-/// Columns a string occupies, under the crate's width convention.
-///
-/// Only the layout tests need the standalone form; production code
-/// measures per character while it wraps.
+/// Columns a string occupies; see [`crate::width::columns`].
 #[cfg(test)]
-pub(crate) fn display_width_of(text: &str) -> usize {
-    text.chars().map(display_width).sum()
-}
+pub(crate) use crate::width::columns as display_width_of;
 
 #[cfg(test)]
 mod tests {
@@ -327,13 +321,37 @@ mod tests {
     }
 
     #[test]
-    fn wide_glyphs_wrap_by_the_crate_width_convention() {
-        // `pi-tui` counts one column per character (see the module docs),
-        // so this is *not* an error: 8 CJK characters are 8 columns here,
-        // exactly how `message::display_width` / `hyperlink::visible_width`
-        // measure them.
-        assert_eq!(texts("你好世界你好世界", 8), vec!["你好世界你好世界"]);
-        assert_eq!(texts("你好世界你好世界", 4), vec!["你好世界", "你好世界"]);
+    fn wide_glyphs_wrap_by_terminal_columns() {
+        // A CJK ideograph is two terminal columns (LUM-1418). A draft of
+        // eight ideographs is sixteen columns wide, so it takes two rows at
+        // width 8 and four rows at width 4.
+        assert_eq!(texts("你好世界你好世界", 16), vec!["你好世界你好世界"]);
+        assert_eq!(texts("你好世界你好世界", 8), vec!["你好世界", "你好世界"]);
+        assert_eq!(
+            texts("你好世界你好世界", 4),
+            vec!["你好", "世界", "你好", "世界"]
+        );
+    }
+
+    #[test]
+    fn a_cjk_run_breaks_between_adjacent_ideographs() {
+        // Upstream's CJK rule: no spaces needed, every boundary is a break
+        // opportunity, and the row is filled to the column budget before the
+        // break fires. "你好世界" is 8 columns, so width 6 keeps three
+        // ideographs (6 columns) and pushes the fourth to the next row.
+        assert_eq!(texts("你好世界", 6), vec!["你好世", "界"]);
+        // The row is filled to the column budget before the break fires, so a
+        // wide glyph that exactly completes the row stays on it — this is the
+        // `currentWidth - wrapOppWidth + gWidth <= maxWidth` backtrack in
+        // upstream's `wordWrapLine`, not a greedy break at the first CJK
+        // boundary.
+        assert_eq!(texts("ab你好", 4), vec!["ab你", "好"]);
+    }
+
+    #[test]
+    fn an_ascii_word_still_wraps_at_its_blank() {
+        // The CJK rule must not turn a Latin word into a break opportunity.
+        assert_eq!(texts("hello world foo", 11), vec!["hello ", "world foo"]);
     }
 
     #[test]
@@ -442,10 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn display_width_of_counts_characters_like_the_crate_does() {
-        assert_eq!(display_width_of("你好"), 2);
+    fn display_width_of_counts_terminal_columns() {
+        assert_eq!(display_width_of("你好"), 4);
         assert_eq!(display_width_of("ab"), 2);
-        assert_eq!(display_width_of("a\tb"), 3);
+        assert_eq!(display_width_of("a\tb"), 5);
         assert_eq!(display_width_of("a\rb"), 2, "a CRLF paste stays invisible");
     }
 }

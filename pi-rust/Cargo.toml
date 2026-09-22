@@ -90,6 +90,14 @@ getrandom = { version = "0.2", features = ["js"] }
 # via `unicode-truncate`), so pinning it directly adds no new package to
 # the lockfile and keeps `--offline` builds working.
 unicode-segmentation = "=1.13.3"
+# Terminal column widths — `pi-tui`'s single width rule (`crate::width`).
+# Upstream measures with `visibleWidth` (`packages/tui/src/utils.ts`), which is
+# `get-east-asian-width` + the `string-width` rules; `unicode-width` implements
+# the same UAX #11 / UTS #51 tables. This crate is already in the dependency
+# graph (pulled in by `ratatui` as an older major), so the direct dependency is
+# the only way to get the 0.2 API that resolves emoji presentation; `--offline`
+# builds work because the crate is in the local registry cache.
+unicode-width = "=0.2.2"
 # NFKC normalization — the `edit` tool's fuzzy matcher (`normalizeForFuzzyMatch`)
 # applies `String.prototype.normalize("NFKC")` before its smart-quote / dash /
 # space folding. Already in the graph transitively via `idna_adapter`, so

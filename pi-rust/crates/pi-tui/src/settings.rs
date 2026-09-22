@@ -28,6 +28,7 @@ use crate::fuzzy::fuzzy_rank;
 use crate::input::{Key, KeyCode};
 use crate::styled::{SpanStyle, StyledLine, StyledSpan};
 use crate::theme::{ColorMode, Theme, ThemeColor};
+use crate::width::{columns, truncate_columns};
 
 /// Maximum label column width, upstream
 /// `Math.min(36, ...)` (`settings-list.ts:137`).
@@ -481,10 +482,10 @@ impl SettingsList {
     }
 }
 
-/// Layout width of a string. This crate counts `char`s (see `selector` /
-/// `message`), so a wide glyph still counts as one column.
+/// Layout width of a string in terminal columns ([`crate::width`]): a CJK
+/// ideograph is two columns, an emoji two, a combining mark none.
 fn display_width(text: &str) -> usize {
-    text.chars().count()
+    columns(text)
 }
 
 /// Pad `text` with trailing spaces to `width` columns, never truncating it.
@@ -500,10 +501,7 @@ fn pad_right(text: &str, width: usize) -> String {
 /// Truncate `text` to at most `max` columns, dropping the tail — upstream
 /// `truncateToWidth(text, max, "")`.
 fn truncate_to_width(text: &str, max: usize) -> String {
-    if display_width(text) <= max {
-        return text.to_string();
-    }
-    text.chars().take(max).collect()
+    truncate_columns(text, max).to_string()
 }
 
 /// Greedy word wrap at `width` columns, falling back to a hard break for a
@@ -523,9 +521,10 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
             current = word.to_string();
         }
         while display_width(&current) > width {
-            let head: String = current.chars().take(width).collect();
+            let head = truncate_columns(&current, width).to_string();
+            let consumed = head.chars().count();
             lines.push(head);
-            current = current.chars().skip(width).collect();
+            current = current.chars().skip(consumed).collect();
         }
     }
     if !current.is_empty() {

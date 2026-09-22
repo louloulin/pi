@@ -9,10 +9,11 @@ use pi_protocol::Usage;
 
 use crate::loader::format_elapsed;
 use crate::styled::{
-    plain_text, themed_text, write_styled_line, SpanStyle, StyledLine, StyledSpan,
+    plain_text, themed_text, write_plain_row, write_styled_line, SpanStyle, StyledLine, StyledSpan,
 };
 use crate::styles::SelectListStyles;
 use crate::theme::{Theme, ThemeColor};
+use crate::width::{columns, prefix_columns};
 
 /// The spinner frame plus the wall-clock time the current turn has been
 /// running, drawn at the head of the status bar while a turn is in flight.
@@ -253,15 +254,15 @@ impl StatusBar {
                 SpanStyle::fg(ThemeColor::Dim),
             ));
         }
-        let right_len = plain_text(&right).chars().count();
+        let right_len = line_width(&right);
         let session = match data.session_name.as_deref().filter(|name| !name.is_empty()) {
             Some(name) => format!("  {name}  "),
             None if data.session_id.is_empty() => String::new(),
             None => format!("  {}  ", data.session_id),
         };
 
-        let left_len = plain_text(&left).chars().count();
-        let session_len = session.chars().count();
+        let left_len = line_width(&left);
+        let session_len = columns(&session);
         if left_len + session_len + right_len > width {
             // The whole line does not fit. Hand the bar to the budgeted
             // layout, which drops parts instead of cutting them (see the
@@ -299,15 +300,7 @@ impl StatusBar {
         buf: &mut ratatui::buffer::Buffer,
     ) {
         let line = self.render(data, area.width);
-        for (col, ch) in line.chars().enumerate() {
-            let x = area.x + col as u16;
-            if x >= area.x + area.width {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((x, area.y)) {
-                cell.set_char(ch);
-            }
-        }
+        write_plain_row(buf, area.x, area.y, area.width, &line);
     }
 
     /// Themed variant of [`StatusBar::render_to_buffer`]: each written cell
@@ -491,7 +484,7 @@ fn narrow_width(data: &StatusData, zones: &[Zone]) -> usize {
             let lead = if index == 0 {
                 0
             } else {
-                zone_lead(*zone).chars().count()
+                columns(zone_lead(*zone))
             };
             lead + line_width(&zone_body(data, *zone))
         })
@@ -514,10 +507,10 @@ fn emit_zones(data: &StatusData, zones: &[Zone]) -> StyledLine {
     out
 }
 
-/// Visible columns of a styled line, by the same character count the fitted
-/// layout budgets with.
+/// Visible columns of a styled line, by the same terminal-column budget the
+/// fitted layout measures with ([`crate::width`]).
 fn line_width(line: &[StyledSpan]) -> usize {
-    plain_text(line).chars().count()
+    columns(&plain_text(line))
 }
 
 /// The budgeted layout: give up whole parts until the rest fits `width`.
@@ -601,8 +594,8 @@ pub fn format_tokens(count: u32) -> String {
     }
 }
 
-/// Take at most `*remaining` leading `char`s of a styled line and decrement
-/// `*remaining` by the number taken. Like [`clip`], but preserves each span's
+/// Take at most `*remaining` columns of a styled line and decrement
+/// `*remaining` by the columns taken. Like [`clip`], but preserves each span's
 /// style, so the multi-span right-hand segment keeps its colours while cut.
 fn clip_line(line: &[StyledSpan], remaining: &mut usize) -> StyledLine {
     let mut out = StyledLine::new();
@@ -610,19 +603,13 @@ fn clip_line(line: &[StyledSpan], remaining: &mut usize) -> StyledLine {
         if *remaining == 0 {
             break;
         }
-        let count = span.text.chars().count();
-        if count <= *remaining {
-            *remaining -= count;
+        let (prefix, used) = prefix_columns(&span.text, *remaining);
+        if prefix.len() == span.text.len() {
+            *remaining -= used;
             out.push(span.clone());
         } else {
-            let end = span
-                .text
-                .char_indices()
-                .nth(*remaining)
-                .map(|(idx, _)| idx)
-                .unwrap_or(span.text.len());
             out.push(StyledSpan {
-                text: span.text[..end].to_string(),
+                text: prefix.to_string(),
                 ..span.clone()
             });
             *remaining = 0;
@@ -631,22 +618,19 @@ fn clip_line(line: &[StyledSpan], remaining: &mut usize) -> StyledLine {
     out
 }
 
-/// Take at most `*remaining` leading `char`s of `text` and decrement
-/// `*remaining` by the number taken. Used by the themed status-bar layout so
-/// the visible character budget matches the plain render.
+/// Take at most `*remaining` columns of `text` and decrement `*remaining` by
+/// the columns taken. Used by the themed status-bar layout so
+/// the visible column budget matches the plain render. A wide glyph that
+/// would straddle the budget is dropped whole rather than half-drawn.
 fn clip<'t>(text: &'t str, remaining: &mut usize) -> &'t str {
-    let count = text.chars().count();
-    if count <= *remaining {
-        *remaining -= count;
-        return text;
+    let (prefix, used) = prefix_columns(text, *remaining);
+    if prefix.len() == text.len() {
+        *remaining -= used;
+        text
+    } else {
+        *remaining = 0;
+        prefix
     }
-    let end = text
-        .char_indices()
-        .nth(*remaining)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len());
-    *remaining = 0;
-    &text[..end]
 }
 
 #[cfg(test)]

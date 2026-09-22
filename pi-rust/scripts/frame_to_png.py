@@ -42,6 +42,13 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("python module 'Pillow' is required: pip install pillow")
 
+try:
+    from wcwidth import wcwidth
+except ImportError:  # pragma: no cover
+    def wcwidth(ch: str) -> int:  # type: ignore[misc]
+        """Fallback for installs without `wcwidth` (see `pty_capture.py`)."""
+        return 0 if ord(ch) < 32 else 1
+
 # Same palette as `pty_capture.py`, so a sheet mixing both kinds of panel does
 # not look like two different products.
 BG = (10, 10, 12)
@@ -55,9 +62,30 @@ _FONT_CANDIDATES = (
     "C:/Windows/Fonts/lucon.ttf",
 )
 
+# Used instead when a dump contains CJK / fullwidth / emoji code points, which
+# the monospace faces above do not cover (they render as blank boxes). Every
+# CJK face here is designed so one ideograph advance equals two half-width
+# advances, which is what the dump's column padding assumes.
+_CJK_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+)
 
-def load_font(size: int):
-    for name in _FONT_CANDIDATES:
+
+def _needs_cjk_font(text: str) -> bool:
+    """True when `text` contains a code point a Latin-only face cannot draw."""
+    return any(ord(ch) > 0x2E7F for ch in text)
+
+
+def load_font(size: int, text: str = ""):
+    candidates = _FONT_CANDIDATES
+    if _needs_cjk_font(text):
+        candidates = _CJK_FONT_CANDIDATES + _FONT_CANDIDATES
+    for name in candidates:
         if os.path.exists(name):
             return ImageFont.truetype(name, size)
     return ImageFont.load_default()
@@ -93,8 +121,19 @@ def read_dump(path: str) -> tuple[int, int, list[str]]:
     return cols, rows, lines
 
 
+def _pad_to_columns(line: str, cols: int) -> str:
+    """Pad `line` to `cols` **terminal columns**, not characters.
+
+    The frame dump is logical text (a wide glyph appears once), so a CJK row
+    has fewer characters than columns and `str.ljust` would leave the right
+    edge ragged.
+    """
+    width = sum(max(wcwidth(ch), 0) for ch in line)
+    return line + " " * max(0, cols - width)
+
+
 def render(cols: int, rows: int, lines: list[str], caption: str) -> Image.Image:
-    font = load_font(32)
+    font = load_font(32, "".join(lines) + caption)
     caption_font = load_font(13)
     adv = font.getlength("M")
     cell_w = int(round(adv))
@@ -108,7 +147,7 @@ def render(cols: int, rows: int, lines: list[str], caption: str) -> Image.Image:
     draw.rectangle([0, 0, width, caption_h], fill=CAPTION_BG)
     draw.text((8, 6), caption, font=caption_font, fill=FG)
     for y, line in enumerate(lines[:rows]):
-        draw.text((1, caption_h + 1 + y * cell_h), line.ljust(cols), font=font, fill=FG)
+        draw.text((1, caption_h + 1 + y * cell_h), _pad_to_columns(line, cols), font=font, fill=FG)
     return img
 
 
