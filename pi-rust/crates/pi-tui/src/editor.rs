@@ -1758,8 +1758,13 @@ impl Editor {
     /// Install the autocomplete provider driving the dropdown, or
     /// replace the current one. The provider's extra
     /// [`trigger_characters`](AutocompleteProvider::trigger_characters)
-    /// are merged into the editor defaults (`@`, `#`).
+    /// are merged into the editor defaults (`@`, `#`), replacing any trigger
+    /// table installed by a previous provider — upstream
+    /// `setAutocompleteProvider` → `setAutocompleteTriggerCharacters`
+    /// (`packages/tui/src/components/editor.ts:407,2329-2340`), so a
+    /// re-installed (re-composed) chain cannot leave a stale trigger behind.
     pub fn set_autocomplete_provider(&mut self, provider: Arc<dyn AutocompleteProvider>) {
+        self.autocomplete_trigger_characters = DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS.to_vec();
         for trigger in provider.trigger_characters() {
             if self.is_valid_trigger_character(*trigger)
                 && !self.autocomplete_trigger_characters.contains(trigger)
@@ -1769,6 +1774,13 @@ impl Editor {
         }
         self.autocomplete_provider = Some(provider);
         self.cancel_autocomplete();
+    }
+
+    /// The trigger characters currently installed (the editor defaults plus
+    /// the provider's own, deduplicated) — the observable form of the table
+    /// `opens_autocomplete_after_insert` consults.
+    pub fn autocomplete_trigger_characters(&self) -> &[char] {
+        &self.autocomplete_trigger_characters
     }
 
     /// Remove the autocomplete provider and close any open dropdown,

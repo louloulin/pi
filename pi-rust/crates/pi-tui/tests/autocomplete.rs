@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pi_tui::autocomplete::{
-    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
+    compose_autocomplete_providers, AutocompleteItem, AutocompleteProvider,
+    AutocompleteProviderFactory, AutocompleteSuggestions, CombinedAutocompleteProvider,
     CompletionResult, SlashCommand,
 };
 use pi_tui::input::{KeyCode, KeyModifiers};
@@ -844,4 +845,175 @@ fn dropdown_rows_are_opaque_over_the_transcript() {
         .expect("dropdown row");
     assert!(!row.contains('X'), "transcript bled through: {row:?}");
     assert!(row.contains("help"), "{row:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Composed provider chains (LUM-1448) — the Rust half of
+// `ctx.ui.addAutocompleteProvider`.
+// ---------------------------------------------------------------------------
+
+/// A wrapper that answers only for its own `marker` token and delegates
+/// everything else to the provider beneath it — upstream's `#1234` provider
+/// shape (`current.getSuggestions(...)` / `current.applyCompletion(...)`).
+#[derive(Debug)]
+struct MarkerProvider {
+    marker: char,
+    values: Vec<&'static str>,
+    triggers: Vec<char>,
+    current: Arc<dyn AutocompleteProvider>,
+}
+
+impl MarkerProvider {
+    fn matches(&self, lines: &[String], cursor_line: usize, cursor_col: usize) -> bool {
+        let line = lines.get(cursor_line).map(String::as_str).unwrap_or("");
+        let before = &line[..cursor_col.min(line.len())];
+        before.trim_start().starts_with(self.marker)
+    }
+}
+
+impl AutocompleteProvider for MarkerProvider {
+    fn trigger_characters(&self) -> &[char] {
+        &self.triggers
+    }
+
+    fn get_suggestions(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+        force: bool,
+    ) -> Option<AutocompleteSuggestions> {
+        if !self.matches(lines, cursor_line, cursor_col) {
+            return self
+                .current
+                .get_suggestions(lines, cursor_line, cursor_col, force);
+        }
+        let line = lines.get(cursor_line).map(String::as_str).unwrap_or("");
+        let before = &line[..cursor_col.min(line.len())];
+        Some(AutocompleteSuggestions {
+            items: self
+                .values
+                .iter()
+                .map(|value| AutocompleteItem::new(*value, *value))
+                .collect(),
+            prefix: before.trim_start().to_string(),
+        })
+    }
+
+    fn apply_completion(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+        item: &AutocompleteItem,
+        prefix: &str,
+    ) -> CompletionResult {
+        if !self.matches(lines, cursor_line, cursor_col) {
+            return self
+                .current
+                .apply_completion(lines, cursor_line, cursor_col, item, prefix);
+        }
+        let line = lines.get(cursor_line).cloned().unwrap_or_default();
+        let head = &line[..cursor_col.saturating_sub(prefix.len())];
+        CompletionResult {
+            lines: vec![format!("{head}{}", item.value)],
+            cursor_line,
+            cursor_col: head.len() + item.value.len(),
+        }
+    }
+
+    fn should_trigger_file_completion(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+    ) -> bool {
+        if !self.matches(lines, cursor_line, cursor_col) {
+            return self
+                .current
+                .should_trigger_file_completion(lines, cursor_line, cursor_col);
+        }
+        false
+    }
+}
+
+fn marker_factory(
+    marker: char,
+    values: Vec<&'static str>,
+    triggers: Vec<char>,
+) -> AutocompleteProviderFactory {
+    Arc::new(move |current: Arc<dyn AutocompleteProvider>| {
+        Arc::new(MarkerProvider {
+            marker,
+            values: values.clone(),
+            triggers: triggers.clone(),
+            current,
+        }) as Arc<dyn AutocompleteProvider>
+    })
+}
+
+fn composed_editor() -> Editor {
+    let mut editor = Editor::new();
+    let base: Arc<dyn AutocompleteProvider> = Arc::new(CombinedAutocompleteProvider::new(
+        vec![SlashCommand::new("help")],
+        ".",
+    ));
+    let composed = compose_autocomplete_providers(
+        base,
+        &[
+            marker_factory('#', vec!["#2983", "#2753"], vec!['#', '$']),
+            marker_factory('$', vec!["$HOME"], vec!['$', '%']),
+        ],
+    );
+    editor.set_autocomplete_provider(composed);
+    editor
+}
+
+/// The editor's trigger table is the defaults plus the chain's deduplicated
+/// triggers — upstream `[...new Set(triggerCharacters)]` over the wrappers
+/// (`interactive-mode.ts:736-743`).
+#[test]
+fn composed_chain_installs_the_deduplicated_trigger_table() {
+    let editor = composed_editor();
+    assert_eq!(
+        editor.autocomplete_trigger_characters(),
+        &['@', '#', '$', '%']
+    );
+}
+
+/// Re-installing a provider replaces the table instead of accumulating it,
+/// so a rebuilt chain cannot leave a stale trigger behind (`setAutocomplete
+/// TriggerCharacters` rebuilds from the defaults).
+#[test]
+fn reinstalling_a_provider_drops_stale_triggers() {
+    let mut editor = composed_editor();
+    assert!(editor.autocomplete_trigger_characters().contains(&'$'));
+    editor.set_autocomplete_provider(Arc::new(CombinedAutocompleteProvider::new(
+        vec![SlashCommand::new("help")],
+        ".",
+    )));
+    assert_eq!(editor.autocomplete_trigger_characters(), &['@', '#']);
+}
+
+/// The `#` trigger the composed chain declares opens the dropdown with the
+/// extension's candidates, and the base provider still answers `/`.
+#[test]
+fn composed_chain_serves_hash_candidates_and_keeps_slash_completion() {
+    let mut editor = composed_editor();
+    type_text(&mut editor, "#29");
+    assert!(editor.is_showing_autocomplete(), "no `#` dropdown");
+    assert_eq!(editor.autocomplete_items().len(), 2);
+    assert_eq!(editor.autocomplete_prefix(), "#29");
+    assert_eq!(editor.autocomplete_items()[0].value, "#2983");
+
+    // Tab accepts the highlighted candidate through the wrapper's
+    // `applyCompletion`.
+    editor.handle_key(key(KeyCode::Tab));
+    assert_eq!(editor.text(), "#2983");
+    assert!(!editor.is_showing_autocomplete());
+
+    // The base provider underneath still drives `/`.
+    editor.set_text("");
+    type_text(&mut editor, "/he");
+    assert_eq!(editor.autocomplete_items()[0].value, "help");
 }

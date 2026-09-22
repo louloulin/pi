@@ -71,6 +71,7 @@ use crate::tool_executor::default_executor;
 use crate::tools::AgentTool;
 
 use pi_tui::app::{App, AppConfig, ExtensionHeader, FollowUpOutcome, Submission};
+use pi_tui::autocomplete::AutocompleteProvider;
 use pi_tui::dialog::{Dialog, DialogAction};
 use pi_tui::input::{InputEvent, KeyCode};
 use pi_tui::message::Role;
@@ -391,18 +392,60 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
 /// complete through the same dropdown because they are real commands —
 /// `/extensions` lists them and `handle_command` dispatch does not care who
 /// registered them.
+///
+/// Returns the installed provider: LUM-1448 publishes the same instance to
+/// the extension host as the chain's `current` delegate, so an extension
+/// wrapper and the editor complete through one provider.
 fn install_composer_autocomplete(
     app: &mut App,
     base_path: PathBuf,
     extra: Vec<pi_tui::autocomplete::SlashCommand>,
-) {
+) -> Arc<dyn AutocompleteProvider> {
     let mut commands = crate::commands::slash::autocomplete_commands();
     commands.extend(extra);
+    let provider: Arc<dyn AutocompleteProvider> = Arc::new(
+        pi_tui::autocomplete::CombinedAutocompleteProvider::new(commands, base_path),
+    );
     app.prompt_mut()
         .editor_mut()
-        .set_autocomplete_provider(Arc::new(
-            pi_tui::autocomplete::CombinedAutocompleteProvider::new(commands, base_path),
-        ));
+        .set_autocomplete_provider(provider.clone());
+    provider
+}
+
+/// Publish the built-in provider and stack the extension wrapper chain on top
+/// of it (LUM-1448, upstream `setupAutocompleteProvider`).
+///
+/// The wrapper chain itself lives in the shim (the wrappers are JS closures),
+/// so what happens here is: hand the built-in provider to the host as the
+/// chain's `current` delegate, ask the chain for its deduplicated trigger
+/// table (`interactive-mode.ts:736-743`), and install the composed provider —
+/// base underneath, JS chain on top — on the editor. Returns `true` when a
+/// chain was installed; `false` leaves the built-in provider in place.
+async fn install_extension_autocomplete(
+    app: &mut App,
+    runtime: &Arc<ExtensionRuntime>,
+    base: Arc<dyn AutocompleteProvider>,
+) -> bool {
+    runtime.autocomplete_base().set(base.clone());
+    if !runtime.has_autocomplete_wrapper() {
+        return false;
+    }
+    let Some(trigger_characters) = runtime.rebuild_autocomplete().await else {
+        return false;
+    };
+    let Some(host) = runtime.host().cloned() else {
+        return false;
+    };
+    // The factory receives the provider it stacks on (the built-in one) and
+    // hands it to the bridge as the fallback used whenever the JS chain cannot
+    // answer; `compose_provider` is what turns the chain's trigger characters
+    // into the editor's table.
+    let composed =
+        crate::extensions::autocomplete::compose_provider(host, base, trigger_characters);
+    app.prompt_mut()
+        .editor_mut()
+        .set_autocomplete_provider(composed);
+    true
 }
 
 /// The extension-registered commands as dropdown rows.
@@ -458,11 +501,31 @@ async fn run_loop(
     // `CombinedAutocompleteProvider` on the editor at startup; `tool_cwd` is
     // the base the `@` file completion walks, and the extension-registered
     // commands ride in the same table (Stage 70 / LUM-1238).
-    install_composer_autocomplete(
+    let composer_provider = install_composer_autocomplete(
         &mut app,
         tool_cwd,
         extension_autocomplete_commands(&options),
     );
+    // LUM-1448 — stack the extension-registered autocomplete wrappers on top
+    // of that provider. `ctx.ui.addAutocompleteProvider` is dispatched during
+    // the load pass, so by the time the App exists the shim already holds the
+    // chain; this publishes the built-in provider it delegates to and installs
+    // the composed provider. A wrapper registered *later* bumps the host's
+    // generation counter and the loop below re-installs the chain.
+    let mut autocomplete_generation = options
+        .extensions
+        .as_ref()
+        .and_then(|runtime| runtime.host().map(|host| host.autocomplete_generation()))
+        .unwrap_or(0);
+    if let Some(runtime) = options.extensions.as_ref() {
+        let base = composer_provider.clone();
+        if install_extension_autocomplete(&mut app, runtime, base).await {
+            autocomplete_generation = runtime
+                .host()
+                .map(|host| host.autocomplete_generation())
+                .unwrap_or(autocomplete_generation);
+        }
+    }
 
     // Stage 67 — seed the session thinking level from the persisted
     // `defaultThinkingLevel`, clamp it to what the active model can honour,
@@ -582,6 +645,20 @@ async fn run_loop(
         if let Some(pump) = region_pump.as_mut() {
             let width = terminal.size().map(|area| area.width).unwrap_or(80);
             pump.pump(&mut app, width).await;
+        }
+        // A late `ctx.ui.addAutocompleteProvider` (from a command handler or
+        // any event after startup) bumps the host's generation counter; pick
+        // the chain up again so its trigger characters reach the editor.
+        if let Some(runtime) = options.extensions.as_ref() {
+            let generation = runtime
+                .host()
+                .map(|host| host.autocomplete_generation())
+                .unwrap_or(autocomplete_generation);
+            if generation != autocomplete_generation {
+                autocomplete_generation = generation;
+                let base = composer_provider.clone();
+                install_extension_autocomplete(&mut app, runtime, base).await;
+            }
         }
         // Turn queued `ctx.ui.*` requests into modals (and notifications
         // into transcript lines) before rendering them.
@@ -7905,6 +7982,70 @@ mod tests {
         .expect("load");
         let _ = std::fs::remove_dir_all(&dir);
         (ExtensionRuntime::for_test(host.clone(), subscribed), host)
+    }
+
+    // -----------------------------------------------------------------------
+    // Extension-injected autocomplete provider (LUM-1448)
+    // -----------------------------------------------------------------------
+
+    /// The `run_loop` install path: an extension that called
+    /// `ctx.ui.addAutocompleteProvider` at `session_start` must end up in the
+    /// editor's trigger table, and a runtime with no wrapper must leave the
+    /// built-in provider alone.
+    ///
+    /// `#[tokio::test]` defaults to a `current_thread` runtime, so the JS chain
+    /// itself is not consulted here (the provider falls back by design — see
+    /// `extensions::autocomplete`); the *wiring* is what this covers. The
+    /// candidates-in-the-dropdown half is
+    /// `tests/lum1448_autocomplete_provider_frames.rs` on a multi-thread
+    /// runtime.
+    #[tokio::test]
+    async fn install_extension_autocomplete_wires_the_chain_into_the_editor() {
+        let source = r#"
+export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.addAutocompleteProvider((current) => ({
+      triggerCharacters: ["$"],
+      getSuggestions(lines, cursorLine, cursorCol, options) {
+        return current.getSuggestions(lines, cursorLine, cursorCol, options);
+      },
+      applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+        return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+      },
+    }));
+  });
+}
+"#;
+        let (runtime, _host) = extension_runtime("lum1448", source, &["session_start"]).await;
+        let runtime = Arc::new(runtime);
+        runtime
+            .deliver_event(&pi_protocol::ExtensionEvent::SessionStart)
+            .await;
+        assert!(
+            runtime.has_autocomplete_wrapper(),
+            "the session_start handler must have registered a wrapper"
+        );
+
+        let (mut app, _agent) = app_starting_at(reasoning_model()).await;
+        let base = install_composer_autocomplete(&mut app, std::env::temp_dir(), Vec::new());
+        assert!(install_extension_autocomplete(&mut app, &runtime, base).await);
+        assert_eq!(
+            app.prompt().editor().autocomplete_trigger_characters(),
+            &['@', '#', '$'],
+            "the wrapper's trigger character reaches the editor table"
+        );
+
+        // A runtime whose extension registered nothing keeps the built-in
+        // provider: no chain, no trigger.
+        let (bare, _host) =
+            extension_runtime("lum1448-bare", "export default function (pi) {}", &[]).await;
+        let (mut app, _agent) = app_starting_at(reasoning_model()).await;
+        let base = install_composer_autocomplete(&mut app, std::env::temp_dir(), Vec::new());
+        assert!(!install_extension_autocomplete(&mut app, &Arc::new(bare), base).await);
+        assert_eq!(
+            app.prompt().editor().autocomplete_trigger_characters(),
+            &['@', '#']
+        );
     }
 
     /// Poll until the extension has recorded an entry named `name` and

@@ -27,6 +27,7 @@
 #![warn(missing_docs)]
 
 mod api;
+mod autocomplete;
 mod bridge;
 mod deflate;
 mod digest;
@@ -39,6 +40,7 @@ mod registry;
 mod shim;
 
 pub use api::*;
+pub use autocomplete::*;
 pub use bridge::*;
 pub use error::*;
 pub use events::*;

@@ -31,6 +31,15 @@
 //! *name* only; this port fuzzy-matches name plus description, which is a
 //! superset — a description-only hit is surfaced too.
 //!
+//! Providers can also be **stacked**: an [`AutocompleteProviderFactory`]
+//! wraps the provider underneath it and
+//! [`compose_autocomplete_providers`] folds a list of factories onto a base,
+//! reporting the chain's deduplicated trigger table — the Rust half of
+//! upstream `setupAutocompleteProvider`
+//! (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:734-745`),
+//! which is how `ctx.ui.addAutocompleteProvider` stacks an extension's
+//! provider on top of the built-in one.
+//!
 //! ```
 //! use pi_tui::autocomplete::{
 //!     AutocompleteItem, AutocompleteProvider, CombinedAutocompleteProvider, SlashCommand,
@@ -268,6 +277,123 @@ pub trait AutocompleteProvider: fmt::Debug + Send + Sync {
         let _ = (lines, cursor_line, cursor_col);
         true
     }
+}
+
+/// Wraps the current provider with additional behaviour — upstream
+/// `AutocompleteProviderFactory`
+/// (`packages/coding-agent/src/core/extensions/types.ts:125`,
+/// `packages/coding-agent/src/modes/interactive/interactive-mode.ts:2450`).
+///
+/// The factory receives the provider it is stacking on top of — the base
+/// [`CombinedAutocompleteProvider`] for the first wrapper, the previous
+/// wrapper's provider afterwards — and returns the wrapper. That is exactly
+/// upstream's chain shape, so `current.getSuggestions(...)` inside a wrapper
+/// delegates to everything underneath it.
+type AutocompleteProviderFactoryInner =
+    dyn Fn(Arc<dyn AutocompleteProvider>) -> Arc<dyn AutocompleteProvider> + Send + Sync;
+
+/// A boxed [`AutocompleteProviderFactoryInner`].
+pub type AutocompleteProviderFactory = Arc<AutocompleteProviderFactoryInner>;
+
+/// Outermost provider of a composed chain: forwards every call to the
+/// provider underneath and reports the chain's deduplicated trigger table.
+///
+/// Upstream does the same by assigning
+/// `provider.triggerCharacters = [...new Set(triggerCharacters)]` on the last
+/// wrapper (`interactive-mode.ts:736-743`); because the Rust trait returns a
+/// borrowed slice, the equivalent is this thin wrapper.
+#[derive(Debug)]
+pub struct TriggeredAutocompleteProvider {
+    inner: Arc<dyn AutocompleteProvider>,
+    trigger_characters: Vec<char>,
+}
+
+impl TriggeredAutocompleteProvider {
+    /// Wrap `inner`, overriding the trigger table it reports.
+    pub fn new(inner: Arc<dyn AutocompleteProvider>, trigger_characters: Vec<char>) -> Self {
+        Self {
+            inner,
+            trigger_characters,
+        }
+    }
+
+    /// The provider underneath.
+    pub fn inner(&self) -> &Arc<dyn AutocompleteProvider> {
+        &self.inner
+    }
+}
+
+impl AutocompleteProvider for TriggeredAutocompleteProvider {
+    fn trigger_characters(&self) -> &[char] {
+        &self.trigger_characters
+    }
+
+    fn get_suggestions(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+        force: bool,
+    ) -> Option<AutocompleteSuggestions> {
+        self.inner
+            .get_suggestions(lines, cursor_line, cursor_col, force)
+    }
+
+    fn apply_completion(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+        item: &AutocompleteItem,
+        prefix: &str,
+    ) -> CompletionResult {
+        self.inner
+            .apply_completion(lines, cursor_line, cursor_col, item, prefix)
+    }
+
+    fn should_trigger_file_completion(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+    ) -> bool {
+        self.inner
+            .should_trigger_file_completion(lines, cursor_line, cursor_col)
+    }
+}
+
+/// Stack `factories` on top of `base`, in registration order, and report the
+/// chain's deduplicated trigger table — the Rust counterpart of upstream's
+/// `setupAutocompleteProvider`
+/// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:734-745`).
+///
+/// Each factory is handed the provider it wraps (`current`), so the last
+/// wrapper is the one the editor talks to. Trigger characters are collected
+/// from every wrapper (not from `base`, which — like upstream's
+/// `CombinedAutocompleteProvider` — declares none) and deduplicated in first
+/// -seen order; when no factory contributes any, `base`'s own table is left
+/// untouched and `base` is returned unchanged.
+pub fn compose_autocomplete_providers(
+    base: Arc<dyn AutocompleteProvider>,
+    factories: &[AutocompleteProviderFactory],
+) -> Arc<dyn AutocompleteProvider> {
+    let mut provider = base;
+    let mut trigger_characters: Vec<char> = Vec::new();
+    for factory in factories {
+        provider = factory(provider);
+        for trigger in provider.trigger_characters() {
+            if !trigger_characters.contains(trigger) {
+                trigger_characters.push(*trigger);
+            }
+        }
+    }
+    if trigger_characters.is_empty() {
+        return provider;
+    }
+    Arc::new(TriggeredAutocompleteProvider::new(
+        provider,
+        trigger_characters,
+    ))
 }
 
 /// The `CombinedAutocompleteProvider` port: slash commands plus file
@@ -1058,6 +1184,7 @@ fn safe_prefix(text: &str, col: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn lines(text: &str) -> Vec<String> {
         vec![text.to_string()]
@@ -1184,6 +1311,157 @@ mod tests {
         assert_eq!(
             parse_path_prefix("src/main.rs"),
             ("src/main.rs".to_string(), false, false)
+        );
+    }
+
+    /// A wrapper that answers only for its own trigger token and delegates
+    /// everything else to the provider it wraps — the shape upstream's
+    /// `#1234` example uses.
+    #[derive(Debug)]
+    struct MarkerProvider {
+        marker: char,
+        value: &'static str,
+        triggers: Vec<char>,
+        seen_current: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl AutocompleteProvider for MarkerProvider {
+        fn trigger_characters(&self) -> &[char] {
+            &self.triggers
+        }
+
+        fn get_suggestions(
+            &self,
+            _lines: &[String],
+            _cursor_line: usize,
+            _cursor_col: usize,
+            _force: bool,
+        ) -> Option<AutocompleteSuggestions> {
+            self.seen_current.lock().unwrap().push(self.value);
+            Some(AutocompleteSuggestions {
+                items: vec![AutocompleteItem::new(self.value, self.value)],
+                prefix: self.marker.to_string(),
+            })
+        }
+
+        fn apply_completion(
+            &self,
+            lines: &[String],
+            cursor_line: usize,
+            cursor_col: usize,
+            item: &AutocompleteItem,
+            prefix: &str,
+        ) -> CompletionResult {
+            let text = lines.get(cursor_line).cloned().unwrap_or_default();
+            let head = &text[..cursor_col.saturating_sub(prefix.len())];
+            CompletionResult {
+                lines: vec![format!("{head}{}", item.value)],
+                cursor_line,
+                cursor_col: head.len() + item.value.len(),
+            }
+        }
+
+        fn should_trigger_file_completion(
+            &self,
+            _lines: &[String],
+            _cursor_line: usize,
+            _cursor_col: usize,
+        ) -> bool {
+            false
+        }
+    }
+
+    fn marker_factory(
+        marker: char,
+        value: &'static str,
+        triggers: Vec<char>,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    ) -> AutocompleteProviderFactory {
+        let factory = move |current: Arc<dyn AutocompleteProvider>| {
+            log.lock().unwrap().push(value);
+            let _ = &current;
+            Arc::new(MarkerProvider {
+                marker,
+                value,
+                triggers: triggers.clone(),
+                seen_current: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn AutocompleteProvider>
+        };
+        Arc::new(factory)
+    }
+
+    #[test]
+    fn compose_without_factories_returns_the_base_unchanged() {
+        let base: Arc<dyn AutocompleteProvider> =
+            Arc::new(CombinedAutocompleteProvider::new(Vec::new(), "."));
+        let composed = compose_autocomplete_providers(base, &[]);
+        assert!(composed.trigger_characters().is_empty());
+    }
+
+    #[test]
+    fn compose_applies_wrappers_in_order_and_dedups_triggers() {
+        let base: Arc<dyn AutocompleteProvider> =
+            Arc::new(CombinedAutocompleteProvider::new(Vec::new(), "."));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let factories = vec![
+            marker_factory('#', "first", vec!['#', '$'], log.clone()),
+            marker_factory('$', "second", vec!['$'], log.clone()),
+        ];
+        let composed = compose_autocomplete_providers(base, &factories);
+        // Every factory ran, in registration order.
+        assert_eq!(log.lock().unwrap().as_slice(), &["first", "second"]);
+        // First-seen dedup over the chain's wrappers, exactly upstream's
+        // `[...new Set(triggerCharacters)]`.
+        assert_eq!(composed.trigger_characters(), &['#', '$']);
+
+        // The outermost wrapper is the one that answers.
+        let lines = vec!["#1".to_string()];
+        let suggestions = composed.get_suggestions(&lines, 0, 2, false).unwrap();
+        assert_eq!(suggestions.items[0].value, "second");
+        let applied = composed.apply_completion(&lines, 0, 2, &suggestions.items[0], "#1");
+        assert_eq!(applied.lines, vec!["second".to_string()]);
+        assert!(!composed.should_trigger_file_completion(&lines, 0, 2));
+    }
+
+    #[test]
+    fn wrapper_gets_the_provider_underneath_as_current() {
+        let base: Arc<dyn AutocompleteProvider> = Arc::new(CombinedAutocompleteProvider::new(
+            vec![SlashCommand::new("help")],
+            ".",
+        ));
+        let base_for_assert = base.clone();
+        let captured: Arc<Mutex<Option<Arc<dyn AutocompleteProvider>>>> =
+            Arc::new(Mutex::new(None));
+        let captured_in_factory = captured.clone();
+        let factory: AutocompleteProviderFactory = Arc::new(move |current| {
+            *captured_in_factory.lock().unwrap() = Some(current.clone());
+            current
+        });
+        let composed = compose_autocomplete_providers(base, &[factory]);
+        let seen = captured.lock().unwrap().clone().unwrap();
+        assert!(Arc::ptr_eq(&seen, &base_for_assert));
+        // The factory returned `current` unchanged, so the base's own
+        // `/`-completion still works through the composed provider.
+        let lines = vec!["/he".to_string()];
+        let suggestions = composed.get_suggestions(&lines, 0, 3, false).unwrap();
+        assert_eq!(suggestions.items[0].value, "help");
+    }
+
+    #[test]
+    fn triggered_provider_reports_the_chain_table() {
+        let inner: Arc<dyn AutocompleteProvider> = Arc::new(CombinedAutocompleteProvider::new(
+            vec![SlashCommand::new("help")],
+            ".",
+        ));
+        let provider = TriggeredAutocompleteProvider::new(inner, vec!['$', '#']);
+        assert_eq!(provider.trigger_characters(), &['$', '#']);
+        let lines = vec!["/he".to_string()];
+        assert_eq!(
+            provider
+                .get_suggestions(&lines, 0, 3, false)
+                .unwrap()
+                .prefix,
+            "/he"
         );
     }
 }

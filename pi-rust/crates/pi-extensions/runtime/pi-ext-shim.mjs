@@ -381,6 +381,361 @@ function __pi_ui_dispose_component(id) {
  * (notify) or returns a Promise that resolves when the host answers
  * (confirm / input / select). When `hasUI` is false, the Promise-based
  * methods return a sensible default (false / null / null) without
+// ---------------------------------------------------------------------------
+// Autocomplete provider chain (`ctx.ui.addAutocompleteProvider`).
+//
+// Upstream stacks wrappers on top of the built-in provider
+// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:734-745`):
+// each factory receives the provider it wraps and returns the wrapper, and
+// the resulting chain's `triggerCharacters` are deduplicated into one table.
+// The chain therefore lives *here*, in JS — the host only ever sees two
+// things: the deduplicated trigger list, and a call into the chain head.
+//
+// The innermost link is the Rust `CombinedAutocompleteProvider`, which is not
+// a JS value; it is exposed as `__pi_autocomplete_base_provider` and answers
+// through the synchronous `host_ui_autocomplete` import.
+//
+// Phase-1 restriction (documented in `docs/LUM1448_AUTOCOMPLETE_PROVIDER.md`):
+// only **synchronous** provider callbacks are served. `getSuggestions` /
+// `applyCompletion` / `shouldTriggerFileCompletion` that return a Promise are
+// not awaited — the chain falls back to the built-in provider for that call
+// and warns once. See `__pi_autocomplete_invoke`.
+// ---------------------------------------------------------------------------
+
+/** Registered `(current) => provider` factories, in registration order. */
+const __pi_autocomplete_wrappers = [];
+/** The current chain head, or `null` before the first rebuild. */
+let __pi_autocomplete_provider = null;
+/** Warn once when a callback returns a Promise (unsupported in phase 1). */
+let __pi_autocomplete_warned_async = false;
+/** Warn once when a factory throws or returns an unusable provider. */
+let __pi_autocomplete_warned_factory = false;
+
+/** A never-aborted signal — upstream providers read `options.signal.aborted`. */
+const __pi_autocomplete_signal = (() => {
+  try {
+    return new AbortController().signal;
+  } catch (_error) {
+    return Object.freeze({
+      aborted: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    });
+  }
+})();
+
+/** Call the `host_ui_autocomplete` import; never throws. */
+function __pi_autocomplete_host(op, payload) {
+  if (typeof globalThis.host_ui_autocomplete !== "function") return { ok: false };
+  try {
+    const raw = globalThis.host_ui_autocomplete(String(op), JSON.stringify(payload || {}));
+    return typeof raw === "string" ? JSON.parse(raw) : { ok: false };
+  } catch (_error) {
+    return { ok: false };
+  }
+}
+
+/** The built-in provider, as the object a wrapper receives as `current`. */
+const __pi_autocomplete_base_provider = {
+  getSuggestions(lines, cursorLine, cursorCol, options) {
+    const reply = __pi_autocomplete_host("baseGetSuggestions", {
+      lines: Array.isArray(lines) ? lines : [],
+      cursorLine: Number(cursorLine) || 0,
+      cursorCol: Number(cursorCol) || 0,
+      force: !!(options && options.force),
+    });
+    if (!reply.ok) return null;
+    return reply.suggestions == null ? null : reply.suggestions;
+  },
+  applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+    const reply = __pi_autocomplete_host("baseApplyCompletion", {
+      lines: Array.isArray(lines) ? lines : [],
+      cursorLine: Number(cursorLine) || 0,
+      cursorCol: Number(cursorCol) || 0,
+      item: item || { value: "", label: "" },
+      prefix: typeof prefix === "string" ? prefix : "",
+    });
+    if (!reply.ok || !reply.completion) {
+      // No built-in adapter: keep the buffer as it was rather than guessing.
+      return {
+        lines: Array.isArray(lines) ? lines.slice() : [],
+        cursorLine: Number(cursorLine) || 0,
+        cursorCol: Number(cursorCol) || 0,
+      };
+    }
+    return reply.completion;
+  },
+  shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+    const reply = __pi_autocomplete_host("baseShouldTriggerFileCompletion", {
+      lines: Array.isArray(lines) ? lines : [],
+      cursorLine: Number(cursorLine) || 0,
+      cursorCol: Number(cursorCol) || 0,
+    });
+    return reply.ok ? reply.value !== false : true;
+  },
+};
+
+/** Warn once through the host's `ctx.ui.notify` channel. */
+function __pi_autocomplete_warn(message) {
+  if (typeof globalThis.host_ui_notify !== "function") return;
+  try {
+    globalThis.host_ui_notify("ctx.ui.addAutocompleteProvider: " + message, "warning");
+  } catch (_error) {
+    // Notify is fire-and-forget.
+  }
+}
+
+/** Whether `value` is thenable — the phase-1 unsupported shape. */
+function __pi_autocomplete_is_thenable(value) {
+  return (
+    !!value &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof value.then === "function"
+  );
+}
+
+/**
+ * Rebuild the chain from the registered factories and return its deduplicated
+ * trigger characters (upstream `provider.triggerCharacters = [...new
+ * Set(triggerCharacters)]`).
+ *
+ * Idempotent: re-running it after the host installs the built-in provider is
+ * how the first delegation starts working, and it is what a late
+ * `addAutocompleteProvider` triggers.
+ */
+function __pi_autocomplete_rebuild() {
+  let provider = __pi_autocomplete_base_provider;
+  const collected = [];
+  for (const factory of __pi_autocomplete_wrappers) {
+    let next;
+    try {
+      next = factory(provider);
+    } catch (error) {
+      if (!__pi_autocomplete_warned_factory) {
+        __pi_autocomplete_warned_factory = true;
+        __pi_autocomplete_warn(
+          "a provider factory threw and was skipped: " +
+            String(error && error.message ? error.message : error),
+        );
+      }
+      continue;
+    }
+    if (!next || typeof next.getSuggestions !== "function") {
+      if (!__pi_autocomplete_warned_factory) {
+        __pi_autocomplete_warned_factory = true;
+        __pi_autocomplete_warn("a provider factory did not return a provider with getSuggestions()");
+      }
+      continue;
+    }
+    provider = next;
+    const declared = Array.isArray(provider.triggerCharacters) ? provider.triggerCharacters : [];
+    for (const character of declared) collected.push(character);
+  }
+  const deduped = Array.from(new Set(collected));
+  // Best-effort mirror of upstream's assignment; a frozen provider object
+  // makes this a no-op, and the host-side table (this return value) is the one
+  // the editor actually reads.
+  try {
+    provider.triggerCharacters = deduped;
+  } catch (_error) {
+    // Ignore: the editor reads the deduplicated list from this function.
+  }
+  __pi_autocomplete_provider = provider;
+  return deduped;
+}
+
+/**
+ * Register one wrapper factory and notify the host that the chain changed.
+ *
+ * Upstream runs `setupAutocompleteProvider()` immediately; this port rebuilds
+ * immediately *and* bumps the host's generation counter so an interactive loop
+ * that is already running re-installs the provider with the new trigger
+ * table.
+ */
+function __pi_autocomplete_register(factory) {
+  if (typeof factory !== "function") {
+    throw new TypeError("ctx.ui.addAutocompleteProvider: factory must be a function");
+  }
+  __pi_autocomplete_wrappers.push(factory);
+  __pi_autocomplete_rebuild();
+  __pi_autocomplete_host("register", { count: __pi_autocomplete_wrappers.length });
+}
+
+/**
+ * Invoke the chain head for one autocomplete op.
+ *
+ * `op` is `getSuggestions` / `applyCompletion` / `shouldTriggerFileCompletion`;
+ * `payload` carries the buffer snapshot plus, for `applyCompletion`, the item
+ * and prefix. The return value is the *inner* result of the op (the raw
+ * provider return), not yet an envelope.
+ *
+ * A callback that returns a Promise is not awaited (phase 1): the built-in
+ * provider answers that call instead, so the user still gets the built-in
+ * behaviour rather than an empty dropdown.
+ */
+function __pi_autocomplete_invoke(op, payload) {
+  const provider = __pi_autocomplete_provider;
+  const lines = Array.isArray(payload.lines) ? payload.lines : [];
+  const cursorLine = Number(payload.cursorLine) || 0;
+  const cursorCol = Number(payload.cursorCol) || 0;
+  if (op === "shouldTriggerFileCompletion") {
+    if (!provider || typeof provider.shouldTriggerFileCompletion !== "function") return true;
+    let value;
+    try {
+      value = provider.shouldTriggerFileCompletion(lines, cursorLine, cursorCol);
+    } catch (_error) {
+      return __pi_autocomplete_base_provider.shouldTriggerFileCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+      );
+    }
+    if (__pi_autocomplete_is_thenable(value)) {
+      __pi_autocomplete_warn_async();
+      return __pi_autocomplete_base_provider.shouldTriggerFileCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+      );
+    }
+    return value !== false;
+  }
+
+  if (op === "applyCompletion") {
+    const delegate = () =>
+      __pi_autocomplete_base_provider.applyCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+        payload.item,
+        payload.prefix,
+      );
+    if (!provider || typeof provider.applyCompletion !== "function") {
+      return delegate();
+    }
+    let value;
+    try {
+      value = provider.applyCompletion(lines, cursorLine, cursorCol, payload.item, payload.prefix);
+    } catch (_error) {
+      return delegate();
+    }
+    if (__pi_autocomplete_is_thenable(value)) {
+      __pi_autocomplete_warn_async();
+      return delegate();
+    }
+    // A completion has to carry the rewritten buffer; anything else would
+    // blank the draft, so it is treated as "the wrapper declined" and the
+    // built-in rewrite is used instead.
+    if (!value || typeof value !== "object" || !Array.isArray(value.lines)) return delegate();
+    return value;
+  }
+
+  // `getSuggestions`
+  const options = { signal: __pi_autocomplete_signal, force: !!payload.force };
+  if (!provider || typeof provider.getSuggestions !== "function") {
+    return __pi_autocomplete_base_provider.getSuggestions(lines, cursorLine, cursorCol, options);
+  }
+  let value;
+  try {
+    value = provider.getSuggestions(lines, cursorLine, cursorCol, options);
+  } catch (_error) {
+    return __pi_autocomplete_base_provider.getSuggestions(lines, cursorLine, cursorCol, options);
+  }
+  if (__pi_autocomplete_is_thenable(value)) {
+    __pi_autocomplete_warn_async();
+    return __pi_autocomplete_base_provider.getSuggestions(lines, cursorLine, cursorCol, options);
+  }
+  return value == null ? null : value;
+}
+
+/** Warn once that a Promise-returning callback is not supported. */
+function __pi_autocomplete_warn_async() {
+  if (__pi_autocomplete_warned_async) return;
+  __pi_autocomplete_warned_async = true;
+  __pi_autocomplete_warn(
+    "an async provider callback returned a Promise; only synchronous callbacks are awaited in this port",
+  );
+}
+
+/** Normalise a `getSuggestions` return value into the wire shape. */
+function __pi_autocomplete_suggestions(value) {
+  if (!value || typeof value !== "object") return null;
+  const items = Array.isArray(value.items) ? value.items : [];
+  if (items.length === 0) return null;
+  return {
+    items: items.map((item) => {
+      const rawValue = item && item.value != null ? item.value : "";
+      const rawLabel = item && item.label != null ? item.label : rawValue;
+      const entry = { value: String(rawValue), label: String(rawLabel) };
+      if (item && item.description != null) entry.description = String(item.description);
+      return entry;
+    }),
+    prefix: typeof value.prefix === "string" ? value.prefix : "",
+  };
+}
+
+/**
+ * Rust-side entry point: `_pi_autocomplete_call(op, payloadJson)`.
+ *
+ * Answers in the same turn (a plain JSON string, no promise) because the host
+ * reaches it from the editor's *synchronous* provider through a bounded
+ * blocking bridge; a promise here would deadlock that bridge.
+ *
+ * @param {string} op
+ * @param {string} payloadJson
+ * @returns {string}
+ */
+globalThis._pi_autocomplete_call = function _pi_autocomplete_call(op, payloadJson) {
+  let payload = {};
+  try {
+    payload = payloadJson == null || payloadJson === "" ? {} : JSON.parse(payloadJson);
+  } catch (_error) {
+    payload = {};
+  }
+  const name = String(op);
+  if (name === "rebuild") {
+    const triggerCharacters = __pi_autocomplete_rebuild();
+    return JSON.stringify({
+      ok: true,
+      registered: __pi_autocomplete_wrappers.length > 0,
+      triggerCharacters: triggerCharacters,
+    });
+  }
+  try {
+    if (name === "getSuggestions") {
+      const raw = __pi_autocomplete_invoke("getSuggestions", payload);
+      return JSON.stringify({ ok: true, suggestions: __pi_autocomplete_suggestions(raw) });
+    }
+    if (name === "applyCompletion") {
+      const completion = __pi_autocomplete_invoke("applyCompletion", payload);
+      const safe = completion && typeof completion === "object" ? completion : {};
+      return JSON.stringify({
+        ok: true,
+        completion: {
+          lines: Array.isArray(safe.lines) ? safe.lines.map((line) => String(line)) : [],
+          cursorLine: Number(safe.cursorLine) || 0,
+          cursorCol: Number(safe.cursorCol) || 0,
+        },
+      });
+    }
+    if (name === "shouldTriggerFileCompletion") {
+      const value = __pi_autocomplete_invoke("shouldTriggerFileCompletion", payload);
+      return JSON.stringify({ ok: true, value: value !== false });
+    }
+  } catch (error) {
+    return JSON.stringify({
+      ok: false,
+      error: String(error && error.message ? error.message : error),
+    });
+  }
+  return JSON.stringify({ ok: false, error: "unknown autocomplete op " + name });
+};
+
+/**
+ * Build the `ui` sub-context. Each method either fires a host import
+ * (notify) or returns a Promise that resolves when the host answers
+ * (confirm / input / select). When `hasUI` is false, the Promise-based
+ * methods return a sensible default (false / null / null) without
  * contacting the host.
  */
 function makeUiContext(hasUI) {
@@ -528,6 +883,19 @@ function makeUiContext(hasUI) {
         keybindingsStub,
       ]);
       installRegion("setEditorComponent", "setEditorComponent", component);
+    },
+
+    /**
+     * Stack a provider on top of the built-in one.
+     *
+     * The factory receives the provider it wraps (`current`) and returns the
+     * wrapper; upstream `addAutocompleteProvider`
+     * (`packages/coding-agent/src/extensions/types.ts`). Only *synchronous*
+     * callbacks are served in this port — a callback returning a Promise is
+     * not awaited and the built-in provider answers that call instead.
+     */
+    addAutocompleteProvider(factory) {
+      __pi_autocomplete_register(factory);
     },
 
     /**
@@ -725,9 +1093,9 @@ function makeUiContext(hasUI) {
     return true;
   }
 
-  // Status / title / theme / autocomplete channels still have no host
-  // bridge: accept the call so extensions that configure them at load time
-  // still load, warn once, and keep the value inert.
+  // Status / title / theme channels still have no host bridge: accept the
+  // call so extensions that configure them at load time still load, warn
+  // once, and keep the value inert.
   for (const kind of [
     "setStatus",
     "setTitle",
@@ -736,7 +1104,6 @@ function makeUiContext(hasUI) {
     "setWorkingIndicator",
     "setWorkingVisible",
     "setWorkingMessage",
-    "addAutocompleteProvider",
     "setTheme",
   ]) {
     ui[kind] = () => {

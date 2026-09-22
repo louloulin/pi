@@ -455,6 +455,50 @@ wire-payload / header 缝，**handler 返回值目前不生效**、`after_provid
 `/help` 的 `keys:` 段与 dialog/settings 页脚仍是硬编码 chord，**本轮不算已修**，
 列为下一轮第 2、3 条。
 
+### 0.15 LUM-1448 复测：扩展注入 autocomplete provider（宿主能力面新增一行「autocomplete provider 注入」）；加权仍 **86.8%**
+
+本轮动 `pi-tui` + `pi-extensions` + `pi-coding-agent`，不改任何轴的分母，也没有一条轴的能力被重估；
+公式里唯一变动的项仍是测试轴。细节、决策（异步化三选一）、逐条上游对照与 8 条偏差见
+`docs/LUM1448_AUTOCOMPLETE_PROVIDER.md`。
+
+| 量 | 本轮实测 | LUM-1447 | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **91.1%**（139,505 / 153,106） | 90.2%（138,153） | `python pi-rust/scripts/measure_loc.py`（仓库根）；+1,352 行 src（新模块 2 个 + host/shim/editor/wiring/interactive） |
+| 测试规模 | **50.8%**（2,670 + 26 = 2,696 / 5,309） | 50.3%（2,670） | 同一命令在改动前后各跑一次：`grep -rn --include=*.rs -E '^\s*#\[(tokio::)?test\(\(|\]\)' pi-rust/crates \| wc -l` → 基线 2,721 / 本轮 2,747（**+26**）。二者绝对数比 §0.14 的 2,670 高 51，是本行口径与上轮的差异（上轮未记录命令）；**为不重估历史轴，此处只把同命令的 +26 增量加在 §0.14 的 2,670 上** |
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 本轮无新 `pi-tui` src 模块（`pi-extensions`/`pi-coding-agent` 各 +1，不计入该轴） |
+| `app.*` 接线 | 43 / 44 = 97.7%，silent 1（`app.tree.editLabel`） | 同 | 未动 |
+| `tui.*` 消费面 | 49 / 49 = 100% | 同 | 未动 |
+| **宿主能力面（本量，§3.6）** | **新增一行：`ctx.ui.addAutocompleteProvider` = 已支持（同步子集）** | 未覆盖 | 上游 wrapper 链（`current` 透传 + `triggerCharacters` 去重）在 shim 实现；宿主侧同步 `host_ui_autocomplete` 提供内置 provider 作链尾；Rust→JS 走 `_pi_autocomplete_call`。已知偏差：只服务同步回调 / `options.signal` 恒不 abort。该轴仍取 **95%**（子项补齐不等于重估） |
+| 扩展生命周期事件 | 36/36 | 同 | 未动 |
+
+**加权完成度（权重表见 §4.1）**：只有第 12 轴从 0.5029 走到 0.5029 + 26/5,309 = **0.5078**：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.5078 + 3×0.95 = 86.79% → **86.8%**
+```
+
+即“测试轴 +26 条”贡献 **+0.025pt**（86.7655 → 86.79），一位小数上仍为 **86.8%**。
+本轮**没有**因新能力而抬高任何轴——宿主能力面本来就在 95%，`addAutocompleteProvider` 是把
+一个空子项填上，不是新的能力层。
+
+**本轮新登记的量与门禁（可反证）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 宿主层（真 QuickJS + 真 fixture） | `cargo test -p pi-extensions --test autocomplete` | **8 passed / 0 failed** |
+| 交互层（真 `App` + frame-buffer 帧） | `cargo test -p pi-coding-agent --test lum1448_autocomplete_provider_frames` | **5 passed / 0 failed**（3 帧） |
+| 接线 | `cargo test -p pi-coding-agent --lib install_extension_autocomplete` | 1 passed |
+| 帧 | `docs/screenshots/lum1448-autocomplete-provider-{hash,tab,enter}-78x14.{png,txt}` | 3 帧，78×14，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 门禁 | `cargo test -p pi-tui` / `-p pi-extensions` / `-p pi-coding-agent`；`cargo fmt --all -- --check`；`cargo clippy -p pi-tui -p pi-extensions -p pi-coding-agent --all-targets` | **1034/0**（基线 1027/0）、**131/5**（基线 120/5）、**823/28**（基线 815/28）；fmt exit 0；clippy 0 条新告警 |
+
+**诚实说明**：三条新测试文件全是**真驱动**（真 QuickJS host + 真 `App` + 磁盘上的真 fixture），
+但本机（Windows runner）**没有 PTY**，所以 Tab/Enter 走的是 `App::step(InputEvent::Key)`，
+不是 crossterm 字节流；截图是 frame-buffer 通道而非 PTY 实拍。上游 TS 侧无法交叉验证
+（本机无 `node_modules`），所以“与上游一致”的判据是**源码逐行核对**（见交付文档 §1）。
+`pi-extensions` 的 5 条 / `pi-coding-agent` 的 28 条失败与本轮**逐字同名**（Windows 环境类：
+临时路径分隔符、`ls`/`bash`、绝对路径拒绝），`diff` 两边失败名集合为空。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
@@ -561,7 +605,15 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 
 ### 3.6 扩展生态（两条子轴，本审计最大发现）
 
-**宿主能力面（强）**：`pi-extensions/docs/EXTENSIONS.md` 表格列出宿主 import：`registerTool/registerCommand/registerProvider/unregisterProvider/appendEntry/sendMessage/sendUserMessage/setSessionName/exec(+cancel)/fetch(+cancel)/ui.notify/ui.confirm/ui.input/ui.select/ui.custom/setWidget/setHeader/setFooter/setEditorComponent/log/child_process(zlib,crypto,fs,os,process via shim)/pi_ai_stream_start`。对照 TS `docs/extensions.md` 的 ~21 个 `pi.*`：宿主能力类**基本全覆盖**，缺 `setActiveTools、setThinkingLevel、setLabel、registerShortcut、registerFlag、registerEntryRenderer、registerMessageRenderer、registerMarkdownTransformer、getAllTools`（9 个）→ 覆盖面约 **57%–95%**，取 **95%**（能力等价入口多于 TS 的 UI 面，例如 `ctx.ui.custom` 的 overlay 生命周期在 Rust 侧有完整 host op）。
+**宿主能力面（强）**：`pi-extensions/docs/EXTENSIONS.md` 表格列出宿主 import：`registerTool/registerCommand/registerProvider/unregisterProvider/appendEntry/sendMessage/sendUserMessage/setSessionName/exec(+cancel)/fetch(+cancel)/ui.notify/ui.confirm/ui.input/ui.select/ui.custom/setWidget/setHeader/setFooter/setEditorComponent/**ui.addAutocompleteProvider**(LUM-1448)/log/child_process(zlib,crypto,fs,os,process via shim)/pi_ai_stream_start`。对照 TS `docs/extensions.md` 的 ~21 个 `pi.*`：宿主能力类**基本全覆盖**，缺 `setActiveTools、setThinkingLevel、setLabel、registerShortcut、registerFlag、registerEntryRenderer、registerMessageRenderer、registerMarkdownTransformer、getAllTools`（9 个）→ 覆盖面约 **57%–95%**，取 **95%**（能力等价入口多于 TS 的 UI 面，例如 `ctx.ui.custom` 的 overlay 生命周期在 Rust 侧有完整 host op）。
+
+新增一行（LUM-1448）：**autocomplete provider 注入 = 已支持（同步子集）**。
+`ctx.ui.addAutocompleteProvider(factory)` 的 wrapper 链（`current` 透传 + `triggerCharacters` 去重）
+在 shim 里实现，宿主侧通过同步 `host_ui_autocomplete(op, json)` 提供内置
+`CombinedAutocompleteProvider` 作为链尾，Rust→JS 走 `_pi_autocomplete_call(op, json)`；
+布局/触发符表对齐 `interactive-mode.ts:734-745`。已知偏差：**只服务同步回调**
+（Promise-returning 回调不 await，该次调用回落内置 provider 并告警一次）、`options.signal` 恒不 abort。
+逐条对照与证据见 `docs/LUM1448_AUTOCOMPLETE_PROVIDER.md`。
 
 **生命周期事件面（弱，真正的 P0 缺口）**：
 - TS（`docs/extensions.md`）扩展可监听 **36 个事件名**：`before_agent_start/agent_start/agent_end/agent_settled/turn_start/turn_end/message_start/message_update/message_end/tool_call/tool_execution_start/tool_execution_update/tool_execution_end/tool_result/input/context/session_start/session_shutdown/session_before_compact/session_compact/session_compact_failed/session_before_fork/session_before_switch/session_before_tree/session_tree/session_info_changed/model_select/thinking_level_select/project_trust/resources_discover/user_bash/ui_prompt_start/ui_prompt_end/before_provider_request/before_provider_headers/after_provider_response`。
