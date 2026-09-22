@@ -611,7 +611,11 @@ fn build_agent(options: &PrintModeOptions) -> Result<Agent, PrintModeError> {
     // `settings.retry` decides how many times a transient provider failure
     // restarts the assistant call before the run fails.
     .with_retry_policy(options.retry);
-    Ok(Agent::new(agent_options))
+    let mut agent = Agent::new(agent_options);
+    // Same tool hooks the TUI installs: print mode loads extensions too, so a
+    // `tool_call` blocker must apply here as well (LUM-1330).
+    crate::extensions::hook::install_tool_hooks(&mut agent, Some(&options.extensions));
+    Ok(agent)
 }
 
 /// Bundle of state shared between the signal handlers and the main

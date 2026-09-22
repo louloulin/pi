@@ -1,0 +1,78 @@
+# lum1330-tool-hooks.png — chars, 110x34 cells
+
+===== LUM-1330 tool hooks: a real `pi` TUI run against a loopback model that asks for `bash {command: "printf %s%s RUNAWAY _MARKER"}`. The loaded extension's `tool_call` handler returns `{ block: true, reason: "blocked-by-extension" }`; the transcript shows the error tool result with that reason, the shell never ran (the run-time marker `RUNAWAY_MARKER` that the baseline frame shows is absent), and the session keeps answering. Real binary, real PTY, pyte VT emulator.  |  [1] 1. the extension blocks the tool call and its reason reaches the transcript  (cursor 93,33, frame efb606651dd9, px b9663b31255b, alive=True) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-30632/.pi/agent/extensions/hooks.js]
+1 extension(s): ~/.pi/agent/extensions/hooks.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Ctrl+R/Ctrl+S to search history
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> please run it
+  [gpt-4o-mini] ▍
+* bash printf %s%s RUNAWAY _MARKER
+* tool call blocked: blocked-by-extension
+  [gpt-4o-mini]finished
+
+
+
+> type a prompt — /help for commands
+GPT-4o mini  session-18d78403c37f78bc                                       in 22 out 14 0.0%/128k  ? for help
+  assert PASS   expect       'blocked-by-extension'
+  assert PASS   expect       'tool call blocked'
+  assert PASS   reject       'RUNAWAY_MARKER'
+
+===== LUM-1330 tool hooks: a real `pi` TUI run against a loopback model that asks for `bash {command: "printf %s%s RUNAWAY _MARKER"}`. The loaded extension's `tool_call` handler returns `{ block: true, reason: "blocked-by-extension" }`; the transcript shows the error tool result with that reason, the shell never ran (the run-time marker `RUNAWAY_MARKER` that the baseline frame shows is absent), and the session keeps answering. Real binary, real PTY, pyte VT emulator.  |  [2] 2. the session survives the block: the next turn is a normal text reply  (cursor 88,33, frame 260752350026, px dea0055bba99, alive=True) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-30632/.pi/agent/extensions/hooks.js]
+1 extension(s): ~/.pi/agent/extensions/hooks.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Ctrl+R/Ctrl+S to search history
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> please run it
+  [gpt-4o-mini] ▍
+* bash printf %s%s RUNAWAY _MARKER
+* tool call blocked: blocked-by-extension
+  [gpt-4o-mini]finished
+> and now something harmless
+  [gpt-4o-mini]finished
+
+> type a prompt — /help for commands
+GPT-4o mini  session-18d78403c37f78bc                                       in 33 out 21 0.0%/128k  ? for help
+  assert PASS   expect       'finished'
+  assert PASS   reject       'RUNAWAY_MARKER'

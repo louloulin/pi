@@ -336,6 +336,16 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
     );
     let agent = Arc::new(AsyncMutex::new(agent));
 
+    // Extensions that subscribed to `tool_call` / `tool_result` get the
+    // agent loop's tool hooks, so they can block a call, patch its
+    // arguments, or replace what the model sees (LUM-1330). Installed here,
+    // before the loop starts, because the hooks must exist for the very
+    // first tool call.
+    crate::extensions::hook::install_tool_hooks(
+        &mut *agent.lock().await,
+        options.extensions.as_ref(),
+    );
+
     let config = interactive_app_config(&options);
 
     let mut terminal = match setup_terminal() {

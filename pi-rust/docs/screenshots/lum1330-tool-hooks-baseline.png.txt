@@ -1,0 +1,39 @@
+# lum1330-tool-hooks-baseline.png — chars, 110x34 cells
+
+===== LUM-1330 baseline: with no `tool_call` handler the command runs, so `RUNAWAY_MARKER` (assembled by the shell at run time) shows up in the transcript together with the tool's duration line. Compare with lum1330-tool-hooks.png, where the same command is blocked and the marker never appears.  |  [1] 1. no tool_call handler: the command runs and its stdout is in the transcript  (cursor 88,33, frame e939fcd8dd00, px 0d02ecde7ed0, alive=True) =====
+pi v0.1.0d 1 extension(s) [/tmp/pi-pty-home-31210/.pi/agent/extensions/hooks.js]
+1 extension(s): ~/.pi/agent/extensions/hooks.js
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Ctrl+R/Ctrl+S to search history
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> please run it
+  [gpt-4o-mini] ▍
+* bash printf %s%s RUNAWAY _MARKER
+* RUNAWAY_MARKER
+* Took 0.1s
+  [gpt-4o-mini]finished
+
+
+> type a prompt — /help for commands
+GPT-4o mini  session-18d78408d0a98e29                                       in 22 out 14 0.0%/128k  ? for help
+  assert PASS   expect       'RUNAWAY_MARKER'
+  assert PASS   expect       'printf'

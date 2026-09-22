@@ -286,11 +286,7 @@ struct BlockOneCall {
 impl BeforeToolCall for BlockOneCall {
     async fn before_tool_call(&self, call: &ToolCall) -> BeforeToolCallDecision {
         if call.id == self.blocked_id {
-            BeforeToolCallDecision {
-                block: true,
-                reason: Some("blocked by test".into()),
-                terminate: false,
-            }
+            BeforeToolCallDecision::block("blocked by test")
         } else {
             BeforeToolCallDecision::default()
         }
