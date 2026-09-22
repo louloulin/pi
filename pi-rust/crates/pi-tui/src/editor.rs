@@ -1414,11 +1414,13 @@ impl Editor {
     /// Remove a whole marker and forget its content, keeping the cursor on
     /// the side it was already on.
     ///
-    /// Marker ids are **not** renumbered afterwards: upstream shifts the
-    /// registry down so the labels stay `#1, #2, …`, this port leaves the
-    /// gap (`[paste #2 +12 lines]` survives `#1` being deleted). The
-    /// content still expands correctly; only the label numbering carries the
-    /// gap. See `docs/LUM1328_PASTE.md` for why the shift was left out.
+    /// Deleting a marker **renumbers** the ones after it, like upstream's
+    /// `higherIds` loop (`components/editor.ts:1389-1410`): the registry
+    /// shifts down and every later label is rewritten, so a draft with two
+    /// pastes never shows `#2` standing alone after `#1` is gone. The id
+    /// counter itself stays monotone (upstream does not decrement
+    /// `pasteCounter`), so a *new* paste after a deletion can still take a
+    /// number above the surviving ones.
     fn remove_paste_marker(&mut self, span: PasteMarkerSpan) {
         self.remove_images_in_range(span.start..span.end);
         self.buffer.replace_range(span.start..span.end, "");
@@ -1428,6 +1430,55 @@ impl Editor {
             self.cursor = span.start;
         }
         self.pastes.remove(&span.id);
+        self.renumber_paste_markers_after(span.id);
+    }
+
+    /// Shift every marker numbered above `removed_id` down by one.
+    ///
+    /// Upstream `higherIds` walks `this.pastes.keys()` in ascending order and
+    /// both re-keys the map and rewrites the marker text it keeps in the
+    /// buffer. This port does the same in two passes: the registry first
+    /// (ascending, so the suffix slides into the slot the removed id left
+    /// free), then the labels **back to front**, because rewriting `#10` to
+    /// `#9` shortens the buffer and would invalidate the offsets of every
+    /// marker after it.
+    ///
+    /// The caret only needs the same shift when a rewritten label sits
+    /// before it (a label after the caret is never renumbered: ids ascend
+    /// with buffer order); a caret that was inside the removed span was
+    /// already parked at `span.start` by [`Editor::remove_paste_marker`].
+    fn renumber_paste_markers_after(&mut self, removed_id: u32) {
+        let higher: Vec<u32> = self
+            .pastes
+            .keys()
+            .copied()
+            .filter(|id| *id > removed_id)
+            .collect();
+        for id in higher {
+            if let Some(content) = self.pastes.remove(&id) {
+                self.pastes.insert(id - 1, content);
+            }
+        }
+
+        let mut spans = paste_marker_spans(&self.buffer);
+        spans.sort_by_key(|span| std::cmp::Reverse(span.start));
+        for span in spans {
+            if span.id <= removed_id {
+                continue;
+            }
+            let old = self.buffer[span.start..span.end].to_string();
+            let new = rewrite_marker_id(&old, span.id, span.id - 1);
+            let delta = new.len() as isize - old.len() as isize;
+            self.buffer.replace_range(span.start..span.end, &new);
+            if delta != 0 && self.cursor >= span.end {
+                self.cursor = (self.cursor as isize + delta) as usize;
+            } else if self.cursor > span.start {
+                self.cursor = span.start;
+            }
+        }
+        // The draft moved under the caret, so a column cached for Up/Down no
+        // longer describes it (same reason a normal edit drops it).
+        self.preferred_col = None;
     }
 
     /// Delete the character before the cursor (`Backspace`).
@@ -2837,6 +2888,16 @@ fn paste_marker_spans(text: &str) -> Vec<PasteMarkerSpan> {
         }
     }
     spans
+}
+
+/// `[paste #<id> …]` with its id replaced by `new_id`.
+///
+/// Used when a deletion renumbers the markers above it: upstream rewrites
+/// the same text (`higherIds`), and only the id digits differ — the summary
+/// (`+12 lines` / `1234 chars`) is carried over verbatim. The marker never
+/// contains a second `#`, so the first occurrence is the id.
+fn rewrite_marker_id(marker: &str, id: u32, new_id: u32) -> String {
+    marker.replacen(&format!("#{id}"), &format!("#{new_id}"), 1)
 }
 
 /// Parse the marker that starts at `start`, returning `(end, id)`.

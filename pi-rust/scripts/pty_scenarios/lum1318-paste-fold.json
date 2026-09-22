@@ -1,7 +1,7 @@
 {
   "cols": 100,
   "rows": 30,
-  "caption": "LUM-1318 paste folding. A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to #2 and deleting the first marker renumbers the survivor to #1 while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.",
+  "caption": "LUM-1318 paste folding on the landed marker model (LUM-1328 + the renumber fix). A 200-line bracketed paste becomes one `[paste #1 +200 lines]` marker and the composer stays one row; Enter hands the model the WHOLE pasted text (the transcript shows `pasted line 200`, never a marker); a second paste folds to the next id and deleting the first marker RENUMBERS the survivor down to `#1` while keeping its own payload — the next Enter submits the 11-line text, not the 200-line one; the last panel is the A/B: the same bytes delivered as individual key presses (no bracketed-paste markers) fold nothing and pile up as a 200-row draft. Real PTY at 100x30 driving the debug binary built from this commit.",
   "args": [
     "--model",
     "faux/faux-model"
@@ -43,14 +43,11 @@
       ]
     },
     {
-      "label": "4. Up recalls the submitted prompt: history keeps the expanded prompt (upstream `addToHistory` parity), so the draft returns full-size — no marker with nothing behind it",
+      "label": "4. Up recalls the submitted prompt: the recalled draft carries the marker again (the registry travels with the history entry), so the draft stays short and still expands — never a marker with nothing behind it",
       "send": "<Up>",
       "wait": 1.2,
       "expect": [
-        "pasted line 200"
-      ],
-      "reject": [
-        "[paste #"
+        "> [paste #1 +200 lines]"
       ]
     },
     {
@@ -62,35 +59,35 @@
       ]
     },
     {
-      "label": "6. paste again: the 200-line text folds to #1 for this draft",
+      "label": "6. paste again after the clear: the id comes from the monotone counter (upstream never resets `pasteCounter`), so this draft's first marker is #2, not #1",
       "paste": "pasted line 1\npasted line 2\npasted line 3\npasted line 4\npasted line 5\npasted line 6\npasted line 7\npasted line 8\npasted line 9\npasted line 10\npasted line 11\npasted line 12\npasted line 13\npasted line 14\npasted line 15\npasted line 16\npasted line 17\npasted line 18\npasted line 19\npasted line 20\npasted line 21\npasted line 22\npasted line 23\npasted line 24\npasted line 25\npasted line 26\npasted line 27\npasted line 28\npasted line 29\npasted line 30\npasted line 31\npasted line 32\npasted line 33\npasted line 34\npasted line 35\npasted line 36\npasted line 37\npasted line 38\npasted line 39\npasted line 40\npasted line 41\npasted line 42\npasted line 43\npasted line 44\npasted line 45\npasted line 46\npasted line 47\npasted line 48\npasted line 49\npasted line 50\npasted line 51\npasted line 52\npasted line 53\npasted line 54\npasted line 55\npasted line 56\npasted line 57\npasted line 58\npasted line 59\npasted line 60\npasted line 61\npasted line 62\npasted line 63\npasted line 64\npasted line 65\npasted line 66\npasted line 67\npasted line 68\npasted line 69\npasted line 70\npasted line 71\npasted line 72\npasted line 73\npasted line 74\npasted line 75\npasted line 76\npasted line 77\npasted line 78\npasted line 79\npasted line 80\npasted line 81\npasted line 82\npasted line 83\npasted line 84\npasted line 85\npasted line 86\npasted line 87\npasted line 88\npasted line 89\npasted line 90\npasted line 91\npasted line 92\npasted line 93\npasted line 94\npasted line 95\npasted line 96\npasted line 97\npasted line 98\npasted line 99\npasted line 100\npasted line 101\npasted line 102\npasted line 103\npasted line 104\npasted line 105\npasted line 106\npasted line 107\npasted line 108\npasted line 109\npasted line 110\npasted line 111\npasted line 112\npasted line 113\npasted line 114\npasted line 115\npasted line 116\npasted line 117\npasted line 118\npasted line 119\npasted line 120\npasted line 121\npasted line 122\npasted line 123\npasted line 124\npasted line 125\npasted line 126\npasted line 127\npasted line 128\npasted line 129\npasted line 130\npasted line 131\npasted line 132\npasted line 133\npasted line 134\npasted line 135\npasted line 136\npasted line 137\npasted line 138\npasted line 139\npasted line 140\npasted line 141\npasted line 142\npasted line 143\npasted line 144\npasted line 145\npasted line 146\npasted line 147\npasted line 148\npasted line 149\npasted line 150\npasted line 151\npasted line 152\npasted line 153\npasted line 154\npasted line 155\npasted line 156\npasted line 157\npasted line 158\npasted line 159\npasted line 160\npasted line 161\npasted line 162\npasted line 163\npasted line 164\npasted line 165\npasted line 166\npasted line 167\npasted line 168\npasted line 169\npasted line 170\npasted line 171\npasted line 172\npasted line 173\npasted line 174\npasted line 175\npasted line 176\npasted line 177\npasted line 178\npasted line 179\npasted line 180\npasted line 181\npasted line 182\npasted line 183\npasted line 184\npasted line 185\npasted line 186\npasted line 187\npasted line 188\npasted line 189\npasted line 190\npasted line 191\npasted line 192\npasted line 193\npasted line 194\npasted line 195\npasted line 196\npasted line 197\npasted line 198\npasted line 199\npasted line 200",
       "wait": 2.0,
       "expect": [
-        "> [paste #1 +200 lines]"
+        "> [paste #2 +200 lines]"
       ]
     },
     {
-      "label": "7. the marker is an ordinary draft character: text typed around it lands next to the label",
+      "label": "7. the marker is ordinary draft text: what you type around it lands next to the label",
       "send": " summary",
       "wait": 0.8,
       "expect": [
-        "> [paste #1 +200 lines] summary"
+        "> [paste #2 +200 lines] summary"
       ]
     },
     {
-      "label": "8. a second, 11-line paste folds as #2",
+      "label": "8. a second, 11-line paste folds as #3",
       "paste": "second paste row 1\nsecond paste row 2\nsecond paste row 3\nsecond paste row 4\nsecond paste row 5\nsecond paste row 6\nsecond paste row 7\nsecond paste row 8\nsecond paste row 9\nsecond paste row 10\nsecond paste row 11",
       "wait": 1.2,
       "expect": [
-        "> [paste #1 +200 lines] summary[paste #2 +11 lines]"
+        "> [paste #2 +200 lines] summary[paste #3 +11 lines]"
       ]
     },
     {
-      "label": "9. Ctrl+A + Del removes the FIRST marker whole: the survivor is renumbered to #1 and shows its own `+11 lines` summary, not the 200-line one",
+      "label": "9. Ctrl+A + Del removes the FIRST marker whole: the survivor is RENUMBERED down to #2 and shows its own `+11 lines` summary, not the 200-line one",
       "send": "<C-a><Del>",
       "wait": 0.8,
       "expect": [
-        "> ▍ summary[paste #1 +11 lines]"
+        "> ▍ summary[paste #2 +11 lines]"
       ],
       "reject": [
         "+200 lines"

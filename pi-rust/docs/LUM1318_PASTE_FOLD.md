@@ -1,78 +1,112 @@
-# LUM-1318 — 大段粘贴折叠成 `[paste #N +M lines]`（LUM-1312 后续 2/3）
+# LUM-1318 — 大段粘贴折叠：独立验收 + 删除后编号连续（上游 `higherIds`）
 
-> scope: `pi-rust/crates/pi-tui/src/{editor,prompt,app}.rs`,
-> `pi-rust/crates/pi-coding-agent/src/interactive.rs`,
-> `pi-rust/crates/pi-tui/tests/{composer_pastes,composer_paging}.rs`,
-> `pi-rust/scripts/{pty_capture.py,pty_scenarios/lum1318-paste-fold.json}`
-> branch: `work/LUM-1318` → `feature/pi.rs`（基线 = `origin/feature/pi.rs` @ `3e7af2761`，
-> 即已含 LUM-1327 指针定位的 tip；§3 的真 PTY 与 §6.1 的门禁都在这条合并树上复拍/复跑）
+> scope（本轮实际改动）：`pi-rust/crates/pi-tui/src/editor.rs`（`remove_paste_marker` +
+> `renumber_paste_markers_after` + `rewrite_marker_id`）、
+> `pi-rust/crates/pi-tui/tests/composer_paste.rs`（+4 条）、
+> `pi-rust/scripts/pty_scenarios/lum1318-paste-fold.json` + `docs/screenshots/lum1318-paste-fold.png{,.txt}`、
+> `pi-rust/scripts/pty_capture.py`（panel 的 `paste` 字段）
+> branch: `work/LUM-1318` → `feature/pi.rs`（基线 `origin/feature/pi.rs` @ `e0ba60d5c`，含 LUM-1327/LUM-1328/LUM-1330）
 > reference: 上游 `packages/tui/src/components/editor.ts` 的 `handlePaste` /
-> `PASTE_MARKER_REGEX` / `pastes` 表 / `higherIds` 重编号 / `expandPasteMarkers`，
-> 以及 `packages/tui/src/terminal.ts:184` 的 `\x1b[?2004h`（bracketed paste 开关）
+> `PASTE_MARKER_REGEX` / `pastes` 表 / `higherIds` 重编号 / `expandPasteMarkers`；
+> 姊妹文档 `docs/LUM1328_PASTE.md`（落地实现的模型与偏差）
 
-一句话结论：composer 现在按上游语义**折叠大段粘贴**——超过 10 行或 1000 字符的粘贴不再
-内联进 buffer，而是进侧表、buffer 里只留一个哨兵字符，渲染成 `[paste #N +M lines]`
-（按长度折叠时是 `[paste #N M chars]`）。200 行粘贴 = **1 行 composer**；`Enter` 交给模型的
-是**原文**；`Backspace`/`Delete`/行域 kill 命中哨兵时整块移除并自动重编号；`Ctrl+-` 恢复整块；
-与图片 chip 混用不串位。同时把驱动接上 **bracketed paste**（上游本来就开着）：粘贴由一个
-`Event::Paste` 事件送达，而不是几十上百次按键重放——这正是真 PTY 里能稳定折叠的前提。
+一句话结论：composer 的大段粘贴折叠（`[paste #N +M lines]`）在 `feature/pi.rs` 上已由 **LUM-1328**
+落地；本轮做两件事——(1) 用**另一套真 PTY 场景**独立验收这条链路，找到并修掉它与 LUM-1318 验收项
+的**唯一差异：删除标记后不重编号**（上游 `higherIds`，本轮补齐）；(2) 如实记录两套实现的取舍，
+不把第二个粘贴模型再落进同一个 crate。
 
 ---
 
-## 1. 真实审计：本轮之前发生了什么
+## 1. 本轮之前发生了什么（真实审计）
 
-| 行为 | 本轮之前（`6a5a2faf2` 树，真 PTY/单测实测） | 本轮之后（真 PTY 实测） |
+LUM-1318（LUM-1312 后续 2/3）与 LUM-1328（并行的另一条 autopilot 轮次）**各自实现了一遍**
+这个功能：
+
+| | LUM-1318 本轮之前（哨兵模型，本分支 `3ad6cc2cd`） | LUM-1328（已落地 `feature/pi.rs`，`6631b8c77`） |
 |---|---|---|
-| 200 行粘贴 | 整段 3091 字节内联进 buffer：composer 按 `composer_max_rows` 长到满窗，`↑` 上方还有 61+ 行 | 一个哨兵字符 → 一行 `> [paste #1 +200 lines]`（截图面板 2/6，帧 `3818b6e2b45e`/`6925b8b04d10`，合并树复拍） |
-| 终端粘贴的送达方式 | 驱动从未开启 bracketed paste：`grep -rn 'EnableBracketedPaste\|Event::Paste'` 全仓 0 命中，粘贴按字节变成一串按键事件（连 `\n` 都按 `Ctrl+J` 逐字重放） | `setup_terminal`/`resume_tui` 开 `EnableBracketedPaste`、`suspend_tui` 关；`CtEvent::Paste` 走 `App::paste_text` → 折叠（`interactive.rs:4130,4201,4182,616`） |
-| 提交文本 | `EditorAction::Submit(self.display_text())`，buffer 里就是全文，模型收到全文 | `Submit(self.expanded_text())`：标记展开回原文，模型收到的仍是原文，**不会**收到 `[paste #N …]` |
-| 删除 | 粘贴的文本是普通字符：删一个字符只删一个字符，`Ctrl+U` 杀掉整行几百字符 | 哨兵是单字符：`Backspace`/`Delete` 一次删整块，kill 命中后剩余标记自动重编号（面板 9：`[paste #2 +11 lines]` 删掉 `#1` 后变 `[paste #1 +11 lines]`，且**载荷跟着标记走**） |
-| kill ring / yank | 无标记可复活 | 被 kill 的文本先 `strip_sentinels`，yank 不会插回一个没有载荷的标记（与图片 chip 同规则） |
-| 外部编辑器 / `ctx.ui.getEditorText` | 只给得到 buffer 文本 | `App::editor_text()` 改为 `expanded_text()`，对齐上游 `getExpandedText() ?? getText()`（`interactive-mode.ts:2447`） |
+| buffer 内容 | 一个哨兵字符 `PASTE_CHAR`（U+FFFB） | 标记**文本**本身（`[paste #1 +123 lines]`），同上游 |
+| 载荷表 | `pastes: Vec<Paste>`，编号 = 出现序号 | `pastes: BTreeMap<u32, String>` + 单调 `paste_counter`，同上游 |
+| 删除后重编号 | 位置即编号，`drain` 的副产品 → **自动连续** | 留空号（删 `#1`，`#2` 仍是 `#2`），文档 §6.1 记为偏差 |
+| 粘贴清洗 | 无（只 `strip_sentinels`） | CSI-u 解码 / CRLF+tab 归一 / 控制字符过滤 / 路径补空格（上游 `handlePaste` 那一套） |
+| 指针（LUM-1327） | 需要把标记算成整条渲染宽度（`raw_byte_for_display_offset` 加分支） | 标记就是普通文本，天然对齐，无需额外映射 |
+| 测试 / PTY | 10 单测 + 8 App 测试 + 22 断言 | 23 App 测试 + 17 断言 |
+| 文档 | `LUM1318_PASTE_FOLD.md` | `LUM1328_PASTE.md` |
 
-`Ctrl+U`/`Ctrl+K` 的可用性也随之恢复：折叠后它们作用在**草稿的当前行**（LUM-1312 的语义），
-而不是几百字符的粘贴内容。
+**取舍**：LUM-1328 的 marker 模型与上游 `handlePaste` 同构（清洗、原子段、`expandPasteMarkers`
+都能逐条对照），且已合入并被其他轮次引用；本轮**不再把哨兵模型落进 `feature/pi.rs`**
+（同一个 crate 里放两套粘贴模型只会让后续每个改动分叉）。因此 `work/LUM-1318` 的最终形态是
+**LUM-1328 的模型 + 本轮补齐的缺口**，哨兵实现只留在本分支历史里作为记录。
 
-## 2. 设计：哨兵字符 + “位置即编号”
+## 2. 独立验收：找到的唯一不达项
 
-移植上游语义时**没有**照搬上游的数据结构，而是复用了端口已有的 chip 模型
-（`CHIP_CHAR` + `images` 对齐），因为哨兵模型天然满足上游用正则维持的那些不变量：
+用 LUM-1318 自己的真 PTY 场景（`lum1318-paste-fold.json`，100×30、`--model faux/faux-model`）
+打在 **LUM-1328 的二进制**上（改动前，`/tmp/pi-prefix-1318`）：
 
-| | 上游 `packages/tui/src/components/editor.ts` | 本端口 |
-|---|---|---|
-| buffer 内容 | 标记**文本**本身（`[paste #1 +123 lines]`）写进 `state.lines` | 一个哨兵字符 [`PASTE_CHAR`]（U+FFFB，与 `CHIP_CHAR` U+FFFC 同族且互不相同，`insert_char` 拒绝直接输入两者） |
-| 载荷表 | `private pastes: Map<number, string>` + `pasteCounter` | `pastes: Vec<Paste>`（`text` + 预先算好的 `summary`）；**没有** `paste_counter` |
-| 编号来源 | 计数器分配 id，标记文本里存 id | id = 在 buffer 中的**出现序号**（第 n 个哨兵 ↔ `pastes[n-1]`，与图片 chip 同一套对齐规则） |
-| 删除后重编号 | 删表项 + 递减计数器 + 正则重写所有更大 id 的标记文本（`higherIds`，`:1388-1401`） | `pastes.drain(..)`：位置即编号，**重编号是删除的副产品**，不需要二次遍历 |
-| 原子性 | `segmentWithMarkers` 把标记文本合并成一个 grapheme（只对仍有效的 id） | 哨兵本来就是**一个字符**：光标移动 / 退格 / 行域 kill 天然整块处理，不需要分词器参与 |
-| 渲染 vs 提交 | `getText()` = 标记文本；`getExpandedText()` 用 `expandPasteMarkers` 展开 | `display_text()` = 标记；`expanded_text()` = 原文；`Submit` 走后者 |
-| 折叠判定 | `pastedLines.length > 10 \|\| totalChars > 1000` | `should_fold_paste`：`split('\n').count() > 10 \|\| chars().count() > 1000`（行数口径完全一致；字符数用 Unicode 标量而非 UTF-16 code unit，只有贴边界的星平面字符会落在不同侧） |
-| 标记摘要 | 展开时按行数决定 `+N lines` / `N chars`，每次都要数 | 折叠时算一次存进 `Paste.summary`，每帧渲染不再扫载荷 |
+```
+21 条断言：20 PASS / 1 FAIL
+FAIL  expect  '> ▍ summary[paste #2 +11 lines]'   # 实际 '> ▍ summary[paste #3 +11 lines]'
+```
 
-`paste_counter` 是这些差异里唯一“上游有、端口没有”的状态：在“位置即编号”下它不再被任何
-读路径使用（id 由位置推出），保留就只是死状态，因此没有引入；上游需要它，是因为它要把 id
-写进 buffer 文本再靠正则找回来。
+面板 9：草稿里有两个标记（`[paste #2 +200 lines] summary[paste #3 +11 lines]`），
+`Ctrl+A`+`Del` 删掉第一个 → **活下来的那个没有重编号**（仍是 `#3`）。
+其余 20 条（折叠成一行、`Enter` 交全文、召回仍是标记、按键重放 A/B 不折叠…）在落地实现上本来就过。
 
-### 2.1 与 LUM-1327 指针定位的合入面
+这正是 LUM-1318 验收项里的一条（“删除后编号连续”，上游 `higherIds`），
+而 LUM-1328 文档 §6.1 把它记为“留作后续 issue”（理由是 char-indexed buffer 上做
+“全局重排 + 光标位移”风险大于收益）。本轮把它补上，代价比预想小：标记是纯 ASCII 文本，
+只改 `#` 后那几位数字，行布局（`visual_text`）每帧从 buffer 现算，没有第二份布局状态。
 
-`feature/pi.rs` 上已有 LUM-1327 的“点击 → 草稿光标”映射
-（`Editor::place_display_cursor` → `raw_byte_for_display_offset`）。网格 → 草稿的换算
-必须把标记当成它渲染出来的**整条宽度**，否则标记之后的每一个格子都会偏：
+## 3. 本轮改动：上游 `higherIds` 语义
 
-* `raw_byte_for_display_offset` 的分支从 `CHIP_CHAR => 10 列` 扩成
-  `CHIP_CHAR => chip_label 宽度，PASTE_CHAR => self.paste_label_width(n)`；
-  `display_cursor` 同样按 `paste_label_width` 计数（chip 固定十列，标记宽度随摘要变）。
-* 回退面：只多一个 match 分支，标记宽度查表失败时是 `0` 列（不会 panic）。
-* 证据：`composer_click.rs` 新增
-  `a_click_after_a_folded_paste_marker_lands_on_the_clicked_character`——200 行粘贴 +` tail` 后，
-  点 `tail` 落在 `tail` 上（若把标记当成 1 列，会落到 `+200 lines` 里），点标记内部落在标记边界，
-  且点前后草稿逐字节不变、载荷仍是 200 行；同一用例用图片 chip 走了同一断言（“标记规则 == chip 规则”）。
+`editor.rs`（`remove_paste_marker` 尾部调用新函数）：
 
-## 3. 真 PTY 证据
+```rust
+fn remove_paste_marker(&mut self, span: PasteMarkerSpan) {
+    ... // 原样：删文本、把光标留在原来那一侧
+    self.pastes.remove(&span.id);
+    self.renumber_paste_markers_after(span.id);   // ← 本轮新增
+}
 
-场景 `scripts/pty_scenarios/lum1318-paste-fold.json`（100×30，`--model faux/faux-model`，
-本提交构建的 `target/debug/pi`），截图与字符网格在
-`docs/screenshots/lum1318-paste-fold.png{,.txt}`：
+fn renumber_paste_markers_after(&mut self, removed_id: u32) {
+    // 注册表先按 id 升序下移一位（后缀滑进被删 id 空出的槽，不会撞车）
+    let higher: Vec<u32> = self.pastes.keys().copied().filter(|id| *id > removed_id).collect();
+    for id in higher {
+        if let Some(content) = self.pastes.remove(&id) { self.pastes.insert(id - 1, content); }
+    }
+    // 再改标签文本：从后往前，因为 `#10`→`#9` 会让 buffer 变短
+    let mut spans = paste_marker_spans(&self.buffer);
+    spans.sort_by_key(|span| std::cmp::Reverse(span.start));
+    for span in spans {
+        if span.id <= removed_id { continue; }
+        let old = self.buffer[span.start..span.end].to_string();
+        let new = rewrite_marker_id(&old, span.id, span.id - 1);
+        ... // 重写 + 光标位移（光标在被改标签之后时按长度差平移）
+    }
+    self.preferred_col = None;   // 草稿在光标下变了，Up/Down 的缓存列失效
+}
+```
+
+边界与口径（都与上游一致，不粉饰）：
+
+* **计数器不递减**：上游不重置也不递减 `pasteCounter`，所以“删掉 `#1` 后**新**粘贴”仍可能拿到
+  `#3`（存活的是 `#1`）。连续的是**草稿里现有的标记**，不是计数器。`a_new_paste_after_a_deletion_takes_the_counter_on`
+  把这条钉死。
+* **只挂在整块删除路径**：`Backspace`/`Delete` 命中整标记时（`remove_paste_marker`）会重编号；
+  行域 kill 把标记**文本**切掉时注册表留下孤儿项（与上游同样：`expandPasteMarkers` 只认识
+  buffer 里还在的 id），孤儿项不参与渲染，也不会与下移后的 id 撞车。
+* **光标**：删除时光标就在被删标记处，所以“标签重写要位移光标”这条分支在这两条按键路径上
+  走不到，代码里保留为防御（将来若有别处整块删标记仍正确）。
+
+测试（`crates/pi-tui/tests/composer_paste.rs`，+4 条，共 27 条）：
+
+| 用例 | 断言 |
+|---|---|
+| `deleting_the_first_marker_renumbers_the_survivor_and_keeps_its_content` | 删 `#1` → `#2` 变 `#1`，`paste_content(1)` 是第二段载荷，`expanded_text` 也是第二段 |
+| `deleting_a_middle_marker_keeps_the_numbering_contiguous` | 三个标记删中间 → `[1,2]`，`#3` 的载荷跟着滑到 `#2` |
+| `renumbering_moves_the_caret_with_the_shorter_label` | 11 个标记删 `#1` → `#11`→`#10`（buffer 真的变短），id `1..=10`，展开文本仍是 10 段 |
+| `a_new_paste_after_a_deletion_takes_the_counter_on` | 计数器单调：删 `#1` 后新粘贴是 `#3`，两份载荷各自正确 |
+
+## 4. 真 PTY 证据（改动前 / 改动后，同一 scenario）
 
 ```bash
 python3 scripts/pty_capture.py --bin target/debug/pi \
@@ -81,146 +115,79 @@ python3 scripts/pty_capture.py --bin target/debug/pi \
   --text-out docs/screenshots/lum1318-paste-fold.png.txt
 ```
 
-**断言 22/22 PASS**（`assert` 行也在 `.txt` 里，逐条可查；下面这组哈希/帧号在合并树
-`3e7af2761` + 本轮提交上**重拍**过，与上一轮基于 `6a5a2faf2` 的那次是同一条 scenario）：
+| | 断言 | 失败项 |
+|---|---|---|
+| 改动前（`/tmp/pi-prefix-1318`，= LUM-1328 的实现） | **20 PASS / 1 FAIL** | 面板 9：删掉第一个标记后幸存者仍是 `#3` |
+| 改动后（本轮 `target/debug/pi`） | **21 PASS / 0 FAIL**（`PY-EXIT=0`） | — |
+
+关键帧（字符网格与 `frame`/`px` 哈希都在 `.png.txt` 里逐条可查）：
 
 | 面板 | 结论 | 关键帧 |
 |---|---|---|
-| 1 | idle，composer 一行 | `cafabf37f53e` |
-| 2 | 200 行 bracketed paste → **一行** `> [paste #1 +200 lines]▍`；`reject 'pasted line 1' / 'pasted line 200' / '  pasted line'` 全过（正文没进屏幕、transcript 也没多出东西） | `3818b6e2b45e` |
-| 3 | `Enter` 提交：transcript 出现 `pasted line 200`，且 `reject '[paste #'` → 模型拿到的是全文、不是标记 | `f1767c01ea16` |
-| 4 | `Up` 召回：草稿回到全文（history 存的是展开后的 prompt，见 §5.1），仍然 `reject '[paste #'` | `c9ac66dd1c38` |
-| 5 | `Ctrl+C` 清空召回的大草稿，网格与面板 3 **逐字节相同**（帧哈希同为 `f1767c01ea16`）= 空 composer + 未动的 transcript | `f1767c01ea16` |
-| 6 | 再粘一次：又折叠成 `#1` | `6925b8b04d10` |
-| 7 | 标记就是普通草稿字符：` summary` 打在它旁边 | `015fb7f35b2f` |
-| 8 | 第二个 11 行粘贴 → `[paste #2 +11 lines]` | `9c6c18324ae2` |
-| 9 | `Ctrl+A`+`Del` 删掉**第一个**标记：剩下的被重编号为 `#1` 且显示自己的 `+11 lines`（`reject '+200 lines'` 通过） | `e79cc503eb92` |
-| 10 | 紧接着 `Enter`：transcript 出现 `second paste row 11` → 重编号后**载荷没有串位**（若串位这里会送出 200 行那份） | `f0e60c3e9347` |
-| 11 | 同一进程内的 A/B：同样的 200 行**按键重放**（无 bracketed paste 标记）→ 不折叠、草稿堆满窗口（`↑` 上方 61 行） | `f0b6c4f42aac` |
+| 1 | idle，composer 一行 | `676c29a93a8b` |
+| 2 | 200 行 bracketed paste → **一行** `> [paste #1 +200 lines]▍`；正文一个字都没进屏幕 | `11d1f46db215` |
+| 3 | `Enter` 提交：transcript 出现 `pasted line 200`，且 `reject '[paste #'` → 模型拿到全文 | `bebf837a591a` |
+| 4 | `Up` 召回：草稿又是标记本身（注册表跟着 history 条目走），草稿仍然只有一行 | `f0e950128e3e` |
+| 5 | `Ctrl+C` 清空召回的大草稿，网格与面板 3 **逐字节相同**（帧哈希同为 `bebf837a591a`） | `bebf837a591a` |
+| 6 | 清空后再粘一次：id 来自单调计数器 → `#2`（上游不重置 `pasteCounter`） | `f69c7692dc3d` |
+| 7 | 标记就是普通草稿文本：` summary` 打在它旁边 | `c1f7afddb0c3` |
+| 8 | 第二个 11 行粘贴 → `#3` | `2bddbf478e1b` |
+| 9 | `Ctrl+A`+`Del` 删掉第一个标记 → 幸存者**重编号为 `#2`**，且显示自己的 `+11 lines`（`reject '+200 lines'`） | `c87e4700e697` |
+| 10 | 紧接着 `Enter`：transcript 出现 `second paste row 11` → 重编号后**载荷没串位** | `4b1491bede18` |
+| 11 | 同进程内 A/B：同样 200 行**按键重放**（无 bracketed paste）→ 不折叠、草稿堆满窗口（`↑` 上方 61 行） | `f9f2af3f0294` |
 
-实测数字（同一组 run，字符网格逐帧可复算）：
+实测数字：折叠后 composer **1 行**；面板 11 的按键重放 6 秒内只推进到 `pasted line 68`（≈1023 B，
+与 LUM-1328 记录的同一条既有读取缺陷一致，见 §6）；本次 21 条断言全部由 pyte 网格判定，
+没有“人工描述的成功”。
 
-- 折叠后 composer 行数 **1**（`> [paste #1 +200 lines]▍`，面板 2/6）；同一段文本按按键送达时
-  composer 窗口 **7 行 + `↑`**，且 6 秒内只重放了 200 行里的 **68 行**（面板 11 冻结帧停在
-  `pasted line 6▍`，约等于 crossterm 一次 1024 字节读的量）。
-- 折叠判定边界：10 行 / 1000 字符**不折叠**，11 行 / 1001 字符折叠（`fold_thresholds_match_upstream`，
-  真 PTY 侧由面板 2（200 行）与面板 8（11 行）覆盖）。
-- 网格→草稿映射（合入 LUM-1327 后新增，`composer_click` 用例）：点标记**之后**的字符落在该字符上、
-  点标记内部落在标记边界、点前后草稿不变——标记按整条渲染宽度参与换算。
-- 断言/截图之外没有“人工描述的成功”：22 条断言全部由 pyte 网格判定，`frame`/`px` 哈希写在 `.txt` 里。
+## 5. 门禁（最终树实测）
 
-## 4. 单元 / 集成测试
+```console
+$ . pi-rust/scripts/toolchain.sh            # rustc 1.85.0 (4d91de4e4 2025-02-17)
+$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=1 \
+    cargo fmt --all -- --check
+FMT-OK
+$ ... cargo clippy --workspace --all-targets --locked -- -D warnings
+Finished `dev` profile [unoptimized] target(s) in 32.22s
+CLIPPY-EXIT=0
+$ ... cargo test --workspace --locked -- --test-threads=2
+TEST-EXIT=0
+# 171 suites：2685 passed / 0 failed / 2 ignored（9m08s）
+```
 
-`cargo test -p pi-tui`（全绿）新增：
+环境事实（共享盘，不粉饰）：`/` 是 50G overlay、4~6 路并发 run 共用，本轮开工时曾 0 字节可用，
+期间出现过两次**与代码无关**的红：一次 `cargo test --workspace` 在磁盘打满时挂
+`pi-coding-agent` 的 `interactive::*`（panic 全是 `tempdir: Custom { kind: StorageFull, … }`），
+另一次 `history_file::clear_history_deletes_the_file_and_reports_the_path` 报
+“did not exit promptly: 41.4s”（当时 `df` 可用 0），单独重跑 3/3 全绿（0.00s）。
+磁盘回落后重跑同一条命令得到上面的 exit 0。为腾出构建空间，本轮清理了**已收工轮次**的
+`target/` 构建缓存（`work/LUM-1318` 上一轮、`work/LUM-1327`、`lum-1305` 等，均为可重建产物），
+未动任何源码或 worktree。
 
-- `crates/pi-tui/src/editor.rs` 单测 10 条：阈值边界、标记渲染 + 提交逐字等于原文、
-  退格删整块并连续重编号、`Delete`、undo 还原整块（再 undo 连标记本身一起撤）、
-  kill ring 不复活无载荷标记（含“只 kill 到一个标记时 ring 保持空、yank 是 no-op”）、
-  chip+paste 交错不串位（含在草稿头部插入后两个表一起位移）、`set_text` 丢掉哨兵与载荷、
-  哨兵不可输入、`clear` 清空。
-- `crates/pi-tui/tests/composer_pastes.rs` 8 条（走真实 `App`）：200 行粘贴后 composer 行数 ≤2
-  且 `editor_text()` 仍是全文、`Enter` 经 `StepOutcome::Submitted` 把原文交给 `Agent` 且 transcript 是全文、
-  小粘贴保持字面、chip+paste 提交顺序与 content block 数量、退格整块删 + undo、
-  历史召回（chip 还原、标记降级为文本）、`follow_up_from_editor` 提交展开文本、`clear_composer` 清空。
+## 6. 偏差与限制（承接 `LUM1328_PASTE.md` §6，本轮新增一条）
 
-既有测试只改了一处：`composer_paging.rs:140` 用 `insert_str(&draft(12))` 造一个 12 行草稿，
-12 行 > 10 行阈值，现在会被折叠——该测试要的是“高草稿”而不是“折叠粘贴”，因此改成
-`set_text(draft(12))`（程序化写入路径，语义不变）。
+1. **按词移动不吃 marker**（承接 LUM-1328）：`Alt+B/F` 会走进标记内部（不坏，只是多按几次）；
+   `←`/`→`/退格/前删已经原子。
+2. **kill ring 丢载荷**（承接）：跨标记的行域 kill 之后，标记文本没了、注册表留孤儿项，
+   yank 出来的是被切掉的纯文本——不会复活一个指向别处的标记，与图片 chip 的既有规则一致。
+3. **宽度口径 1 字符 = 1 列**（承接，全 crate 决定）：粘贴/中文在多行换行处会偏窄。
+4. **本轮新记：编号仍可能跳号**。删掉 `#1` 后**新**粘贴拿到的 id 来自单调计数器（上游同款），
+   所以草稿可能重新出现 `#1` 与 `#3` 并存。上游如此，本轮刻意保持同构；若产品上不接受，
+   需要在计数器上另做一次全局重排（那会连 history 里已存的 id 一起动，属于新 issue）。
+5. **既有缺陷（两轮都未修）**：一次性向 stdin 写入 >1 KiB 的**按键字节**时，驱动读取循环会在读完
+   约一个 1024 字节块后停住（进程仍活、仍写帧）。60 行按键正常，200 行停在 68 行；用不含本次
+   改动的 `work/LUM-1327` 二进制可复现同样的停顿。真实粘贴走 bracketed paste 不再经过这条路径，
+   但大块按键字节仍是问题，建议单独立项。
 
-合入后另加一条指针侧的合入面用例（`composer_click.rs`，与 LUM-1327 的指针定位对齐）：
-`a_click_after_a_folded_paste_marker_lands_on_the_clicked_character`（见 §2.1）。其余未改动、全绿：
-全量 `cargo test --workspace --locked` **2651 passed / 0 failed / 2 ignored，169 suites，exit 0**（§6.1）。
-
-## 5. 已知偏差与限制（真实，不粉饰）
-
-1. **history 存的是展开后的 prompt**：`addToHistory` 在上游拿到的也是 `submitValue` 展开后的文本，
-   所以召回一条折叠过的粘贴会把全文放回草稿（面板 4 就是这个行为）。端口与上游一致，
-   本轮**没有**改成“history 存标记”。副作用：历史文件（LUM-1319 的跨会话 history）也会追加全文。
-2. **history 条目无法还原折叠态**：会话内条目的 `raw`（含哨兵）在 `push_history_entry` 里被拒绝
-   （条目没有地方存粘贴原文，还原出哨兵就成了“没有载荷的标记”），改走
-   `rebuild_raw(display_text, images)`：chip 照样还原（`[Image #N]` 标签反推），标记部分按文本落地。
-   图片 chip 的召回能力不受影响（`composer_pastes.rs` 的召回用例覆盖）。
-3. **kill ring 丢载荷**：跨哨兵的 kill 先 `strip_sentinels` 再入 ring，所以被 kill 的粘贴原文不会被
-   yank 回来（与图片 chip 已有规则一致，`editor.rs` 的 `kill_ring_never_resurrects_a_chip_without_its_payload`）。
-   上游的 ring 存的是标记文本，若 id 恰好还有效会重新展开——端口**故意不模仿**：那会让一个陈旧标记
-   指向另一段粘贴的载荷。
-4. **`handlePaste` 的清洗没有移植**：上游在折叠前会解 CSI-u 控制字符、展开 tab、过滤不可打印字符、
-   给“路径形”粘贴补前导空格；端口的折叠直接吃 `insert_str` 拿到的字符串（只做 `strip_sentinels`）。
-   这些属于上游终端层的整理，本端口没有对应层。
-5. **没有粘贴数量上限**：上游也没有；图片 chip 的 8 张上限不变。
-6. **发现的既有缺陷（本轮未修，已如实记录）**：一次性向 stdin 写入 >1 KiB 的**按键字节**时，
-   驱动的读取循环会在读完约一个 1024 字节块后停住——应用还在跑（进程状态 `R`、CPU 时间继续增长、
-   仍在写帧），但之后的按键（包括 `Ctrl+C`）都不再被消费，20 秒后仍停在同一帧。
-   60 行按键（890 B）可以正常走完，200 行（3091 B）停在 68 行（≈1023 B）。
-   这与折叠无关：在同一台机器上用**不含本轮改动**的二进制
-   （`work/LUM-1327` 树上构建的基线，`/tmp/pi-ab/pi-baseline`；该临时目录已在本轮的共享盘清理中
-   随 `work/LUM-1327` 的 `target/` 一并删除——两者都是可重建的构建产物，结论由当时记录的冻结帧
-   哈希（`c6325e9af5bd`，合并树复拍为 `f0b6c4f42aac`）支撑）复现出完全相同的 68 行停顿。
-   本轮接上 bracketed paste 之后，真实粘贴不再走这条路径（一个 `Event::Paste`），
-   但“大块按键字节”这条路径的问题仍在，建议单独立项（根因在 crossterm 读取/`poll(ZERO)` 层，
-   不在编辑器）。
-
-## 6. 门禁与交付
-
-改动清单：
+## 7. 交付清单
 
 | 文件 | 改动 |
 |---|---|
-| `crates/pi-tui/src/editor.rs` | `PASTE_CHAR`(383) / `PASTE_FOLD_LINE_THRESHOLD`,`PASTE_FOLD_CHAR_THRESHOLD`(389,393) / `Paste`(465) / `should_fold_paste`(509) / `expanded_text`+`render`(842,848) / `paste_label_width`(915) / `paste_attachments`,`paste_count`(922,927) / `remove_pastes_in_range`,`remove_attachments_in_range`(1001,1020) / `insert_str` 折叠(1472) / `insert_folded_paste`(1501) / `strip_sentinels`(2878)；`display_text`(832)/`display_cursor`(886)/`raw_byte_for_display_offset`/`kill_range`/`yank`/`yank_pop`/`undo`/`clear`/`set_text_internal`/`set_buffer_and_images`/`push_history_entry` 相应接线 |
-| `crates/pi-tui/src/prompt.rs` | `Prompt::expanded_text`(90) |
-| `crates/pi-tui/src/app.rs` | `editor_text` 走展开文本(2580) / `follow_up_from_editor` 提交展开文本(2197) / `CtEvent::Paste` 显式归为 `Ignored`(5649) / `paste_text` 文档(4824) |
-| `crates/pi-coding-agent/src/interactive.rs` | `EnableBracketedPaste`(4130,4201) + `DisableBracketedPaste`(4182) + `Event::Paste` → `App::paste_text`(616) |
-| `crates/pi-tui/tests/composer_pastes.rs` | 新增 8 条 App 级测试 |
-| `crates/pi-tui/tests/composer_click.rs` | 新增 1 条：粘贴标记参与网格→草稿换算（与 LUM-1327 的合入面） |
-| `scripts/pty_capture.py` | 新增 `encode_paste` 与 panel 的 `paste` 字段：把面板内容当成一次 bracketed paste 发送 |
-| `scripts/pty_scenarios/lum1318-paste-fold.json`, `docs/screenshots/lum1318-paste-fold.png{,.txt}` | 11 面板 / 22 断言的实拍证据 |
+| `crates/pi-tui/src/editor.rs` | `remove_paste_marker` 调用新的 `renumber_paste_markers_after`；新增 `renumber_paste_markers_after` / `rewrite_marker_id` |
+| `crates/pi-tui/tests/composer_paste.rs` | +4 条重编号用例（27 条） |
+| `scripts/pty_scenarios/lum1318-paste-fold.json` | 11 面板 / 21 断言的独立验收场景（对齐落地模型的 id 口径 + 重编号断言） |
+| `docs/screenshots/lum1318-paste-fold.png{,.txt}` | 改动后的真 PTY 截图 + 字符网格 |
+| `scripts/pty_capture.py` | panel 的 `paste:` 字段：把面板内容按 bracketed paste（`\x1b[200~…\x1b[201~`）发送 |
 
-> 行号是**合并树**（`origin/feature/pi.rs` @ `3e7af2761` + 本轮提交）上的位置。
-
-门禁命令（本沙箱同一卷上同时跑 3 个 agent，按 LUM-1224 记录的磁盘缓解前缀执行）：
-
-```console
-$ . pi-rust/scripts/toolchain.sh
-$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=1 \
-    cargo fmt --all -- --check
-$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=1 \
-    cargo clippy --workspace --all-targets --locked -- -D warnings
-$ CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=1 \
-    cargo test --workspace --locked
-```
-
-结果见下方 §6.1（本文件随最后一次门禁运行更新）。
-
-### 6.1 门禁实测结果
-
-全部在**最终树**（`origin/feature/pi.rs` @ `3e7af2761` + 本轮提交，工作树干净）上跑，
-rustc `1.85.0 (4d91de4e4 2025-02-17)`、`--locked`、`CARGO_PROFILE_{DEV,TEST}_DEBUG=0
-CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`：
-
-```console
-$ cargo fmt --all -- --check
-FMT-OK                                    # 无 diff
-$ cargo clippy --workspace --all-targets --locked -- -D warnings
-Finished `dev` profile [unoptimized] target(s) in 2m 17s
-CLIPPY-EXIT=0                             # 0 warnings / 0 errors
-$ cargo test --workspace --locked -- --test-threads=1
-TEST-EXIT=0
-# 169 suites：2651 passed / 0 failed / 2 ignored
-```
-
-实测数字：**169 suites、2651 passed、0 failed、2 ignored、exit 0**。用例数相对 `feature/pi.rs` tip
-（`2650 passed`，含 LUM-1327）多 19 条：`editor.rs` 折叠组 10 条 + `composer_pastes.rs` 8 条 +
-`composer_click.rs` 1 条。
-
-门禁之外的环境事实（不粉饰）：这台机器的 `/` 是 50G overlay，被 4~6 路并发 run 共用、
-每路都在编译同一套 Rust workspace（观测到单路 `target/` 长到 20G）。本轮因此出现过**与代码无关**的
-红：
-
-* 一次 `cargo test --workspace` 在 0 字节可用时挂掉 `pi-coding-agent` 的 `interactive::*` 77 条
-  （panic 全是一句 `tempdir: Custom { kind: StorageFull, ... }`）；
-* 一次 `history_file::clear_history_deletes_the_file_and_reports_the_path` 报
-  "pi --clear-history did not exit promptly: 41.387373805s"（当时 `df` 可用 0），
-  单独重跑 3/3 全绿（0.00s）。
-
-上述两次之后在磁盘回落（可用 ≥ 3G）重跑**同一条** `cargo test --workspace --locked` 得到
-上文 exit 0 的结果，因此把红归因于共享盘耗尽，而不是本轮改动。
+上游对照的一句话总结：`higherIds` 的重编号语义已在端口落地（`higherIds` → 注册表下移 + 标签重写，
+`expandedText`/`getText` 的分工沿用 LUM-1328 的实现）。
