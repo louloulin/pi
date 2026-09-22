@@ -137,7 +137,10 @@ fn page_keys_scroll_the_transcript_while_the_draft_fits() {
 #[test]
 fn an_overflowing_draft_pages_itself_and_leaves_the_transcript_alone() {
     let mut app = app(8);
-    app.prompt_mut().editor_mut().insert_str(&draft(12));
+    // `set_text` and not `insert_str`: 12 lines is past the paste-fold
+    // threshold (LUM-1318), and this test wants a tall *draft*, not a
+    // folded paste.
+    app.prompt_mut().editor_mut().set_text(draft(12));
     fill_log(&mut app, 40);
     // Caret at the end of the draft: the window shows the last 8 of 12 rows.
     assert_eq!(drawn_scroll(&app), 4);

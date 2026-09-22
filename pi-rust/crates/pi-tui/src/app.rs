@@ -2159,7 +2159,8 @@ impl App {
     /// the App reports [`FollowUpOutcome::RefusedImages`] and *keeps* the
     /// draft in the editor.
     pub fn follow_up_from_editor(&mut self) -> FollowUpOutcome {
-        if self.prompt.text().trim().is_empty() {
+        let text = self.prompt.expanded_text();
+        if text.trim().is_empty() {
             return FollowUpOutcome::Empty;
         }
         let busy = self.turn_busy.load(Ordering::SeqCst);
@@ -2167,7 +2168,9 @@ impl App {
             return FollowUpOutcome::RefusedImages;
         }
         let submission = Submission {
-            text: self.prompt.text(),
+            // Upstream `handleFollowUp` submits `getExpandedText()`, so a
+            // folded paste travels as the pasted bytes here too.
+            text,
             images: self.prompt.images().to_vec(),
             raw_text: Some(self.prompt.editor().text().to_string()),
         };
@@ -2533,11 +2536,13 @@ impl App {
         self.prompt.editor_mut().set_text(text);
     }
 
-    /// The current visible text of the core input editor (upstream
-    /// `ctx.ui.getEditorText`). Pasted chips render as their `[Image #N]`
-    /// labels.
+    /// The current text of the core input editor (upstream
+    /// `ctx.ui.getEditorText`, which reads `getExpandedText() ??
+    /// getText()`): pasted chips render as their `[Image #N]` labels and a
+    /// folded paste is spliced back to the bytes it stands for, so an
+    /// extension and the external editor still see the whole draft.
     pub fn editor_text(&self) -> String {
-        self.prompt.text()
+        self.prompt.expanded_text()
     }
 
     /// Show a custom component with keyboard focus (upstream
@@ -4627,6 +4632,10 @@ impl App {
     /// Insert clipboard *text* at the cursor — the fallback
     /// `app.clipboard.pasteImage` takes when the clipboard holds no image
     /// (upstream `handleClipboardPaste`'s else branch).
+    ///
+    /// This is also where a terminal bracketed paste lands (the interactive
+    /// driver feeds `crossterm`'s `Event::Paste` here), so the composer folds
+    /// a large paste into a `[paste #N …]` marker instead of inlining it.
     pub fn paste_text(&mut self, text: &str) {
         self.prompt.editor_mut().insert_str(text);
     }
@@ -5430,6 +5439,11 @@ impl App {
                 width: w,
                 height: h,
             },
+            // A bracketed paste has no [`InputEvent`] shape: the interactive
+            // driver routes it straight to [`App::paste_text`], because a
+            // paste is a *string* the composer folds, not a key press. It is
+            // listed here so the catch-all below does not hide the intent.
+            CtEvent::Paste(_) => InputEvent::Ignored,
             _ => InputEvent::Ignored,
         }
     }

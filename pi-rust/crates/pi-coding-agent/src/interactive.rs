@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    self as ct_event, DisableMouseCapture, EnableMouseCapture, Event as CtEvent,
+    self as ct_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+    EnableMouseCapture, Event as CtEvent,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -603,6 +604,19 @@ async fn run_loop(
         // (see `drain_ready_events`).
         if ct_event::poll(config.event_poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
+                // Bracketed paste (`\x1b[200~ … \x1b[201~`): the terminal hands
+                // the whole paste over as one event, which is what lets the
+                // composer fold it. Without `EnableBracketedPaste` a paste
+                // arrives as its individual key presses, so a newline inside
+                // it submits and a 200-line paste becomes 200 typed lines —
+                // upstream enables the mode for the same reason
+                // (`packages/tui/src/terminal.ts:184`,
+                // `process.stdout.write("\x1b[?2004h")`) and routes the event
+                // through the editor's paste path (`handlePaste`).
+                if let CtEvent::Paste(text) = &event {
+                    app.paste_text(text);
+                    continue;
+                }
                 let translated = App::translate_event(event);
                 if let Some(action) =
                     handle_input_event(&mut app, &agent, &mut options, &mut bash, translated)
@@ -4109,7 +4123,7 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     // own selection + copy-on-select (`:1343-1379`, `:1449-1462`), which the
     // App mirrors. Text selection by the terminal itself is therefore
     // unavailable, matching upstream.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     request_keyboard_enhancement(&mut stdout);
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -4160,6 +4174,7 @@ fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Res
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -4177,7 +4192,8 @@ fn resume_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resu
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableMouseCapture
+        EnableMouseCapture,
+        EnableBracketedPaste
     )?;
     request_keyboard_enhancement(terminal.backend_mut());
     terminal.hide_cursor()?;

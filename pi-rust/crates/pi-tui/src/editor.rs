@@ -50,10 +50,11 @@
 //!   codex#21833). On a single-line draft that is the whole buffer, which
 //!   is the port's historical behaviour.
 //! * `Enter` returns [`EditorAction::Submit`] with the draft text (chips
-//!   expanded to their `[Image #N]` labels), except when the character
-//!   before the cursor is a backslash: then the backslash is deleted and a
-//!   newline is inserted instead (upstream's fallback for terminals that
-//!   cannot report `Shift+Enter`).
+//!   expanded to their `[Image #N]` labels and folded pastes expanded back
+//!   to the pasted bytes — [`Editor::expanded_text`]), except when the
+//!   character before the cursor is a backslash: then the backslash is
+//!   deleted and a newline is inserted instead (upstream's fallback for
+//!   terminals that cannot report `Shift+Enter`).
 //! * `tui.input.newLine` (`shift+enter`, `ctrl+j`) inserts a newline at the
 //!   cursor, so the composer grows instead of submitting. `tui.input.submit`
 //!   (`enter`) is resolved first, so rebinding it changes the submit chord.
@@ -176,6 +177,32 @@
 //! [`Editor::display_cursor`] maps the raw byte cursor onto that string.
 //! Submitting never sends a bare sentinel to the model; the driver turns the
 //! attachments into `UserMessage` image blocks.
+//!
+//! # Folded pastes
+//!
+//! A **large** paste is folded the way upstream's `handlePaste` folds it:
+//! more than [`PASTE_FOLD_LINE_THRESHOLD`] lines or more than
+//! [`PASTE_FOLD_CHAR_THRESHOLD`] characters and the composer stores the text
+//! in [`Editor::paste_attachments`] and puts one [`PASTE_CHAR`] sentinel in
+//! the buffer, which renders as `[paste #N +M lines]` (or `[paste #N M
+//! chars]` when it was folded for its length rather than its height). The
+//! draft therefore stays a couple of rows tall where the pre-fold port
+//! inlined hundreds, and `Ctrl+U` / `Ctrl+K` keep working on the *composer*
+//! line instead of a wall of pasted text.
+//!
+//! The sentinel is the same trick the image chips use, and the two types
+//! share one alignment rule: n-th sentinel ↔ n-th entry, in buffer order.
+//! That is also why removing a folded paste **renumbers** the rest with no
+//! extra pass — the ids *are* the positions, so draining one entry shifts
+//! every later marker's number, which is exactly what upstream's
+//! `higherIds` loop does by rewriting the marker text it keeps in the
+//! buffer.
+//!
+//! Submitting expands every marker back to its full text, so the model
+//! receives the bytes the user pasted and never `[paste #N …]` —
+//! [`Editor::expanded_text`] is what [`EditorAction::Submit`] carries. A
+//! recalled history entry, by contrast, is the *expanded* prompt (upstream
+//! `addToHistory` stores what was submitted), so it comes back as text.
 //!
 //! History is stored in a [`VecDeque`] capped at 100 entries (matching
 //! the TS implementation); consecutive duplicates are collapsed.
@@ -345,6 +372,26 @@ pub const CHIP_CHAR: char = '\u{FFFC}';
 /// silently discarding the paste.
 pub const MAX_IMAGE_ATTACHMENTS: usize = 8;
 
+/// Sentinel standing in for one folded paste in the buffer.
+///
+/// U+FFFB INTERLINEAR ANNOTATION ANCHOR belongs to the same
+/// "object embedded in text" family as [`CHIP_CHAR`] and is just as absent
+/// from real input, which is what keeps it from colliding with the chip or
+/// with anything a user can type ([`Editor::insert_char`] refuses both).
+/// One character wide, so cursor motion, `Backspace` / `Delete` and the
+/// range kills treat a folded paste as one atomic unit.
+pub const PASTE_CHAR: char = '\u{FFFB}';
+
+/// Line count above which a paste is folded (upstream `handlePaste`:
+/// `pastedLines.length > 10`). [`Editor::insert_str`] folds strictly past
+/// this, so a 10-line paste stays literal while an 11-line one becomes a
+/// marker.
+pub const PASTE_FOLD_LINE_THRESHOLD: usize = 10;
+
+/// Character count above which a paste is folded (upstream `handlePaste`:
+/// `totalChars > 1000`).
+pub const PASTE_FOLD_CHAR_THRESHOLD: usize = 1000;
+
 /// Characters that open the autocomplete dropdown at a token boundary
 /// by default, upstream `DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS`.
 pub const DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS: [char; 2] = ['@', '#'];
@@ -404,6 +451,64 @@ pub fn parse_bash_command(text: &str) -> Option<BashCommand> {
         command: command.to_string(),
         excluded,
     })
+}
+
+/// One folded paste: the pasted text plus the summary its marker spells.
+///
+/// Upstream keeps `pastes: Map<number, string>` and writes the *marker text
+/// itself* into the buffer (`[paste #1 +123 lines]`), then rewrites every
+/// higher id with a regex pass when one is deleted. The port keeps only the
+/// payload: the marker is derived at render time, the id is the entry's
+/// 1-based position, and the summary is computed once when the paste is
+/// folded so no frame ever rescans a megabyte of pasted text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paste {
+    /// The pasted text, exactly as it must be handed to the model.
+    text: String,
+    /// The part of the marker after the id: `+123 lines` or `1234 chars`.
+    summary: String,
+}
+
+impl Paste {
+    /// Fold `text`, deriving the summary upstream's `handlePaste` derives.
+    ///
+    /// The line count is `split('\n').count()` and the character count is
+    /// Unicode scalar values; upstream measures UTF-16 code units, so a
+    /// paste of astral characters can land on either side of the 1000
+    /// boundary differently. The *fold decision* is the same function of
+    /// both, so only that boundary row differs.
+    fn new(text: String) -> Self {
+        let lines = text.split('\n').count();
+        let summary = if lines > PASTE_FOLD_LINE_THRESHOLD {
+            format!("+{lines} lines")
+        } else {
+            format!("{} chars", text.chars().count())
+        };
+        Self { text, summary }
+    }
+
+    /// The folded text — what a submission sends in place of the marker.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The marker's summary, e.g. `+200 lines`.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// The full marker for the 1-based `id` this paste occupies in the
+    /// draft, e.g. `[paste #2 +200 lines]`.
+    fn label(&self, id: usize) -> String {
+        format!("[paste #{id} {}]", self.summary)
+    }
+}
+
+/// True when `text` is large enough to fold (upstream `handlePaste`'s
+/// `pastedLines.length > 10 || totalChars > 1000`).
+pub fn should_fold_paste(text: &str) -> bool {
+    text.split('\n').count() > PASTE_FOLD_LINE_THRESHOLD
+        || text.chars().count() > PASTE_FOLD_CHAR_THRESHOLD
 }
 
 /// Result of [`Editor::insert_image`].
@@ -466,9 +571,10 @@ pub enum JumpDirection {
 
 /// Editor state captured by an undo snapshot.
 ///
-/// Upstream stores its multi-line `EditorState` plus the paste tables;
-/// the Rust editor is single-line, so the buffer, cursor and the chip
-/// attachments are the whole of it.
+/// Upstream stores its multi-line `EditorState` plus the paste tables
+/// (`{ state, pastes, pasteCounter }`); the Rust editor folds both
+/// attachment tables — image chips and pasted text — into the snapshot, so
+/// one `Ctrl+-` puts a removed paste back whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorSnapshot {
     /// Buffer contents at capture time.
@@ -478,6 +584,9 @@ struct EditorSnapshot {
     /// Chip attachments at capture time, aligned with the buffer's
     /// [`CHIP_CHAR`] occurrences.
     images: Vec<ImageContent>,
+    /// Folded pastes at capture time, aligned with the buffer's
+    /// [`PASTE_CHAR`] occurrences.
+    pastes: Vec<Paste>,
 }
 
 /// Multi-line text editor with prompt history and an Emacs-style kill
@@ -543,6 +652,10 @@ pub struct Editor {
     /// Pasted image chips, aligned with the buffer's [`CHIP_CHAR`]
     /// occurrences: the n-th sentinel carries `images[n]`.
     images: Vec<ImageContent>,
+    /// Folded pastes, aligned with the buffer's [`PASTE_CHAR`] occurrences:
+    /// the n-th sentinel carries `pastes[n]`, and its marker spells the id
+    /// `n + 1`.
+    pastes: Vec<Paste>,
 }
 
 impl Default for Editor {
@@ -578,6 +691,7 @@ impl Editor {
             autocomplete_force: false,
             autocomplete_max_visible: DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
             images: Vec::new(),
+            pastes: Vec::new(),
         }
     }
 
@@ -610,9 +724,12 @@ impl Editor {
     /// [`history_next`](Self::history_next), where resetting the history
     /// index would trap the user at the same entry on every Up arrow.
     fn set_text_internal(&mut self, text: impl Into<String>) {
-        self.buffer = strip_chips(&text.into());
+        self.buffer = strip_sentinels(&text.into());
         self.cursor = self.buffer.len();
         self.images.clear();
+        // The old table belonged to the old buffer; keeping it would pair a
+        // stale payload with the next sentinel the buffer gains.
+        self.pastes.clear();
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
     }
@@ -620,7 +737,7 @@ impl Editor {
     /// Clear the buffer without touching history, and drop the undo
     /// stack. Upstream clears its stack the same way when a prompt is
     /// submitted, so `Ctrl+-` cannot resurrect an already-sent prompt.
-    /// Pasted images go with the text.
+    /// Pasted images and folded pastes go with the text.
     ///
     /// An open reverse search is dropped too: the composer it previewed into
     /// no longer exists, and leaving the mode armed would trap the next keys
@@ -629,6 +746,7 @@ impl Editor {
         self.buffer.clear();
         self.cursor = 0;
         self.images.clear();
+        self.pastes.clear();
         self.history_index = None;
         self.history_draft = None;
         self.history_search = None;
@@ -703,37 +821,111 @@ impl Editor {
         self.cursor
     }
 
-    /// The buffer with each chip sentinel rendered as `[Image #N]`.
+    /// The buffer with each attachment sentinel rendered as its label.
     ///
-    /// This is the user-visible draft and the text a submission carries;
-    /// [`Editor::text`] is the raw form that keeps the [`CHIP_CHAR`]
-    /// placeholders.
+    /// A chip becomes `[Image #N]`; a folded paste becomes
+    /// `[paste #N +M lines]` / `[paste #N M chars]`. This is the draft the
+    /// composer draws and the text history holds — the whole point of
+    /// folding is that hundreds of pasted lines cost one marker here.
+    /// [`Editor::expanded_text`] is the same string with every folded paste
+    /// spliced back in, and is what a submission carries.
     pub fn display_text(&self) -> String {
-        if self.images.is_empty() {
+        self.render(false)
+    }
+
+    /// The draft with every folded paste expanded back to its full text.
+    ///
+    /// This mirrors upstream `getExpandedText` and is what must reach the
+    /// model: a submission carries the bytes the user pasted, never
+    /// `[paste #N …]`. Image chips still render as their `[Image #N]` label
+    /// — their payload is not text and travels as its own content block.
+    pub fn expanded_text(&self) -> String {
+        self.render(true)
+    }
+
+    /// Render the buffer for a reader: `expand_pastes` splices each folded
+    /// paste's text back in where its marker would otherwise stand.
+    fn render(&self, expand_pastes: bool) -> String {
+        if self.images.is_empty() && self.pastes.is_empty() {
             return self.buffer.clone();
         }
-        let mut out = String::with_capacity(self.buffer.len() + self.images.len() * 12);
-        let mut index = 0usize;
+        let pastes_len: usize = self.pastes.iter().map(|paste| paste.text.len()).sum();
+        let mut out = String::with_capacity(
+            self.buffer.len() + self.images.len() * 12 + pastes_len + self.pastes.len() * 32,
+        );
+        let mut images = 0usize;
+        let mut pastes = 0usize;
         for ch in self.buffer.chars() {
-            if ch == CHIP_CHAR {
-                index += 1;
-                out.push_str(&chip_label(index));
-            } else {
-                out.push(ch);
+            match ch {
+                CHIP_CHAR => {
+                    images += 1;
+                    out.push_str(&chip_label(images));
+                }
+                PASTE_CHAR => {
+                    pastes += 1;
+                    // A sentinel with no payload cannot happen while the
+                    // alignment invariant holds (every mutation path keeps
+                    // the two in step); it renders as nothing rather than
+                    // as a contentless marker if it ever did.
+                    if let Some(paste) = self.pastes.get(pastes - 1) {
+                        if expand_pastes {
+                            out.push_str(paste.text());
+                        } else {
+                            out.push_str(&paste.label(pastes));
+                        }
+                    }
+                }
+                _ => out.push(ch),
             }
         }
         out
     }
 
     /// Cursor column within [`Editor::display_text`] (character count,
-    /// with each chip counted as its full `[Image #N]` label).
+    /// with each attachment counted as its full label).
     pub fn display_cursor(&self) -> usize {
-        let label_width = chip_label(1).chars().count();
-        self.buffer
-            .char_indices()
-            .take_while(|(byte, _)| *byte < self.cursor)
-            .map(|(_, ch)| if ch == CHIP_CHAR { label_width } else { 1 })
-            .sum()
+        // A chip's label is a fixed ten columns (`[Image #N]` with a single
+        // digit id), so only the paste markers need their index.
+        let chip_width = chip_label(1).chars().count();
+        let mut display = 0usize;
+        let mut pastes = 0usize;
+        for (byte, ch) in self.buffer.char_indices() {
+            if byte >= self.cursor {
+                break;
+            }
+            match ch {
+                CHIP_CHAR => display += chip_width,
+                PASTE_CHAR => {
+                    pastes += 1;
+                    display += self.paste_label_width(pastes);
+                }
+                _ => display += 1,
+            }
+        }
+        display
+    }
+
+    /// Width of the marker the `id`-th folded paste renders as (`0` when
+    /// there is no such entry).
+    ///
+    /// Unlike a chip — whose `[Image #N]` label is a fixed ten columns
+    /// because [`MAX_IMAGE_ATTACHMENTS`] keeps `N` a single digit — a paste
+    /// marker's width depends on its own summary, so every mapping between
+    /// the raw buffer and the display string has to ask per occurrence.
+    fn paste_label_width(&self, id: usize) -> usize {
+        self.pastes
+            .get(id - 1)
+            .map_or(0, |paste| paste.label(id).chars().count())
+    }
+
+    /// Folded pastes attached to the draft, in buffer order.
+    pub fn paste_attachments(&self) -> &[Paste] {
+        &self.pastes
+    }
+
+    /// Number of folded pastes in the draft.
+    pub fn paste_count(&self) -> usize {
+        self.pastes.len()
     }
 
     /// Attached image chips, in buffer order.
@@ -770,12 +962,16 @@ impl Editor {
     }
 
     /// Drop every chip, removing their sentinels from the buffer as well.
+    ///
+    /// Only chips: a folded paste and its payload stay where they are.
     pub fn clear_images(&mut self) {
         if self.images.is_empty() && !self.buffer.contains(CHIP_CHAR) {
             return;
         }
         self.images.clear();
-        self.buffer = strip_chips(&self.buffer);
+        if self.buffer.contains(CHIP_CHAR) {
+            self.buffer = self.buffer.chars().filter(|ch| *ch != CHIP_CHAR).collect();
+        }
         self.cursor = self.cursor.min(self.buffer.len());
     }
 
@@ -793,6 +989,37 @@ impl Editor {
         if removed > 0 {
             self.images.drain(base..base + removed);
         }
+    }
+
+    /// Drop the folded pastes whose sentinels fall inside `range`.
+    ///
+    /// Draining the entries *is* the renumbering: a marker's number is its
+    /// position, so removing the k-th entry turns the old `[paste #k+1]`
+    /// into `[paste #k]` with no second pass over the text — upstream's
+    /// `higherIds` loop exists only because it stores the marker text in
+    /// the buffer instead of a sentinel.
+    fn remove_pastes_in_range(&mut self, range: Range<usize>) {
+        let start = range.start.min(self.buffer.len());
+        let end = range.end.min(self.buffer.len());
+        if start >= end {
+            return;
+        }
+        let base = self.buffer[..start].matches(PASTE_CHAR).count();
+        let removed = self.buffer[start..end].matches(PASTE_CHAR).count();
+        if removed > 0 {
+            self.pastes.drain(base..base + removed);
+        }
+    }
+
+    /// Drop every attachment whose sentinel falls inside `range`, which the
+    /// caller is about to delete from the buffer.
+    ///
+    /// A single-character deletion can only hit one kind of sentinel, but a
+    /// kill range can span both, so the two tables are always drained
+    /// together.
+    fn remove_attachments_in_range(&mut self, range: Range<usize>) {
+        self.remove_images_in_range(range.clone());
+        self.remove_pastes_in_range(range);
     }
 
     /// Number of history entries (oldest to newest).
@@ -851,6 +1078,14 @@ impl Editor {
     /// text-only (the recall then shows the labels as literal text, exactly
     /// like a persistent entry).
     ///
+    /// A `raw` that carries [`PASTE_CHAR`] sentinels is rejected on the same
+    /// terms: the entry has nowhere to keep the pasted *text*, so a restored
+    /// sentinel would be a marker with no payload. The entry then falls back
+    /// to the rebuild path, which keeps the chips; the pasted text survives
+    /// in `text` (the submitted, already expanded prompt), so a recall
+    /// brings it back as plain text rather than as a marker. That matches
+    /// upstream, whose history also stores the expanded prompt.
+    ///
     /// The visible text is appended to the attached history file (text only —
     /// attachments live for the session, codex parity) and the file is trimmed
     /// to [`HISTORY_LIMIT`] rows. An append failure is ignored: the in-session
@@ -869,7 +1104,20 @@ impl Editor {
         if self.history.front().map(|entry| entry.text.as_str()) == Some(trimmed) {
             return;
         }
-        let raw = match raw.or_else(|| rebuild_raw(trimmed, &images)) {
+        // A captured raw that carries a paste sentinel cannot be restored:
+        // the entry has nowhere to keep the pasted text, so a sentinel put
+        // back into the buffer would be a marker with no payload. It falls
+        // through to the rebuild below, which keeps the chips and leaves the
+        // marker as the literal text the entry's `text` already spells.
+        //
+        // A raw that simply disagrees with `images` keeps its existing rule
+        // (drop both) — the rebuild is for a caller who never had a raw, not
+        // for one whose raw cannot be trusted.
+        let captured = match raw {
+            Some(raw) if raw.contains(PASTE_CHAR) => None,
+            other => other,
+        };
+        let raw = match captured.or_else(|| rebuild_raw(trimmed, &images)) {
             Some(raw) if raw.matches(CHIP_CHAR).count() == images.len() && !images.is_empty() => {
                 Some(raw)
             }
@@ -993,8 +1241,17 @@ impl Editor {
 
     /// Set the buffer and its chip attachments without touching undo or
     /// history navigation state (the history-recall path).
+    ///
+    /// A buffer that carries no [`PASTE_CHAR`] cannot be paired with the live
+    /// paste table — its sentinels are the only thing tying the two together
+    /// — so the table is dropped in that case. The reverse (a recalled draft
+    /// that still carries its sentinels) happens while browsing history, when
+    /// the table is untouched and therefore still aligned.
     fn set_buffer_and_images(&mut self, buffer: &str, images: Vec<ImageContent>) {
         self.buffer = buffer.to_string();
+        if !self.buffer.contains(PASTE_CHAR) {
+            self.pastes.clear();
+        }
         self.cursor = self.buffer.len();
         self.images = images;
         self.last_action = LastAction::Other;
@@ -1186,9 +1443,10 @@ impl Editor {
     /// makes the state *before* the space the restore point, so undoing
     /// a space removes the space together with the word after it.
     pub fn insert_char(&mut self, c: char) -> EditorAction {
-        if c == CHIP_CHAR {
+        if c == CHIP_CHAR || c == PASTE_CHAR {
             // A literal sentinel would desync the buffer from
-            // `image_attachments`; only `insert_image` may place one.
+            // `image_attachments` / `paste_attachments`; only
+            // `insert_image` / `insert_str` may place one.
             return EditorAction::None;
         }
         if c.is_whitespace() || self.last_action != LastAction::TypeWord {
@@ -1204,22 +1462,50 @@ impl Editor {
 
     /// Insert a string at the cursor.
     ///
-    /// Atomic for undo — one snapshot, so a single `Ctrl+-` removes the
-    /// whole string. Mirrors upstream `insertTextAtCursor`, which is the
-    /// path a bracketed paste takes.
+    /// This is the bracketed-paste path (upstream `handlePaste`, which every
+    /// terminal paste goes through): a string past the fold thresholds is
+    /// stored whole in [`Editor::paste_attachments`] and only a
+    /// [`PASTE_CHAR`] marker enters the buffer, so a 200-line paste costs the
+    /// composer one row instead of two hundred. Folded or not, the insert is
+    /// atomic for undo — one snapshot, so a single `Ctrl+-` removes the whole
+    /// thing.
     pub fn insert_str(&mut self, s: &str) -> EditorAction {
         if s.is_empty() {
             return EditorAction::None;
         }
-        let s = strip_chips(s);
+        let s = strip_sentinels(s);
         if s.is_empty() {
-            // The paste was nothing but chip sentinels; there is no text to
-            // insert and the images themselves are not part of the paste.
+            // The paste was nothing but sentinels; there is no text to
+            // insert and the attachments themselves are not part of the
+            // paste.
             return EditorAction::None;
+        }
+        if should_fold_paste(&s) {
+            return self.insert_folded_paste(s);
         }
         self.push_undo_snapshot();
         self.buffer.insert_str(self.cursor, &s);
         self.cursor += s.len();
+        self.reset_history_navigation();
+        self.last_action = LastAction::Other;
+        self.cancel_autocomplete();
+        EditorAction::Changed
+    }
+
+    /// Fold `text` into a `[paste #N …]` marker at the cursor, keeping
+    /// [`Editor::paste_attachments`] aligned with the sentinel's position.
+    ///
+    /// Mirrors [`Editor::insert_image`]: the entry is inserted at the index
+    /// matching how many sentinels precede the cursor, so text typed between
+    /// two folded pastes never shifts one onto the other's payload.
+    fn insert_folded_paste(&mut self, text: String) -> EditorAction {
+        self.push_undo_snapshot();
+        let index = self.buffer[..self.cursor.min(self.buffer.len())]
+            .matches(PASTE_CHAR)
+            .count();
+        self.buffer.insert(self.cursor, PASTE_CHAR);
+        self.pastes.insert(index, Paste::new(text));
+        self.cursor += PASTE_CHAR.len_utf8();
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
@@ -1234,7 +1520,7 @@ impl Editor {
         self.push_undo_snapshot();
         // Walk back one UTF-8 character.
         let prev = self.prev_char_boundary(self.cursor);
-        self.remove_images_in_range(prev..self.cursor);
+        self.remove_attachments_in_range(prev..self.cursor);
         self.buffer.replace_range(prev..self.cursor, "");
         self.cursor = prev;
         self.reset_history_navigation();
@@ -1250,7 +1536,7 @@ impl Editor {
         }
         self.push_undo_snapshot();
         let next = self.next_char_boundary(self.cursor);
-        self.remove_images_in_range(self.cursor..next);
+        self.remove_attachments_in_range(self.cursor..next);
         self.buffer.replace_range(self.cursor..next, "");
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
@@ -1317,11 +1603,19 @@ impl Editor {
     fn raw_byte_for_display_offset(&self, display: usize) -> usize {
         let label_width = chip_label(1).chars().count();
         let mut seen = 0usize;
+        let mut pastes = 0usize;
         for (byte, ch) in self.buffer.char_indices() {
             if seen >= display {
                 return byte;
             }
-            seen += if ch == CHIP_CHAR { label_width } else { 1 };
+            seen += match ch {
+                CHIP_CHAR => label_width,
+                PASTE_CHAR => {
+                    pastes += 1;
+                    self.paste_label_width(pastes)
+                }
+                _ => 1,
+            };
         }
         self.buffer.len()
     }
@@ -1570,12 +1864,12 @@ impl Editor {
         }
         self.push_undo_snapshot();
         self.cancel_autocomplete();
-        let killed = strip_chips(&self.buffer[from..to]);
+        let killed = strip_sentinels(&self.buffer[from..to]);
         // Read the previous action *before* overwriting it: a kill that
         // follows another kill accumulates into the same ring entry
         // instead of opening a new chain (upstream `deleteWordBackwards`).
         let accumulate = self.last_action == LastAction::Kill;
-        self.remove_images_in_range(from..to);
+        self.remove_attachments_in_range(from..to);
         self.buffer.replace_range(from..to, "");
         self.cursor = from;
         self.preferred_col = None;
@@ -1646,11 +1940,17 @@ impl Editor {
 
     /// Yank the most recent kill ring entry at the cursor (`Ctrl+Y`,
     /// `tui.editor.yank`). No-op when nothing has been killed yet.
+    ///
+    /// A kill never stores a sentinel, so a yank inserts plain text: it can
+    /// not bring back a chip without its image, nor a paste marker without
+    /// its payload. A ring whose last entry was a lone attachment (all of it
+    /// stripped) has nothing to insert and is a no-op rather than an empty
+    /// insert.
     pub fn yank(&mut self) -> EditorAction {
         let Some(text) = self.kill_ring.peek().map(str::to_string) else {
             return EditorAction::None;
         };
-        let text = strip_chips(&text);
+        let text = strip_sentinels(&text);
         if text.is_empty() {
             return EditorAction::None;
         }
@@ -1678,13 +1978,13 @@ impl Editor {
         // Remove the text the previous yank inserted; the cursor sits at
         // its end, so the range is `cursor - last_yank_len .. cursor`.
         let start = self.cursor.saturating_sub(self.last_yank_len);
-        self.remove_images_in_range(start..self.cursor);
+        self.remove_attachments_in_range(start..self.cursor);
         self.buffer.replace_range(start..self.cursor, "");
         self.cursor = start;
         // Rotate first, then read: the next entry to insert is now the
         // most recent one (upstream `yankPop` order).
         self.kill_ring.rotate();
-        let text = strip_chips(
+        let text = strip_sentinels(
             &self
                 .kill_ring
                 .peek()
@@ -1722,6 +2022,7 @@ impl Editor {
         self.buffer = snapshot.buffer;
         self.cursor = snapshot.cursor.min(self.buffer.len());
         self.images = snapshot.images;
+        self.pastes = snapshot.pastes;
         self.preferred_col = None;
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
@@ -1978,12 +2279,14 @@ impl Editor {
         let cursor_line = self.cursor_line();
         let result =
             provider.apply_completion(&lines, cursor_line, self.cursor_col(), item, prefix);
-        self.buffer = strip_chips(&result.lines.join("\n"));
+        self.buffer = strip_sentinels(&result.lines.join("\n"));
         self.cursor = self.byte_offset_of(result.cursor_line, result.cursor_col);
         // A completion rewrites the whole line; the chip/attachment pairing
         // cannot survive that, so the chips go with it (same rule as
-        // `set_text_internal`).
+        // `set_text_internal`). Folded pastes go the same way, for the same
+        // reason.
         self.images.clear();
+        self.pastes.clear();
         self.reset_history_navigation();
         self.last_action = LastAction::Other;
         self.preferred_col = None;
@@ -2105,6 +2408,7 @@ impl Editor {
             buffer: self.buffer.clone(),
             cursor: self.cursor,
             images: self.images.clone(),
+            pastes: self.pastes.clone(),
         });
     }
 
@@ -2276,7 +2580,7 @@ impl Editor {
                 // through to the normal Enter handling when the
                 // prefix starts with `/`.
                 if prefix.starts_with('/') {
-                    return EditorAction::Submit(self.display_text());
+                    return EditorAction::Submit(self.expanded_text());
                 }
                 return applied;
             }
@@ -2381,7 +2685,7 @@ impl Editor {
                 self.backspace();
                 return self.insert_newline();
             }
-            return EditorAction::Submit(self.display_text());
+            return EditorAction::Submit(self.expanded_text());
         }
 
         // Meta chords are not part of the default table; ignore them
@@ -2528,15 +2832,18 @@ fn chip_label(index: usize) -> String {
     format!("[Image #{index}]")
 }
 
-/// Remove every chip sentinel from `text`.
+/// Remove every attachment sentinel from `text`.
 ///
-/// Used wherever raw text enters the buffer from outside the chip model
+/// Used wherever raw text enters the buffer from outside the attachment
+/// model
 /// (programmatic `set_text`, the kill ring, completion insertions), so a
 /// stray sentinel can never desync the buffer from
 /// [`Editor::image_attachments`].
-fn strip_chips(text: &str) -> String {
-    if text.contains(CHIP_CHAR) {
-        text.replace(CHIP_CHAR, "")
+fn strip_sentinels(text: &str) -> String {
+    if text.contains(CHIP_CHAR) || text.contains(PASTE_CHAR) {
+        text.chars()
+            .filter(|ch| *ch != CHIP_CHAR && *ch != PASTE_CHAR)
+            .collect()
     } else {
         text.to_string()
     }
@@ -3787,5 +4094,250 @@ mod tests {
         ed.undo();
         assert_eq!(ed.image_count(), 1);
         assert_eq!(ed.display_text(), "a[Image #1]");
+    }
+
+    // -------------------------------------------------------------------
+    // Folded pastes (LUM-1318)
+    // -------------------------------------------------------------------
+
+    /// A paste past the fold thresholds: 11 lines, or 1001 characters.
+    fn big_paste(marker: char) -> String {
+        (0..11)
+            .map(|row| format!("{marker}{row}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn fold_thresholds_match_upstream() {
+        // Height: `> 10` lines folds, exactly 10 stays literal.
+        let ten_lines = (0..10)
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let eleven_lines = (0..11)
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!should_fold_paste(&ten_lines));
+        assert!(should_fold_paste(&eleven_lines));
+
+        // Length: `> 1000` characters folds, exactly 1000 stays literal.
+        let thousand = "x".repeat(PASTE_FOLD_CHAR_THRESHOLD);
+        let thousand_and_one = "x".repeat(PASTE_FOLD_CHAR_THRESHOLD + 1);
+        assert!(!should_fold_paste(&thousand));
+        assert!(should_fold_paste(&thousand_and_one));
+
+        let mut ed = Editor::new();
+        ed.insert_str(&ten_lines);
+        ed.insert_str(&thousand);
+        assert_eq!(ed.paste_count(), 0, "both boundary rows stay literal");
+        assert!(!ed.text().contains(PASTE_CHAR));
+
+        ed.insert_str(&eleven_lines);
+        ed.insert_str(&thousand_and_one);
+        assert_eq!(ed.paste_count(), 2);
+        assert_eq!(ed.text().matches(PASTE_CHAR).count(), 2);
+    }
+
+    #[test]
+    fn a_folded_paste_renders_a_marker_and_submits_the_full_text() {
+        let mut ed = Editor::new();
+        ed.insert_str("look at ");
+        let pasted = big_paste('a');
+        ed.insert_str(&pasted);
+
+        // One character in the raw buffer; the draft shows the marker.
+        assert_eq!(ed.text(), format!("look at {PASTE_CHAR}"));
+        assert_eq!(ed.display_text(), "look at [paste #1 +11 lines]");
+        assert_eq!(ed.paste_count(), 1);
+        assert_eq!(ed.paste_attachments()[0].text(), pasted);
+        assert_eq!(ed.paste_attachments()[0].summary(), "+11 lines");
+        assert_eq!(
+            ed.display_cursor(),
+            "look at [paste #1 +11 lines]".chars().count()
+        );
+
+        // Height decides the summary; a one-line paste is measured in chars.
+        let mut wide = Editor::new();
+        wide.insert_str(&"y".repeat(PASTE_FOLD_CHAR_THRESHOLD + 1));
+        assert_eq!(wide.display_text(), "[paste #1 1001 chars]");
+
+        // The model receives the pasted bytes, never the marker.
+        match ed.handle_key(Key::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            EditorAction::Submit(text) => assert_eq!(text, format!("look at {pasted}")),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backspace_deletes_a_folded_paste_and_renumbers_the_rest() {
+        let mut ed = Editor::new();
+        let first = big_paste('a');
+        let second = big_paste('b');
+        let third = big_paste('c');
+        ed.insert_str(&first);
+        ed.insert_str(&second);
+        ed.insert_str(&third);
+        assert_eq!(ed.paste_count(), 3);
+
+        // Cursor sits after the third marker: one step left lands between
+        // the second and the third, so one Backspace removes the second.
+        ed.move_left();
+        ed.backspace();
+        assert_eq!(ed.paste_count(), 2);
+        assert_eq!(
+            ed.display_text(),
+            "[paste #1 +11 lines][paste #2 +11 lines]"
+        );
+        assert_eq!(ed.paste_attachments()[0].text(), first);
+        assert_eq!(
+            ed.paste_attachments()[1].text(),
+            third,
+            "the marker that survived the renumber still carries its own text"
+        );
+
+        // The numbering stays contiguous from either end of the draft.
+        ed.move_end();
+        ed.backspace();
+        assert_eq!(ed.display_text(), "[paste #1 +11 lines]");
+        assert_eq!(ed.paste_attachments()[0].text(), first);
+    }
+
+    #[test]
+    fn delete_removes_the_folded_paste_at_the_cursor() {
+        let mut ed = Editor::new();
+        ed.insert_str(&big_paste('a'));
+        ed.insert_str("tail");
+        ed.move_home();
+        ed.delete();
+        assert_eq!(ed.paste_count(), 0);
+        assert_eq!(ed.display_text(), "tail");
+        assert!(!ed.text().contains(PASTE_CHAR));
+    }
+
+    #[test]
+    fn undo_restores_a_deleted_folded_paste_whole() {
+        let mut ed = Editor::new();
+        let pasted = big_paste('a');
+        ed.insert_str(&pasted);
+        ed.backspace();
+        assert_eq!(ed.paste_count(), 0);
+
+        ed.undo();
+        assert_eq!(ed.paste_count(), 1);
+        assert_eq!(ed.paste_attachments()[0].text(), pasted);
+        assert_eq!(ed.display_text(), "[paste #1 +11 lines]");
+
+        // ... and undoing the folded insert itself takes the marker away.
+        ed.undo();
+        assert_eq!(ed.paste_count(), 0);
+        assert!(ed.is_empty());
+    }
+
+    #[test]
+    fn kill_ring_never_resurrects_a_paste_marker_without_its_payload() {
+        let mut ed = Editor::new();
+        let pasted = big_paste('a');
+        ed.insert_str("keep ");
+        ed.insert_str(&pasted);
+        ed.insert_str(" tail");
+        ed.move_home();
+        ed.kill_to_line_end();
+        assert_eq!(ed.paste_count(), 0);
+        assert!(!ed.text().contains(PASTE_CHAR));
+
+        // The yanked text is the plain killed text, with the sentinel gone.
+        ed.yank();
+        assert!(!ed.text().contains(PASTE_CHAR));
+        assert_eq!(ed.text(), "keep  tail");
+
+        // A kill that removes *only* a folded paste has nothing to store, so
+        // the ring stays empty and a yank is a no-op rather than an empty
+        // marker.
+        let mut only = Editor::new();
+        only.insert_str(&pasted);
+        only.kill_to_line_start();
+        assert_eq!(only.kill_ring_len(), 0);
+        assert!(only.text().is_empty());
+        assert_eq!(only.yank(), EditorAction::None);
+    }
+
+    #[test]
+    fn folded_pastes_and_chips_interleave_without_desyncing() {
+        let mut ed = Editor::new();
+        let first = big_paste('a');
+        let second = big_paste('b');
+        ed.insert_str("before ");
+        ed.insert_image(image("one"));
+        ed.insert_str(" middle ");
+        ed.insert_str(&first);
+        ed.insert_str(" after ");
+        ed.insert_str(&second);
+
+        assert_eq!(
+            ed.display_text(),
+            "before [Image #1] middle [paste #1 +11 lines] after [paste #2 +11 lines]"
+        );
+        assert_eq!(ed.image_count(), 1);
+        assert_eq!(ed.paste_count(), 2);
+
+        // Inserting at the front shifts both tables with their sentinels.
+        ed.move_home();
+        ed.insert_image(image("zero"));
+        ed.insert_str(&big_paste('c'));
+        assert_eq!(ed.image_attachments(), &[image("zero"), image("one")]);
+        assert_eq!(
+            ed.paste_attachments()
+                .iter()
+                .map(|paste| paste.text().to_string())
+                .collect::<Vec<_>>(),
+            vec![big_paste('c'), first.clone(), second.clone()]
+        );
+        assert!(ed.display_text().starts_with("[Image #1][paste #1 +11 lines]"));
+
+        // Killing a range that spans both kinds drops both payloads.
+        ed.move_end();
+        ed.kill_to_line_start();
+        assert_eq!(ed.image_count(), 0);
+        assert_eq!(ed.paste_count(), 0);
+        assert!(ed.is_empty());
+    }
+
+    #[test]
+    fn programmatic_set_text_drops_folded_pastes() {
+        let mut ed = Editor::new();
+        ed.insert_str(&big_paste('a'));
+        ed.set_text("replacement");
+        assert_eq!(ed.paste_count(), 0);
+        assert_eq!(ed.text(), "replacement");
+
+        // A stray sentinel in incoming text is stripped, not adopted: a
+        // marker with no payload must never reach the buffer.
+        ed.set_text(format!("x{PASTE_CHAR}y"));
+        assert_eq!(ed.paste_count(), 0);
+        assert_eq!(ed.text(), "xy");
+    }
+
+    #[test]
+    fn the_paste_sentinel_is_not_typeable() {
+        let mut ed = Editor::new();
+        ed.insert_str("a");
+        assert_eq!(ed.insert_char(PASTE_CHAR), EditorAction::None);
+        assert_eq!(ed.insert_char(CHIP_CHAR), EditorAction::None);
+        assert_eq!(ed.text(), "a");
+        // A paste sentinel is not a chip: the two sentinels are distinct.
+        assert_ne!(PASTE_CHAR, CHIP_CHAR);
+        assert!(!CHIP_CHAR.is_alphanumeric() && !PASTE_CHAR.is_alphanumeric());
+    }
+
+    #[test]
+    fn clear_drops_folded_pastes() {
+        let mut ed = Editor::new();
+        ed.insert_str(&big_paste('a'));
+        ed.clear();
+        assert_eq!(ed.paste_count(), 0);
+        assert!(ed.is_empty());
+        assert!(ed.display_text().is_empty());
     }
 }
