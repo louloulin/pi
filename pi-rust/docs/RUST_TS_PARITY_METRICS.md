@@ -802,7 +802,7 @@ App 级 `paste_burst` **默认关闭**（驱动 `interactive.rs` 打开），避
 2,755/5,563 = 0.4954 计算，合并后实测 2,782/5,563 = 0.5001 应给 +0.03pt，而不是 +0.05pt；
 剩下的 0.12pt 是它把「口径修正」与「新增用例」一起记到了轴上）。本表只登记**实测**，不重估别轮。
 
-### 0.20 LUM-1455 复测：退出时会话保留（`fullscreenExitOutput` 从「静默忽略」到「真生效」）；加权仍 **86.9%**
+### 0.22 LUM-1455 复测：退出时会话保留（`fullscreenExitOutput` 从「静默忽略」到「真生效」）；加权仍 **86.9%**
 
 **量的是什么**：上游默认「退出后终端里留下整段 transcript + 一行 resume 提示」这条契约，pi-rust 有没有。
 基线取证（限定路径）：
@@ -833,7 +833,8 @@ $ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
 
 > **口径声明（诚实读法）**：§4.1 的 13 条轴里**没有「退出行为」这一格**，所以加权分一分没动——本轮不靠重估旧轴抬分，
 > 价值登记在两条**新的、可反证**的轴上（上表第 3、4 行）。另外 `app.*` 仍是 43/44：
-> LUM-1263（`app.tree.editLabel`）的提交只存在于本地分支 `work/LUM-1263`，`origin` 上没有它（`git ls-remote` 无对应分支）。
+> LUM-1263（`app.tree.editLabel`）的提交 `271cb109f` 停在 `origin/work/LUM-1263`（已推、未并入 `feature/pi.rs`），
+> 合并面与在飞的 LUM-1457/1466 及本轮重叠，登记为下一轮的收编项（见 `docs/LUM1455_EXIT_TRANSCRIPT.md` §5.4）。
 
 **门禁**：`cargo fmt --all -- --check` exit 0；`cargo clippy -p pi-tui --all-targets -D warnings` 0 告警
 （`-p pi-coding-agent` 被既存 `pi-extensions/src/host.rs:3383 signal_name is never used` 挡在 `-D warnings` 前，本轮未碰该文件）；
@@ -1118,7 +1119,7 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 3. 补 CLI 的 `--theme/--thinking/--tools/--provider/--offline` 与 4 个高价值 slash 命令。
 4. 补测试：把 Rust 用例数从 2,232 往 5,309 靠（当前 42%，是最大的"隐藏债务"）。
 
-### 0.22 LUM-1469 复测：排队输入的可见面（位置 + 形状 + 取回提示）+ 两条 `in_review` 交付并入；加权 **86.9% → 87.0%**
+### 0.23 LUM-1469 复测：排队输入的可见面（位置 + 形状 + 取回提示）+ 两条 `in_review` 交付并入；加权 **86.9% → 87.1%**
 
 **量的是什么**：排队输入（`App::submit` 忙碌时走 `MessageView::push_pending`）在屏幕上的**位置、形状、
 以及「怎么处置它」的提示**。基线取证（限定路径，不重蹈 LUM-1460 的整树假阳性）：
@@ -1139,13 +1140,13 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
 
 | 口径 | 本轮 | 上一快照（LUM-1466） |
 |---|---|---|
-| 纯代码规模（src↔src） | **93.7%**（143,457 / 153,106） | 92.3%（141,365 / 153,106） |
-| 测试规模 | **50.8%**（2,829 / 5,563） | 49.8%（2,773 / 5,563） |
+| 纯代码规模（src↔src） | **94.1%**（144,101 / 153,106） | 92.3%（141,365 / 153,106） |
+| 测试规模 | **51.3%**（2,856 / 5,563） | 49.8%（2,773 / 5,563） |
 | `app.*` 接线 | **44/44 = 100%**（silent 0 / advertised 0） | 43/44 = 97.7% |
 | 扩展生命周期事件 | 36/36 声明 + 36/36 构造点 | 同 |
 | TUI 模块 | 36/42 = 85.7% | 同 |
 | TUI 交互+视觉轴 | 轴 5 = (0.857 + **1.000**)/2 = **92.9%**；轴 6 = 90% | 轴 5 = 91.7% |
-| 加权完成度 | **87.0%**（86.9 → 87.02） | 86.9% |
+| 加权完成度 | **87.1%**（86.9 → 87.14，tip `lum1469-tui`） | 86.9% |
 
 **增量归属（必须说清，否则这一个百分点会被误读）**：
 
@@ -1153,6 +1154,9 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
   （`origin/work/LUM-1263` = `271cb109f`，`/tree` 改名 UI）；`input.rs`/`word_navigation.rs` 的行数与
   `pi-tui` 的 +24 条来自**并入 LUM-1461**（`origin/work/LUM-1461` = `4eec9a628`，composer `paste_burst`）。
   两者都是 `in_review` 但从未进入 `feature/pi.rs` 的交付，本轮按 issue 的「都合并 feature/pi.rs」救回。
+* 推送前 `origin/feature/pi.rs` 已先走到 `c7a7b5878`（LUM-1457：Windows 真 PTY + 「按键执行两遍」修复）
+  与 `9b008633b`（LUM-1455：退出时会话保留 + `visible_lines` 哨兵溢出），本轮两次一并合入
+  （测试标记 `fc18cb09e` 2773 → `origin/feature/pi.rs` **2800**，见 `docs/LUM1469_PENDING_QUEUE.md` §0.2）。
 * 本轮自身只写 **+256 行 src**（`app.rs` +80/-2、`extension_ui.rs` +58/-1、`message.rs` +140/-19）
   与 **+17 条测试**（9 `lum1469_pending_block` + 1 `lum1469_pending_chord` + 4 `message.rs` 单测
   + 2 `extension_ui.rs` 单测 + 1 驱动级）。轴 12 因此从 0.4985 走到 0.5085（**+0.05pt**）。
@@ -1163,7 +1167,7 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
 
 ```text
 5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
-+ 8×0.95 + 7×1.00 + 9×0.85 + 5×(2829/5563) + 3×0.95 = 87.02% → **87.0%**
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×(2856/5563) + 3×0.95 = 87.14% → **87.1%**
 ```
 
 **本轮的门禁与证据（可复跑）**：
@@ -1174,7 +1178,7 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
 | 提示跟随键位 | `cargo test --offline -p pi-tui --test lum1469_pending_chord` | **1 / 0**（未知 id → 平台默认；覆盖 → 生效键位；未绑定 → 不广告死键位） |
 | 真实提交路径 | `cargo test --offline -p pi-tui --test pending_messages` | **5 / 0**（含 +1：忙碌时画、清空后不画） |
 | 驱动级 | `cargo test --offline -p pi-coding-agent --lib follow_up_queues_while_busy` | **1 / 0**（帧里有 `Follow-up:` 行与 `↳` 提示行） |
-| 全量 | `cargo test --offline -p pi-tui -j 8`；`cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast` | **1154 / 0**（基线 1137/0）；**836 / 28**（基线 830/28，28 条同集合，全 Windows 环境类） |
+| 全量 | `cargo test --offline -p pi-tui -j 8`；`cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast` | **1169 / 0**（本轮 +17，其余来自并入轮）；**848 / 28**（`--lib` 603/8，基线 588/8 同一组名字；28 条同集合，全 Windows 环境类） |
 | 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；改动文件 0 告警（其余落在 `pi-extensions` 与 vendored `rquickjs-core`） |
 | 帧截图 | `docs/screenshots/lum1469-{queued-prompts-100x24,cut-queued-draft-44x16,no-queue-100x24}.png`(+`.txt`) | 3 帧，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
 | 反向验证 | 把 `composed_frame` 的 `frame.pending` 硬写成 `0` | 9 条帧测试里 **7 条红** + `pending_messages` **2 条红**；恢复后全绿 |

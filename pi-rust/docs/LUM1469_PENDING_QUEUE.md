@@ -18,12 +18,12 @@
 | 本轮后 pi-rust | 块移到 **composer 正上方**，每条约**一行**（超宽 `…` 标记），末行 `↳ <生效键位> to edit all queued messages` | §2 |
 | 新增行为测试 | **17 条**（9 `lum1469_pending_block` + 1 `lum1469_pending_chord` + 4 `message.rs` 单测 + 2 `extension_ui.rs` 单测 + 1 驱动级） | §3 |
 | 新增帧截图 | **3 张**（`docs/screenshots/lum1469-*.{png,txt}`） | §5 |
-| `pi-tui` 全量 | **1154 passed / 0 failed**（基线合入后 1137 / 0 → **+17**） | `cargo test -p pi-tui` |
-| `pi-coding-agent` | **836 passed / 28 failed**（28 条与基线同集合，全为 Windows 环境类） | §4.3 |
-| 纯代码规模（src↔src） | **93.7%**（143,457 / 153,106）——涨幅**主要来自本轮救回的两条交付**，本轮的 src 净增 **+256 行** | §4.4 |
-| 测试规模 | **50.8%**（2,829 / 5,563） | §4.4 |
+| `pi-tui` 全量 | **1169 passed / 0 failed**（本轮新增 **17** 条；其余来自并入轮，见 §0.1/§0.2） | `cargo test -p pi-tui` |
+| `pi-coding-agent` | **848 passed / 28 failed**（28 条与基线同集合，全为 Windows 环境类） | §4.3 |
+| 纯代码规模（src↔src） | **94.1%**（144,101 / 153,106）——涨幅**主要来自并入的各轮**，本轮的 src 净增 **+256 行** | §4.4 |
+| 测试规模 | **51.3%**（2,856 / 5,563） | §4.4 |
 | `app.*` 接线 | **44/44 = 100%**（本轮并入 LUM-1263 后 silent 清零） | `app_action_coverage.py` |
-| 加权完成度 | **87.0%**（86.9% → 87.0%，只动测试轴） | §4.5 |
+| 加权完成度 | **87.1%**（86.9% → 87.14；只动测试轴与接线率，两者都含并入轮） | §4.5 |
 
 一句话结论：**排队输入本来就能看见（画在日志尾部），但它画错了地方、画错了形状，而且完全没有告诉读者「这些消息还能取回来改」。**
 上游 pi-ts、codex、Martty 三家都有这层上下文提示（位置 + 取回 affordance），pi-rust 是三家对照里唯一
@@ -41,6 +41,20 @@
 `?` 速查面板在前、paste-burst 分类在后）与 `RUST_TS_PARITY_METRICS.md` 的 `§0.18` 段
 （LUM-1461 的段落改写为 `§0.19`、LUM-1263 的为 `§0.20`，两段内容都留）。
 合并前先跑 `cargo test -p pi-tui`：**1137 / 0**。
+
+### 0.2 推送前两次并入 `origin/feature/pi.rs`（LUM-1457 与 LUM-1455 已先落）
+
+本轮开工时 `origin/feature/pi.rs` 是 `fc18cb09e`（LUM-1466）；推送前它已经走到 `c7a7b5878`
+（`LUM-1457`：Windows 真 PTY 打通 + 「每次按键执行两遍」修复），随后又走到 `9b008633b`
+（`LUM-1455`：退出时把会话留在终端里 + `visible_lines` 哨兵溢出）。两次并入都在本轮分支上做：
+
+* 第一次只有 `FEATURE_PI_RS_STATUS.md` 一处冲突（两侧各自追加一轮的段落），按「两段都留、
+  按并入顺序排列」解决（LUM-1457 在前、LUM-1469 在后）；
+* 第二次 `git merge` 干净通过（0 冲突），只有 `RUST_TS_PARITY_METRICS.md` 的段号需要重排：
+  `§0.19`(LUM-1461) / `§0.20`(LUM-1263) / `§0.21`(LUM-1457) / `§0.22`(LUM-1455) / `§0.23`(本轮)。
+
+两次并入把 tip 的测试标记从 2,773（`fc18cb09e`）推到 **2,800**（`origin/feature/pi.rs`），
+本轮在此基础上加自己的 **17** 条 → **2,856**（救回的两条交付另贡献 39 条，见 §0.1）。
 
 ## 1. 真实审计：差的是**位置 + 形状 + 取回 affordance**，不是「有没有」
 
@@ -163,21 +177,23 @@ tests/pending_messages             2 / 5 立刻红
 
 ```
 $ cargo test --offline -p pi-tui -j 8
-targets + doc-tests  passed 1154  failed 0
+targets + doc-tests  passed 1169  failed 0
 ```
 
-基线（本轮救回的两条交付合入后，`20f3666d9`）**1137 / 0** → **+17** =
-4（`message.rs` 单测）+ 2（`extension_ui.rs` 单测）+ 9（`lum1469_pending_block`）
-+ 1（`lum1469_pending_chord`）+ 1（`pending_messages`）。
+本轮自己的增量是 **+17** = 4（`message.rs` 单测）+ 2（`extension_ui.rs` 单测）
++ 9（`lum1469_pending_block`）+ 1（`lum1469_pending_chord`）+ 1（`pending_messages`）；
+其余来自并入的 LUM-1461/1263（§0.1）与 LUM-1457/LUM-1455（§0.2）。逐项可数的依据是
+`git grep -h -o -E '#\[(tokio::)?test\]' <commit> -- pi-rust/crates | wc -l`：
+`fc18cb09e` = **2773**，`origin/feature/pi.rs`（推送前）= **2800**，
+救回两条交付的 `20f3666d9` = **2812**，本轮 tip = **2856**。
 
 ### 4.3 `pi-coding-agent`（含集成 target）
 
 ```
 $ cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast
-targets  passed 836  failed 28
+targets  passed 848  failed 28
 ```
 
-基线同机为 **830 / 28**（LUM-1466 §4.3）→ **+6**（LUM-1263 的 `--lib` 用例）。
 28 条失败逐条核对，全部是 Windows 环境类：真 `bash` 工具、绝对路径断言、
 `/tmp`、node fs、project trust、扩展发现 —— 与基线同一集合，**新增失败 0**。
 
@@ -185,7 +201,7 @@ targets  passed 836  failed 28
 
 ```
 $ cargo test --offline -p pi-coding-agent --lib
-594 passed / 8 failed      # 基线 588 / 8，同一组 8 条名字（export / js_loader / paths /
+603 passed / 8 failed      # 基线 588 / 8，同一组 8 条名字（export / js_loader / paths /
                            # resource_loader / trust×2 / tools::mod_ignore）
 ```
 
@@ -202,12 +218,12 @@ python pi-rust/scripts/app_action_coverage.py
 
 | 口径 | 本轮 | 上轮（LUM-1466） | 说明 |
 |---|---|---|---|
-| Rust src（去 mod.rs） | 143,457 行 / 254 文件 | 141,365 / 254 | **+2,092**，其中本轮救回的 LUM-1461 +1,012 行、LUM-1263 +387 行（两条各自文档口径），本轮自身 **+256 行**（`app.rs` +80/-2、`extension_ui.rs` +58/-1、`message.rs` +140/-19）；余量为两条交付与合并树的其它既有差异 |
+| Rust src（去 mod.rs） | 144,101 行 / 254 文件 | 141,365 / 254 | **+2,736**，全部来自**并入的其它轮**：救回的 LUM-1461 +1,012 / LUM-1263 +387，以及 `origin/feature/pi.rs` 上的 LUM-1457/1455；本轮自身 **+256 行**（`app.rs` +80/-2、`extension_ui.rs` +58/-1、`message.rs` +140/-19） |
 | TS src | 153,106 行 / 669 文件 | 153,106 | 未变 |
-| 规模比 | **93.7%** | 92.3% | **涨幅主要来自救回的两条交付，不是本轮新功能** |
-| Rust `#[test]` | **2,829** | 2,773 | +56 = 救回交付 +39（LUM-1461 24 + LUM-1263 15）+ 本轮 **+17** |
+| 规模比 | **94.1%** | 92.3% | **涨幅主要来自并入的各轮（救回两条 + LUM-1457/1455），不是本轮新功能** |
+| Rust `#[test]` | **2,856** | 2,773（issue 基线 `fc18cb09e`） | +83 = 并入的 LUM-1457/1455 +27（`origin/feature/pi.rs` = 2800）+ 救回的两条 +39（`20f3666d9` = 2812）+ 本轮 **+17** |
 | TS 用例 | 5,563 | 5,563 | 同口径 |
-| 测试比 | **50.8%** | 49.8% | 2829/5563 = 0.5085 |
+| 测试比 | **51.3%** | 49.8% | 2856/5563 = 0.5134 |
 | TUI 模块 | 36 / 42 = 85.7% | 36 / 42 | 本轮没有新增模块（改的是同一批模块内的行） |
 | `app.*` 接线 | **44/44 = 100%**（silent 0、advertised 0） | 43/44 = 97.7% | 由并入的 LUM-1263 关闭最后一格 |
 | 扩展生命周期事件 | 36/36 声明 + 36/36 生产构造点 | 36/36 | 未动 |
@@ -227,16 +243,17 @@ python pi-rust/scripts/app_action_coverage.py
 | 9 | 扩展宿主能力 | 8% | 95% | 未动 |
 | 10 | 扩展生命周期事件 | 7% | 100% | 未动 |
 | 11 | 会话 / 存储 / 导入导出 | 9% | 85% | 未动 |
-| 12 | 测试与门禁强度 | 5% | **50.8%** | §4.4 |
+| 12 | 测试与门禁强度 | 5% | **51.3%** | §4.4 |
 | 13 | 子包完整度 | 3% | 95% | 未动 |
 
 ```
 5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
-+ 8×0.95 + 7×1.00 + 9×0.85 + 5×0.5085 + 3×0.95 = 87.02% → **87.0%**
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×0.5134 + 3×0.95 = 87.14% → **87.1%**
 ```
 
 **口径声明（诚实读法）**：轴 5 的 +0.09 来自**并入的 LUM-1263**（`app.*` 44/44），
-不是本轮写的代码；本轮自己只贡献轴 12 的 `2773→2829`（+0.056pt）与轴 6 的**证据修复**。
+轴 12 里 LUM-1457/1455 的 +27 条标记来自**并入的那两轮**，都不是本轮写的代码；
+本轮自己在这一轴上只贡献 `2812→2856` 里的 17 条（+0.06pt）与轴 6 的**证据修复**。
 轴 6（TUI 视觉保真）**本轮不上调**——理由沿用 LUM-1418 §6：该轴的取值口径是「读者能否在正确的位置
 看到正确的东西」，本轮把一个已知缺口（排队输入的位置/形状/提示）从「不符上游」变成「符合上游」，
 属可信度修复，不足以把 90% 重估。
@@ -291,7 +308,7 @@ python pi-rust/scripts/app_action_coverage.py
 「如果任务存在是跳过还是计划和实现后续任务」的回答：**不跳过、也不重开大改**，本轮在同一个 run 里
 完成 issue 点名的四件事（TUI 审计 / 缺口修复 / 截图 / 推送合并），并**派发 1 个**精确定义的后续任务：
 
-* **LUM-1470** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 的第 3 行（§6 #4）。
+* **LUM-1483** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 的第 3 行（§6 #4）。
   上游 `footer.ts:243-251` 用 `footerData.getExtensionStatuses()` push 一行，Rust 侧
   `app.rs:200-216` 的 `ctx.ui` 对照表把它列为不支持。证据、行号、验收判据写进任务正文；
   创建时为 `backlog`（避免与 LUM-1467 抢同一个 `status.rs` / `plan_chrome` 文件面），
@@ -300,6 +317,17 @@ python pi-rust/scripts/app_action_coverage.py
 **只派 1 条而不是 2 条**的理由：剩下的候选中，`/transcript` 带出块（§6.1）与「cut above 覆盖正文」
 都要改 `app.rs` 的渲染路径，与 LUM-1467 正在动的 `status.rs`/`plan_chrome` 是同一屏几何；
 本仓库已经为「同一缺陷两条并发线各修一次」清过两次（LUM-1431 §3、LUM-1445 §8）。
+
+### 7.1 一条已经失效的派单（提请注意，本轮不改它）
+
+上一轮（LUM-1457）派了一条 `backlog`：**LUM-1479「`app.tree.editLabel` 与 tree label 全链路
+（最后一条 silent `app.*`）」**。它成立的前提在本轮**已不成立**：LUM-1263 已把 `app.tree.editLabel`
+接线（本轮并入 `feature/pi.rs`），`python pi-rust/scripts/app_action_coverage.py` 在 tip 上输出
+`wired: 44/44 (100.0%) / silent: 0/44`。
+
+LUM-1479 正文里另一半（`pi-protocol` 的 `SessionEntry` 缺 label 变体、`pi-session` 没有存 label 的地方、
+`appendLabelChange` 没移植）**可能仍然成立**——那是「树改名能不能持久化」的上游兼容问题，
+与「有没有消费者」不是同一件事。建议由 issue 负责人决定收窄为「label 持久化链路」还是关掉。
 
 ## 8. 范围之外
 
