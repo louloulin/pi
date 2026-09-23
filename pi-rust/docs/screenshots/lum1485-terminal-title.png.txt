@@ -1,0 +1,124 @@
+# lum1485-terminal-title.png — chars, 90x26 cells (Windows ConPTY backend)
+
+===== LUM-1485 terminal title (OSC 0) through the real bridge. Nothing here is visible in the frames on purpose: a window/tab title is terminal state, not cell content, so pages 1-4 are checked by `raw_expect`/`raw_reject` against the byte trace each panel produced. Panel 1 is the automatic title `pi - <cwd>`; panel 2 is `/name demo`, which recomposes it to `pi - demo - <cwd>`; panel 3 is an extension calling `ctx.ui.setTitle` from a slash command (the footer row `handler ran` proves the handler executed); panel 4 is the same call with BEL+ESC inside the title, which must reach the terminal fully neutralised. Commands are sent as two steps — text, a 0.4s pause, then Enter — because a single instantaneous write is classified as a paste burst (LUM-1461) and an Enter inside the burst window is inserted as the paste's trailing newline instead of submitting. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 90x26.  |  [1] 1. startup: the automatic title is `pi - <cwd basename>`  (cursor 90,25, frame 0e6f2714293d, px 64070925cf33, alive=True) =====
+pi v0.1.0
+1 extension(s): ~/.pi/agent/extensions\lum1485-title.js
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-95104
+?/8.2k (auto)  ? for help  session-18d7d07d58498c0c                 (faux) Faux test model
+  assert PASS   expect       '> type a prompt'  — the TUI is up and idle
+  assert PASS   reject       'pi - pi-pty-cwd'  — the title is not cell content: the composed string must never be painted into the grid
+  assert PASS   raw_expect   '\\u001b\\]0;pi - pi-pty-cwd-\\d+\\u0007'  — upstream's `updateTerminalTitle` composes `APP_TITLE - cwdBasename` when the session has no name (interactive-mode.ts:1017-1028); the harness cwd is a temp dir named pi-pty-cwd-<pid>
+
+===== LUM-1485 terminal title (OSC 0) through the real bridge. Nothing here is visible in the frames on purpose: a window/tab title is terminal state, not cell content, so pages 1-4 are checked by `raw_expect`/`raw_reject` against the byte trace each panel produced. Panel 1 is the automatic title `pi - <cwd>`; panel 2 is `/name demo`, which recomposes it to `pi - demo - <cwd>`; panel 3 is an extension calling `ctx.ui.setTitle` from a slash command (the footer row `handler ran` proves the handler executed); panel 4 is the same call with BEL+ESC inside the title, which must reach the terminal fully neutralised. Commands are sent as two steps — text, a 0.4s pause, then Enter — because a single instantaneous write is classified as a paste burst (LUM-1461) and an Enter inside the burst window is inserted as the paste's trailing newline instead of submitting. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 90x26.  |  [2] 2. `/name demo` recomposes the title with the session name in the middle  (cursor 53,25, frame 93e018de2abf, px c129d6aab8b9, alive=True) =====
+pi v0.1.0
+1 extension(s): ~/.pi/agent/extensions\lum1485-title.js
+hints hidden on a short terminal — Alt+H shows them
+> Session name set: demo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-95104 • demo
+?/8.2k (auto)  ? for help                                           (faux) Faux test model
+  assert PASS   expect       'Session name set: demo'  — the command ran (its info line, not just the echoed prompt)
+  assert PASS   raw_expect   '\\u001b\\]0;pi - demo - pi-pty-cwd-\\d+\\u0007'  — upstream's shape is `APP_TITLE - sessionName - cwdBasename`; `/name` is the Rust path that calls App::set_session_name, which re-queues it
+
+===== LUM-1485 terminal title (OSC 0) through the real bridge. Nothing here is visible in the frames on purpose: a window/tab title is terminal state, not cell content, so pages 1-4 are checked by `raw_expect`/`raw_reject` against the byte trace each panel produced. Panel 1 is the automatic title `pi - <cwd>`; panel 2 is `/name demo`, which recomposes it to `pi - demo - <cwd>`; panel 3 is an extension calling `ctx.ui.setTitle` from a slash command (the footer row `handler ran` proves the handler executed); panel 4 is the same call with BEL+ESC inside the title, which must reach the terminal fully neutralised. Commands are sent as two steps — text, a 0.4s pause, then Enter — because a single instantaneous write is classified as a paste burst (LUM-1461) and an Enter inside the burst window is inserted as the paste's trailing newline instead of submitting. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 90x26.  |  [3] 3. an extension's `ctx.ui.setTitle` reaches the terminal  (cursor 90,25, frame 4e3ec68c8d68, px b14aeaeed4c0, alive=True) =====
+pi v0.1.0
+1 extension(s): ~/.pi/agent/extensions\lum1485-title.js
+hints hidden on a short terminal — Alt+H shows them
+> Session name set: demo
+> retitled
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-95104 • demo
+?/8.2k (auto)  ? for help                                           (faux) Faux test model
+handler ran
+  assert PASS   expect       'handler ran'  — the same handler's ctx.ui.setStatus is the visible proof it executed; without this row a missing title could be a dispatch failure rather than a broken title channel
+  assert PASS   reject       'ext owns the title'  — still not cell content: the driver writes it outside `terminal.draw`
+  assert PASS   raw_expect   '\x1b]0;ext owns the title\x07'  — shim -> host_ui_region('setTitle') -> RegionOp::Title -> App -> driver write, byte for byte upstream's OSC 0
+
+===== LUM-1485 terminal title (OSC 0) through the real bridge. Nothing here is visible in the frames on purpose: a window/tab title is terminal state, not cell content, so pages 1-4 are checked by `raw_expect`/`raw_reject` against the byte trace each panel produced. Panel 1 is the automatic title `pi - <cwd>`; panel 2 is `/name demo`, which recomposes it to `pi - demo - <cwd>`; panel 3 is an extension calling `ctx.ui.setTitle` from a slash command (the footer row `handler ran` proves the handler executed); panel 4 is the same call with BEL+ESC inside the title, which must reach the terminal fully neutralised. Commands are sent as two steps — text, a 0.4s pause, then Enter — because a single instantaneous write is classified as a paste burst (LUM-1461) and an Enter inside the burst window is inserted as the paste's trailing newline instead of submitting. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 90x26.  |  [4] 4. a BEL+ESC inside the title is neutralised, not forwarded  (cursor 36,22, frame cd84b7c76846, px 4a9bdf171942, alive=True) =====
+pi v0.1.0
+1 extension(s): ~/.pi/agent/extensions\lum1485-title.js
+hints hidden on a short terminal — Alt+H shows them
+> Session name set: demo
+> retitled
+> retitled (sanitised)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-95104 • demo
+?/8.2k (auto)  ? for help                                           (faux) Faux test model
+handler ran
+  assert PASS   raw_expect   '\x1b]0;evil  ]2;payload\x07'  — each control character becomes a space, so the sequence still ends exactly once, where the driver put its BEL
+  assert PASS   raw_reject   '\x1b]0;evil\x07'  — the un-sanitised form would let an extension end the title early and start an OSC 2 of its own
+  assert PASS   raw_reject   '\x07\x1b]2;payload'  — the injected control sequence must not survive as an injected control sequence

@@ -88,7 +88,7 @@
     },
     {
       "label": "12. Enter submits, the transcript echoes the prompt",
-      "send": "hello codex parity<Enter>",
+      "send": ["hello codex parity", { "pause": 0.4 }, "<Enter>"],
       "wait": 1.5,
       "wait_for": "hello codex parity",
       "probe": [{ "text": "> hello codex parity", "why": "the submitted prompt is echoed in the transcript" }]

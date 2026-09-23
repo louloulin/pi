@@ -15893,3 +15893,58 @@ LUM-1461 / LUM-1263 为 `in_review`（**本轮已合入**）。因此合并后�
 正面冲突。下一轮第一顺位（不派 run）已单子化在 `docs/LUM1481_EXTENSION_STATUS.md` §7：
 `setTitle`（`OSC 2`，复用 `hyperlink.rs` 的写序列先例）→ `footerData.getGitBranch()` 的
 host→JS 查询通道。
+
+## LUM-1485 round — 终端标题（`ctx.ui.setTitle` → OSC 0）接通 + 真 ConPTY 抓到「`Ctrl+J` 在 Windows 上无效」；`pi-tui` 1216/0；零派发（槽位 2/3，未满但同缝不并发）
+
+### 一、本轮做了什么（issue 点名的四件事）
+
+1. **TUI 审计**：对照上游第一手源码，定位「终端标题」这一面：`Terminal.setTitle` 写 OSC 0 + BEL
+   （`packages/tui/src/terminal.ts:520-523`），交互模式在 init / `/new` / `/resume` / `/name` /
+   `session_info_changed` 时自动写成 `"<APP_TITLE> - <session name> - <cwd basename>"`
+   （`interactive-mode.ts:1017-1028`），插件用 `ctx.ui.setTitle` 覆盖（`:2443`）。
+   Rust 端口此前**整条通路不存在**（生产代码 0 命中，shim 的 unsupported 列表里有它）。
+2. **缺口修复**：新增 `pi-tui/src/terminal_title.rs`（序列 + 清洗 + 合成）；
+   `App` 只排队（`set_terminal_title` / `sync_terminal_title` / `take_terminal_title`），
+   驱动 `flush_terminal_title` 每 tick 写一次、内容不变不写；
+   `UiRegionHost::set_title` + `RegionCommand::Title` + `handle_region_call("setTitle")` +
+   shim 的 `ui.setTitle` 真正转发 + `RegionOp::Title` → `App`。
+3. **顺带抓到的第二个缺陷（真终端驱动才看得见）**：`Ctrl+J` 在 Windows 上完全无效 ——
+   `crossterm` Unix 解析器把 `0x0A` 折成 `Char('j') + CONTROL`，Win32 控制台后端报成
+   `Enter + CONTROL`，而 `tui.input.newLine` 绑的是 `"ctrl+j"` → 匹配不到绑定、被丢弃。
+   在 `input.rs` 的 `From<CtKeyEvent>` 归一化（`is_ctrl_j`），并给出**同场景 A/B**：
+   compositor 审计第 8 面板 `XFAIL → PASS`。
+4. **截图**：2 张 **ConPTY 实拍**（4 面板标题场景 + 14 面板 chatinput 审计），
+   并给 harness 新增 `raw_expect`/`raw_reject`（OSC 字节级断言）与 `send` 分步（绕开 paste-burst 把
+   `Enter` 折成粘贴换行）。
+
+### 二、门禁与数字（本机实测）
+
+* `cargo test --offline -p pi-tui -j 8`：**1216 passed / 0 failed**（同机基线 `c2d40dc7e` = **1198/0** → **+18**）。
+* `cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast`：**850 / 28**（28 条逐条为 Windows
+  环境类：绝对路径拒绝、真 `bash`、扩展发现、trust、export 文案 → **新增失败 0**）。
+* `cargo test --offline -p pi-extensions -j 8 --no-fail-fast`：**133 / 5**（5 条 `/dev/urandom` 等 Unix 环境类）。
+* `cargo fmt --all -- --check` 干净；`cargo clippy --offline -p pi-tui --all-targets -- -D warnings` **exit 0**。
+* **反向验证**：短路 `sync_terminal_title` → 标题测试 8 条里 5 条红 + 驱动级 1 条红；
+  短路 `is_ctrl_j` → Ctrl+J 集成 2 条红。恢复后全绿。
+* 新增测试 **20 条**、新增真终端帧 **2 张**；`docs/LUM1485_TERMINAL_TITLE.md` 是本轮审计全文。
+
+### 三、Rust↔TS 口径复测
+
+* 纯代码规模 **94.9%**（145,296 / 153,106）；测试 **52.3%**（2,907 / 5,563）。
+* `app.*` 接线 **44/44**、`tui.*` **49/49**、扩展事件 **36/36 声明 + 36/36 构造点**。
+* `ctx.ui` 显示通路：区域类 **5/5**、文本类 **1/3**（本轮接通 `setTitle`）。
+* 加权完成度 **87.2%**（87.155 → 87.173）。**诚实读法**：本轮两项交付都不在 13 轴里
+  —— 一个是文本类显示通路的第一条，一个是平台输入通路缺陷（修复前后第 1 轴都是 100%）；
+  机械口径下 `pi-tui/src` 文件数 +1 会把模块面推到 37/42，但**不计入加权**（上游把这段放在 `terminal.ts`）。
+
+### 四、槽位 / 派发
+
+开工时 `multica daemon status --output json` 实测 `running_task_count = 2`（含本轮），**未满**（上限 3）；
+本仓在办面（LUM-1467 / LUM-1469 / LUM-1481）都已合入 `feature/pi.rs`。
+
+**仍零派发**，理由不是槽位而是**同缝冲突**：剩下的候选（`footerData.getGitBranch()` 的 host→JS 查询通道、
+`ctx.ui.setTheme`/`setEditorText`）都要动本轮刚改过的同一批文件
+（`app.rs` + `host.rs` + `shim` + `ui_bridge.rs`）。仓库为这种「同一缝两条并发线各改一次」
+已经清过两次（LUM-1431 §3、LUM-1445 §8），所以下一轮顺序写进
+`docs/LUM1485_TERMINAL_TITLE.md` §8：`getGitBranch()` → 文本类显示通路收尾 →
+与两者都不冲突的「44×16 下 `cut above` 提示与正文首行叠字」（可并发）。

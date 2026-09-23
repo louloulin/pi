@@ -405,6 +405,29 @@ class Renderer:
 # --------------------------------------------------------------- pty
 
 
+# Raw bytes every backend has read from the pty, in order.
+#
+# The pyte grid is the right target for everything a user can *see*, but a few
+# sequences are deliberately invisible: OSC 0 (terminal title) and OSC 8
+# (hyperlinks) change the terminal's state, not its cells. `raw_expect` /
+# `raw_reject` assert against this trace instead, bounded per panel by
+# `raw_since()` so one panel's assertion cannot be satisfied by an earlier
+# panel's output. A backend that reads bytes is responsible for calling
+# `note_raw()` — `pump` / `drain` do it here, and the Windows backend does it
+# in `ConPty.drain`.
+RAW_TRACE = bytearray()
+
+
+def note_raw(data: bytes) -> None:
+    """Record bytes a backend just read from the pty."""
+    RAW_TRACE.extend(data)
+
+
+def raw_since(mark: int) -> str:
+    """The raw trace from byte `mark` on, decoded for substring assertions."""
+    return bytes(RAW_TRACE[mark:]).decode("utf-8", "replace")
+
+
 def spawn(binary, args, cwd, env, cols, rows):
     master, slave = pty.openpty()
     fcntl.ioctl(
@@ -448,6 +471,7 @@ def pump(master, stream, seconds, chunk=1 << 16):
         if not data:
             break
         got += data
+        note_raw(data)
         stream.feed(data.decode("utf-8", "replace"))
     return bytes(got)
 
@@ -467,7 +491,30 @@ def drain(master, stream, idle=0.35, hard_timeout=3.0):
         if not data:
             break
         last = time.time()
+        note_raw(data)
         stream.feed(data.decode("utf-8", "replace"))
+
+
+def send_steps(panel: dict) -> list[tuple[str, float]]:
+    """Normalize a panel's `send` into `[(key_tokens, pause_after_seconds), …]`.
+
+    A plain string is one step with no pause. A list lets a scenario separate
+    keys in time — see the schema note above `evaluate_panel` for why a
+    `text` + `Enter` burst needs it (LUM-1461's paste-burst classifier treats
+    an instantaneous run as a paste, including its trailing newline).
+    """
+    send = panel.get("send", "")
+    if not send:
+        return []
+    if isinstance(send, str):
+        return [(send, 0.0)]
+    steps: list[tuple[str, float]] = []
+    for step in send:
+        if isinstance(step, str):
+            steps.append((step, 0.0))
+        else:
+            steps.append((step.get("keys", ""), float(step.get("pause", 0.0))))
+    return steps
 
 
 def snapshot(screen) -> str:
@@ -532,6 +579,13 @@ class AltScreenFeeder:
 #   "probe":         ["text"]   A/B evidence             -> XFAIL when missing
 #   "xfail":         ["text"]   a KNOWN defect: present today -> FAIL when missing
 #   "xfail_reject":  ["text"]   a known defect: present today -> FAIL when absent
+#   "raw_expect":    ["\u001b]0;pi"]  present in the pty BYTE stream -> FAIL when missing
+#   "raw_reject":    ["\u001b]0;pi"]  absent from the byte stream     -> FAIL when present
+#
+# `raw_*` exists for state-changing-but-invisible sequences: a terminal title
+# (OSC 0) and a hyperlink (OSC 8) are not cell content, so the pyte grid can
+# never show them. They are evaluated against the bytes this panel's own window
+# produced (`RAW_TRACE`), not the whole session.
 #
 # `probe` is for a behaviour that only a *fixed* binary can show: it records
 # "this binary does not satisfy it yet" as XFAIL instead of failing the run, so
@@ -548,6 +602,19 @@ class AltScreenFeeder:
 # `count` accepts an int, "N..M", ">=N" or "<=N"; without it the entry asserts
 # presence (expect/xfail_reject) or absence (reject/xfail). `regex` switches the
 # needle from a literal substring to a pattern (counted per line).
+#
+# A panel's `send` is normally one string of key tokens, written in one go.
+# When the *timing* of the keys matters it can instead be a list of steps, each
+# a token string or `{"keys": ..., "pause": seconds}`:
+#
+#   "send": ["/retitle", {"pause": 0.3}, "<Enter>"]
+#
+# That form exists because of the paste-burst classifier (LUM-1461): a run of
+# three or more plain characters delivered within `PASTE_BURST_CHAR_INTERVAL`
+# is treated as a paste, and an `Enter` inside the burst window is inserted as
+# a newline instead of submitting. A harness write is instantaneous, so
+# `"/retitle<Enter>"` is *exactly* that burst; a scenario that means "type a
+# command and press Enter" has to space the two apart, the way a human does.
 
 _STATUS_FOR = {
     # kind -> (status when the needle is found, status when it is not)
@@ -563,7 +630,16 @@ _STATUS_FOR = {
     # outlive the bug.
     "xfail": ("XPASS", "XFAIL"),
     "xfail_reject": ("XFAIL", "XPASS"),
+    # Raw-stream assertions (see the schema note above). `raw_expect` is a hard
+    # requirement like `expect`: a title either reached the terminal or it did
+    # not, and there is no "not implemented yet" reading of it.
+    "raw_expect": ("PASS", "FAIL"),
+    "raw_reject": ("FAIL", "PASS"),
 }
+
+# Assertion kinds whose needles are matched against the raw byte stream rather
+# than the frozen grid.
+RAW_KINDS = ("raw_expect", "raw_reject")
 
 
 def parse_count(spec):
@@ -597,8 +673,12 @@ def count_needle(body: str, needle: str, pattern: bool, count) -> tuple[int, boo
     return found, ok
 
 
-def evaluate_panel(panel: dict, body: str) -> list[dict]:
-    """Evaluate one frozen panel's assertions. One row per assertion."""
+def evaluate_panel(panel: dict, body: str, raw: str = "") -> list[dict]:
+    """Evaluate one frozen panel's assertions. One row per assertion.
+
+    `body` is the panel's grid, `raw` the byte window this panel produced —
+    `raw_expect` / `raw_reject` match against the latter.
+    """
     rows: list[dict] = []
     for kind, found_status, absent_status in (
         ("expect", *_STATUS_FOR["expect"]),
@@ -606,7 +686,10 @@ def evaluate_panel(panel: dict, body: str) -> list[dict]:
         ("probe", *_STATUS_FOR["probe"]),
         ("xfail", *_STATUS_FOR["xfail"]),
         ("xfail_reject", *_STATUS_FOR["xfail_reject"]),
+        ("raw_expect", *_STATUS_FOR["raw_expect"]),
+        ("raw_reject", *_STATUS_FOR["raw_reject"]),
     ):
+        target = raw if kind in RAW_KINDS else body
         for entry in panel.get(kind) or []:
             if isinstance(entry, str):
                 spec = {"text": entry}
@@ -616,7 +699,7 @@ def evaluate_panel(panel: dict, body: str) -> list[dict]:
             is_pattern = "regex" in spec or spec.get("pattern") is True
             if is_pattern and not needle:
                 needle = spec["regex"]
-            found, satisfied = count_needle(body, needle, is_pattern, spec.get("count"))
+            found, satisfied = count_needle(target, needle, is_pattern, spec.get("count"))
             rows.append(
                 {
                     "kind": kind,
@@ -831,6 +914,9 @@ def main() -> int:
     cards = []
     assertion_rows: list[tuple[str, list[dict]]] = []
     text_sections = []
+    # Byte offset the current panel's raw window starts at; panels advance it,
+    # so a `raw_expect` can only be satisfied by this panel's own output.
+    raw_mark = 0
     try:
         drain(master, stream, idle=0.6, hard_timeout=8.0)
         if not pump_until(
@@ -842,9 +928,13 @@ def main() -> int:
                 file=sys.stderr,
             )
         for index, panel in enumerate(panels, start=1):
-            send = panel.get("send", "")
-            if send:
-                os.write(master, encode_keys(send))
+            panel_raw_mark = raw_mark
+            for keys, pause in send_steps(panel):
+                if keys:
+                    os.write(master, encode_keys(keys))
+                if pause > 0:
+                    pump(master, stream, pause)
+            raw_mark = len(RAW_TRACE)
             wait = float(panel.get("wait", 0.7))
             if wait > 0:
                 pump(master, stream, wait)
@@ -873,6 +963,7 @@ def main() -> int:
             # paint every panel with the *last* frame (the bug this fixes).
             frame = copy.deepcopy(screen)
             body = snapshot(frame)
+            panel_raw = raw_since(panel_raw_mark)
             cards.append(
                 (
                     head,
@@ -883,7 +974,7 @@ def main() -> int:
                     child_alive(pid),
                 )
             )
-            assertion_rows.append((head, evaluate_panel(panel, body)))
+            assertion_rows.append((head, evaluate_panel(panel, body, panel_raw)))
     finally:
         send = scenario.get("final_send")
         exited = False

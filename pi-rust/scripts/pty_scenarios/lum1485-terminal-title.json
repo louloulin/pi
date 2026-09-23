@@ -1,0 +1,93 @@
+{
+  "cols": 90,
+  "rows": 26,
+  "caption": "LUM-1485 terminal title (OSC 0) through the real bridge. Nothing here is visible in the frames on purpose: a window/tab title is terminal state, not cell content, so pages 1-4 are checked by `raw_expect`/`raw_reject` against the byte trace each panel produced. Panel 1 is the automatic title `pi - <cwd>`; panel 2 is `/name demo`, which recomposes it to `pi - demo - <cwd>`; panel 3 is an extension calling `ctx.ui.setTitle` from a slash command (the footer row `handler ran` proves the handler executed); panel 4 is the same call with BEL+ESC inside the title, which must reach the terminal fully neutralised. Commands are sent as two steps — text, a 0.4s pause, then Enter — because a single instantaneous write is classified as a paste burst (LUM-1461) and an Enter inside the burst window is inserted as the paste's trailing newline instead of submitting. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 90x26.",
+  "args": ["--model", "faux/faux-model"],
+  "extensions": ["scripts/pty_scenarios/lum1485-title.js"],
+  "final_send": "<C-d>",
+  "distinct_panels": true,
+  "panels": [
+    {
+      "label": "1. startup: the automatic title is `pi - <cwd basename>`",
+      "send": "",
+      "wait": 2.0,
+      "wait_for": "? for help",
+      "raw_expect": [
+        {
+          "regex": "\\u001b\\]0;pi - pi-pty-cwd-\\d+\\u0007",
+          "why": "upstream's `updateTerminalTitle` composes `APP_TITLE - cwdBasename` when the session has no name (interactive-mode.ts:1017-1028); the harness cwd is a temp dir named pi-pty-cwd-<pid>"
+        }
+      ],
+      "reject": [
+        {
+          "text": "pi - pi-pty-cwd",
+          "why": "the title is not cell content: the composed string must never be painted into the grid"
+        }
+      ],
+      "expect": [
+        { "text": "> type a prompt", "why": "the TUI is up and idle" }
+      ]
+    },
+    {
+      "label": "2. `/name demo` recomposes the title with the session name in the middle",
+      "send": ["/name demo", { "pause": 0.4 }, "<Enter>"],
+      "wait": 1.5,
+      "raw_expect": [
+        {
+          "regex": "\\u001b\\]0;pi - demo - pi-pty-cwd-\\d+\\u0007",
+          "why": "upstream's shape is `APP_TITLE - sessionName - cwdBasename`; `/name` is the Rust path that calls App::set_session_name, which re-queues it"
+        }
+      ],
+      "expect": [
+        {
+          "text": "Session name set: demo",
+          "why": "the command ran (its info line, not just the echoed prompt)"
+        }
+      ]
+    },
+    {
+      "label": "3. an extension's `ctx.ui.setTitle` reaches the terminal",
+      "send": ["/retitle", { "pause": 0.4 }, "<Enter>"],
+      "wait": 1.5,
+      "raw_expect": [
+        {
+          "text": "\u001b]0;ext owns the title\u0007",
+          "why": "shim -> host_ui_region('setTitle') -> RegionOp::Title -> App -> driver write, byte for byte upstream's OSC 0"
+        }
+      ],
+      "expect": [
+        {
+          "text": "handler ran",
+          "why": "the same handler's ctx.ui.setStatus is the visible proof it executed; without this row a missing title could be a dispatch failure rather than a broken title channel"
+        }
+      ],
+      "reject": [
+        {
+          "text": "ext owns the title",
+          "why": "still not cell content: the driver writes it outside `terminal.draw`"
+        }
+      ]
+    },
+    {
+      "label": "4. a BEL+ESC inside the title is neutralised, not forwarded",
+      "send": ["/retitle-evil", { "pause": 0.4 }, "<Enter>"],
+      "wait": 1.5,
+      "raw_expect": [
+        {
+          "text": "\u001b]0;evil  ]2;payload\u0007",
+          "why": "each control character becomes a space, so the sequence still ends exactly once, where the driver put its BEL"
+        }
+      ],
+      "raw_reject": [
+        {
+          "text": "\u001b]0;evil\u0007",
+          "why": "the un-sanitised form would let an extension end the title early and start an OSC 2 of its own"
+        },
+        {
+          "text": "\u0007\u001b]2;payload",
+          "why": "the injected control sequence must not survive as an injected control sequence"
+        }
+      ]
+    }
+  ]
+}

@@ -1236,3 +1236,58 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
 冻结帧（本机无 `pty`），证明几何与字段内容，**不证明按键时序**；交互时序由 `status.rs` 的
 5 条单测、`tests/lum1481_extension_status.rs` 的 7 条与 `pi-extensions/tests/host.rs` 的
 端到端用例覆盖。本轮细节、上游取证、已知偏差见 `docs/LUM1481_EXTENSION_STATUS.md`。
+
+### 0.26 LUM-1485 复测：终端标题（`ctx.ui.setTitle`，OSC 0）接通 + 真 ConPTY 抓到 `Ctrl+J` 平台缺陷；加权 **87.2%**（87.173%）
+
+**量的是什么**：上游把终端标题当成一条显示通路 —— `Terminal.setTitle` 写 OSC 0 + BEL
+（`packages/tui/src/terminal.ts:520-523`），交互模式在 init / `/new` / `/resume` / `/name` /
+`session_info_changed` 时自动写成 `"<APP_TITLE> - <session name> - <cwd basename>"`
+（`interactive-mode.ts:1017-1028`，5 个调用点），插件用 `ctx.ui.setTitle` 覆盖（`:2443`）。
+Rust 端口此前**整条不存在**（生产代码 `setTitle`/`set_title` 0 命中，shim 的 unsupported 列表里有它）。
+本轮接通，并顺手用真 ConPTY 抓到第二条缺陷：**`Ctrl+J` 在 Windows 上无效**（`crossterm` Win32 后端
+把 `0x0A` 报成 `Enter + CONTROL`，而 `tui.input.newLine` 绑的是 `"ctrl+j"`）。
+
+基线 = `c2d40dc7e`（= LUM-1481 推送后的 `origin/feature/pi.rs`，本机同工具链实测）。
+
+| 口径 | 本轮 | 基线 `c2d40dc7e` |
+|---|---|---|
+| 纯代码规模（src↔src） | **94.9%**（145,296 / 153,106） | 94.6%（144,896 / 153,106） |
+| 测试规模（#\[test\] vs `it(`/`test(`） | **52.3%**（2,907 / 5,563） | 51.9%（2,887 / 5,563） |
+| `pi-tui` 全量 | **1,216 / 0** | 1,198 / 0 |
+| `pi-coding-agent` 全量 | **850 / 28**（28 条逐条为 Windows 环境类） | 844 / 33（失败集合随并发目标漂移，均为同一批环境类，**新增失败 0**） |
+| `pi-extensions` 全量 | 133 / 5（`/dev/urandom` 等 Unix 环境类） | 132 / 5 |
+| TUI 模块面（机械口径） | 37 / 42 = 88.1%（+1 = `terminal_title.rs`） | 36 / 42 = 85.7% |
+| TUI 模块面（**计入加权**） | **36 / 42 = 85.7%（不上调）** | 同 |
+| `app.*` 接线 / `tui.*` 消费 | 44/44、49/49 = 100% | 同 |
+| 扩展生命周期事件 | 36/36 声明 + 36/36 构造点 | 同 |
+| **`ctx.ui` 显示通路** | 区域类 **5/5**、文本类 **1/3**（`setTitle` 本轮接通；`setEditorText`/`setTheme` 仍 no-op） | 区域类 5/5、文本类 0/3 |
+| 轴 5 TUI 交互面 | (0.857 + 1.000)/2 = **92.9%** | 同 |
+| 轴 12 测试与门禁强度 | 2,907 / 5,563 = **0.5226** | 2,887 / 5,563 = 0.5190 |
+| 加权完成度 | **87.2%**（87.173%） | 87.2%（87.155%） |
+
+```
+5×1.000 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×0.523 + 3×0.95 = 87.173% ≈ 87.2%
+```
+
+**为什么总分只动 +0.02pt（一位小数不变）**：本轮的两项交付都不落在 13 轴里 ——
+① `setTitle` 是 `ctx.ui` 文本类显示通路的第一条，和第 9/10 轴的「区域宿主 / 生命周期事件」不是同一层；
+② `Ctrl+J` 是**平台输入通路**缺陷，修复前后第 1 轴（可运行）都是 100%。按 §0.8 / LUM-1418 §6 的规矩，
+**不改口径、不抬第 9 轴**（把它从 0.95 抬到 0.97 只值 +0.16pt 且会掩盖真正剩下的 `getGitBranch()` 查询通道）。
+机械口径上 `pi-tui/src` 的文件数 +1（`terminal_title.rs`）会让模块面从 36/42 跳到 37/42，
+但**加权里不采用**：上游把这段逻辑放在 `terminal.ts` 里，涨的是文件数不是覆盖率。
+
+**门禁**（本机 Windows / cargo 1.97.1 / `--offline`）：`cargo fmt --all -- --check` 干净；
+`cargo clippy -p pi-tui --all-targets -- -D warnings` **exit 0**；其余改动文件 0 告警。
+**反向验证**：① 短路 `App::sync_terminal_title` → `tests/terminal_title.rs` 8 条里 5 条红 +
+驱动级用例红；② 短路 `is_ctrl_j` → `tests/key_event_kinds.rs` 2 条红。
+
+**真 PTY A/B**：`lum1360-chatinput-audit.json` 在 Windows ConPTY 上 **修复前 15 PASS / 1 XFAIL →
+修复后 16 PASS / 0 XFAIL**（转正的是第 8 面板 `Ctrl+J opens a second draft row`）；
+既有 `lum1457-win-key-release.json` 回归 **9 PASS / 0 FAIL**。
+
+**证据分级**：`docs/screenshots/lum1485-terminal-title.png`(+`.txt`) 11 条断言、
+`docs/screenshots/lum1485-chatinput-audit-conpty-80x26.png`(+`.txt`) 16 条断言 —— 两张都是
+**ConPTY 实拍**（`scripts/pty_capture_win.py`，每帧记 `alive=True`），不是冻结帧；其中 4 条是新增的
+OSC 字节级断言（`raw_expect`），因为终端标题在格子里永远看不见。本轮细节见
+`docs/LUM1485_TERMINAL_TITLE.md`。

@@ -140,6 +140,7 @@ class ConPty:
                 break
             last = time.time()
             got += data
+            pc.note_raw(data)
             stream.feed(data.decode("utf-8", "replace"))
         return bytes(got)
 
@@ -274,6 +275,11 @@ def main() -> int:
 
     cards = []
     assertion_rows: list[tuple[str, list[dict]]] = []
+    # Byte offset the current panel's raw window starts at. `raw_expect` /
+    # `raw_reject` assertions (OSC 0 terminal titles, OSC 8 links) are matched
+    # against this window, because those sequences are not cell content. See
+    # `pty_capture.RAW_TRACE` for what ConPTY does and does not preserve.
+    raw_mark = 0
     try:
         child.drain(stream, idle=1.0, hard_timeout=10.0)
         deadline = time.time() + 25.0
@@ -286,9 +292,11 @@ def main() -> int:
                 file=sys.stderr,
             )
         for index, panel in enumerate(panels, start=1):
-            send = panel.get("send", "")
-            if send:
-                child.write(pc.encode_keys(send))
+            for keys, pause in pc.send_steps(panel):
+                if keys:
+                    child.write(pc.encode_keys(keys))
+                if pause > 0:
+                    child.drain(stream, idle=min(0.4, max(0.1, pause / 2)), hard_timeout=pause + 1.0)
             wait = float(panel.get("wait", 0.7))
             if wait > 0:
                 child.drain(stream, idle=min(0.5, max(0.15, wait / 2)), hard_timeout=wait + 1.0)
@@ -311,10 +319,12 @@ def main() -> int:
             head = f"[{index}] {label}" if not caption else f"{caption}  |  [{index}] {label}"
             frame = copy.deepcopy(screen)
             body = pc.snapshot(frame)
+            panel_raw = pc.raw_since(raw_mark)
+            raw_mark = len(pc.RAW_TRACE)
             cards.append(
                 (head, body, frame, frame.cursor.x, frame.cursor.y, child.is_alive())
             )
-            assertion_rows.append((head, pc.evaluate_panel(panel, body)))
+            assertion_rows.append((head, pc.evaluate_panel(panel, body, panel_raw)))
     finally:
         send = scenario.get("final_send")
         if send:

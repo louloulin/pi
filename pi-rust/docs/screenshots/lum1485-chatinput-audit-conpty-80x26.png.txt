@@ -1,0 +1,409 @@
+# lum1485-chatinput-audit-conpty-80x26.png — chars, 80x26 cells (Windows ConPTY backend)
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [1] 1. idle composer at 80x26  (cursor 80,25, frame ecf273df20d3, px d987f356c17d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [2] 2. three words typed; caret at the end of the draft  (cursor 36,23, frame 5c2381d150fc, px 753101cac6cc, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta gamma▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> alpha beta gamma▍'  — a plain draft renders with the block caret at the end
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [3] 3. Ctrl+W deletes one word backward (codex, Martty and pi-ts all bind this)  (cursor 19,23, frame 1dffa53cf4ce, px 06715590baae, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta ▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> alpha beta ▍'  — `gamma` is gone and the caret sits where it was
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [4] 4. Alt+B hops one word left (esc-b; untouched by the LUM-1360 defect)  (cursor 14,23, frame 5d3ba10aaee9, px b816c49fde76, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha ▍beta
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> alpha ▍beta'  — the caret stops at the start of `beta`; the frame trims the draft's trailing space
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [5] 5. Alt+F hops one word right — the LUM-1360 fix (before: this forked the session)  (cursor 13,23, frame ef5055952bb9, px 29012d034fc1, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   reject       '/fork: no session database'  — the fork picker must NOT run: `alt+f` is the editor's forward-word chord, not `app.session.fork` (LUM-1360). This row is a hard FAIL, so the pre-fix binary fails this scenario.
+  assert PASS   probe        '> alpha beta▍'  — the caret is back at the end of `beta`, one word right; the frame trims the draft's trailing space
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [6] 6. Ctrl+A / Ctrl+E are line-scoped, not draft-scoped  (cursor 19,23, frame 97a724308933, px 0c8595c6955b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> ▍alpha beta gamma
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> ▍alpha beta gamma'  — Ctrl+A put the caret at the start of the only line
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [7] 7. Ctrl+K kills to the end of the line and Ctrl+Y yanks it back  (cursor 20,23, frame 22e52e72f0fa, px 138eacdc566a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta gamma ▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> alpha beta gamma'  — the kill ring round-trips the whole killed tail
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [8] 8. Ctrl+J opens a second draft row instead of submitting  (cursor 14,23, frame f9a96a1e3819, px 6e21fe8c079a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta gamma
+  second line▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> alpha beta gamma'  — line 1 keeps its content (Ctrl+J did not submit)
+  assert PASS   probe        '  second line▍'  — line 2 is a real draft row with the caret at its end
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [9] 9. double-click inside the composer selects the word under the pointer  (cursor 70,23, frame 391ae8e3aeb4, px ebd9d59a92c5, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta gamma
+  second line<MPress:9,23><MRelease:9,23><MPress:9,23><MRelease:9,23>▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        'lpha'  — the draft is intact after the double click
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [10] 10. a drag that starts in the composer extends the selection as the pointer moves left  (cursor 70,23, frame 6e37e8e306ce, px 60da5df0c60c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta gamma
+  second
+  line<MPress:9,23><MRelease:9,23><MPress:9,23><MRelease:9,23><MPress:20,23><MDr
+  ag:12,23><MDrag:6,23>▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        'lpha'  — the draft survives a drag that leaves the composer body
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [11] 11. Ctrl+C clears the draft on the first press (no exit)  (cursor 36,23, frame ecf273df20d3, px d987f356c17d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> type a prompt'  — the composer is back to its placeholder and the process is alive
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [12] 12. Enter submits, the transcript echoes the prompt  (cursor 30,3, frame 2a6c411c3101, px 4a1fbde8bbbd, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hello codex parity
+  f          hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> hello codex parity'  — the submitted prompt is echoed in the transcript
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [13] 13. Up on the empty composer recalls it from the prompt history  (cursor 30,3, frame 5d809b23b79a, px 1a1639010a07, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hello codex parity
+  f          hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello codex parity▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+?/8.2k (auto)  ? for help  session-18d7d07283accc84       (faux) Faux test model
+  assert PASS   probe        '> hello codex parity▍'  — history recall puts the prompt back in the composer
+
+===== LUM-1360 chatinput A/B: the composer's word-motion and readline vocabulary, driven in a real 80x26 PTY against the real binary. Panel 5 (`Alt+F`) is the A/B pair for the LUM-1360 defect: before the fix the global `app.session.fork` binding consumed `alt+f` and the frame showed `/fork: no session database`; after it, `alt+f` is `tui.editor.cursorWordRight` and the caret hops right, matching codex `move_word_right`, Martty `WordRight` and upstream `cursorWordRight`. Composer row is y=23, prompt prefix is x=0..1.  |  [14] 14. Ctrl+R opens the reverse search over the prompt history  (cursor 30,3, frame d1496e673024, px ba9edc6d370e, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hello codex parity
+  f          hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello codex parity▍
+C:\Users\ADMINI~1\AppData\Local\Temp\multica-task-310513225\pi-pty-cwd-118308
+reverse-i-search: hel  Enter accept · Esc/Ctrl+C cancel  Faux test model…
+  assert PASS   probe        'hello codex parity'  — the reverse search lists the matching history entry
