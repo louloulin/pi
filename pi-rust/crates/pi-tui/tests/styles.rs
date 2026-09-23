@@ -152,8 +152,10 @@ fn status_bar_themed_layout_matches_the_plain_render() {
     assert_eq!(strip_ansi(&themed), plain);
     assert!(themed.contains(&format!("{ACCENT}gpt-4o\x1b[39m")));
     assert!(themed.contains(&format!("{MUTED}  abc-123  \x1b[39m")));
-    assert!(themed.contains(&format!("{DIM}in 0 out 0\x1b[39m")));
-    assert!(themed.contains(&format!("{DIM}  ? for help\x1b[39m")));
+    // LUM-1467 — with no window and no usage the stats cluster is just the
+    // trailing hint, and the model is the accent right side.
+    assert!(themed.contains(&format!("{DIM}? for help\x1b[39m")));
+    assert!(plain.ends_with("gpt-4o"));
 }
 
 #[test]
@@ -252,5 +254,6 @@ fn the_plain_render_paths_are_unchanged() {
     let data = StatusData::new("gpt-4o", "abc-123").with_hint("? for help");
     let plain = bar.render(&data, 60);
     assert!(!plain.contains('\x1b'));
-    assert!(plain.starts_with("gpt-4o"));
+    // The model is the right side now (`footer.ts:230-240`).
+    assert!(plain.ends_with("gpt-4o"), "{plain}");
 }

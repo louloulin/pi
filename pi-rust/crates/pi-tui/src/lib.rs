@@ -94,7 +94,7 @@ pub use search::{
 };
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use settings::{SettingItem, SettingsAction, SettingsList};
-pub use status::{format_tokens, BusyIndicator, StatusBar, StatusData};
+pub use status::{format_cost, format_tokens, BusyIndicator, StatusBar, StatusData, StatusPricing};
 pub use styled::{SpanStyle, StyledLine, StyledSpan};
 pub use styles::SelectListStyles;
 pub use terminal_image::{

@@ -120,7 +120,7 @@ fn a_location_row_is_drawn_above_the_stats_row() {
         .expect("the location row is painted");
     let stats = lines
         .iter()
-        .position(|line| line.contains("in 0 out 0") && line.contains("Faux"))
+        .position(|line| line.contains("?/8.2k") && line.contains("Faux"))
         .expect("the stats row is painted");
     assert_eq!(stats, location + 1, "stats sit directly below the location");
     // The name moved to the location row, so it is not repeated below it.
@@ -150,12 +150,9 @@ fn a_session_without_a_cwd_keeps_the_single_row_footer() {
     let mut app = app(None, None);
     let lines = rows(&mut app, 100, 30);
     // Exactly one row carries the stats; the row above it is transcript.
-    let stats_rows = lines
-        .iter()
-        .filter(|line| line.contains("in 0 out 0"))
-        .count();
+    let stats_rows = lines.iter().filter(|line| line.contains("?/8.2k")).count();
     assert_eq!(stats_rows, 1, "{lines:#?}");
-    assert!(lines[29].contains("in 0 out 0"), "{:?}", lines[29]);
+    assert!(lines[29].contains("?/8.2k"), "{:?}", lines[29]);
     // The composer takes the row the location row would have used.
     assert!(lines[28].starts_with("> "), "{:?}", lines[28]);
 }
@@ -208,7 +205,7 @@ fn a_short_terminal_still_paints_the_composer_and_both_footer_rows() {
         "the location row survives:\n{lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line.contains("in 0 out 0")),
+        lines.iter().any(|line| line.contains("?/8.2k")),
         "the stats row survives:\n{lines:#?}"
     );
 }
@@ -222,7 +219,7 @@ fn frame_dump_two_line_footer() {
         .iter()
         .any(|l| l.starts_with("/srv/repo (main) • demo")));
     assert!(
-        lines.iter().any(|l| l.contains("in 0 out 0")),
+        lines.iter().any(|l| l.contains("?/8.2k")),
         "the stats row is painted below it:
 {lines:#?}"
     );
@@ -238,7 +235,7 @@ fn frame_dump_cut_location_row() {
     let lines = rows(&mut app, 44, 14);
     assert!(lines.iter().any(|l| l.ends_with('…')));
     assert!(
-        lines.iter().any(|l| l.contains("in 0 out 0")),
+        lines.iter().any(|l| l.contains("?/8.2k")),
         "the stats row survives the cut:
 {lines:#?}"
     );
@@ -249,7 +246,7 @@ fn frame_dump_cut_location_row() {
 fn frame_dump_single_row_footer_without_a_cwd() {
     let mut app = app(None, None);
     let lines = rows(&mut app, 100, 30);
-    assert!(lines.iter().any(|l| l.contains("in 0 out 0")));
+    assert!(lines.iter().any(|l| l.contains("?/8.2k")));
     dump(
         &lines,
         100,

@@ -495,6 +495,12 @@ async fn run_loop(
         app.set_status_git_branch(crate::footer::git_branch(&cwd));
         app.set_status_cwd(Some(cwd.display().to_string()));
     }
+    // LUM-1467 — the stats row's provider prefix, ` (sub)` suffix, ` (auto)`
+    // suffix and `$cost` rates are facts only the driver owns.
+    {
+        let agent_guard = agent.lock().await;
+        sync_status_metrics(&mut app, &options, agent_guard.model());
+    }
     // Wire the existing rich tool renderers (`tools/render.rs`) into the
     // interactive transcript. The App cannot name that type (no
     // `pi-tui` → `pi-coding-agent` dependency), so the driver installs the
@@ -1470,6 +1476,60 @@ fn sync_thinking_for_model(app: &mut App, agent: &mut Agent) {
     app.set_thinking_level(level);
 }
 
+/// LUM-1467 — hand the footer the facts only the driver owns.
+///
+/// Upstream's `FooterComponent` reads them off `session.state.model` and
+/// `footerData` (`footer.ts:139-197`):
+///
+/// * how many providers are routable (`getAvailableProviderCount() > 1`),
+///   which decides the model's `(provider) ` prefix — counted from the same
+///   catalog `/model` and `Ctrl+P` cycle through (`options.models`);
+/// * whether the active provider bills by subscription, which decides the
+///   ` (sub)` suffix;
+/// * whether auto-compaction is on, which decides the gauge's ` (auto)`;
+/// * the active model's per-1M-token rates, so [`pi_tui::StatusData`] can
+///   turn the usage events it already receives into the `$cost` part.
+///
+/// The rate lookup is the static catalog's (`model_pricing`); a model the
+/// catalog has no rates for leaves the cost unknown, exactly like a provider
+/// that reports no cost upstream.
+fn sync_status_metrics(app: &mut App, options: &InteractiveOptions, model: &Model) {
+    let mut providers: Vec<&str> = options
+        .models
+        .iter()
+        .map(|(provider, _)| provider.0.as_str())
+        .collect();
+    providers.sort_unstable();
+    providers.dedup();
+
+    app.set_status_provider(providers.len(), Some(model.provider.0.clone()));
+    app.set_status_subscription(is_subscription_provider(&model.provider.0));
+    app.set_status_auto_compact(options.compaction.enabled);
+    app.set_status_pricing(
+        pi_ai::providers::registry::model_pricing(&model.provider.0, &model.id).map(|pricing| {
+            pi_tui::StatusPricing {
+                input_micro_usd: pricing.input_micro_usd,
+                output_micro_usd: pricing.output_micro_usd,
+                cache_read_micro_usd: pricing.cache_read_micro_usd,
+                cache_write_micro_usd: pricing.cache_write_micro_usd,
+            }
+        }),
+    );
+}
+
+/// Upstream's subscription test (`footer.ts:139-140`): Kimi Coding bills
+/// through a subscription even though it authenticates with an API key, or
+/// the model runtime reports the provider as subscription-backed.
+///
+/// Only the literal half is ported: the OAuth/subscription-first providers
+/// (`kimi-coding`, `github-copilot`, `openai-codex`) are not registered in
+/// this build yet (see `pi-ai/src/auth/provider_registry.rs`), so
+/// `modelRuntime.isUsingSubscription` has nothing to answer — the same gap
+/// the provider-auth module documents.
+fn is_subscription_provider(provider: &str) -> bool {
+    provider == "kimi-coding"
+}
+
 /// `app.thinking.cycle` — the Shift+Tab cycle.
 ///
 /// Upstream `cycleThinkingLevel` (`interactive-mode.ts:4177`): a model that
@@ -1859,6 +1919,7 @@ async fn cycle_model(
     let (provider, model) = catalog[next].clone();
     let label = model.label.clone().unwrap_or_else(|| model.id.clone());
     app.queue_model_switch(&mut agent_guard, model);
+    sync_status_metrics(app, options, agent_guard.model());
     sync_thinking_for_model(app, &mut agent_guard);
     app.info(format!("model → {provider}/{label}"));
 }
@@ -1909,6 +1970,7 @@ async fn apply_selector_choice(
             };
             let mut agent_guard = agent.lock().await;
             app.queue_model_switch(&mut agent_guard, model);
+            sync_status_metrics(app, options, agent_guard.model());
             sync_thinking_for_model(app, &mut agent_guard);
             drop(agent_guard);
             // Upstream `model_select` (`AgentSession._emitModelSelect`),
@@ -3755,6 +3817,8 @@ fn apply_setting_change(
             // `options` is owned by the run loop, so the toggle applies to
             // every later `maybe_auto_compact` check — live, like upstream.
             options.compaction.enabled = enabled;
+            // LUM-1467 — the footer's ` (auto)` suffix is the same switch.
+            app.set_status_auto_compact(enabled);
             (
                 "compaction.enabled",
                 Value::Bool(enabled),
