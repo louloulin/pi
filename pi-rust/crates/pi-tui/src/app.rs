@@ -286,6 +286,7 @@ use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate, ThinkingLevel};
 use pi_protocol::{Content, Message, StopReason, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::prelude::Widget;
 use ratatui::style::Modifier;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -6957,7 +6958,7 @@ impl App {
             return;
         }
         let widget = SlashMenuWidget::new(&self.slash_menu, editor_area, &self.theme);
-        widget.render(buf);
+        widget.render(editor_area, buf);
     }
 
     /// Paint the `?` shortcut overlay directly above the composer.

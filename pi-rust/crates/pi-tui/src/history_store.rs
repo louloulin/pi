@@ -35,6 +35,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::editor::HISTORY_LIMIT;
 
+/// Cross-session composer history manager.
+///
+/// Wraps the file-based history operations into a simple interface.
+#[derive(Debug)]
+pub struct HistoryStore {
+    path: PathBuf,
+}
+
+impl HistoryStore {
+    /// Create a new history store for the given path.
+    pub fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+        }
+    }
+
+    /// Clear all history entries.
+    pub fn clear(&self) -> std::io::Result<()> {
+        // Rewrite with empty list to clear
+        rewrite(&self.path, &[])
+    }
+}
+
 /// Longest single record read from the file.
 ///
 /// A pathological row (a pasted megabyte) is skipped rather than allowed to

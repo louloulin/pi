@@ -40,6 +40,11 @@ pub fn default_session_dir() -> PathBuf {
         .join("sessions")
 }
 
+/// The cross-session prompt history file (`~/.pi/agent/history.jsonl`).
+pub fn history_file_path() -> PathBuf {
+    agent_dir_or_default().join("history.jsonl")
+}
+
 /// Collapse `.` / `..` components without touching the filesystem.
 pub fn normalize_lexically(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();

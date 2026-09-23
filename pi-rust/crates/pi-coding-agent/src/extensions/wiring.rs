@@ -238,6 +238,30 @@ impl ExtensionLoadOutcome {
 ///    `pi.sendUserMessage` / `pi.setSessionName` since the last call,
 ///    so the mode can persist it to its session store.
 ///
+/// Result of `tool_call` hook dispatch.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallDispatchOutcome {
+    /// Whether the tool call was blocked.
+    pub blocked: bool,
+    /// Reason for blocking, if blocked.
+    pub reason: Option<String>,
+    /// Whether to terminate after this tool call.
+    pub terminate: bool,
+    /// Patched input arguments, if modified by a handler.
+    pub input: serde_json::Value,
+}
+
+/// Patch from `tool_result` hook dispatch.
+#[derive(Debug, Clone)]
+pub struct ToolResultDispatchPatch {
+    /// Replacement content blocks, if modified by a handler.
+    pub content: Option<Vec<pi_protocol::Content>>,
+    /// Replacement is_error flag, if modified by a handler.
+    pub is_error: Option<bool>,
+    /// Replacement details, if modified by a handler.
+    pub details: Option<serde_json::Value>,
+}
+
 /// [`ExtensionRuntime::empty`] is the no-extension case: commands are an
 /// empty list and every drain yields nothing.
 #[derive(Clone, Default)]
@@ -492,6 +516,118 @@ impl ExtensionRuntime {
             target_session_file: None,
         })
         .await
+    }
+
+    /// Dispatch a `tool_call` event and return the before-tool-call decision.
+    ///
+    /// This method wraps `dispatch_event` for the `tool_call` event, providing
+    /// a typed return value for the agent loop's `BeforeToolCall` hook.
+    pub async fn dispatch_tool_call(&self, call: &pi_protocol::ToolCall) -> ToolCallDispatchOutcome {
+        
+
+        let event = ExtensionEvent::ToolCall {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            input: call.arguments.clone(),
+        };
+
+        let Some(outcome) = self.dispatch_event(&event).await else {
+            return ToolCallDispatchOutcome::default();
+        };
+
+        // Parse the dispatch outcome into our typed result.
+        // The handlers return their decision as the first result.
+        let (blocked, reason, terminate, input) = if let Some(first_result) = outcome.results.first() {
+            let blocked = first_result
+                .get("block")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let reason = first_result
+                .get("reason")
+                .and_then(|v| v.as_str().map(String::from));
+            let terminate = first_result
+                .get("terminate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let input = first_result.get("input").cloned();
+            (blocked, reason, terminate, input)
+        } else {
+            (false, None, false, None)
+        };
+
+        // Also check the patched event for updated input
+        let patched_input = outcome
+            .event
+            .as_ref()
+            .and_then(|e| e.get("input"))
+            .cloned();
+
+        ToolCallDispatchOutcome {
+            blocked,
+            reason,
+            terminate,
+            input: input.or(patched_input).unwrap_or(call.arguments.clone()),
+        }
+    }
+
+    /// Dispatch a `tool_result` event and return the after-tool-call patch.
+    ///
+    /// This method wraps `dispatch_event` for the `tool_result` event, providing
+    /// a typed return value for the agent loop's `AfterToolCall` hook.
+    pub async fn dispatch_tool_result(
+        &self,
+        call: &pi_protocol::ToolCall,
+        result: &pi_protocol::ToolResult,
+    ) -> Option<ToolResultDispatchPatch> {
+        use pi_protocol::Content;
+
+        let content_vec = vec![(*result.content).clone()];
+        let event = ExtensionEvent::ToolResult {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            input: call.arguments.clone(),
+            content: content_vec,
+            is_error: result.is_error,
+            details: result.details.clone(),
+        };
+
+        let Some(outcome) = self.dispatch_event(&event).await else {
+            return None;
+        };
+
+        // Parse the dispatch outcome into our typed patch.
+        // The handlers return their decision as the first result.
+        let (content, is_error, details) = if let Some(first_result) = outcome.results.first() {
+            let content = first_result.get("content").map(|v| {
+                serde_json::from_value(v.clone()).unwrap_or_else(|_| {
+                    vec![Content::Text(pi_protocol::TextContent::default())]
+                })
+            });
+            let is_error = first_result.get("isError").and_then(|v| v.as_bool());
+            let details = first_result.get("details").cloned();
+            (content, is_error, details)
+        } else {
+            // Fall back to the patched event
+            let event_patch = outcome.event.as_ref();
+            let content = event_patch.and_then(|e| e.get("content")).map(|v| {
+                serde_json::from_value(v.clone()).unwrap_or_else(|_| {
+                    vec![Content::Text(pi_protocol::TextContent::default())]
+                })
+            });
+            let is_error = event_patch.and_then(|e| e.get("isError")).and_then(|v| v.as_bool());
+            let details = event_patch.and_then(|e| e.get("details")).cloned();
+            (content, is_error, details)
+        };
+
+        if content.is_none() && is_error.is_none() && details.is_none() {
+            return None;
+        }
+
+        Some(ToolResultDispatchPatch {
+            content,
+            is_error,
+            details,
+        })
     }
 }
 
