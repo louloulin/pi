@@ -56,6 +56,12 @@
    判断抓到的前缀"像不像粘贴"（含空白或 ≥16 字符），否则放弃缓冲。本端口在
    `consecutive >= PASTE_BURST_MIN_CHARS` 时直接开始缓冲：前缀最多 2 个字符，
    不存在 codex 要避免的"先画出来再收回去"的抖动，反而少一条会**放弃粘贴识别**的分支。
+3. **Windows AltGr 字符不算 burst 字符**。codex 的 `on_plain_char` 注释明确把
+   "plain, Shift, or Windows AltGr" 都当文本；本端口 `App::burst_plain_char`
+   （`app.rs:3328`）只要带了 Control / Alt / Meta 就判为和弦，因此 AltGr 打出的字符
+   会**结束**当前突发（flush 后按普通键入插入），而不会成为突发的一部分。
+   代价：含 AltGr 字符的粘贴可能被切成两段；收益：不会把 `Ctrl+Alt+…` 热键吞进粘贴。
+   两种情况下都不丢字符。
 
 ## 2. 本轮落地（文件:行号）
 
