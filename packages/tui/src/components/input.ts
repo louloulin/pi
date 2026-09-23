@@ -97,13 +97,7 @@ export class Input implements Component, Focusable {
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
-	private lastAction: "kill" | "yank" | "type-word" | "burst" | null = null;
-
-	// Paste burst detection - classify rapid chars as paste vs human typing
-	private lastCharTime: number = 0;
-	private burstBuffer: string = "";
-	private readonly pasteBurstThresholdMs: number = 12; // chars arriving <12ms apart = paste burst
-	private readonly pasteBurstMaxGap: number = 15; // max gap between chars to continue burst
+	private lastAction: "kill" | "yank" | "type-word" | null = null;
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
@@ -183,8 +177,6 @@ export class Input implements Component, Focusable {
 
 		// Submit
 		if (kb.matches(data, "tui.input.submit") || data === "\n") {
-			// Flush any pending burst before submit
-			if (this.burstBuffer.length > 0) this.flushBurst();
 			if (this.onSubmit) this.onSubmit(this.value);
 			return;
 		}
@@ -258,16 +250,12 @@ export class Input implements Component, Focusable {
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
-			// Flush burst before cursor movement
-			if (this.burstBuffer.length > 0) this.flushBurst();
 			this.lastAction = null;
 			this.moveToVisualLineStart(this.lastRenderWidth);
 			return;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
-			// Flush burst before cursor movement
-			if (this.burstBuffer.length > 0) this.flushBurst();
 			this.lastAction = null;
 			this.moveToVisualLineEnd(this.lastRenderWidth);
 			return;
@@ -362,68 +350,22 @@ export class Input implements Component, Focusable {
 	}
 
 	private insertCharacter(char: string): void {
-		const now = performance.now();
-		const timeSinceLast = now - this.lastCharTime;
-		this.lastCharTime = now;
-
-		// Paste burst detection: rapid characters indicate a paste
-		// Flush any ongoing burst if gap is too large
-		if (this.burstBuffer.length > 0 && timeSinceLast > this.pasteBurstMaxGap) {
-			this.flushBurst();
-		}
-
-		// Classify as burst if arriving quickly
-		const isBurstChar = timeSinceLast < this.pasteBurstThresholdMs;
-
-		if (isBurstChar && this.burstBuffer.length === 0) {
-			// First char of potential burst - save undo state
+		// For word-boundary undo coalescing, we need to push undo state BEFORE
+		// inserting whitespace. This ensures the undo state includes the word.
+		const isWhitespace = isWhitespaceChar(char);
+		if (isWhitespace) {
 			this.pushUndo();
 		}
 
-		if (isBurstChar || this.burstBuffer.length > 0) {
-			// Add to burst buffer
-			this.burstBuffer += char;
-			this.lastAction = "burst";
-		} else {
-			// Normal typing - flush any pending burst first
-			if (this.burstBuffer.length > 0) {
-				this.flushBurst();
-			}
-
-			// Undo coalescing: consecutive word chars coalesce into one undo unit
-			if (isWhitespaceChar(char) || this.lastAction !== "type-word") {
-				this.pushUndo();
-			}
-			this.lastAction = "type-word";
-
-			this.value = this.value.slice(0, this.cursor) + char + this.value.slice(this.cursor);
-			this.cursor += char.length;
-
-			// Invalidate visual layout cache
-			this.cachedLayout = null;
-			// Reset preferred column on edit
-			this.preferredVisualCol = null;
-			this.cursorAtWrapEnd = false;
+		// Undo coalescing: consecutive word chars coalesce into one undo unit
+		// A new word starts if: previous action wasn't "type-word"
+		if (!isWhitespace && this.lastAction !== "type-word") {
+			this.pushUndo();
 		}
-	}
+		this.lastAction = "type-word";
 
-	/**
-	 * Flush accumulated burst buffer as a single paste operation.
-	 */
-	private flushBurst(): void {
-		if (this.burstBuffer.length === 0) return;
-
-		const burstText = this.burstBuffer;
-		this.burstBuffer = "";
-
-		// Insert the burst as a single undo unit
-		// Clean newlines and tabs from pasted text
-		const cleanText = burstText.replace(/\r?\n/g, "").replace(/\t/g, "    ");
-		if (cleanText.length > 0) {
-			this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
-			this.cursor += cleanText.length;
-		}
-		this.lastAction = "burst";
+		this.value = this.value.slice(0, this.cursor) + char + this.value.slice(this.cursor);
+		this.cursor += char.length;
 
 		// Invalidate visual layout cache
 		this.cachedLayout = null;
@@ -433,8 +375,6 @@ export class Input implements Component, Focusable {
 	}
 
 	private handleBackspace(): void {
-		// Flush any pending burst before editing
-		if (this.burstBuffer.length > 0) this.flushBurst();
 		this.lastAction = null;
 		if (this.cursor > 0) {
 			this.pushUndo();
