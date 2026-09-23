@@ -312,11 +312,11 @@ PI_HYPERLINKS=0（= 关）：      4;3H faux-model  (faux)   4;21H hello
 
 * **自做（1 件）**：ConPTY 后端 + `translate_event` 修复 + 9 条回归 + 3 张真机截图 + 本文件。
 * **新立 3 条，全部 `backlog`（入库不启动，避免超上限）**：
-  1. Windows 键位通路：`Ctrl+J` → `Ctrl+Enter`（`\n` 探针证据 + 推荐修法：`cfg!(windows)` 下把
+  1. **LUM-1477**（指派 `编程助手-window`，验收需用 `scripts/pty_capture_win.py` 复跑）— Windows 键位通路：`Ctrl+J` → `Ctrl+Enter`（`\n` 探针证据 + 推荐修法：`cfg!(windows)` 下把
      `ctrl+enter` 作为 `tui.input.newLine` 的别名，并在 Unix 侧加「不得凭空新增 `ctrl+enter` 语义」的断言）。
-  2. hyperlink 开启时助手行掉格（跨平台 markdown 语义 + ConPTY 格丢失两件事分开验收；
+  2. **LUM-1478**（指派 `编程助手-devbox1`，可在 Linux 用 `PI_HYPERLINKS=1` 交叉复现）— hyperlink 开启时助手行掉格（跨平台 markdown 语义 + ConPTY 格丢失两件事分开验收；
      建议先修平台无关那条：模型名不应该是一个指向 provider id 的 markdown 链接）。
-  3. `app.tree.editLabel` 与 tree label 全链路（`pi-protocol` + `pi-session` + `pi-coding-agent` + `pi-tui`）。
+  3. **LUM-1479**（指派 `编程助手-devbox2`）— `app.tree.editLabel` 与 tree label 全链路（`pi-protocol` + `pi-session` + `pi-coding-agent` + `pi-tui`）。
 * **并发数**：自做 1 + 在办/待办（LUM-1434 CLI flag、LUM-1448 已并入收尾、LUM-1453 backlog）= 上限内，
   本轮不新起 run。
 
