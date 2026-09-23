@@ -8,13 +8,13 @@ Based on real code analysis of the pi repository (TypeScript) and pi-rust (Rust)
 
 | Component | TypeScript (pi) | Rust (pi-rust) | Gap |
 |-----------|----------------|----------------|-----|
-| **Input (single-line)** | `packages/tui/src/components/input.ts` (720 lines) | N/A (Input is pi-ts specific) | Single-line input only |
+| **Input (single-line)** | `packages/tui/src/components/input.ts` (960 lines) | N/A (Input is pi-ts specific) | Single-line input only |
 | **Editor (multi-line)** | `packages/tui/src/components/editor.ts` (2461 lines) | `pi-rust/crates/pi-tui/src/editor.rs` (4501 lines) | Rust > TS |
-| **Input visual layout** | `computeVisualLayout()` (basic) | `visual_layout()` (advanced) | **Gap: 40%** |
-| **Sticky column** | `preferredVisualCol` (basic) | `preferred_visual_col` (advanced) | **Gap: 30%** |
-| **Vertical movement** | Missing in Input | `move_vertical()` | **Gap: 100%** |
-| **Wrap end affinity** | Not implemented | `cursor_at_wrap_end` | **Gap: 100%** |
-| **Visual line navigation** | Missing in Input | `move_to_visual_line_start/end` | **Gap: 100%** |
+| **Input visual layout** | `computeVisualLayout()` (advanced) | `visual_layout()` (advanced) | **Gap: 20%** |
+| **Sticky column** | `preferredVisualCol` (full) | `preferred_visual_col` (full) | **Gap: 0%** ✅ |
+| **Vertical movement** | `moveVertical()` ✅ | `move_vertical()` | **Gap: 0%** ✅ |
+| **Wrap end affinity** | `cursorAtWrapEnd` ✅ | `cursor_at_wrap_end` | **Gap: 0%** ✅ |
+| **Visual line navigation** | `moveToVisualLineStart/End()` ✅ | `move_to_visual_line_start/end` | **Gap: 0%** ✅ |
 
 ## Real Gap Analysis
 
@@ -24,13 +24,17 @@ Based on real code analysis of the pi repository (TypeScript) and pi-rust (Rust)
 - Single-line text input with horizontal scrolling
 - Has `preferredVisualCol` for sticky column preservation
 - Has `computeVisualLayout()` method for visual position tracking
-- Has jump mode support (recently added in LUM-1608)
+- Has jump mode support (LUM-1608)
+- **Has vertical movement** - `moveVertical()` for row-by-row navigation (LUM-1629)
+- **Has wrap end affinity** - `cursorAtWrapEnd` tracking (LUM-1629)
+- **Has visual line navigation** - `moveToVisualLineStart/End()` (LUM-1629)
 
-**Missing Features (vs Martty):**
-1. **No vertical movement** - Single-line only, no `moveVertical()` method
-2. **No visual row tracking** - `computeVisualLayout()` is basic
-3. **No wrap end affinity** - Missing `cursor_at_wrap_end`
-4. **No visual line start/end navigation** - Missing `move_to_visual_line_start/end`
+**Implemented Features (LUM-1629):**
+1. ✅ **Vertical movement** - `moveVertical()` method with sticky column preservation
+2. ✅ **Wrap end affinity** - `cursorAtWrapEnd` tracking for soft wrap boundaries
+3. ✅ **Visual line navigation** - `moveToVisualLineStart()` and `moveToVisualLineEnd()`
+4. ✅ **Visual candidates** - `computeVisualCandidates()` for cursor positioning
+5. ✅ **Wrap end position** - `getWrapEndPosition()` for affinity calculations
 
 **Comparison with Martty:**
 ```rust
@@ -85,28 +89,28 @@ Based on actual code analysis:
 
 | Feature | TypeScript | Rust | Gap |
 |---------|-----------|------|-----|
-| Input visual layout | 60% | 100% | **40%** |
-| Sticky column (Input) | 50% | 100% | **50%** |
-| Vertical movement | 0% (single-line) | 100% | **100%** |
-| Wrap end affinity | 0% | 100% | **100%** |
-| Visual line nav | 0% (Input only) | 100% | **100%** |
+| Input visual layout | 80% | 100% | **20%** |
+| Sticky column (Input) | 100% | 100% | **0%** ✅ |
+| Vertical movement | 100% | 100% | **0%** ✅ |
+| Wrap end affinity | 100% | 100% | **0%** ✅ |
+| Visual line nav | 100% | 100% | **0%** ✅ |
 
 ## Recommendations
 
-### Priority 1: Fix TypeScript Input
-The Input component needs:
-1. Add `moveVertical()` method for row-by-row navigation
-2. Add wrap end affinity tracking
-3. Add visual line start/end navigation
+### Priority 1: Fix TypeScript Input ✅ COMPLETED (LUM-1629)
+The Input component now has:
+1. ✅ `moveVertical()` method for row-by-row navigation
+2. ✅ Wrap end affinity tracking (`cursorAtWrapEnd`)
+3. ✅ Visual line start/end navigation (`moveToVisualLineStart/End`)
 
 ### Priority 2: TUI Layout Improvements
 - Fix horizontal scrolling centering
 - Improve cursor positioning during scrolling
 - Add smooth scroll behavior
 
-### Priority 3: Match Martty Features
-- Implement `cursor_at_wrap_end` in Input
-- Implement `move_to_visual_line_start/end`
+### Priority 3: Match Martty Features ✅ COMPLETED (LUM-1629)
+- ✅ Implemented `cursor_at_wrap_end` in Input
+- ✅ Implemented `move_to_visual_line_start/end`
 
 ## Actual Completion Percentage
 
@@ -114,25 +118,30 @@ The Input component needs:
 |--------|------------|
 | Layout System (VStack/HStack/ScrollView) | 95% |
 | Editor multi-line | 85% |
-| Input single-line | 60% |
-| Visual rows (Input) | 0% |
-| Wrap affinity | 0% |
-| **Overall TUI** | **~75%** |
+| Input single-line | 80% |
+| Visual rows (Input) | 100% ✅ |
+| Wrap affinity | 100% ✅ |
+| **Overall TUI** | **~85%** |
 
 ## Rust vs TypeScript Gap Summary
 
-**Rust pi-tui** is ahead of **TypeScript pi** in:
-- Visual layout system (fully implemented)
-- Vertical movement
-- Wrap end affinity
-- Multi-line navigation
+**Rust pi-tui** and **TypeScript pi** are now mostly equivalent in:
+- Visual layout system (both fully implemented)
+- Vertical movement ✅ (TS implemented in LUM-1629)
+- Wrap end affinity ✅ (TS implemented in LUM-1629)
+- Multi-line navigation ✅ (TS implemented in LUM-1629)
 
 **TypeScript pi** has:
-- Working single-line Input
+- Working single-line Input with vertical movement
 - Multi-line Editor
-- Basic visual layout tracking
+- Full visual layout tracking
+- Sticky column support
 
-**Gap**: TypeScript TUI is approximately **75% complete** compared to what pi-rust has implemented.
+**Gap**: TypeScript TUI is approximately **85% complete** compared to what pi-rust has implemented.
+
+---
+
+*Updated by 编程助手devbox - LUM-1629: Vertical movement and visual line navigation implemented*
 
 ---
 
