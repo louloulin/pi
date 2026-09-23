@@ -485,6 +485,16 @@ async fn run_loop(
     // `--resume <id>` seeds the stored session's `/name` so the status bar
     // and `/session` show it before the first command runs.
     app.set_session_name(options.session_name.clone());
+    // LUM-1466 — upstream's footer is two rows: `pwd (branch) • name` above
+    // the stats row (`components/footer.ts:119-127,230-231`). Only the driver
+    // knows the process cwd and the repository it sits in, so it hands both
+    // to the App. A session outside a repo — or on a detached HEAD — still
+    // gets the `pwd` row, just without the `(branch)` suffix, which is
+    // upstream's own `getGitBranch()` contract.
+    if let Ok(cwd) = std::env::current_dir() {
+        app.set_status_git_branch(crate::footer::git_branch(&cwd));
+        app.set_status_cwd(Some(cwd.display().to_string()));
+    }
     // Wire the existing rich tool renderers (`tools/render.rs`) into the
     // interactive transcript. The App cannot name that type (no
     // `pi-tui` → `pi-coding-agent` dependency), so the driver installs the

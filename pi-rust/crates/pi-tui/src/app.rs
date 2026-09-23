@@ -509,13 +509,12 @@ const SELECTION_AUTOSCROLL_LINES: usize = 1;
 const MIN_TRANSCRIPT_ROWS: u16 = 3;
 
 /// Rows below the message view that are never an extension region's to take:
-/// the composer and the status bar. Mirrors the reservation in
-/// [`crate::extension_ui::plan_chrome`].
+/// the composer and the (LUM-1466: one- or two-row) status bar. Mirrors the
+/// reservation in [`crate::extension_ui::plan_chrome`].
 const RESERVED_CHROME_ROWS: u16 = 2;
 
 /// Rows the expanded startup header must leave for the rest of the frame.
 const HEADER_RESERVED_ROWS: u16 = MIN_TRANSCRIPT_ROWS + RESERVED_CHROME_ROWS;
-
 /// Columns the chat-log scrollbar occupies at the right edge of the frame when
 /// it is drawn.
 const SCROLLBAR_COLUMNS: u16 = 1;
@@ -1749,7 +1748,30 @@ impl App {
         if frame.header.is_empty() {
             frame.header = self.builtin_header_lines(total_height);
         }
+        // The status region is the one chrome region whose height is data
+        // driven: a host that supplied a working directory gets upstream's
+        // two-row footer (`pwd` row + stats row), a host that did not keeps
+        // the single stats row (`docs/LUM1466_TWO_LINE_FOOTER.md`).
+        frame.status = self.status_bar.line_count(&self.status_for_render());
         frame
+    }
+
+    /// [`HEADER_RESERVED_ROWS`], adjusted for a footer that draws a location
+    /// row (LUM-1466).
+    ///
+    /// The startup header folds when it cannot leave the composer, the status
+    /// region and [`MIN_TRANSCRIPT_ROWS`] transcript rows behind. The status
+    /// region is one row for a host with no working directory and two for the
+    /// interactive driver, so the fold decision has to read the live count —
+    /// otherwise a 24-row terminal would keep the hint list one row too long
+    /// and `plan_chrome` would truncate the header's tail anyway, which is the
+    /// silently-cut frame LUM-1266 removed.
+    fn header_reserved_rows(&self) -> u16 {
+        HEADER_RESERVED_ROWS
+            + self
+                .status_bar
+                .line_count(&self.status_for_render())
+                .saturating_sub(1)
     }
 
     /// The built-in startup header: title, key hints, onboarding line.
@@ -1776,7 +1798,7 @@ impl App {
             return lines;
         }
         let expanded_rows = lines.len() as u16 + u16::try_from(hints.len()).unwrap_or(u16::MAX);
-        if expanded_rows.saturating_add(HEADER_RESERVED_ROWS) <= total_height {
+        if expanded_rows.saturating_add(self.header_reserved_rows()) <= total_height {
             lines.extend(hints);
             return lines;
         }
@@ -1787,7 +1809,7 @@ impl App {
             .label(|id| kb.get_keys(id))
             .map(|keys| crate::locale::header_folded_line(self.config.locale, &keys));
         let folded_rows = lines.len() as u16 + u16::from(folded.is_some());
-        if folded_rows.saturating_add(HEADER_RESERVED_ROWS) <= total_height {
+        if folded_rows.saturating_add(self.header_reserved_rows()) <= total_height {
             if let Some(text) = folded {
                 lines.push(vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Dim))]);
             }
@@ -2016,6 +2038,24 @@ impl App {
     /// status bar falls back to the session identifier.
     pub fn set_session_name(&mut self, name: Option<String>) {
         self.status_data.session_name = name;
+    }
+
+    /// Set the working directory the footer's location row shows.
+    ///
+    /// The driver owns this: `pi-tui` cannot reach the process cwd on behalf
+    /// of a host, and a host that never calls this keeps the one-row footer
+    /// (the pre-LUM-1466 geometry). [`AppConfig`] is not touched, so no
+    /// existing `AppConfig` literal changes shape.
+    pub fn set_status_cwd(&mut self, cwd: Option<String>) {
+        self.status_data.cwd = cwd;
+    }
+
+    /// Set the git branch joined onto the footer's location row.
+    ///
+    /// `None` is both "not a repo" and "detached HEAD", matching upstream's
+    /// `FooterDataProvider::getGitBranch` (`core/footer-data-provider.ts:126`).
+    pub fn set_status_git_branch(&mut self, branch: Option<String>) {
+        self.status_data.git_branch = branch;
     }
 
     /// The last transient status message pushed by [`App::flash_status`], if
