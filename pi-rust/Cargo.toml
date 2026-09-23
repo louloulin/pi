@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/louloulin/pi.git"
 description = "Rust rewrite of the Pi coding agent harness with WASM plugin compatibility"
@@ -128,6 +128,7 @@ which = "6.0"
 # vendor a copy carrying the upstream fix verbatim.
 [patch.crates-io]
 rquickjs-core = { path = "vendor/rquickjs-core" }
+cpufeatures = { path = "vendor/cpufeatures" }
 
 # Shared `[profile.release]` overrides for WASM builds — apply the
 # size-minimisation recipe from the Stage 6 plan to any wasm build done

@@ -35,6 +35,51 @@ use serde::{Deserialize, Serialize};
 
 use crate::editor::HISTORY_LIMIT;
 
+/// Default limit for history file entries.
+pub const DEFAULT_HISTORY_FILE_LIMIT: usize = HISTORY_LIMIT;
+
+/// Cross-session composer history manager.
+///
+/// Wraps the file-based history operations into a simple interface.
+#[derive(Debug)]
+pub struct HistoryStore {
+    path: PathBuf,
+    limit: usize,
+}
+
+impl HistoryStore {
+    /// Create a new history store for the given path using the default limit.
+    pub fn new(path: &Path) -> Self {
+        Self::with_limit(path, DEFAULT_HISTORY_FILE_LIMIT)
+    }
+
+    /// Create a new history store with a custom limit.
+    pub fn with_limit(path: &Path, limit: usize) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            limit,
+        }
+    }
+
+    /// Returns the path to the history file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the limit on the number of history entries.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Clear all history entries by deleting the file.
+    pub fn clear(&self) -> std::io::Result<()> {
+        if self.path.exists() {
+            std::fs::remove_file(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
 /// Longest single record read from the file.
 ///
 /// A pathological row (a pasted megabyte) is skipped rather than allowed to

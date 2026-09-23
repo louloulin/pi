@@ -351,11 +351,19 @@ pub enum ThemeColor {
     ThinkingMax,
     /// Bash mode border.
     BashMode,
+    /// Brand/accent color for highlighted elements (falls back to Accent).
+    Brand,
+    /// Hint/secondary muted text (falls back to Muted).
+    Hint,
+    /// Secondary foreground color (falls back to Dim).
+    FgSecondary,
+    /// Caption/metadata text (falls back to Muted).
+    Caption,
 }
 
 impl ThemeColor {
     /// Every foreground slot, in upstream declaration order.
-    pub const ALL: [ThemeColor; 49] = [
+    pub const ALL: [ThemeColor; 53] = [
         ThemeColor::Accent,
         ThemeColor::Border,
         ThemeColor::BorderAccent,
@@ -405,6 +413,10 @@ impl ThemeColor {
         ThemeColor::ThinkingXhigh,
         ThemeColor::ThinkingMax,
         ThemeColor::BashMode,
+        ThemeColor::Brand,
+        ThemeColor::Hint,
+        ThemeColor::FgSecondary,
+        ThemeColor::Caption,
     ];
 
     /// The JSON key used for this slot.
@@ -459,6 +471,10 @@ impl ThemeColor {
             ThemeColor::ThinkingXhigh => "thinkingXhigh",
             ThemeColor::ThinkingMax => "thinkingMax",
             ThemeColor::BashMode => "bashMode",
+            ThemeColor::Brand => "brand",
+            ThemeColor::Hint => "hint",
+            ThemeColor::FgSecondary => "fgSecondary",
+            ThemeColor::Caption => "caption",
         }
     }
 
@@ -469,6 +485,10 @@ impl ThemeColor {
             ThemeColor::ScrollbarThumb => Some(ThemeColor::Text),
             ThemeColor::SearchMatchText => Some(ThemeColor::Text),
             ThemeColor::ThinkingMax => Some(ThemeColor::ThinkingXhigh),
+            ThemeColor::Brand => Some(ThemeColor::Accent),
+            ThemeColor::Hint => Some(ThemeColor::Muted),
+            ThemeColor::FgSecondary => Some(ThemeColor::Dim),
+            ThemeColor::Caption => Some(ThemeColor::Muted),
             _ => None,
         }
     }
@@ -507,11 +527,13 @@ pub enum ThemeBg {
     ToolSuccessBg,
     /// Background of a failed tool call.
     ToolErrorBg,
+    /// Panel/popup background (falls back to SelectedBg).
+    Panel,
 }
 
 impl ThemeBg {
     /// Every background slot, in upstream declaration order.
-    pub const ALL: [ThemeBg; 7] = [
+    pub const ALL: [ThemeBg; 8] = [
         ThemeBg::SelectedBg,
         ThemeBg::SearchMatchBg,
         ThemeBg::UserMessageBg,
@@ -519,6 +541,7 @@ impl ThemeBg {
         ThemeBg::ToolPendingBg,
         ThemeBg::ToolSuccessBg,
         ThemeBg::ToolErrorBg,
+        ThemeBg::Panel,
     ];
 
     /// The JSON key used for this slot.
@@ -531,6 +554,7 @@ impl ThemeBg {
             ThemeBg::ToolPendingBg => "toolPendingBg",
             ThemeBg::ToolSuccessBg => "toolSuccessBg",
             ThemeBg::ToolErrorBg => "toolErrorBg",
+            ThemeBg::Panel => "panel",
         }
     }
 
@@ -538,6 +562,7 @@ impl ThemeBg {
     pub fn fallback(self) -> Option<ThemeBg> {
         match self {
             ThemeBg::SearchMatchBg => Some(ThemeBg::SelectedBg),
+            ThemeBg::Panel => Some(ThemeBg::SelectedBg),
             _ => None,
         }
     }

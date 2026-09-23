@@ -10,13 +10,12 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
     widgets::Widget,
 };
 
-use crate::theme::Theme;
-use crate::width::char_columns;
+use crate::styled::SpanStyle;
+use crate::theme::{Theme, ThemeBg, ThemeColor};
+use crate::width::columns;
 
 /// Number of menu items shown at once.
 const SLASH_MENU_ROWS: usize = 12;
@@ -208,7 +207,7 @@ impl SlashMenu {
 fn name_column_width(entries: &[SlashMenuEntry]) -> usize {
     entries
         .iter()
-        .map(|e| char_columns(&e.usage))
+        .map(|e| columns(&e.usage))
         .max()
         .unwrap_or(14)
         .clamp(14, 26) as usize
@@ -229,7 +228,7 @@ impl<'a> SlashMenuWidget<'a> {
 }
 
 impl<'a> Widget for SlashMenuWidget<'a> {
-    fn render(self, buf: &mut Buffer) {
+    fn render(self, _area: Rect, buf: &mut Buffer) {
         if !self.menu.is_visible() || self.area.width == 0 || self.area.height == 0 {
             return;
         }
@@ -260,7 +259,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
         let menu_area = Rect::new(self.area.x + 2, y, w, h);
 
         // Clear the background
-        let bg_style = Style::default().bg(self.theme.panel);
+        let bg_style = SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::Panel).to_style(self.theme);
         for y in menu_area.y..(menu_area.y + menu_area.height) {
             for x in menu_area.x..(menu_area.x + menu_area.width) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
@@ -270,7 +269,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
         }
 
         // Draw border
-        let border_style = Style::default().fg(self.theme.border);
+        let border_style = SpanStyle::fg(ThemeColor::Border).to_style(self.theme);
         // Top border
         if let Some(cell) = buf.cell_mut((menu_area.x, menu_area.y)) {
             cell.set_char('┌').set_style(border_style);
@@ -313,7 +312,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
         } else {
             " commands "
         };
-        let title_style = Style::default().fg(self.theme.caption);
+        let title_style = SpanStyle::fg(ThemeColor::Caption).to_style(self.theme);
         for (i, ch) in title.char_indices() {
             if let Some(cell) = buf.cell_mut((menu_area.x + 2 + i as u16, menu_area.y)) {
                 cell.set_char(ch).set_style(title_style);
@@ -330,7 +329,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
                 _ => "↓",
             };
             let pos_text = format!(" {}/{} {} ", selected + 1, n, arrows);
-            let pos_style = Style::default().fg(self.theme.caption);
+            let pos_style = SpanStyle::fg(ThemeColor::Caption).to_style(self.theme);
             let pos_x = menu_area.x + menu_area.width.saturating_sub(pos_text.len() as u16 + 2);
             for (i, ch) in pos_text.char_indices() {
                 if let Some(cell) = buf.cell_mut((pos_x + i as u16, menu_area.y)) {
@@ -348,11 +347,9 @@ impl<'a> Widget for SlashMenuWidget<'a> {
             // Selection marker
             let marker = if is_selected { "▸ " } else { "  " };
             let marker_style = if is_selected {
-                Style::default()
-                    .fg(self.theme.brand)
-                    .add_modifier(Modifier::BOLD)
+                SpanStyle::fg(ThemeColor::Brand).bold().to_style(self.theme)
             } else {
-                Style::default().fg(self.theme.fg_secondary)
+                SpanStyle::fg(ThemeColor::FgSecondary).to_style(self.theme)
             };
             for (j, ch) in marker.char_indices() {
                 if let Some(cell) = buf.cell_mut((menu_area.x + 1 + j as u16, y)) {
@@ -362,13 +359,11 @@ impl<'a> Widget for SlashMenuWidget<'a> {
 
             // Name column
             let name_style = if is_selected {
-                Style::default()
-                    .fg(self.theme.brand)
-                    .add_modifier(Modifier::BOLD)
+                SpanStyle::fg(ThemeColor::Brand).bold().to_style(self.theme)
             } else if entry.is_skill {
-                Style::default().fg(self.theme.hint)
+                SpanStyle::fg(ThemeColor::Hint).to_style(self.theme)
             } else {
-                Style::default().fg(self.theme.fg_secondary)
+                SpanStyle::fg(ThemeColor::FgSecondary).to_style(self.theme)
             };
 
             let padded_name = pad_or_ellipsize(&entry.usage, name_w);
@@ -383,7 +378,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
 
             // Description column
             let desc_x = menu_area.x + 5 + name_w as u16;
-            let desc_style = Style::default().fg(self.theme.caption);
+            let desc_style = SpanStyle::fg(ThemeColor::Caption).to_style(self.theme);
             let desc_text = format!(" {}", entry.description);
             for (j, ch) in desc_text.char_indices() {
                 let x = desc_x + j as u16;
@@ -399,7 +394,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
 
 /// Pad `s` to exactly `w` display cells, ellipsizing when longer.
 fn pad_or_ellipsize(s: &str, w: usize) -> String {
-    let sw = char_columns(s);
+    let sw = columns(s);
     if sw <= w {
         return format!("{}{}", s, " ".repeat(w - sw));
     }
@@ -407,7 +402,7 @@ fn pad_or_ellipsize(s: &str, w: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in s.chars() {
-        let cw = crate::width::char_columns(&ch.to_string());
+        let cw = crate::width::char_columns(ch);
         if used + cw > w.saturating_sub(1) {
             break;
         }
@@ -415,16 +410,20 @@ fn pad_or_ellipsize(s: &str, w: usize) -> String {
         used += cw;
     }
     out.push('…');
-    let ow = char_columns(&out);
+    let ow = columns(&out);
     format!("{}{}", out, " ".repeat(w.saturating_sub(ow)))
 }
 
 /// The slash menu area rect for hit testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlashMenuHitBox {
+    /// Left edge.
     pub x: u16,
+    /// Top edge.
     pub y: u16,
+    /// Width in columns.
     pub width: u16,
+    /// Height in rows.
     pub height: u16,
 }
 
@@ -441,7 +440,7 @@ impl SlashMenu {
             return None;
         }
 
-        let (start, vis) = self.visible_range(editor_area.height as usize);
+        let vis = self.visible_range(editor_area.height as usize).1;
         if vis == 0 {
             return None;
         }
@@ -470,9 +469,6 @@ impl SlashMenu {
 
         // Account for border and title
         let row = y - hit_box.y - 1;
-        if row < 0 {
-            return None;
-        }
 
         let (start, vis) = self.visible_range(editor_area.height as usize);
         let entry_idx = start + row as usize;

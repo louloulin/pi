@@ -94,7 +94,7 @@ impl BeforeToolCall for ExtensionToolHooks {
         }
         let mut decision = BeforeToolCallDecision::allow();
         decision.terminate = outcome.terminate;
-        decision.input = outcome.input;
+        decision.input = Some(outcome.input);
         decision
     }
 }
