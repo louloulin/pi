@@ -27,6 +27,19 @@ pub fn agent_dir_or_default() -> PathBuf {
     agent_dir().unwrap_or_else(|| PathBuf::from(CONFIG_DIR_NAME).join("agent"))
 }
 
+/// The default session directory (`--session-dir`'s default): `~/.pi/sessions`,
+/// or `./.pi/sessions` when no home directory is known.
+///
+/// Shared by the CLI's default and the interactive exit hint, which appends
+/// `--session-dir` only when the session lives somewhere else
+/// (`format_resume_command`).
+pub fn default_session_dir() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CONFIG_DIR_NAME)
+        .join("sessions")
+}
+
 /// Collapse `.` / `..` components without touching the filesystem.
 pub fn normalize_lexically(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();

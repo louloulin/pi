@@ -663,6 +663,48 @@ pi-rust 本轮补齐，并保留「任何其它键先关掉它、再照常处理
 （本机无 `pty`），证明几何与内容，**不证明按键时序**；时序由 `tests/shortcut_overlay.rs` 的 11 条覆盖。
 本轮审计与缺口清单见 `docs/LUM1464_SHORTCUT_OVERLAY.md`。
 
+### 0.19 LUM-1455 复测：退出时会话保留（`fullscreenExitOutput` 从「静默忽略」到「真生效」）；加权仍 **86.9%**
+
+**量的是什么**：上游默认「退出后终端里留下整段 transcript + 一行 resume 提示」这条契约，pi-rust 有没有。
+基线取证（限定路径）：
+
+```bash
+$ git grep -n "To resume" b7d93acb5 -- pi-rust/crates | wc -l
+0
+$ git grep -n "fullscreenExitOutput" b7d93acb5 -- pi-rust/crates | wc -l
+0
+$ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
+0
+```
+
+对照上游三处：`interactive-mode.ts:790-812`（`transcript` 时切到 regular 渲染一次再退）、`:3988`（退出后无条件打印
+`chalk.dim("To resume this session:")`）、`core/settings-manager.ts:1259`（getter：只有 `"resume-hint"` 例外）。
+
+| 口径 | 本轮 | 上一快照（LUM-1464） |
+|---|---|---|
+| 纯代码规模（src↔src） | **92.4%**（141,478 / 153,106） | 92.0%（140,894 / 153,106） |
+| 测试规模（新口径） | **49.8%**（2,773 / 5,572） | 49.5%（2,755 / 5,563） |
+| `fullscreenExitOutput` 消费 | **是**（transcript / resume-hint 两模式 + `/settings` 行） | 否（`config.rs` 里 0 命中） |
+| 退出时会话保留 | **有**（默认 `transcript`，写回普通屏幕） | **0** |
+| `/settings` 行 | **7** | 6 |
+| `tui.*` / `app.*` 接线 | 49/49 · 43/44 | 49/49 · 43/44 |
+| 提示面硬编码 chord | 0 硬编码（5 条知会项） | 0 |
+| 扩展生命周期事件 | 36/36 | 36/36 |
+| 加权完成度 | **86.9%** | 86.9% |
+
+> **口径声明（诚实读法）**：§4.1 的 13 条轴里**没有「退出行为」这一格**，所以加权分一分没动——本轮不靠重估旧轴抬分，
+> 价值登记在两条**新的、可反证**的轴上（上表第 3、4 行）。另外 `app.*` 仍是 43/44：
+> LUM-1263（`app.tree.editLabel`）的提交只存在于本地分支 `work/LUM-1263`，`origin` 上没有它（`git ls-remote` 无对应分支）。
+
+**门禁**：`cargo fmt --all -- --check` exit 0；`cargo clippy -p pi-tui --all-targets -D warnings` 0 告警
+（`-p pi-coding-agent` 被既存 `pi-extensions/src/host.rs:3383 signal_name is never used` 挡在 `-D warnings` 前，本轮未碰该文件）；
+`cargo test -p pi-tui` **1096 / 0**（基线 1090/0 → +6）；`cargo test -p pi-coding-agent --lib` **593 / 8**
+（基线 584/8，8 条**逐条同名**，Windows 环境类）；四个扫描门禁全部 in sync。
+
+**证据分级**：3 张 `docs/screenshots/lum1455-exit-*.png`(+`.txt`) 是**真实退出输出字节**的 frame-buffer 渲染，
+证明终端收到什么，**不是 PTY 实拍**（本机无 `pty`），也不证明按键时序；行为契约由 14 条新单测覆盖。
+本轮审计与缺口清单见 `docs/LUM1455_EXIT_TRANSCRIPT.md`。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

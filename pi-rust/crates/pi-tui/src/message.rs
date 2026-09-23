@@ -1250,7 +1250,11 @@ impl MessageView {
     ) -> (usize, Vec<StyledLine>) {
         let lines = self.render_styled_lines_with_links(width, hyperlinks);
         let total = lines.len();
-        let skip = total.saturating_sub(height as usize + self.scroll_from_bottom);
+        // `scroll_to_top`'s sentinel is `usize::MAX`, so the sum has to saturate:
+        // without it a direct caller of this public API panics in a debug build
+        // (found by LUM-1455's transcript test, which pins the viewport to the
+        // head). A saturated skip is `0`, which is exactly "the first line".
+        let skip = total.saturating_sub((height as usize).saturating_add(self.scroll_from_bottom));
         let start = skip.min(total);
         let end = (start + height as usize).min(total);
         (start, lines[start..end].to_vec())
@@ -1798,6 +1802,30 @@ mod tests {
         view.push(MessageItem::assistant("b"));
         view.clear();
         assert!(view.is_empty());
+    }
+
+    /// `scroll_to_top` stores `usize::MAX`; the visible window must resolve that
+    /// sentinel to the head of the log instead of overflowing on the sum
+    /// (LUM-1455 — a direct caller of this public API used to panic in a debug
+    /// build).
+    #[test]
+    fn visible_lines_accept_the_scroll_to_top_sentinel() {
+        let mut view = MessageView::new();
+        for index in 0..40 {
+            view.push(MessageItem::tool(format!("tool {index}")));
+        }
+        view.scroll_to_top();
+        let total = view.line_count(40);
+        assert!(total > 10);
+
+        let (start, lines) = view.visible_lines(40, 10);
+        assert_eq!(start, 0, "the sentinel means the top of the log");
+        assert_eq!(lines.len(), 10);
+        assert!(
+            plain_text(&lines[0]).contains("tool 0"),
+            "{:?}",
+            plain_text(&lines[0])
+        );
     }
 
     #[test]

@@ -303,8 +303,8 @@ use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::{
-    buffer_row_text, plain_text, write_plain_row, write_styled_line, write_styled_line_ellipsized,
-    SpanStyle, StyledLine, StyledSpan,
+    buffer_row_text, plain_text, themed_text, write_plain_row, write_styled_line,
+    write_styled_line_ellipsized, SpanStyle, StyledLine, StyledSpan,
 };
 use crate::theme::{
     builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
@@ -5792,6 +5792,44 @@ impl App {
         // bar, which is where upstream refreshes it too (from `render`).
         let _ = self.refresh_search();
         self.render_to_buffer_impl(area, buf, true, self.messages.hyperlinks(), &frame, &layout);
+    }
+
+    /// The whole chat log rendered as themed ANSI lines — the flat transcript,
+    /// not the viewport.
+    ///
+    /// Upstream prints this *after* leaving the alternate screen when a
+    /// fullscreen session ends with `fullscreenExitOutput: "transcript"`
+    /// (the default): `stopInteractiveTui` switches the fullscreen TUI to the
+    /// regular renderer and renders once, so the session is left in the
+    /// terminal's own scrollback instead of vanishing with the alt screen
+    /// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:790-795`).
+    /// This port has no regular renderer, so the driver prints the same
+    /// document from the frame-buffer side: [`MessageView::render_styled_lines`]
+    /// is the single layout behind the screen *and* this dump, and each line is
+    /// themed with the live palette by [`crate::styled::themed_text`].
+    ///
+    /// Empty when there is nothing worth printing (a session quit before its
+    /// first line), so the driver writes nothing rather than a screen of
+    /// blank rows. Trailing whitespace is trimmed per line: the composer rows
+    /// are padded to the full width, and padding would paint the terminal's
+    /// background where the dump is supposed to stop.
+    ///
+    /// Scope note: this is the chat log, not the composer / status chrome. The
+    /// regular renderer upstream switches to is what paints the input dock, and
+    /// it does not exist here (see `docs/LUM1455_EXIT_TRANSCRIPT.md` §5).
+    pub fn transcript_text(&self, width: u16) -> String {
+        if width == 0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        for line in self.messages.render_styled_lines(width) {
+            out.push_str(themed_text(&line, &self.theme).trim_end());
+            out.push('\n');
+        }
+        if out.trim().is_empty() {
+            return String::new();
+        }
+        out
     }
 
     /// The message viewport a frame paints into, narrowed by the chat-log

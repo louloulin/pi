@@ -1,0 +1,3 @@
+FRAME DUMP cols=100 rows=1
+|[2mTo resume this session:[22m pi --resume lum1455-exit|
+END FRAME DUMP
