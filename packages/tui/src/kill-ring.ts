@@ -49,7 +49,7 @@ export class KillRing {
 		if (this.ring.length > 1) {
 			// Move the last element (newest) to the front.
 			// This makes the second-newest become the last element,
-		// so peek() returns the older entry next time.
+			// so peek() returns the older entry next time.
 			const last = this.ring.pop()!;
 			this.ring.unshift(last);
 		}

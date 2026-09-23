@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added vertical movement and visual line navigation to TypeScript Input component, matching Martty and pi-rust behavior (LUM-1629)
+- Added jump mode support (Ctrl+] / Ctrl+Alt+]) to TypeScript Input component (LUM-1608)
+
+### Fixed
+
+- Fixed Input component visual layout cache invalidation bug - `setValue()` now clears cached layout (LUM-1637)
+- Fixed Input component kill ring rotate direction for proper yank-pop cycling (LUM-1637)
+
+### Changed
+
+- Updated TUI ChatInput gap analysis with real code audit vs Martty (LUM-1634)
+
 ## [0.85.1] - 2026-09-05
 
 ### Added
