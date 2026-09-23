@@ -772,6 +772,23 @@ $ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
 证明终端收到什么，**不是 PTY 实拍**（本机无 `pty`），也不证明按键时序；行为契约由 14 条新单测覆盖。
 本轮审计与缺口清单见 `docs/LUM1455_EXIT_TRANSCRIPT.md`。
 
+#### 0.20.1 合并后复测（`feature/pi.rs` = LUM-1460 + LUM-1464 + LUM-1457 + LUM-1466 + 本轮）
+
+分支合并基：`origin/feature/pi.rs` = `c7a7b5878`；冲突 1 处（本文 §0.19 两节同名，**两节都留**，本轮顺延为 §0.20）。
+
+| 量 | 合并后实测 | 本轮自测（仅我的提交） | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **92.4%**（141,478 / 153,106） | 同 | 我的改动 +约 200 行 src |
+| 测试规模（新口径） | **50.2%**（2,800 / 5,572） | 49.8%（2,773 / 5,572） | 合并带入 LUM-1457/1466 的用例 |
+| `pi-tui` 全量 | **1,119 passed / 0 failed** | 1,096 / 0（基线 1,090/0 → +6） | +14（LUM-1466）+9（LUM-1457）+6（本轮） = 1,119 ✓ |
+| `pi-coding-agent --lib` | **597 / 8** | 593 / 8（基线 584/8） | 8 条与前两份基线**逐条同名**（Windows 环境类） |
+| 本轮新 frames target | **3 / 0** | 3 / 0 | `--test lum1455_exit_output_frames` |
+| `/settings` 行 | **7** | 7 | 合并后仍 7 行 |
+
+合并后 8 条 `--lib` 失败名单与基线逐字相同（`commands::export::…`、`export::session_file::…`、
+`extensions::js_loader::…`、`paths::absolute_paths_stay_absolute`、`resource_loader::…`、
+`tools::mod_ignore::…`、`trust::…` ×2）——即合并与新一轮改动都没有新增产品缺陷。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
