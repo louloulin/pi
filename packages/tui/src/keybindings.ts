@@ -8,6 +8,8 @@ export interface Keybindings {
 	// Editor navigation and editing
 	"tui.editor.cursorUp": true;
 	"tui.editor.cursorDown": true;
+	"tui.editor.cursorVisualLineStart": true;
+	"tui.editor.cursorVisualLineEnd": true;
 	"tui.editor.historyPrevious": true;
 	"tui.editor.historyNext": true;
 	"tui.editor.cursorLeft": true;
@@ -71,6 +73,14 @@ export type KeybindingsConfig = Record<string, KeyId | KeyId[] | undefined>;
 export const TUI_KEYBINDINGS = {
 	"tui.editor.cursorUp": { defaultKeys: "up", description: "Move cursor up" },
 	"tui.editor.cursorDown": { defaultKeys: "down", description: "Move cursor down" },
+	"tui.editor.cursorVisualLineStart": {
+		defaultKeys: [],
+		description: "Move to visual line start (for multi-line input)",
+	},
+	"tui.editor.cursorVisualLineEnd": {
+		defaultKeys: [],
+		description: "Move to visual line end (for multi-line input)",
+	},
 	"tui.editor.historyPrevious": {
 		defaultKeys: [],
 		description: "Select previous prompt history entry",

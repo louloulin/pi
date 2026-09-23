@@ -63,6 +63,11 @@ export class Input implements Component, Focusable {
 	// When moving up/down in multi-line, preserve the original display column.
 	private preferredVisualCol: number | null = null;
 
+	// Cursor affinity at soft-wrap line end (Martty-style).
+	// When true, the cursor visually stays at the end of the previous row
+	// rather than at the start of the next row.
+	private cursorAtWrapEnd: boolean = false;
+
 	// Cached visual layout for current width.
 	private cachedLayoutWidth: number = 0;
 	private cachedLayout: VisualLayoutResult | null = null;
@@ -627,6 +632,193 @@ export class Input implements Component, Focusable {
 	 */
 	resetPreferredVisualCol(): void {
 		this.preferredVisualCol = null;
+	}
+
+	/**
+	 * Forget the sticky display column used by repeated vertical motions.
+	 * Mirrors Martty's `reset_vertical_goal()` method.
+	 */
+	resetVerticalGoal(): void {
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
+	}
+
+	/**
+	 * All visual cursor position candidates for character boundaries.
+	 * Soft wraps contribute both the previous row's end and the next row's start.
+	 * Returns tuples of (charIndex, row, col, isWrapEnd).
+	 * Mirrors Martty's `visual_candidates()` method.
+	 */
+	private getVisualCandidates(
+		width: number,
+	): Array<{ charIndex: number; row: number; col: number; isWrapEnd: boolean }> {
+		const layout = this.computeVisualLayout(width);
+		const chars: string[] = [...this.value];
+		const candidates: Array<{ charIndex: number; row: number; col: number; isWrapEnd: boolean }> = [];
+
+		for (let index = 0; index < layout.carets.length; index++) {
+			const { row, col } = layout.carets[index]!;
+			candidates.push({ charIndex: index, row, col, isWrapEnd: false });
+
+			// Check for wrap-end affinity at soft-wrap boundaries
+			if (index > 0 && index <= chars.length) {
+				const wrapEnd = this.getWrapEndPosition(index, chars, layout.carets);
+				if (wrapEnd) {
+					candidates.push({ charIndex: index, row: wrapEnd.row, col: wrapEnd.col, isWrapEnd: true });
+				}
+			}
+		}
+
+		return candidates;
+	}
+
+	/**
+	 * Get the wrap-end position for a character boundary.
+	 * This is the visual position just after the previous character at a soft-wrap boundary.
+	 * Mirrors Martty's `wrap_end_position()` method.
+	 */
+	private getWrapEndPosition(
+		index: number,
+		chars: string[],
+		carets: VisualCaret[],
+	): { row: number; col: number } | null {
+		if (index === 0) return null;
+		const previousChar = chars[index - 1];
+		if (!previousChar || previousChar === "\n") return null;
+
+		const prevCaret = carets[index - 1];
+		const currentCaret = carets[index];
+
+		// Only provide wrap-end position if we're at a soft-wrap boundary
+		// (current row is different from previous row)
+		if (currentCaret.row > prevCaret.row) {
+			const charWidth = visibleWidth(previousChar);
+			return { row: prevCaret.row, col: prevCaret.col + charWidth };
+		}
+		return null;
+	}
+
+	/**
+	 * Get the current visual cursor position, respecting wrap-end affinity.
+	 * Mirrors Martty's `visual_cursor()` method.
+	 */
+	getVisualCursorPosition(width: number): VisualCaret {
+		const layout = this.computeVisualLayout(width);
+		const index = Math.min(this.cursor, layout.carets.length - 1);
+
+		// If cursor has wrap-end affinity and there's a valid wrap-end position
+		if (this.cursorAtWrapEnd) {
+			const chars: string[] = [...this.value];
+			const wrapEnd = this.getWrapEndPosition(index, chars, layout.carets);
+			if (wrapEnd) {
+				return { row: wrapEnd.row, col: wrapEnd.col };
+			}
+		}
+
+		return layout.carets[index]!;
+	}
+
+	/**
+	 * Move cursor by one visual row while preserving the original display column.
+	 * Mirrors Martty's `move_vertical()` method.
+	 * @param width - The available display width
+	 * @param direction - -1 for up, +1 for down
+	 */
+	moveVertical(width: number, direction: number): void {
+		width = Math.max(1, width);
+		const candidates = this.getVisualCandidates(width);
+		const layout = this.computeVisualLayout(width);
+
+		if (candidates.length === 0) return;
+
+		const currentPos = this.getVisualCursorPosition(width);
+		const goal = this.preferredVisualCol ?? currentPos.col;
+
+		// Determine target row
+		let targetRow: number | null = null;
+		if (direction < 0) {
+			if (currentPos.row > 0) {
+				targetRow = currentPos.row - 1;
+			}
+		} else if (direction > 0) {
+			if (currentPos.row + 1 < layout.rows) {
+				targetRow = currentPos.row + 1;
+			}
+		}
+
+		if (targetRow === null) return;
+
+		// Find the best candidate on the target row
+		let best: { charIndex: number; distance: number; isWrapEnd: boolean } | null = null;
+		for (const candidate of candidates) {
+			if (candidate.row !== targetRow) continue;
+
+			const distance = Math.abs(candidate.col - goal);
+			if (!best || distance < best.distance) {
+				best = { charIndex: candidate.charIndex, distance, isWrapEnd: candidate.isWrapEnd };
+			}
+		}
+
+		if (best) {
+			this.cursor = best.charIndex;
+			this.cursorAtWrapEnd = best.isWrapEnd;
+			// Set preferred column on first vertical move
+			if (this.preferredVisualCol === null) {
+				this.preferredVisualCol = goal;
+			}
+		}
+	}
+
+	/**
+	 * Move cursor to the beginning of the current rendered row.
+	 * Mirrors Martty's `move_to_visual_line_start()` method.
+	 */
+	moveToVisualLineStart(width: number): void {
+		width = Math.max(1, width);
+		const candidates = this.getVisualCandidates(width);
+		const currentPos = this.getVisualCursorPosition(width);
+
+		// Find the leftmost candidate on the current row
+		let best: { charIndex: number; col: number; isWrapEnd: boolean } | null = null;
+		for (const candidate of candidates) {
+			if (candidate.row !== currentPos.row) continue;
+			if (!best || candidate.col < best.col) {
+				best = { charIndex: candidate.charIndex, col: candidate.col, isWrapEnd: candidate.isWrapEnd };
+			}
+		}
+
+		if (best) {
+			this.cursor = best.charIndex;
+			this.cursorAtWrapEnd = best.isWrapEnd;
+			this.preferredVisualCol = null;
+		}
+	}
+
+	/**
+	 * Move cursor to the end of the current rendered row.
+	 * A soft-wrap boundary has two visual affinities; this moves to the
+	 * wrap-end position so the cursor remains at this row's end.
+	 * Mirrors Martty's `move_to_visual_line_end()` method.
+	 */
+	moveToVisualLineEnd(width: number): void {
+		width = Math.max(1, width);
+		const candidates = this.getVisualCandidates(width);
+		const currentPos = this.getVisualCursorPosition(width);
+
+		// Find the rightmost candidate on the current row
+		let best: { charIndex: number; col: number; isWrapEnd: boolean } | null = null;
+		for (const candidate of candidates) {
+			if (candidate.row !== currentPos.row) continue;
+			if (!best || candidate.col > best.col) {
+				best = { charIndex: candidate.charIndex, col: candidate.col, isWrapEnd: candidate.isWrapEnd };
+			}
+		}
+
+		if (best) {
+			this.cursor = best.charIndex;
+			this.cursorAtWrapEnd = best.isWrapEnd;
+			this.preferredVisualCol = null;
+		}
 	}
 
 	invalidate(): void {
