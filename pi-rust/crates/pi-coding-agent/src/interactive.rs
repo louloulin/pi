@@ -3855,7 +3855,7 @@ async fn run_slash_command(
                 Err(err) => app.info(format!("/clone: {err}")),
             }
         }
-        SlashCommand::Import { path } => {
+        SlashCommand::Import { path: _ } => {
             // Import and resume a session from a JSONL file.
             app.info("/import: session import not yet implemented in Rust port".to_string());
         }

@@ -6970,7 +6970,7 @@ impl App {
     ///
     /// The menu appears when the user types `/` in the editor and shows
     /// matching slash commands with descriptions. Mirrors Martty's slash menu UI.
-    fn paint_slash_menu(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
+    fn paint_slash_menu(&self, _message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
         if !self.slash_menu.is_visible() || editor_area.width == 0 {
             return;
         }
