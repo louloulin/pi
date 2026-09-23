@@ -15652,6 +15652,59 @@ Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.13）：本条 tip 上
 收编＝**LUM-1432**（扩展事件）已完成但停在 `work/LUM-1432`，本轮并入 `feature/pi.rs`（§三）。
 不派第四条：`docs/LUM1445_MODAL_POINTER.md` §8 的 2、3 条与在办线共享 `pi-coding-agent`。
 
+## LUM-1464 round — `?` 键假广告收口（footer 广告了 `? for help`，Rust 端口 0 个 `?` 处理点）→ codex/Martty 同构的快捷键速查面板；`pi-tui` 1090/0；零派发（槽位 3/3 已满）
+
+### 一、本轮交付
+
+* **根因（可复现）**：基线 `git grep -n "Char('?')" origin/feature/pi.rs -- pi-rust/crates` → **0 命中**；
+  而 `app.rs:1384` 从第一版起就把 `status_data.hint = Some("? for help")` 送进 footer。即真实 TUI 的空闲
+  footer 一直广告一个**不存在**的键——与 LUM-1240/LUM-1245 清掉的 `app.*` 死键位同类，只是它不在 registry 里，
+  所以三条既有扫描脚本（都只扫 id / `Ctrl+…` 字面量）全部漏掉。
+* **对照（第一手）**：codex `ChatComposer::handle_shortcut_overlay_key`
+  （`bottom_pane/chat_composer.rs:3154-3157`：空 composer + `?` + 非 paste burst → 多行 footer 列布局
+  `footer.rs::shortcut_overlay_lines`）；Martty `src/input/keymap.rs:97`（空输入 `Ctrl+K` → `ShowKeys`）。
+  两边都是「空输入 + 单键 = 键位速查」，且**任何其它键先关掉它再照常处理**（codex `reset_mode_after_activity`）。
+* **落地**（`pi-tui` 单模块，无新依赖）：`App::shortcut_overlay` + 3 个公开 API；
+  `step_key_at` 在 modal/settings 之后、全局 chord 之前插入 `?` 路由（打开 / `?`·`Esc` 关闭 / 其它键落穿）；
+  `hint_entries()` 把 header 的「已接线 + 已绑定」解析抽成 **header / /hotkeys / overlay 三处同源**的入口；
+  `shortcut_overlay_lines` 出标题 + 分隔线 + 一/两列（按本组最宽 chord 对齐、按**终端列**补白、超宽用 `…`）；
+  `paint_shortcut_overlay` 底部锚定、借用 transcript 行，**关闭后帧逐行复原**（有测试钉住）。
+* 新增 `tests/shortcut_overlay.rs`（11 条行为）+ `tests/lum1464_shortcut_overlay_frames.rs`（4 帧）。
+
+### 二、门禁与实测
+
+* `cargo fmt --all -- --check` 干净；`cargo clippy --offline -p pi-tui --all-targets` 0 warning。
+* `cargo test --offline -p pi-tui -j 4`：**1090 passed / 0 failed**，74 target
+  （基线 `c37d80742` = **1075/0** → **+15** = 11 行为 + 4 帧）。
+* `cargo test --offline -p pi-coding-agent -j 2 --no-fail-fast`：**826 passed / 28 failed**，33 target。
+  28 条全为 Windows 环境类（真 `bash`、绝对路径、`/tmp`、node fs、trust、扩展发现）；
+  唯一名字带 keybinding 的 `reload_rereads_keybindings_and_ui_settings_mid_session` 已用 `git stash`
+  在**未打补丁的基线**上重跑，**同样 FAILED** → 新增失败 **0**。
+  与 `?`/footer/帧相关的 5 个 target 全绿（`chatinput_chord_conflicts` / `keybindings` / `help_text_layout`
+  / `startup_header` / `extension_ui`）。
+* **反向验证**：把触发分支换成 `return StepOutcome::Idle`（不动其它行）→ 立刻 **5 条红**
+  （行为 3 + 帧 2），恢复后全绿。
+* 截图 4 张 `docs/screenshots/lum1464-hints-{idle,open-wide,open-narrow,closed}.png`(+`.txt`)。本机 Windows
+  无 `pty`，走 frame-buffer 通道：**证明几何与内容，不证明按键时序**（时序由 11 条 App 级用例覆盖）。
+
+### 三、Rust↔TS 口径复测
+
+* 纯代码规模 **92.0%**（140,894 → / 153,106，本轮 +279 行 src）；测试 **49.5%**（2,755 / 5,563，**换过口径**：
+  TS 分母由 5,309 改按 `it|test(` 前缀重数为 5,563，所以这 0.1pt 不可当成绩读）。
+* `app.*` 接线 **43/44 = 97.7%**（`app_action_coverage.py --check-consumed` → `43/43 in sync`）；
+  扩展事件 **36/36 声明 + 36/36 生产构造点**；TUI 模块 **36/42 = 85.7%**。
+* 加权完成度 **86.9%**（轴 5 = 模块率与接线率均值 91.7%，轴 12 = 49.5%）。**诚实读法**：`?` overlay
+  不落在任何「有没有这个能力」的轴上，本轮是**广告可信度**的修复，不是覆盖率 +1。
+
+### 四、槽位 / 派发
+
+**零派发**。开工时 board 实测 `in_progress` 已有 3 条：LUM-1263（tree 改名 UI，`编程助手-winpi`）、
+LUM-1461（composer `paste_burst`，`编程助手-winpi`）、LUM-1434（CLI flag 面，`编程助手-go`）——
+已达「最多 3 个任务同时运行」上限，且前两条与 `pi-tui` 同一文件面（本轮刻意不碰 `editor.rs` 的粘贴路径）。
+下一轮第一顺位已单子化在 `docs/LUM1464_SHORTCUT_OVERLAY.md` §5：**footer 改回上游的两行结构**
+（`pwd (git branch) • sessionName` + stats 行 + 扩展 `setStatus` 行），跨 `status` + `plan_chrome` +
+驱动接线，单独一轮更安全。
+
 ## LUM-1457 round — Windows 真 PTY 打通（`scripts/pty_capture_win.py`，ConPTY）→ 当场抓到并修掉「每次按键执行两遍」（`pi-tui` 1054/0）；加权 **86.8%**
 
 ### 一、本轮交付
@@ -15719,3 +15772,22 @@ Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.13）：本条 tip 上
 
 **加权 86.8%（86.81%）— 与上一轮同一小数**，原因写在 `RUST_TS_PARITY_METRICS.md` §0.17：
 这类平台通路缺陷正好落在那 13 轴测不到的缝里（第 1 轴在修复前后都是 100%）。
+
+### 六、合并后复测（`feature/pi.rs` = LUM-1460 + LUM-1464 + LUM-1466 + 本轮）
+
+合并基 `fc18cb09e`，4 处冲突全部两边保留（`app.rs` 的 `Option` 形状 + 粘贴注释、
+`interactive.rs` 的 `step_paste` 分支 + `let Some(..) else { continue }`、两份文档各追加一节）。
+合并期发现一处**跨轮集成缺陷**：LUM-1460 的 `tests/composer_paste.rs:573` 断言
+`App::translate_event(..) == InputEvent::Ignored`，与本轮签名变更编译期冲突，已按新签名改为
+`Some(InputEvent::Ignored)` 并注明原因。
+
+| 量 | 合并后 | 本轮分支自测 |
+|---|---|---|
+| `pi-tui` 全量 | **1,113 / 0** | 1,054 / 0 |
+| `pi-coding-agent --lib` | **588 / 8**（同名 8 条） | 584 / 8 |
+| 纯代码规模（src↔src） | **92.4%**（141,396 / 153,106） | 91.5% |
+| 测试规模 | **50.0%**（2,782 / 5,563） | 51.2%（2,720 / 5,309） |
+| 加权完成度 | **86.8%**（86.75%） | 86.8%（86.81%） |
+
+> 加权在合并前后都落在 86.8%，与本轮「平台通路缺陷不在 13 轴里」的判断一致：
+> 本轮真正涨的是**证据可信度**（Windows 首次可真 PTY 断言）与**一条 P0 缺陷的消失**。

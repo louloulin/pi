@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    self as ct_event, DisableMouseCapture, EnableMouseCapture, Event as CtEvent,
+    self as ct_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+    EnableMouseCapture, Event as CtEvent,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -484,6 +485,16 @@ async fn run_loop(
     // `--resume <id>` seeds the stored session's `/name` so the status bar
     // and `/session` show it before the first command runs.
     app.set_session_name(options.session_name.clone());
+    // LUM-1466 — upstream's footer is two rows: `pwd (branch) • name` above
+    // the stats row (`components/footer.ts:119-127,230-231`). Only the driver
+    // knows the process cwd and the repository it sits in, so it hands both
+    // to the App. A session outside a repo — or on a detached HEAD — still
+    // gets the `pwd` row, just without the `(branch)` suffix, which is
+    // upstream's own `getGitBranch()` contract.
+    if let Ok(cwd) = std::env::current_dir() {
+        app.set_status_git_branch(crate::footer::git_branch(&cwd));
+        app.set_status_cwd(Some(cwd.display().to_string()));
+    }
     // Wire the existing rich tool renderers (`tools/render.rs`) into the
     // interactive transcript. The App cannot name that type (no
     // `pi-tui` → `pi-coding-agent` dependency), so the driver installs the
@@ -699,6 +710,17 @@ async fn run_loop(
         // (see `drain_ready_events`).
         if ct_event::poll(config.event_poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
+                // Bracketed paste is not expressible as an `InputEvent` (that
+                // enum is `Copy` and the payload is owned), so the driver
+                // routes it straight to the composer. Without this branch the
+                // payload was translated to `Ignored` and the paste was
+                // dropped entirely; with bracketed paste disabled, the same
+                // bytes used to arrive as keystrokes and every newline in a
+                // pasted block submitted the draft.
+                if let CtEvent::Paste(text) = &event {
+                    app.step_paste(text);
+                    continue;
+                }
                 // `translate_event` drops Windows key *release* events, which
                 // carry no input but would otherwise replay every keystroke
                 // (see its doc comment).
@@ -4403,7 +4425,12 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     // own selection + copy-on-select (`:1343-1379`, `:1449-1462`), which the
     // App mirrors. Text selection by the terminal itself is therefore
     // unavailable, matching upstream.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     request_keyboard_enhancement(&mut stdout);
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -4454,6 +4481,7 @@ fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Res
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -4471,7 +4499,8 @@ fn resume_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Resu
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableMouseCapture
+        EnableMouseCapture,
+        EnableBracketedPaste
     )?;
     request_keyboard_enhancement(terminal.backend_mut());
     terminal.hide_cursor()?;
@@ -4490,7 +4519,7 @@ fn run_external_editor(
     app: &mut App,
     command: &str,
 ) {
-    let draft = app.editor_text();
+    let draft = app.expanded_editor_text();
     let suspended = suspend_tui(terminal);
     let result = if suspended.is_ok() {
         crate::external_editor::edit_in_external_editor(

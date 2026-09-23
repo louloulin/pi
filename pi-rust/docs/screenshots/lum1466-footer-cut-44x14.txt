@@ -1,0 +1,16 @@
+FRAME DUMP cols=44 rows=14
+|> where does the footer come from?          |
+|> Ready.                                    |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|> type a prompt — /help for commands        |
+|/srv/very/deep/inside/a/long/repository (fe…|
+|Faux  lum1466-footer  in 0 out 0 ?/8.2k…    |
+END FRAME DUMP

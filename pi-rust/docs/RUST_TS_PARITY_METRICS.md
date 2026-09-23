@@ -571,7 +571,99 @@ bash 忙提示与 `/settings` 描述），无丢失。
 差额来自 §0.15 自己就记过的**同一命令在不同轮次给出 ±51** 的口径差（它当时只在 2,670 上加增量，
 没有重估历史轴）。本轮同样**不重估** §0.14/§0.15 的旧值，只把合并后实测量登记在这里。
 
-### 0.17 LUM-1457 复测：Windows 真 PTY 打通 + 「每次按键执行两遍」修复；加权 **86.8%**（86.81%）
+### 0.17 LUM-1460 复测：抢救 LUM-1328/LUM-1318 的 composer 粘贴通道（`pi-rust/crates` 里此前 **0 命中**）；加权仍 **86.8%**
+
+本轮**不是新功能**，是把一条已写完却从未进入 `feature/pi.rs` 的交付救回来
+（提交 `6631b8c77` / `9c20bd8f1` 只存在于 `origin/work/LUM-1328` 与 `origin/work/LUM-1318`，
+`git merge-base --is-ancestor` 两条都是 NOT），并适配当前 tip 的
+`HistoryEntry` / `Submission` 模型。根因是上一轮收编检查的**假阳性**
+（`git grep 'paste #'` 不限路径 → 命中上游 `packages/tui/src/components/editor.ts`
+与 pi-rust 的 md 文档，`-- pi-rust/crates` 是 **0**）。细节、逐行对照、偏差清单与
+frame-buffer 截图见 `docs/LUM1460_PASTE_RESCUE.md`。
+
+| 量 | 本轮实测 | 基线 `815b21d13` | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **91.8%**（140,615 / 153,106） | 91.5%（140,032） | `python pi-rust/scripts/measure_loc.py`；+583 行 src |
+| 测试规模 | **51.6%**（2,740 / 5,309） | 51.1%（2,711） | `grep -rhoE '#\[(tokio::)?test\]' pi-rust/crates --include=*.rs \| wc -l`，基线在同一命令下于 `lum-1457` worktree（tip `815b21d13`）复测 |
+| `pi-tui` 全量 | **1075 passed / 0 failed** | 1045 / 0 | `cargo test --offline -p pi-tui`（57 target），+30 = `composer_paste`（27）+ `lum1460_paste_frames`（3）|
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 无新模块 |
+| `app.*` 接线 | 43 / 44 = 97.7%（silent 1：`app.tree.editLabel`） | 同 | 未动 |
+| `tui.*` 消费面 | 49 / 49 = 100% | 同 | 未动 |
+| 扩展生命周期事件 | 36 / 36 | 同 | 未动 |
+| **composer 粘贴能力面（本期新登记轴）** | **7 / 7 = 100%** | **0 / 7 = 0%** | 7 行逐条挂在 `tests/composer_paste.rs` 的用例上，见交付文档 §4 |
+
+**加权完成度（权重表见 §4.1，公式公开）**：13 条轴里只有第 12 轴动了，
+`2711/5309 = 0.5107` → `2740/5309 = 0.5161`：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×(2740/5309) + 3×0.95 = 86.83% → **86.8%**
+```
+
+即一位小数不变（86.80 → 86.83，**+0.03pt**）。**粘贴通道不单独进公式**：它是轴 5
+（TUI 交互面）内部的一格，而轴 5 的输入是"模块率与 `app.*` 接线率的均值"，两条都没动。
+按 LUM-1450 立下的规矩（"新轴要先说清权重来源再进 §4.1"），本轮只把它作为
+**新登记、可反证的量**公开（0/7 → 7/7）。
+
+**本轮的门禁与证据（可复跑）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 粘贴行为 | `cargo test --offline -p pi-tui --test composer_paste` | **27 / 0**（含删除重编号 3 条、原子编辑 3 条、撤销/历史 3 条） |
+| 帧 | `cargo test --offline -p pi-tui --test lum1460_paste_frames` | **3 / 0** |
+| 全仓编译 | `cargo check --offline --workspace --all-targets` | exit 0（只剩 `rquickjs-core`(vendor) 与 `pi-extensions` 的既有告警） |
+| 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；`pi-tui` / `pi-coding-agent` **0 告警**（老分支带来的 `question_mark` 1 条已修） |
+| 帧截图 | `docs/screenshots/lum1460-paste-{marker,two-markers,submitted}-100x24.png`(+`.txt`) | 3 帧，100×24，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 丢失证据 | `git grep -c 'paste #' origin/feature/pi.rs -- pi-rust/crates \| wc -l` | **0**（整树 12 文件全是上游 TS 与 md 文档） |
+
+**诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，
+证明"画出来的东西"（composer 只有一行 marker；提交后 transcript 是 12 行正文），
+**不证明按键/字节时序**——时序由 27 条 `App`/`Editor` 级驱动用例覆盖。
+老分支的真 PTY 场景（`lum1328-paste.json` / `lum1318-paste-fold.json`）与基线截图
+**没有带进本轮**（在本机跑不了）；`docs/screenshots/lum1328-paste*.png` 是那条分支的历史实拍，
+不是在本轮代码上拍的。
+
+### 0.18 LUM-1464 复测：`?` 键假广告收口（footer 广告 `? for help`，基线 `pi-rust/crates` 里 `Char('?')` **0 命中**）；加权 **86.8% → 86.9%**（只有测试轴 +0.05pt）
+
+**量的是什么**：footer 文案里的**单字符 chord** 有没有兑现。基线取证（限定路径，不重蹈 LUM-1460 的整树假阳性）：
+
+```bash
+$ git grep -n "Char('?')" origin/feature/pi.rs -- pi-rust/crates | wc -l
+0
+$ git grep -n '"\? for help"' origin/feature/pi.rs -- pi-rust/crates
+origin/feature/pi.rs:pi-rust/crates/pi-tui/src/app.rs:1384:  status_data.hint = Some("? for help".to_string())
+```
+
+对照 codex（`bottom_pane/chat_composer.rs:3154-3157` → `footer.rs::shortcut_overlay_lines`）与 Martty
+（`src/input/keymap.rs:97` 空输入 `Ctrl+K` → `ShowKeys`）：两边都有「空输入 + 单键 = 键位速查表」，
+pi-rust 本轮补齐，并保留「任何其它键先关掉它、再照常处理」（codex `reset_mode_after_activity`）。
+
+| 口径 | 本轮 | 上一快照（LUM-1460） |
+|---|---|---|
+| 纯代码规模（src↔src） | **92.0%**（140,894 / 153,106） | 91.8%（140,615 / 153,106） |
+| 测试规模 | **49.5%**（2,755 / 5,563） | 49.4%（2,740 / 5,309） |
+| `app.*` 接线 | 43/44 = **97.7%** | 43/44 |
+| 扩展生命周期事件 | **36/36** 声明 + **36/36** 生产构造点 | 同 |
+| TUI 模块 | **36/42 = 85.7%** | 35/42 |
+| TUI 交互+视觉轴 | 轴 5 = (0.857 + 0.977)/2 = **91.7%**；轴 6 = 90% | 同形 |
+| 加权完成度 | **86.9%** | 86.8% |
+
+> **口径声明（两条）**：① TS 用例分母由 5,309 改为 5,563 是**换口径**（旧口径只数 `it(`/`test(`，
+> 新口径收 `it.each(` 等包装），不是 TS 测试变多——所以测试轴上那 0.1pt 不可当成绩读；
+> ② TUI 模块 35→36 是**别的轮次并入的模块**，本轮没有新增模块，也没有关闭任何「能力有没有」的轴，
+> 加权从 86.8 到 86.9 只有测试轴的 +0.05pt。**本轮交付的是可信度（广告可兑现），不是覆盖率**。
+
+**门禁**：`cargo fmt --all -- --check` 干净；`cargo clippy --offline -p pi-tui --all-targets` 0 warning；
+`cargo test --offline -p pi-tui` **1090 / 0**（基线 1075/0 → +15）；
+`cargo test --offline -p pi-coding-agent -j 2 --no-fail-fast` **826 / 28**（28 条全为 Windows 环境类；
+`reload_rereads_keybindings_and_ui_settings_mid_session` 已用 `git stash` 在基线复现同一条 FAILED →
+新增失败 0）；**反向验证**：禁用触发分支 → 5 条测试立刻红。
+
+**证据分级**：4 张 `docs/screenshots/lum1464-hints-*.png`(+`.txt`) 是 frame-buffer 冻结帧
+（本机无 `pty`），证明几何与内容，**不证明按键时序**；时序由 `tests/shortcut_overlay.rs` 的 11 条覆盖。
+本轮审计与缺口清单见 `docs/LUM1464_SHORTCUT_OVERLAY.md`。
+
+### 0.19 LUM-1457 复测：Windows 真 PTY 打通 + 「每次按键执行两遍」修复；加权 **86.8%**（86.81%）
 
 基线与 §0.16.1 相同（`origin/feature/pi.rs` = `815b21d13`），本轮从它起。改动面：
 `pi-tui`（`app.rs` 的事件翻译 + 1 个新测试文件）、`pi-coding-agent`（`interactive.rs` 一处调用点）、
@@ -600,7 +692,7 @@ bash 忙提示与 `/settings` 描述），无丢失。
 本轮不擅自加轴（新轴要先把测量做实，§0.16 同规矩），只把候选轴登记在
 `docs/LUM1457_WIN_KEY_RELEASE.md` §8 第 1 条。
 
-#### 0.17.1 本轮的真机证据（Windows ConPTY，首次）
+#### 0.19.1 本轮的真机证据（Windows ConPTY，首次）
 
 `scripts/pty_capture_win.py` 是 `pty_capture.py` 的 ConPTY 后端（只重写 spawn/pump/drain 三个原语，
 `encode_keys` / `Renderer` / 断言 schema / 场景 JSON 全部复用），因此**为 Linux 写的场景可原样在 Windows 跑**：
@@ -608,6 +700,36 @@ bash 忙提示与 `/settings` 描述），无丢失。
 `lum1457-win-key-release.json` → 修复后 9 PASS（修复前 3 PASS / 6 FAIL，同一二进制对同一份场景）。
 附带修掉捕获器自身缺陷：`pyte` 无备用屏缓冲，`\x1b[?1049h` 被忽略导致主屏残留与备用屏首帧重叠
 （`AltScreenFeeder`，`scripts/pty_capture.py:485`）。
+
+#### 0.19.2 合并后复测（`feature/pi.rs` = LUM-1460 + LUM-1464 + LUM-1466 + 本轮）
+
+分支合并基：`origin/feature/pi.rs` = `fc18cb09e`。冲突 4 处，全部手工合并且两边都保留：
+`pi-tui/src/app.rs`（本轮的 `Option<InputEvent>` 形状 + LUM-1460 的 `CtEvent::Paste` 注释）、
+`pi-coding-agent/src/interactive.rs`（LUM-1460 的 `step_paste` 分支 + 本轮的 `let Some(..) else { continue }`）、
+`FEATURE_PI_RS_STATUS.md` 与本文（两边各追加一节，**都留**，本节顺延为 §0.19）。
+另修一处**跨轮集成缺陷**：LUM-1460 的 `tests/composer_paste.rs:573` 直接断言
+`App::translate_event(..) == InputEvent::Ignored`，与本轮的签名变更冲突（编译期就红）——
+按新签名改为 `Some(InputEvent::Ignored)` 并在注释里写明原因。
+
+| 量 | 合并后实测 | 本轮自测（分支 `fc18cb09e` 之前） | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **92.4%**（141,396 / 153,106） | 91.5%（140,063） | LUM-1460/1464/1466 的 src |
+| 测试规模 | **50.0%**（2,782 / 5,563） | 51.2%（2,720 / 5,309） | 分母按 LUM-1464 复算的 5,563 口径 |
+| `app.*` 接线 | 43 / 44 = 97.7% | 同 | 未动 |
+| `tui.*` 消费面 | 49 / 49 = 100% | 同 | 未动 |
+| 扩展生命周期事件 | 36 / 36 | 同 | 未动 |
+| `pi-tui` 全量 | **1,113 passed / 0 failed** | 1,054 / 0（分支） | 合并带入 LUM-1460/1464/1466 的用例 |
+| `pi-coding-agent --lib` | **588 / 8** | 584 / 8 | 8 条与合并前**逐字同名** |
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.5001 + 3×0.95 = 86.75% → **86.8%**
+```
+
+合并后加权 86.75%，与 LUM-1464 单轮报的 86.9% 差 0.15pt：差额全部来自**测试轴**（它按
+2,755/5,563 = 0.4954 计算，合并后实测 2,782/5,563 = 0.5001 应给 +0.03pt，而不是 +0.05pt；
+剩下的 0.12pt 是它把「口径修正」与「新增用例」一起记到了轴上）。本表只登记**实测**，不重估别轮。
+
 
 ## 1. 方法与口径
 

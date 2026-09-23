@@ -355,3 +355,48 @@ fn the_header_folds_on_a_terminal_that_cannot_hold_it() {
 
     reset_keybindings();
 }
+
+/// LUM-1466: the fold threshold has to follow the status region's live
+/// height, or a two-row footer (`pwd` row + stats row) leaves the header one
+/// row too tall and `plan_chrome` silently drops the hint list's tail.
+#[test]
+fn a_two_row_footer_folds_the_header_one_row_earlier() {
+    let _guard = lock_registry();
+    install(&[]);
+
+    // The smallest terminal that still keeps the expanded hint list.
+    let hints_visible = |height: u16, cwd: Option<&str>| {
+        let agent = Agent::new(AgentOptions::new(
+            faux_model(),
+            Arc::new(FauxProvider::default()),
+            "you are pi",
+        ));
+        let mut app = App::new(
+            &agent,
+            AppConfig {
+                session_id: "startup-header".into(),
+                startup_header: true,
+                ..AppConfig::default()
+            },
+        );
+        app.set_status_cwd(cwd.map(str::to_string));
+        app.render_snapshot(WIDTH, height)
+            .lines
+            .join("\n")
+            .contains("to interrupt")
+    };
+
+    let single_row = (6..40)
+        .find(|height| hints_visible(*height, None))
+        .expect("the hints fit somewhere with a one-row footer");
+    let two_row = (6..40)
+        .find(|height| hints_visible(*height, Some("/srv/repo")))
+        .expect("the hints fit somewhere with a two-row footer");
+    assert_eq!(
+        two_row,
+        single_row + 1,
+        "the location row costs the header exactly one row"
+    );
+
+    reset_keybindings();
+}
