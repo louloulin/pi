@@ -241,7 +241,7 @@ python pi-rust/scripts/extension_event_coverage.py
 | 顺位 | 问题 | 证据 | 本轮处置 |
 |---|---|---|---|
 | 1 | ~~footer 是单行，上游 pi 是两行（缺 pwd/branch/name 整行）~~ | LUM-1464 §5 #1 | **已关闭**（§2，含 14 条测试 + 3 帧） |
-| 2 | **stats 行本身仍缺上游的字段**：`↑/↓` 箭头、`CH%` 缓存命中率、`$cost`（+`(sub)`）、`(auto)` 自动压缩、多 provider 的 `(provider)` 前缀；且上游 stats 行**不含** session 段，pi-rust 仍保留 | 上游 `footer.ts:130-200`（`statsParts.push('↑…')`、`R/W`、`CH${rate}%`、`$${cost}`、`(auto)`、`getAvailableProviderCount() > 1` 前缀） | **未做**，已写成子任务（§8） |
+| 2 | **stats 行本身仍缺上游的字段**：`↑/↓` 箭头、`CH%` 缓存命中率、`$cost`（+`(sub)`）、`(auto)` 自动压缩、多 provider 的 `(provider)` 前缀；且上游 stats 行**不含** session 段，pi-rust 仍保留 | 上游 `footer.ts:130-200`（`statsParts.push('↑…')`、`R/W`、`CH${rate}%`、`$${cost}`、`(auto)`、`getAvailableProviderCount() > 1` 前缀） | **未做**，已派发 **LUM-1467**（§7） |
 | 3 | `app.tree.editLabel` 是唯一 silent `app.*`（44 条里 43 条有消费点） | `app_action_coverage.py` → 43/44 | **在办**：LUM-1263（`in_review`，尚未合入 `feature/pi.rs`） |
 | 4 | 扩展 `ctx.ui.setStatus(key, text)`：上游 footer 的**第 3 行**来自它，pi-rust 仍是 `ERR_PI_UI_UNSUPPORTED` | `app.rs:200-216` 的 `ctx.ui` 对照表明确排除 `setStatus`；上游 `footer.ts:243-251` 用 `footerData.getExtensionStatuses()` push 一行 | **未做**，列为下一轮第一顺位（与 #2 **同一文件面**，本轮不并发派发，见 §8） |
 | 5 | composer `paste_burst`（终端不发 bracketed paste 时的突发识别） | codex `chat_composer.rs` / `paste_burst.rs` | **在办**：LUM-1461（`in_review`） |
@@ -264,8 +264,9 @@ python pi-rust/scripts/extension_event_coverage.py
 「如果任务存在是跳过还是计划和实现后续任务」的回答：**不跳过、也不重开大改**，本轮在同一个 run 里
 完成 issue 点名的四件事（TUI 审计 / 缺口修复 / 截图 / 推送合并），并**派发 1 个**精确定义的后续任务：
 
-* **LUM-1467（子任务）**——footer stats 行对齐上游（§6 #2）：`↑/↓`、`CH%`、`$cost (+sub)`、`(auto)`、
-  `(provider)` 前缀。证据、行号、验收判据全部写进任务正文。
+* **LUM-1467** —— footer stats 行对齐上游（§6 #2）：`↑/↓`、`CH%`、`$cost (+sub)`、`(auto)`、
+  `(provider)` 前缀。证据、行号、验收判据全部写进任务正文；创建时为 `backlog`（避免与正在合并的
+  本轮抢同一文件面），在本轮 `feature/pi.rs` 推送成功之后才提升为 `todo` 触发运行。
 
 **只派 1 条而不是 2 条**的理由：§6 #2 与 #4 都要改 `pi-tui/src/status.rs`（stats 行与第 3 行是同一个
 `render_lines`）；本仓库已经为「同一缺陷两条并发线各修一次」清过两次（LUM-1431 §3、LUM-1445 §8）。
