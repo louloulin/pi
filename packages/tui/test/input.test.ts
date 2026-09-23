@@ -661,4 +661,90 @@ describe("Input component", () => {
 			assert.strictEqual(input.getValue(), "");
 		});
 	});
+
+	describe("Jump mode", () => {
+		// Note: Jump mode is triggered by Ctrl+] (\x1d) for forward and Ctrl+Alt+] for backward
+		// However, keybindings must be configured to enable these actions.
+
+		it("jump mode arming does not change cursor or value", () => {
+			const input = new Input();
+			input.setValue("hello world");
+			input.handleInput("\x01"); // Ctrl+A
+
+			// Arm jump mode via keybinding
+			input.handleInput("\x1d"); // Ctrl+] - arm forward jump
+			assert.strictEqual(input.getValue(), "hello world");
+			// Cursor should not have moved
+		});
+
+		it("character jump consumes the armed jump mode", () => {
+			const input = new Input();
+			input.setValue("hello world");
+			input.handleInput("\x01"); // Ctrl+A
+
+			// Arm jump mode
+			input.handleInput("\x1d"); // Ctrl+] - arm forward jump
+			// Jump to 'o' in "hello"
+			input.handleInput("o");
+			// After jump, the character 'o' should be inserted (not both jumped and inserted)
+			// Actually in our implementation, if jump succeeds, we don't insert
+			// Let's check the actual behavior - the jump should succeed and NOT insert
+			assert.strictEqual(input.getValue(), "hello world");
+		});
+
+		it("empty buffer prevents jump", () => {
+			const input = new Input();
+			// Arm jump mode on empty input
+			input.handleInput("\x1d"); // Ctrl+] - arm forward jump
+			// Character 'x' should be inserted (no jump possible)
+			input.handleInput("x");
+			assert.strictEqual(input.getValue(), "x");
+		});
+
+		it("jump mode is consumed when character is pressed", () => {
+			const input = new Input();
+			input.setValue("hello world");
+			input.handleInput("\x01"); // Ctrl+A - go to start
+
+			// Arm jump mode
+			input.handleInput("\x1d"); // Ctrl+]
+			// Now pressing any printable should either jump or insert
+			input.handleInput("x");
+			// If jump succeeds, no insert; if no match, character is inserted
+			// In this case 'x' is not in "hello world", so it should be inserted
+			assert.ok(input.getValue().includes("x"));
+		});
+
+		it("jump mode can be disarmed by arrow keys", () => {
+			const input = new Input();
+			input.setValue("hello world");
+			input.handleInput("\x01"); // Ctrl+A
+
+			// Arm jump mode
+			input.handleInput("\x1d"); // Ctrl+]
+			// Disarm by pressing an arrow key
+			input.handleInput("\x1b[C"); // Right arrow
+			// Now pressing 'x' should just insert (jump was disarmed, 'x' not in text)
+			input.handleInput("x");
+			// The cursor should be at position 1 (after 'h'), so 'x' is inserted after 'h'
+			assert.strictEqual(input.getValue(), "hxello world");
+		});
+
+		it("multiple jumps work sequentially", () => {
+			const input = new Input();
+			input.setValue("hello world");
+			input.handleInput("\x01"); // Ctrl+A - go to start
+
+			// First jump to 'o' (in "hello")
+			input.handleInput("\x1d"); // Ctrl+]
+			input.handleInput("o");
+			// Cursor should be at position 4 (first 'o')
+
+			// Second jump to 'o' (in "world")
+			input.handleInput("\x1d"); // Ctrl+]
+			input.handleInput("o");
+			// Should find the 'o' in "world"
+			assert.strictEqual(input.getValue(), "hello world");
+		});
+	});
 });

@@ -38,6 +38,17 @@ export interface InputOptions {
 }
 
 /**
+ * Jump mode direction - mirrors Rust's JumpDirection enum.
+ * When armed, the next printable character jumps to its next/previous occurrence.
+ */
+export const JUMP_DIRECTION = {
+	Forward: "forward",
+	Backward: "backward",
+} as const;
+
+export type JumpDirection = (typeof JUMP_DIRECTION)[keyof typeof JUMP_DIRECTION];
+
+/**
  * Input component - single-line text input with horizontal scrolling
  */
 export class Input implements Component, Focusable {
@@ -71,6 +82,10 @@ export class Input implements Component, Focusable {
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
+
+	// Jump mode - mirrors Rust's jump_mode field
+	// When armed, the next printable character jumps to its next/previous occurrence.
+	private jumpMode: JumpDirection | null = null;
 
 	constructor(options: InputOptions = {}) {
 		this.prompt = options.prompt ?? "> ";
@@ -239,12 +254,29 @@ export class Input implements Component, Focusable {
 			return;
 		}
 
+		// Jump mode controls - arm jump mode for forward/backward search
+		if (kb.matches(data, "tui.editor.jumpForward")) {
+			this.armJumpMode(JUMP_DIRECTION.Forward);
+			return;
+		}
+
+		if (kb.matches(data, "tui.editor.jumpBackward")) {
+			this.armJumpMode(JUMP_DIRECTION.Backward);
+			return;
+		}
+
 		// Kitty CSI-u printable character (e.g. \x1b[97u for 'a').
 		// Terminals with Kitty protocol flag 1 (disambiguate) send CSI-u for all keys,
 		// including plain printable characters. Decode before the control-char check
 		// since CSI-u sequences contain \x1b which would be rejected.
 		const kittyPrintable = decodeKittyPrintable(data);
 		if (kittyPrintable !== undefined) {
+			// Jump mode: if armed, jump to the next/previous occurrence of this character
+			if (this.jumpMode !== null) {
+				const jumped = this.jumpToChar(kittyPrintable, this.jumpMode);
+				this.jumpMode = null; // Consume the jump
+				if (jumped) return;
+			}
 			this.insertCharacter(kittyPrintable);
 			return;
 		}
@@ -256,6 +288,12 @@ export class Input implements Component, Focusable {
 			return code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
 		});
 		if (!hasControlChars) {
+			// Jump mode: if armed, jump to the next/previous occurrence of this character
+			if (this.jumpMode !== null) {
+				const jumped = this.jumpToChar(data, this.jumpMode);
+				this.jumpMode = null; // Consume the jump
+				if (jumped) return;
+			}
 			this.insertCharacter(data);
 		}
 	}
@@ -440,6 +478,69 @@ export class Input implements Component, Focusable {
 		this.cursor = findWordForward(this.value, this.cursor);
 		// Reset preferred column on explicit cursor movement
 		this.preferredVisualCol = null;
+	}
+
+	/**
+	 * Arm jump mode - the next printable character will jump to its next/previous occurrence.
+	 * Mirrors Rust's `Ctrl+]` / `Ctrl+Alt+]` behavior.
+	 * @param direction - Forward (Ctrl+]) or Backward (Ctrl+Alt+])
+	 */
+	private armJumpMode(direction: JumpDirection): void {
+		this.jumpMode = direction;
+		// Jump breaks the kill/yank/typing chains
+		this.lastAction = null;
+	}
+
+	/**
+	 * Jump to the next or previous occurrence of a character.
+	 * Mirrors Rust's `jump_to_char` method.
+	 * @param needle - The character to search for
+	 * @param direction - Forward or backward search
+	 * @returns true if the cursor moved, false if no match found
+	 */
+	private jumpToChar(needle: string, direction: JumpDirection): boolean {
+		// Jump breaks the kill/yank/typing chains
+		this.lastAction = null;
+
+		if (this.value.length === 0 || needle.length === 0) {
+			return false;
+		}
+
+		const char = needle[0]!;
+
+		if (direction === JUMP_DIRECTION.Forward) {
+			// Search forward from cursor position
+			// The character under the cursor is never a match (like Rust implementation)
+			const searchStart = this.cursor + 1;
+			const matchIndex = this.value.indexOf(char, searchStart);
+			if (matchIndex !== -1) {
+				this.cursor = matchIndex;
+				// Reset preferred column on explicit cursor movement
+				this.preferredVisualCol = null;
+				return true;
+			}
+		} else {
+			// Search backward from cursor position
+			// The character under the cursor is never a match (like Rust implementation)
+			// Find the last occurrence before cursor
+			let matchIndex = -1;
+			let pos = this.cursor;
+			while (pos > 0) {
+				pos--;
+				if (this.value[pos] === char) {
+					matchIndex = pos;
+					break;
+				}
+			}
+			if (matchIndex !== -1) {
+				this.cursor = matchIndex;
+				// Reset preferred column on explicit cursor movement
+				this.preferredVisualCol = null;
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	private handlePaste(pastedText: string): void {
