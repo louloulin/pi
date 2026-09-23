@@ -73,6 +73,15 @@ pub struct Cli {
     #[arg(long, value_name = "PROVIDER/MODEL")]
     pub model: Option<String>,
 
+    /// Override the system prompt. Mirrors `pi --system-prompt`.
+    #[arg(long = "system-prompt", value_name = "TEXT")]
+    pub system_prompt: Option<String>,
+
+    /// Comma-separated list of model patterns for Ctrl+P cycling.
+    /// Mirrors `pi --models`.
+    #[arg(long = "models", value_name = "PATTERNS")]
+    pub models: Option<String>,
+
     /// Append text to the system prompt. Mirrors `pi --append-system-prompt`.
     #[arg(long, value_name = "TEXT")]
     pub append_system_prompt: Vec<String>,
@@ -134,6 +143,18 @@ pub struct Cli {
     #[arg(long = "no-header")]
     pub no_header: bool,
 
+    /// TUI mode: `regular` (default) or `fullscreen`. Mirrors `pi --tui-mode`.
+    #[arg(long = "tui-mode", value_name = "MODE")]
+    pub tui_mode: Option<String>,
+
+    /// Disable theme discovery and loading (`--no-themes` in the TS CLI).
+    #[arg(long = "no-themes")]
+    pub no_themes: bool,
+
+    /// Set the initial interactive theme for this run. Mirrors `pi --use-theme`.
+    #[arg(long = "use-theme", value_name = "NAME")]
+    pub use_theme: Option<String>,
+
     /// Export a session file to HTML and exit.
     ///
     /// Usage: `pi --export <session.jsonl> [output.html]`. Without an
@@ -183,6 +204,19 @@ pub struct Cli {
     /// session.
     #[arg(long, value_name = "SESSION")]
     pub session: Option<String>,
+
+    /// Use exact project session ID, creating it if missing.
+    /// Mirrors `pi --session-id`.
+    #[arg(long = "session-id", value_name = "ID")]
+    pub session_id: Option<String>,
+
+    /// Fork a specific session into a new session. Mirrors `pi --fork`.
+    #[arg(long = "fork", value_name = "SESSION")]
+    pub fork: Option<String>,
+
+    /// Don't save session (ephemeral mode). Mirrors `pi --no-session`.
+    #[arg(long = "no-session")]
+    pub no_session: bool,
 
     /// Output format for print mode. `text` streams the final reply on
     /// stdout (default); `json` emits a single JSON object at the end
