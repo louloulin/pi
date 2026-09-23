@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|> where does the footer come from?                                                                  |
+|> Ready.                                                                                            |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> type a prompt — /help for commands                                                                |
+|Faux  lum1466-footer                                                   in 0 out 0 ?/8.2k  ? for help|
+END FRAME DUMP
