@@ -948,3 +948,68 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 2. 补 `models.* / session.* / tree.*` 快捷键接线（+2.9pt），顺手修 `@` 补全首行重复。
 3. 补 CLI 的 `--theme/--thinking/--tools/--provider/--offline` 与 4 个高价值 slash 命令。
 4. 补测试：把 Rust 用例数从 2,232 往 5,309 靠（当前 42%，是最大的"隐藏债务"）。
+
+### 0.21 LUM-1469 复测：排队输入的可见面（位置 + 形状 + 取回提示）+ 两条 `in_review` 交付并入；加权 **86.9% → 87.0%**
+
+**量的是什么**：排队输入（`App::submit` 忙碌时走 `MessageView::push_pending`）在屏幕上的**位置、形状、
+以及「怎么处置它」的提示**。基线取证（限定路径，不重蹈 LUM-1460 的整树假阳性）：
+
+```bash
+$ git grep -n 'Steering: ' fc18cb09e -- pi-rust/crates/pi-tui/src/message.rs
+fc18cb09e:pi-rust/crates/pi-tui/src/message.rs:1140:  ("Steering: ", &self.pending_steering),   # 画在日志尾部
+$ git grep -c 'to edit all queued messages' fc18cb09e -- pi-rust/crates/pi-tui/src
+0                                              # 上下文取回提示 0 命中（只有 locale.rs 的启动 header 广告行）
+```
+
+对照三家（本机第一手）：pi-ts `interactive-mode.ts:4366-4385`（`Spacer(1)` + 每条一行 + `↳ <chord> to edit
+all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input_preview.rs:84-160`（composer 上方，
+3 行预览 + `…` + `alt+up edit last queued message`）、Martty `src/app.rs:4841-4845`（transcript cell +
+`queued — lands after this turn · ctrl+x would send now` 一次性 tip）与 `src/ui.rs:707-709`（meta 行计数）。
+**三家都有紧邻输入框的可见面 + 处置提示**；pi-rust 是唯一两者都缺的。本轮按 pi-ts 形状补齐，
+并把块从日志里搬出去（此前它可滚动、可框选、可被 `/transcript` 导出）。
+
+| 口径 | 本轮 | 上一快照（LUM-1466） |
+|---|---|---|
+| 纯代码规模（src↔src） | **93.7%**（143,457 / 153,106） | 92.3%（141,365 / 153,106） |
+| 测试规模 | **50.8%**（2,829 / 5,563） | 49.8%（2,773 / 5,563） |
+| `app.*` 接线 | **44/44 = 100%**（silent 0 / advertised 0） | 43/44 = 97.7% |
+| 扩展生命周期事件 | 36/36 声明 + 36/36 构造点 | 同 |
+| TUI 模块 | 36/42 = 85.7% | 同 |
+| TUI 交互+视觉轴 | 轴 5 = (0.857 + **1.000**)/2 = **92.9%**；轴 6 = 90% | 轴 5 = 91.7% |
+| 加权完成度 | **87.0%**（86.9 → 87.02） | 86.9% |
+
+**增量归属（必须说清，否则这一个百分点会被误读）**：
+
+* `app.*` 43/44 → 44/44 与 `pi-coding-agent --lib` 588/8 → 594/8 来自**并入 LUM-1263**
+  （`origin/work/LUM-1263` = `271cb109f`，`/tree` 改名 UI）；`input.rs`/`word_navigation.rs` 的行数与
+  `pi-tui` 的 +24 条来自**并入 LUM-1461**（`origin/work/LUM-1461` = `4eec9a628`，composer `paste_burst`）。
+  两者都是 `in_review` 但从未进入 `feature/pi.rs` 的交付，本轮按 issue 的「都合并 feature/pi.rs」救回。
+* 本轮自身只写 **+256 行 src**（`app.rs` +80/-2、`extension_ui.rs` +58/-1、`message.rs` +140/-19）
+  与 **+17 条测试**（9 `lum1469_pending_block` + 1 `lum1469_pending_chord` + 4 `message.rs` 单测
+  + 2 `extension_ui.rs` 单测 + 1 驱动级）。轴 12 因此从 0.4985 走到 0.5085（**+0.05pt**）。
+* 轴 6（TUI 视觉保真）**不上调**：本轮把「排队输入的位置/形状/提示」从「不符上游」变成「符合上游」，
+  属证据/可信度修复，口径沿用 LUM-1418 §6，不重估。
+
+加权重算：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×(2829/5563) + 3×0.95 = 87.02% → **87.0%**
+```
+
+**本轮的门禁与证据（可复跑）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 排队块行为 | `cargo test --offline -p pi-tui --test lum1469_pending_block` | **9 / 0**（位置 / 顺序 / 几何 / 空队列回归 / `…` 标记 / 矮终端 / 3 帧） |
+| 提示跟随键位 | `cargo test --offline -p pi-tui --test lum1469_pending_chord` | **1 / 0**（未知 id → 平台默认；覆盖 → 生效键位；未绑定 → 不广告死键位） |
+| 真实提交路径 | `cargo test --offline -p pi-tui --test pending_messages` | **5 / 0**（含 +1：忙碌时画、清空后不画） |
+| 驱动级 | `cargo test --offline -p pi-coding-agent --lib follow_up_queues_while_busy` | **1 / 0**（帧里有 `Follow-up:` 行与 `↳` 提示行） |
+| 全量 | `cargo test --offline -p pi-tui -j 8`；`cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast` | **1154 / 0**（基线 1137/0）；**836 / 28**（基线 830/28，28 条同集合，全 Windows 环境类） |
+| 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；改动文件 0 告警（其余落在 `pi-extensions` 与 vendored `rquickjs-core`） |
+| 帧截图 | `docs/screenshots/lum1469-{queued-prompts-100x24,cut-queued-draft-44x16,no-queue-100x24}.png`(+`.txt`) | 3 帧，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 反向验证 | 把 `composed_frame` 的 `frame.pending` 硬写成 `0` | 9 条帧测试里 **7 条红** + `pending_messages` **2 条红**；恢复后全绿 |
+
+**诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，证明「画在哪一格、
+内容是什么」，**不证明按键/字节时序**；时序与几何由 17 条 App/驱动级用例覆盖。
+本轮审计全文见 `docs/LUM1469_PENDING_QUEUE.md`（含 §6.1 两条顺带发现的既有缺陷与 §8 五条有意偏差）。

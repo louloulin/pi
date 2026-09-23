@@ -220,6 +220,12 @@
 //! custom overlay (topmost: drawn after the search bar) ← when visible
 //! ```
 //!
+//! One extra region is data driven and sits directly above the editor: the
+//! queued-messages block (LUM-1469), upstream's `pendingMessagesContainer`
+//! (`interactive-mode.ts:878-892`). It costs zero rows while nothing is
+//! queued, so a host that never queues a prompt keeps the geometry it had
+//! before the block existed.
+//!
 //! All region rects are computed once per frame by
 //! `crate::extension_ui::plan_chrome`; the message viewport's geometry (and
 //! therefore the scroll, selection and search coordinates) follows the
@@ -286,7 +292,7 @@ use crate::input::{
     BurstDecision, InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture,
     MouseGestureKind, PasteBurst,
 };
-use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
+use crate::keybindings::{get_keybindings, key_text_or, matches_with_fallback, KeybindingsManager};
 use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
 use crate::locale::{
     format_chord, HeaderKey, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH,
@@ -1775,6 +1781,11 @@ impl App {
         // two-row footer (`pwd` row + stats row), a host that did not keeps
         // the single stats row (`docs/LUM1466_TWO_LINE_FOOTER.md`).
         frame.status = self.status_bar.line_count(&self.status_for_render());
+        // The queued-messages block is the second data-driven region: it
+        // occupies rows exactly when a prompt is waiting behind the
+        // in-flight turn, so an idle App is byte-for-byte the pre-LUM-1469
+        // frame.
+        frame.pending = self.messages.pending_block_rows();
         frame
     }
 
@@ -1794,6 +1805,12 @@ impl App {
                 .status_bar
                 .line_count(&self.status_for_render())
                 .saturating_sub(1)
+            // A queued-messages block is budgeted before the header by
+            // `plan_chrome`, so the fold decision has to count it too —
+            // otherwise the header would keep hint rows the frame cannot
+            // hold and `plan_chrome` would cut its tail (the silent cut
+            // LUM-1266 removed).
+            + self.messages.pending_block_rows()
     }
 
     /// The built-in startup header: title, key hints, onboarding line.
@@ -6147,7 +6164,7 @@ impl App {
         };
         let editor_area = Rect {
             x: area.x,
-            y: message_area.y + message_height,
+            y: message_area.y + message_height + layout.pending,
             width: area.width,
             height: layout.editor,
         };
@@ -6207,6 +6224,19 @@ impl App {
             self.truncated_above.2.store(0, Ordering::Relaxed);
         }
 
+        // The queued-messages block sits between the transcript and the
+        // composer (upstream keeps it in the prompt area), on top of whatever
+        // the transcript painted there last frame — hence the per-row blank
+        // before the line is written.
+        self.paint_pending_block(
+            Rect {
+                x: area.x,
+                y: message_area.y + message_height,
+                width: area.width,
+                height: layout.pending,
+            },
+            buf,
+        );
         // The editor region: a custom component (a non-overlay `custom`
         // session or `set_editor_component`) replaces the prompt line
         // entirely.
@@ -6440,6 +6470,54 @@ impl App {
     /// come from: the draft rows it showed (`composer_scroll`) and the rows
     /// it could show (`composer_window`). Both are read back by the key path
     /// before [`crate::Prompt::render_lines`] runs again.
+    /// The chord the queued-messages hint advertises (`app.message.dequeue`).
+    ///
+    /// Resolved through the live keybinding table, so an override in
+    /// `keybindings.json` shows up here exactly as it does in `/hotkeys` and
+    /// the startup header (LUM-1447/1450). The fallback is the shipped
+    /// default from upstream's table (`packages/coding-agent/src/core/keybindings.ts:138`:
+    /// `alt+up`, `alt+q` on Windows), used when no `app.*` table is installed
+    /// — a bare `pi-tui` host, which is what the frame tests are.
+    fn dequeue_chord(&self) -> String {
+        // A **raw** chord into `format_chord`, so the unknown-id fallback is
+        // spelled the way every other surface spells it (`Alt+Up`), while a
+        // resolvable id keeps the registry's effective set — the same rule the
+        // startup header's hint rows use.
+        key_text_or(
+            "app.message.dequeue",
+            &format_chord(if cfg!(windows) { "alt+q" } else { "alt+up" }),
+        )
+    }
+
+    /// Paint the queued-messages block into `rect`.
+    ///
+    /// The block is only planned when something is queued
+    /// ([`MessageView::pending_block_rows`]), so an empty queue paints
+    /// nothing and the rows stay with the transcript. Rows are blanked before
+    /// the line is written: this region is carved out of what the transcript
+    /// painted last frame, and the block's spacer row is genuinely empty.
+    fn paint_pending_block(&self, rect: Rect, buf: &mut Buffer) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let lines = self.messages.pending_lines(&self.dequeue_chord());
+        for (row, line) in lines.iter().enumerate() {
+            let row = u16::try_from(row).unwrap_or(u16::MAX);
+            if row >= rect.height {
+                break;
+            }
+            let y = rect.y + row;
+            for col in 0..rect.width {
+                if let Some(cell) = buf.cell_mut((rect.x + col, y)) {
+                    cell.reset();
+                }
+            }
+            // `…` in the last column the line did not fit in, instead of the
+            // silent clip every pre-LUM-1412 region performed.
+            write_styled_line_ellipsized(buf, rect.x, y, rect.width, line, &self.theme);
+        }
+    }
+
     fn paint_prompt(&self, rect: Rect, buf: &mut Buffer) {
         if rect.width == 0 || rect.height == 0 {
             return;

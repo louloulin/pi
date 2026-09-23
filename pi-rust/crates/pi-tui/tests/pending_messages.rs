@@ -141,3 +141,59 @@ async fn idle_follow_up_behaves_like_enter() {
     // An empty buffer is a no-op.
     assert_eq!(app.follow_up_from_editor(), FollowUpOutcome::Empty);
 }
+
+/// LUM-1469: the queue is not just bookkeeping — while a turn runs the queued
+/// prompts are painted **above the composer** (upstream's
+/// `pendingMessagesContainer` position, `interactive-mode.ts:876-892`) together
+/// with the `↳ <chord> to edit all queued messages` hint, and they stop being
+/// painted the moment the queues are empty.
+#[tokio::test]
+async fn queued_prompts_are_painted_above_the_composer() {
+    let agent = new_agent();
+    let mut app = new_app(&agent).await;
+
+    // Idle: no block, so no row is spent on it.
+    let idle = app.render_snapshot(80, 20).lines;
+    assert!(
+        !idle.iter().any(|line| line.contains("Steering:")),
+        "{idle:#?}"
+    );
+    assert!(
+        !idle.iter().any(|line| line.trim_end().starts_with('↳')),
+        "the hint row is planned only when something is queued:\n{idle:#?}"
+    );
+    assert_eq!(app.messages().pending_block_rows(), 0);
+
+    app.submit(agent.clone(), "first".to_string());
+    assert!(app.is_busy(), "a submitted prompt is in flight");
+    for text in ["second", "third"] {
+        app.submit(agent.clone(), text.to_string());
+    }
+    assert_eq!(app.pending_len(), 2);
+
+    let lines = app.render_snapshot(80, 20).lines;
+    let steer = lines
+        .iter()
+        .position(|line| line.trim_end() == "Steering: second")
+        .unwrap_or_else(|| panic!("the queued prompt is painted:\n{lines:#?}"));
+    let hint = lines
+        .iter()
+        .position(|line| line.trim_end().starts_with('↳'))
+        .expect("the dequeue hint is painted");
+    let composer = lines
+        .iter()
+        .rposition(|line| line.starts_with("> "))
+        .expect("the composer is painted");
+    assert!(steer < hint && hint < composer, "{lines:#?}");
+    // Two queued prompts + spacer + hint.
+    assert_eq!(app.messages().pending_block_rows(), 4);
+
+    // Draining the queue removes the block from the next frame.
+    assert_eq!(app.restore_pending_to_editor(), 2);
+    let after = app.render_snapshot(80, 20).lines;
+    assert!(
+        !after.iter().any(|line| line.contains("Steering:")),
+        "{after:#?}"
+    );
+    assert_eq!(app.messages().pending_block_rows(), 0);
+}

@@ -322,6 +322,7 @@ impl ExtensionUi {
             editor: self.editor_lines(width),
             overlay: self.overlay_layer(width),
             status: 1,
+            pending: 0,
         }
     }
 
@@ -412,6 +413,12 @@ pub(crate) struct ExtensionFrame {
     /// exactly this many rows so a host that never supplies a working
     /// directory keeps the single-row geometry.
     pub(crate) status: u16,
+    /// Rows the queued-messages block asked for (`0` when no prompt is
+    /// queued). The App sets this from
+    /// [`crate::message::MessageView::pending_block_rows`]; it is data driven
+    /// for the same reason `status` is — an empty queue must keep the frame
+    /// geometry it had before LUM-1469.
+    pub(crate) pending: u16,
 }
 
 /// A visible `custom` overlay and the options that place it.
@@ -438,6 +445,10 @@ pub(crate) struct ChromeLayout {
     pub(crate) status: u16,
     /// Footer rows.
     pub(crate) footer: u16,
+    /// Queued-messages rows, directly above the editor region (upstream keeps
+    /// its `pendingMessagesContainer` in the prompt area,
+    /// `interactive-mode.ts:878-892`).
+    pub(crate) pending: u16,
 }
 
 /// Split `total` rows between the message view, the status bar and the
@@ -487,11 +498,16 @@ pub(crate) fn plan_chrome(
                 lines_height(lines).max(editor_min_rows.max(1))
             }),
     );
+    // The queued-messages block (LUM-1469) is budgeted immediately after the
+    // composer: it is the second thing the reader cannot work without while a
+    // turn is running (it is where their typed-ahead prompt shows up), and the
+    // foldable header is what gives way when both cannot fit.
+    let pending = take(frame.pending);
     let header = take(lines_height(&frame.header));
     let above = take(lines_height(&frame.above));
     let below = take(lines_height(&frame.below));
     let footer = take(lines_height(&frame.footer));
-    let used = header + above + editor + below + footer;
+    let used = header + above + editor + below + footer + pending;
     ChromeLayout {
         header,
         above,
@@ -500,6 +516,7 @@ pub(crate) fn plan_chrome(
         message: total.saturating_sub(status + used),
         status,
         footer,
+        pending,
     }
 }
 
@@ -771,6 +788,16 @@ mod tests {
             editor: editor.map(lines),
             overlay: None,
             status: 1,
+            pending: 0,
+        }
+    }
+
+    /// [`frame_with`] plus a queued-messages block of `pending` rows
+    /// (LUM-1469).
+    fn frame_with_pending(pending: u16) -> ExtensionFrame {
+        ExtensionFrame {
+            pending,
+            ..frame_with(0, 0, None, 0, 0)
         }
     }
 
@@ -784,6 +811,36 @@ mod tests {
         );
         assert_eq!((layout.status, layout.footer), (1, 0));
         assert_eq!(layout.message, 8);
+    }
+
+    /// LUM-1469: the queued-messages block costs transcript rows, exactly the
+    /// rows it asked for, and it sits between the composer and the header.
+    #[test]
+    fn plan_chrome_reserves_pending_rows_above_the_editor() {
+        // 12 rows: 1 status + 1 composer + 3 pending leave 7 transcript rows.
+        let layout = plan_chrome(12, &frame_with_pending(3), 1);
+        assert_eq!((layout.editor, layout.pending), (1, 3));
+        assert_eq!(
+            (layout.header, layout.above, layout.below, layout.footer),
+            (0, 0, 0, 0)
+        );
+        assert_eq!((layout.status, layout.message), (1, 7));
+    }
+
+    /// The composer is reserved first and the queued block next, so a header
+    /// that cannot fit both is what shrinks — never the composer, and never a
+    /// queued prompt whose only on-screen home is this block.
+    #[test]
+    fn plan_chrome_folds_the_header_before_dropping_the_pending_block() {
+        let frame = ExtensionFrame {
+            pending: 3,
+            ..frame_with(8, 0, None, 0, 0)
+        };
+        // 6 rows: 1 status + 1 transcript leave 4 for chrome.
+        let layout = plan_chrome(6, &frame, 1);
+        assert_eq!((layout.editor, layout.pending), (1, 3));
+        assert_eq!(layout.header, 0);
+        assert_eq!(layout.message, 1);
     }
 
     #[test]

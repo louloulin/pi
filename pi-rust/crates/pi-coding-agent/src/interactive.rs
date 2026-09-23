@@ -6227,6 +6227,20 @@ mod tests {
         assert_eq!(app.pending_len(), 1);
         assert_eq!(app.editor_text(), "", "the queue took the buffer");
 
+        // LUM-1469: the queued prompt is on the frame the driver draws — with
+        // the dequeue hint — not just counted in `pending_len`.
+        let lines = app.render_snapshot(80, 24).lines;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_end() == "Follow-up: queued follow-up"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.trim_end().starts_with('↳')),
+            "the dequeue hint is painted:\n{lines:#?}"
+        );
+
         // Dequeue pulls it back into the editor and reports upstream's tally.
         handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_up())
             .await
@@ -6236,6 +6250,11 @@ mod tests {
         assert_eq!(
             app.status_flash(),
             Some("Restored 1 queued message to editor")
+        );
+        let lines = app.render_snapshot(80, 24).lines;
+        assert!(
+            !lines.iter().any(|line| line.contains("Follow-up:")),
+            "the block is gone once the queue is empty:\n{lines:#?}"
         );
     }
 
