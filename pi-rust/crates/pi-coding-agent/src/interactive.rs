@@ -3748,7 +3748,7 @@ async fn run_slash_command(
                 None => app.info("usage: /name <name>".to_string()),
             },
         },
-        SlashCommand::Exit => {
+        SlashCommand::Exit | SlashCommand::Quit => {
             app.request_exit();
         }
         SlashCommand::Model => {
@@ -3853,6 +3853,32 @@ async fn run_slash_command(
                     clone_into_new_session(app, agent, options, created).await;
                 }
                 Err(err) => app.info(format!("/clone: {err}")),
+            }
+        }
+        SlashCommand::Import { path } => {
+            // Import and resume a session from a JSONL file.
+            app.info("/import: session import not yet implemented in Rust port".to_string());
+        }
+        SlashCommand::Share => {
+            // Share the current session as a GitHub gist.
+            app.info("/share: session sharing not yet implemented in Rust port".to_string());
+        }
+        SlashCommand::Changelog => {
+            // Show changelog entries.
+            app.info("/changelog: not yet implemented in Rust port".to_string());
+        }
+        SlashCommand::Login { provider } => {
+            // Configure provider authentication.
+            match provider {
+                Some(p) => app.info(format!("/login: login for {p} not yet implemented in Rust port")),
+                None => app.info("/login: provider required (usage: /login <provider>)".to_string()),
+            }
+        }
+        SlashCommand::Logout { provider } => {
+            // Remove provider authentication.
+            match provider {
+                Some(p) => app.info(format!("/logout: logout for {p} not yet implemented in Rust port")),
+                None => app.info("/logout: provider required (usage: /logout <provider>)".to_string()),
             }
         }
         SlashCommand::Trust(action) => {
