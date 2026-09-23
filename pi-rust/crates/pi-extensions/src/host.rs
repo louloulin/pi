@@ -1223,6 +1223,12 @@ pub trait UiRegionHost: Send + Sync + 'static {
     async fn close_custom(&self, session: u64, result: Option<String>);
     /// Show or hide a custom session without closing it.
     async fn set_custom_visible(&self, session: u64, visible: bool);
+    /// Set the theme by name — `ctx.ui.setTheme(name)`.
+    /// Upstream calls `app.setTheme(name)` (`interactive-mode.ts:2443`).
+    async fn set_theme(&self, name: String) -> Result<(), String>;
+    /// Set the editor text — `ctx.ui.setEditorText(text)`.
+    /// Upstream calls `app.setEditorText(text)`.
+    async fn set_editor_text(&self, text: String);
 }
 
 /// One queued region mutation from the shim to the [`UiRegionHost`].
@@ -1256,6 +1262,10 @@ enum RegionCommand {
     },
     /// Show / hide a custom session.
     SetCustomVisible { session: u64, visible: bool },
+    /// Set the theme by name.
+    Theme(String),
+    /// Set the editor text.
+    EditorText(String),
 }
 
 /// Drain region mutations into the injected [`UiRegionHost`].
@@ -1291,6 +1301,12 @@ async fn region_worker(
             }
             RegionCommand::SetCustomVisible { session, visible } => {
                 host.set_custom_visible(session, visible).await
+            }
+            RegionCommand::Theme(name) => {
+                let _ = host.set_theme(name).await;
+            }
+            RegionCommand::EditorText(text) => {
+                host.set_editor_text(text).await;
             }
         }
     }
@@ -1455,6 +1471,26 @@ fn handle_region_call(
                 .unwrap_or(true);
             region_envelope(
                 send(RegionCommand::SetCustomVisible { session, visible }),
+                serde_json::Value::Null,
+            )
+        }
+        "setTheme" => {
+            let name = payload
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            region_envelope(
+                send(RegionCommand::Theme(name.to_string())),
+                serde_json::Value::Null,
+            )
+        }
+        "setEditorText" => {
+            let text = payload
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            region_envelope(
+                send(RegionCommand::EditorText(text.to_string())),
                 serde_json::Value::Null,
             )
         }

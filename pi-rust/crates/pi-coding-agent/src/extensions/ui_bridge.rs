@@ -399,6 +399,10 @@ pub enum RegionOp {
         /// New visibility.
         visible: bool,
     },
+    /// Set the theme by name — `ctx.ui.setTheme(name)`.
+    Theme(String),
+    /// Set the editor text — `ctx.ui.setEditorText(text)`.
+    EditorText(String),
     /// The App dropped a component; dispose its QuickJS counterpart.
     Dispose(JsComponent),
 }
@@ -483,6 +487,15 @@ impl UiRegionHost for TuiRegionHost {
         let _ = self
             .tx
             .send(RegionOp::SetCustomVisible { session, visible });
+    }
+
+    async fn set_theme(&self, name: String) -> Result<(), String> {
+        let _ = self.tx.send(RegionOp::Theme(name.clone()));
+        Ok(())
+    }
+
+    async fn set_editor_text(&self, text: String) {
+        let _ = self.tx.send(RegionOp::EditorText(text));
     }
 }
 
@@ -658,6 +671,12 @@ impl RegionPump {
                 if let Some(custom) = self.custom.as_ref().filter(|c| c.session == session) {
                     custom.handle.set_visible(visible);
                 }
+            }
+            RegionOp::Theme(name) => {
+                let _ = app.set_theme_by_name(&name);
+            }
+            RegionOp::EditorText(text) => {
+                app.set_editor_text(&text);
             }
             RegionOp::Dispose(component) => component.dispose().await,
         }

@@ -1236,21 +1236,32 @@ function makeUiContext(hasUI) {
     return true;
   }
 
-  // Theme / editor-text / working-indicator channels still have no host
-  // bridge: accept the call so extensions that configure them at load time
-  // still load, warn once, and keep the value inert.
+  // Theme / editor-text channels now have host bridge.
+  // setHiddenThinkingLabel / setWorkingIndicator / setWorkingVisible / setWorkingMessage
+  // still have no host bridge: accept the call so extensions that configure
+  // them at load time still load, warn once, and keep the value inert.
   for (const kind of [
-    "setEditorText",
     "setHiddenThinkingLabel",
     "setWorkingIndicator",
     "setWorkingVisible",
     "setWorkingMessage",
-    "setTheme",
   ]) {
     ui[kind] = () => {
       reportUnsupported(kind);
     };
   }
+  // setEditorText — `ctx.ui.setEditorText(text)`, mirrors upstream
+  // `app.setEditorText(text)` (`interactive-mode.ts:2444`).
+  ui.setEditorText = (text) => {
+    if (!regionsAvailable("setEditorText")) return;
+    regionCall("setEditorText", { text: String(text) });
+  };
+  // setTheme — `ctx.ui.setTheme(name)`, mirrors upstream
+  // `app.setTheme(name)` (`interactive-mode.ts:2443`).
+  ui.setTheme = (name) => {
+    if (!regionsAvailable("setTheme")) return;
+    regionCall("setTheme", { name: String(name) });
+  };
   return Object.freeze(ui);
 }
 

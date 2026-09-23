@@ -897,6 +897,15 @@ impl UiRegionHost for RecordingRegionHost {
     async fn set_custom_visible(&self, session: u64, visible: bool) {
         self.push(format!("custom-visible:{session}:{visible}"));
     }
+
+    async fn set_theme(&self, name: String) -> Result<(), String> {
+        self.push(format!("theme:{name}"));
+        Ok(())
+    }
+
+    async fn set_editor_text(&self, text: String) {
+        self.push(format!("editor-text:{text}"));
+    }
 }
 
 /// Wait for the region worker to finish draining: region mutations are
