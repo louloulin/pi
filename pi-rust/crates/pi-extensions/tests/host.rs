@@ -1227,6 +1227,107 @@ fn footer_data_snapshot_is_queryable_from_a_custom_footer() {
     });
 }
 
+/// LUM-1490 — the `ctx.ui` state `footerData` reads is **session**-scoped, not
+/// per-`ctx`: `buildCtx` hands every handler and command a fresh `ctx`, so the
+/// status map and the `onBranchChange` subscribers have to live outside it.
+/// Upstream has one `FooterDataProvider` per session; before this, a footer
+/// installed from one handler saw only the statuses written through that same
+/// handler, and the driver's branch-change hook pointed at whichever `ctx` was
+/// built last (a real app bug the ConPTY scenario caught: the branch updated,
+/// `onBranchChange` never fired).
+#[test]
+fn footer_data_state_is_session_scoped_not_per_ctx() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(Arc::new(ScriptedUiHandler::new(
+                    ScriptedUiAnswers::default(),
+                )))
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                // Status written from the session_start ctx…
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setStatus("build", "compiling");
+                });
+                // …and a footer installed from a *different* ctx (a command),
+                // which must still see it.
+                pi.registerCommand("install", {
+                    handler: async function (args, ctx) {
+                        ctx.ui.setFooter((tui, theme, data) => {
+                            let fired = 0;
+                            data.onBranchChange(function () {
+                                fired += 1;
+                            });
+                            return {
+                                render: () => [
+                                    "statuses=" + Array.from(data.getExtensionStatuses().keys()).sort().join(","),
+                                    "fired=" + fired,
+                                ],
+                            };
+                        });
+                        return "installed";
+                    },
+                });
+                // Another event rebuilds a `ctx` after the footer is installed:
+                // the driver's branch-change hook must not follow it.
+                pi.on("turn_start", async function (event, ctx) {
+                    ctx.ui.setStatus("turn", "running");
+                });
+            };
+        "#;
+        host.load(entry("session-scoped-footer"), source)
+            .await
+            .expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+        host.execute_command("install", "", "tui", true, "/tmp")
+            .await
+            .expect("command");
+        host.emit_event(&ExtensionEvent::TurnStart {
+            turn_index: 1,
+            timestamp: 1_700_000_000_000,
+        })
+        .await
+        .expect("turn_start");
+
+        wait_for_region_ops(&recorder, 3).await;
+        let footer = recorder.footer();
+        println!("OPS {:?}", recorder.ops());
+        assert_eq!(
+            footer.render(40).await.lines,
+            vec!["statuses=build,turn".to_string(), "fired=0".to_string()],
+            "a later ctx must not hide the statuses a custom footer reads"
+        );
+
+        // The first push only seeds the snapshot (upstream's `onBranchChange`
+        // is a transition channel), the second is the transition under test.
+        assert!(!host
+            .sync_footer_data(FooterData {
+                git_branch: Some("main".to_string()),
+                available_provider_count: 1,
+            })
+            .await);
+        assert!(host
+            .sync_footer_data(FooterData {
+                git_branch: Some("side".to_string()),
+                available_provider_count: 1,
+            })
+            .await);
+        assert_eq!(
+            footer.render(40).await.lines,
+            vec!["statuses=build,turn".to_string(), "fired=1".to_string()],
+            "the subscriber registered by the command's ctx still fires after other ctxs were built"
+        );
+    });
+}
+
 /// LUM-1490 — `footerData.onBranchChange(cb)` is a real channel, not a stub:
 /// the driver's push fires every subscriber, the *initial* snapshot does not
 /// count as a change (upstream fires on a `HEAD` move), and the returned
@@ -1284,22 +1385,25 @@ fn on_branch_change_fires_on_transitions_only_and_unsubscribes() {
 
         // The initial value seeds the snapshot without firing: upstream's
         // `onBranchChange` is a change channel, not an initial-value channel.
-        assert!(!host
-            .sync_footer_data(FooterData {
-                git_branch: Some("main".to_string()),
-                available_provider_count: 2,
-            })
-            .await);
+        assert!(
+            !host
+                .sync_footer_data(FooterData {
+                    git_branch: Some("main".to_string()),
+                    available_provider_count: 2,
+                })
+                .await
+        );
         assert_eq!(footer.render(20).await.lines, vec!["fired=0".to_string()]);
 
         // A real move fires exactly once, and the subscriber's own host call
         // lands on the region bridge before the next render.
-        assert!(host
-            .sync_footer_data(FooterData {
+        assert!(
+            host.sync_footer_data(FooterData {
                 git_branch: Some("side".to_string()),
                 available_provider_count: 2,
             })
-            .await);
+            .await
+        );
         assert_eq!(footer.render(20).await.lines, vec!["fired=1".to_string()]);
         let ops = wait_for_region_ops(&recorder, 3).await;
         assert!(
@@ -1308,23 +1412,26 @@ fn on_branch_change_fires_on_transitions_only_and_unsubscribes() {
         );
 
         // Re-pushing the same branch is not a transition.
-        assert!(!host
-            .sync_footer_data(FooterData {
-                git_branch: Some("side".to_string()),
-                available_provider_count: 9,
-            })
-            .await);
+        assert!(
+            !host
+                .sync_footer_data(FooterData {
+                    git_branch: Some("side".to_string()),
+                    available_provider_count: 9,
+                })
+                .await
+        );
         assert_eq!(footer.render(20).await.lines, vec!["fired=1".to_string()]);
 
         // `onBranchChange` returns the unsubscribe function; after it runs a
         // further move no longer reaches that subscriber.
         assert!(footer.handle_input("stop").await);
-        assert!(host
-            .sync_footer_data(FooterData {
+        assert!(
+            host.sync_footer_data(FooterData {
                 git_branch: Some("third".to_string()),
                 available_provider_count: 2,
             })
-            .await);
+            .await
+        );
         assert_eq!(
             footer.render(20).await.lines,
             vec!["fired=1".to_string()],

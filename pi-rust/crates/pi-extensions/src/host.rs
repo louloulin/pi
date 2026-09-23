@@ -1472,17 +1472,13 @@ fn handle_region_call(
                 .unwrap_or_default();
             let snapshot = inner.footer_data.lock().clone();
             let value = match field {
-                "gitBranch" => serde_json::json!(
-                    snapshot
-                        .as_ref()
-                        .and_then(|data| data.git_branch.clone())
-                ),
-                "availableProviderCount" => serde_json::json!(
-                    snapshot
-                        .as_ref()
-                        .map(|data| data.available_provider_count)
-                        .unwrap_or(0)
-                ),
+                "gitBranch" => {
+                    serde_json::json!(snapshot.as_ref().and_then(|data| data.git_branch.clone()))
+                }
+                "availableProviderCount" => serde_json::json!(snapshot
+                    .as_ref()
+                    .map(|data| data.available_provider_count)
+                    .unwrap_or(0)),
                 other => {
                     return region_envelope(
                         false,

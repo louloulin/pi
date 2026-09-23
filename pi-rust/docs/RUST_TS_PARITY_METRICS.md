@@ -1291,3 +1291,61 @@ Rust 端口此前**整条不存在**（生产代码 `setTitle`/`set_title` 0 命
 **ConPTY 实拍**（`scripts/pty_capture_win.py`，每帧记 `alive=True`），不是冻结帧；其中 4 条是新增的
 OSC 字节级断言（`raw_expect`），因为终端标题在格子里永远看不见。本轮细节见
 `docs/LUM1485_TERMINAL_TITLE.md`。
+
+### 0.27 LUM-1490 复测：`footerData` 宿主→JS 查询通道（4/4）+ 驱动每帧跟踪 `HEAD`；加权 **87.2%**（87.179%）
+
+**量的是什么**：上游把 `footerData` 定义成一个**只读视图**，随 `setFooter` 工厂的第三个参数交给插件，
+恰好四个成员 —— `getGitBranch()` / `getExtensionStatuses()` / `getAvailableProviderCount()` /
+`onBranchChange(cb)`（`packages/coding-agent/src/core/footer-data-provider.ts:387-390`），
+官方示例 `examples/extensions/custom-footer.ts:28,45` 两个都用。Rust 端口此前只有两个成员，
+且 `getGitBranch: () => undefined` 是硬编码；`getAvailableProviderCount` / `onBranchChange`
+**不存在**（按官方示例写的插件会 `TypeError`）。这是 `ctx.ui` 里**唯一一个 host→JS 方向**的接口。
+本轮补齐四个成员，并顺带关掉「分支只在启动时解析一次」这条写在 `footer.rs` 文档里的刻意偏差：
+驱动改为**每帧重读 `.git/HEAD`**，内置 footer 与插件 `footerData` 共用一个 `BranchTracker`。
+
+基线 = `8678f7327`（= LUM-1485 推送后的 `origin/feature/pi.rs`，本机同工具链**先后各跑一遍**）。
+
+| 口径 | 本轮 | 基线 `8678f7327` |
+|---|---|---|
+| 纯代码规模（src↔src） | **95.1%**（145,618 / 153,106） | 94.9%（145,296 / 153,106） |
+| 测试规模（统一正则：`#[test]`+`#[tokio::test]` vs `it(`/`test(`） | **0.5450**（2,969 / 5,448） | 0.5439（2,963 / 5,448） |
+| 测试规模（§0.26 headline 口径，分母 5,563 折算） | **0.5237**（0.5226 + 6/5,563） | 0.5226（2,907 / 5,563） |
+| `pi-tui` 全量 | **1,216 / 0** | 1,216 / 0（本轮未改 `pi-tui`） |
+| `pi-coding-agent` 全量 | **853 / 28** | 850 / 28（**失败逐条同名**，全为 Windows 环境类） |
+| `pi-extensions` 全量 | **136 / 5** | 133 / 5（失败同名同数） |
+| TUI 模块面（计入加权） | **36 / 42 = 85.7%（不上调）** | 同 |
+| `app.*` 接线 / `tui.*` 消费 | 44/44、49/49 = 100% | 同 |
+| 扩展生命周期事件 | 36/36 声明 + 36/36 生产构造点 | 同 |
+| **`ctx.ui` 显示通路** | 区域类 **5/5**、文本类 **1/3**、**`footerData` 4/4**（本轮 0/4 → 4/4） | 区域类 5/5、文本类 1/3、`footerData` 2/4（且 `getGitBranch` 硬编码 `undefined`） |
+| 轴 9 扩展宿主能力 | **95%（不上调）** | 95% |
+| 轴 12 测试与门禁强度 | **0.5237**（headline 口径；本轮 +6 条用例） | 0.5226 |
+| 加权完成度 | **87.2%**（87.179%） | 87.2%（87.173%） |
+
+```
+5×1.000 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×0.5237 + 3×0.95 = 87.179% ≈ 87.2%
+```
+
+**为什么总分只动 +0.006pt（一位小数不变）**：本轮交付不落在 13 条轴里 —— `footerData` 属于
+「扩展宿主能力」轴（第 9 轴，权重 8%，现记 95%），而该轴的缺口是 §3.6 列的另外 9 个 `pi.*` 宿主 API，
+不是这一格；按 §0.8「不靠重估旧轴抬分」的规矩，**第 9 轴保留 95%**（上一轮拒绝抬它的理由正是
+「会掩盖真正剩下的 `getGitBranch()` 查询通道」，本轮把那条通道关掉即兑现，但不改分）。
+驱动每帧跟踪 `HEAD` 修的是内置 footer 的刷新时机，属第 5/6 轴内的行为正确性，不是新覆盖面。
+唯一动的是第 12 轴：+6 条用例 × 权重 5% = **+0.006pt**。
+
+**门禁**（本机 Windows / cargo 1.97.1）：`cargo fmt --all -- --check` 干净；
+`cargo clippy -p pi-tui --all-targets -- -D warnings` **exit 0**；`pi-extensions` /
+`pi-coding-agent` 改动文件 0 告警（余下为 vendored `rquickjs-core` 与既存 `signal_name`）。
+
+**反向验证**（本机实做）：把 shim 打回 `getGitBranch: () => undefined` + `onBranchChange` 空实现、
+并把驱动每帧轮询短路 → 同一份真 ConPTY 场景由 **12 PASS / 0 FAIL 变成 4 PASS / 8 FAIL**；
+会话级作用域另有回归用例（打回 per-`ctx` 版本时 `statuses=` 空表红）。两条都在
+`docs/LUM1490_FOOTER_DATA.md` §4.3。
+
+**真 PTY 证据**：`docs/screenshots/lum1490-footer-data.png`(+`.txt`)，100×26、4 面板、
+**12 条断言全绿**：启动 `branch=lum1490-main`（`changes=0`、`providers=32`）→
+`! git checkout -b lum1490-side`（footer 变 `branch=lum1490-side` 且 `changes=1`）→
+`/default-footer`（内置 footer 显示 `(lum1490-side)`）→ `git checkout --detach HEAD`
+（`branch=null`）。场景用 harness 新增的 `git_init` **真建仓库 + 真空提交**，不是伪造 `HEAD`；
+全程真 `pi.exe`、真按键、真重绘（每帧 `alive=True`）。本轮细节见
+`docs/LUM1490_FOOTER_DATA.md`。

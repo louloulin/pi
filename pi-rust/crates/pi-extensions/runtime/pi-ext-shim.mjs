@@ -278,6 +278,120 @@ function buildCtx(extra) {
 }
 
 // ---------------------------------------------------------------------------
+// Session-scoped `ctx.ui` state.
+//
+// `buildCtx` hands every event handler and command a *fresh* `ctx` object, so
+// anything that outlives one turn — the `ctx.ui.setStatus` map a custom footer
+// reads, and the `footerData.onBranchChange` subscribers — has to live here and
+// not inside `makeUiContext`. Upstream has exactly one `FooterDataProvider` per
+// session (`footer-data-provider.ts:50-70`); a per-`ctx` copy would answer a
+// footer with only the statuses written through the same handler that installed
+// it, and would lose the driver's branch-change hook to whichever `buildCtx`
+// ran last.
+// ---------------------------------------------------------------------------
+
+/** `ctx.ui.setStatus(key, text)` state, shared by every `ctx` of the session. */
+const __pi_ui_statuses = new Map();
+
+/** `footerData.onBranchChange(cb)` subscribers, shared by every `ctx`. */
+const __pi_footer_branch_subscribers = new Set();
+
+/** Warn through whatever notify channel the host installed; never throws. */
+function __pi_ui_warn(message) {
+  if (typeof globalThis.host_ui_notify !== "function") return;
+  try {
+    globalThis.host_ui_notify(String(message), "warning");
+  } catch (_error) {
+    // Swallow — notify is fire-and-forget.
+  }
+}
+
+/**
+ * Entry point the Rust driver calls when the branch it tracks changed
+ * (`JsExtensionHost::notify_branch_change`). Each subscriber is extension code,
+ * so a throw is reported and dropped instead of unwinding into the driver's
+ * frame.
+ */
+globalThis.__pi_footer_branch_changed = function () {
+  if (__pi_footer_branch_subscribers.size === 0) return;
+  for (const callback of Array.from(__pi_footer_branch_subscribers)) {
+    try {
+      callback();
+    } catch (error) {
+      __pi_ui_warn(
+        "ctx.ui.onBranchChange failed: " +
+          String(error && error.message ? error.message : error),
+      );
+    }
+  }
+};
+
+/**
+ * Read one `footerData` field from the host. A missing bridge (no UI) or an
+ * unknown field reads as `undefined`, which each getter folds into its own
+ * upstream default.
+ */
+function __pi_footer_data_query(field) {
+  if (typeof globalThis.host_ui_region !== "function") return undefined;
+  try {
+    const raw = globalThis.host_ui_region(
+      "footerData",
+      JSON.stringify({ field: String(field) }),
+    );
+    const reply = typeof raw === "string" ? JSON.parse(raw) : null;
+    return reply && reply.ok ? reply.value : undefined;
+  } catch (_error) {
+    return undefined;
+  }
+}
+
+/**
+ * `footerData` — the read-only view of driver-owned (and session-scoped) facts a
+ * custom footer gets as its third factory argument (upstream
+ * `ReadonlyFooterDataProvider`, `footer-data-provider.ts:387-390`).
+ *
+ * `getGitBranch()` / `getAvailableProviderCount()` are the host *→* JS direction
+ * of the bridge: the interactive driver pushes a snapshot
+ * (`JsExtensionHost::sync_footer_data`) and these getters query it back
+ * synchronously over the same `host_ui_region` bridge the mutations use, so a
+ * render-time read never crosses an await. A host that never pushed one
+ * (non-interactive mode) answers the untouched default — branch `null`, count
+ * `0` — which is upstream's own pre-resolve answer.
+ */
+const __pi_footer_data_stub = Object.freeze({
+  /**
+   * The branch of the repository the session runs in, or `null` outside a
+   * repository / on a detached HEAD (`string | null` upstream).
+   */
+  getGitBranch: () => {
+    const branch = __pi_footer_data_query("gitBranch");
+    return branch === null || branch === undefined ? null : String(branch);
+  },
+  /**
+   * How many providers this session can route to — the count upstream derives
+   * from the session's model catalog (`footer-data-provider.ts:360-370`).
+   */
+  getAvailableProviderCount: () => {
+    const count = Number(__pi_footer_data_query("availableProviderCount"));
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  },
+  // A copy, like the `ReadonlyMap` upstream hands a custom footer.
+  getExtensionStatuses: () => new Map(__pi_ui_statuses),
+  /**
+   * Subscribe to branch transitions; returns the unsubscribe function
+   * (`footer-data-provider.ts:149-160`). Fired by the host when the driver sees
+   * `HEAD` move — a checkout in another terminal included.
+   */
+  onBranchChange: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    __pi_footer_branch_subscribers.add(callback);
+    return () => {
+      __pi_footer_branch_subscribers.delete(callback);
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Extension UI component registry (`ctx.ui.setWidget` / `setHeader` /
 // `setFooter` / `setEditorComponent` / `custom`).
 //
@@ -760,11 +874,6 @@ function makeUiContext(hasUI) {
     }
   }
   const warnedKinds = {};
-  // `ctx.ui.setStatus(key, text)` state: the shim keeps the map so a custom
-  // footer installed through `setFooter` sees the same statuses upstream's
-  // `footerData.getExtensionStatuses()` returns, and mirrors every mutation to
-  // the host over the region bridge.
-  const extensionStatuses = new Map();
   function reportUnsupported(kind) {
     if (warnedKinds[kind]) return;
     warnedKinds[kind] = true;
@@ -852,12 +961,12 @@ function makeUiContext(hasUI) {
     setStatus(key, text) {
       const name = String(key);
       if (text === undefined || text === null) {
-        extensionStatuses.delete(name);
+        __pi_ui_statuses.delete(name);
         regionCall("setStatus", { key: name, text: null });
         return;
       }
       const value = String(text);
-      extensionStatuses.set(name, value);
+      __pi_ui_statuses.set(name, value);
       regionCall("setStatus", { key: name, text: value });
     },
 
@@ -906,7 +1015,7 @@ function makeUiContext(hasUI) {
       const component = normalizeRegionComponent("setFooter", factory, [
         tuiStub,
         ui.theme,
-        footerDataStub,
+        __pi_footer_data_stub,
       ]);
       installRegion("setFooter", "setFooter", component);
     },
@@ -1043,7 +1152,8 @@ function makeUiContext(hasUI) {
   // No-op stand-ins for the upstream `tui` / `keybindings` objects a region
   // factory receives. Extensions mostly use them to request a re-render; the
   // host re-renders every frame regardless. `footerData` is *not* a no-op
-  // stand-in — it is a live query channel (see below).
+  // stand-in — it is a live query channel over session-scoped state (see
+  // `__pi_footer_data_stub`).
   const tuiStub = Object.freeze({
     requestRender: () => {},
     setFocus: () => {},
@@ -1053,76 +1163,6 @@ function makeUiContext(hasUI) {
     matches: () => false,
     getKeys: () => [],
   });
-  // `footerData` — the read-only view of driver-owned facts a custom footer
-  // gets as its third factory argument (upstream
-  // `ReadonlyFooterDataProvider`, `footer-data-provider.ts:387-390`).
-  //
-  // This is the host *→* JS direction of the bridge: the interactive driver
-  // pushes a snapshot (`JsExtensionHost::sync_footer_data`) and these getters
-  // query it back synchronously over the same `host_ui_region` bridge the
-  // mutations use, so render-time reads never cross an await. A host that
-  // never pushed one (non-interactive mode) answers the untouched default —
-  // branch `null`, count `0` — which is upstream's own pre-resolve answer.
-  const footerBranchSubscribers = new Set();
-  const footerDataStub = Object.freeze({
-    /**
-     * The branch of the repository the session runs in, or `null` outside a
-     * repository / on a detached HEAD (`string | null` upstream).
-     */
-    getGitBranch: () => {
-      const branch = footerDataQuery("gitBranch");
-      return branch === null || branch === undefined ? null : String(branch);
-    },
-    /** How many providers this session can route to (upstream counts them from the session's model catalog). */
-    getAvailableProviderCount: () => {
-      const count = Number(footerDataQuery("availableProviderCount"));
-      return Number.isFinite(count) && count > 0 ? count : 0;
-    },
-    // A copy, like the `ReadonlyMap` upstream hands a custom footer.
-    getExtensionStatuses: () => new Map(extensionStatuses),
-    /**
-     * Subscribe to branch transitions; returns the unsubscribe function
-     * (`footer-data-provider.ts:149-160`). Fired by the host when the driver
-     * sees `HEAD` move — a checkout in another terminal included.
-     */
-    onBranchChange: (callback) => {
-      if (typeof callback !== "function") return () => {};
-      footerBranchSubscribers.add(callback);
-      return () => {
-        footerBranchSubscribers.delete(callback);
-      };
-    },
-  });
-
-  /**
-   * Read one `footerData` field from the host. A missing bridge (no UI) or an
-   * unknown field reads as `undefined`, which each getter folds into its own
-   * upstream default.
-   */
-  function footerDataQuery(field) {
-    const reply = regionCall("footerData", { field: field });
-    return reply && reply.ok ? reply.value : undefined;
-  }
-
-  /**
-   * Entry point the Rust driver calls when the branch it tracks changed
-   * (`JsExtensionHost::notify_branch_change`). Each subscriber is extension
-   * code, so a throw is reported and dropped instead of unwinding into the
-   * driver's frame.
-   */
-  globalThis.__pi_footer_branch_changed = function () {
-    if (footerBranchSubscribers.size === 0) return;
-    for (const callback of Array.from(footerBranchSubscribers)) {
-      try {
-        callback();
-      } catch (error) {
-        reportRegionError(
-          "onBranchChange",
-          error && error.message ? error.message : error,
-        );
-      }
-    }
-  };
 
   /** Call the `host_ui_region` import; never throws. */
   function regionCall(op, payload) {
