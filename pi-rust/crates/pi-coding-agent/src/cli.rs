@@ -13,6 +13,14 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
+    /// Provider name (default: google). Mirrors `pi --provider`.
+    #[arg(long = "provider", value_name = "NAME")]
+    pub provider: Option<String>,
+
+    /// API key for the provider. Mirrors `pi --api-key`.
+    #[arg(long = "api-key", value_name = "KEY")]
+    pub api_key: Option<String>,
+
     /// Path to a single extension file (or directory) to load for this
     /// run only (matches `pi -e <path>` in the TS CLI). Repeatable.
     #[arg(short = 'e', long = "extension", value_name = "PATH")]
@@ -30,6 +38,11 @@ pub struct Cli {
     /// only the built-in tool bundle.
     #[arg(long = "no-extensions", conflicts_with_all = ["extension", "extensions_dir"])]
     pub no_extensions: bool,
+
+    /// Thinking level (off, minimal, low, medium, high, xhigh, max).
+    /// Mirrors `pi --thinking`.
+    #[arg(long = "thinking", value_name = "LEVEL")]
+    pub thinking: Option<String>,
 
     /// Print events to stdout as JSON instead of rendering the TUI.
     ///
@@ -63,6 +76,39 @@ pub struct Cli {
     /// Append text to the system prompt. Mirrors `pi --append-system-prompt`.
     #[arg(long, value_name = "TEXT")]
     pub append_system_prompt: Vec<String>,
+
+    /// Comma-separated list of tool names to enable. Mirrors `pi --tools`.
+    #[arg(long = "tools", short = 't', value_name = "TOOLS")]
+    pub tools: Option<String>,
+
+    /// Comma-separated list of tool names to disable. Mirrors `pi --exclude-tools`.
+    #[arg(long = "exclude-tools", short = 'x', value_name = "TOOLS")]
+    pub exclude_tools: Option<String>,
+
+    /// Disable built-in tools but keep extension/custom tools enabled.
+    /// Mirrors `pi --no-builtin-tools`.
+    #[arg(long = "no-builtin-tools", short = 'n')]
+    pub no_builtin_tools: bool,
+
+    /// Theme name to use. Mirrors `pi --theme`.
+    #[arg(long = "theme", value_name = "NAME")]
+    pub theme: Option<String>,
+
+    /// Disable all tools (built-in and extension). Mirrors `pi --no-tools`.
+    #[arg(long = "no-tools")]
+    pub no_tools: bool,
+
+    /// Enable verbose output. Mirrors `pi --verbose`.
+    #[arg(long = "verbose", short = 'v')]
+    pub verbose: bool,
+
+    /// Run in offline mode (no network requests). Mirrors `pi --offline`.
+    #[arg(long = "offline")]
+    pub offline: bool,
+
+    /// List models matching pattern. Mirrors `pi --list-models`.
+    #[arg(long = "list-models", value_name = "PATTERN")]
+    pub list_models: Option<Option<String>>,
 
     /// Load a skill file or directory for this run only. The default
     /// locations (`~/.pi/agent/skills` and `.pi/skills`) are always
