@@ -308,7 +308,7 @@ python pi-rust/scripts/app_action_coverage.py
 「如果任务存在是跳过还是计划和实现后续任务」的回答：**不跳过、也不重开大改**，本轮在同一个 run 里
 完成 issue 点名的四件事（TUI 审计 / 缺口修复 / 截图 / 推送合并），并**派发 1 个**精确定义的后续任务：
 
-* **LUM-1470** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 的第 3 行（§6 #4）。
+* **LUM-1483** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 的第 3 行（§6 #4）。
   上游 `footer.ts:243-251` 用 `footerData.getExtensionStatuses()` push 一行，Rust 侧
   `app.rs:200-216` 的 `ctx.ui` 对照表把它列为不支持。证据、行号、验收判据写进任务正文；
   创建时为 `backlog`（避免与 LUM-1467 抢同一个 `status.rs` / `plan_chrome` 文件面），
@@ -317,6 +317,17 @@ python pi-rust/scripts/app_action_coverage.py
 **只派 1 条而不是 2 条**的理由：剩下的候选中，`/transcript` 带出块（§6.1）与「cut above 覆盖正文」
 都要改 `app.rs` 的渲染路径，与 LUM-1467 正在动的 `status.rs`/`plan_chrome` 是同一屏几何；
 本仓库已经为「同一缺陷两条并发线各修一次」清过两次（LUM-1431 §3、LUM-1445 §8）。
+
+### 7.1 一条已经失效的派单（提请注意，本轮不改它）
+
+上一轮（LUM-1457）派了一条 `backlog`：**LUM-1479「`app.tree.editLabel` 与 tree label 全链路
+（最后一条 silent `app.*`）」**。它成立的前提在本轮**已不成立**：LUM-1263 已把 `app.tree.editLabel`
+接线（本轮并入 `feature/pi.rs`），`python pi-rust/scripts/app_action_coverage.py` 在 tip 上输出
+`wired: 44/44 (100.0%) / silent: 0/44`。
+
+LUM-1479 正文里另一半（`pi-protocol` 的 `SessionEntry` 缺 label 变体、`pi-session` 没有存 label 的地方、
+`appendLabelChange` 没移植）**可能仍然成立**——那是「树改名能不能持久化」的上游兼容问题，
+与「有没有消费者」不是同一件事。建议由 issue 负责人决定收窄为「label 持久化链路」还是关掉。
 
 ## 8. 范围之外
 
