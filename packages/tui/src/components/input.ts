@@ -388,10 +388,10 @@ export class Input implements Component, Focusable {
 			this.burstConsecutive = 1;
 		}
 
-		// Only start buffering when we have 20+ consecutive fast chars within window (likely a real paste)
+		// Only start buffering when we have pasteBurstMinChars+ consecutive fast chars within window (likely a real paste)
 		// Real pastes typically have 50-100+ chars, while normal typing won't reach this
 		// This ensures normal typing is always inserted immediately
-		const isPasteLikely = this.burstConsecutive >= 20 && withinWindow;
+		const isPasteLikely = this.burstConsecutive >= this.pasteBurstMinChars && withinWindow;
 
 		if (this.burstBuffer.length > 0) {
 			// Already in burst mode - add to buffer
