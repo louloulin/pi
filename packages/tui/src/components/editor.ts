@@ -232,6 +232,26 @@ interface LayoutLine {
 	cursorPos?: number;
 }
 
+/**
+ * Reverse history search state. Mirrors Rust's `HistorySearch` struct.
+ *
+ * When active, the footer shows the search prompt and the editor preview
+ * shows the current match. The user types to filter, and Up/Down (or
+ * Ctrl+R/Ctrl+S) navigate through matching entries.
+ */
+interface HistorySearchState {
+	/** The query string the user is typing in the search prompt. */
+	query: string;
+	/** Draft editor state saved when the search started. Restored on cancel. */
+	draft: EditorState;
+	/** Draft paste registry saved alongside the draft. */
+	draftPastes: Map<number, string>;
+	/** Indices into `history` that match `query`, newest first, de-duplicated. */
+	matches: number[];
+	/** Index into `matches` currently previewed, or null if query has no matches. */
+	selected: number | null;
+}
+
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
@@ -333,6 +353,9 @@ export class Editor implements Component, Focusable {
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	private historyDraft: EditorState | null = null;
+
+	// Reverse history search state (Ctrl+R / Ctrl+S), mirrors Rust's HistorySearch
+	private historySearch: HistorySearchState | null = null;
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
@@ -475,6 +498,163 @@ export class Editor implements Component, Focusable {
 	private exitHistoryBrowsing(): void {
 		this.historyIndex = -1;
 		this.historyDraft = null;
+	}
+
+	/**
+	 * Begin a reverse history search (Ctrl+R). Saves the current draft and
+	 * enters search mode, showing an interactive prompt in the editor's status.
+	 * Mirrors Rust's `Editor::begin_history_search()`.
+	 */
+	private beginHistorySearch(): void {
+		if (this.history.length === 0) return;
+
+		// Cancel any open autocomplete
+		this.cancelAutocomplete();
+
+		// Save current draft (same as `historyDraft`)
+		this.pushUndoSnapshot();
+		const draftState = structuredClone(this.state) as EditorState;
+		const draftPastes = new Map(this.pastes);
+
+		// Build initial matches (empty query = all entries, newest first)
+		const matches = this.buildHistorySearchMatches("");
+
+		this.historySearch = {
+			query: "",
+			draft: draftState,
+			draftPastes,
+			matches,
+			selected: null,
+		};
+
+		// Preview the most recent match if available
+		if (matches.length > 0) {
+			this.historySearchStep(1); // step forward to first match (same direction as Ctrl+R)
+		}
+	}
+
+	/**
+	 * Perform one step of the reverse history search.
+	 * Mirrors Rust's `Editor::history_search_step()`.
+	 * @param direction 1 = older (forward), -1 = newer (backward)
+	 */
+	private historySearchStep(direction: 1 | -1): void {
+		if (!this.historySearch) return;
+
+		const { matches } = this.historySearch;
+		if (matches.length === 0) return;
+
+		let newSelected: number;
+		if (this.historySearch.selected === null) {
+			// First step: go in the requested direction from the "before start" position
+			// For Ctrl+R (direction=1/older): start at the oldest match (index = matches.length - 1)
+			// For Ctrl+S (direction=-1/newer): start at the newest match (index = 0)
+			newSelected = direction === 1 ? matches.length - 1 : 0;
+		} else {
+			newSelected = this.historySearch.selected + direction;
+		}
+
+		// Clamp to valid range
+		newSelected = Math.max(0, Math.min(matches.length - 1, newSelected));
+
+		this.historySearch.selected = newSelected;
+
+		// Preview the selected match
+		const historyIndex = matches[newSelected]!;
+		const matchText = this.history[historyIndex] ?? "";
+		this.setTextInternal(matchText, "end");
+		if (this.onChange) this.onChange(this.getText());
+	}
+
+	/**
+	 * Update the history search query and re-filter matches.
+	 * Called when the user types characters into the search prompt.
+	 * Mirrors Rust's incremental query update.
+	 */
+	private updateHistorySearchQuery(query: string): void {
+		if (!this.historySearch) return;
+
+		this.historySearch.query = query;
+		this.historySearch.matches = this.buildHistorySearchMatches(query);
+		this.historySearch.selected = null; // Reset selection until user navigates
+
+		// Preview first match if available
+		if (this.historySearch.matches.length > 0) {
+			this.historySearchStep(1);
+		} else {
+			// No match: restore draft
+			this.state = structuredClone(this.historySearch.draft);
+			this.pastes = new Map(this.historySearch.draftPastes);
+			if (this.onChange) this.onChange(this.getText());
+		}
+	}
+
+	/**
+	 * Build the list of matching history indices for a given query string.
+	 * De-duplicated by exact text, newest first.
+	 */
+	private buildHistorySearchMatches(query: string): number[] {
+		const seen = new Set<string>();
+		const matches: number[] = [];
+
+		for (let i = 0; i < this.history.length; i++) {
+			const entry = this.history[i]!;
+			// De-duplicate by exact text (keep newest occurrence)
+			if (seen.has(entry)) continue;
+
+			if (query === "" || entry.toLowerCase().includes(query.toLowerCase())) {
+				seen.add(entry);
+				matches.push(i);
+			}
+		}
+
+		return matches;
+	}
+
+	/**
+	 * Cancel the active history search and restore the saved draft.
+	 * Mirrors Rust's `Editor::cancel_history_search()`.
+	 */
+	private cancelHistorySearch(): void {
+		if (!this.historySearch) return;
+
+		const { draft, draftPastes } = this.historySearch;
+		this.state = structuredClone(draft);
+		this.pastes = new Map(draftPastes);
+		this.historySearch = null;
+		this.preferredVisualCol = null;
+		this.snappedFromCursorCol = null;
+		this.scrollOffset = 0;
+
+		if (this.onChange) this.onChange(this.getText());
+	}
+
+	/**
+	 * Accept the currently previewed history search result and exit search mode.
+	 * The draft is committed as the current editor state.
+	 */
+	private acceptHistorySearch(): void {
+		if (!this.historySearch) return;
+		// The previewed match is already in `state`; just clear the search UI
+		this.historySearch = null;
+		this.historyIndex = -1; // Don't treat this as history browsing
+		this.historyDraft = null;
+	}
+
+	/**
+	 * Get the current history search status for rendering.
+	 * Returns the search UI label and whether there's a match.
+	 */
+	public getHistorySearchStatus(): { active: boolean; query: string; matchCount: number; selected: number | null } {
+		if (!this.historySearch) {
+			return { active: false, query: "", matchCount: 0, selected: null };
+		}
+		return {
+			active: true,
+			query: this.historySearch.query,
+			matchCount: this.historySearch.matches.length,
+			selected: this.historySearch.selected,
+		};
 	}
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
@@ -741,6 +921,12 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// Escape cancels history search
+		if (kb.matches(data, "tui.select.cancel") && this.historySearch) {
+			this.cancelHistorySearch();
+			return;
+		}
+
 		// Handle autocomplete mode
 		if (this.autocompleteState && this.autocompleteList) {
 			if (kb.matches(data, "tui.select.cancel")) {
@@ -826,6 +1012,16 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 		if (kb.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace")) {
+			// During history search, delete from the query
+			if (this.historySearch) {
+				if (this.historySearch.query.length > 0) {
+					this.updateHistorySearchQuery(this.historySearch.query.slice(0, -1));
+				} else {
+					// Empty query: cancel search and restore draft
+					this.cancelHistorySearch();
+				}
+				return;
+			}
 			this.handleBackspace();
 			return;
 		}
@@ -853,6 +1049,19 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.historyNext")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(1);
+			return;
+		}
+
+		// Reverse history search: Ctrl+R (older) / Ctrl+S (newer)
+		if (kb.matches(data, "tui.editor.historySearch") || kb.matches(data, "tui.editor.historySearchNext")) {
+			const isCtrlR = kb.matches(data, "tui.editor.historySearch");
+			if (this.historySearch) {
+				// Search already active: step to next/previous match
+				this.historySearchStep(isCtrlR ? 1 : -1);
+			} else {
+				// Begin new search
+				this.beginHistorySearch();
+			}
 			return;
 		}
 
@@ -896,6 +1105,12 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.input.submit")) {
 			if (this.disableSubmit) return;
 
+			// During history search, Enter accepts the current match and exits search
+			if (this.historySearch) {
+				this.acceptHistorySearch();
+				return;
+			}
+
 			// Workaround for terminals without Shift+Enter support:
 			// If char before cursor is \, delete it and insert newline instead of submitting.
 			const currentLine = this.state.lines[this.state.cursorLine] || "";
@@ -911,6 +1126,11 @@ export class Editor implements Component, Focusable {
 
 		// Arrow key navigation (with history support)
 		if (kb.matches(data, "tui.editor.cursorUp")) {
+			// During history search, Up navigates to older matches
+			if (this.historySearch) {
+				this.historySearchStep(1);
+				return;
+			}
 			if (
 				this.isOnFirstVisualLine() &&
 				(this.isEditorEmpty() || this.historyIndex > -1 || this.state.cursorCol === 0)
@@ -925,6 +1145,11 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
+			// During history search, Down navigates to newer matches
+			if (this.historySearch) {
+				this.historySearchStep(-1);
+				return;
+			}
 			if (this.historyIndex > -1 && this.isOnLastVisualLine()) {
 				this.navigateHistory(1);
 			} else if (this.isOnLastVisualLine()) {
@@ -972,12 +1197,22 @@ export class Editor implements Component, Focusable {
 
 		const printable = decodePrintableKey(data);
 		if (printable !== undefined) {
+			// During history search, update the query instead of inserting
+			if (this.historySearch) {
+				this.updateHistorySearchQuery(this.historySearch.query + printable);
+				return;
+			}
 			this.insertCharacter(printable);
 			return;
 		}
 
 		// Regular characters
 		if (data.charCodeAt(0) >= 32) {
+			// During history search, update the query instead of inserting
+			if (this.historySearch) {
+				this.updateHistorySearchQuery(this.historySearch.query + data);
+				return;
+			}
 			this.insertCharacter(data);
 		}
 	}
@@ -1103,6 +1338,7 @@ export class Editor implements Component, Focusable {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
+		this.historySearch = null; // Cancel history search on programmatic change
 		const normalized = this.normalizeText(text);
 		// Push undo snapshot if content differs (makes programmatic changes undoable)
 		if (this.getText() !== normalized) {
@@ -1353,10 +1589,14 @@ export class Editor implements Component, Focusable {
 		this.cancelAutocomplete();
 		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
 
+		// Add submitted text to history
+		this.addToHistory(result);
+
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
 		this.pasteCounter = 0;
 		this.exitHistoryBrowsing();
+		this.historySearch = null; // Exit history search on submit
 		this.scrollOffset = 0;
 		this.undoStack.clear();
 		this.lastAction = null;

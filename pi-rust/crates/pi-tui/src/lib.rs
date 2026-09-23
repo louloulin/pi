@@ -23,6 +23,7 @@ pub mod history_store;
 pub mod hyperlink;
 pub mod image;
 pub mod input;
+pub mod input_text;
 pub mod keybindings;
 pub mod kill_ring;
 pub mod latex;
@@ -63,6 +64,7 @@ pub use editor::{
     is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, HistoryEntry,
     HistorySearchDirection, HistorySearchStatus, JumpDirection,
 };
+pub use input_text::{Input, InputAction};
 pub use extension_ui::ExtensionUi;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
 pub use highlight::{

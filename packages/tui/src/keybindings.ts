@@ -10,6 +10,8 @@ export interface Keybindings {
 	"tui.editor.cursorDown": true;
 	"tui.editor.historyPrevious": true;
 	"tui.editor.historyNext": true;
+	"tui.editor.historySearch": true;
+	"tui.editor.historySearchNext": true;
 	"tui.editor.cursorLeft": true;
 	"tui.editor.cursorRight": true;
 	"tui.editor.cursorWordLeft": true;
@@ -78,6 +80,14 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.historyNext": {
 		defaultKeys: [],
 		description: "Select next prompt history entry",
+	},
+	"tui.editor.historySearch": {
+		defaultKeys: ["ctrl+r"],
+		description: "Reverse history search (Ctrl+R)",
+	},
+	"tui.editor.historySearchNext": {
+		defaultKeys: ["ctrl+s"],
+		description: "Next history search match (Ctrl+S)",
 	},
 	"tui.editor.cursorLeft": {
 		defaultKeys: ["left", "ctrl+b"],

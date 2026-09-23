@@ -85,6 +85,12 @@ export class Input implements Component, Focusable {
 	// Cached visual layout for current width.
 	private cachedLayout: VisualLayoutResult | null = null;
 	private cachedLayoutWidth: number = 0;
+
+	// Prompt history for up/down navigation (mirrors Martty's Input.history)
+	private history: string[] = [];
+	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older
+	private historyDraft: string = ""; // Saved draft when entering history browsing
+
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
 
@@ -119,6 +125,9 @@ export class Input implements Component, Focusable {
 	setValue(value: string): void {
 		this.value = value;
 		this.cursor = Math.min(this.cursor, value.length);
+		// Exit history browsing on programmatic change
+		this.historyIndex = -1;
+		this.historyDraft = "";
 	}
 
 	handleInput(data: string): void {
@@ -175,7 +184,13 @@ export class Input implements Component, Focusable {
 
 		// Submit
 		if (kb.matches(data, "tui.input.submit") || data === "\n") {
-			if (this.onSubmit) this.onSubmit(this.value);
+			const submitted = this.value;
+			// Add to history before clearing
+			this.addToHistory(submitted);
+			// Exit history browsing
+			this.historyIndex = -1;
+			this.historyDraft = "";
+			if (this.onSubmit) this.onSubmit(submitted);
 			return;
 		}
 
@@ -260,14 +275,22 @@ export class Input implements Component, Focusable {
 		}
 
 		// Vertical movement - mirrors Martty's move_vertical()
+		// When input is empty, Up/Down browse prompt history (Martty-style)
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			this.lastAction = null;
-			this.moveVertical(this.lastRenderWidth, -1);
+			if (this.value.length === 0) {
+				this.navigateHistory(-1);
+			} else {
+				this.moveVertical(this.lastRenderWidth, -1);
+			}
 			return;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorDown")) {
 			this.lastAction = null;
+			if (this.navigateHistory(1)) {
+				return;
+			}
 			this.moveVertical(this.lastRenderWidth, 1);
 			return;
 		}
@@ -348,6 +371,12 @@ export class Input implements Component, Focusable {
 	}
 
 	private insertCharacter(char: string): void {
+		// Exit history browsing when user types (like Martty)
+		if (this.historyIndex !== -1) {
+			this.historyIndex = -1;
+			this.historyDraft = "";
+		}
+
 		// Undo coalescing: consecutive word chars coalesce into one undo unit
 		if (isWhitespaceChar(char) || this.lastAction !== "type-word") {
 			this.pushUndo();
@@ -859,6 +888,74 @@ export class Input implements Component, Focusable {
 	resetVerticalGoal(): void {
 		this.preferredVisualCol = null;
 		this.cursorAtWrapEnd = false;
+	}
+
+	/**
+	 * Add a submitted value to the prompt history.
+	 * Consecutive duplicates are collapsed. Mirrors Martty's history management.
+	 */
+	addToHistory(text: string): void {
+		const trimmed = text.trim();
+		if (!trimmed) return;
+		// Don't add consecutive duplicates
+		if (this.history.length > 0 && this.history[0] === trimmed) return;
+		this.history.unshift(trimmed);
+		// Limit history size
+		if (this.history.length > 100) {
+			this.history.pop();
+		}
+	}
+
+	/**
+	 * Navigate the prompt history (Up/Down arrows when input is empty).
+	 * Mirrors Martty's `history_prev` / `history_next` behavior.
+	 * @param direction -1 = older (Up), +1 = newer (Down)
+	 */
+	navigateHistory(direction: -1 | 1): boolean {
+		// History browsing only starts from an empty prompt (like Martty)
+		if (this.value.length > 0 && this.historyIndex === -1) {
+			return false;
+		}
+
+		if (this.history.length === 0) return false;
+
+		// Calculate new history index
+		const newIndex = this.historyIndex - direction; // Up(-1) goes older, Down(+1) goes newer
+		if (newIndex < -1 || newIndex >= this.history.length) return false;
+
+		// Save current draft when first entering history browsing
+		if (this.historyIndex === -1 && newIndex >= 0) {
+			this.historyDraft = this.value;
+		}
+
+		this.historyIndex = newIndex;
+
+		if (this.historyIndex === -1) {
+			// Restore saved draft
+			this.value = this.historyDraft;
+			this.historyDraft = "";
+		} else {
+			// Show history entry
+			this.value = this.history[this.historyIndex] ?? "";
+		}
+
+		this.cursor = this.value.length;
+		this.cachedLayout = null;
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
+
+		return true;
+	}
+
+	/**
+	 * Get the current history state for UI display.
+	 */
+	public getHistoryStatus(): { browsing: boolean; index: number; total: number } {
+		return {
+			browsing: this.historyIndex !== -1,
+			index: this.historyIndex,
+			total: this.history.length,
+		};
 	}
 
 	invalidate(): void {
