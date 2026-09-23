@@ -1684,6 +1684,10 @@ globalThis._pi_dispatch = async function _pi_dispatch(eventJson) {
     subscribers: handlers.length,
     results,
     errored,
+    // The event object the handlers received, after in-place mutation.
+    // Upstream hooks patch tool arguments by mutating `event.input`;
+    // the host reads the patched value back off this field (LUM-1330).
+    event: parsed,
   });
 };
 

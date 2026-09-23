@@ -1,0 +1,92 @@
+{
+  "cols": 76,
+  "rows": 26,
+  "args": ["--model", "faux/faux-model"],
+  "notes": [
+    "Session B of the LUM-1319 cross-process proof: a NEW process over the --home that lum1319-history-session-a.json filled.",
+    "Panel 1 is the load-bearing cross-process claim: nothing in this process ever submitted `third prompt`, yet `Up` recalls it.",
+    "Panels 3-7 are the `Ctrl+R` reverse search: idle (no preview), filter, step to the older unique match, boundary, Esc restore.",
+    "Panel 8 proves the recall produced a real draft (Enter submits it and the transcript echoes it)."
+  ],
+  "caption": "LUM-1319 session B (recall): a second process, same $HOME. `Up` recalls `third prompt` — submitted by the *previous* process, not this one. `Ctrl+R` opens `reverse-i-search:`, typing filters to the newest match, repeated `Ctrl+R` walks to the older unique match and stops at the boundary, `Esc` restores the pre-search draft, and `Up` + `Enter` submits the recalled prompt. Real binary, real PTY, pyte VT emulator.",
+  "panels": [
+    {
+      "label": "1. fresh process: Up recalls the newest prompt written by the previous process",
+      "send": "<Up>",
+      "wait": 1.0,
+      "expect": ["> third prompt"],
+      "probe": [
+        {
+          "text": "> first prompt",
+          "count": 0,
+          "why": "Up starts at the newest entry: the transcript is empty in this process, so the only `> third prompt` is the recalled draft"
+        }
+      ]
+    },
+    {
+      "label": "2. Down leaves the history again and restores the empty draft",
+      "send": "<Down>",
+      "wait": 0.8,
+      "expect": ["> type a prompt"]
+    },
+    {
+      "label": "3. Ctrl+R opens the reverse search with an empty query: no preview, no draft damage",
+      "send": "<C-r>",
+      "wait": 0.8,
+      "expect": ["reverse-i-search:"],
+      "probe": [
+        {
+          "text": "third prompt",
+          "count": 0,
+          "why": "codex's Idle state: opening the search previews nothing until a query is typed"
+        }
+      ]
+    },
+    {
+      "label": "4. typing `prompt` filters the history and previews the newest match",
+      "send": "prompt",
+      "wait": 1.0,
+      "expect": [
+        "reverse-i-search: prompt",
+        "Enter accept",
+        "Esc cancel",
+        "> third prompt"
+      ]
+    },
+    {
+      "label": "5. Ctrl+R again steps to the older unique match",
+      "send": "<C-r>",
+      "wait": 0.8,
+      "expect": ["> second prompt"]
+    },
+    {
+      "label": "6. Ctrl+R at the oldest match keeps it (boundary, not a miss)",
+      "send": "<C-r>",
+      "wait": 0.8,
+      "expect": [
+        "> first prompt",
+        { "text": "no match", "count": 0, "why": "a boundary is not a miss" }
+      ]
+    },
+    {
+      "label": "7. Esc cancels the search and restores the pre-search draft",
+      "send": "<Esc>",
+      "wait": 0.8,
+      "expect": ["> type a prompt"],
+      "probe": [
+        {
+          "text": "reverse-i-search",
+          "count": 0,
+          "why": "the search row is gone with the mode"
+        }
+      ]
+    },
+    {
+      "label": "8. Up recalls and Enter submits the cross-process prompt",
+      "send": "<Up><Enter>",
+      "wait": 1.5,
+      "expect": ["> third prompt"]
+    }
+  ],
+  "final_send": "<C-d>"
+}

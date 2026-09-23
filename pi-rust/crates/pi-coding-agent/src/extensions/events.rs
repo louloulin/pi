@@ -84,15 +84,16 @@ impl ExtensionEventMapper {
             AgentEvent::ToolExecutionStart { call } => {
                 self.active_tools
                     .insert(call.id.clone(), (call.name.clone(), call.arguments.clone()));
-                vec![
-                    // Rust-native tag kept for Stage-3 subscribers.
-                    ExtensionEvent::ToolCall { call: call.clone() },
-                    ExtensionEvent::ToolExecutionStart {
-                        tool_call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                        args: call.arguments.clone(),
-                    },
-                ]
+                // `tool_call` is **not** mapped here: it is a hook, fired by
+                // the tool executor *before* the tool runs so a handler can
+                // block it (LUM-1330, `extensions::hook`). Mapping it off
+                // this fan-out too would deliver it a second time, after the
+                // decision had already been made.
+                vec![ExtensionEvent::ToolExecutionStart {
+                    tool_call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    args: call.arguments.clone(),
+                }]
             }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id,
@@ -115,17 +116,15 @@ impl ExtensionEventMapper {
                     .active_tools
                     .remove(&result.tool_call_id)
                     .unwrap_or_else(|| (String::new(), serde_json::Value::Null));
-                vec![
-                    ExtensionEvent::ToolResult {
-                        result: result.clone(),
-                    },
-                    ExtensionEvent::ToolExecutionEnd {
-                        tool_call_id: result.tool_call_id.clone(),
-                        tool_name,
-                        result: result.clone(),
-                        is_error: result.is_error,
-                    },
-                ]
+                // `tool_result` is a hook too (LUM-1330): it is fired by the
+                // executor *after* the tool runs, and a handler may replace
+                // the content / `isError` before the model sees it.
+                vec![ExtensionEvent::ToolExecutionEnd {
+                    tool_call_id: result.tool_call_id.clone(),
+                    tool_name,
+                    result: result.clone(),
+                    is_error: result.is_error,
+                }]
             }
             AgentEvent::TurnEnd {
                 message,
@@ -308,10 +307,14 @@ mod tests {
             },
             0,
         );
-        assert_eq!(mapped.len(), 2, "tool_call + tool_execution_start");
-        assert_eq!(mapped[0].name(), "tool_call");
         assert_eq!(
-            mapped[1],
+            mapped.len(),
+            1,
+            "only tool_execution_start: tool_call is the executor hook now"
+        );
+        assert_eq!(mapped[0].name(), "tool_execution_start");
+        assert_eq!(
+            mapped[0],
             ExtensionEvent::ToolExecutionStart {
                 tool_call_id: "t1".into(),
                 tool_name: "read".into(),
@@ -343,8 +346,13 @@ mod tests {
             },
             0,
         );
-        assert_eq!(end.len(), 2, "tool_result + tool_execution_end");
-        match &end[1] {
+        assert_eq!(
+            end.len(),
+            1,
+            "only tool_execution_end: tool_result is a hook"
+        );
+        assert_eq!(end[0].name(), "tool_execution_end");
+        match &end[0] {
             ExtensionEvent::ToolExecutionEnd {
                 tool_call_id,
                 tool_name,

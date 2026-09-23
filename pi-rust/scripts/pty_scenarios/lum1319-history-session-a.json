@@ -1,0 +1,39 @@
+{
+  "cols": 76,
+  "rows": 26,
+  "args": ["--model", "faux/faux-model"],
+  "notes": [
+    "Session A of the LUM-1319 cross-process proof. Run it with `--home /tmp/lum1319/home` and then run lum1319-history-session-b.json against the SAME --home: the second process is what proves the history survived the first one.",
+    "Each panel submits one prompt through the real Enter path, so the append happens in the composer's own submit hook (`Editor::push_history_entry` → `HistoryStore::append`).",
+    "`<C-d>` exits gracefully so the run has a real shutdown before session B starts.",
+    "Evidence on disk after the run: `$HOME/.pi/agent/history.jsonl`, one JSON row per prompt, mode 0600."
+  ],
+  "caption": "LUM-1319 session A (write): three real prompts submitted in a real 76x26 PTY, driving the debug binary. Each submit appends one JSON row to $HOME/.pi/agent/history.jsonl. Session B (lum1319-history-session-b.json) starts a *new process* over the same home and recalls them.",
+  "panels": [
+    {
+      "label": "1. idle 76x26, empty composer, nothing in the history file yet",
+      "send": "",
+      "wait": 1.5,
+      "expect": ["> type a prompt"]
+    },
+    {
+      "label": "2. Enter submits `first prompt` — the transcript echoes it",
+      "send": "first prompt<Enter>",
+      "wait": 1.2,
+      "expect": ["> first prompt"]
+    },
+    {
+      "label": "3. `second prompt` is submitted too",
+      "send": "second prompt<Enter>",
+      "wait": 1.2,
+      "expect": ["> second prompt"]
+    },
+    {
+      "label": "4. `third prompt` is the newest entry when the process exits",
+      "send": "third prompt<Enter>",
+      "wait": 1.2,
+      "expect": ["> third prompt"]
+    }
+  ],
+  "final_send": "<C-d>"
+}

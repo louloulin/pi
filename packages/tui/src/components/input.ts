@@ -13,6 +13,24 @@ interface InputState {
 	cursor: number;
 }
 
+/**
+ * Visual caret position: (row, column) in display cells.
+ * Matches Martty's caret tracking for consistent multi-line behavior.
+ */
+interface VisualCaret {
+	row: number;
+	col: number;
+}
+
+/**
+ * Visual layout result: carets array + row count.
+ * Each entry represents the caret position after each character.
+ */
+interface VisualLayoutResult {
+	carets: VisualCaret[];
+	rows: number;
+}
+
 export interface InputOptions {
 	prompt?: string;
 	placeholder?: string;
@@ -29,6 +47,14 @@ export class Input implements Component, Focusable {
 	private readonly placeholder: string;
 	private readonly placeholderStyle: (text: string) => string;
 	private renderedStartColumn = 0;
+
+	// Sticky visual column for vertical movement (Martty-style).
+	// When moving up/down in multi-line, preserve the original display column.
+	private preferredVisualCol: number | null = null;
+
+	// Cached visual layout for current width.
+	private cachedLayoutWidth: number = 0;
+	private cachedLayout: VisualLayoutResult | null = null;
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
 
@@ -169,6 +195,8 @@ export class Input implements Component, Focusable {
 				const lastGrapheme = graphemes[graphemes.length - 1];
 				this.cursor -= lastGrapheme ? lastGrapheme.segment.length : 1;
 			}
+			// Reset preferred column on explicit cursor movement
+			this.preferredVisualCol = null;
 			return;
 		}
 
@@ -180,18 +208,24 @@ export class Input implements Component, Focusable {
 				const firstGrapheme = graphemes[0];
 				this.cursor += firstGrapheme ? firstGrapheme.segment.length : 1;
 			}
+			// Reset preferred column on explicit cursor movement
+			this.preferredVisualCol = null;
 			return;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.lastAction = null;
 			this.cursor = 0;
+			// Reset preferred column
+			this.preferredVisualCol = null;
 			return;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
 			this.lastAction = null;
 			this.cursor = this.value.length;
+			// Reset preferred column
+			this.preferredVisualCol = null;
 			return;
 		}
 
@@ -241,6 +275,8 @@ export class Input implements Component, Focusable {
 			currentColumn = nextColumn;
 		}
 		this.lastAction = null;
+		// Reset preferred column on mouse click positioning
+		this.preferredVisualCol = null;
 		return { handled: true, focus: true };
 	}
 
@@ -253,6 +289,11 @@ export class Input implements Component, Focusable {
 
 		this.value = this.value.slice(0, this.cursor) + char + this.value.slice(this.cursor);
 		this.cursor += char.length;
+
+		// Invalidate visual layout cache
+		this.cachedLayout = null;
+		// Reset preferred column on edit
+		this.preferredVisualCol = null;
 	}
 
 	private handleBackspace(): void {
@@ -265,6 +306,8 @@ export class Input implements Component, Focusable {
 			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
 			this.value = this.value.slice(0, this.cursor - graphemeLength) + this.value.slice(this.cursor);
 			this.cursor -= graphemeLength;
+			this.cachedLayout = null;
+			this.preferredVisualCol = null;
 		}
 	}
 
@@ -277,6 +320,8 @@ export class Input implements Component, Focusable {
 			const firstGrapheme = graphemes[0];
 			const graphemeLength = firstGrapheme ? firstGrapheme.segment.length : 1;
 			this.value = this.value.slice(0, this.cursor) + this.value.slice(this.cursor + graphemeLength);
+			this.cachedLayout = null;
+			this.preferredVisualCol = null;
 		}
 	}
 
@@ -385,12 +430,16 @@ export class Input implements Component, Focusable {
 		if (this.cursor === 0) return;
 		this.lastAction = null;
 		this.cursor = findWordBackward(this.value, this.cursor);
+		// Reset preferred column on explicit cursor movement
+		this.preferredVisualCol = null;
 	}
 
 	private moveWordForwards(): void {
 		if (this.cursor >= this.value.length) return;
 		this.lastAction = null;
 		this.cursor = findWordForward(this.value, this.cursor);
+		// Reset preferred column on explicit cursor movement
+		this.preferredVisualCol = null;
 	}
 
 	private handlePaste(pastedText: string): void {
@@ -403,6 +452,80 @@ export class Input implements Component, Focusable {
 		// Insert at cursor position
 		this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
 		this.cursor += cleanText.length;
+
+		// Invalidate visual layout cache
+		this.cachedLayout = null;
+		this.preferredVisualCol = null;
+	}
+
+	/**
+	 * Compute visual layout for the current text at the given width.
+	 * Returns caret positions for each character boundary and total row count.
+	 * Mirrors Martty's `visual_layout()` method for consistent behavior.
+	 */
+	private computeVisualLayout(width: number): VisualLayoutResult {
+		// Return cached result if width matches
+		if (this.cachedLayout && this.cachedLayoutWidth === width) {
+			return this.cachedLayout;
+		}
+
+		const chars: string[] = [...this.value];
+		const carets: VisualCaret[] = new Array(chars.length + 1);
+
+		let row = 0;
+		let col = 0;
+
+		for (let index = 0; index < chars.length; index++) {
+			const ch = chars[index]!;
+			const charWidth = visibleWidth(ch);
+
+			// Wrap if needed (single-line input wraps at width boundary)
+			if (col + charWidth > width) {
+				row++;
+				col = 0;
+			}
+
+			carets[index] = { row, col };
+			col += charWidth;
+		}
+
+		// Final caret at end of text
+		carets[chars.length] = { row, col };
+
+		const result: VisualLayoutResult = {
+			carets,
+			rows: row + 1,
+		};
+
+		// Cache the result
+		this.cachedLayout = result;
+		this.cachedLayoutWidth = width;
+
+		return result;
+	}
+
+	/**
+	 * Get the current visual cursor position as (row, column).
+	 */
+	getVisualCursor(width: number): VisualCaret {
+		const layout = this.computeVisualLayout(width);
+		const index = Math.min(this.cursor, layout.carets.length - 1);
+		return layout.carets[index]!;
+	}
+
+	/**
+	 * Get the total visual row count at the given width.
+	 */
+	getVisualRowCount(width: number): number {
+		return this.computeVisualLayout(width).rows;
+	}
+
+	/**
+	 * Reset the preferred visual column.
+	 * Called when the user explicitly moves to a new position.
+	 */
+	resetPreferredVisualCol(): void {
+		this.preferredVisualCol = null;
 	}
 
 	invalidate(): void {
@@ -441,26 +564,28 @@ export class Input implements Component, Focusable {
 			// Need horizontal scrolling
 			// Reserve one column for cursor if it's at the end
 			const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
-			const cursorCol = visibleWidth(this.value.slice(0, this.cursor));
+
+			// Use preferred visual column if set, otherwise use current cursor position
+			const targetCol = this.preferredVisualCol ?? visibleWidth(this.value.slice(0, this.cursor));
 
 			if (scrollWidth > 0) {
 				const halfWidth = Math.floor(scrollWidth / 2);
 				let startCol = 0;
 
-				if (cursorCol < halfWidth) {
+				if (targetCol < halfWidth) {
 					// Cursor near start
 					startCol = 0;
-				} else if (cursorCol > totalWidth - halfWidth) {
+				} else if (targetCol > totalWidth - halfWidth) {
 					// Cursor near end
 					startCol = Math.max(0, totalWidth - scrollWidth);
 				} else {
-					// Cursor in middle
-					startCol = Math.max(0, cursorCol - halfWidth);
+					// Cursor in middle - center on the preferred/target column
+					startCol = Math.max(0, targetCol - halfWidth);
 				}
 
 				this.renderedStartColumn = startCol;
 				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
-				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
+				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, targetCol - startCol), true);
 				cursorDisplay = beforeCursor.length;
 			} else {
 				visibleText = "";

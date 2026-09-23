@@ -121,6 +121,13 @@ pub struct BeforeToolCallDecision {
     pub reason: Option<String>,
     /// Hint that the loop should stop after this tool batch.
     pub terminate: bool,
+    /// Replacement arguments for the call, when a hook patched them.
+    ///
+    /// Mirrors upstream's "mutate `event.input` in place" contract
+    /// (`packages/coding-agent/src/core/extensions/types.ts`, `ToolCallEvent`)
+    /// and the `agent-loop.ts` path that hands those arguments to the
+    /// executor. `None` leaves the model's arguments untouched.
+    pub input: Option<serde_json::Value>,
 }
 
 impl BeforeToolCallDecision {
@@ -135,7 +142,14 @@ impl BeforeToolCallDecision {
             block: true,
             reason: Some(reason.into()),
             terminate: false,
+            input: None,
         }
+    }
+
+    /// Replace the arguments the executor receives.
+    pub fn with_input(mut self, input: serde_json::Value) -> Self {
+        self.input = Some(input);
+        self
     }
 }
 

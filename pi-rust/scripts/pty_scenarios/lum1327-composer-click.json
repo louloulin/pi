@@ -1,0 +1,90 @@
+{
+  "cols": 100,
+  "rows": 20,
+  "args": ["--model", "faux/faux-model"],
+  "notes": [
+    "LUM-1327 — pointer placement in the composer, driven through a real PTY into the real binary (100x20).",
+    "Geometry: the composer is docked above the status bar, so a one-row draft sits on row 18 (0-based) and a two-row draft on rows 17-18; the status bar is row 19. The label '> ' owns columns 0-1, so body column N sits at cell x = 2 + N.",
+    "Every panel asserts on the character grid: the caret is the '▍' glyph the renderer inserts at the cursor offset, so 'where is the caret' is a text assertion rather than a screenshot opinion.",
+    "The matching baseline run of the pre-fix binary is lum1327-composer-click-baseline.json — the same gestures with 'the click changed nothing' as the expectation.",
+    "Ctrl+C clears the draft (upstream handleCtrlC: the text is dropped, the process stays alive) and Ctrl+J inserts the line break, so both are used to shape the draft between panels."
+  ],
+  "caption": "LUM-1327 — composer pointer placement (codex chat_composer/mouse.rs + upstream Editor.handleMouse parity), real binary + real PTY + pyte. Panel 1: a click in the middle of 'hello world' puts the caret on the clicked character (it was at the end before). Panel 2: a click on the label gutter puts it on column 0. Panel 3: the same on the second row of a two-line draft — the click accounts for the visual row it landed on. Panel 4: Ctrl+C clears the draft. Panel 5: a 120-column draft wraps over two rows and a click on the first row's last cell leaves the caret on that row instead of spilling onto the next one. Panel 6: a click on the status bar, outside the composer, changes nothing. Nothing mocked.",
+  "panels": [
+    {
+      "label": "1. type a draft, then click in the middle of 'hello world'",
+      "send": "hello world<Click:4,18>",
+      "wait": 1.5,
+      "expect": [
+        "> he▍llo world",
+        {
+          "text": "hello world▍",
+          "count": 0,
+          "why": "the caret left the end of the draft"
+        }
+      ]
+    },
+    {
+      "label": "2. click on the label gutter: the caret goes to column 0",
+      "send": "<Click:1,18>",
+      "wait": 1.0,
+      "expect": ["> ▍hello world"]
+    },
+    {
+      "label": "3. Ctrl+E to the line end, Ctrl+J for a second line, then click on 'cond' of that row",
+      "send": "<C-e><C-j>second line<Click:4,18>",
+      "wait": 1.5,
+      "expect": [
+        "> hello world",
+        "  se▍cond line",
+        {
+          "text": "  second line▍",
+          "count": 0,
+          "why": "the caret moved onto the clicked character of the second row"
+        }
+      ]
+    },
+    {
+      "label": "4. Ctrl+C clears the draft (the process stays alive)",
+      "send": "<C-c>",
+      "wait": 1.0,
+      "expect": ["type a prompt"],
+      "reject": ["  second line"]
+    },
+    {
+      "label": "5. a click on the last cell of a wrapped row keeps the caret on that row",
+      "send": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww<Click:99,17>",
+      "wait": 1.8,
+      "expect": [
+        {
+          "regex": "^> w{97}▍",
+          "why": "the caret is on the first visual row's last character, not on the next visual row"
+        },
+        {
+          "regex": "^> w{97}▍w",
+          "count": 0,
+          "why": "and it did not spill onto the row below"
+        }
+      ]
+    },
+    {
+      "label": "6. a click on the status bar (outside the composer) moves nothing",
+      "send": "<Click:20,19>",
+      "wait": 1.0,
+      "expect": [
+        "Faux test model",
+        {
+          "regex": "^> w{97}▍",
+          "count": 1,
+          "why": "exactly one caret, still on the row the previous click placed it on"
+        },
+        {
+          "text": "▍Faux test model",
+          "count": 0,
+          "why": "a click below the composer never places a caret in the status bar"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

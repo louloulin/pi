@@ -414,7 +414,7 @@ fn trigger_pattern_does_not_fire_inside_a_word() {
 fn dropdown_rendering_marks_the_selection_and_windows_long_lists() {
     let mut editor = editor_with(command_provider());
     type_text(&mut editor, "/");
-    let rows = editor.autocomplete_render_lines(40);
+    let rows = editor.autocomplete_render_lines(40, usize::MAX);
     assert_eq!(rows.len(), 3);
     assert!(rows[0].starts_with("❯ "), "{rows:?}");
     assert!(rows[0].contains("help"));
@@ -432,7 +432,7 @@ fn dropdown_rendering_marks_the_selection_and_windows_long_lists() {
     editor.set_autocomplete_max_visible(3);
     assert_eq!(editor.autocomplete_max_visible(), 3);
     type_text(&mut editor, "/");
-    let rows = editor.autocomplete_render_lines(40);
+    let rows = editor.autocomplete_render_lines(40, usize::MAX);
     assert_eq!(rows.len(), 4);
     assert!(rows[3].contains("/6"), "{rows:?}");
 
@@ -450,7 +450,7 @@ fn dropdown_rendering_marks_the_selection_and_windows_long_lists() {
 fn slash_dropdown_aligns_descriptions_into_the_select_list_column() {
     let mut editor = editor_with(command_provider());
     type_text(&mut editor, "/");
-    let rows = editor.autocomplete_render_lines(80);
+    let rows = editor.autocomplete_render_lines(80, usize::MAX);
     assert_eq!(rows.len(), 3);
 
     // Slash menu: `SLASH_COMMAND_SELECT_LIST_LAYOUT` (12..32). The widest
@@ -493,7 +493,7 @@ fn slash_dropdown_primary_column_tracks_the_widest_label() {
     );
     let mut editor = editor_with(provider);
     type_text(&mut editor, "/");
-    let rows = editor.autocomplete_render_lines(80);
+    let rows = editor.autocomplete_render_lines(80, usize::MAX);
 
     // Widest label 24 + gap 2 = 26, inside [12, 32], so the column is 26 and
     // the descriptions start at 2 + 26 = 28 on both rows.
@@ -518,7 +518,7 @@ fn slash_dropdown_clamps_a_label_wider_than_the_primary_column() {
     );
     let mut editor = editor_with(provider);
     type_text(&mut editor, "/");
-    let rows = editor.autocomplete_render_lines(80);
+    let rows = editor.autocomplete_render_lines(80, usize::MAX);
 
     // The column is clamped at 32, so the label is truncated to 30 columns
     // and the description still starts at 2 + 32 = 34.
@@ -541,7 +541,7 @@ fn file_dropdown_uses_the_fixed_primary_column() {
     let provider = CombinedAutocompleteProvider::new(Vec::new(), dir.path().clone());
     let mut editor = editor_with(provider);
     type_text(&mut editor, "@readme");
-    let rows = editor.autocomplete_render_lines(80);
+    let rows = editor.autocomplete_render_lines(80, usize::MAX);
     assert_eq!(rows.len(), 1, "{rows:?}");
 
     // Default layout: a fixed 32-column primary column, so the path
@@ -564,7 +564,7 @@ fn narrow_dropdown_drops_the_description_column() {
     let mut editor = editor_with(command_provider());
     type_text(&mut editor, "/");
     for width in [40, 30, 20] {
-        let rows = editor.autocomplete_render_lines(width);
+        let rows = editor.autocomplete_render_lines(width, usize::MAX);
         assert!(
             !rows.iter().any(|row| row.contains("help text")),
             "{rows:?}"
@@ -598,7 +598,7 @@ fn the_dropdown_and_the_modal_selector_share_one_row_layout() {
         SelectorLayout::slash_command(),
         "the slash menu must use upstream's slash bounds"
     );
-    let dropdown = editor.autocomplete_render_lines(80);
+    let dropdown = editor.autocomplete_render_lines(80, usize::MAX);
 
     let selector = Selector::new(
         "Pick",

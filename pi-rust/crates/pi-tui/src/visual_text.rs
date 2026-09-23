@@ -64,6 +64,14 @@ impl VisualRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VisualLayout {
     rows: Vec<VisualRow>,
+    /// Per row: is this the **last** row of its hard line (the row a
+    /// hard break follows, rather than a soft wrap)?
+    ///
+    /// Only the pointer path needs it — see
+    /// [`VisualLayout::click_offset`], where a click past the end of a
+    /// soft-wrapped row snaps back onto that row instead of spilling to
+    /// the next one.
+    last_of_line: Vec<bool>,
 }
 
 impl VisualLayout {
@@ -76,6 +84,7 @@ impl VisualLayout {
     pub(crate) fn new(text: &str, width: usize) -> Self {
         let chars: Vec<char> = text.chars().collect();
         let mut rows: Vec<VisualRow> = Vec::new();
+        let mut last_of_line: Vec<bool> = Vec::new();
         for (line_start, line_end) in hard_lines(&chars) {
             let before = rows.len();
             wrap_line(&chars, line_start, line_end, width, &mut rows);
@@ -90,6 +99,13 @@ impl VisualLayout {
                     source: Vec::new(),
                 });
             }
+            // Every row this hard line produced is a soft wrap except the
+            // last one, which the next hard break (or the end of the
+            // draft) follows.
+            last_of_line.resize(rows.len(), false);
+            if rows.len() > before {
+                last_of_line[rows.len() - 1] = true;
+            }
         }
         if rows.is_empty() {
             rows.push(VisualRow {
@@ -97,8 +113,9 @@ impl VisualLayout {
                 start: 0,
                 source: Vec::new(),
             });
+            last_of_line.push(true);
         }
-        Self { rows }
+        Self { rows, last_of_line }
     }
 
     /// The rendered rows.
@@ -169,6 +186,32 @@ impl VisualLayout {
     /// Characters the row renders.
     pub(crate) fn row_len(&self, row: usize) -> usize {
         self.rows.get(row).map(VisualRow::len).unwrap_or(0)
+    }
+
+    /// Character offset a **pointer click** on `column` of `row` places the
+    /// caret at.
+    ///
+    /// Upstream `Editor.handleMouse`
+    /// (`packages/tui/src/components/editor.ts:615-670`): the caret goes to
+    /// the character under the pointer, except for a click past the end of a
+    /// row that is **not** the last row of its hard line, which snaps back to
+    /// that row's last character (upstream's `targetIndex = lastGraphemeIndex`)
+    /// instead of spilling onto the first character of the next visual row.
+    /// Without that rule a click on the right half of a wrapped line looks
+    /// like it jumped a line down.
+    ///
+    /// Unlike [`VisualLayout::cursor_at`] — shared with the keyboard's
+    /// vertical motion, where "past the end of the row" must mean the row's
+    /// end — this is the pointer's own rule, so the two are kept apart.
+    pub(crate) fn click_offset(&self, row: usize, column: usize) -> usize {
+        let Some(line) = self.rows.get(row) else {
+            return 0;
+        };
+        let is_last_of_line = self.last_of_line.get(row).copied().unwrap_or(true);
+        if !is_last_of_line && column >= line.len() && line.len() > 0 {
+            return line.source.last().copied().unwrap_or(line.start);
+        }
+        self.cursor_at(row, column)
     }
 }
 
@@ -286,6 +329,32 @@ pub(crate) use crate::width::columns as display_width_of;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_past_a_wrapped_row_snaps_back_onto_it() {
+        // "hello world" at width 6 wraps to "hello " / "world".
+        let layout = VisualLayout::new("hello world", 6);
+        assert_eq!(layout.rows().len(), 2);
+        assert_eq!(layout.row_len(0), 6);
+        // Any column past the first row's content stops at its last
+        // character (the space at offset 5) instead of landing on 'w'
+        // (offset 6).
+        assert_eq!(layout.click_offset(0, 6), 5);
+        assert_eq!(layout.click_offset(0, 9), 5);
+        // Inside the row it is the character under the pointer.
+        assert_eq!(layout.click_offset(0, 1), 1);
+    }
+
+    #[test]
+    fn a_click_past_the_last_row_of_a_hard_line_runs_to_its_end() {
+        // The row after `hello` starts a new hard line, so a click past its
+        // end is "end of line" (`cursor_at`'s trailing position), not the
+        // last character.
+        let layout = VisualLayout::new("hi\nthere", 6);
+        assert_eq!(layout.rows().len(), 2);
+        assert_eq!(layout.click_offset(0, 5), 2, "end of the first line");
+        assert_eq!(layout.click_offset(1, 5), 8, "end of the draft");
+    }
 
     fn texts(text: &str, width: usize) -> Vec<String> {
         VisualLayout::new(text, width)

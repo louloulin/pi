@@ -1,0 +1,90 @@
+{
+  "cols": 100,
+  "rows": 20,
+  "args": ["--model", "faux/faux-model"],
+  "notes": [
+    "LUM-1327 — the *before* half of the A/B: the pre-fix binary over the same gestures as lum1327-composer-click.json.",
+    "Every panel here asserts the defect positively (the frame the click produced did NOT change), so this file is evidence of the gap rather than a passing gate. Run it against the binary built from the parent commit:",
+    "  python3 scripts/pty_capture.py --bin <pre-fix pi> --steps scripts/pty_scenarios/lum1327-composer-click-baseline.json ...",
+    "Panel 6 is byte-identical to panel 5 on purpose: 'a click that changes nothing' is the claim."
+  ],
+  "caption": "LUM-1327 — the same pointer gestures against the pre-fix binary (100x20, real PTY). Panels 1-3: clicking in the middle of the draft, on the label gutter, and on the second row of a two-line draft all leave the caret exactly where it was — the composer consumed none of them, because the transcript viewport stops above the composer and no other layer claimed the cell. Panels 4-6: the wrapped-draft click and the status-bar click are likewise no-ops. This is the state lum1327-composer-click.json fixes.",
+  "panels": [
+    {
+      "label": "1. a click in the middle of the draft moves nothing (pre-fix)",
+      "send": "hello world<Click:4,18>",
+      "wait": 1.5,
+      "expect": [
+        {
+          "text": "> hello world▍",
+          "why": "the caret is still at the end of the draft"
+        }
+      ],
+      "reject": [
+        {
+          "text": "> he▍llo world",
+          "why": "the post-fix frame — it must not appear on this binary"
+        }
+      ]
+    },
+    {
+      "label": "2. a click on the label gutter moves nothing (pre-fix)",
+      "send": "<Click:1,18>",
+      "wait": 1.0,
+      "expect": ["> hello world▍"],
+      "reject": [{ "text": "> ▍hello world" }]
+    },
+    {
+      "label": "3. a click on the second row of a two-line draft moves nothing (pre-fix)",
+      "send": "<C-e><C-j>second line<Click:4,18>",
+      "wait": 1.5,
+      "expect": [
+        "> hello world",
+        "  second line▍",
+        {
+          "text": "  se▍cond line",
+          "count": 0,
+          "why": "the caret never left the end of the second row"
+        }
+      ]
+    },
+    {
+      "label": "4. Ctrl+C clears the draft",
+      "send": "<C-c>",
+      "wait": 1.0,
+      "expect": ["type a prompt"],
+      "reject": ["  second line"]
+    },
+    {
+      "label": "5. a click on the first row of a wrapped draft keeps the caret on the last row (pre-fix)",
+      "send": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww<Click:99,17>",
+      "wait": 1.8,
+      "expect": [
+        {
+          "regex": "^  w{22}▍",
+          "why": "the caret is still at the end of the draft, on the second visual row"
+        }
+      ],
+      "reject": [
+        {
+          "regex": "^> w{97}▍",
+          "why": "the post-fix frame — the caret on the clicked row"
+        }
+      ]
+    },
+    {
+      "label": "6. a click on the status bar changes nothing (pre-fix and post-fix alike)",
+      "send": "<Click:20,19>",
+      "wait": 1.0,
+      "expect": [
+        "Faux test model",
+        {
+          "regex": "^  w{22}▍",
+          "count": 1,
+          "why": "one caret, where it has been since the draft was typed"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}
