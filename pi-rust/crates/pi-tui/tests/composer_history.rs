@@ -231,7 +231,7 @@ fn the_persistent_file_is_trimmed_to_the_history_limit() {
     let store = HistoryStore::with_limit(temp_path("trim"), 3);
     let mut ed = editor_with(&store);
     for index in 0..5 {
-        ed.push_history_entry(format!("entry-{index}"), None, Vec::new());
+        ed.push_history_entry(HistoryEntry::new(format!("entry-{index}")));
     }
     assert_eq!(ed.history_len(), 5, "in-session history has its own bound");
     let restarted = editor_with(&store);
@@ -304,7 +304,7 @@ fn recalling_an_image_prompt_restores_text_and_chips() {
     assert_eq!(display, "describe [Image #1] and [Image #2]");
 
     // Submit, then clear the composer the way `App` does.
-    ed.push_history_entry(display.clone(), Some(raw.clone()), images.clone());
+    ed.push_history_entry(HistoryEntry::with_images(raw.clone(), images.clone()));
     ed.clear();
     assert_eq!(ed.image_count(), 0);
 
@@ -352,11 +352,10 @@ fn a_persistent_entry_is_text_only_even_when_it_looked_like_a_chip() {
     first.insert_str("look at ");
     first.insert_image(image("one"));
     let display = first.display_text();
-    first.push_history_entry(
-        display.clone(),
-        Some(first.text().to_string()),
+    first.push_history_entry(HistoryEntry::with_images(
+        first.text().to_string(),
         first.image_attachments().to_vec(),
-    );
+    ));
 
     // The file holds the *text*; the attachments are an in-session feature.
     let body = fs::read_to_string(store.path()).unwrap();
@@ -384,7 +383,7 @@ fn a_raw_buffer_that_disagrees_with_the_images_degrades_to_text() {
         pi_tui::editor::CHIP_CHAR,
         pi_tui::editor::CHIP_CHAR
     );
-    ed.push_history_entry("a[Image #1]b[Image #2]c", Some(raw), vec![image("one")]);
+    ed.push_history_entry(HistoryEntry::with_images(raw, vec![image("one")]));
     ed.clear();
     assert_eq!(ed.handle_event(up()), EditorAction::Changed);
     assert_eq!(ed.display_text(), "a[Image #1]b[Image #2]c");
@@ -396,11 +395,10 @@ fn a_raw_buffer_is_rebuilt_from_the_labels_when_the_caller_has_none() {
     let mut ed = Editor::new();
     // `push_history_entry` with no raw buffer still restores the chips: the
     // labels are in buffer order, so they can be mapped back.
-    ed.push_history_entry(
-        "x [Image #1] y [Image #2]",
-        None,
+    ed.push_history_entry(HistoryEntry::with_images(
+        format!("x {} y {}", pi_tui::editor::CHIP_CHAR, pi_tui::editor::CHIP_CHAR),
         vec![image("one"), image("two")],
-    );
+    ));
     ed.clear();
     assert_eq!(ed.handle_event(up()), EditorAction::Changed);
     assert_eq!(ed.image_count(), 2);
@@ -620,40 +618,38 @@ fn other_keys_are_swallowed_while_searching() {
     assert_eq!(ed.history_search_query(), Some(""));
 }
 
+/// Tests the Editor's history-search state machine directly.
+/// The search hint ("reverse-i-search: …") is rendered by `App::history_search_hint`
+/// in the status/footer area, not by the Prompt itself.
 #[test]
 fn the_search_row_reports_the_query_and_the_phase() {
-    let mut prompt = pi_tui::Prompt::new("> ");
-    prompt.push_history("older prompt".to_string());
-    prompt.editor_mut().insert_str("draft");
+    let mut ed = Editor::new();
+    ed.push_history_entry(HistoryEntry::new("older prompt".to_string()));
+    ed.insert_str("draft");
 
-    assert!(prompt.history_search_row(40).is_none());
-    assert_eq!(prompt.line_count(40, 8), 1);
+    // Not searching yet.
+    assert!(!ed.history_search_active());
+    assert_eq!(ed.history_search_query(), None);
 
-    assert_eq!(
-        prompt.editor_mut().handle_event(ctrl('r')),
-        EditorAction::Changed
-    );
-    let idle = prompt.history_search_row(40).expect("the row is shown");
-    assert!(idle.starts_with("reverse-i-search: "), "{idle}");
-    assert_eq!(
-        prompt.line_count(40, 8),
-        2,
-        "the row costs one composer row"
-    );
+    // Open search: Ctrl+R activates it with an empty query.
+    assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
+    assert!(ed.history_search_active());
+    assert_eq!(ed.history_search_query(), Some(""));
+    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::NoMatch));
 
-    type_text_search(prompt.editor_mut(), "old");
-    let matched = prompt.history_search_row(60).expect("the row is shown");
-    assert!(matched.contains("old"), "{matched}");
-    assert!(matched.contains("Enter accept"), "{matched}");
-    assert!(matched.contains("Esc cancel"), "{matched}");
-    // The composer body previews the match under the search row.
-    let (lines, _) = prompt.render_lines(60, 8, 0);
-    assert!(lines[0].contains("reverse-i-search: old"), "{lines:?}");
-    assert!(lines[1].starts_with("> older prompt"), "{lines:?}");
+    // Type a query that matches.
+    type_text_search(&mut ed, "old");
+    assert_eq!(ed.history_search_query(), Some("old"));
+    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::Match));
+    assert_eq!(ed.history_search_match_count(), 1);
 
-    type_text_search(prompt.editor_mut(), "zz");
-    let miss = prompt.history_search_row(60).expect("the row is shown");
-    assert!(miss.contains("no match"), "{miss}");
+    // The matched entry replaces the draft.
+    assert_eq!(ed.display_text(), "older prompt");
+
+    // A query with no match.
+    type_text_search(&mut ed, "zz");
+    assert_eq!(ed.history_search_query(), Some("oldzz"));
+    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::NoMatch));
 }
 
 // ---------------------------------------------------------------------------
@@ -759,12 +755,19 @@ fn the_rendered_frame_shows_the_reverse_search_row() {
 
     let snapshot = app.render_snapshot(80, 24);
     let text = snapshot.lines.join("\n");
+    // The search row is the `history_search_hint()` rendered in the footer.
     assert!(
         text.contains("reverse-i-search: a"),
-        "the search row is painted:\n{text}"
+        "the search hint is painted in the footer:\n{text}"
     );
-    assert!(snapshot.history_search_open);
-    assert_eq!(snapshot.history_search_query, "a");
+    // Verify via App API: search is active and the query is "a".
+    assert!(app.history_search_active());
+    let hint = app.history_search_hint();
+    assert!(hint.is_some(), "hint must be present while searching");
+    assert!(
+        hint.unwrap().contains("reverse-i-search: a"),
+        "hint contains the query"
+    );
     assert_eq!(snapshot.prompt_buffer, "deployed the api");
     reset_keybindings();
     cleanup(&store);
