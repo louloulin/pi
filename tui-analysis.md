@@ -68,6 +68,41 @@ Based on real code analysis comparing three implementations: **pi TypeScript**, 
 3. **Visual layout caching** — TS Input already caches layout per width; verify invalidation on width change.
 4. **CJK/emoji width handling** — Both TS and Rust use `unicode-width`; verify C0, C1, and combining character edge cases.
 
+## LUM-1632 Update: Ctrl+R History Search (2026-09-24)
+
+**New features added in LUM-1632:**
+
+1. **TypeScript Editor: Ctrl+R / Ctrl+S Reverse History Search**
+   - `Ctrl+R` (default): Start or advance search to older history entries
+   - `Ctrl+S`: Navigate to newer history entries (reverse of Ctrl+R)
+   - `Up/Down` arrows during search: Navigate matches
+   - `Escape`: Cancel search and restore draft
+   - `Enter`: Accept current match and exit search
+   - Type characters: Incrementally filter matches
+   - `HistorySearchState` interface mirrors Rust's `HistorySearch`
+   - De-duplicated matches (newest first)
+
+2. **TypeScript Input: Prompt History Browsing (Martty-style)**
+   - Up/Down arrows browse history when input is empty (like Martty)
+   - Draft is stashed when entering history mode
+   - Restore draft when navigating back to bottom
+   - `addToHistory()`, `navigateHistory()`, `getHistoryStatus()` added
+
+3. **Rust pi-tui: New `input_text.rs` Module**
+   - 1007-line single-line Input component
+   - Full Martty feature parity: Emacs editing, kill ring, jump mode, visual layout
+   - Unit tests for core operations
+   - Mirrors TypeScript Input API for future integration
+
+**Updated Completion Percentage:**
+
+| Component | Before | After |
+|-----------|--------|-------|
+| TS Editor Ctrl+R history search | 0% ❌ | 100% ✅ |
+| TS Input history browsing | 0% ❌ | 100% ✅ |
+| Rust pi-tui Input component | N/A | 100% ✅ |
+| Overall TUI input system | ~92% | ~96% |
+
 ---
 
 *Updated by 编程助手devbox — LUM-1634 audit (2026-09-23)*
