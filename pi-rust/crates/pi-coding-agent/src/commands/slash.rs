@@ -40,6 +40,30 @@ pub enum SlashCommand {
         /// Optional output path, with surrounding quotes removed.
         path: Option<String>,
     },
+    /// `/import [path]` — import and resume a session from a JSONL file.
+    /// Mirrors upstream `handleImportCommand`.
+    Import {
+        /// Path to the JSONL file.
+        path: Option<String>,
+    },
+    /// `/share` — share the current session as a secret GitHub gist.
+    /// Mirrors upstream `handleShareCommand`.
+    Share,
+    /// `/changelog` — show recent changelog entries.
+    /// Mirrors upstream `handleChangelogCommand`.
+    Changelog,
+    /// `/login [provider]` — configure provider authentication.
+    /// Mirrors upstream `handleLoginCommand`.
+    Login {
+        /// Provider name. `None` opens an interactive selector.
+        provider: Option<String>,
+    },
+    /// `/logout [provider]` — remove provider authentication.
+    /// Mirrors upstream `handleLogoutCommand`.
+    Logout {
+        /// Provider name. `None` opens an interactive selector.
+        provider: Option<String>,
+    },
     /// `/exit` — quit the interactive session.
     Exit,
     /// `/resume` — list and pick a previous session file.
@@ -88,6 +112,8 @@ pub enum SlashCommand {
     /// this port reloads; see [`crate::reload`] for what it deliberately
     /// does not re-read.
     Reload,
+    /// `/quit` — alias for `/exit`, quit the interactive session.
+    Quit,
     /// Anything else, captured as the command name (without the slash).
     Unknown(String),
 }
@@ -118,6 +144,17 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "export" => SlashCommand::Export {
             path: (!args.is_empty()).then(|| strip_quotes(args)),
         },
+        "import" => SlashCommand::Import {
+            path: (!args.is_empty()).then(|| strip_quotes(args)),
+        },
+        "share" => SlashCommand::Share,
+        "changelog" => SlashCommand::Changelog,
+        "login" => SlashCommand::Login {
+            provider: (!args.is_empty()).then(|| args.to_string()),
+        },
+        "logout" => SlashCommand::Logout {
+            provider: (!args.is_empty()).then(|| args.to_string()),
+        },
         "resume" => SlashCommand::Resume,
         "tree" => SlashCommand::Tree,
         "fork" => SlashCommand::Fork,
@@ -129,7 +166,8 @@ pub fn handle_command(text: &str) -> Result<SlashCommand, String> {
         "compact" => SlashCommand::Compact {
             instructions: (!args.is_empty()).then(|| args.to_string()),
         },
-        "exit" | "quit" => SlashCommand::Exit,
+        "exit" => SlashCommand::Exit,
+        "quit" => SlashCommand::Quit,
         "trust" => SlashCommand::Trust(parse_trust_decision(args)),
         "hotkeys" => SlashCommand::Hotkeys,
         "extensions" => SlashCommand::Extensions,
@@ -192,6 +230,11 @@ pub fn help_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) -> 
     ));
     out.push_str("  /session  show the current session info\n");
     out.push_str("  /export [path] export the session (HTML, or JSONL for a .jsonl path)\n");
+    out.push_str("  /import [path] import and resume a session from a JSONL file\n");
+    out.push_str("  /share    share the session as a secret GitHub gist\n");
+    out.push_str("  /changelog show recent changelog entries\n");
+    out.push_str("  /login [provider] configure provider authentication\n");
+    out.push_str("  /logout [provider] remove provider authentication\n");
     out.push_str("  /resume   resume a previous session\n");
     out.push_str("  /tree     navigate the session tree and switch branches\n");
     out.push_str("  /fork     branch a new session from a user message\n");
@@ -205,6 +248,7 @@ pub fn help_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) -> 
     out.push_str("  /hotkeys  list the keyboard shortcuts\n");
     out.push_str("  /extensions list loaded extensions and what they register\n");
     out.push_str("  /reload   re-read keybindings.json and the interface settings\n");
+    out.push_str("  /quit     quit the interactive session (alias for /exit)\n");
     out.push_str("  /exit     quit the interactive session\n");
     out.push('\n');
     out.push_str("keys:\n");
@@ -373,6 +417,15 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "Export session (HTML default, or a .jsonl path)",
         Some("[path]"),
     ),
+    (
+        "import",
+        "Import and resume a session from a JSONL file",
+        Some("[path]"),
+    ),
+    ("share", "Share session as a secret GitHub gist", None),
+    ("changelog", "Show changelog entries", None),
+    ("login", "Configure provider authentication", Some("<provider>")),
+    ("logout", "Remove provider authentication", Some("<provider>")),
     ("resume", "Resume a different session", None),
     ("tree", "Navigate session tree (switch branches)", None),
     (
@@ -404,6 +457,7 @@ pub const AUTOCOMPLETE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     ("reload", "Reload keybindings and interface settings", None),
+    ("quit", "Quit the interactive session", None),
     ("exit", "Quit the interactive session", None),
 ];
 
