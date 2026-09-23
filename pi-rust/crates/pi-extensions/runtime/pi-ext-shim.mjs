@@ -861,6 +861,19 @@ function makeUiContext(hasUI) {
       regionCall("setStatus", { key: name, text: value });
     },
 
+    /**
+     * Set the terminal window/tab title (upstream's `ctx.ui.setTitle`,
+     * `interactive-mode.ts:2443` → `Terminal.setTitle`, OSC 0 at
+     * `terminal.ts:520`). The value is stringified like upstream's template
+     * literal would, and the host sanitises control characters before the
+     * sequence reaches the terminal. Upstream has no "restore" call, so a
+     * later session change is what replaces the title again.
+     */
+    setTitle(title) {
+      if (!regionsAvailable("setTitle")) return;
+      regionCall("setTitle", { title: String(title) });
+    },
+
     // --- Region / overlay surface ---------------------------------------
     // The Rust TUI owns header / footer / widget / editor regions and the
     // overlay stack; these methods register a JS component and forward the
@@ -1117,11 +1130,10 @@ function makeUiContext(hasUI) {
     return true;
   }
 
-  // Title / theme channels still have no host bridge: accept the call so
-  // extensions that configure them at load time still load, warn once, and
-  // keep the value inert.
+  // Theme / editor-text / working-indicator channels still have no host
+  // bridge: accept the call so extensions that configure them at load time
+  // still load, warn once, and keep the value inert.
   for (const kind of [
-    "setTitle",
     "setEditorText",
     "setHiddenThinkingLabel",
     "setWorkingIndicator",

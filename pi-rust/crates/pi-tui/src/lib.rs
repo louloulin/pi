@@ -39,6 +39,7 @@ pub mod status;
 pub mod styled;
 pub mod styles;
 pub mod terminal_image;
+pub mod terminal_title;
 pub mod theme;
 pub mod tree;
 pub mod undo_stack;
@@ -110,6 +111,9 @@ pub use terminal_image::{
     ImageProtocol, ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions, KittyImageMetadata,
     KittyImagePlacement, Override, RenderImageResult, TerminalCapabilities, ITERM2_PREFIX,
     KITTY_CHUNK_SIZE, KITTY_PREFIX,
+};
+pub use terminal_title::{
+    auto_title, path_basename, sanitize_title, title_sequence, TITLE_CLOSE, TITLE_OPEN,
 };
 pub use theme::{
     available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,

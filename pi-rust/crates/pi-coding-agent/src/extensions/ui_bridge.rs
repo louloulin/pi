@@ -369,6 +369,13 @@ pub enum RegionOp {
         /// Status text, or `None` for upstream's `undefined` clear.
         text: Option<String>,
     },
+    /// Set the terminal window/tab title — `ctx.ui.setTitle(title)`.
+    ///
+    /// A different sink from every other region op: the App holds the value
+    /// and the interactive loop writes the OSC 0 sequence to the tty
+    /// (`App::take_terminal_title`), because the sequence must not enter the
+    /// frame buffer.
+    Title(String),
     /// Open a `ctx.ui.custom` session.
     OpenCustom {
         /// Session token the shim allocated for the `custom()` call.
@@ -454,6 +461,10 @@ impl UiRegionHost for TuiRegionHost {
 
     async fn set_status(&self, key: String, text: Option<String>) {
         let _ = self.tx.send(RegionOp::Status { key, text });
+    }
+
+    async fn set_title(&self, title: String) {
+        let _ = self.tx.send(RegionOp::Title(title));
     }
 
     async fn open_custom(&self, session: u64, component: JsComponent, options: UiCustomOptions) {
@@ -623,6 +634,7 @@ impl RegionPump {
             RegionOp::Status { key, text } => {
                 app.set_extension_status(&key, text.as_deref());
             }
+            RegionOp::Title(title) => app.set_terminal_title(title),
             RegionOp::OpenCustom {
                 session,
                 component,

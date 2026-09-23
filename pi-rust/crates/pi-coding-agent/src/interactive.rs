@@ -703,6 +703,12 @@ async fn run_loop(
             let width = terminal.size().map(|area| area.width).unwrap_or(80);
             pump.pump(&mut app, width).await;
         }
+        // LUM-1485 — the terminal title (`ctx.ui.setTitle` or the automatic
+        // `pi - <session> - <cwd>`). The App only queues it: the OSC 0
+        // sequence has to go to the tty *outside* the frame buffer, or the
+        // cell grid would count it as text. Written before the draw so a
+        // `setTitle` that just arrived lands in this tick.
+        flush_terminal_title(&mut app, terminal.backend_mut());
         // A late `ctx.ui.addAutocompleteProvider` (from a command handler or
         // any event after startup) bumps the host's generation counter; pick
         // the chain up again so its trigger characters reach the editor.
@@ -4793,6 +4799,22 @@ fn default_model(models: &Models) -> Model {
         })
 }
 
+/// Write the terminal title the App queued, if any (LUM-1485).
+///
+/// Upstream's `Terminal.setTitle` writes OSC 0 + BEL straight to stdout
+/// (`packages/tui/src/terminal.ts:520-523`); this is the same sequence, taken
+/// from the App's single pending slot, so the common tick — no title change —
+/// writes nothing at all. Errors are swallowed on purpose: a title is cosmetic
+/// and a closed pipe must not take the session down, the same stance
+/// [`request_keyboard_enhancement`] takes.
+fn flush_terminal_title(app: &mut App, out: &mut impl Write) {
+    let Some(title) = app.take_terminal_title() else {
+        return;
+    };
+    let _ = out.write_all(pi_tui::terminal_title::title_sequence(&title).as_bytes());
+    let _ = out.flush();
+}
+
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -4922,6 +4944,9 @@ fn run_external_editor(
         ));
         return;
     }
+    // The editor is free to retitle the terminal; take the title back the same
+    // way upstream's next `updateTerminalTitle` would (LUM-1485).
+    app.reassert_terminal_title();
     match result {
         // Upstream changes the editor only on success; an unchanged draft is
         // still "success", it just costs a repaint.
@@ -4951,6 +4976,9 @@ fn suspend_to_background(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app:
         app.flash_status(format!("suspend: cannot restore the terminal: {err}"));
         return;
     }
+    // The shell that ran in the foreground owns the title while the job is
+    // stopped; put ours back (LUM-1485).
+    app.reassert_terminal_title();
     if let Err(err) = stopped {
         app.flash_status(format!("suspend failed: {err}"));
     }

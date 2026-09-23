@@ -411,6 +411,49 @@ fn interactive_extension_statuses_reach_the_footer_row() {
     assert!(!snapshot.lines.iter().any(|line| line.contains("queued")));
 }
 
+/// LUM-1485 — `ctx.ui.setTitle` crosses the same bridge as the region
+/// mutations but lands in a different sink: the App queues the OSC 0 sequence
+/// for the tty and the frame stays unchanged, which is exactly why the driver
+/// writes it outside `terminal.draw` (a terminal title is not cell content).
+const EXTENSION_TITLE: &str = r#"
+    module.exports = function (pi) {
+        pi.on("session_start", function (event, ctx) {
+            ctx.ui.setTitle("ext - compiling");
+        });
+    };
+"#;
+
+#[test]
+fn interactive_extension_title_reaches_the_terminal_queue() {
+    let (dir, file) = write_extension_source("title", EXTENSION_TITLE);
+    let rt = runtime();
+    let (mut ui, mut pump, _loaded) = load_regions(&rt, &dir, &file);
+
+    let mut app = app();
+    app.attach_ui_dialogs(ui.take_dialogs().expect("dialog receiver"));
+    // Put the App in the state the driver leaves it in (session facts set,
+    // automatic title already written) so the assertion is about the
+    // extension's value and not about the default title.
+    app.set_status_cwd(Some("/srv/repo".to_string()));
+    assert_eq!(app.take_terminal_title().as_deref(), Some("pi - repo"));
+
+    rt.block_on(async { pump.pump(&mut app, 60).await });
+
+    assert_eq!(app.terminal_title(), Some("ext - compiling"));
+    let queued = app.take_terminal_title().expect("the extension title");
+    assert_eq!(
+        pi_tui::terminal_title::title_sequence(&queued),
+        "\u{1b}]0;ext - compiling\u{7}",
+        "the driver writes exactly upstream's OSC 0 sequence"
+    );
+    // Drained: the loop must not re-emit it on every subsequent frame.
+    assert_eq!(app.take_terminal_title(), None);
+
+    // …and none of it is cell content.
+    let rendered = app.render_snapshot(60, 14).lines.join("\n");
+    assert!(!rendered.contains("ext - compiling"), "{rendered}");
+}
+
 #[test]
 fn interactive_regions_render_into_the_app() {
     let (dir, file) = write_extension_source("regions", EXTENSION_REGIONS);

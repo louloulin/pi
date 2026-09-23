@@ -197,16 +197,20 @@
 //! | `custom(factory, { overlay, overlayOptions, onHandle })` | [`App::open_custom`] → [`crate::component::CustomHandle`], [`App::close_custom`] |
 //! | `setEditorComponent(factory)` | [`App::set_editor_component`] / [`App::clear_editor_component`] |
 //! | `setStatus(key, text)` | [`App::set_extension_status`] (footer's third row, LUM-1481) |
+//! | `setTitle(title)` | [`App::set_terminal_title`] (queued OSC 0, LUM-1485) |
 //!
-//! `setWorkingMessage` / `setTitle` and the remaining `ctx.ui` methods are
-//! *not* region-shaped and stay with the coding-agent layer; they are out of
+//! `setWorkingMessage` and the remaining `ctx.ui` methods are *not*
+//! region-shaped and stay with the coding-agent layer; they are out of
 //! scope here. `setStatus` is region-shaped in the one sense that matters —
 //! it is host chrome drawn from data the host holds — so the App owns the map
 //! and the footer renders it; the JS-side plumbing lives in
 //! `pi-extensions` / `pi-coding-agent` and no longer answers
-//! `ERR_PI_UI_UNSUPPORTED` for it. The JS factory → Rust component bridge is
-//! still incomplete (`ctx.ui.custom` reaches the App, the setters above do
-//! not).
+//! `ERR_PI_UI_UNSUPPORTED` for it. `setTitle` is the same story with a
+//! different sink: the App holds the title and queues it, and the driver is
+//! the only component that writes it ([`App::take_terminal_title`]) — the
+//! sequence never enters the frame buffer. The JS factory → Rust component
+//! bridge is still incomplete (`ctx.ui.custom` reaches the App, the setters
+//! above do not).
 //!
 //! **Render order** was rearranged by this surface to match upstream's
 //! container stack (`header` → chat → widget-above → editor → widget-below →
@@ -1215,6 +1219,15 @@ pub struct App {
     /// Set when the App should exit at the next opportunity. The TUI
     /// exit path checks this between key events.
     exit_requested: bool,
+    /// The terminal title currently in effect — the last value queued for the
+    /// driver (upstream's `Terminal.setTitle`, OSC 0). `None` until something
+    /// queues one.
+    terminal_title: Option<String>,
+    /// A title the driver has not written yet, consumed with
+    /// [`App::take_terminal_title`]. One slot, not a queue: only the newest
+    /// title matters, so a startup that sets the session name and the cwd in
+    /// the same tick emits one sequence, not two.
+    pending_terminal_title: Option<String>,
     /// When the last idle `app.clear` (`Ctrl+C`) press landed. A second
     /// press within [`CLEAR_EXIT_WINDOW`] exits; see [`App::step_key_at`].
     /// `None` before the first press of the session.
@@ -1516,6 +1529,8 @@ impl App {
             last_turn_usage: None,
             turn_busy: Arc::new(AtomicBool::new(false)),
             exit_requested: false,
+            terminal_title: None,
+            pending_terminal_title: None,
             last_clear_at: None,
             viewport_width: AtomicU16::new(0),
             viewport_reserved: AtomicU16::new(0),
@@ -2083,6 +2098,7 @@ impl App {
     /// status bar falls back to the session identifier.
     pub fn set_session_name(&mut self, name: Option<String>) {
         self.status_data.session_name = name;
+        self.sync_terminal_title();
     }
 
     /// Set the working directory the footer's location row shows.
@@ -2093,6 +2109,7 @@ impl App {
     /// existing `AppConfig` literal changes shape.
     pub fn set_status_cwd(&mut self, cwd: Option<String>) {
         self.status_data.cwd = cwd;
+        self.sync_terminal_title();
     }
 
     /// Set the git branch joined onto the footer's location row.
@@ -2148,6 +2165,81 @@ impl App {
     /// host teardown).
     pub fn clear_extension_statuses(&mut self) {
         self.status_data.clear_extension_statuses();
+    }
+
+    /// The terminal title currently in effect, or `None` before anything
+    /// queued one. Read-only view of the last value handed to the driver;
+    /// the wire format lives in [`crate::terminal_title`].
+    pub fn terminal_title(&self) -> Option<&str> {
+        self.terminal_title.as_deref()
+    }
+
+    /// Give the terminal a title (`ctx.ui.setTitle(title)`).
+    ///
+    /// The title is queued for the driver to write as OSC 0, sanitised first
+    /// so a title containing `ESC` / `BEL` cannot escape into a control
+    /// sequence ([`crate::terminal_title::sanitize_title`]). Upstream hands the
+    /// string to the terminal verbatim; the difference is deliberate and only
+    /// ever drops characters a terminal title has no use for.
+    ///
+    /// The next automatic title ([`App::sync_terminal_title`] on a session
+    /// change) overwrites it, which is upstream's behaviour too: `setTitle`
+    /// owns the title only until the session next changes.
+    pub fn set_terminal_title(&mut self, title: impl Into<String>) {
+        self.queue_terminal_title(crate::terminal_title::sanitize_title(&title.into()));
+    }
+
+    /// Recompute the automatic title — `"<app> - <session name> - <cwd>"`,
+    /// upstream's `updateTerminalTitle`
+    /// (`modes/interactive/interactive-mode.ts:1017-1028`).
+    ///
+    /// Called by the setters the title is derived from
+    /// ([`App::set_session_name`], [`App::set_status_cwd`]), so `/new`,
+    /// `/resume`, `/name` and session-tree switches all refresh it without the
+    /// driver having to remember. Nothing is queued when the composed title is
+    /// already the one in effect.
+    pub fn sync_terminal_title(&mut self) {
+        let title = crate::terminal_title::auto_title(
+            crate::locale::HEADER_TITLE,
+            self.status_data.session_name.as_deref(),
+            self.status_data.cwd.as_deref(),
+        );
+        self.queue_terminal_title(title);
+    }
+
+    /// Re-assert the automatic title even when it has not changed.
+    ///
+    /// `app.editor.external` and `app.suspend` hand the tty to a child
+    /// process, which is free to retitle the terminal while it runs; upstream
+    /// has no equivalent because it never leaves the alternate screen. Called
+    /// after the driver takes the tty back, where the queued-title dedup in
+    /// [`App::queue_terminal_title`] would otherwise swallow the write.
+    pub fn reassert_terminal_title(&mut self) {
+        let title = crate::terminal_title::auto_title(
+            crate::locale::HEADER_TITLE,
+            self.status_data.session_name.as_deref(),
+            self.status_data.cwd.as_deref(),
+        );
+        self.terminal_title = Some(title.clone());
+        self.pending_terminal_title = Some(title);
+    }
+
+    /// Take the title the driver still has to write, if any.
+    ///
+    /// The driver calls this once per tick and writes the result with
+    /// [`crate::terminal_title::title_sequence`]. `None` — the common case —
+    /// means the terminal title is already correct, so no bytes are written.
+    pub fn take_terminal_title(&mut self) -> Option<String> {
+        self.pending_terminal_title.take()
+    }
+
+    /// Queue `title` unless it is already the title in effect.
+    fn queue_terminal_title(&mut self, title: String) {
+        if self.terminal_title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        self.terminal_title = Some(title.clone());
+        self.pending_terminal_title = Some(title);
     }
 
     /// The last transient status message pushed by [`App::flash_status`], if

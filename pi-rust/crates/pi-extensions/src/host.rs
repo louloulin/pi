@@ -1185,6 +1185,13 @@ pub trait UiRegionHost: Send + Sync + 'static {
     /// text)`. `None` deletes the key (upstream's `undefined` clear,
     /// `footer-data-provider.ts:140-147`).
     async fn set_status(&self, key: String, text: Option<String>);
+    /// Set the terminal window/tab title — `ctx.ui.setTitle(title)`.
+    ///
+    /// Upstream hands the string straight to `Terminal.setTitle`
+    /// (`interactive-mode.ts:2443`, OSC 0 at `terminal.ts:520`); the adapter
+    /// is what turns it into bytes, and it is expected to sanitise control
+    /// characters before they reach the terminal.
+    async fn set_title(&self, title: String);
     /// Open a `ctx.ui.custom` session. `session` is the token the shim passes
     /// back to [`set_custom_visible`](Self::set_custom_visible) and
     /// [`close_custom`](Self::close_custom).
@@ -1212,6 +1219,8 @@ enum RegionCommand {
     Editor(Option<JsComponent>),
     /// Install / clear one extension status text.
     Status { key: String, text: Option<String> },
+    /// Set the terminal window/tab title.
+    Title(String),
     /// Open a custom session.
     OpenCustom {
         session: u64,
@@ -1249,6 +1258,7 @@ async fn region_worker(
             RegionCommand::Footer(component) => host.set_footer(component).await,
             RegionCommand::Editor(component) => host.set_editor_component(component).await,
             RegionCommand::Status { key, text } => host.set_status(key, text).await,
+            RegionCommand::Title(title) => host.set_title(title).await,
             RegionCommand::OpenCustom {
                 session,
                 component,
@@ -1340,6 +1350,18 @@ fn handle_region_call(
                 send(RegionCommand::Status { key, text }),
                 serde_json::Value::Null,
             )
+        }
+        "setTitle" => {
+            // The shim stringifies before calling (`setTitle(title: string)`
+            // upstream), so a missing field means an empty title — which OSC 0
+            // renders as "no title", the same as upstream interpolating an
+            // empty value into its template literal.
+            let title = payload
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            region_envelope(send(RegionCommand::Title(title)), serde_json::Value::Null)
         }
         "customOpen" => {
             let Some(component) = component else {

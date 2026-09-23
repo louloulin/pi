@@ -875,6 +875,10 @@ impl UiRegionHost for RecordingRegionHost {
         }
     }
 
+    async fn set_title(&self, title: String) {
+        self.push(format!("title:{title}"));
+    }
+
     async fn open_custom(&self, session: u64, _component: JsComponent, options: UiCustomOptions) {
         self.push(format!(
             "custom-open:{session}:{}:{}",
@@ -1088,6 +1092,48 @@ fn region_host_receives_extension_statuses_and_a_custom_footer_sees_them() {
             rendered_again.lines,
             vec!["build=compiling".to_string()],
             "a mutating footer cannot change the host's status map"
+        );
+    });
+}
+
+/// LUM-1485 — `ctx.ui.setTitle(title)` is a region mutation like the rest:
+/// the shim forwards it through `host_ui_region("setTitle", …)` and the host
+/// hands the string to `UiRegionHost::set_title`. The value is stringified
+/// the way upstream's template literal would.
+#[test]
+fn region_host_receives_the_terminal_title() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(Arc::new(ScriptedUiHandler::new(
+                    ScriptedUiAnswers::default(),
+                )))
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setTitle("ext owns this");
+                    // Upstream's `setTitle(title: string)` interpolates, so a
+                    // non-string is stringified rather than dropped.
+                    ctx.ui.setTitle(42);
+                });
+            };
+        "#;
+        host.load(entry("title-ext"), source).await.expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let ops = wait_for_region_ops(&recorder, 2).await;
+        assert_eq!(
+            ops,
+            vec!["title:ext owns this".to_string(), "title:42".to_string(),],
+            "every setTitle reaches the host, in order"
         );
     });
 }
