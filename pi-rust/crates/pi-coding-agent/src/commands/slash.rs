@@ -915,7 +915,7 @@ mod tests {
             }
         );
         assert_eq!(handle_command("/exit").unwrap(), SlashCommand::Exit);
-        assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Exit);
+        assert_eq!(handle_command("/quit").unwrap(), SlashCommand::Quit);
         assert_eq!(handle_command("/new").unwrap(), SlashCommand::New);
         assert_eq!(handle_command("/copy").unwrap(), SlashCommand::Copy);
         assert_eq!(

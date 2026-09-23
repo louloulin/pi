@@ -87,7 +87,7 @@ pub struct Cli {
 
     /// Disable built-in tools but keep extension/custom tools enabled.
     /// Mirrors `pi --no-builtin-tools`.
-    #[arg(long = "no-builtin-tools", short = 'n')]
+    #[arg(long = "no-builtin-tools")]
     pub no_builtin_tools: bool,
 
     /// Theme name to use. Mirrors `pi --theme`.
