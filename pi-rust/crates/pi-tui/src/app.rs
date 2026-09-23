@@ -283,7 +283,8 @@ use crate::dialog::{Dialog, DialogAction, DialogKind};
 use crate::editor::{EditorAction, HistoryEntry, HistorySearchStatus};
 use crate::extension_ui::{plan_chrome, ChromeLayout, ExtensionFrame, ExtensionUi};
 use crate::input::{
-    InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind,
+    BurstDecision, InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture,
+    MouseGestureKind, PasteBurst,
 };
 use crate::keybindings::{get_keybindings, matches_with_fallback, KeybindingsManager};
 use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
@@ -564,6 +565,17 @@ pub struct AppConfig {
     /// matches Martty's `min(h/2, 12)` cap for tall terminals
     /// (`src/ui.rs:25-54`). The default is `8`.
     pub composer_max_rows: usize,
+    /// Recognize a paste the terminal delivered as a fast burst of key
+    /// events instead of a bracketed-paste event (codex `paste_burst`; the
+    /// fallback for old emulators and some SSH / multiplexer relays).
+    ///
+    /// `false` — the default — keeps the App deterministic for headless
+    /// consumers and unit tests: two synthetic characters can share an
+    /// `Instant`, which a real terminal never does. The interactive driver
+    /// turns it on ([`AppConfig::default`] stays off, mirroring
+    /// `startup_header`), and only then does [`App::step_key_at`] classify a
+    /// run of plain characters by timing.
+    pub paste_burst: bool,
     /// Cross-session composer history file (see [`crate::history_store`]).
     ///
     /// `None` — the default — disables persistence, so a headless App or a
@@ -611,6 +623,7 @@ impl Default for AppConfig {
             locale: Locale::default(),
             extension_header: ExtensionHeader::Hidden,
             composer_max_rows: 8,
+            paste_burst: false,
             history_path: None,
         }
     }
@@ -1346,6 +1359,13 @@ pub struct App {
     /// from [`AppConfig::startup_header`] (visible at all) and from an
     /// extension's `ctx.ui.setHeader`, which replaces the built-in lines.
     header_expanded: bool,
+    /// Paste-burst classifier (codex `paste_burst`). Fed only while
+    /// [`AppConfig::paste_burst`] is on; see [`App::tick_paste_burst`].
+    paste_burst: PasteBurst,
+    /// Set when a burst was flushed while handling a key that the burst did
+    /// not consume, so [`App::step_key_at`] can turn an otherwise idle
+    /// outcome into a redraw.
+    burst_flush_pending: bool,
     /// Session thinking level — what the next provider call requests
     /// (upstream `session.thinkingLevel`). Seeded from the persisted
     /// `defaultThinkingLevel` by the driver, then moved by
@@ -1463,6 +1483,8 @@ impl App {
             turn_started: None,
             spinner_advanced_at: Instant::now(),
             header_expanded,
+            paste_burst: PasteBurst::new(),
+            burst_flush_pending: false,
             thinking_level: ThinkingLevel::Medium,
             thinking_supported: false,
         }
@@ -2879,6 +2901,11 @@ impl App {
         if self.exit_requested {
             return StepOutcome::Exit;
         }
+        // A real bracketed paste is authoritative: any burst still being
+        // classified is flushed first (so byte order is preserved) and the
+        // classification window is dropped, so the keystrokes that follow the
+        // paste cannot be grouped with it.
+        self.flush_paste_burst_now();
         if self.dialog.is_some()
             || self.settings.is_some()
             || self.selector.is_some()
@@ -2920,9 +2947,24 @@ impl App {
     ///
     /// The instant is what the `app.clear` (`Ctrl+C`) double-press window is
     /// measured against, so tests can drive the window without sleeping;
-    /// nothing else reads it. `Instant::now()` must not appear in the
+    /// nothing else reads it except the paste-burst classifier
+    /// (`AppConfig::paste_burst`). `Instant::now()` must not appear in the
     /// decision itself (LUM-1238 acceptance 2).
     pub fn step_key_at(&mut self, key: Key, now: Instant) -> StepOutcome {
+        // A burst that a non-burst key flushed changes the draft even when
+        // the key itself is a no-op: `Ctrl+R` must still open the search,
+        // but the frame it opens on has to show the flushed paste text.
+        self.burst_flush_pending = false;
+        let outcome = self.step_key_inner(key, now);
+        if self.burst_flush_pending && matches!(outcome, StepOutcome::Idle) {
+            StepOutcome::Redraw
+        } else {
+            outcome
+        }
+    }
+
+    /// [`App::step_key_at`]'s body, after the burst-flush bookkeeping.
+    fn step_key_inner(&mut self, key: Key, now: Instant) -> StepOutcome {
         // A transient status message lives for exactly one key press
         // (upstream's `showStatus` clears on a timer; this port has no timer
         // in the App, and a key press is the next thing the reader does).
@@ -2947,6 +2989,16 @@ impl App {
         // The settings modal is the next-outermost layer.
         if self.settings.is_some() {
             return self.step_settings(key);
+        }
+        // Paste-burst classification (LUM-1461, codex `paste_burst`): a
+        // terminal without bracketed paste delivers a paste as a fast run of
+        // key events, and this is where such a run is recognized. It runs
+        // after the modal layers (which own the keyboard outright) and before
+        // the `app.*` chords, because a chord is not paste content: it ends
+        // the burst, flushing whatever was buffered first. A plain character
+        // that is not (yet) paste-like falls through to the ordinary path.
+        if let Some(outcome) = self.step_composer_burst(key, now) {
+            return outcome;
         }
         // Global keys. Resolved through the keybinding registry so an
         // installed override reaches the App; with nothing installed the
@@ -3139,13 +3191,25 @@ impl App {
     /// `app.*` chords above (expand tools, paste an image, fold the header,
     /// page the transcript) must not fire on a keystroke the user means as a
     /// search query.
+    ///
+    /// Paste-burst classification happens in [`App::step_key_at`], ahead of
+    /// the `app.*` chords, so this only ever sees a character the classifier
+    /// left alone.
     fn step_composer(&mut self, key: Key) -> StepOutcome {
         let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
         let composer_page = self.composer_window_rows();
         self.prompt.editor_mut().set_visual_width(composer_width);
         self.prompt.editor_mut().set_page_rows(composer_page);
 
-        match self.prompt.handle_key(key) {
+        let action = self.prompt.handle_key(key);
+        // A recall from the cross-session history file can bring back a
+        // marker whose content this session never had; say so once.
+        if self.prompt.editor_mut().take_stale_paste_notice() {
+            self.flash_status(
+                "Pasted content recalled from a previous session is no longer available",
+            );
+        }
+        match action {
             PromptAction::None => StepOutcome::Idle,
             PromptAction::Changed => StepOutcome::Redraw,
             PromptAction::Submit(text) => {
@@ -3180,6 +3244,160 @@ impl App {
                 StepOutcome::Exit
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Paste burst (codex `paste_burst`)
+    // -----------------------------------------------------------------
+
+    /// Feed a key that has reached the composer into the paste-burst
+    /// detector.
+    ///
+    /// `None` means "not consumed — handle the key normally"; `Some(outcome)`
+    /// means the key joined a burst (or a due burst was flushed), so the
+    /// ordinary composer path must not see it.
+    ///
+    /// Every character is inserted as ordinary typing until a run proves to
+    /// be paste-like, so nothing is ever held back waiting for a tick; when
+    /// the run is confirmed, the prefix is *retroactively* folded into the
+    /// burst ([`Editor::cut_chars_before_cursor`](crate::Editor::cut_chars_before_cursor)).
+    /// A misclassification therefore degrades to "a few characters inserted
+    /// together" and never to a lost keystroke.
+    fn step_composer_burst(&mut self, key: Key, now: Instant) -> Option<StepOutcome> {
+        // A reverse search owns the composer: its query is not a paste, and
+        // its `Esc` must not be swallowed by a burst either.
+        if !self.config.paste_burst || self.history_search_active() {
+            return None;
+        }
+        // A burst that has gone quiet is flushed before this key is read, so
+        // a chord never lands on top of half a paste.
+        if self.flush_paste_burst_if_due(now) {
+            self.burst_flush_pending = true;
+        }
+
+        if let Some(c) = Self::burst_plain_char(key) {
+            return match self.paste_burst.on_plain_char(c, now) {
+                // Not paste-like: let the ordinary path insert it. A due
+                // flush, if any, is reported by the flag.
+                BurstDecision::Typed => None,
+                BurstDecision::BeginBurst { retro_chars } => {
+                    let prefix = self
+                        .prompt
+                        .editor_mut()
+                        .cut_chars_before_cursor(retro_chars);
+                    if prefix.chars().count() == retro_chars {
+                        self.paste_burst.absorb_retro(&prefix);
+                    } else {
+                        // The cursor had fewer characters than the run: the
+                        // prefix cannot be absorbed, so fall back to plain
+                        // insertion rather than dropping the buffered text.
+                        let recovered = self.paste_burst.abort();
+                        let text = format!("{prefix}{recovered}");
+                        if !text.is_empty() {
+                            self.prompt.editor_mut().insert_str(&text);
+                        }
+                    }
+                    Some(StepOutcome::Redraw)
+                }
+                BurstDecision::Buffered => Some(StepOutcome::Idle),
+            };
+        }
+
+        // `Enter` / `Tab` inside a burst stay inside the paste: the newline
+        // of a pasted block must never submit the draft it was pasted into.
+        if let Some(c) = Self::burst_control_char(key) {
+            if self.paste_burst.append_control_if_active(c, now) {
+                return Some(StepOutcome::Idle);
+            }
+        }
+
+        // Any other key ends the burst context: flush whatever was buffered
+        // and forget the window, so the next keystroke starts a fresh run
+        // instead of being grouped with this one. The key itself is **not**
+        // consumed — `Ctrl+R` must still open the search.
+        if self.flush_paste_burst_now() {
+            self.burst_flush_pending = true;
+        }
+        None
+    }
+
+    /// The character a plain text-producing key carries, if any.
+    ///
+    /// Shifted characters count — a capital letter is ordinary text — while
+    /// Control / Alt / Meta combinations are chords, never paste content.
+    fn burst_plain_char(key: Key) -> Option<char> {
+        if key.modifiers.control || key.modifiers.alt || key.modifiers.meta {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The control character a paste can carry, if `key` is one.
+    fn burst_control_char(key: Key) -> Option<char> {
+        if key.modifiers.control || key.modifiers.alt || key.modifiers.meta {
+            return None;
+        }
+        match key.code {
+            KeyCode::Enter => Some('\n'),
+            KeyCode::Tab => Some('\t'),
+            _ => None,
+        }
+    }
+
+    /// Flush a burst that has gone quiet, returning whether the draft
+    /// changed.
+    fn flush_paste_burst_if_due(&mut self, now: Instant) -> bool {
+        match self.paste_burst.flush_if_due(now) {
+            Some(text) => self.insert_paste_burst_text(&text),
+            None => false,
+        }
+    }
+
+    /// Flush an active burst immediately (a key that cannot belong to the
+    /// paste is about to be handled).
+    fn flush_paste_burst_now(&mut self) -> bool {
+        match self.paste_burst.flush_now_and_clear() {
+            Some(text) => self.insert_paste_burst_text(&text),
+            None => false,
+        }
+    }
+
+    /// Route burst content through the composer's paste entry point, so a
+    /// folded marker, its registry entry and its undo unit are the very same
+    /// ones a bracketed paste produces.
+    fn insert_paste_burst_text(&mut self, text: &str) -> bool {
+        match self.prompt.editor_mut().insert_paste(text) {
+            crate::editor::PasteInsertOutcome::Ignored => false,
+            crate::editor::PasteInsertOutcome::Inserted
+            | crate::editor::PasteInsertOutcome::Marker(_) => true,
+        }
+    }
+
+    /// Flush a paste burst that has gone quiet, driven by the render loop's
+    /// beat.
+    ///
+    /// A burst becomes visible only when it is flushed, and the flush is
+    /// time-based, so a driver must call this on every loop iteration;
+    /// `pi-coding-agent`'s `run_loop` does, and uses
+    /// [`App::paste_burst_deadline`] to shorten its poll timeout while a
+    /// burst is accumulating. Returns whether the draft changed.
+    pub fn tick_paste_burst(&mut self, now: Instant) -> bool {
+        if !self.config.paste_burst {
+            return false;
+        }
+        self.flush_paste_burst_if_due(now)
+    }
+
+    /// When [`App::tick_paste_burst`] next has something to flush, if a burst
+    /// is accumulating. `None` when the classifier is off or idle.
+    pub fn paste_burst_deadline(&self) -> Option<Instant> {
+        if !self.config.paste_burst {
+            return None;
+        }
+        self.paste_burst.flush_deadline()
     }
 
     /// Route a key to the open dialog.

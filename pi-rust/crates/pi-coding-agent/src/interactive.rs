@@ -275,6 +275,13 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // budget. `8` matches Martty's `min(h/2, 12)` cap on tall
         // terminals (`src/ui.rs:25-54`).
         composer_max_rows: 8,
+        // Paste-burst fallback (LUM-1461, codex `paste_burst`): a terminal
+        // that never sends bracketed paste (an old emulator, some SSH /
+        // multiplexer relays) delivers a paste as a fast run of key events.
+        // The App's default is `false` so headless consumers stay
+        // deterministic; the real terminal owns the timing, so the
+        // interactive driver turns it on.
+        paste_burst: true,
         // Cross-session prompt history (codex `~/.codex/history.jsonl`): what
         // makes `Ctrl+R` recall survive a restart. `$PI_HISTORY_PATH` wins,
         // then `$PI_HOME`, then `~/.pi/agent` — the same root the rest of the
@@ -698,7 +705,21 @@ async fn run_loop(
         // buffered without blocking. `Event::read` blocks until the next
         // event, so it may only ever be called after `poll` reported one
         // (see `drain_ready_events`).
-        if ct_event::poll(config.event_poll_interval)? {
+        //
+        // While a paste burst is accumulating (LUM-1461) the timeout is
+        // shortened to land just after it goes quiet: the classifier flushes
+        // on a time boundary, and a 50 ms poll would leave the pasted text
+        // invisible for a beat after the terminal stopped sending it.
+        let poll_interval = app
+            .paste_burst_deadline()
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .max(Duration::from_millis(1))
+                    .min(config.event_poll_interval)
+            })
+            .unwrap_or(config.event_poll_interval);
+        if ct_event::poll(poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
                 // Bracketed paste is not expressible as an `InputEvent` (that
                 // enum is `Copy` and the payload is owned), so the driver
@@ -728,6 +749,9 @@ async fn run_loop(
                 }
             }
         }
+        // A burst that has gone quiet is handed to the composer here, on
+        // every beat, whether or not an event arrived.
+        app.tick_paste_burst(std::time::Instant::now());
 
         // Copy-on-select: the App hands over the finished selection, the
         // driver performs the terminal write (upstream's default is an

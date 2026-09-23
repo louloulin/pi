@@ -623,6 +623,47 @@ frame-buffer 截图见 `docs/LUM1460_PASTE_RESCUE.md`。
 **没有带进本轮**（在本机跑不了）；`docs/screenshots/lum1328-paste*.png` 是那条分支的历史实拍，
 不是在本轮代码上拍的。
 
+### 0.18 LUM-1461：composer `paste_burst` 兜底 + marker 按词原子 + 历史 marker 降级
+
+三个切片都是 LUM-1460 收尾清单里的项（§4.1 偏差、§5 偏差 1/4、§10 顺位 1–3）。
+`paste_burst` 是 **codex 独有**的能力（参考实现 `codex-rs/tui/src/bottom_pane/paste_burst.rs`，
+上游 pi-ts 只认 bracketed paste 事件），因此它**不是 pi-ts 对等面上的格子**；
+按 LUM-1450 的规矩，它只作**新登记、可反证的量**公开（`docs/LUM1461_PASTE_BURST.md` §0/§4），
+不擅自加轴进 §4.1 公式。逐行对照、两条有意偏差（不做“持首字符”、不做 retro 的
+`looks_pastey` 启发式）与 frame-buffer 截图见交付文档。
+
+| 量 | 本轮实测 | 基线 `c37d80742` | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **92.5%**（141,557 / 153,106） | 91.8%（140,615） | `python pi-rust/scripts/measure_loc.py`；+942 行 src |
+| 测试规模 | **52.1%**（2,764 / 5,309） | 51.6%（2,740） | `grep -rhoE '#\[(tokio::)?test\]' pi-rust/crates --include=*.rs \| wc -l`，+24 |
+| `pi-tui` 全量 | **1099 passed / 0 failed** | 1075 / 0 | `cargo test --offline -p pi-tui`（75 target），+24 = `lum1461_paste_burst`（11）+ `lum1461_burst_frames`（3）+ `input.rs`（6）+ `word_navigation.rs`（4）|
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 无新模块 |
+| **`paste_burst` 兜底（本期新登记，codex 独有）** | **1 / 1** | 0 / 1 | 11 条行为用例 + 3 帧，见交付文档 §4 |
+| composer 粘贴能力面（LUM-1460 §4 登记轴） | 7 / 7 | 7 / 7 | marker 按词原子接上后不变；`Alt+B`/`Alt+F` 一格 |
+
+**加权完成度**：13 条轴里仍然只有第 12 轴（测试）动，`2740/5309 = 0.5161` →
+`2764/5309 = 0.5206`：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×(2764/5309) + 3×0.95 = 86.85% → **86.9%**
+```
+
+**本轮的门禁与证据（可复跑）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 粘贴突发行为 | `cargo test --offline -p pi-tui --test lum1461_paste_burst` | **11 / 0**（窗口内/外、换行不提交、误判不丢字、和弦打断、按词原子、历史降级正反各一） |
+| 帧 | `cargo test --offline -p pi-tui --test lum1461_burst_frames` | **3 / 0** |
+| 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；`pi-tui` 0 告警，本轮文件在 `pi-coding-agent` 0 命中 |
+| 帧截图 | `docs/screenshots/lum1461-burst-{marker,two-markers,stale-recall}-120x24.png`(+`.txt`) | 3 帧，120×24，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 既有失败（未处置） | `cargo test --offline -p pi-coding-agent` | 本机 `--lib` 8 条（Windows 路径分隔符 / trust / export / js_loader / resource_loader）+ `--test cli_extensions` 10 条（mock provider `transport error` / trust），均与粘贴无关，失败文件本轮一行未碰；跳过它们后其余 558 条全绿 |
+
+**诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，
+不证明按键/字节时序；时序由 11 条注入了显式 `Instant` 的驱动级用例覆盖。
+App 级 `paste_burst` **默认关闭**（驱动 `interactive.rs` 打开），避免合成事件同毫秒
+被 `App` 级测试误判为粘贴。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
