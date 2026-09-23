@@ -582,6 +582,14 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ("tui.editor.jumpBackward", "jump backward to character"),
         ("tui.editor.pageUp", "prompt page up"),
         ("tui.editor.pageDown", "prompt page down"),
+        (
+            "tui.editor.historySearch",
+            "search the prompt history (Ctrl+R again: older match)",
+        ),
+        (
+            "tui.editor.historySearchNext",
+            "next (newer) prompt history search match",
+        ),
     ];
     const EDITING: &[(&str, &str)] = &[
         ("tui.input.submit", "send message"),
@@ -932,6 +940,24 @@ mod tests {
                 .any(|command| command.name == "reload"),
             "/reload missing from the composer dropdown"
         );
+    }
+
+    #[test]
+    fn hotkeys_text_lists_the_history_search_chords() {
+        // LUM-1319 gave `tui.editor.historySearch` / `historySearchNext` a
+        // consumer in the composer, so the legend has to advertise them.
+        let manager = pi_tui::keybindings::KeybindingsManager::new(
+            crate::keybindings::merged_definitions(
+                &crate::keybindings::Platform::Linux,
+                &crate::keybindings::process_env(),
+            ),
+            pi_tui::keybindings::KeybindingsConfig::default(),
+        );
+        let text = hotkeys_text_with(&manager);
+        assert!(text.contains("search the prompt history"), "{text}");
+        assert!(text.contains("prompt history search match"), "{text}");
+        assert!(text.contains("Ctrl+R"), "{text}");
+        assert!(text.contains("Ctrl+S"), "{text}");
     }
 
     #[test]

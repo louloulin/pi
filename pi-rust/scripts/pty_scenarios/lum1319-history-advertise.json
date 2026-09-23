@@ -1,0 +1,72 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": ["--model", "faux/faux-model"],
+  "notes": [
+    "Run against the same --home as session A/B, after them: this is the advertising half of LUM-1319.",
+    "120x34 so the expanded startup header (and therefore the new `Ctrl+R/Ctrl+S to search history` row) is on screen — at 76x26 the header folds itself and the row is not painted.",
+    "Panel 2 folds the header (Alt+H) so the transcript has the rows `/hotkeys` needs; without it the legend's navigation section is scrolled off the bottom.",
+    "Panels 3/4 split the legend: the tail is painted first, and `Home` (the chat-log jump) brings the navigation section — with both reverse-search rows — onto the screen.",
+    "The cleanup entry point is the CLI parameter `pi --clear-history` (not a slash command): it is checked by the gate's integration test and by the shell step right after this scenario, so no TUI row had to be spent on it."
+  ],
+  "caption": "LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.",
+  "panels": [
+    {
+      "label": "1. idle 120x34: the startup header advertises the new reverse-search chords",
+      "send": "",
+      "wait": 1.5,
+      "expect": ["Ctrl+R/Ctrl+S to search history"]
+    },
+    {
+      "label": "2. Alt+H folds the header, so the transcript gets the rows /hotkeys needs",
+      "send": "<M-h>",
+      "wait": 0.8,
+      "expect": ["> type a prompt"],
+      "probe": [
+        {
+          "text": "to search history",
+          "count": 0,
+          "why": "the hint rows are folded away"
+        }
+      ]
+    },
+    {
+      "label": "3. the cross-process history is still recallable before the cleanup",
+      "send": "<Up>",
+      "wait": 1.0,
+      "expect": ["> third prompt"]
+    },
+    {
+      "label": "4. /hotkeys prints the keyboard legend (its tail, since the block is taller than the viewport)",
+      "send": "<C-u>/hotkeys<Enter>",
+      "wait": 1.5,
+      "wait_for": "keyboard shortcuts",
+      "expect": ["commands:"]
+    },
+    {
+      "label": "5. Home jumps to the top of the log, where both reverse-search rows are",
+      "send": "<Home>",
+      "wait": 1.0,
+      "expect": [
+        "navigation:",
+        "Ctrl+R",
+        "search the prompt history",
+        "Ctrl+S",
+        "prompt history search match"
+      ]
+    },
+    {
+      "label": "6. End comes back to the tail of the log",
+      "send": "<End>",
+      "wait": 0.6,
+      "skip_capture": true
+    },
+    {
+      "label": "6. the composer is back and still holds the cross-process recall",
+      "send": "<Up>",
+      "wait": 0.8,
+      "expect": ["> third prompt"]
+    }
+  ],
+  "final_send": "<C-d>"
+}

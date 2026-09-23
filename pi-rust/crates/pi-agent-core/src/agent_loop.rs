@@ -964,8 +964,9 @@ async fn execute_tool_calls(
 
 /// `BeforeToolCall` outcome for a single call.
 enum CallPreparation {
-    /// The call may be dispatched to the executor.
-    Execute,
+    /// The call may be dispatched to the executor — with the arguments the
+    /// hook left it with (`Execute`, plus any `tool_call` input patch).
+    Execute(ToolCall),
     /// The call is already complete and must not reach the executor.
     Immediate(ToolResult),
 }
@@ -989,7 +990,17 @@ async fn prepare_call(hooks: &AgentHookAdapter, call: &ToolCall) -> (CallPrepara
             decision.terminate,
         )
     } else {
-        (CallPreparation::Execute, decision.terminate)
+        // A hook may have patched the arguments (upstream's "mutate
+        // `event.input` in place"): the executor must run the patched call,
+        // not the one the model emitted.
+        let executed = match decision.input {
+            Some(input) => ToolCall {
+                arguments: input,
+                ..call.clone()
+            },
+            None => call.clone(),
+        };
+        (CallPreparation::Execute(executed), decision.terminate)
     }
 }
 
@@ -1021,7 +1032,9 @@ async fn execute_batch_sequential(
         all_terminate &= terminate;
         let result = match preparation {
             CallPreparation::Immediate(result) => result,
-            CallPreparation::Execute => run_call(executor, hooks, call, signal, telemetry).await,
+            CallPreparation::Execute(patched) => {
+                run_call(executor, hooks, &patched, signal, telemetry).await
+            }
         };
         emit_tool_end(observer, &result, started);
         results.push(result);
@@ -1057,7 +1070,7 @@ async fn execute_batch_parallel(
 ) -> (Vec<ToolResult>, bool) {
     let mut all_terminate = true;
     let mut slots: Vec<Option<ToolResult>> = Vec::with_capacity(tool_calls.len());
-    let mut prepared: Vec<(usize, &ToolCall, Monotonic)> = Vec::with_capacity(tool_calls.len());
+    let mut prepared: Vec<(usize, ToolCall, Monotonic)> = Vec::with_capacity(tool_calls.len());
 
     for call in tool_calls {
         let started = Monotonic::now();
@@ -1069,8 +1082,8 @@ async fn execute_batch_parallel(
                 emit_tool_end(observer, &result, started);
                 slots.push(Some(result));
             }
-            CallPreparation::Execute => {
-                prepared.push((slots.len(), call, started));
+            CallPreparation::Execute(patched) => {
+                prepared.push((slots.len(), patched, started));
                 slots.push(None);
             }
         }

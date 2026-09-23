@@ -2600,6 +2600,18 @@ pub struct DispatchOutcome {
     /// First handler-level error the shim caught, if any.
     #[serde(default)]
     pub errored: Option<DispatchError>,
+    /// The event object the handlers received, after any in-place
+    /// mutation they performed.
+    ///
+    /// Upstream hooks patch tool arguments by mutating `event.input`
+    /// (`packages/coding-agent/src/core/extensions/types.ts`:
+    /// "To modify arguments, mutate `event.input` in place instead"). The
+    /// shim hands each handler the same parsed object and echoes it back
+    /// here, so the host can read the patched arguments. Only the
+    /// successful dispatch path carries it; `None` means "no handler
+    /// touched anything", which is also what an older shim returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<serde_json::Value>,
 }
 
 /// Failure surfaced by a JS-side handler.

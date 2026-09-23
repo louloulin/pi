@@ -325,15 +325,15 @@ runtime today:
 | `message_start`      | `ExtensionEvent::MessageStart`            | Empty assistant message; the loop only streams deltas.  |
 | `message_update`     | `ExtensionEvent::MessageUpdate`           | `assistantMessageEvent` (the `type`-tagged delta).      |
 | `message_end`        | `ExtensionEvent::MessageEnd`              |                                                         |
-| `tool_execution_start`| `ExtensionEvent::ToolExecutionStart`     | Sent after the legacy `tool_call`.                      |
-| `tool_execution_update`| `ExtensionEvent::ToolExecutionUpdate`   | Sent after the legacy `tool_call`.                      |
-| `tool_execution_end` | `ExtensionEvent::ToolExecutionEnd`        | Sent after the legacy `tool_result`.                    |
+| `tool_execution_start`| `ExtensionEvent::ToolExecutionStart`     | Sent before the call runs (see `tool_call` below for the blockable hook). |
+| `tool_execution_update`| `ExtensionEvent::ToolExecutionUpdate`   | Partial output while a call runs.                        |
+| `tool_execution_end` | `ExtensionEvent::ToolExecutionEnd`        | Final `result` + duration; **not** rewriteable — use `tool_result`. |
 | `thinking_level_select`| `ExtensionEvent::ThinkingLevelSelect`   | Shift+Tab cycle, `/thinking`, the selector.             |
 | `user_bash`          | `ExtensionEvent::UserBash`                | Local `!` / `!!` commands.                              |
 | `input`              | `ExtensionEvent::Input`                   | Every submitted user message.                           |
 | `user_message`       | `ExtensionEvent::UserMessage { … }`       | Port-only extra; carries the full `Message` payload.    |
-| `tool_call`          | `ExtensionEvent::ToolCall { … }`          | Port-only extra; carries the `ToolCall`.                |
-| `tool_result`        | `ExtensionEvent::ToolResult { … }`        | Port-only extra; carries the `ToolResult`.              |
+| `tool_call`          | `ExtensionEvent::ToolCall { toolCallId, toolName, input }` | **Hook**, fired before execution: `{ block, reason, terminate }` blocks the call; mutating `event.input` patches the arguments the executor runs (LUM-1330). |
+| `tool_result`        | `ExtensionEvent::ToolResult { toolCallId, toolName, input, content, isError, details }` | **Hook**, fired after execution: the returned `{ content, details, isError }` replaces what the model sees (LUM-1330). |
 
 LUM-1432 closed the rest of the upstream surface — the port now declares and emits
 **all 36 upstream event names** (`python pi-rust/scripts/extension_event_coverage.py pi-rust`
@@ -367,6 +367,49 @@ Event payloads use `serde_json` tagged representation; the shim
 inserts three underscore-prefixed context fields before serialising
 (`_ctx_mode`, `_ctx_hasUI`, `_ctx_cwd`). Extensions read them off
 the event object directly.
+
+### Tool hooks (`tool_call` / `tool_result`)
+
+Both are delivered by the tool hooks, **not** by the agent event
+fan-out, because a handler's return value changes what happens next:
+
+```js
+module.exports = function (pi) {
+  pi.on("tool_call", function (event) {
+    if (event.toolName === "bash" && /rm -rf/.test(event.input.command)) {
+      return { block: true, reason: "refusing to delete" };   // the tool never runs
+    }
+    if (event.toolName === "read") {
+      event.input.path = "safe.txt";                          // patch the arguments
+    }
+  });
+
+  pi.on("tool_result", function (event) {
+    if (event.toolName === "read") {
+      return { content: [{ type: "text", text: "REDACTED" }] };  // what the model sees
+    }
+  });
+};
+```
+
+The hooks are installed only when an extension subscribed to one of them
+(`crate::extensions::hook::install_tool_hooks`), in the interactive TUI
+and in print mode. Folding rules — first `block` wins and short-circuits,
+the last verdict owns `terminate`, later `tool_result` patches win, an
+in-place `event.input` mutation is only a patch when it actually changed
+the value — live in `pi_extensions::hook` and mirror
+`ExtensionRunner.emitToolCall` / `emitToolResult`.
+
+Known divergences from upstream:
+
+* `ToolResult::content` carries **one** block, upstream's array carries
+  many. A handler that returns several blocks keeps the original content
+  and logs a warning rather than silently dropping output.
+* `tool_execution_start` is still emitted before the `tool_call` hook runs
+  (the TUI renders a call as running for its whole lifetime, hook time
+  included), so it carries the model's arguments and a blocked call still
+  shows a start/end pair.
+* A blocked call does not fire `tool_result`.
 
 ### UI requests
 

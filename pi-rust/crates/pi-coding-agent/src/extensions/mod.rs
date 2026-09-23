@@ -7,6 +7,7 @@
 
 pub mod autocomplete;
 pub mod events;
+pub mod hook;
 pub mod js_loader;
 pub mod lifecycle;
 pub mod pi_ai_runner;

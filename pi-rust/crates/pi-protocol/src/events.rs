@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Content, Message, ToolCall, ToolResult, Usage};
+use crate::{Content, Message, ToolResult, Usage};
 
 /// Final stop reason of an assistant turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,16 +106,16 @@ pub struct AssistantMessage {
 ///
 /// Two families live in this enum:
 ///
-/// * **Rust-native** variants from Stage 3 (`session_start`, `user_message`,
-///   `tool_call`, `tool_result`, `resources_discover`). Their payloads are
-///   Rust shapes and do **not** match upstream's field names.
-/// * **Upstream-parity** variants (LUM-1246). Tag *and* payload field names
-///   mirror `packages/coding-agent/src/core/extensions/types.ts` — a
-///   snake_case `type` tag with camelCase fields — so a TypeScript plugin
-///   that reads `event.toolCallId` / `event.assistantMessageEvent` works
-///   without an adapter. Field names are pinned with explicit `rename`s
-///   rather than a container attribute so the parity is visible at the
-///   definition site.
+/// * **Rust-native** variants from Stage 3 (`session_start`,
+///   `user_message`, `resources_discover`). Their payloads are Rust
+///   shapes and do **not** match upstream's field names.
+/// * **Upstream-parity** variants (LUM-1246, extended by LUM-1330 for the
+///   tool hooks). Tag *and* payload field names mirror
+///   `packages/coding-agent/src/core/extensions/types.ts` — a snake_case
+///   `type` tag with camelCase fields — so a TypeScript plugin that reads
+///   `event.toolCallId` / `event.assistantMessageEvent` works without an
+///   adapter. Field names are pinned with explicit `rename`s rather than a
+///   container attribute so the parity is visible at the definition site.
 ///
 /// `ExtensionEvent::name()` returns the wire tag; it is the string a plugin
 /// passes to `pi.on(...)`.
@@ -123,7 +123,7 @@ pub struct AssistantMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtensionEvent {
     // ------------------------------------------------------------------
-    // Rust-native (Stage 3) — kept for wire compatibility.
+    // Upstream parity — tool hooks (LUM-1330) and the Rust-native extras.
     // ------------------------------------------------------------------
     /// Session started.
     SessionStart,
@@ -133,17 +133,50 @@ pub enum ExtensionEvent {
         /// The user message.
         message: Message,
     },
-    /// Agent is about to call a tool (Rust-native; upstream's typed
-    /// `tool_call` carries `toolCallId` / `toolName` / `input`).
+    /// Upstream `tool_call`: the agent is about to run a tool, and a
+    /// handler may block it, ask the loop to stop after this batch, or
+    /// patch the arguments in place.
+    ///
+    /// Payload parity (LUM-1330): `toolCallId` / `toolName` / `input` are
+    /// upstream's field names, so a TypeScript plugin that reads
+    /// `event.input` sees the same object it sees under pi-ts. Before
+    /// LUM-1330 this variant carried the Rust-native `{ call }` shape,
+    /// which no upstream plugin could read.
     ToolCall {
-        /// Tool call about to be executed.
-        call: ToolCall,
+        /// Provider-issued tool call id.
+        #[serde(rename = "toolCallId")]
+        tool_call_id: String,
+        /// Registered tool name.
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        /// Parsed tool arguments. A handler mutating `event.input` in
+        /// place patches the arguments the executor receives.
+        #[serde(rename = "input")]
+        input: serde_json::Value,
     },
-    /// Tool finished executing (Rust-native; upstream's `tool_result`
-    /// carries `toolCallId` / `content` / `isError`).
+    /// Upstream `tool_result`: a tool finished, and a handler may replace
+    /// the content / `isError` flag / structured details.
     ToolResult {
-        /// Tool result.
-        result: ToolResult,
+        /// Provider-issued tool call id.
+        #[serde(rename = "toolCallId")]
+        tool_call_id: String,
+        /// Registered tool name.
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        /// Arguments the call ran with (post-`tool_call` patching).
+        #[serde(rename = "input")]
+        input: serde_json::Value,
+        /// Result blocks. Upstream types this as `(TextContent |
+        /// ImageContent)[]`; the port reuses [`Content`], which is a
+        /// superset — a plugin that reads `item.text` off a text block
+        /// works unchanged.
+        content: Vec<Content>,
+        /// Whether the tool failed.
+        #[serde(rename = "isError")]
+        is_error: bool,
+        /// Structured details, when the tool produced any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
     },
     /// An extension is asked to advertise extra skill / prompt / theme
     /// paths. Mirrors upstream `resources_discover`.

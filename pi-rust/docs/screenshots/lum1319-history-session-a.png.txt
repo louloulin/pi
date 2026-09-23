@@ -1,0 +1,117 @@
+# lum1319-history-session-a.png — chars, 76x26 cells
+
+===== LUM-1319 session A (write): three real prompts submitted in a real 76x26 PTY, driving the debug binary. Each submit appends one JSON row to $HOME/.pi/agent/history.jsonl. Session B (lum1319-history-session-b.json) starts a *new process* over the same home and recalls them.  |  [1] 1. idle 76x26, empty composer, nothing in the history file yet  (cursor 76,25, frame 830257f8bf8e, px d346be71b344, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76fbaeae82090      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1319 session A (write): three real prompts submitted in a real 76x26 PTY, driving the debug binary. Each submit appends one JSON row to $HOME/.pi/agent/history.jsonl. Session B (lum1319-history-session-b.json) starts a *new process* over the same home and recalls them.  |  [2] 2. Enter submits `first prompt` — the transcript echoes it  (cursor 25,3, frame 498effc4f4a4, px 50f30df8c73d, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> first prompt
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76fbaeae82090      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> first prompt'
+
+===== LUM-1319 session A (write): three real prompts submitted in a real 76x26 PTY, driving the debug binary. Each submit appends one JSON row to $HOME/.pi/agent/history.jsonl. Session B (lum1319-history-session-b.json) starts a *new process* over the same home and recalls them.  |  [3] 3. `second prompt` is submitted too  (cursor 25,5, frame 9b90963fce7d, px 84ea2ce4e68c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> first prompt
+  faux-model (faux) hello
+> second prompt
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76fbaeae82090      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> second prompt'
+
+===== LUM-1319 session A (write): three real prompts submitted in a real 76x26 PTY, driving the debug binary. Each submit appends one JSON row to $HOME/.pi/agent/history.jsonl. Session B (lum1319-history-session-b.json) starts a *new process* over the same home and recalls them.  |  [4] 4. `third prompt` is the newest entry when the process exits  (cursor 25,7, frame feae9b88ec5a, px 98aee5064c9f, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> first prompt
+  faux-model (faux) hello
+> second prompt
+  faux-model (faux) hello
+> third prompt
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76fbaeae82090      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> third prompt'

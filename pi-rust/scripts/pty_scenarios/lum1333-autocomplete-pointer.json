@@ -1,0 +1,138 @@
+{
+  "cols": 100,
+  "rows": 20,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "LUM-1333 — pointer routing for the composer's autocomplete dropdown, driven through a real PTY into the real binary (100x20).",
+    "Geometry (0-based rows): the dropdown owns rows 12..17 — five candidate rows (12 help, 13 clear, 14 new, 15 copy, 16 name) plus the '(k/21)' window indicator on row 17 — the composer is row 18 and the status bar row 19. `DEFAULT_AUTOCOMPLETE_MAX_VISIBLE` is 5 and the real binary offers 21 commands, so the window never moves and the indicator is a stable index witness.",
+    "The '(k/21)' row is the machine-readable witness of *which* candidate is highlighted and the '❯' marker the visual one: a press on row 14 moves both to the third candidate, a wheel notch on row 15 to the fourth.",
+    "The matching pre-fix run is lum1333-autocomplete-pointer-baseline.json — the same gestures with 'the pointer did nothing to the list' as the expectation.",
+    "The wheel steps the *selection* by one per notch, clamped at both ends (upstream `SelectList.handleMouse`: `delta = wheelDelta < 0 ? -1 : 1`), which is why panel 5 moves the highlight to the second candidate and not to row 15 under the pointer."
+  ],
+  "caption": "LUM-1333 — composer dropdown pointer routing (upstream Editor.handleMouse's dropdown branch + SelectList.handleMouse), real binary + real PTY + pyte. Panel 1: `/` opens the command menu above the composer. Panel 2: a left press on the third row moves the highlight there — the '❯' marker and the '(3/21)' indicator both move. Panel 3: the release on that same cell accepts the candidate: the composer line holds `/new ` and the dropdown is gone. Panel 4: the draft is cleared and `/` reopens the menu. Panel 5: a wheel notch inside the list moves the highlight one candidate down (upstream SelectList.handleMouse's wheel branch steps the selection by one, it does not jump to the row under the pointer) instead of scrolling the log. Panel 6: the notch back up moves it back. Panel 7: a click on a transcript row above the list still runs the chat-log selection path and leaves the list and the draft alone. Nothing mocked.",
+  "panels": [
+    {
+      "label": "1. type `/`: the command dropdown is painted above the composer",
+      "send": "/",
+      "wait": 1.2,
+      "expect": [
+        "❯ help",
+        "(1/21)",
+        {
+          "regex": "^> /▍\\s*$",
+          "why": "the draft is just the trigger"
+        }
+      ]
+    },
+    {
+      "label": "2. press row 14 (`new`): the highlight moves to that candidate",
+      "send": "<MPress:6,14>",
+      "wait": 1.0,
+      "expect": [
+        "❯ new",
+        {
+          "text": "(3/21)",
+          "why": "the third candidate is highlighted"
+        },
+        {
+          "text": "(1/21)",
+          "count": 0,
+          "why": "the highlight left the first candidate"
+        },
+        {
+          "regex": "^> /▍\\s*$",
+          "why": "a press is not an edit"
+        }
+      ]
+    },
+    {
+      "label": "3. release on that same cell: the candidate is accepted",
+      "send": "<MRelease:6,14>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "regex": "^> /new ▍\\s*$",
+          "why": "the composer holds the completed command"
+        },
+        {
+          "text": "❯",
+          "count": 0,
+          "why": "the dropdown is gone"
+        },
+        {
+          "text": "(3/21)",
+          "count": 0,
+          "why": "and with it the window indicator"
+        }
+      ]
+    },
+    {
+      "label": "4. Ctrl+C clears the draft and `/` reopens the menu",
+      "send": "<C-c>/",
+      "wait": 1.2,
+      "expect": [
+        "❯ help",
+        {
+          "text": "(1/21)",
+          "why": "the menu opens on its best match again"
+        }
+      ]
+    },
+    {
+      "label": "5. one wheel notch down inside the list: the highlight steps down one candidate",
+      "send": "<WheelDown:6,15>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "text": "❯ clear",
+          "why": "one notch down steps the highlight onto the second candidate"
+        },
+        {
+          "text": "(2/21)",
+          "why": "the indicator moved with it"
+        },
+        {
+          "regex": "^> /▍\\s*$",
+          "why": "the draft is untouched by a wheel notch"
+        }
+      ]
+    },
+    {
+      "label": "6. one notch back up inside the list",
+      "send": "<WheelUp:6,15>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "text": "❯ help",
+          "why": "up steps the highlight back"
+        },
+        {
+          "text": "(1/21)",
+          "why": "and the indicator follows"
+        }
+      ]
+    },
+    {
+      "label": "7. a click on a transcript row above the list is not the dropdown's",
+      "send": "<Click:6,3>",
+      "wait": 1.0,
+      "expect": [
+        {
+          "text": "❯ help",
+          "why": "the dropdown keeps its highlight: the click fell through to the transcript"
+        },
+        {
+          "text": "(1/21)"
+        },
+        {
+          "regex": "^> /▍\\s*$",
+          "why": "and nothing was completed"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-c><C-d>"
+}

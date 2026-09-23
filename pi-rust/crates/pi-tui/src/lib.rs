@@ -67,6 +67,7 @@ pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMat
 pub use highlight::{
     get_language_from_path, highlight_code, supports_language, tokenize, Token, TokenKind,
 };
+pub use history_store::{HistoryStore, DEFAULT_HISTORY_FILE_LIMIT};
 pub use hyperlink::{close_hyperlink, hyperlink, open_hyperlink, visible_width};
 pub use image::{truncate_to_width, Image, ImageOptions, ImageTheme};
 pub use input::{

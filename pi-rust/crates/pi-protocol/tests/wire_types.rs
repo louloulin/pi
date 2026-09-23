@@ -71,16 +71,26 @@ fn assistant_message_event_round_trip() {
 #[test]
 fn extension_event_tagged() {
     let ev = ExtensionEvent::ToolResult {
-        result: ToolResult {
-            tool_call_id: "1".into(),
-            content: Box::new(Content::Text(TextContent { text: "ok".into() })),
-            is_error: false,
-            details: None,
-            added_tool_names: None,
-        },
+        tool_call_id: "1".into(),
+        tool_name: "read".into(),
+        input: serde_json::json!({ "path": "src/main.rs" }),
+        content: vec![Content::Text(TextContent { text: "ok".into() })],
+        is_error: false,
+        details: None,
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(v["type"], "tool_result");
+    // Upstream field names, not Rust ones (LUM-1330).
+    assert_eq!(v["toolCallId"], "1");
+    assert_eq!(v["toolName"], "read");
+    assert_eq!(v["isError"], false);
+    assert_eq!(v["input"]["path"], "src/main.rs");
+    assert!(
+        v.get("tool_call_id").is_none(),
+        "no Rust field name on the wire"
+    );
+    let back: ExtensionEvent = serde_json::from_value(v).unwrap();
+    assert_eq!(back, ev);
 }
 
 #[test]

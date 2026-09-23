@@ -1,0 +1,228 @@
+# lum1319-history-advertise.png — chars, 120x34 cells
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [1] 1. idle 120x34: the startup header advertises the new reverse-search chords  (cursor 120,33, frame 687ed9c09056, px 5585dbed3123, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Ctrl+R/Ctrl+S to search history
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76fc1e089fb4a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Ctrl+R/Ctrl+S to search history'
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [2] 2. Alt+H folds the header, so the transcript gets the rows /hotkeys needs  (cursor 120,33, frame a63345ae6a6b, px f428c1b77f2a, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d76fc1e089fb4a                   in 0 out 0 ?/8.2k  Startup header: collapsed (Alt+H to show)
+  assert PASS   expect       '> type a prompt'
+  assert PASS   probe        'to search history' (x0)  — the hint rows are folded away
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [3] 3. the cross-process history is still recallable before the cleanup  (cursor 120,33, frame 92c831154a23, px 483b3b91a406, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> third prompt▍
+Faux test model  session-18d76fc1e089fb4a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> third prompt'
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [4] 4. /hotkeys prints the keyboard legend (its tail, since the block is taller than the viewport)  (cursor 36,32, frame 7e1918a31ad7, px f5ebc1fbba69, alive=True) =====
+ ⋯ 46 lines above · Home  when the prompt is empty                                                                     │
+·   Ctrl+Z           suspend to the background                                                                         │
+·   Shift+Tab        cycle the thinking level                                                                          │
+·   Ctrl+P           cycle to the next model                                                                           │
+·   Shift+Ctrl+P     cycle to the previous model                                                                       │
+·   Ctrl+X           copy the last assistant message                                                                   │
+·   Alt+Enter        queue a follow-up message                                                                         │
+·   Alt+Up           restore queued messages to the editor                                                             │
+·   Ctrl+T           show or hide thinking blocks                                                                      │
+·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                │
+·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          │
+·   Ctrl+L           open the model selector                                                                           │
+·   Ctrl+G           edit the prompt in $EDITOR                                                                        │
+·   Alt+N            start a new session                                                                               │
+·   Alt+T            open the session tree                                                                             │
+·   Alt+F            fork a session from a message                                                                     │
+·   Alt+R            resume a session                                                                                  │
+·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             │
+·                                                                                                                      │
+· selectors and completion:                                                                                            ┃
+·   Up               move the selection up                                                                             ┃
+·   Down             move the selection down                                                                           ┃
+·   PgUp             selection page up                                                                                 ┃
+·   PgDn             selection page down                                                                               ┃
+·   Enter            confirm the selection                                                                             ┃
+·   Esc / Ctrl+C     close the selection list                                                                          ┃
+·   Tab              path completion / accept autocomplete                                                             ┃
+·                                                                                                                      ┃
+· commands:                                                                                                            ┃
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        ┃
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d76fc1e089fb4a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'commands:'
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [5] 5. Home jumps to the top of the log, where both reverse-search rows are  (cursor 120,31, frame 7c752e231900, px 35cee5279d73, alive=True) =====
+· keyboard shortcuts:                                                                                                  ┃
+·                                                                                                                      ┃
+· navigation:                                                                                                          ┃
+·   Up               previous line / prompt history                                                                    ┃
+·   Down             next line / prompt history                                                                        ┃
+·   Left / Ctrl+B    move cursor left                                                                                  ┃
+·   Right / Ctrl+F   move cursor right                                                                                 ┃
+·   Alt+Left / Ctrl+Left / Alt+B move by word (left)                                                                   ┃
+·   Alt+Right / Ctrl+Right / Alt+F move by word (right)                                                                ┃
+·   Home / Ctrl+Home / Ctrl+A start of line                                                                            ┃
+·   End / Ctrl+End / Ctrl+E end of line                                                                                ┃
+·   Ctrl+]           jump forward to character                                                                         ┃
+·   Ctrl+Alt+]       jump backward to character                                                                        ┃
+·   PgUp / Ctrl+PgUp prompt page up                                                                                    │
+·   PgDn / Ctrl+PgDn prompt page down                                                                                  │
+·   Ctrl+R           search the prompt history (Ctrl+R again: older match)                                             │
+·   Ctrl+S           next (newer) prompt history search match                                                          │
+·                                                                                                                      │
+· editing:                                                                                                             │
+·   Enter            send message                                                                                      │
+·   Shift+Enter / Ctrl+J insert a newline                                                                              │
+·   backspace        delete character backwards                                                                        │
+·   delete / Ctrl+D  delete character forwards                                                                         │
+·   Ctrl+W / Alt+backspace delete word backwards                                                                       │
+·   Alt+D / Alt+delete delete word forwards                                                                            │
+·   Ctrl+U           delete to start of line                                                                           │
+·   Ctrl+K           delete to end of line                                                                             │
+·   Ctrl+Y           paste the most-recently-deleted text                                                              │
+·   Alt+Y            cycle through pasted deleted text                                                                 │
+·   Ctrl+-           undo                                                                                              │
+·                                                                                                                      │
+· chat log:                                 ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d76fc1e089fb4a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'navigation:'
+  assert PASS   expect       'Ctrl+R'
+  assert PASS   expect       'search the prompt history'
+  assert PASS   expect       'Ctrl+S'
+  assert PASS   expect       'prompt history search match'
+
+===== LUM-1319 advertising: the startup header advertises `Ctrl+R/Ctrl+S to search history` on one row, and `/hotkeys` lists both reverse-search chords. The explicit cleanup entry point is the CLI parameter `pi --clear-history`, which deletes $HOME/.pi/agent/history.jsonl (verified on disk right after this run). Real binary + real PTY + pyte VT emulator.  |  [7] 6. the composer is back and still holds the cross-process recall  (cursor 36,32, frame 7af9eb5198f9, px d15e536656b9, alive=True) =====
+ ⋯ 46 lines above · Home  when the prompt is empty                                                                     │
+·   Ctrl+Z           suspend to the background                                                                         │
+·   Shift+Tab        cycle the thinking level                                                                          │
+·   Ctrl+P           cycle to the next model                                                                           │
+·   Shift+Ctrl+P     cycle to the previous model                                                                       │
+·   Ctrl+X           copy the last assistant message                                                                   │
+·   Alt+Enter        queue a follow-up message                                                                         │
+·   Alt+Up           restore queued messages to the editor                                                             │
+·   Ctrl+T           show or hide thinking blocks                                                                      │
+·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                │
+·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          │
+·   Ctrl+L           open the model selector                                                                           │
+·   Ctrl+G           edit the prompt in $EDITOR                                                                        │
+·   Alt+N            start a new session                                                                               │
+·   Alt+T            open the session tree                                                                             │
+·   Alt+F            fork a session from a message                                                                     │
+·   Alt+R            resume a session                                                                                  │
+·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             │
+·                                                                                                                      │
+· selectors and completion:                                                                                            ┃
+·   Up               move the selection up                                                                             ┃
+·   Down             move the selection down                                                                           ┃
+·   PgUp             selection page up                                                                                 ┃
+·   PgDn             selection page down                                                                               ┃
+·   Enter            confirm the selection                                                                             ┃
+·   Esc / Ctrl+C     close the selection list                                                                          ┃
+·   Tab              path completion / accept autocomplete                                                             ┃
+·                                                                                                                      ┃
+· commands:                                                                                                            ┃
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        ┃
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> third prompt▍
+Faux test model  session-18d76fc1e089fb4a                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> third prompt'

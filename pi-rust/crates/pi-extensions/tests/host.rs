@@ -1568,6 +1568,7 @@ fn discovered_resources_parses_every_handler_result() {
             json!({ "skillPaths": ["/c/SKILL.md"], "promptPaths": ["/p/note.md"] }),
         ],
         errored: None,
+        event: None,
     };
 
     let discovered = pi_extensions::DiscoveredResources::from_dispatch(&outcome);
@@ -1602,6 +1603,7 @@ fn discovered_resources_dedups_and_tolerates_garbage() {
             }),
         ],
         errored: None,
+        event: None,
     };
 
     let discovered = pi_extensions::DiscoveredResources::from_dispatch(&outcome);

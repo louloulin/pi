@@ -45,6 +45,16 @@ pub struct Cli {
     #[arg(long)]
     pub rpc: bool,
 
+    /// Delete the cross-session prompt history (`~/.pi/agent/history.jsonl`)
+    /// and exit.
+    ///
+    /// The explicit cleanup entry point for the composer history: `/clear`
+    /// leaves the file alone (upstream parity) and the TUI never deletes it as
+    /// a side effect of a keystroke, so clearing it is a deliberate command.
+    /// Prints the path it cleared.
+    #[arg(long)]
+    pub clear_history: bool,
+
     /// Default model — accepts `<provider>/<model-id>` (e.g.
     /// `faux/faux-model`). Mirrors `pi --model` in the TS CLI.
     #[arg(long, value_name = "PROVIDER/MODEL")]

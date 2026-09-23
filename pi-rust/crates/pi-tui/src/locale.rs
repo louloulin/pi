@@ -151,6 +151,14 @@ pub const STARTUP_HINTS: &[HeaderHint] = &[
         zh: "删除到行尾",
     },
     HeaderHint {
+        // One row for both reverse-search chords, like the model-cycle row:
+        // the header's hint list is a fixed-height block above the transcript,
+        // and a second row would cost the transcript one (LUM-1319 §3.4).
+        key: HeaderKey::ChordPair("tui.editor.historySearch", "tui.editor.historySearchNext"),
+        en: "to search history",
+        zh: "反查历史",
+    },
+    HeaderHint {
         key: HeaderKey::Chord("app.thinking.cycle"),
         en: "to cycle thinking level",
         zh: "切换思考等级",
