@@ -861,7 +861,7 @@ $ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
 合并后 8 条 `--lib` 失败名单与基线逐字相同（`commands::export::…`、`export::session_file::…`、
 `extensions::js_loader::…`、`paths::absolute_paths_stay_absolute`、`resource_loader::…`、
 `tools::mod_ignore::…`、`trust::…` ×2）——即合并与新一轮改动都没有新增产品缺陷。
-### 0.21 LUM-1467 复测：footer stats 行对齐上游字段（`↑/↓`、`CH%`、`$cost`、`(auto)`、`(provider)` 前缀）；加权仍 **86.9%**
+### 0.23 LUM-1467 复测：footer stats 行对齐上游字段（`↑/↓`、`CH%`、`$cost`、`(auto)`、`(provider)` 前缀）；加权仍 **86.9%**
 
 **量的是什么**：`pi-rust` 的第二行 footer（stats 行）与上游 `footer.ts:130-200` 的**字段差**。
 基线（LUM-1466 交付后）缺四类：箭头形状（`in/out` vs `↑/↓`）、`CH%`、`$cost (+sub)`、
@@ -1119,7 +1119,7 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 3. 补 CLI 的 `--theme/--thinking/--tools/--provider/--offline` 与 4 个高价值 slash 命令。
 4. 补测试：把 Rust 用例数从 2,232 往 5,309 靠（当前 42%，是最大的"隐藏债务"）。
 
-### 0.23 LUM-1469 复测：排队输入的可见面（位置 + 形状 + 取回提示）+ 两条 `in_review` 交付并入；加权 **86.9% → 87.1%**
+### 0.24 LUM-1469 复测：排队输入的可见面（位置 + 形状 + 取回提示）+ 两条 `in_review` 交付并入；加权 **86.9% → 87.1%**
 
 **量的是什么**：排队输入（`App::submit` 忙碌时走 `MessageView::push_pending`）在屏幕上的**位置、形状、
 以及「怎么处置它」的提示**。基线取证（限定路径，不重蹈 LUM-1460 的整树假阳性）：
@@ -1187,7 +1187,7 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
 内容是什么」，**不证明按键/字节时序**；时序与几何由 17 条 App/驱动级用例覆盖。
 本轮审计全文见 `docs/LUM1469_PENDING_QUEUE.md`（含 §6.1 两条顺带发现的既有缺陷与 §8 五条有意偏差）。
 
-### 0.22 LUM-1481 复测：`ctx.ui.setStatus` 落地为 footer 第三行（区域类显示通路 5/5）；加权 **87.2%**（87.155%）
+### 0.25 LUM-1481 复测：`ctx.ui.setStatus` 落地为 footer 第三行（区域类显示通路 5/5）；加权 **87.2%**（87.155%）
 
 **量的是什么**：上游 `ctx.ui.setStatus(key, text)` 的显示通路。上游把它渲染成 footer 的
 **第三行**（`footer.ts:243-251`：按 key 排序、`sanitizeStatusText`、空格连接、`truncateToWidth`），
