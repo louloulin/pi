@@ -1,0 +1,18 @@
+FRAME DUMP cols=44 rows=16
+|> what is the extension status row?         |
+|> Ready.                                    |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|> type a prompt — /help for commands        |
+|/srv/repo (main)                            |
+|?/200k  lum1481-status  claude-sonnet-4…    |
+|a status that is far too wide for a forty-f…|
+END FRAME DUMP

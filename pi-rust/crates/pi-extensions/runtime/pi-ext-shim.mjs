@@ -760,6 +760,11 @@ function makeUiContext(hasUI) {
     }
   }
   const warnedKinds = {};
+  // `ctx.ui.setStatus(key, text)` state: the shim keeps the map so a custom
+  // footer installed through `setFooter` sees the same statuses upstream's
+  // `footerData.getExtensionStatuses()` returns, and mirrors every mutation to
+  // the host over the region bridge.
+  const extensionStatuses = new Map();
   function reportUnsupported(kind) {
     if (warnedKinds[kind]) return;
     warnedKinds[kind] = true;
@@ -836,6 +841,24 @@ function makeUiContext(hasUI) {
     async editor(title) {
       reportDenied("editor", title);
       return null;
+    },
+
+    /**
+     * Set (or clear, with `undefined`) a persistent status line owned by this
+     * extension. Upstream draws every status as one extra footer row
+     * (`packages/coding-agent/src/modes/interactive/components/footer.ts:243-251`),
+     * sorted by key; the host keeps the canonical map and the TUI renders it.
+     */
+    setStatus(key, text) {
+      const name = String(key);
+      if (text === undefined || text === null) {
+        extensionStatuses.delete(name);
+        regionCall("setStatus", { key: name, text: null });
+        return;
+      }
+      const value = String(text);
+      extensionStatuses.set(name, value);
+      regionCall("setStatus", { key: name, text: value });
     },
 
     // --- Region / overlay surface ---------------------------------------
@@ -1018,7 +1041,8 @@ function makeUiContext(hasUI) {
   });
   const footerDataStub = Object.freeze({
     getGitBranch: () => undefined,
-    getExtensionStatuses: () => new Map(),
+    // A copy, like the `ReadonlyMap` upstream hands a custom footer.
+    getExtensionStatuses: () => new Map(extensionStatuses),
   });
 
   /** Call the `host_ui_region` import; never throws. */
@@ -1093,11 +1117,10 @@ function makeUiContext(hasUI) {
     return true;
   }
 
-  // Status / title / theme channels still have no host bridge: accept the
-  // call so extensions that configure them at load time still load, warn
-  // once, and keep the value inert.
+  // Title / theme channels still have no host bridge: accept the call so
+  // extensions that configure them at load time still load, warn once, and
+  // keep the value inert.
   for (const kind of [
-    "setStatus",
     "setTitle",
     "setEditorText",
     "setHiddenThinkingLabel",

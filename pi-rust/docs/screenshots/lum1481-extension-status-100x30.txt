@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|> what is the extension status row?                                                                 |
+|> Ready.                                                                                            |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> type a prompt — /help for commands                                                                |
+|/srv/repo (main)                                                                                    |
+|?/200k  ? for help  lum1481-status                                                   claude-sonnet-4|
+|thinking compiling                                                                                  |
+END FRAME DUMP

@@ -1181,6 +1181,10 @@ pub trait UiRegionHost: Send + Sync + 'static {
     async fn set_footer(&self, component: Option<JsComponent>);
     /// Install or clear the editor-region component.
     async fn set_editor_component(&self, component: Option<JsComponent>);
+    /// Install or clear one extension status line — `ctx.ui.setStatus(key,
+    /// text)`. `None` deletes the key (upstream's `undefined` clear,
+    /// `footer-data-provider.ts:140-147`).
+    async fn set_status(&self, key: String, text: Option<String>);
     /// Open a `ctx.ui.custom` session. `session` is the token the shim passes
     /// back to [`set_custom_visible`](Self::set_custom_visible) and
     /// [`close_custom`](Self::close_custom).
@@ -1206,6 +1210,8 @@ enum RegionCommand {
     Footer(Option<JsComponent>),
     /// Install / clear the editor-region component.
     Editor(Option<JsComponent>),
+    /// Install / clear one extension status text.
+    Status { key: String, text: Option<String> },
     /// Open a custom session.
     OpenCustom {
         session: u64,
@@ -1242,6 +1248,7 @@ async fn region_worker(
             RegionCommand::Header(component) => host.set_header(component).await,
             RegionCommand::Footer(component) => host.set_footer(component).await,
             RegionCommand::Editor(component) => host.set_editor_component(component).await,
+            RegionCommand::Status { key, text } => host.set_status(key, text).await,
             RegionCommand::OpenCustom {
                 session,
                 component,
@@ -1316,6 +1323,24 @@ fn handle_region_call(
             send(RegionCommand::Editor(component)),
             serde_json::Value::Null,
         ),
+        "setStatus" => {
+            let key = payload
+                .get("key")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // The shim sends `null` for `setStatus(key, undefined)`; an absent
+            // field means the same thing, which keeps both spellings on one
+            // clear path.
+            let text = match payload.get("text") {
+                Some(serde_json::Value::String(text)) => Some(text.clone()),
+                _ => None,
+            };
+            region_envelope(
+                send(RegionCommand::Status { key, text }),
+                serde_json::Value::Null,
+            )
+        }
         "customOpen" => {
             let Some(component) = component else {
                 return region_envelope(

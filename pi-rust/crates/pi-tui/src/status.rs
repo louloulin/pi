@@ -152,6 +152,15 @@ pub struct StatusData {
     /// screen is distinguishable from a slow model at a glance. `None` hides
     /// the segment entirely (no placeholder, no stray space).
     pub busy: Option<BusyIndicator>,
+    /// Status texts extensions installed with
+    /// `ctx.ui.setStatus(key, text)`, already sanitized by the caller.
+    ///
+    /// Upstream draws them as a **third** footer row — one line, sorted by
+    /// key, joined with a single space (`footer.ts:243-251`) — and the host
+    /// keeps the canonical map (`footer-data-provider.ts:140-147`); the
+    /// driver mirrors it here. Empty by default, which keeps the pre-LUM-1481
+    /// one/two-row frames byte-identical.
+    pub extension_statuses: Vec<(String, String)>,
 }
 
 impl StatusData {
@@ -179,7 +188,43 @@ impl StatusData {
             hint: None,
             hint_pinned: false,
             busy: None,
+            extension_statuses: Vec::new(),
         }
+    }
+
+    /// Install or clear one extension status — upstream
+    /// `setExtensionStatus(key, text)` (`footer-data-provider.ts:140-147`):
+    /// `Some(text)` sets the key, `None` deletes it.
+    ///
+    /// The vector is kept sorted by key so the stored order is already the
+    /// rendered order; [`StatusBar::render_lines`] re-sorts anyway, so a test
+    /// that builds [`StatusData::extension_statuses`] by hand gets upstream's
+    /// order too.
+    pub fn set_extension_status(&mut self, key: &str, text: Option<&str>) {
+        self.extension_statuses
+            .retain(|(existing, _)| existing != key);
+        if let Some(text) = text {
+            self.extension_statuses
+                .push((key.to_string(), text.to_string()));
+            self.extension_statuses.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    }
+
+    /// Builder form of [`StatusData::set_extension_status`].
+    pub fn with_extension_status(
+        mut self,
+        key: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        let key = key.into();
+        let text = text.into();
+        self.set_extension_status(&key, Some(&text));
+        self
+    }
+
+    /// Drop every extension status (a fresh session / host teardown).
+    pub fn clear_extension_statuses(&mut self) {
+        self.extension_statuses.clear();
     }
 
     /// Start (or refresh) the busy segment.
@@ -332,26 +377,39 @@ impl StatusBar {
 
     /// How many rows [`StatusBar::render_lines`] draws for this snapshot.
     ///
-    /// Two when the host supplied a working directory (the location row plus
-    /// the stats row, upstream's `[pwdLine, statsLine]`), one otherwise. The
-    /// App budgets exactly this many rows for the status region, so the
-    /// transcript gives up a row only when there is a row to draw.
+    /// One stats row, plus a location row when the host supplied a working
+    /// directory (upstream's `[pwdLine, statsLine]`), plus a third row when
+    /// extensions installed statuses (`footer.ts:243-251`). The App budgets
+    /// exactly this many rows for the status region, so the transcript gives
+    /// up a row only when there is a row to draw.
     pub fn line_count(&self, data: &StatusData) -> u16 {
+        let mut rows = 1;
         if data.location_line().is_some() {
-            2
-        } else {
-            1
+            rows += 1;
         }
+        if !data.extension_statuses.is_empty() {
+            rows += 1;
+        }
+        rows
     }
 
     /// Every footer row as themed spans: the location row (when the host
-    /// supplied a cwd) above [`StatusBar::render_styled_line`]'s stats row.
+    /// supplied a cwd) above [`StatusBar::render_styled_line`]'s stats row,
+    /// and the extension-status row below it when any extension installed
+    /// one.
     pub fn render_lines(&self, data: &StatusData, width: u16) -> Vec<StyledLine> {
-        let mut lines: Vec<StyledLine> = Vec::with_capacity(2);
+        let mut rows = if data.location_line().is_some() { 2 } else { 1 };
+        if !data.extension_statuses.is_empty() {
+            rows += 1;
+        }
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(rows);
         if let Some(location) = data.location_line() {
             lines.push(location_span(&location, width));
         }
         lines.push(self.render_styled_line(data, width));
+        if !data.extension_statuses.is_empty() {
+            lines.push(extension_status_line(data, width));
+        }
         lines
     }
 
@@ -852,6 +910,60 @@ fn session_segment(data: &StatusData, location_present: bool) -> String {
     }
 }
 
+/// The footer's third row: every extension status, sorted by key and joined
+/// with a single space, truncated to `width` columns with the crate's `…`
+/// marker (`footer.ts:243-251`).
+///
+/// Upstream's marker for this row is the three-dot string `"..."`; the port
+/// uses [`ELLIPSIS`] instead, the same deliberate deviation [`location_span`]
+/// makes for the pwd row, because every truncated chrome row in this crate is
+/// marked the same way (LUM-1412).
+fn extension_status_line(data: &StatusData, width: u16) -> StyledLine {
+    let width = width as usize;
+    if width == 0 {
+        return StyledLine::new();
+    }
+    // Upstream sorts by `localeCompare`; the port sorts by byte order, which
+    // is the same order for the ASCII keys extensions use as names.
+    let mut entries: Vec<&(String, String)> = data.extension_statuses.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let text = entries
+        .iter()
+        .map(|(_, text)| sanitize_status_text(text))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if columns(&text) <= width {
+        return vec![StyledSpan::new(text, SpanStyle::PLAIN)];
+    }
+    let (prefix, _) = prefix_columns(&text, width.saturating_sub(1));
+    vec![
+        StyledSpan::new(prefix.to_string(), SpanStyle::PLAIN),
+        StyledSpan::new(ELLIPSIS, SpanStyle::fg(ThemeColor::Dim)),
+    ]
+}
+
+/// Upstream `sanitizeStatusText` (`footer.ts:13-20`): newlines, tabs and
+/// carriage returns become spaces, runs of spaces collapse to one, and the
+/// edges are trimmed — so an extension that embeds a multi-line string can
+/// never break the footer's one-row-per-status invariant.
+fn sanitize_status_text(text: &str) -> String {
+    let flattened: String = text
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '\r' | '\n' | '\t') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    flattened
+        .split(' ')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The footer's location row as one dim span, truncated to `width` columns
 /// with the crate's `…` marker when the path does not fit.
 fn location_span(location: &str, width: u16) -> StyledLine {
@@ -1185,6 +1297,87 @@ mod tests {
         assert_eq!(lines[0].chars().count(), 20, "{}", lines[0]);
         assert!(lines[0].ends_with('…'), "{}", lines[0]);
         assert!(lines[1].ends_with("gpt-4o"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn an_extension_status_adds_a_third_row_sorted_by_key() {
+        let bar = StatusBar::new();
+        // Installed out of order on purpose: upstream sorts at render
+        // (`footer.ts:243-247`), so insertion order must not leak into the row.
+        let data = StatusData::new("gpt-4o", "abc")
+            .with_extension_status("zz", "last")
+            .with_extension_status("aa", "first")
+            .with_extension_status("mm", "middle");
+        assert_eq!(bar.line_count(&data), 2);
+        let lines = bar
+            .render(&data, 60)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1].trim_end(), "first middle last");
+    }
+
+    #[test]
+    fn the_extension_row_sits_below_the_stats_row_and_above_nothing() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "abc")
+            .with_cwd("/srv/repo")
+            .with_extension_status("build", "compiling");
+        assert_eq!(bar.line_count(&data), 3);
+        let lines = bar
+            .render(&data, 60)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "/srv/repo");
+        assert!(lines[1].ends_with("gpt-4o"), "{}", lines[1]);
+        assert_eq!(lines[2].trim_end(), "compiling");
+    }
+
+    #[test]
+    fn clearing_the_last_status_removes_the_row() {
+        let bar = StatusBar::new();
+        let mut data = StatusData::new("gpt-4o", "abc")
+            .with_extension_status("aa", "one")
+            .with_extension_status("bb", "two");
+        assert_eq!(bar.line_count(&data), 2);
+        data.set_extension_status("aa", None);
+        assert_eq!(bar.line_count(&data), 2);
+        assert_eq!(bar.render(&data, 60).lines().nth(1), Some("two"));
+        data.set_extension_status("bb", None);
+        // The row is gone, not blank: the footer is back to one row.
+        assert_eq!(bar.line_count(&data), 1);
+        assert_eq!(bar.render(&data, 60).lines().count(), 1);
+        assert!(data.extension_statuses.is_empty());
+    }
+
+    #[test]
+    fn a_status_text_is_sanitised_to_one_line() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "abc")
+            .with_extension_status("aa", "line one\n\tline   two \r");
+        let rendered = bar.render(&data, 60);
+        let row = rendered.lines().nth(1).expect("the status row");
+        assert_eq!(row.trim_end(), "line one line two");
+        // A status text can never smuggle a second row into the footer.
+        assert_eq!(bar.line_count(&data), 2);
+    }
+
+    #[test]
+    fn a_long_status_line_is_marked_when_it_is_cut() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "s")
+            .with_extension_status("aa", "a-status-text-that-is-far-too-long-for-the-terminal");
+        let row = bar
+            .render(&data, 20)
+            .lines()
+            .nth(1)
+            .map(str::to_string)
+            .expect("the status row");
+        assert_eq!(columns(&row), 20, "{row}");
+        assert!(row.ends_with('…'), "{row}");
     }
 
     #[test]

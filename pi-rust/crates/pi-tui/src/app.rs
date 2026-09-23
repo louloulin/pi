@@ -196,12 +196,17 @@
 //! | `getEditorText()` | [`App::editor_text`] |
 //! | `custom(factory, { overlay, overlayOptions, onHandle })` | [`App::open_custom`] → [`crate::component::CustomHandle`], [`App::close_custom`] |
 //! | `setEditorComponent(factory)` | [`App::set_editor_component`] / [`App::clear_editor_component`] |
+//! | `setStatus(key, text)` | [`App::set_extension_status`] (footer's third row, LUM-1481) |
 //!
-//! `setStatus` / `setWorkingMessage` / `setTitle` and the remaining
-//! `ctx.ui` methods are *not* region-shaped and stay with the coding-agent
-//! layer; they are out of scope here, as is the JS factory → Rust component
-//! bridge (`pi-extensions` still answers `ERR_PI_UI_UNSUPPORTED` for
-//! `ctx.ui.custom` and the setters).
+//! `setWorkingMessage` / `setTitle` and the remaining `ctx.ui` methods are
+//! *not* region-shaped and stay with the coding-agent layer; they are out of
+//! scope here. `setStatus` is region-shaped in the one sense that matters —
+//! it is host chrome drawn from data the host holds — so the App owns the map
+//! and the footer renders it; the JS-side plumbing lives in
+//! `pi-extensions` / `pi-coding-agent` and no longer answers
+//! `ERR_PI_UI_UNSUPPORTED` for it. The JS factory → Rust component bridge is
+//! still incomplete (`ctx.ui.custom` reaches the App, the setters above do
+//! not).
 //!
 //! **Render order** was rearranged by this surface to match upstream's
 //! container stack (`header` → chat → widget-above → editor → widget-below →
@@ -2123,6 +2128,26 @@ impl App {
     /// (`footer.ts:137-143`).
     pub fn set_status_pricing(&mut self, pricing: Option<crate::status::StatusPricing>) {
         self.status_data.set_pricing(pricing);
+    }
+
+    /// Install or clear one extension status
+    /// (`ctx.ui.setStatus(key, text)`), drawn by the footer as a third row.
+    ///
+    /// `None` deletes the key, matching upstream's `undefined` clear
+    /// (`footer-data-provider.ts:140-147`). Every install/clear re-budgets the
+    /// status region through [`StatusBar::line_count`], so the transcript
+    /// gives up exactly one row while a status exists and gets it back when
+    /// the last extension clears its key.
+    ///
+    /// [`StatusBar::line_count`]: crate::status::StatusBar::line_count
+    pub fn set_extension_status(&mut self, key: &str, text: Option<&str>) {
+        self.status_data.set_extension_status(key, text);
+    }
+
+    /// Drop every extension status (`session_start` on a fresh session, or
+    /// host teardown).
+    pub fn clear_extension_statuses(&mut self) {
+        self.status_data.clear_extension_statuses();
     }
 
     /// The last transient status message pushed by [`App::flash_status`], if

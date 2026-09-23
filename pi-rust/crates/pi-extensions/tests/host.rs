@@ -777,6 +777,8 @@ struct RecordingRegionHost {
     headers: std::sync::Mutex<Vec<JsComponent>>,
     /// Every `setWidget(key, …)` payload that carried a component.
     widgets: std::sync::Mutex<Vec<(String, JsComponent)>>,
+    /// Every footer component handed over, in order.
+    footers: std::sync::Mutex<Vec<JsComponent>>,
 }
 
 impl RecordingRegionHost {
@@ -805,6 +807,15 @@ impl RecordingRegionHost {
             .find(|(candidate, _)| candidate == key)
             .map(|(_, component)| component.clone())
             .unwrap_or_else(|| panic!("widget {key}"))
+    }
+
+    fn footer(&self) -> JsComponent {
+        self.footers
+            .lock()
+            .expect("region lock")
+            .last()
+            .expect("a footer component")
+            .clone()
     }
 
     /// `set` / `clear`, the two states a region slot can be in.
@@ -846,10 +857,22 @@ impl UiRegionHost for RecordingRegionHost {
 
     async fn set_footer(&self, component: Option<JsComponent>) {
         self.push(format!("footer:{}", Self::state(&component)));
+        if let Some(component) = component {
+            self.footers.lock().expect("region lock").push(component);
+        }
     }
 
     async fn set_editor_component(&self, component: Option<JsComponent>) {
         self.push(format!("editor:{}", Self::state(&component)));
+    }
+
+    async fn set_status(&self, key: String, text: Option<String>) {
+        // `set` / `clear` plus the text, so a test can assert both the key and
+        // what an extension passed for it.
+        match text {
+            Some(text) => self.push(format!("status:{key}:set:{text}")),
+            None => self.push(format!("status:{key}:clear")),
+        }
     }
 
     async fn open_custom(&self, session: u64, _component: JsComponent, options: UiCustomOptions) {
@@ -997,6 +1020,75 @@ fn region_host_receives_every_ui_region_mutation() {
         // `dispose` drops the shim-side registration; a later render is empty.
         todos.dispose().await;
         assert!(todos.render(40).await.lines.is_empty());
+    });
+}
+
+/// `ctx.ui.setStatus` used to be an inert no-op in the shim. It now reaches the
+/// region host as its own mutation, and the shim-side map it maintains is the
+/// same one a custom footer reads through `footerData.getExtensionStatuses()`
+/// (upstream `footer-data-provider.ts:132-147`).
+#[test]
+fn region_host_receives_extension_statuses_and_a_custom_footer_sees_them() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(Arc::new(ScriptedUiHandler::new(
+                    ScriptedUiAnswers::default(),
+                )))
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setStatus("build", "compiling");
+                    ctx.ui.setStatus("agent", "thinking");
+                    // `undefined` deletes the key, upstream's clear contract.
+                    ctx.ui.setStatus("agent", undefined);
+                    // A custom footer reads the live map through footerData,
+                    // and must not be able to mutate it.
+                    ctx.ui.setFooter((tui, theme, data) => ({
+                        render: () => {
+                            const statuses = data.getExtensionStatuses();
+                            statuses.set("sneaky", "injected");
+                            return Array.from(data.getExtensionStatuses().entries())
+                                .map((pair) => pair[0] + "=" + pair[1]);
+                        },
+                    }));
+                });
+            };
+        "#;
+        host.load(entry("status-ext"), source).await.expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        let ops = wait_for_region_ops(&recorder, 4).await;
+        assert_eq!(
+            ops,
+            vec![
+                "status:build:set:compiling".to_string(),
+                "status:agent:set:thinking".to_string(),
+                "status:agent:clear".to_string(),
+                "footer:set".to_string(),
+            ],
+            "every setStatus reaches the host, in order"
+        );
+
+        // The footer renders the surviving key, and the copy it receives is
+        // not the map the shim keeps: a `set` on it does not leak back.
+        let footer = recorder.footer();
+        let rendered = footer.render(40).await;
+        assert_eq!(rendered.lines, vec!["build=compiling".to_string()]);
+        let rendered_again = footer.render(40).await;
+        assert_eq!(
+            rendered_again.lines,
+            vec!["build=compiling".to_string()],
+            "a mutating footer cannot change the host's status map"
+        );
     });
 }
 

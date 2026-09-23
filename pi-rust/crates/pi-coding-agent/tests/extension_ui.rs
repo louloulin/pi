@@ -328,6 +328,23 @@ const EXTENSION_OVERLAY_LIFECYCLE: &str = r#"
     };
 "#;
 
+/// `ctx.ui.setStatus(key, text)` used to be inert here: the shim answered
+/// `not available in the pi extension host` and the footer stayed two rows.
+/// This drives the real JS host, the region pump and the App, so the assertion
+/// is on a rendered frame, not on a counter.
+const EXTENSION_STATUS: &str = r#"
+    module.exports = function (pi) {
+        pi.on("session_start", function (event, ctx) {
+            // Installed out of order, and one key cleared, so the test also
+            // pins the sort and the clear contract.
+            ctx.ui.setStatus("zz", "queued");
+            ctx.ui.setStatus("aa", "thinking");
+            ctx.ui.setStatus("gone", "never seen");
+            ctx.ui.setStatus("gone", undefined);
+        });
+    };
+"#;
+
 /// Load an extension that drives `ctx.ui` regions and return the pieces the
 /// interactive loop owns: the dialog/region halves plus the host runtime.
 fn load_regions(
@@ -349,6 +366,49 @@ fn load_regions(
     ui.arm();
     let (ops, tx) = ui.take_regions().expect("region receiver");
     (ui, RegionPump::new(ops, tx), loaded)
+}
+
+#[test]
+fn interactive_extension_statuses_reach_the_footer_row() {
+    let (dir, file) = write_extension_source("status", EXTENSION_STATUS);
+    let rt = runtime();
+    let (mut ui, mut pump, _loaded) = load_regions(&rt, &dir, &file);
+
+    let mut app = app();
+    app.attach_ui_dialogs(ui.take_dialogs().expect("dialog receiver"));
+    // `session_start` ran during load, so the mutations are already queued.
+    rt.block_on(async { pump.pump(&mut app, 60).await });
+
+    // The host's map landed in the App's footer snapshot, sorted by key and
+    // with the cleared key gone.
+    let statuses = app.status_data().extension_statuses.clone();
+    assert_eq!(
+        statuses,
+        vec![
+            ("aa".to_string(), "thinking".to_string()),
+            ("zz".to_string(), "queued".to_string()),
+        ],
+        "the cleared key must not survive"
+    );
+
+    // …and the frame grew a third footer row with the extension text on it.
+    let snapshot = app.render_snapshot(60, 14);
+    let last = snapshot.lines.last().expect("a rendered frame").trim_end();
+    assert_eq!(last, "thinking queued", "{:?}", snapshot.lines);
+    // The stats row is still the row above it — the status row is appended
+    // below upstream's `[pwdLine, statsLine]`, not inserted between them.
+    assert!(
+        !snapshot.lines[13 - 1].contains("thinking"),
+        "{:?}",
+        snapshot.lines
+    );
+
+    // Clearing the last status restores the two-row footer.
+    app.clear_extension_statuses();
+    rt.block_on(async { pump.pump(&mut app, 60).await });
+    let snapshot = app.render_snapshot(60, 14);
+    assert!(!snapshot.lines.iter().any(|line| line.contains("thinking")));
+    assert!(!snapshot.lines.iter().any(|line| line.contains("queued")));
 }
 
 #[test]

@@ -328,8 +328,8 @@ impl UiHandler for TuiUiHandler {
 // ---------------------------------------------------------------------------
 // Region / overlay bridge
 //
-// `ctx.ui.setWidget / setHeader / setFooter / setEditorComponent / custom`
-// are *not* request/response like a dialog: the extension mutates a region
+// `ctx.ui.setWidget / setHeader / setFooter / setEditorComponent / setStatus /
+// custom` are *not* request/response like a dialog: the extension mutates a region
 // and moves on. So they travel the other way — the extension host pushes a
 // [`RegionOp`] into an unbounded channel, and the interactive loop applies
 // it to the [`App`] once per tick ([`RegionPump::pump`]). Rendering is the
@@ -361,6 +361,14 @@ pub enum RegionOp {
     Footer(Option<JsComponent>),
     /// Install (`Some`) or clear (`None`) the editor region.
     Editor(Option<JsComponent>),
+    /// Install (`Some`) or clear (`None`) one extension status text —
+    /// `ctx.ui.setStatus(key, text)`, drawn as the footer's third row.
+    Status {
+        /// Extension-chosen status key.
+        key: String,
+        /// Status text, or `None` for upstream's `undefined` clear.
+        text: Option<String>,
+    },
     /// Open a `ctx.ui.custom` session.
     OpenCustom {
         /// Session token the shim allocated for the `custom()` call.
@@ -442,6 +450,10 @@ impl UiRegionHost for TuiRegionHost {
 
     async fn set_editor_component(&self, component: Option<JsComponent>) {
         let _ = self.tx.send(RegionOp::Editor(component));
+    }
+
+    async fn set_status(&self, key: String, text: Option<String>) {
+        let _ = self.tx.send(RegionOp::Status { key, text });
     }
 
     async fn open_custom(&self, session: u64, component: JsComponent, options: UiCustomOptions) {
@@ -608,6 +620,9 @@ impl RegionPump {
             RegionOp::Header(component) => app.set_header(self.wrap(component)),
             RegionOp::Footer(component) => app.set_footer(self.wrap(component)),
             RegionOp::Editor(component) => app.set_editor_component(self.wrap(component)),
+            RegionOp::Status { key, text } => {
+                app.set_extension_status(&key, text.as_deref());
+            }
             RegionOp::OpenCustom {
                 session,
                 component,
