@@ -263,7 +263,8 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    Event as CtEvent, KeyModifiers as CtModifiers, MouseEventKind as CtMouseEventKind,
+    Event as CtEvent, KeyEventKind as CtKeyEventKind, KeyModifiers as CtModifiers,
+    MouseEventKind as CtMouseEventKind,
 };
 use parking_lot::Mutex;
 use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate, ThinkingLevel};
@@ -6531,12 +6532,34 @@ impl App {
         }
     }
 
-    /// Convert a raw `crossterm` event into an [`InputEvent`]. Used by
-    /// the binary entry point.
-    pub fn translate_event(event: CtEvent) -> InputEvent {
+    /// Convert a raw `crossterm` event into an [`InputEvent`], or `None`
+    /// when the event carries no input. Used by the binary entry point.
+    ///
+    /// **Key releases carry no input.** crossterm's Win32 backend reports a
+    /// `KeyEventKind::Release` for every key the user lets go of (its own
+    /// source comments call the release events out; a crossterm probe run
+    /// under a Windows ConPTY prints `kind=Press` *and* `kind=Release` for a
+    /// single typed character), and a Windows console is the only way pi runs
+    /// there. Upstream pi (Node `readline`) never sees a release, each of its
+    /// key handlers runs once per press — so mapping releases here made every
+    /// keystroke act **twice** on Windows: typing `alpha` rendered
+    /// `aallpphhaa`, one `Backspace` deleted two characters, one `Enter`
+    /// submitted twice. Dropping releases is parity with upstream and with
+    /// codex, not a platform workaround; `Press` and `Repeat` (key
+    /// auto-repeat) still map, and no chord in this port consumes
+    /// `KeyEventKind`, so nothing else can regress.
+    ///
+    /// Found by `scripts/pty_capture_win.py`, the ConPTY backend of the
+    /// capture harness (LUM-1457) — the Windows rounds before it only ever
+    /// drove the app through `App::step(InputEvent::Key)`, which cannot show
+    /// how many times a real console delivers one keystroke.
+    pub fn translate_event(event: CtEvent) -> Option<InputEvent> {
         match event {
-            CtEvent::Key(key) => InputEvent::from(key),
-            CtEvent::Mouse(mouse) => match mouse.kind {
+            CtEvent::Key(key) => match key.kind {
+                CtKeyEventKind::Release => None,
+                CtKeyEventKind::Press | CtKeyEventKind::Repeat => Some(InputEvent::from(key)),
+            },
+            CtEvent::Mouse(mouse) => Some(match mouse.kind {
                 CtMouseEventKind::ScrollUp => InputEvent::wheel(
                     true,
                     mouse.modifiers.contains(CtModifiers::ALT),
@@ -6577,23 +6600,26 @@ impl App {
                 // upstream ignores for the chat log: no horizontal
                 // scrolling exists yet.
                 _ => InputEvent::Ignored,
-            },
-            CtEvent::Resize(w, h) => InputEvent::Resize {
+            }),
+            CtEvent::Resize(w, h) => Some(InputEvent::Resize {
                 width: w,
                 height: h,
-            },
+            }),
             // Bracketed paste has no `InputEvent` counterpart (the enum is
             // `Copy`, and the payload is owned): the driver recognises
             // `CtEvent::Paste` itself and calls [`App::step_paste`]. Mapping
             // it to `Ignored` here is what keeps a byte-level paste from
             // being replayed as a burst of key events.
-            _ => InputEvent::Ignored,
+            _ => Some(InputEvent::Ignored),
         }
     }
 
     /// Translate a slice of `crossterm` events.
     pub fn translate_events<I: IntoIterator<Item = CtEvent>>(events: I) -> Vec<InputEvent> {
-        events.into_iter().map(Self::translate_event).collect()
+        events
+            .into_iter()
+            .filter_map(Self::translate_event)
+            .collect()
     }
 }
 

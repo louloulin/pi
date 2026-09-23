@@ -565,13 +565,15 @@ fn a_paste_with_a_modal_open_does_not_edit_the_frozen_composer() {
 
 #[test]
 fn a_terminal_paste_event_is_not_replayed_as_keys() {
-    // `translate_event` deliberately maps `CtEvent::Paste` to `Ignored`: the
+    // `translate_event` deliberately maps `CtEvent::Paste` to `Ignored` (and
+    // wraps it in `Some`, because since LUM-1457 the signature is
+    // `Option<InputEvent>` so a Windows key *release* can be dropped): the
     // payload is owned and `InputEvent` is `Copy`, so the driver routes it
     // through `App::step_paste` before translation. What must never happen is
     // the payload being decoded into keystrokes — the pre-LUM-1328 path.
     assert_eq!(
         App::translate_event(CtEvent::Paste("a\nb".into())),
-        InputEvent::Ignored
+        Some(InputEvent::Ignored)
     );
 }
 
