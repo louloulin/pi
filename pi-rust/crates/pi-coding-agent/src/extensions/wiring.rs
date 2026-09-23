@@ -23,8 +23,8 @@ use pi_ai::providers::registry::BUILTIN_PROVIDERS;
 use pi_ai::{AssistantMessageEventStream, SimpleStreamOptions, StreamError, StreamFn};
 use pi_extensions::{
     canonical_event_name, CommandExecutionOutcome, DiscoveredResources, DispatchOutcome,
-    ExtensionBridge, ExtensionError, ExtensionSearchPaths, ExtensionSideEffects, HostOptions,
-    JsExtensionHost, RegisteredCommand, RegisteredProviderConfig, RegisteredProviders,
+    ExtensionBridge, ExtensionError, ExtensionSearchPaths, ExtensionSideEffects, FooterData,
+    HostOptions, JsExtensionHost, RegisteredCommand, RegisteredProviderConfig, RegisteredProviders,
     RegisteredToolPrompt, ToolContext, UiHandler,
 };
 use pi_protocol::{
@@ -322,6 +322,21 @@ impl ExtensionRuntime {
     /// The live extension host, when extensions are enabled.
     pub fn host(&self) -> Option<&JsExtensionHost> {
         self.host.as_ref()
+    }
+
+    /// Push the driver-owned `footerData` snapshot to the extensions and report
+    /// a branch transition.
+    ///
+    /// The interactive loop owns the facts (`footerData.getGitBranch()` /
+    /// `getAvailableProviderCount()`); the extension host owns the readers. This
+    /// is the thin wrapper that joins them, and it is deliberately a no-op that
+    /// answers `false` when no host is attached — a session without extensions
+    /// pays one `Option` check per frame.
+    pub async fn sync_footer_data(&self, data: FooterData) -> bool {
+        match self.host.as_ref() {
+            Some(host) => host.sync_footer_data(data).await,
+            None => false,
+        }
     }
 
     /// Whether the host gathered an autocomplete wrapper chain that the

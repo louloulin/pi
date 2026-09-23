@@ -531,12 +531,24 @@ async fn run_loop(
     // to the App. A session outside a repo — or on a detached HEAD — still
     // gets the `pwd` row, just without the `(branch)` suffix, which is
     // upstream's own `getGitBranch()` contract.
+    //
+    // LUM-1490 — the branch is no longer resolved once: `HEAD` moves outside
+    // this process (`git checkout` in another terminal), so the driver keeps a
+    // [`BranchTracker`] and re-reads it every frame. That single tracker feeds
+    // both readers of the fact: the built-in footer and — through the
+    // `footerData` snapshot pushed below — a custom footer.
+    let mut branch_tracker = crate::footer::BranchTracker::new();
     if let Ok(cwd) = std::env::current_dir() {
-        app.set_status_git_branch(crate::footer::git_branch(&cwd));
+        branch_tracker.poll(&cwd);
+        app.set_status_git_branch(branch_tracker.branch().map(str::to_string));
         app.set_status_cwd(Some(cwd.display().to_string()));
     }
     // LUM-1467 — the stats row's provider prefix, ` (sub)` suffix, ` (auto)`
     // suffix and `$cost` rates are facts only the driver owns.
+    let mut footer_facts = pi_extensions::FooterData {
+        git_branch: branch_tracker.branch().map(str::to_string),
+        available_provider_count: available_provider_count(&options),
+    };
     {
         let agent_guard = agent.lock().await;
         sync_status_metrics(&mut app, &options, agent_guard.model());
@@ -547,6 +559,10 @@ async fn run_loop(
     // adapter and the App owns the folding (collapsed preview, Ctrl+O,
     // click-to-toggle). Print mode keeps its own session in `text_fallback`.
     let tool_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // The same directory the tool renderer and the `@` completion walk: the
+    // per-frame `HEAD` re-read needs one path the loop can keep borrowing after
+    // `tool_cwd` is moved into the autocomplete provider below.
+    let branch_cwd = tool_cwd.clone();
 
     app.set_tool_block_renderer(Box::new(crate::tools::InteractiveToolRenderer::new(
         tool_cwd.clone(),
@@ -683,6 +699,15 @@ async fn run_loop(
         .clone()
         .unwrap_or_else(|| Arc::new(crate::clipboard::SystemClipboard::new()));
 
+    // Seed the `footerData` snapshot before the first frame. A custom footer
+    // installed from `session_start` reads `getGitBranch()` during its very
+    // first render, and [`ExtensionRuntime::sync_footer_data`] does not report
+    // the initial value as a branch transition (upstream's `onBranchChange`
+    // fires on a change, never on the initial value).
+    if let Some(runtime) = options.extensions.as_ref() {
+        runtime.sync_footer_data(footer_facts.clone()).await;
+    }
+
     loop {
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
@@ -693,6 +718,23 @@ async fn run_loop(
         if bash.is_running() {
             let width = terminal.size().map(|area| area.width).unwrap_or(80);
             bash.poll(&mut app, width);
+        }
+        // LUM-1490 — `HEAD` moves outside this process (`git checkout` in
+        // another terminal), so the branch both footers read is re-read every
+        // tick; upstream watches the file and repaints on change
+        // (`footer-data-provider.ts:139-196`). The tracker reports a
+        // *transition* only, so an idle frame costs one small read, and a real
+        // move updates both readers: the built-in footer through the App and a
+        // custom footer through the `footerData` query channel (whose
+        // `onBranchChange` subscribers are told from inside
+        // `sync_footer_data`).
+        if branch_tracker.poll(&branch_cwd) {
+            let branch = branch_tracker.branch().map(str::to_string);
+            app.set_status_git_branch(branch.clone());
+            footer_facts.git_branch = branch;
+            if let Some(runtime) = options.extensions.as_ref() {
+                runtime.sync_footer_data(footer_facts.clone()).await;
+            }
         }
         // Apply queued `ctx.ui` region mutations and re-render the JS
         // components before the frame is drawn, so a `setHeader` that
@@ -1722,15 +1764,10 @@ fn sync_thinking_for_model(app: &mut App, agent: &mut Agent) {
 /// catalog has no rates for leaves the cost unknown, exactly like a provider
 /// that reports no cost upstream.
 fn sync_status_metrics(app: &mut App, options: &InteractiveOptions, model: &Model) {
-    let mut providers: Vec<&str> = options
-        .models
-        .iter()
-        .map(|(provider, _)| provider.0.as_str())
-        .collect();
-    providers.sort_unstable();
-    providers.dedup();
-
-    app.set_status_provider(providers.len(), Some(model.provider.0.clone()));
+    app.set_status_provider(
+        available_provider_count(options),
+        Some(model.provider.0.clone()),
+    );
     app.set_status_subscription(is_subscription_provider(&model.provider.0));
     app.set_status_auto_compact(options.compaction.enabled);
     app.set_status_pricing(
@@ -1743,6 +1780,20 @@ fn sync_status_metrics(app: &mut App, options: &InteractiveOptions, model: &Mode
             }
         }),
     );
+}
+
+/// How many providers this session can route to — the same count the footer's
+/// `(provider) ` prefix and `footerData.getAvailableProviderCount()` are built
+/// from (`footer.ts:192`).
+fn available_provider_count(options: &InteractiveOptions) -> usize {
+    let mut providers: Vec<&str> = options
+        .models
+        .iter()
+        .map(|(provider, _)| provider.0.as_str())
+        .collect();
+    providers.sort_unstable();
+    providers.dedup();
+    providers.len()
 }
 
 /// Upstream's subscription test (`footer.ts:139-140`): Kimi Coding bills

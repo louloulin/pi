@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use pi_extensions::ExtensionEntry;
 use pi_extensions::{
-    DispatchOutcome, ExtensionCapabilities, ExtensionError, ExtensionRegistry, HostOptions,
-    JsComponent, JsExtensionHost, ScriptedUiAnswers, ScriptedUiHandler, ToolExecutionOutcome,
-    UiCustomOptions, UiHandler, UiRegionHost, UiWidgetPlacement,
+    DispatchOutcome, ExtensionCapabilities, ExtensionError, ExtensionRegistry, FooterData,
+    HostOptions, JsComponent, JsExtensionHost, ScriptedUiAnswers, ScriptedUiHandler,
+    ToolExecutionOutcome, UiCustomOptions, UiHandler, UiRegionHost, UiWidgetPlacement,
 };
 use pi_protocol::{ExtensionEvent, Message, Role, UiLevel, UiResponse};
 use serde_json::json;
@@ -1134,6 +1134,213 @@ fn region_host_receives_the_terminal_title() {
             ops,
             vec!["title:ext owns this".to_string(), "title:42".to_string(),],
             "every setTitle reaches the host, in order"
+        );
+    });
+}
+
+/// LUM-1490 — `footerData` is the one **host → JS** surface: the driver pushes
+/// a snapshot with [`JsExtensionHost::sync_footer_data`] and a custom footer
+/// queries it back from `getGitBranch()` / `getAvailableProviderCount()` while
+/// it renders. Upstream's own custom-footer example reads both
+/// (`examples/extensions/custom-footer.ts:45`) and its doc types them
+/// `string | null` / `number` (`footer-data-provider.ts:387-390`).
+#[test]
+fn footer_data_snapshot_is_queryable_from_a_custom_footer() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(Arc::new(ScriptedUiHandler::new(
+                    ScriptedUiAnswers::default(),
+                )))
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setFooter((tui, theme, data) => ({
+                        render: () => [
+                            // `null` (not `undefined`) is upstream's
+                            // not-in-a-repo answer, so it is stringified
+                            // explicitly here rather than relied on being falsy.
+                            "branch=" + (data.getGitBranch() === null ? "null" : data.getGitBranch()),
+                            "providers=" + data.getAvailableProviderCount(),
+                            "statuses=" + Array.from(data.getExtensionStatuses().keys()).sort().join(","),
+                        ],
+                    }));
+                    ctx.ui.setStatus("build", "compiling");
+                });
+            };
+        "#;
+        host.load(entry("footer-data-ext"), source)
+            .await
+            .expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        wait_for_region_ops(&recorder, 2).await;
+        let footer = recorder.footer();
+        // Before any push the snapshot is the untouched default: `null` and
+        // `0`, exactly what upstream's provider answers before its first
+        // resolve. This is *not* the pre-LUM-1490 hardcoded `undefined`.
+        assert_eq!(
+            footer.render(60).await.lines,
+            vec![
+                "branch=null".to_string(),
+                "providers=0".to_string(),
+                "statuses=build".to_string(),
+            ]
+        );
+
+        // The driver pushes the facts it owns; the very next render sees them
+        // without any extra round trip or event.
+        host.sync_footer_data(FooterData {
+            git_branch: Some("feature/pi.rs".to_string()),
+            available_provider_count: 3,
+        })
+        .await;
+        assert_eq!(
+            footer.render(60).await.lines,
+            vec![
+                "branch=feature/pi.rs".to_string(),
+                "providers=3".to_string(),
+                "statuses=build".to_string(),
+            ]
+        );
+
+        // A detached HEAD / a session that left the repo reads as `null` again
+        // (upstream's `getGitBranch()` contract), and the provider count is
+        // unaffected by a branch move.
+        host.sync_footer_data(FooterData {
+            git_branch: None,
+            available_provider_count: 3,
+        })
+        .await;
+        assert_eq!(
+            footer.render(60).await.lines.first().map(String::as_str),
+            Some("branch=null")
+        );
+    });
+}
+
+/// LUM-1490 — `footerData.onBranchChange(cb)` is a real channel, not a stub:
+/// the driver's push fires every subscriber, the *initial* snapshot does not
+/// count as a change (upstream fires on a `HEAD` move), and the returned
+/// function unsubscribes. A throwing subscriber is contained shim-side, because
+/// the callback is extension code running inside the driver's push.
+#[test]
+fn on_branch_change_fires_on_transitions_only_and_unsubscribes() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let recorder = Arc::new(RecordingRegionHost::default());
+        let handler = Arc::new(RecordingUiHandler::default());
+        let host = JsExtensionHost::with_options(
+            HostOptions::default()
+                .with_ui_handler(handler.clone())
+                .with_ui_region_host(recorder.clone()),
+        )
+        .await
+        .expect("host");
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("session_start", async function (event, ctx) {
+                    ctx.ui.setFooter((tui, theme, data) => {
+                        let fired = 0;
+                        const unsubscribe = data.onBranchChange(function () {
+                            fired += 1;
+                            // The subscriber runs on the same bridge as any
+                            // other extension turn, so a host call inside it
+                            // must work.
+                            ctx.ui.setStatus("branch", "fired=" + fired);
+                        });
+                        // A second subscriber that always throws: one broken
+                        // extension must not stop the others or the push.
+                        data.onBranchChange(function () {
+                            throw new Error("boom");
+                        });
+                        return {
+                            render: () => ["fired=" + fired],
+                            handleInput: (data) => {
+                                if (data === "stop") unsubscribe();
+                            },
+                        };
+                    });
+                });
+            };
+        "#;
+        host.load(entry("branch-change-ext"), source)
+            .await
+            .expect("load");
+        host.emit_event_with(&ExtensionEvent::SessionStart, Some("tui"), true, "/tmp")
+            .await
+            .expect("dispatch");
+
+        wait_for_region_ops(&recorder, 1).await;
+        let footer = recorder.footer();
+
+        // The initial value seeds the snapshot without firing: upstream's
+        // `onBranchChange` is a change channel, not an initial-value channel.
+        assert!(!host
+            .sync_footer_data(FooterData {
+                git_branch: Some("main".to_string()),
+                available_provider_count: 2,
+            })
+            .await);
+        assert_eq!(footer.render(20).await.lines, vec!["fired=0".to_string()]);
+
+        // A real move fires exactly once, and the subscriber's own host call
+        // lands on the region bridge before the next render.
+        assert!(host
+            .sync_footer_data(FooterData {
+                git_branch: Some("side".to_string()),
+                available_provider_count: 2,
+            })
+            .await);
+        assert_eq!(footer.render(20).await.lines, vec!["fired=1".to_string()]);
+        let ops = wait_for_region_ops(&recorder, 3).await;
+        assert!(
+            ops.contains(&"status:branch:set:fired=1".to_string()),
+            "a subscriber's ctx.ui call reaches the host: {ops:?}"
+        );
+
+        // Re-pushing the same branch is not a transition.
+        assert!(!host
+            .sync_footer_data(FooterData {
+                git_branch: Some("side".to_string()),
+                available_provider_count: 9,
+            })
+            .await);
+        assert_eq!(footer.render(20).await.lines, vec!["fired=1".to_string()]);
+
+        // `onBranchChange` returns the unsubscribe function; after it runs a
+        // further move no longer reaches that subscriber.
+        assert!(footer.handle_input("stop").await);
+        assert!(host
+            .sync_footer_data(FooterData {
+                git_branch: Some("third".to_string()),
+                available_provider_count: 2,
+            })
+            .await);
+        assert_eq!(
+            footer.render(20).await.lines,
+            vec!["fired=1".to_string()],
+            "the unsubscribed callback must not run again"
+        );
+
+        // The throwing subscriber is reported, not propagated: the push above
+        // already returned, the render above already ran, and the warning is
+        // visible to the user.
+        let notifies = handler.notifies.lock().expect("notify lock").clone();
+        assert!(
+            notifies
+                .iter()
+                .any(|(message, level)| *level == UiLevel::Warning
+                    && message.contains("onBranchChange")),
+            "a throwing subscriber warns instead of breaking the driver: {notifies:?}"
         );
     });
 }

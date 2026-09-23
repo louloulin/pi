@@ -64,6 +64,7 @@ import json
 import os
 import queue
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -189,6 +190,44 @@ def prepare_child(scenario, root, home, cwd, cols, rows):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
+
+    # `git_init` (LUM-1490): a scenario that needs a repository starts one in
+    # the child's cwd, with `git` writing `.git/HEAD` itself — so the branch the
+    # app reads (and a custom footer queries through `footerData`) is a real
+    # one, not a synthesised file. `--initial-branch` keeps the name stable
+    # across the git versions a developer may have (>= 2.28); the scenario can
+    # pass `{"branch": "…"}` for the same thing. One empty commit is made so
+    # `HEAD` is *born*: without it `git checkout --detach HEAD` (the detached-
+    # HEAD panel) fails on an unborn branch.
+    git_init = scenario.get("git_init")
+    if git_init:
+        branch = git_init if isinstance(git_init, str) else git_init.get("branch")
+        command = ["git", "init", "--quiet"]
+        if branch:
+            command += ["--initial-branch", str(branch)]
+        run_git = {
+            "cwd": cwd,
+            "check": True,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        subprocess.run(command, **run_git)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=pi-pty@example.invalid",
+                "-c",
+                "user.name=pi pty harness",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "pty-scenario init",
+            ],
+            **run_git,
+        )
 
     env = dict(os.environ)
     env.update(

@@ -1158,6 +1158,28 @@ fn parse_component_render(raw: &str) -> UiComponentRender {
     UiComponentRender { lines, has_input }
 }
 
+/// Facts only the interactive driver owns, read back by a custom footer
+/// through `footerData` (upstream `ReadonlyFooterDataProvider`,
+/// `packages/coding-agent/src/core/footer-data-provider.ts:387-390`).
+///
+/// This is the one `ctx.ui` surface that runs **host → JS**: the driver pushes
+/// a snapshot ([`JsExtensionHost::sync_footer_data`]) and the shim queries it
+/// back synchronously from `footerData.getGitBranch()` /
+/// `footerData.getAvailableProviderCount()` (region op `"footerData"`). Every
+/// other `ctx.ui` call is a JS → host mutation. `getExtensionStatuses()` is
+/// neither: the shim keeps that map itself, because the mutations that fill it
+/// (`ctx.ui.setStatus`) already pass through it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FooterData {
+    /// `getGitBranch()` — the branch of the repository the session runs in,
+    /// `None` outside a repository or on a detached HEAD (the same contract
+    /// `pi-coding-agent`'s `footer::git_branch` implements).
+    pub git_branch: Option<String>,
+    /// `getAvailableProviderCount()` — how many providers are routable in this
+    /// session, counted the way the built-in footer counts them.
+    pub available_provider_count: usize,
+}
+
 /// Adapter behind the `ctx.ui` region surface.
 ///
 /// `pi-extensions` cannot depend on the crate that owns the TUI, so that crate
@@ -1436,6 +1458,42 @@ fn handle_region_call(
                 serde_json::Value::Null,
             )
         }
+        // The only *query* on this bridge: `footerData.getGitBranch()` /
+        // `getAvailableProviderCount()` read the snapshot the driver pushed
+        // through [`JsExtensionHost::sync_footer_data`]. Nothing is queued, so
+        // the answer is available even before the region worker has applied
+        // any mutation, and a non-interactive host answers the untouched
+        // default (branch `null`, count `0`) exactly like upstream's provider
+        // before its first resolve.
+        "footerData" => {
+            let field = payload
+                .get("field")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let snapshot = inner.footer_data.lock().clone();
+            let value = match field {
+                "gitBranch" => serde_json::json!(
+                    snapshot
+                        .as_ref()
+                        .and_then(|data| data.git_branch.clone())
+                ),
+                "availableProviderCount" => serde_json::json!(
+                    snapshot
+                        .as_ref()
+                        .map(|data| data.available_provider_count)
+                        .unwrap_or(0)
+                ),
+                other => {
+                    return region_envelope(
+                        false,
+                        serde_json::json!({
+                            "error": format!("unknown footerData field `{other}`")
+                        }),
+                    )
+                }
+            };
+            region_envelope(true, serde_json::json!({"value": value}))
+        }
         // Not a mutation: the shim asks the host to poll its async driver so
         // a component factory it just scheduled actually runs. See
         // [`wake_async_driver`].
@@ -1642,6 +1700,11 @@ struct Inner {
     region_tx: Option<mpsc::UnboundedSender<RegionCommand>>,
     /// Allocates the session tokens `ctx.ui.custom` hands back to the shim.
     next_ui_session: Arc<AtomicU64>,
+    /// Latest `footerData` snapshot the interactive driver pushed. `None`
+    /// until the first push: `getGitBranch()` then answers `null`, which is
+    /// upstream's "not resolved yet / not in a repo" answer and is what a
+    /// non-interactive host keeps returning.
+    footer_data: Arc<Mutex<Option<FooterData>>>,
     /// Built-in provider the extension's autocomplete wrapper chain
     /// delegates to (see [`AutocompleteBaseProvider`]). `None` when no
     /// interactive adapter was injected.
@@ -1822,6 +1885,7 @@ impl JsExtensionHost {
             execs,
             region_tx,
             next_ui_session: Arc::new(AtomicU64::new(1)),
+            footer_data: Arc::new(Mutex::new(None)),
             autocomplete_base: opts.autocomplete_base.clone(),
             autocomplete_generation: Arc::new(AtomicU64::new(0)),
         });
@@ -1898,6 +1962,55 @@ impl JsExtensionHost {
     /// Per-call timeout.
     pub fn timeout(&self) -> Duration {
         self.inner.timeout
+    }
+
+    /// Push the driver-owned `footerData` snapshot into the host.
+    ///
+    /// Returns `true` when this push **moved the branch** — the transition a
+    /// custom footer subscribes to with `footerData.onBranchChange(cb)`. The
+    /// first push only seeds the snapshot and does *not* count as a change:
+    /// upstream's `onBranchChange` fires on a `HEAD` change, never on the
+    /// initial value (`footer-data-provider.ts:149-160`).
+    ///
+    /// A change also calls the shim's `__pi_footer_branch_changed()` hook, so
+    /// a subscriber that exists at that moment is told without waiting for a
+    /// render. A subscriber that throws is caught shim-side (the callback is
+    /// extension code) and never propagates into the driver's frame.
+    pub async fn sync_footer_data(&self, data: FooterData) -> bool {
+        let previous = self.inner.footer_data.lock().replace(data.clone());
+        let changed = previous.is_some_and(|old| old.git_branch != data.git_branch);
+        if changed {
+            self.notify_branch_change().await;
+        }
+        changed
+    }
+
+    /// The snapshot [`sync_footer_data`](Self::sync_footer_data) last stored.
+    ///
+    /// Exposed for the driver's own assertions (and for a host that wants to
+    /// seed one footer region without a round trip); the JS side reads it
+    /// through the `"footerData"` region op.
+    pub fn footer_data(&self) -> Option<FooterData> {
+        self.inner.footer_data.lock().clone()
+    }
+
+    /// Fire the shim's `footerData.onBranchChange` subscribers.
+    ///
+    /// Best effort by design: a missing hook (an older shim, or a context that
+    /// has already been torn down) and a hook that runs past the host timeout
+    /// both leave the new snapshot stored, so the next `getGitBranch()` still
+    /// answers the current branch.
+    async fn notify_branch_change(&self) {
+        let context = self.inner.context.clone();
+        let future = async_with!(context => |ctx| {
+            if let Ok(func) = ctx
+                .globals()
+                .get::<_, Function>("__pi_footer_branch_changed")
+            {
+                let _ = func.call::<_, ()>(());
+            }
+        });
+        let _ = tokio::time::timeout(self.inner.timeout, future).await;
     }
 
     /// Borrow the accumulated registration log (tools / commands / entries).

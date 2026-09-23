@@ -22,10 +22,11 @@
 //!   (`footer-data-provider.ts:14-47`).
 //!
 //! Deliberate deviations: no `packed-refs` lookup (a branch ref always has a
-//! loose `HEAD`), no per-frame re-resolution, and no filesystem watcher —
-//! upstream repaints the footer when `HEAD` changes
-//! (`footer-data-provider.ts:139-196`), the Rust driver resolves the branch
-//! once at startup. See `docs/LUM1466_TWO_LINE_FOOTER.md` §6.
+//! loose `HEAD`), and no filesystem watcher — the interactive driver polls
+//! through [`BranchTracker`] once per frame instead of watching `HEAD`
+//! (`footer-data-provider.ts:139-196`). The observable contract is the same:
+//! a `git checkout` in another terminal repaints both the built-in footer and
+//! every `footerData.getGitBranch()` reader.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,69 @@ use std::path::{Path, PathBuf};
 pub fn git_branch(cwd: &Path) -> Option<String> {
     let head = head_path(cwd)?;
     branch_from_head(&fs::read_to_string(head).ok()?)
+}
+
+/// The branch `cwd` sits on, re-read on every [`poll`](Self::poll).
+///
+/// Upstream resolves the branch once and then watches `HEAD` (`and`, for
+/// reftable repos, the reftable directory) with `fs.watch`, repainting the
+/// footer on change (`footer-data-provider.ts:51-59,139-196`). The port does
+/// the cheap half of that: the repository's `HEAD` path is resolved once and
+/// only its contents are re-read per poll, so an idle session costs one
+/// `stat` + one small read per frame and never re-walks the ancestors of a
+/// repository it already found. A path that stops resolving (HEAD deleted, the
+/// directory moved, the session started outside a repo) makes the next poll
+/// walk the ancestors again, so `git init` in a session's cwd is picked up
+/// without a restart.
+#[derive(Debug, Default)]
+pub struct BranchTracker {
+    /// `HEAD` of the repository the previous poll resolved, when it still
+    /// exists.
+    head: Option<PathBuf>,
+    /// Branch the previous poll read; `None` outside a repo or on a detached
+    /// `HEAD`.
+    branch: Option<String>,
+    /// Whether [`poll`](Self::poll) has ever run.
+    resolved: bool,
+}
+
+impl BranchTracker {
+    /// A tracker that has not read anything yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The value the last [`poll`](Self::poll) resolved.
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// Re-read the branch for `cwd`.
+    ///
+    /// Returns `true` when the value is **new to this tracker**: on the first
+    /// call (the initial value is reported so the caller can seed both the
+    /// footer and the `footerData` snapshot) and on every call that observes a
+    /// moved `HEAD`. A session that keeps resolving the same branch — the
+    /// overwhelming common case — reports `false` and costs nothing but the
+    /// read.
+    pub fn poll(&mut self, cwd: &Path) -> bool {
+        let head = match self.head.clone().filter(|path| path.is_file()) {
+            Some(cached) => Some(cached),
+            // Nothing cached, or the cached `HEAD` is gone: the session may have
+            // started outside a repo (or a worktree's gitdir moved), so resolve
+            // again from the cwd instead of staying stuck on `None`.
+            None => head_path(cwd),
+        };
+        let branch = head
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|content| branch_from_head(&content));
+        self.head = head;
+        let changed = !self.resolved || branch != self.branch;
+        self.branch = branch;
+        self.resolved = true;
+        changed
+    }
 }
 
 /// The `HEAD` file of the repository `cwd` sits in, walking up its ancestors.
@@ -89,6 +153,89 @@ fn branch_from_head(content: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn tracker_reports_the_initial_value_then_only_real_moves() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let nested = repo.join("crates").join("pi-tui");
+        fs::create_dir_all(&nested).unwrap();
+
+        let mut tracker = BranchTracker::new();
+        assert!(
+            tracker.poll(&nested),
+            "the first poll is the initial value, which the caller must seed from"
+        );
+        assert_eq!(tracker.branch(), Some("main"));
+        assert!(
+            !tracker.poll(&nested),
+            "an unchanged HEAD is not a transition (upstream's onBranchChange must stay quiet)"
+        );
+
+        // `git checkout -b side`, from another terminal: the driver re-reads
+        // HEAD each frame, so the very next poll sees it.
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/side\n").unwrap();
+        assert!(tracker.poll(&nested));
+        assert_eq!(tracker.branch(), Some("side"));
+        assert!(!tracker.poll(&nested));
+
+        // Detached HEAD: no branch, and that *is* a transition.
+        fs::write(
+            repo.join(".git/HEAD"),
+            "9f2c7e92853f9f2c7e92853f9f2c7e92853f9f2c\n",
+        )
+        .unwrap();
+        assert!(tracker.poll(&repo));
+        assert_eq!(tracker.branch(), None);
+        assert!(!tracker.poll(&repo));
+    }
+
+    #[test]
+    fn tracker_notices_a_repository_appearing_after_a_non_repo_start() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let dir = temp.path().join("empty");
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut tracker = BranchTracker::new();
+        assert!(tracker.poll(&dir), "the initial value is reported");
+        assert_eq!(tracker.branch(), None);
+        assert!(!tracker.poll(&dir), "still no repo: no transition");
+
+        // `git init` inside the session's cwd, with a HEAD written before the
+        // next frame. The tracker must walk the ancestors again instead of
+        // caching "no repo" forever.
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git/HEAD"), "ref: refs/heads/fresh\n").unwrap();
+        assert!(tracker.poll(&dir));
+        assert_eq!(tracker.branch(), Some("fresh"));
+    }
+
+    #[test]
+    fn tracker_follows_a_worktree_gitfile() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let worktree = temp.path().join("worktree");
+        let git_dir = temp.path().join("main/.git/worktrees/worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/topic\n").unwrap();
+
+        let mut tracker = BranchTracker::new();
+        assert!(tracker.poll(&worktree));
+        assert_eq!(tracker.branch(), Some("topic"));
+
+        // A worktree checkout rewrites the *common* git dir's HEAD through the
+        // gitfile indirection, which is exactly the path the tracker caches.
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/other\n").unwrap();
+        assert!(tracker.poll(&worktree));
+        assert_eq!(tracker.branch(), Some("other"));
+    }
 
     #[test]
     fn parses_a_branch_head() {
