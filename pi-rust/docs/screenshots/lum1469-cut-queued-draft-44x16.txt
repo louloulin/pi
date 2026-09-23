@@ -1,0 +1,18 @@
+FRAME DUMP cols=44 rows=16
+| ⋯ 1 line above · Home il the turn ends.   │|
+|> turn 9: explain the queue                │|
+|  Prompts typed while a turn is running    │|
+|  wait in the queue until the turn ends.   │|
+|> turn 10: explain the queue               │|
+|  Prompts typed while a turn is running    │|
+|  wait in the queue until the turn ends.   │|
+|> turn 11: explain the queue               │|
+|  Prompts typed while a turn is running    ┃|
+|  wait in the queue until the turn ends.   ┃|
+|> Ready.                                   ┃|
+|                                            |
+|Steering: a queued draft long enough that…  |
+|↳ Alt+Q to edit all queued messages         |
+|> type a prompt — /help for commands        |
+|Faux  lum1469-pending  in 0 out 0 ?/8.2k…   |
+END FRAME DUMP

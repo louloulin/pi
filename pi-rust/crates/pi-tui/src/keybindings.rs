@@ -434,6 +434,11 @@ pub fn tui_default_keybindings() -> Vec<(String, KeybindingDefinition)> {
 /// to `$EDITOR` (`crate::external_editor`) and to `SIGTSTP` respectively. This
 /// retires the *whole* false-ad class: every `app.*` id in the merged table now
 /// has a consumer.
+///
+/// [# LUM-1263] `app.tree.editLabel` (`Shift+L`) is claimed by
+/// `handle_picker_key` while the `/tree` overlay is open: it opens
+/// [`crate::tree::TreeLabelEditor`], whose `Enter` appends the label entry to
+/// the session (the last *silent* `app.*` id).
 pub const CONSUMED_APP_ACTIONS: &[&str] = &[
     "app.interrupt",
     "app.clear",
@@ -474,6 +479,7 @@ pub const CONSUMED_APP_ACTIONS: &[&str] = &[
     "app.session.deleteNoninvasive",
     "app.tree.foldOrUp",
     "app.tree.unfoldOrDown",
+    "app.tree.editLabel",
     "app.tree.toggleLabelTimestamp",
     "app.tree.filter.default",
     "app.tree.filter.noTools",

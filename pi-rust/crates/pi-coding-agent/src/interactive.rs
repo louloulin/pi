@@ -50,8 +50,8 @@ use crate::commands::resume::{
 };
 use crate::commands::session::new_session_id;
 use crate::commands::tree::{
-    clone_session, fork_selector, fork_session, session_tip, tree_selector_with, CreatedSession,
-    TreeFilter, TreeView,
+    append_label_change, clone_session, fork_selector, fork_session, session_tip,
+    tree_selector_with, CreatedSession, TreeFilter, TreeView,
 };
 use crate::commands::{handle_command, SlashCommand};
 use crate::compaction::{
@@ -286,6 +286,13 @@ pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
         // budget. `8` matches Martty's `min(h/2, 12)` cap on tall
         // terminals (`src/ui.rs:25-54`).
         composer_max_rows: 8,
+        // Paste-burst fallback (LUM-1461, codex `paste_burst`): a terminal
+        // that never sends bracketed paste (an old emulator, some SSH /
+        // multiplexer relays) delivers a paste as a fast run of key events.
+        // The App's default is `false` so headless consumers stay
+        // deterministic; the real terminal owns the timing, so the
+        // interactive driver turns it on.
+        paste_burst: true,
         // Cross-session prompt history (codex `~/.codex/history.jsonl`): what
         // makes `Ctrl+R` recall survive a restart. `$PI_HISTORY_PATH` wins,
         // then `$PI_HOME`, then `~/.pi/agent` — the same root the rest of the
@@ -747,7 +754,21 @@ async fn run_loop(
         // buffered without blocking. `Event::read` blocks until the next
         // event, so it may only ever be called after `poll` reported one
         // (see `drain_ready_events`).
-        if ct_event::poll(config.event_poll_interval)? {
+        //
+        // While a paste burst is accumulating (LUM-1461) the timeout is
+        // shortened to land just after it goes quiet: the classifier flushes
+        // on a time boundary, and a 50 ms poll would leave the pasted text
+        // invisible for a beat after the terminal stopped sending it.
+        let poll_interval = app
+            .paste_burst_deadline()
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .max(Duration::from_millis(1))
+                    .min(config.event_poll_interval)
+            })
+            .unwrap_or(config.event_poll_interval);
+        if ct_event::poll(poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
                 // Bracketed paste is not expressible as an `InputEvent` (that
                 // enum is `Copy` and the payload is owned), so the driver
@@ -782,6 +803,9 @@ async fn run_loop(
                 }
             }
         }
+        // A burst that has gone quiet is handed to the composer here, on
+        // every beat, whether or not an event arrived.
+        app.tick_paste_burst(std::time::Instant::now());
 
         // Copy-on-select: the App hands over the finished selection, the
         // driver performs the terminal write (upstream's default is an
@@ -1237,6 +1261,14 @@ async fn handle_input_event(
         // driver: the shared `Selector` does not know them
         // (`session-selector.ts:537-601`, `tree-selector.ts:996-1091`).
         let kind = app.selector().map(picker_kind).unwrap_or(PickerKind::Other);
+        // An open label editor owns every key, including the ones the picker
+        // chords would otherwise claim (`Ctrl+D`, printable characters →
+        // search): upstream routes the whole `handleInput` to `labelInput`
+        // while it is open (`tree-selector.ts:1400-1405`).
+        if kind == PickerKind::Tree && options.pickers.tree.label_editor.is_some() {
+            handle_tree_label_editor_key(app, options, key);
+            return Ok(None);
+        }
         if kind != PickerKind::Other && handle_picker_key(app, options, kind, key) {
             return Ok(None);
         }
@@ -2503,6 +2535,10 @@ fn handle_picker_key(
             false
         }
         PickerKind::Tree => {
+            if matches("app.tree.editLabel", &["shift+l"]) {
+                open_tree_label_editor(app, options);
+                return true;
+            }
             if matches("app.tree.foldOrUp", &["ctrl+left", "alt+left"]) {
                 return tree_fold_or_up(app, options);
             }
@@ -2785,6 +2821,74 @@ fn handle_rename_dialog_key(
         _ => {
             let _ = app.open_dialog(dialog);
             options.pickers.session.pending_rename = Some(pending);
+            true
+        }
+    }
+}
+
+/// `app.tree.editLabel`: open the label editor on the highlighted row,
+/// pre-filled with that node's current label — upstream
+/// `TreeList`'s `onLabelEdit(entry.id, entry.label) → showLabelInput`
+/// (`tree-selector.ts:1084-1088`, `:1364-1382`).
+///
+/// The editor lives in `options.pickers.tree` (not on the App) because the
+/// tree overlay itself is driver state: the selector is rebuilt from the
+/// session on every change, and the editor has to survive that.
+fn open_tree_label_editor(app: &mut App, options: &mut InteractiveOptions) {
+    let Some(entry_id) = selected_tree_entry(app) else {
+        return;
+    };
+    let current = current_tree_rows(options)
+        .into_iter()
+        .find(|row| row.value == entry_id)
+        .and_then(|row| row.user_label);
+    options.pickers.tree.label_editor = Some(pi_tui::tree::TreeLabelEditor::new(
+        entry_id,
+        current.as_deref(),
+    ));
+    refresh_tree_selector(app, options);
+}
+
+/// Drive the open label editor for one key and apply its answer.
+///
+/// `Enter` appends the label entry to the session and rebuilds the overlay
+/// (the new label is read back from the session, so the row redraws as
+/// `[label] …`); `Esc` closes without writing. Every other key stays inside
+/// the editor and only redraws the input line.
+fn handle_tree_label_editor_key(
+    app: &mut App,
+    options: &mut InteractiveOptions,
+    key: pi_tui::input::Key,
+) -> bool {
+    let Some(mut editor) = options.pickers.tree.label_editor.take() else {
+        return false;
+    };
+    match editor.handle_key(key) {
+        pi_tui::tree::TreeLabelAction::Edited => {
+            options.pickers.tree.label_editor = Some(editor);
+            refresh_tree_selector(app, options);
+            true
+        }
+        pi_tui::tree::TreeLabelAction::Cancel => {
+            refresh_tree_selector(app, options);
+            true
+        }
+        pi_tui::tree::TreeLabelAction::Commit(label) => {
+            let entry_id = editor.entry_id().to_string();
+            match options.session_database.clone() {
+                Some(database) => {
+                    let session_id = options.session_id.clone();
+                    match append_label_change(&database, &session_id, &entry_id, label.as_deref()) {
+                        Ok(()) => match &label {
+                            Some(label) => app.info(format!("Labeled {entry_id} as [{label}]")),
+                            None => app.info(format!("Removed the label from {entry_id}")),
+                        },
+                        Err(err) => app.info(format!("/tree: {err}")),
+                    }
+                }
+                None => app.info("/tree: no session database".to_string()),
+            }
+            refresh_tree_selector(app, options);
             true
         }
     }
@@ -6556,6 +6660,20 @@ mod tests {
         assert_eq!(app.pending_len(), 1);
         assert_eq!(app.editor_text(), "", "the queue took the buffer");
 
+        // LUM-1469: the queued prompt is on the frame the driver draws — with
+        // the dequeue hint — not just counted in `pending_len`.
+        let lines = app.render_snapshot(80, 24).lines;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_end() == "Follow-up: queued follow-up"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.trim_end().starts_with('↳')),
+            "the dequeue hint is painted:\n{lines:#?}"
+        );
+
         // Dequeue pulls it back into the editor and reports upstream's tally.
         handle_input_event(&mut app, &agent, &mut options, &mut bash, alt_up())
             .await
@@ -6565,6 +6683,11 @@ mod tests {
         assert_eq!(
             app.status_flash(),
             Some("Restored 1 queued message to editor")
+        );
+        let lines = app.render_snapshot(80, 24).lines;
+        assert!(
+            !lines.iter().any(|line| line.contains("Follow-up:")),
+            "the block is gone once the queue is empty:\n{lines:#?}"
         );
     }
 
@@ -8397,6 +8520,324 @@ mod tests {
         send(&mut app, &agent, &mut options, shift_t).await;
         assert!(!options.pickers.tree.show_label_timestamps);
         assert_eq!(descriptions(&app), before);
+    }
+
+    // -----------------------------------------------------------------------
+    // `app.tree.editLabel` (LUM-1263)
+    // -----------------------------------------------------------------------
+
+    fn shift_l() -> pi_tui::input::Key {
+        chord(KeyCode::Char('L'), Default::default())
+    }
+
+    async fn type_text(
+        app: &mut App,
+        agent: &Arc<AsyncMutex<Agent>>,
+        options: &mut InteractiveOptions,
+        text: &str,
+    ) {
+        for ch in text.chars() {
+            send(
+                app,
+                agent,
+                options,
+                chord(KeyCode::Char(ch), Default::default()),
+            )
+            .await;
+        }
+    }
+
+    /// The label entries the session currently stores, in order.
+    fn stored_labels(options: &InteractiveOptions) -> Vec<(String, Option<String>)> {
+        let database = options.session_database.clone().expect("session database");
+        let reader = SessionReader::open(&database).expect("reader");
+        reader
+            .iter_entries(&options.session_id)
+            .expect("entries")
+            .into_iter()
+            .filter_map(|entry| match &entry.entry {
+                SessionEntry::Extension { kind, payload, .. }
+                    if kind == crate::commands::tree::LABEL_ENTRY_KIND =>
+                {
+                    let target = payload
+                        .get("targetId")
+                        .and_then(|value| value.as_str())?
+                        .to_string();
+                    let label = payload
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    Some((target, label))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tree_item_label(app: &App, entry_id: &str) -> String {
+        app.selector()
+            .expect("selector")
+            .items()
+            .iter()
+            .find(|item| item.value == format!("tree:{entry_id}"))
+            .unwrap_or_else(|| panic!("{entry_id} is not in the tree"))
+            .label
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn shift_l_opens_the_label_editor_on_the_highlighted_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+        move_cursor_to(&mut app, "e1");
+
+        send(&mut app, &agent, &mut options, shift_l()).await;
+
+        let editor = options
+            .pickers
+            .tree
+            .label_editor
+            .as_ref()
+            .expect("the label editor is open");
+        assert_eq!(editor.entry_id(), "e1");
+        assert_eq!(editor.text(), "", "the node has no label yet");
+        let body = app
+            .selector()
+            .expect("selector")
+            .body()
+            .expect("the label input replaces the tree list")
+            .to_vec();
+        assert!(body[0].contains("Label (empty to remove):"), "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn the_label_editor_owns_the_keyboard_until_it_closes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+        move_cursor_to(&mut app, "e1");
+        send(&mut app, &agent, &mut options, shift_l()).await;
+
+        // Printable keys edit the buffer, not the overlay's search filter.
+        type_text(&mut app, &agent, &mut options, "cp").await;
+        assert_eq!(
+            options.pickers.tree.label_editor.as_ref().unwrap().text(),
+            "cp"
+        );
+        assert_eq!(app.selector().expect("selector").filter(), "");
+
+        // A picker chord is not claimed while the input is open.
+        send(&mut app, &agent, &mut options, ctrl('d')).await;
+        assert!(options.pickers.tree.label_editor.is_some(), "still editing");
+        assert_eq!(options.pickers.tree.filter, TreeFilter::Default);
+
+        // `Esc` cancels without writing and restores the tree list.
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Esc, Default::default()),
+        )
+        .await;
+        assert!(options.pickers.tree.label_editor.is_none());
+        assert!(app.selector().expect("selector").body().is_none());
+        assert!(stored_labels(&options).is_empty(), "nothing was written");
+        assert!(tree_values(&app).contains(&"e1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn committing_a_label_writes_it_to_the_session_and_the_row_shows_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+        move_cursor_to(&mut app, "e1");
+        send(&mut app, &agent, &mut options, shift_l()).await;
+        type_text(&mut app, &agent, &mut options, "checkpoint").await;
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+
+        assert!(options.pickers.tree.label_editor.is_none(), "committed");
+        assert_eq!(
+            stored_labels(&options),
+            vec![("e1".to_string(), Some("checkpoint".to_string()))]
+        );
+        assert!(
+            tree_item_label(&app, "e1").contains("[checkpoint] "),
+            "{}",
+            tree_item_label(&app, "e1")
+        );
+
+        // Re-opening prefills the stored label, like upstream `Input.setValue`.
+        move_cursor_to(&mut app, "e1");
+        send(&mut app, &agent, &mut options, shift_l()).await;
+        assert_eq!(
+            options.pickers.tree.label_editor.as_ref().unwrap().text(),
+            "checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_label_removes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+        move_cursor_to(&mut app, "e1");
+        send(&mut app, &agent, &mut options, shift_l()).await;
+        type_text(&mut app, &agent, &mut options, "temp").await;
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+        assert!(tree_item_label(&app, "e1").contains("[temp]"));
+
+        // Empty it out and commit: upstream `value || undefined` removes it.
+        move_cursor_to(&mut app, "e1");
+        send(&mut app, &agent, &mut options, shift_l()).await;
+        for _ in 0.."temp".len() {
+            send(
+                &mut app,
+                &agent,
+                &mut options,
+                chord(KeyCode::Backspace, Default::default()),
+            )
+            .await;
+        }
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+
+        assert_eq!(
+            stored_labels(&options).last(),
+            Some(&("e1".to_string(), None)),
+            "the removal is a label entry with a null label; the log is append-only"
+        );
+        assert!(
+            !tree_item_label(&app, "e1").contains('['),
+            "{}",
+            tree_item_label(&app, "e1")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_labeled_only_filter_keeps_labeled_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+        move_cursor_to(&mut app, "e1");
+        send(&mut app, &agent, &mut options, shift_l()).await;
+        type_text(&mut app, &agent, &mut options, "keep").await;
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+
+        send(&mut app, &agent, &mut options, ctrl('l')).await;
+        assert_eq!(options.pickers.tree.filter, TreeFilter::LabeledOnly);
+        let values = tree_values(&app);
+        assert_eq!(
+            values,
+            vec!["e1".to_string()],
+            "only the labeled entry survives (the label entry itself is bookkeeping): {values:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Frame dumps (LUM-1263 screenshots)
+    // -----------------------------------------------------------------------
+
+    const FRAME_COLS: u16 = 80;
+    const FRAME_ROWS: u16 = 24;
+
+    /// One buffer row as plain text (wide glyphs collapse to one cell) — the
+    /// same dump `scripts/frame_to_png.py` paints. This Windows runner has no
+    /// PTY, so these are frame-buffer screenshots, not terminal captures.
+    fn frame_row(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut text = String::new();
+        let mut skip = 0usize;
+        for x in 0..FRAME_COLS {
+            let Some(cell) = buf.cell((x, y)) else {
+                break;
+            };
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            skip = pi_tui::width::columns(cell.symbol()).saturating_sub(1);
+            text.push_str(cell.symbol());
+        }
+        text
+    }
+
+    fn frame_rows(app: &mut App) -> Vec<String> {
+        let area = ratatui::layout::Rect::new(0, 0, FRAME_COLS, FRAME_ROWS);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        app.render_to_buffer(area, &mut buf);
+        (0..FRAME_ROWS).map(|y| frame_row(&buf, y)).collect()
+    }
+
+    fn dump_frame(lines: &[String], caption: &str) {
+        println!("PANEL {caption}");
+        println!("FRAME DUMP cols={FRAME_COLS} rows={FRAME_ROWS}");
+        for line in lines {
+            println!("|{line}|");
+        }
+        println!("END FRAME DUMP");
+    }
+
+    #[tokio::test]
+    async fn frame_dump_tree_rename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut app, agent, mut options) = tree_picker(dir.path()).await;
+        move_cursor_to(&mut app, "e1");
+        dump_frame(
+            &frame_rows(&mut app),
+            "LUM-1263 /tree idle: no label editor",
+        );
+
+        send(&mut app, &agent, &mut options, shift_l()).await;
+        type_text(&mut app, &agent, &mut options, "checkpoint").await;
+        let lines = frame_rows(&mut app);
+        assert!(
+            lines.iter().any(|l| l.contains("Label (empty to remove):")),
+            "the label input is drawn: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("checkpoint\u{258d}")),
+            "the typed buffer with the caret: {lines:#?}"
+        );
+        dump_frame(&lines, "LUM-1263 /tree editing: `Shift+L` label editor");
+
+        send(
+            &mut app,
+            &agent,
+            &mut options,
+            chord(KeyCode::Enter, Default::default()),
+        )
+        .await;
+        let lines = frame_rows(&mut app);
+        assert!(
+            lines.iter().any(|l| l.contains("[checkpoint]")),
+            "the committed label is on the row: {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("Label (empty to remove):")),
+            "the editor is closed: {lines:#?}"
+        );
+        dump_frame(
+            &lines,
+            "LUM-1263 /tree committed: the row carries `[checkpoint]`",
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,26 @@
+FRAME DUMP cols=80 rows=24
+|                                                                                |
+|Session tree                                                                    |
+|────────────────────────────────────────                                        |
+|❯ • user: u1                                                                    |
+|  • assistant: a1                                                               |
+|  ├⊟ • user: u2b                                                                |
+|  │     • assistant: a2b                                                        |
+|  └⊟ user: u2                                                                   |
+|        assistant: a2                                                           |
+|  ↑/↓ move · ←/→ page · ctrl+← branch · shift+l label · shift+t label time      |
+|  ctrl+d default · ctrl+t no-tools · ctrl+u user-only · ctrl+l labeled-only · ct|
+|  ctrl+o cycle forward · shift+ctrl+o back · filter: default                    |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|> type a prompt — /help for commands                                            |
+|faux-model  cycle                                  in 0 out 0 ?/1.0M  ? for help|
+END FRAME DUMP
