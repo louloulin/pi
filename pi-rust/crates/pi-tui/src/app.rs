@@ -318,6 +318,7 @@ use crate::search::{
 };
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
+use crate::slash_menu::{SlashMenu, SlashMenuWidget};
 use crate::status::{StatusBar, StatusData};
 use crate::styled::{
     buffer_row_text, plain_text, themed_text, write_plain_row, write_styled_line,
@@ -1467,6 +1468,10 @@ pub struct App {
     /// level and the driver answers a cycle with the "does not support
     /// thinking" notice.
     thinking_supported: bool,
+    /// Interactive slash command menu overlay (mirrors Martty's slash menu).
+    /// Appears when the user types `/` in the editor, shows matching
+    /// commands with descriptions, supports ↑/↓ navigation and Enter to execute.
+    slash_menu: SlashMenu,
 }
 
 /// Upstream's footer join (`components/footer.ts:182-188`): an extended
@@ -1580,6 +1585,7 @@ impl App {
             burst_flush_pending: false,
             thinking_level: ThinkingLevel::Medium,
             thinking_supported: false,
+            slash_menu: SlashMenu::new(),
         }
     }
 
@@ -1656,6 +1662,58 @@ impl App {
     /// (`components/footer.ts:182-188`).
     pub fn set_thinking_supported(&mut self, supported: bool) {
         self.thinking_supported = supported;
+    }
+
+    // -- slash menu -------------------------------------------------------
+
+    /// Whether the slash menu is currently visible.
+    pub fn slash_menu_visible(&self) -> bool {
+        self.slash_menu.is_visible()
+    }
+
+    /// Show the slash menu with the given entries.
+    pub fn show_slash_menu(&mut self, entries: Vec<crate::slash_menu::SlashMenuEntry>) {
+        self.slash_menu.show(entries);
+    }
+
+    /// Hide the slash menu.
+    pub fn hide_slash_menu(&mut self) {
+        self.slash_menu.hide();
+    }
+
+    /// Clear the slash menu.
+    pub fn clear_slash_menu(&mut self) {
+        self.slash_menu.clear();
+    }
+
+    /// Move the slash menu selection up by one row.
+    pub fn slash_menu_up(&mut self) {
+        self.slash_menu.move_up();
+    }
+
+    /// Move the slash menu selection down by one row.
+    pub fn slash_menu_down(&mut self) {
+        self.slash_menu.move_down();
+    }
+
+    /// Page up in the slash menu.
+    pub fn slash_menu_page_up(&mut self) {
+        self.slash_menu.page_up(5);
+    }
+
+    /// Page down in the slash menu.
+    pub fn slash_menu_page_down(&mut self) {
+        self.slash_menu.page_down(5);
+    }
+
+    /// Get the currently selected slash menu entry, if any.
+    pub fn slash_menu_selected(&self) -> Option<&crate::slash_menu::SlashMenuEntry> {
+        self.slash_menu.selected_entry()
+    }
+
+    /// Get the number of entries in the slash menu.
+    pub fn slash_menu_len(&self) -> usize {
+        self.slash_menu.len()
     }
 
     /// Whether tool blocks render expanded.
@@ -3401,6 +3459,39 @@ impl App {
             self.shortcut_overlay = true;
             return StepOutcome::Redraw;
         }
+
+        // Slash menu: ↑/↓ navigate, Enter executes, Tab completes, Escape closes.
+        // The menu owns vertical arrows while it is visible.
+        if self.slash_menu.is_visible() {
+            match key.code {
+                KeyCode::Up => {
+                    self.slash_menu.move_up();
+                    return StepOutcome::Redraw;
+                }
+                KeyCode::Down => {
+                    self.slash_menu.move_down();
+                    return StepOutcome::Redraw;
+                }
+                KeyCode::PageUp => {
+                    self.slash_menu.page_up(5);
+                    return StepOutcome::Redraw;
+                }
+                KeyCode::PageDown => {
+                    self.slash_menu.page_down(5);
+                    return StepOutcome::Redraw;
+                }
+                KeyCode::Esc => {
+                    self.slash_menu.hide();
+                    return StepOutcome::Redraw;
+                }
+                // Enter, Tab, and other keys fall through to composer handling
+                // (Enter will submit if the menu is closed, Tab will complete)
+                _ => {
+                    self.slash_menu.hide();
+                }
+            }
+        }
+
         // Paste-burst classification (LUM-1461, codex `paste_burst`): a
         // terminal without bracketed paste delivers a paste as a fast run of
         // key events, and this is where such a run is recognized. It runs
@@ -6437,6 +6528,10 @@ impl App {
                 self.paint_autocomplete(message_area, editor_area, buf);
             }
         }
+
+        // Slash menu overlay — rendered after the editor so it appears above it.
+        self.paint_slash_menu(message_area, editor_area, buf);
+
         self.paint_shortcut_overlay(message_area, editor_area, buf);
 
         // Below-editor widgets.
@@ -6851,6 +6946,18 @@ impl App {
             }
             write_styled_line(buf, editor_area.x, y, editor_area.width, line, &self.theme);
         }
+    }
+
+    /// Paint the slash menu overlay directly above the editor.
+    ///
+    /// The menu appears when the user types `/` in the editor and shows
+    /// matching slash commands with descriptions. Mirrors Martty's slash menu UI.
+    fn paint_slash_menu(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
+        if !self.slash_menu.is_visible() || editor_area.width == 0 {
+            return;
+        }
+        let widget = SlashMenuWidget::new(&self.slash_menu, editor_area, &self.theme);
+        widget.render(buf);
     }
 
     /// Paint the `?` shortcut overlay directly above the composer.

@@ -34,6 +34,7 @@ pub mod mouse_region;
 pub mod prompt;
 pub mod search;
 pub mod selector;
+pub mod slash_menu;
 pub mod settings;
 pub mod status;
 pub mod styled;
@@ -95,6 +96,7 @@ pub use search::{
 };
 pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
 pub use settings::{SettingItem, SettingsAction, SettingsList};
+pub use slash_menu::{SlashMenu, SlashMenuEntry, SlashMenuWidget};
 pub use status::{format_cost, format_tokens, BusyIndicator, StatusBar, StatusData, StatusPricing};
 pub use styled::{SpanStyle, StyledLine, StyledSpan};
 pub use styles::SelectListStyles;
