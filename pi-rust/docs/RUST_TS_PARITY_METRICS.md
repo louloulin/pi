@@ -623,6 +623,39 @@ frame-buffer 截图见 `docs/LUM1460_PASTE_RESCUE.md`。
 **没有带进本轮**（在本机跑不了）；`docs/screenshots/lum1328-paste*.png` 是那条分支的历史实拍，
 不是在本轮代码上拍的。
 
+### 0.18 LUM-1263 复测：`/tree` 改名 UI 接线，`app.*` **43/44 → 44/44**（`silent` / `advertised` 双清零）；门禁工具修正恒真缺陷
+
+本轮把最后一个未消费的 `app.*`（`app.tree.editLabel`）接上线：`Shift+L` 进入标签编辑态
+（输入框复用 `Editor`，不是第二套输入框），`Enter` 提交/`Esc` 取消，空值 = 删除标签，
+提交后标签以 `[label] ` 前缀画在树上并写回会话文件（`custom` 条目 `kind = "label"`）。
+逐行对照、偏差清单、截图见 `docs/LUM1263_TREE_RENAME.md`。
+
+| 量 | 本轮实测 | 基线 `c37d80742` | 说明 |
+|---|---|---|---|
+| `app.*` 接线 | **44 / 44 = 100%**，`silent` 0，`advertised` 0 | 43 / 44 = 97.7%（silent 1：`app.tree.editLabel`） | `python pi-rust/scripts/app_action_coverage.py pi-rust --check-consumed` → `44 entries; measured wired: 44 / in sync` |
+| `tui.*` 消费面 / 死键位 | **49 / 49 + 44 / 44**，`0 known-unconsumed` | 49/49 + 43/44，`1 known-unconsumed` | `python pi-rust/scripts/keybinding_coverage.py pi-rust --check` → exit 0 |
+| `pi-tui` lib | **438 passed / 0 failed** | 429 / 0 | +9 = 7 `tree` + 2 `selector` |
+| `pi-coding-agent` lib | **590 passed / 8 failed** | 584 / 8 | +6 用例；8 条失败与基线**逐条相同**（Windows 环境类：真 `bash`/`/tmp`/绝对路径/node fs） |
+| 既有失败集合 | **28 条，与基线 `diff` 为空** | 28 条 | 同一条 `cargo test --offline -p pi-tui -p pi-coding-agent` |
+
+**反向验证（写进交付文档）**：只摘掉 `interactive.rs:2252` 的 `editLabel` 分支，
+`app_action_coverage.py --check-consumed` 报 `FALSE AD app.tree.editLabel` 且 exit 1，
+`keybinding_coverage.py --check` 报 `NEW DEAD ID(S)` 且 exit 1；复原后双双 exit 0。
+为此**修了工具**：`app_action_coverage.py` 原先把自己 `CONSUMED_APP_ACTIONS` 的字面量
+也算作 handler 证据，使 `--check-consumed` 恒真（列在表里 = 已接线），反向验证根本挂不了；
+现在 `scan()` 与 `keybinding_coverage.py` 的消费扫描都跳过 `crates/pi-tui/src/keybindings.rs`
+这张注册表。修完 44/44 不变（已核对没有任何 id 只靠注册表一处“消费”）。
+
+**门禁**：`cargo fmt --all -- --check` exit 0；`cargo clippy --offline -p pi-tui -p pi-coding-agent
+--all-targets` 本两包 **0 告警**（只剩 `rquickjs-core`(vendor) 13 条与 `pi-extensions` 1 条的既有告警）。
+**截图**：`docs/screenshots/lum1263-tree-rename-{idle,editing,committed}.{txt,png}`，三帧 80×24，
+真 `App::render_to_buffer`；本机无 PTY，是 **frame-buffer 冻结帧**，caption 已写明。
+
+**诚实条目**：`print_mode.rs::sigint_or_clean_exit` 在合并跑时偶发
+`unexpected exit code: Some(1)`（带改动 4 次合并跑出现 2 次；单跑 3/3、`-p pi-coding-agent`
+整包跑 2/2 都通过）；判定为负载敏感的环境抖动，与本轮改动无关，上表引用的对比取
+两边都无该抖动的那一对 log。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）
