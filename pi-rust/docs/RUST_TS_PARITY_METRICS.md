@@ -761,7 +761,8 @@ $ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
 
 > **口径声明（诚实读法）**：§4.1 的 13 条轴里**没有「退出行为」这一格**，所以加权分一分没动——本轮不靠重估旧轴抬分，
 > 价值登记在两条**新的、可反证**的轴上（上表第 3、4 行）。另外 `app.*` 仍是 43/44：
-> LUM-1263（`app.tree.editLabel`）的提交只存在于本地分支 `work/LUM-1263`，`origin` 上没有它（`git ls-remote` 无对应分支）。
+> LUM-1263（`app.tree.editLabel`）的提交 `271cb109f` 停在 `origin/work/LUM-1263`（已推、未并入 `feature/pi.rs`），
+> 合并面与在飞的 LUM-1457/1466 及本轮重叠，登记为下一轮的收编项（见 `docs/LUM1455_EXIT_TRANSCRIPT.md` §5.4）。
 
 **门禁**：`cargo fmt --all -- --check` exit 0；`cargo clippy -p pi-tui --all-targets -D warnings` 0 告警
 （`-p pi-coding-agent` 被既存 `pi-extensions/src/host.rs:3383 signal_name is never used` 挡在 `-D warnings` 前，本轮未碰该文件）；

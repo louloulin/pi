@@ -113,8 +113,14 @@ app.*: 43/44 consumed
   UNCONSUMED app.tree.editLabel
 ```
 
-而 LUM-1263（`feat(pi-rust): /tree 改名 UI`）的提交 `271cb109f` **只存在于本地分支 `work/LUM-1263`**，
-它基于 `c37d80742`，`git ls-remote origin` 里没有对应分支。也就是说这条 `in_review` 的交付**漂着、也没推**。
+而 LUM-1263（`feat(pi-rust): /tree 改名 UI`）的提交 `271cb109f` 停在 `origin/work/LUM-1263`
+（`git ls-remote origin work/LUM-1263` = `271cb109f`，**已推、但没并入 `feature/pi.rs`**），
+它基于 `c37d80742`，落后 LUM-1460/1464/1457/1466 以及本轮。
+
+**本轮不收编它**，理由要写清楚：它的改动面（`interactive.rs` +402、`tree.rs` +314、`selector.rs`、两个扫描脚本）
+与在飞的 LUM-1457/LUM-1466 **和本轮**都在同一批文件同一批区域（`interactive.rs`）上，
+把它塞进本轮等于把三条并发线的冲突一次性吞掉——而它的验收标准（`app.* 44/44` + 三张帧图）
+需要独立的一轮来复测。所以：**登记为下一轮第一顺位的收编项**，而不是本轮顺手合掉。
 
 ### 5.5 交互会话的写入侧（§3.9 的「写兼容」缺口）
 
