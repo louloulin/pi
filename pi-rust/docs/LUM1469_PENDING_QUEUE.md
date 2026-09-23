@@ -308,7 +308,7 @@ python pi-rust/scripts/app_action_coverage.py
 「如果任务存在是跳过还是计划和实现后续任务」的回答：**不跳过、也不重开大改**，本轮在同一个 run 里
 完成 issue 点名的四件事（TUI 审计 / 缺口修复 / 截图 / 推送合并），并**派发 1 个**精确定义的后续任务：
 
-* **LUM-1470** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 的第 3 行（§6 #4）。
+* **LUM-1483** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 的第 3 行（§6 #4）。
   上游 `footer.ts:243-251` 用 `footerData.getExtensionStatuses()` push 一行，Rust 侧
   `app.rs:200-216` 的 `ctx.ui` 对照表把它列为不支持。证据、行号、验收判据写进任务正文；
   创建时为 `backlog`（避免与 LUM-1467 抢同一个 `status.rs` / `plan_chrome` 文件面），

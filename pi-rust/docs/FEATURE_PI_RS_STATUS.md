@@ -15837,7 +15837,7 @@ LUM-1461（composer `paste_burst`，`编程助手-winpi`）、LUM-1434（CLI fla
 开工时 board：LUM-1467（footer stats 行，`in_progress`，`编程助手-winpi`）为唯一在办面；
 LUM-1461 / LUM-1263 为 `in_review`（**本轮已合入**）。因此合并后槽位回落到 **2/3**，**有余量**。
 
-**派发 1 条**：**LUM-1470** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 第 3 行
+**派发 1 条**：**LUM-1483** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 第 3 行
 （上游 `footer.ts:243-251`；Rust 侧仍是 `ERR_PI_UI_UNSUPPORTED`）。创建为 `backlog`，
 等 LUM-1467 合入、本轮推送成功后再提升为 `todo`（两条都要动 `status.rs` / `plan_chrome`，不并发）。
 未派第二条的理由与「同一屏几何不并发」的判据写在 `docs/LUM1469_PENDING_QUEUE.md` §7。
