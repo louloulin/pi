@@ -2,6 +2,14 @@
 //! session identifier, and the rolling token usage.
 //!
 //! Mirrors `packages/coding-agent/src/modes/interactive/components/footer.ts`.
+//!
+//! LUM-1467 aligned the stats row's *fields* with upstream: `↑/↓` token
+//! totals, `R/W` cache totals, `CH<n>%` latest cache-hit rate, `$<cost>`
+//! (with ` (sub)` on subscription providers), the context gauge with its
+//! ` (auto)` suffix, and the `(provider) model` prefix when more than one
+//! provider is routable (`footer.ts:130-200`). The row's arrangement is
+//! upstream's too — stats on the left, model on the right — while the middle
+//! session segment stays a deliberate deviation (see [`session_segment`]).
 
 use std::time::Duration;
 
@@ -29,8 +37,47 @@ pub struct BusyIndicator {
     pub elapsed: Duration,
 }
 
+/// Per-1M-token model pricing, in micro-USD, used to accumulate
+/// [`StatusData::cost_micros`] as turns report usage.
+///
+/// This is the `pi-tui`-local copy of the catalog's `Pricing`
+/// (`pi-ai/src/providers/registry.rs`): the TUI cannot depend on `pi-ai`, so
+/// the driver installs the rates and the status bar does the arithmetic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusPricing {
+    /// Price per 1M input tokens, in micro-USD (USD × 1e6).
+    pub input_micro_usd: u64,
+    /// Price per 1M output tokens, in micro-USD.
+    pub output_micro_usd: u64,
+    /// Price per 1M cached-input (prompt-cache read) tokens, in micro-USD.
+    pub cache_read_micro_usd: u64,
+    /// Price per 1M cache-write tokens, in micro-USD.
+    pub cache_write_micro_usd: u64,
+}
+
+impl StatusPricing {
+    /// The cost of one turn's usage in micro-USD.
+    ///
+    /// Each term is truncated toward zero after the division, matching the
+    /// integer-micro-USD resolution [`StatusData::cost_micros`] keeps; the
+    /// rendered `$x.xxx` is rounded from the accumulated total, which is where
+    /// upstream's float arithmetic ends up too.
+    pub fn cost_micros(&self, usage: &Usage) -> u64 {
+        let term = |tokens: u32, rate: u64| -> u64 {
+            ((tokens as u128) * (rate as u128) / 1_000_000) as u64
+        };
+        term(usage.input, self.input_micro_usd)
+            .saturating_add(term(usage.output, self.output_micro_usd))
+            .saturating_add(term(usage.cache_read, self.cache_read_micro_usd))
+            .saturating_add(term(usage.cache_write, self.cache_write_micro_usd))
+    }
+}
+
 /// Snapshot of the data the status bar renders.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent (unlike the pre-LUM-1467 type):
+/// [`StatusData::latest_cache_hit_rate`] is an `f32`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StatusData {
     /// Active model display label (e.g. `gpt-4o`).
     pub model: String,
@@ -62,6 +109,32 @@ pub struct StatusData {
     pub cache_read: u32,
     /// Cumulative cache-write tokens (`W` in the footer).
     pub cache_write: u32,
+    /// Cumulative session cost in micro-USD (USD × 1e6), so `$0.123` is
+    /// `123_000`. `None` until a model with known pricing reports usage —
+    /// upstream hides the `$` part while `usageTotals.cost` is falsy
+    /// (`footer.ts:139-143`).
+    pub cost_micros: Option<u64>,
+    /// Cache-hit rate of the most recent prompt, as a percentage
+    /// (`cache_read / (input + cache_read + cache_write) × 100`). `None`
+    /// before any turn, or when that prompt reported zero tokens — upstream's
+    /// `latestPromptTokens > 0` guard (`footer.ts:88-98`).
+    pub latest_cache_hit_rate: Option<f32>,
+    /// Auto-compaction switch — upstream's `(auto)` suffix on the context
+    /// gauge (`footer.ts:150`). `false` keeps the pre-LUM-1467 frame.
+    pub auto_compact: bool,
+    /// How many providers the host can route to. Upstream prepends
+    /// `(provider) ` to the model only when this is `> 1`
+    /// (`footer.ts:191-197`). `0`/`1` hide it.
+    pub provider_count: usize,
+    /// The active model's provider name, used for that prefix.
+    pub provider_label: Option<String>,
+    /// True when the active provider bills through a subscription (upstream's
+    /// `kimi-coding` special case plus `isUsingSubscription`): the cost part
+    /// then renders ` (sub)` (`footer.ts:139-143`).
+    pub subscription: bool,
+    /// Rates that turn [`StatusData::add_usage`]'s token counts into
+    /// [`StatusData::cost_micros`]. `None` leaves the cost unknown.
+    pub pricing: Option<StatusPricing>,
     /// Context tokens consumed by the most recent turn (`0` = the window is
     /// known but no turn has reported usage yet, rendered as `?`).
     pub context_used: u32,
@@ -94,6 +167,13 @@ impl StatusData {
             output_tokens: 0,
             cache_read: 0,
             cache_write: 0,
+            cost_micros: None,
+            latest_cache_hit_rate: None,
+            auto_compact: false,
+            provider_count: 0,
+            provider_label: None,
+            subscription: false,
+            pricing: None,
             context_used: 0,
             context_window: 0,
             hint: None,
@@ -175,6 +255,55 @@ impl StatusData {
         self.output_tokens = self.output_tokens.saturating_add(usage.output);
         self.cache_read = self.cache_read.saturating_add(usage.cache_read);
         self.cache_write = self.cache_write.saturating_add(usage.cache_write);
+        if let Some(pricing) = self.pricing {
+            let turn = pricing.cost_micros(usage);
+            self.cost_micros = Some(self.cost_micros.unwrap_or(0).saturating_add(turn));
+        }
+        // Upstream recomputes the rate from the latest assistant message that
+        // reported a prompt (`footer.ts:88-98`); a prompt with no tokens at
+        // all clears it rather than leaving a stale ratio on screen.
+        let prompt_tokens = usage.input as u64 + usage.cache_read as u64 + usage.cache_write as u64;
+        self.latest_cache_hit_rate = if prompt_tokens > 0 {
+            Some((usage.cache_read as f64 / prompt_tokens as f64 * 100.0) as f32)
+        } else {
+            None
+        };
+    }
+
+    /// Install the active model's per-1M-token rates so
+    /// [`StatusData::add_usage`] can accumulate [`StatusData::cost_micros`].
+    /// `None` leaves the cost unknown (no `$` part) without discarding what
+    /// earlier turns already accumulated — a session that switched from a
+    /// priced model to an unpriced one still spent that money.
+    pub fn set_pricing(&mut self, pricing: Option<StatusPricing>) {
+        self.pricing = pricing;
+    }
+
+    /// Forget the accumulated cost (a fresh session).
+    pub fn reset_cost(&mut self) {
+        self.cost_micros = None;
+    }
+
+    /// Builder form of [`StatusData::set_pricing`].
+    pub fn with_pricing(mut self, pricing: StatusPricing) -> Self {
+        self.set_pricing(Some(pricing));
+        self
+    }
+
+    /// Turn the context gauge's `(auto)` suffix on or off
+    /// (`footer.ts:150`).
+    pub fn with_auto_compact(mut self, enabled: bool) -> Self {
+        self.auto_compact = enabled;
+        self
+    }
+
+    /// Tell the bar how many providers are routable and which one is active,
+    /// so the model can carry upstream's `(provider) ` prefix
+    /// (`footer.ts:191-197`).
+    pub fn with_provider(mut self, count: usize, label: Option<String>) -> Self {
+        self.provider_count = count;
+        self.provider_label = label;
+        self
     }
 
     /// Set the model context window shown by the context gauge. `0` hides it.
@@ -271,13 +400,19 @@ impl StatusBar {
     /// text), [`render_themed`] (ANSI strings) and the App's themed buffer
     /// path.
     ///
+    /// The row is upstream's: the stats cluster on the left and the model on
+    /// the right, right-aligned (`footer.ts:230-240`). The model carries a
+    /// `(provider) ` prefix when more than one provider is routable, and the
+    /// prefix is dropped first when that is what pushed the line over
+    /// (`footer.ts:191-197`). The middle session segment is this port's own
+    /// addition (upstream's stats row has none) and keeps the LUM-1466 rule:
+    /// suppressed while the location row already carries the name.
+    ///
     /// Two layouts share this entry point, and the switch between them is the
     /// one measured difference between them:
     ///
-    /// * **Fitted** — the full `<busy><model><session><padding><stats>` line
-    ///   is at most `width` columns wide. It is drawn exactly as it always has
-    ///   been, right-aligned, so every wide terminal is byte-identical to the
-    ///   pre-LUM-1367 footer.
+    /// * **Fitted** — the full `<left><session><padding><model>` line is at
+    ///   most `width` columns wide, so the model sits flush right.
     /// * **Narrow** — it is not. The line is then laid out from
     ///   [`NARROW_SACRIFICE_ORDER`]: whole parts are dropped, lowest value
     ///   first, until the rest fits, and the drop is marked with a trailing
@@ -286,10 +421,10 @@ impl StatusBar {
     /// That second layout is what the bar used to lack. The old code clipped
     /// the parts in visual order against a shrinking budget, so a real 44×14
     /// PTY (measured, `docs/LUM1367_FOOTER_BUDGET.md`) drew
-    /// `Faux test model  session-18d79c9c08d4dceb  i` — the *first character*
-    /// of `in 0 out 0` stranded at the right edge with no way to tell that the
-    /// rest had been dropped. Whole-part dropping removes the orphans; the
-    /// `…` is the honest signal that the bar is showing a subset.
+    /// `…session-18d79c9c08d4dceb  i` — the *first character* of a right-hand
+    /// part stranded at the right edge with no way to tell that the rest had
+    /// been dropped. Whole-part dropping removes the orphans; the `…` is the
+    /// honest signal that the bar is showing a subset.
     ///
     /// The busy segment is empty unless [`StatusData::busy`] is `Some`, so an
     /// idle footer is byte-identical to the pre-spinner layout.
@@ -302,66 +437,27 @@ impl StatusBar {
             return StyledLine::new();
         }
 
-        // Left cluster, built as spans (outermost first): the busy spinner +
-        // elapsed while a turn is in flight, then the model. The spinner is
-        // `accent` and the elapsed time `muted`, so the animated glyph stands
-        // out from the model name next to it.
-        let mut left: StyledLine = Vec::new();
-        if let Some(busy) = &data.busy {
-            left.push(StyledSpan::new(
-                format!("{} ", busy.frame),
-                SpanStyle::fg(ThemeColor::Accent),
-            ));
-            left.push(StyledSpan::new(
-                format!("{}  ", format_elapsed(busy.elapsed)),
-                SpanStyle::fg(ThemeColor::Muted),
-            ));
-        }
-        left.push(StyledSpan::new(
-            data.model.clone(),
-            SpanStyle::fg(ThemeColor::Accent),
-        ));
+        // Left cluster (outermost first): the busy spinner + elapsed while a
+        // turn is in flight, then the stats parts in upstream order, then the
+        // transient hint. Spans (rather than one dim string) let the context
+        // gauge carry its own severity colour while the rest stays dim
+        // (`footer.ts:145-176`).
+        let left = left_cluster(data);
 
-        // Right-hand side, built as spans (outermost first): cumulative
-        // usage, cache totals, the context gauge, then the transient hint.
-        // Spans (rather than one dim string) let the context gauge carry its
-        // own severity colour while the rest stays dim (`footer.ts:145-176`).
-        let mut right: StyledLine = Vec::new();
-        right.push(StyledSpan::new(
-            format!(
-                "in {} out {}",
-                format_tokens(data.input_tokens),
-                format_tokens(data.output_tokens)
-            ),
-            SpanStyle::fg(ThemeColor::Dim),
-        ));
-        if data.cache_read > 0 || data.cache_write > 0 {
-            right.push(StyledSpan::new(
-                format!(
-                    " R{} W{}",
-                    format_tokens(data.cache_read),
-                    format_tokens(data.cache_write)
-                ),
-                SpanStyle::fg(ThemeColor::Dim),
-            ));
-        }
-        if data.context_window > 0 {
-            let (gauge, color) = context_gauge(data.context_used, data.context_window);
-            // The separating space stays dim; only the gauge itself escalates.
-            right.push(StyledSpan::new(" ", SpanStyle::fg(ThemeColor::Dim)));
-            right.push(StyledSpan::new(gauge, SpanStyle::fg(color)));
-        }
-        if let Some(hint) = &data.hint {
-            right.push(StyledSpan::new(
-                format!("  {hint}"),
-                SpanStyle::fg(ThemeColor::Dim),
-            ));
-        }
-        let right_len = line_width(&right);
+        // Right cluster: upstream's `rightSide`, the model name — with the
+        // `(provider) ` prefix only when more than one provider is routable.
+        let prefixed = data.provider_count > 1;
+        let mut right = model_right(data, prefixed);
         let session = session_segment(data, data.location_line().is_some());
 
         let left_len = line_width(&left);
         let session_len = columns(&session);
+        if prefixed && left_len + session_len + line_width(&right) > width {
+            // Upstream's fallback (`footer.ts:194-196`): the prefix goes
+            // before anything else does.
+            right = model_right(data, false);
+        }
+        let right_len = line_width(&right);
         if left_len + session_len + right_len > width {
             // The whole line does not fit. Hand the bar to the budgeted
             // layout, which drops parts instead of cutting them (see the
@@ -441,12 +537,19 @@ const ELLIPSIS: &str = "…";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Zone {
     Busy,
-    Model,
-    Session,
+    /// `↑12k ↓3k` — upstream's two cumulative token arrows.
     Usage,
+    /// `R12k W300` — cumulative cache-read / cache-write tokens.
     Cache,
+    /// `CH65.0%` — the latest prompt's cache-hit rate.
+    CacheHit,
+    /// `$0.123` (optionally ` (sub)`) — cumulative spend.
+    Cost,
+    /// `42.0%/128k (auto)` — context pressure.
     Gauge,
+    Session,
     Hint,
+    Model,
 }
 
 /// The order the narrow layout gives parts up in — least valuable first.
@@ -456,24 +559,30 @@ enum Zone {
 /// * `Hint` is transient by construction (`? for help` and friends): it is
 ///   the part a returning user needs least, and the startup header already
 ///   lists the same chords.
-/// * `Cache` is a detail of the usage totals next to it, not a total of its
-///   own.
+/// * `CacheHit` is a ratio derived from the cache totals next to it — the
+///   least actionable number in the cluster.
+/// * `Cache` is a detail of the usage totals, not a total of its own.
 /// * `Session` is an identity the caller usually already knows (it is the
 ///   session they launched), and it is the widest single part — dropping it
 ///   buys back a whole line's worth of real numbers.
-/// * `Usage` is cumulative session cost, worth keeping over the identity.
-/// * `Gauge` is the one number that changes a decision (context pressure), so
-///   it outlives usage.
+/// * `Usage` is cumulative session tokens, kept over the identity.
+/// * `Cost` is cumulative money — a decision number, but one that moves
+///   slowly, so it yields to `Usage` (which explains the spend) and to the
+///   gauge (which is live).
+/// * `Gauge` is the one number that changes a decision *right now* (context
+///   pressure), so it outlives the cumulative totals.
 /// * `Model` outlives everything except the busy spinner: it is the shortest
 ///   part and the one that says what an answer will come from.
 /// * `Busy` is never dropped while it is present — it is the only sign a turn
 ///   is still running, and codex / Martty both keep a live activity indicator
 ///   when space runs short.
-const NARROW_SACRIFICE_ORDER: [Zone; 6] = [
+const NARROW_SACRIFICE_ORDER: [Zone; 8] = [
     Zone::Hint,
+    Zone::CacheHit,
     Zone::Cache,
     Zone::Session,
     Zone::Usage,
+    Zone::Cost,
     Zone::Gauge,
     Zone::Model,
 ];
@@ -485,12 +594,14 @@ const NARROW_SACRIFICE_ORDER: [Zone; 6] = [
 /// [`StatusData::hint_pinned`] hint is the opposite: it is the query the user
 /// is typing into, so it outlives every counter (only the model name, which
 /// says what an answer will come from, is kept past it).
-fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 6] {
+fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 8] {
     if data.hint_pinned {
         [
+            Zone::CacheHit,
             Zone::Cache,
             Zone::Session,
             Zone::Usage,
+            Zone::Cost,
             Zone::Gauge,
             Zone::Model,
             Zone::Hint,
@@ -502,50 +613,94 @@ fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 6] {
 
 /// The separator drawn in front of a part when it is not the first part left.
 ///
-/// The values add up to the fitted layout's own separators, so a bar that has
+/// The values mirror the fitted layout's own separators, so a bar that has
 /// just lost a part does not reshuffle the parts it keeps. Every lead is
 /// either empty (the busy spinner, which is only ever the first part) or at
 /// least one space, so two neighbouring parts can never run together — which
 /// is also why the budgeted layout only ever needs the lead, never a fallback
-/// gap.
+/// gap. Upstream joins its `statsParts` with a single space and the busy
+/// segment is followed by two (`footer.ts:147`), so the stats parts carry ` `
+/// and the first one after the spinner carries `  `.
 fn zone_lead(zone: Zone) -> &'static str {
     match zone {
         Zone::Busy => "",
-        Zone::Model => "  ",
-        Zone::Session => "  ",
         Zone::Usage => "  ",
         Zone::Cache => " ",
+        Zone::CacheHit => " ",
+        Zone::Cost => " ",
         Zone::Gauge => " ",
+        Zone::Session => "  ",
         Zone::Hint => "  ",
+        Zone::Model => "  ",
     }
+}
+
+/// The stats cluster plus the transient hint, in upstream order.
+///
+/// This is the fitted layout's left cluster; the budgeted layout
+/// ([`emit_zones`]) rebuilds the same parts from [`zone_body`].
+fn left_cluster(data: &StatusData) -> StyledLine {
+    let mut spans = zone_body(data, Zone::Busy);
+    let mut first = spans.is_empty();
+    for zone in [
+        Zone::Usage,
+        Zone::Cache,
+        Zone::CacheHit,
+        Zone::Cost,
+        Zone::Gauge,
+        Zone::Hint,
+    ] {
+        let body = zone_body(data, zone);
+        if body.is_empty() {
+            continue;
+        }
+        if !first {
+            spans.push(StyledSpan::new(
+                zone_lead(zone),
+                SpanStyle::fg(ThemeColor::Dim),
+            ));
+        }
+        first = false;
+        spans.extend(body);
+    }
+    spans
+}
+
+/// Upstream's `rightSide` (`footer.ts:178-197`): the model name, optionally
+/// preceded by `(provider) ` when more than one provider is routable.
+fn model_right(data: &StatusData, with_provider: bool) -> StyledLine {
+    let text = match (
+        with_provider,
+        data.provider_label.as_deref().filter(|p| !p.is_empty()),
+    ) {
+        (true, Some(provider)) => format!("({provider}) {}", data.model),
+        _ => data.model.clone(),
+    };
+    vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Accent))]
 }
 
 /// The parts present for this snapshot, in visual order.
 fn narrow_zones(data: &StatusData) -> Vec<Zone> {
-    let mut zones: Vec<Zone> = Vec::with_capacity(7);
+    let mut zones: Vec<Zone> = Vec::with_capacity(9);
     if data.busy.is_some() {
         zones.push(Zone::Busy);
     }
-    zones.push(Zone::Model);
-    let has_name = data
-        .session_name
-        .as_deref()
-        .is_some_and(|name| !name.is_empty());
-    if (has_name || !data.session_id.is_empty())
-        && !session_segment(data, data.location_line().is_some()).is_empty()
-    {
+    for zone in [
+        Zone::Usage,
+        Zone::Cache,
+        Zone::CacheHit,
+        Zone::Cost,
+        Zone::Gauge,
+        Zone::Hint,
+    ] {
+        if !zone_body(data, zone).is_empty() {
+            zones.push(zone);
+        }
+    }
+    if !session_segment(data, data.location_line().is_some()).is_empty() {
         zones.push(Zone::Session);
     }
-    zones.push(Zone::Usage);
-    if data.cache_read > 0 || data.cache_write > 0 {
-        zones.push(Zone::Cache);
-    }
-    if data.context_window > 0 {
-        zones.push(Zone::Gauge);
-    }
-    if data.hint.is_some() {
-        zones.push(Zone::Hint);
-    }
+    zones.push(Zone::Model);
     zones
 }
 
@@ -577,30 +732,103 @@ fn zone_body(data: &StatusData, zone: Zone) -> StyledLine {
             };
             vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Muted))]
         }
-        Zone::Usage => vec![StyledSpan::new(
-            format!(
-                "in {} out {}",
-                format_tokens(data.input_tokens),
-                format_tokens(data.output_tokens)
-            ),
-            SpanStyle::fg(ThemeColor::Dim),
-        )],
-        Zone::Cache => vec![StyledSpan::new(
-            format!(
-                "R{} W{}",
-                format_tokens(data.cache_read),
-                format_tokens(data.cache_write)
-            ),
-            SpanStyle::fg(ThemeColor::Dim),
-        )],
+        // `if (usageTotals.input) statsParts.push(\`↑…\`)` — each arrow is
+        // independently conditional upstream (`footer.ts:130-131`), so a
+        // fresh session carries no token part at all.
+        Zone::Usage => {
+            let mut spans = StyledLine::new();
+            if data.input_tokens > 0 {
+                spans.push(StyledSpan::new(
+                    format!("↑{}", format_tokens(data.input_tokens)),
+                    SpanStyle::fg(ThemeColor::Dim),
+                ));
+            }
+            if data.output_tokens > 0 {
+                if !spans.is_empty() {
+                    spans.push(StyledSpan::new(" ", SpanStyle::fg(ThemeColor::Dim)));
+                }
+                spans.push(StyledSpan::new(
+                    format!("↓{}", format_tokens(data.output_tokens)),
+                    SpanStyle::fg(ThemeColor::Dim),
+                ));
+            }
+            spans
+        }
+        // Same rule for `R` / `W` (`footer.ts:132-133`).
+        Zone::Cache => {
+            let mut spans = StyledLine::new();
+            if data.cache_read > 0 {
+                spans.push(StyledSpan::new(
+                    format!("R{}", format_tokens(data.cache_read)),
+                    SpanStyle::fg(ThemeColor::Dim),
+                ));
+            }
+            if data.cache_write > 0 {
+                if !spans.is_empty() {
+                    spans.push(StyledSpan::new(" ", SpanStyle::fg(ThemeColor::Dim)));
+                }
+                spans.push(StyledSpan::new(
+                    format!("W{}", format_tokens(data.cache_write)),
+                    SpanStyle::fg(ThemeColor::Dim),
+                ));
+            }
+            spans
+        }
+        // `CH<rate>%`, but only while there is cache traffic to explain it
+        // (`footer.ts:134-136`).
+        Zone::CacheHit => {
+            let cache_traffic = data.cache_read > 0 || data.cache_write > 0;
+            match (cache_traffic, data.latest_cache_hit_rate) {
+                (true, Some(rate)) => vec![StyledSpan::new(
+                    format!("CH{rate:.1}%"),
+                    SpanStyle::fg(ThemeColor::Dim),
+                )],
+                _ => StyledLine::new(),
+            }
+        }
+        // `$cost`, shown when a cost is known *or* the provider bills by
+        // subscription (`footer.ts:139-143`).
+        Zone::Cost => {
+            let cost = data.cost_micros.unwrap_or(0);
+            if cost > 0 || data.subscription {
+                vec![StyledSpan::new(
+                    format_cost(cost, data.subscription),
+                    SpanStyle::fg(ThemeColor::Dim),
+                )]
+            } else {
+                StyledLine::new()
+            }
+        }
         Zone::Gauge => {
+            // `0` = unknown window, so the gauge has nothing to measure
+            // against and is hidden (`StatusData::context_window`).
+            if data.context_window == 0 {
+                return StyledLine::new();
+            }
             let (gauge, color) = context_gauge(data.context_used, data.context_window);
+            let gauge = if data.auto_compact {
+                format!("{gauge} (auto)")
+            } else {
+                gauge
+            };
             vec![StyledSpan::new(gauge, SpanStyle::fg(color))]
         }
         Zone::Hint => vec![StyledSpan::new(
             data.hint.clone().unwrap_or_default(),
             SpanStyle::fg(ThemeColor::Dim),
         )],
+    }
+}
+
+/// `$0.123`, or `$0.123 (sub)` on a subscription provider — upstream's
+/// `$${cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`
+/// (`footer.ts:141-143`).
+pub fn format_cost(cost_micros: u64, subscription: bool) -> String {
+    let usd = cost_micros as f64 / 1_000_000.0;
+    if subscription {
+        format!("${usd:.3} (sub)")
+    } else {
+        format!("${usd:.3}")
     }
 }
 
@@ -848,10 +1076,15 @@ mod tests {
         let bar = StatusBar::new();
         let data = StatusData::new("gpt-4o", "abc-123").with_hint("? for help");
         let line = bar.render(&data, 60);
-        assert!(line.starts_with("gpt-4o"));
+        // LUM-1467 — the model is upstream's `rightSide`, flush against the
+        // right edge (`footer.ts:230-240`).
+        assert!(line.ends_with("gpt-4o"), "{line}");
         assert!(line.contains("abc-123"));
-        assert!(line.contains("in 0 out 0"));
         assert!(line.contains("? for help"));
+        // A fresh session reports no usage yet, and upstream hides the arrows
+        // entirely (`footer.ts:130-131`).
+        assert!(!line.contains('↑'), "{line}");
+        assert!(!line.contains('↓'), "{line}");
     }
 
     #[test]
@@ -916,9 +1149,9 @@ mod tests {
         assert_eq!(lines[0], "/srv/repo (main) • demo");
         // The name moved up, so the stats row does not repeat it…
         assert!(!lines[1].contains("demo"), "{}", lines[1]);
-        // …but it still carries the model and the counters.
-        assert!(lines[1].starts_with("gpt-4o"), "{}", lines[1]);
-        assert!(lines[1].contains("in 0 out 0"), "{}", lines[1]);
+        // …and with no usage and no window the stats cluster is empty, so the
+        // row is upstream's: right-aligned model, nothing else.
+        assert!(lines[1].ends_with("gpt-4o"), "{}", lines[1]);
     }
 
     #[test]
@@ -951,7 +1184,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(lines[0].chars().count(), 20, "{}", lines[0]);
         assert!(lines[0].ends_with('…'), "{}", lines[0]);
-        assert!(lines[1].starts_with("gpt-4o"), "{}", lines[1]);
+        assert!(lines[1].ends_with("gpt-4o"), "{}", lines[1]);
     }
 
     #[test]
@@ -991,9 +1224,10 @@ mod tests {
         data.cache_write = 300;
         data.context_used = 64_000;
         let line = bar.render(&data, 90);
-        assert!(line.contains("in 1.5k out 250"), "{line}");
-        assert!(line.contains("R12k W300"), "{line}");
-        assert!(line.contains("50.0%/128k"), "{line}");
+        // Upstream's `↑<in> ↓<out> R<cacheRead> W<cacheWrite> <gauge>` order
+        // (`footer.ts:130-146`).
+        assert!(line.contains("↑1.5k ↓250 R12k W300 50.0%/128k"), "{line}");
+        assert!(line.ends_with("gpt-4o"), "{line}");
     }
 
     #[test]
@@ -1063,9 +1297,10 @@ mod tests {
         data.output_tokens = 250;
         data.set_busy('⠹', Duration::from_secs(12));
         let line = bar.render(&data, 90);
-        // Spinner first, on the same row as the Stage 64 usage numbers.
-        assert!(line.starts_with("⠹ 12s  gpt-4o"), "{line}");
-        assert!(line.contains("in 1.5k out 250"), "{line}");
+        // Spinner first, then the same row's stats cluster (upstream order),
+        // with the model flush right.
+        assert!(line.starts_with("⠹ 12s  ↑1.5k ↓250 ?/128k"), "{line}");
+        assert!(line.ends_with("gpt-4o"), "{line}");
         assert_eq!(line.lines().count(), 1, "{line}");
     }
 
@@ -1074,8 +1309,9 @@ mod tests {
         let bar = StatusBar::new();
         let idle = StatusData::new("gpt-4o", "abc-123");
         let line = bar.render(&idle, 60);
-        assert!(line.starts_with("gpt-4o"), "{line}");
-        // No placeholder glyph and no extra leading space.
+        // No spinner glyph, and the row is padded from the left so the model
+        // keeps the right edge.
+        assert!(line.ends_with("gpt-4o"), "{line}");
         assert!(!SPINNER_FRAMES.iter().any(|frame| line.contains(*frame)));
         assert_eq!(line, bar.render(&StatusData::new("gpt-4o", "abc-123"), 60));
     }
@@ -1118,13 +1354,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // LUM-1367 — the narrow-footer budget (`docs/LUM1367_FOOTER_BUDGET.md`).
+    // LUM-1367/LUM-1467 — the narrow-footer budget
+    // (`docs/LUM1367_FOOTER_BUDGET.md`).
     //
-    // Every expectation below is the real 44/46/52/60/70-column PTY frame's
-    // shape, replayed through `StatusBar::render` with the frame's own data:
-    // model `Faux test model`, a 24-character session id, a `?/8.2k` context
-    // gauge, zero usage and the `? for help` hint. The full line is 72
-    // columns, so widths below that exercise the budgeted layout.
+    // Every expectation below is the real 44-column PTY frame's data,
+    // replayed through `StatusBar::render`: model `Faux test model`, a
+    // 24-character session id, a `?/8.2k` context gauge, zero usage and the
+    // `? for help` hint. LUM-1467 moved the stats cluster to the left and the
+    // model to the right edge, and made zero-valued stats parts disappear the
+    // way upstream's `if (usageTotals.input)` does, so the fitted line is 61
+    // columns and every width below that exercises the budgeted layout.
     // -----------------------------------------------------------------
 
     /// The snapshot a real 44×14 PTY frame carries.
@@ -1134,28 +1373,29 @@ mod tests {
             .with_hint("? for help")
     }
 
-    const NARROW_FRAME_FULL: &str =
-        "Faux test model  session-18d79c9c08d4dceb  in 0 out 0 ?/8.2k  ? for help";
+    const NARROW_FRAME_FULL: &str = "?/8.2k  ? for help  session-18d79c9c08d4dceb  Faux test model";
 
     #[test]
-    fn a_fitting_bar_is_unchanged_and_exactly_width_wide() {
+    fn a_fitting_bar_is_exactly_width_wide_and_right_aligns_the_model() {
         let bar = StatusBar::new();
         let data = narrow_frame_data();
-        // The fitted layout is `<left><session><padding><right>`: extra
-        // columns land between the session id and the stats, right-aligning
-        // the stats exactly as the pre-LUM-1367 bar did.
+        // The fitted layout is `<left><session><padding><model>`: extra
+        // columns land between the session id and the model, right-aligning
+        // the model the way upstream's `statsLeft + padding + rightSide`
+        // does (`footer.ts:205-215`).
         let fitted = |pad: usize| {
             format!(
-                "Faux test model  session-18d79c9c08d4dceb  {}in 0 out 0 ?/8.2k  ? for help",
-                " ".repeat(pad)
+                "?/8.2k  ? for help  session-18d79c9c08d4dceb  {}{}",
+                " ".repeat(pad),
+                "Faux test model"
             )
         };
-        // 72 = the exact fit: no padding, and every part present.
-        assert_eq!(NARROW_FRAME_FULL.chars().count(), 72);
+        // 61 = the exact fit: no padding, and every part present.
+        assert_eq!(NARROW_FRAME_FULL.chars().count(), 61);
         assert_eq!(fitted(0), NARROW_FRAME_FULL);
-        assert_eq!(bar.render(&data, 72), NARROW_FRAME_FULL);
-        assert_eq!(bar.render(&data, 80), fitted(8));
-        assert_eq!(bar.render(&data, 120), fitted(48));
+        assert_eq!(bar.render(&data, 61), NARROW_FRAME_FULL);
+        assert_eq!(bar.render(&data, 80), fitted(19));
+        assert_eq!(bar.render(&data, 120), fitted(59));
     }
 
     #[test]
@@ -1163,67 +1403,49 @@ mod tests {
         let bar = StatusBar::new();
         let data = narrow_frame_data();
 
-        // 60: dropping the hint alone is enough, and there is no column left
-        // for the marker — the pre-fix bar drew exactly this line here.
+        // 49..=60: the hint is the first part to go; the marker takes the
+        // freed column once there is one.
+        assert_eq!(
+            bar.render(&data, 49),
+            "?/8.2k  session-18d79c9c08d4dceb  Faux test model"
+        );
         assert_eq!(
             bar.render(&data, 60),
-            "Faux test model  session-18d79c9c08d4dceb  in 0 out 0 ?/8.2k"
-        );
-        // 61..=72: the same parts, now honestly marked as a subset.
-        assert_eq!(
-            bar.render(&data, 61),
-            "Faux test model  session-18d79c9c08d4dceb  in 0 out 0 ?/8.2k…"
-        );
-        assert_eq!(
-            bar.render(&data, 70),
             format!(
-                "{}…{}",
-                "Faux test model  session-18d79c9c08d4dceb  in 0 out 0 ?/8.2k",
-                " ".repeat(9)
+                "?/8.2k  session-18d79c9c08d4dceb  Faux test model…{}",
+                " ".repeat(10)
             )
         );
 
-        // 34..=59: the session id is the next part to go, and dropping it buys
-        // back every number that fits. The old bar stranding `in` / `out` at
-        // the right edge is what this replaces.
+        // 23..=48: the session id goes next, and the model stays on the
+        // right edge.
+        assert_eq!(bar.render(&data, 23), "?/8.2k  Faux test model");
         assert_eq!(
-            bar.render(&data, 52),
-            format!("Faux test model  in 0 out 0 ?/8.2k…{}", " ".repeat(17))
+            bar.render(&data, 48),
+            format!("?/8.2k  Faux test model…{}", " ".repeat(24))
         );
-        assert_eq!(
-            bar.render(&data, 46),
-            format!("Faux test model  in 0 out 0 ?/8.2k…{}", " ".repeat(11))
-        );
-        assert_eq!(
-            bar.render(&data, 40),
-            format!("Faux test model  in 0 out 0 ?/8.2k…{}", " ".repeat(5))
-        );
-        assert_eq!(bar.render(&data, 34), "Faux test model  in 0 out 0 ?/8.2k");
 
-        // 23..=33: the usage total goes next; the context gauge is the last
-        // number the bar gives up.
-        assert_eq!(
-            bar.render(&data, 30),
-            format!("Faux test model ?/8.2k…{}", " ".repeat(7))
-        );
-        assert_eq!(bar.render(&data, 22), "Faux test model ?/8.2k");
-
-        // 16..=21: only the model is left, marked as a subset.
-        assert_eq!(
-            bar.render(&data, 21),
-            format!("Faux test model…{}", " ".repeat(5))
-        );
+        // 15..=22: the gauge is the last number the bar gives up, because it
+        // is the one that changes a decision.
         assert_eq!(bar.render(&data, 15), "Faux test model");
+        assert_eq!(
+            bar.render(&data, 22),
+            format!("Faux test model…{}", " ".repeat(6))
+        );
+
+        // Below that only the model is left, and it is the one part the
+        // budgeted layout cuts — with the crate's marker.
+        assert_eq!(bar.render(&data, 14), "Faux test mod…");
     }
 
     /// The regression the fix exists for: the pre-fix layout clipped parts
     /// positionally, so a narrow bar could end in the *first letters* of a
-    /// right-hand part. These are the exact endings measured in a real PTY at
-    /// 44/46/52/70 columns (`docs/LUM1367_FOOTER_BUDGET.md` §2) — `i`, `in`,
-    /// `in 0 out` and `? for he`. No width may produce any of them again.
+    /// right-hand part. LUM-1467 changed which parts exist (zero usage is
+    /// hidden) but not the invariant — no width may end in a partial stats
+    /// token, and every width must fill its budget exactly.
     #[test]
     fn a_narrow_bar_never_ends_with_a_partial_token_at_any_width() {
-        const ORPHANS: [&str; 6] = ["i", "in", "in 0 out", "? for he", "? for h", "? for"];
+        const ORPHANS: [&str; 8] = ["↑", "↓", "R", "W", "CH", "$", "?/", "?/8.2"];
         let bar = StatusBar::new();
         let data = narrow_frame_data();
         for width in 1u16..=120 {
@@ -1284,5 +1506,229 @@ mod tests {
                 "themed and plain renders disagree at width {width}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // LUM-1467 — the stats row's upstream fields (`footer.ts:130-200`).
+    // -----------------------------------------------------------------
+
+    /// A snapshot carrying every new field, so each part's text and order can
+    /// be read off one row.
+    fn all_fields_data() -> StatusData {
+        let mut data = StatusData::new("claude-sonnet-4", "abc-123")
+            .with_context_window(128_000)
+            .with_auto_compact(true)
+            .with_hint("? for help");
+        data.input_tokens = 12_000;
+        data.output_tokens = 3_000;
+        data.cache_read = 12_000;
+        data.cache_write = 300;
+        data.context_used = 64_000;
+        // The rate the last turn reported (`add_usage` derives it in
+        // production; this pins the rendering).
+        data.latest_cache_hit_rate = Some(65.0);
+        data.cost_micros = Some(123_000);
+        data
+    }
+
+    #[test]
+    fn the_stats_cluster_matches_upstreams_field_order() {
+        let bar = StatusBar::new();
+        let line = bar.render(&all_fields_data(), 100);
+        assert!(
+            line.starts_with("↑12k ↓3.0k R12k W300 CH65.0% $0.123 50.0%/128k (auto)"),
+            "{line}"
+        );
+        assert!(line.ends_with("claude-sonnet-4"), "{line}");
+    }
+
+    #[test]
+    fn each_token_arrow_hides_independently_at_zero() {
+        let bar = StatusBar::new();
+        // `if (usageTotals.input)` / `if (usageTotals.output)`
+        // (`footer.ts:130-131`).
+        let mut input_only = StatusData::new("m", "s");
+        input_only.input_tokens = 5;
+        assert!(bar.render(&input_only, 40).contains("↑5"));
+        assert!(!bar.render(&input_only, 40).contains('↓'));
+
+        let mut output_only = StatusData::new("m", "s");
+        output_only.output_tokens = 7;
+        assert!(bar.render(&output_only, 40).contains("↓7"));
+        assert!(!bar.render(&output_only, 40).contains('↑'));
+
+        let fresh = StatusData::new("m", "s");
+        let line = bar.render(&fresh, 40);
+        assert!(!line.contains('↑') && !line.contains('↓'), "{line}");
+    }
+
+    #[test]
+    fn the_cache_hit_rate_needs_traffic_and_a_reported_prompt() {
+        let bar = StatusBar::new();
+
+        // A rate with no cache traffic renders nothing (upstream's
+        // `cacheRead > 0 || cacheWrite > 0` guard).
+        let mut no_traffic = StatusData::new("m", "s");
+        no_traffic.latest_cache_hit_rate = Some(65.0);
+        assert!(!bar.render(&no_traffic, 60).contains("CH"));
+
+        // Traffic with no reported prompt renders nothing either.
+        let mut no_rate = StatusData::new("m", "s");
+        no_rate.cache_read = 100;
+        assert!(!bar.render(&no_rate, 60).contains("CH"));
+
+        // Both together render `CH<rate>%`.
+        no_rate.latest_cache_hit_rate = Some(65.0);
+        assert!(bar.render(&no_rate, 60).contains("CH65.0%"));
+    }
+
+    #[test]
+    fn the_cost_part_needs_a_cost_or_a_subscription() {
+        let bar = StatusBar::new();
+
+        // No cost, no subscription: hidden.
+        let plain = StatusData::new("m", "s");
+        assert!(!bar.render(&plain, 60).contains('$'));
+
+        // A known cost renders `$x.xxx`.
+        let mut paid = StatusData::new("m", "s");
+        paid.cost_micros = Some(123_000);
+        assert!(bar.render(&paid, 60).contains("$0.123"));
+
+        // A subscription provider renders `$0.000 (sub)` even at zero spend
+        // (`footer.ts:139-143`).
+        let mut sub = StatusData::new("m", "s");
+        sub.subscription = true;
+        assert!(bar.render(&sub, 60).contains("$0.000 (sub)"));
+    }
+
+    #[test]
+    fn the_auto_suffix_follows_the_auto_compact_switch() {
+        let bar = StatusBar::new();
+        let off = StatusData::new("m", "s")
+            .with_context_window(128_000)
+            .with_auto_compact(false);
+        assert!(!bar.render(&off, 60).contains("(auto)"));
+        let on = off.clone().with_auto_compact(true);
+        assert!(bar.render(&on, 60).contains("/128k (auto)"));
+    }
+
+    #[test]
+    fn the_provider_prefix_needs_more_than_one_provider() {
+        let bar = StatusBar::new();
+        let single =
+            StatusData::new("claude-sonnet-4", "").with_provider(1, Some("anthropic".into()));
+        assert!(!bar.render(&single, 60).contains("anthropic"));
+
+        let multi =
+            StatusData::new("claude-sonnet-4", "").with_provider(2, Some("anthropic".into()));
+        assert!(bar
+            .render(&multi, 60)
+            .contains("(anthropic) claude-sonnet-4"));
+
+        // No label to print: nothing to prefix with.
+        let anonymous = StatusData::new("claude-sonnet-4", "").with_provider(3, None);
+        assert!(!bar.render(&anonymous, 60).contains('('));
+    }
+
+    #[test]
+    fn the_provider_prefix_is_dropped_before_the_bar_goes_narrow() {
+        let bar = StatusBar::new();
+        let data =
+            StatusData::new("claude-sonnet-4", "").with_provider(2, Some("anthropic".into()));
+        // `(anthropic) claude-sonnet-4` is 27 columns; the bare model is 15.
+        // At 20 the prefix is what does not fit, so upstream's fallback drops
+        // it (`footer.ts:194-196`) and the bar stays fitted.
+        let narrow = bar.render(&data, 20);
+        assert!(!narrow.contains("anthropic"), "{narrow}");
+        assert_eq!(narrow, format!("{}claude-sonnet-4", " ".repeat(5)));
+        // With room for both, the prefix stays.
+        assert!(bar
+            .render(&data, 30)
+            .contains("(anthropic) claude-sonnet-4"));
+    }
+
+    #[test]
+    fn add_usage_records_the_latest_prompts_cache_hit_rate() {
+        let mut data = StatusData::new("m", "s");
+        data.add_usage(&Usage {
+            input: 300,
+            output: 0,
+            cache_read: 650,
+            cache_write: 50,
+            total: 0,
+        });
+        // 650 / (300 + 650 + 50) = 65%.
+        assert_eq!(data.latest_cache_hit_rate, Some(65.0));
+
+        // A prompt with no tokens at all clears it rather than keeping a
+        // stale ratio (upstream's `latestPromptTokens > 0` guard).
+        data.add_usage(&Usage::default());
+        assert_eq!(data.latest_cache_hit_rate, None);
+    }
+
+    #[test]
+    fn add_usage_accumulates_cost_from_the_installed_rates() {
+        let mut data = StatusData::new("m", "s").with_pricing(StatusPricing {
+            input_micro_usd: 3_000_000,
+            output_micro_usd: 15_000_000,
+            cache_read_micro_usd: 300_000,
+            cache_write_micro_usd: 3_750_000,
+        });
+        // No turn yet: the cost is unknown, not zero.
+        assert_eq!(data.cost_micros, None);
+
+        data.add_usage(&Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 1_000_000,
+            total: 0,
+        });
+        // $3 + $15 + $0.30 + $3.75 = $22.05.
+        assert_eq!(data.cost_micros, Some(22_050_000));
+        assert_eq!(format_cost(data.cost_micros.unwrap(), false), "$22.050");
+
+        // Installing no rates stops further accumulation but keeps what the
+        // session already spent.
+        data.set_pricing(None);
+        assert_eq!(data.cost_micros, Some(22_050_000));
+        data.reset_cost();
+        assert_eq!(data.cost_micros, None);
+    }
+
+    #[test]
+    fn format_cost_renders_micro_usd_with_three_decimals() {
+        assert_eq!(format_cost(0, false), "$0.000");
+        assert_eq!(format_cost(123_000, false), "$0.123");
+        assert_eq!(format_cost(1_234_567, false), "$1.235");
+        assert_eq!(format_cost(0, true), "$0.000 (sub)");
+        assert_eq!(format_cost(123_000, true), "$0.123 (sub)");
+    }
+
+    #[test]
+    fn a_narrow_all_fields_bar_sheds_the_cache_hit_rate_before_the_cache_totals() {
+        let bar = StatusBar::new();
+        let data = all_fields_data();
+
+        // 79 = dropping the hint alone is enough, and the rate survives.
+        let wide = bar.render(&data, 79);
+        assert!(!wide.contains("? for help"), "{wide}");
+        assert!(wide.contains("CH65.0%"), "{wide}");
+        assert!(wide.contains("$0.123"), "{wide}");
+
+        // 71..=78: the derived ratio goes next — it is worth less than the
+        // cache totals it is derived from — while `$cost` and the gauge stay.
+        let tighter = bar.render(&data, 71);
+        assert!(!tighter.contains("CH65.0%"), "{tighter}");
+        assert!(tighter.contains("R12k W300"), "{tighter}");
+        assert!(tighter.contains("$0.123"), "{tighter}");
+
+        // 61..=70: now the cache totals themselves go.
+        let without_cache = bar.render(&data, 61);
+        assert!(!without_cache.contains("R12k"), "{without_cache}");
+        assert!(without_cache.contains("↑12k"), "{without_cache}");
+        assert!(without_cache.contains("50.0%/128k"), "{without_cache}");
+        assert!(without_cache.contains("claude-sonnet-4"), "{without_cache}");
     }
 }

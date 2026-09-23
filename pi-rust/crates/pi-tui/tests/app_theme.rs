@@ -121,14 +121,16 @@ fn app_buffer_cells_carry_the_theme_colours() {
     assert!(is_unstyled(style_at(&buf, 2, 1)));
 
     // Status row (y = height - 1, the last row: the status bar sits below
-    // the editor region, upstream's footer position): model accent, session
-    // muted, stats dim.
-    assert_eq!(symbol_at(&buf, 0, 3), "F");
-    assert_eq!(style_at(&buf, 0, 3).fg, Some(ACCENT));
-    assert_eq!(symbol_at(&buf, 6, 3), "t"); // "  test  " starts at column 4
-    assert_eq!(style_at(&buf, 6, 3).fg, Some(MUTED));
-    assert_eq!(symbol_at(&buf, 12, 3), "i"); // "in 0 out 0 …" starts at column 12
-    assert_eq!(style_at(&buf, 12, 3).fg, Some(DIM));
+    // the editor region, upstream's footer position): the stats cluster is
+    // dim and left-aligned, the session id muted in the middle, and the model
+    // accent at the right edge — upstream's `statsLeft + padding + rightSide`
+    // with LUM-1467's field alignment (`footer.ts:205-240`).
+    assert_eq!(symbol_at(&buf, 0, 3), "?"); // "?/1.0k  ? for help" starts here
+    assert_eq!(style_at(&buf, 0, 3).fg, Some(DIM));
+    assert_eq!(symbol_at(&buf, 20, 3), "t"); // "  test  " starts at column 18
+    assert_eq!(style_at(&buf, 20, 3).fg, Some(MUTED));
+    assert_eq!(symbol_at(&buf, 36, 3), "F"); // "Faux" is flush right, at column 36
+    assert_eq!(style_at(&buf, 36, 3).fg, Some(ACCENT));
 
     // The editor region (y = height - 2) paints the prompt label in the
     // current thinking level's border colour (upstream

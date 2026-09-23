@@ -2059,6 +2059,33 @@ impl App {
         self.status_data.git_branch = branch;
     }
 
+    /// Tell the footer how many providers are routable and which one is
+    /// active, so the model can carry upstream's `(provider) ` prefix
+    /// (`footer.ts:191-197`). The driver owns the catalog.
+    pub fn set_status_provider(&mut self, count: usize, label: Option<String>) {
+        self.status_data.provider_count = count;
+        self.status_data.provider_label = label;
+    }
+
+    /// Turn the footer's `(auto)` context-gauge suffix on or off
+    /// (`footer.ts:150`) — `compaction.enabled` in the driver's settings.
+    pub fn set_status_auto_compact(&mut self, enabled: bool) {
+        self.status_data.auto_compact = enabled;
+    }
+
+    /// Mark the active provider as subscription-billed, which renders the
+    /// cost part as ` (sub)` (`footer.ts:139-143`).
+    pub fn set_status_subscription(&mut self, subscription: bool) {
+        self.status_data.subscription = subscription;
+    }
+
+    /// Install the active model's per-token rates so the footer can
+    /// accumulate `$cost` from the usage events it already receives
+    /// (`footer.ts:137-143`).
+    pub fn set_status_pricing(&mut self, pricing: Option<crate::status::StatusPricing>) {
+        self.status_data.set_pricing(pricing);
+    }
+
     /// The last transient status message pushed by [`App::flash_status`], if
     /// any. Consumed by the next render and cleared by the next key press.
     pub fn status_flash(&self) -> Option<&str> {

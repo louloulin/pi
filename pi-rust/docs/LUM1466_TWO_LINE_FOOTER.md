@@ -231,6 +231,12 @@ python pi-rust/scripts/extension_event_coverage.py
 | `docs/screenshots/lum1466-footer-cut-44x14.png` / `.txt` | 44×14：位置行被切且**以 `…` 标记**，stats 行同时按 LUM-1367 的整段丢弃规则收窄 | 同上（`frame_dump_cut_location_row`） |
 | `docs/screenshots/lum1466-footer-single-row-100x30.png` / `.txt` | 100×30 无 cwd：**基线的一行 footer，逐行相同**（回归证据） | 同上（`frame_dump_single_row_footer_without_a_cwd`） |
 
+> **后续变更（LUM-1467）**：本节的 `.txt` 是 **LUM-1466 当时的帧**；LUM-1467 把 stats 行
+> 的字段与排布换成了上游的形状（`↑/↓`、`CH%`、`$cost`、`(auto)`、stats 左 / model 右），
+> 所以现在跑 `frame_dump_*` 得到的长相已不同。两行几何（位置行 + stats 行）不变，
+> 新帧见 `docs/LUM1467_FOOTER_STATS_FIELDS.md` §3 与
+> `docs/screenshots/lum1467-stats-*.{png,txt}`。
+
 **诚实说明（本机限制）**：这台 Windows runner 没有 `pty`（`import pty` 不可用），所以截图走 LUM-1412
 建立的 **frame-buffer 通道**：它证明「画在哪一格、内容是什么」，**不证明按键时序**；时序/几何由
 14 条 App 级测试覆盖（§3 的反向验证）。`scripts/pty_capture.py` 仍是真终端的证据标准，Linux runner 上

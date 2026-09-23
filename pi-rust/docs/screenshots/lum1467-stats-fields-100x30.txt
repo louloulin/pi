@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|> which stats does the footer show?                                                                 |
+|> Ready.                                                                                            |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> type a prompt — /help for commands                                                                |
+|/srv/repo (main) • demo                                                                             |
+|↑12k ↓3.0k R12k W300 CH65.0% $0.123 32.0%/200k (auto)  ? for help (anthropic) claude-sonnet-4 • high|
+END FRAME DUMP

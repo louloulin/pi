@@ -788,6 +788,49 @@ $ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
 合并后 8 条 `--lib` 失败名单与基线逐字相同（`commands::export::…`、`export::session_file::…`、
 `extensions::js_loader::…`、`paths::absolute_paths_stay_absolute`、`resource_loader::…`、
 `tools::mod_ignore::…`、`trust::…` ×2）——即合并与新一轮改动都没有新增产品缺陷。
+### 0.21 LUM-1467 复测：footer stats 行对齐上游字段（`↑/↓`、`CH%`、`$cost`、`(auto)`、`(provider)` 前缀）；加权仍 **86.9%**
+
+**量的是什么**：`pi-rust` 的第二行 footer（stats 行）与上游 `footer.ts:130-200` 的**字段差**。
+基线（LUM-1466 交付后）缺四类：箭头形状（`in/out` vs `↑/↓`）、`CH%`、`$cost (+sub)`、
+`(auto)`、多 provider 的 `(provider)` 前缀；且行内排布是 model 左 / stats 右，上游相反。
+本轮全部补齐，并改成上游的 stats 左 / model 右。
+
+| 口径 | 本轮 | 上一快照（LUM-1464，§0.18） |
+|---|---|---|
+| 纯代码规模（src↔src） | **92.7%**（141,902 / 153,106） | 92.0%（140,894 / 153,106） |
+| 测试规模（新口径 / 旧口径） | **50.2%**（2,790 / 5,563） / 52.6%（2,790 / 5,309） | 49.5%（2,755 / 5,563） |
+| Rust 用例数（`crates/**`） | **2,790** | 2,755 |
+| 轴 5 TUI 交互面 | 轴 5 = (0.857 + 0.977)/2 = **91.7%** | 同形 |
+| 轴 6 TUI 视觉保真 | **90%（不重估）** | 90% |
+| 轴 12 测试与门禁强度 | 2,790/5,563 = **0.5015** | 0.4953 |
+| 加权完成度 | **86.9%** | 86.9% |
+
+**为什么总分不动**：本轮没有关闭任何“能力有没有”的轴。它是一个 **TUI 视觉保真度**的
+缺口——但 §4.1 的轴 6 依据是 **§3.8**（主题 / Markdown / 高亮 / LaTeX / 图片），footer 的
+stats 行不在那 5 项里，所以本轮**换的是证据，不是数字**。把轴 6 从 0.90 推到 0.95 只值
++0.4pt（`8×0.05`），不足以改变结论，本文**不动**它（与 §0.8 的处置同一条规矩；要重估先得在
+§3.8 里说清哪一项抬了多少）。加权和里唯一动的是第 12 轴 **+0.015pt**（+17 条用例）：
+
+```
+5×1.000 + 13×0.90 + 8×1.000 + 6×0.70 + 14×0.917 + 8×0.90 + 7×0.783
++ 7×0.70 + 8×0.95 + 7×1.00 + 9×0.85 + 5×0.5015 + 3×0.95 = 86.93% ≈ 86.9%
+```
+
+**口径诚实声明**：TS 分母 5,563 沿用 §0.18 的新口径；用 §1.1 的旧口径
+（`\bit\(|\btest\(`）在同一棵树上量到 **5,309**，对应第 12 轴 0.5255、加权 **87.05%**。
+两个数都对，取决于用哪个尺子；为与上一快照逐项对照，这里沿用 §0.18 的尺子并写明差额
+（+0.12pt）。
+
+**门禁**（本机 Windows / cargo 1.97.1 / `--offline`）：`cargo fmt --all -- --check` 干净；
+`cargo clippy -p pi-tui --all-targets` **0 warning**；`cargo test -p pi-tui` **1121 / 0**
+（基线 1104/0 → +17）；`cargo test -p pi-coding-agent --lib interactive::` **107 / 0**；
+`--test reload_config` 的 `reload_rereads_keybindings_and_ui_settings_mid_session` **既有失败**
+（已 `git stash` 掉本轮 `interactive.rs` 后在基线复现同一条），**新增失败 0**。
+
+**证据分级**：3 张 `docs/screenshots/lum1467-stats-*.png`(+`.txt`) 是 frame-buffer 冻结帧
+（本机无 `pty`），证明几何与字段内容，**不证明按键时序**；交互时序由 `status.rs` 的 37 条
+单测与 `tests/lum1467_stats_fields_frames.rs` 的 6 条覆盖。本轮细节、上游取证、已知偏差
+见 `docs/LUM1467_FOOTER_STATS_FIELDS.md`。
 
 ## 1. 方法与口径
 
