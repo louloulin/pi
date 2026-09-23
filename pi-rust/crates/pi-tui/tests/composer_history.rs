@@ -27,7 +27,7 @@ use pi_agent_core::{Agent, AgentOptions};
 use pi_ai::providers::faux::FauxProvider;
 use pi_protocol::{Api, ImageContent, Model, ProviderId};
 use pi_tui::app::{App, AppConfig, StepOutcome};
-use pi_tui::editor::{HistorySearchStatus, HISTORY_LIMIT};
+use pi_tui::editor::{HistoryEntry, HistorySearchStatus, HISTORY_LIMIT};
 use pi_tui::history_store::HistoryStore;
 use pi_tui::input::{InputEvent, Key, KeyCode, KeyModifiers};
 use pi_tui::keybindings::{reset_keybindings, set_keybindings, KeybindingsManager};
@@ -122,8 +122,8 @@ fn a_submitted_prompt_survives_a_restart_and_up_recalls_it() {
     let store = store("restart");
     {
         let mut first = editor_with(&store);
-        first.push_history_entry("first prompt".to_string(), None, Vec::new());
-        first.push_history_entry("second prompt".to_string(), None, Vec::new());
+        first.push_history_entry(HistoryEntry::new("first prompt".to_string()));
+        first.push_history_entry(HistoryEntry::new("second prompt".to_string()));
         assert_eq!(first.history_len(), 2);
     }
 
@@ -132,7 +132,7 @@ fn a_submitted_prompt_survives_a_restart_and_up_recalls_it() {
     let mut second = editor_with(&store);
     assert_eq!(second.history_len(), 2);
     assert_eq!(
-        second.history().collect::<Vec<_>>(),
+        second.history_texts().collect::<Vec<_>>(),
         vec!["second prompt", "first prompt"],
         "`history()` iterates newest first, like the deque"
     );
@@ -160,8 +160,8 @@ fn a_submitted_prompt_survives_a_restart_and_up_recalls_it() {
 fn the_file_holds_one_json_row_per_prompt() {
     let store = store("jsonl");
     let mut ed = editor_with(&store);
-    ed.push_history_entry("hello \"pi\"".to_string(), None, Vec::new());
-    ed.push_history_entry("second".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("hello \"pi\"".to_string()));
+    ed.push_history_entry(HistoryEntry::new("second".to_string()));
 
     let body = fs::read_to_string(store.path()).expect("the file exists");
     let rows: Vec<serde_json::Value> = body
@@ -192,15 +192,15 @@ fn a_corrupt_line_is_skipped_and_the_history_still_loads() {
 
     let mut ed = editor_with(&store);
     assert_eq!(
-        ed.history().collect::<Vec<_>>(),
+        ed.history_texts().collect::<Vec<_>>(),
         vec!["also kept", "kept"],
         "corrupt rows are skipped, newest first"
     );
     // The bad rows are dropped on the next append as well, so a damaged file
     // heals instead of accumulating junk.
-    ed.push_history_entry("new".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("new".to_string()));
     assert_eq!(
-        ed.history().collect::<Vec<_>>(),
+        ed.history_texts().collect::<Vec<_>>(),
         vec!["new", "also kept", "kept"]
     );
     let body = fs::read_to_string(store.path()).unwrap();
@@ -218,7 +218,7 @@ fn a_read_only_or_missing_file_degrades_to_in_session_history() {
     // it. Point the store at a *directory* instead, so every write fails.
     let mut ed = Editor::new();
     ed.set_history_store(HistoryStore::new(store.path().parent().unwrap()));
-    ed.push_history_entry("kept in session".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("kept in session".to_string()));
     assert_eq!(ed.history_len(), 1, "an unwritable store loses no input");
     assert_eq!(ed.display_text(), "");
     assert_eq!(ed.handle_event(up()), EditorAction::Changed);
@@ -236,7 +236,7 @@ fn the_persistent_file_is_trimmed_to_the_history_limit() {
     assert_eq!(ed.history_len(), 5, "in-session history has its own bound");
     let restarted = editor_with(&store);
     assert_eq!(
-        restarted.history().collect::<Vec<_>>(),
+        restarted.history_texts().collect::<Vec<_>>(),
         vec!["entry-4", "entry-3", "entry-2"],
         "the file kept only its newest 3 rows"
     );
@@ -256,10 +256,10 @@ fn a_queued_prompt_is_persisted_too() {
     let store = store("queued");
     let mut ed = editor_with(&store);
     // The App's queued/steer path calls the same `push_history_entry`.
-    ed.push_history_entry("queued prompt".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("queued prompt".to_string()));
     let restarted = editor_with(&store);
     assert_eq!(
-        restarted.history().collect::<Vec<_>>(),
+        restarted.history_texts().collect::<Vec<_>>(),
         vec!["queued prompt"]
     );
     cleanup(&store);
@@ -269,7 +269,7 @@ fn a_queued_prompt_is_persisted_too() {
 fn the_store_is_only_read_once_per_editor() {
     let store = store("once");
     let mut first = editor_with(&store);
-    first.push_history_entry("shared".to_string(), None, Vec::new());
+    first.push_history_entry(HistoryEntry::new("shared".to_string()));
 
     let mut second = editor_with(&store);
     assert_eq!(second.history_len(), 1);
@@ -330,7 +330,7 @@ fn the_draft_replaced_by_a_recall_keeps_its_own_chips() {
     let mut ed = Editor::new();
     ed.insert_str("typed ");
     ed.insert_image(image("draft-image"));
-    ed.push_history_entry("older prompt".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("older prompt".to_string()));
 
     // Recall over a draft that carries a chip: the draft is saved, not lost.
     // `Up` only reaches the history from the draft's first visual column, so
@@ -417,7 +417,7 @@ fn searching(history: &[&str], query: &str) -> Editor {
     // Oldest first, exactly like the persistent file: `push_history_entry`
     // puts each new prompt at the front.
     for entry in history {
-        ed.push_history_entry((*entry).to_string(), None, Vec::new());
+        ed.push_history_entry(HistoryEntry::new((*entry).to_string()));
     }
     assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
     assert!(ed.history_search_active());
@@ -440,7 +440,7 @@ fn type_text_search(ed: &mut Editor, query: &str) {
 #[test]
 fn opening_the_search_leaves_the_draft_alone_until_a_query_is_typed() {
     let mut ed = Editor::new();
-    ed.push_history_entry("older".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("older".to_string()));
     ed.insert_str("my draft");
     assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
     assert!(ed.history_search_active());
@@ -520,7 +520,7 @@ fn a_wider_query_restarts_the_scan_from_the_newest_match() {
 #[test]
 fn a_miss_restores_the_draft_and_keeps_the_search_open() {
     let mut ed = Editor::new();
-    ed.push_history_entry("known prompt".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("known prompt".to_string()));
     ed.insert_str("half typed");
     assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
     type_text_search(&mut ed, "zz");
@@ -540,7 +540,7 @@ fn a_miss_restores_the_draft_and_keeps_the_search_open() {
 #[test]
 fn escape_restores_the_exact_pre_search_draft_including_chips() {
     let mut ed = Editor::new();
-    ed.push_history_entry("an older prompt".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("an older prompt".to_string()));
     ed.insert_str("draft ");
     ed.insert_image(image("kept"));
     ed.insert_str(" here");
@@ -559,7 +559,7 @@ fn escape_restores_the_exact_pre_search_draft_including_chips() {
 #[test]
 fn ctrl_c_cancels_the_search_instead_of_clearing_the_draft() {
     let mut ed = Editor::new();
-    ed.push_history_entry("older".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("older".to_string()));
     ed.insert_str("draft");
     assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
     type_text_search(&mut ed, "old");
@@ -571,8 +571,8 @@ fn ctrl_c_cancels_the_search_instead_of_clearing_the_draft() {
 #[test]
 fn enter_accepts_the_preview_as_the_editable_draft() {
     let mut ed = Editor::new();
-    ed.push_history_entry("keep me".to_string(), None, Vec::new());
-    ed.push_history_entry("other".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("keep me".to_string()));
+    ed.push_history_entry(HistoryEntry::new("other".to_string()));
     ed.insert_str("draft");
     assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
     type_text_search(&mut ed, "keep");
@@ -592,8 +592,8 @@ fn a_search_over_a_persistent_history_reaches_last_session_entries() {
     let store = store("search-persist");
     {
         let mut first = editor_with(&store);
-        first.push_history_entry("previous session alpha".to_string(), None, Vec::new());
-        first.push_history_entry("previous session beta".to_string(), None, Vec::new());
+        first.push_history_entry(HistoryEntry::new("previous session alpha".to_string()));
+        first.push_history_entry(HistoryEntry::new("previous session beta".to_string()));
     }
     let mut second = editor_with(&store);
     assert_eq!(second.handle_event(ctrl('r')), EditorAction::Changed);
@@ -605,7 +605,7 @@ fn a_search_over_a_persistent_history_reaches_last_session_entries() {
 #[test]
 fn other_keys_are_swallowed_while_searching() {
     let mut ed = Editor::new();
-    ed.push_history_entry("entry".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("entry".to_string()));
     ed.insert_str("draft");
     assert_eq!(ed.handle_event(ctrl('r')), EditorAction::Changed);
     // A cursor move or a kill chord must not edit the draft under the search.
@@ -774,7 +774,7 @@ fn the_rendered_frame_shows_the_reverse_search_row() {
 fn slash_clear_history_deletes_the_file_and_the_in_session_entries() {
     let store = store("clear");
     let mut ed = editor_with(&store);
-    ed.push_history_entry("kept until cleared".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("kept until cleared".to_string()));
     assert!(fs::metadata(store.path()).is_ok());
 
     ed.clear_persisted_history();
@@ -793,7 +793,7 @@ fn slash_clear_history_deletes_the_file_and_the_in_session_entries() {
 fn clearing_the_composer_keeps_the_file() {
     let store = store("clear-keeps-file");
     let mut ed = editor_with(&store);
-    ed.push_history_entry("still here".to_string(), None, Vec::new());
+    ed.push_history_entry(HistoryEntry::new("still here".to_string()));
     // `/clear` clears the transcript, not the history; the in-memory variant is
     // what `Prompt::reset` uses.
     ed.clear_history();

@@ -1541,6 +1541,11 @@ mod tests {
             "scoped-models",
             "session",
             "export",
+            "import",
+            "share",
+            "changelog",
+            "login",
+            "logout",
             "resume",
             "tree",
             "fork",
@@ -1552,6 +1557,7 @@ mod tests {
             "hotkeys",
             "extensions",
             "reload",
+            "quit",
             "exit",
         ];
         let names: Vec<String> = autocomplete_commands()
@@ -1586,7 +1592,7 @@ mod tests {
             .collect();
         assert_eq!(
             with_hints,
-            ["name", "model", "export", "thinking", "trust", "compact"]
+            ["name", "model", "export", "import", "login", "logout", "thinking", "trust", "compact"]
         );
     }
 

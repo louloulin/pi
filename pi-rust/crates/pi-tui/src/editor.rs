@@ -953,6 +953,20 @@ impl Editor {
         self.history.iter().map(|entry| entry.text.as_str())
     }
 
+    /// Attach a history store, loading its persisted entries into session
+    /// history. Entries are prepended to the in-memory list so the store's
+    /// newest entry appears most recently.
+    pub fn set_history_store(&mut self, store: &crate::history_store::HistoryStore) {
+        for text in crate::history_store::load(store.path()).into_iter().rev() {
+            if self.history.len() >= HISTORY_LIMIT {
+                break;
+            }
+            if !self.history.iter().any(|e| e.text == text) {
+                self.history.push_back(HistoryEntry::new(text));
+            }
+        }
+    }
+
     /// Move the cursor to the previous history entry. Captures the
     /// current draft the first time so `history_next` can restore it.
     pub fn history_prev(&mut self) -> EditorAction {

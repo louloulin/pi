@@ -386,14 +386,14 @@ fn the_wheel_inside_the_list_steers_the_highlight_and_not_the_log() {
     let log_top_row = row_text(&buf, 0);
 
     assert_eq!(
-        app.step(InputEvent::wheel_at(false, false, x, y)),
+        app.step(InputEvent::wheel(false, false, x, y)),
         StepOutcome::Redraw,
         "one notch down moves the highlight"
     );
     assert_eq!(selected(&app), 3, "the highlight followed the wheel");
 
     assert_eq!(
-        app.step(InputEvent::wheel_at(true, false, x, y)),
+        app.step(InputEvent::wheel(true, false, x, y)),
         StepOutcome::Redraw,
         "and one notch up moves it back"
     );
@@ -419,7 +419,7 @@ fn a_wheel_notch_that_cannot_move_the_highlight_still_does_not_scroll_the_log() 
     // Down is already at the end of the list: the notch is swallowed, the log
     // stays put (upstream clamps instead of wrapping, unlike `Up` / `Down`).
     assert_eq!(
-        app.step(InputEvent::wheel_at(false, false, x, y)),
+        app.step(InputEvent::wheel(false, false, x, y)),
         StepOutcome::Idle
     );
     assert_eq!(selected(&app), 4);
@@ -427,7 +427,7 @@ fn a_wheel_notch_that_cannot_move_the_highlight_still_does_not_scroll_the_log() 
 
     // One notch up does move, and still does not scroll the log.
     assert_eq!(
-        app.step(InputEvent::wheel_at(true, false, x, y)),
+        app.step(InputEvent::wheel(true, false, x, y)),
         StepOutcome::Redraw
     );
     assert_eq!(selected(&app), 3);
@@ -447,7 +447,7 @@ fn the_wheel_outside_the_list_still_scrolls_the_log() {
 
     // One row above the list is the transcript's own row.
     assert_eq!(
-        app.step(InputEvent::wheel_at(true, false, 5, list_top - 1)),
+        app.step(InputEvent::wheel(true, false, 5, list_top - 1)),
         StepOutcome::Redraw,
         "a notch over the transcript scrolls it"
     );

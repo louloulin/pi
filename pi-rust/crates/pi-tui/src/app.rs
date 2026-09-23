@@ -5471,6 +5471,23 @@ impl App {
         Some((start + row, col))
     }
 
+    /// Returns the selected text in the composer, if any.
+    /// Currently the composer has no selection model, so this always returns `None`.
+    pub fn composer_selection_text(&self) -> Option<String> {
+        None
+    }
+
+    /// Returns the last recorded composer area as `(x, y, width, height)`,
+    /// or `(0, 0, 0, 0)` if no frame has been painted yet.
+    pub fn composer_area(&self) -> (u16, u16, u16, u16) {
+        (
+            self.composer_origin.0.load(Ordering::Relaxed),
+            self.composer_origin.1.load(Ordering::Relaxed),
+            self.composer_size.0.load(Ordering::Relaxed),
+            self.composer_size.1.load(Ordering::Relaxed),
+        )
+    }
+
     /// Record the composer rectangle for the pointer hit test, or clear it
     /// when the frame painted no composer (`None`).
     fn record_composer_area(&self, rect: Option<Rect>) {
