@@ -133,7 +133,10 @@ fn frame_dump_resume_hint_mode() {
     // Exactly one row: the transcript is deliberately dropped, the previous
     // screen comes back instead.
     assert_eq!(rows(&exit).len(), 1, "{exit:?}");
-    dump("LUM-1455 fullscreenExitOutput=resume-hint：只写提示，屏幕上恢复原内容", &rows(&exit));
+    dump(
+        "LUM-1455 fullscreenExitOutput=resume-hint：只写提示，屏幕上恢复原内容",
+        &rows(&exit),
+    );
 }
 
 #[test]
