@@ -47,17 +47,23 @@ TABLES = (
     ),
 )
 
+#: The `app.*` consumed-hint list. It lives in the `pi-tui` table file but is a
+#: *registry*, not a consumer: counting its literals would report every listed
+#: id as consumed even after its handler is deleted (LUM-1263 made
+#: `app_action_coverage.py` skip the same file for the same reason).
+CONSUMED_LIST = pathlib.Path("crates/pi-tui/src/keybindings.rs")
+
 #: Ids that are known to have no consumer yet. `--check` fails when this set
 #: and reality disagree in **either** direction: a new dead id regresses, and
 #: a fixed id must be removed from here in the same commit (the reverse test
 #: `app_action_coverage.py --check-consumed` documents for its own list).
-KNOWN_UNCONSUMED = frozenset(
-    {
-        # The session-tree rename UI does not exist yet; tracked as the last
-        # silent `app.*` action in `docs/RUST_TS_PARITY_METRICS.md` §0.13.
-        "app.tree.editLabel",
-    }
-)
+#:
+#: **Emptied by LUM-1263**, which wired the last one
+#: (`app.tree.editLabel` — the `/tree` rename editor, claimed by
+#: `interactive.rs::handle_picker_key`). The set is kept as the tripwire for the
+#: next dead id: a new definition with no consumer fails `--check` until it is
+#: wired or listed here.
+KNOWN_UNCONSUMED: frozenset[str] = frozenset()
 
 
 def defined(repo: pathlib.Path, path: pathlib.Path, pattern: re.Pattern[str]) -> list[str]:
@@ -70,7 +76,7 @@ def consumers(repo: pathlib.Path, definitions: pathlib.Path, ids: list[str]) -> 
     hits: dict[str, list[str]] = {id_: [] for id_ in ids}
     for path in sorted((repo / "crates").rglob("*.rs")):
         rel = path.relative_to(repo)
-        if rel == definitions or "tests" in rel.parts:
+        if rel == definitions or rel == CONSUMED_LIST or "tests" in rel.parts:
             continue
         product = strip_test_items(path.read_text(encoding="utf-8", errors="replace"))
         for id_ in ids:

@@ -405,6 +405,14 @@ pub struct Selector {
     /// the coding agent and hands the already-formatted lines to the
     /// shared list so the layout stays in one place.
     footer: Vec<String>,
+    /// Rows drawn *instead of* the item list, if any.
+    ///
+    /// Upstream's `/tree` label editor replaces the tree list with a
+    /// one-line `Input` (`tree-selector.ts:1364-1382`, `treeContainer.clear()`
+    /// and `labelInputContainer.addChild`). This port feeds the equivalent
+    /// rows through here so the shared list keeps owning the title, the
+    /// rule and the footer, and the caller keeps owning the input state.
+    body: Option<Vec<String>>,
 }
 
 impl Selector {
@@ -422,6 +430,7 @@ impl Selector {
             cursor: 0,
             initial_cursor: 0,
             footer: Vec::new(),
+            body: None,
         }
     }
 
@@ -437,6 +446,21 @@ impl Selector {
     /// The key-hint lines configured by [`Selector::with_footer`].
     pub fn footer(&self) -> &[String] {
         &self.footer
+    }
+
+    /// Builder: draw these rows instead of the item list.
+    ///
+    /// The rows are rendered verbatim with no styling, exactly like the
+    /// footer lines are rendered muted — the caller owns the wording. The
+    /// title and the `─` rule stay drawn, so the modal identity survives.
+    pub fn with_body(mut self, lines: Vec<String>) -> Self {
+        self.body = Some(lines);
+        self
+    }
+
+    /// The body rows configured by [`Selector::with_body`], if any.
+    pub fn body(&self) -> Option<&[String]> {
+        self.body.as_deref()
     }
 
     /// Builder: route typed characters into the filter.
@@ -907,6 +931,16 @@ impl Selector {
             "─".repeat(width.min(40)),
             SpanStyle::fg(ThemeColor::BorderMuted),
         )]);
+        // A body override replaces the list the way upstream's `/tree` label
+        // editor replaces its tree container: the title, the rule and the
+        // footer stay, the rows in between change.
+        if let Some(body) = &self.body {
+            for line in body {
+                lines.push(vec![StyledSpan::new(line.clone(), SpanStyle::default())]);
+            }
+            self.append_footer(&mut lines);
+            return lines;
+        }
         if self.filtered.is_empty() {
             // An empty list and a filter without matches read differently
             // to the user, so they keep different lines.
@@ -1063,6 +1097,39 @@ mod tests {
             sel.handle_key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
             SelectorAction::None,
         );
+    }
+
+    #[test]
+    fn a_body_override_replaces_the_item_rows_and_keeps_title_and_footer() {
+        let sel = Selector::new("Session tree", items())
+            .with_footer(vec!["  footer".to_string()])
+            .with_body(vec![
+                "  Label (empty to remove):".to_string(),
+                "  a▍b".to_string(),
+            ]);
+        assert_eq!(sel.body().map(<[String]>::len), Some(2));
+        let lines = sel.render_lines(40);
+        assert_eq!(lines[0], "Session tree", "the title stays: {lines:#?}");
+        assert!(
+            lines.iter().any(|l| l.contains("Label (empty to remove):")),
+            "{lines:#?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("a▍b")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l == "  footer"), "{lines:#?}");
+        for item in items() {
+            assert!(
+                !lines.iter().any(|l| l.contains(&item.label)),
+                "the list is not drawn behind the body: {lines:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_body_the_item_rows_are_drawn() {
+        let sel = Selector::new("Pick", items());
+        assert!(sel.body().is_none());
+        let lines = sel.render_lines(40);
+        assert!(lines.iter().any(|l| l.contains("gpt-4o")), "{lines:#?}");
     }
 
     #[test]
