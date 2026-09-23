@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/louloulin/pi.git"
 description = "Rust rewrite of the Pi coding agent harness with WASM plugin compatibility"
