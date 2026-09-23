@@ -36,6 +36,20 @@ pub struct StatusData {
     pub model: String,
     /// Session identifier shown in the middle of the bar.
     pub session_id: String,
+    /// Working directory the session runs in, absolute and host-supplied.
+    ///
+    /// When present the footer grows a row above the stats line and prints it
+    /// the way upstream's `FooterComponent` does — home shortened to `~`,
+    /// joined with the git branch and the session name
+    /// (`packages/coding-agent/src/modes/interactive/components/footer.ts:119-127`).
+    /// `None` renders no location row at all (a host with no working
+    /// directory has nothing to say there), which is also why the default
+    /// frame stays single-row.
+    pub cwd: Option<String>,
+    /// Current git branch for [`StatusData::cwd`], or `None` outside a repo
+    /// or on a detached HEAD — exactly upstream's `getGitBranch()` contract
+    /// (`core/footer-data-provider.ts:126-132`).
+    pub git_branch: Option<String>,
     /// Display name set with `/name`, shown in place of the identifier
     /// when present — upstream's footer shows `pwd • name` instead of the
     /// session id (`footer.ts:122-126`).
@@ -74,6 +88,8 @@ impl StatusData {
             model: model.into(),
             session_id: session_id.into(),
             session_name: None,
+            cwd: None,
+            git_branch: None,
             input_tokens: 0,
             output_tokens: 0,
             cache_read: 0,
@@ -101,6 +117,43 @@ impl StatusData {
     pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
         self.session_name = Some(name.into());
         self
+    }
+
+    /// Set the working directory shown on the footer's location row.
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Set the git branch joined onto the location row.
+    pub fn with_git_branch(mut self, branch: impl Into<String>) -> Self {
+        self.git_branch = Some(branch.into());
+        self
+    }
+
+    /// The footer's first row (`~/repo (main) • session name`), or `None`
+    /// when no working directory is known.
+    ///
+    /// Upstream builds the identical string in `FooterComponent::render`
+    /// (`footer.ts:119-127`): the cwd with the home directory folded to `~`,
+    /// then ` (branch)` when git reports one, then ` • name` when `/name` set
+    /// one.
+    pub fn location_line(&self) -> Option<String> {
+        let cwd = self.cwd.as_deref().filter(|cwd| !cwd.is_empty())?;
+        let mut line = format_cwd_for_footer(
+            cwd,
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok()
+                .as_deref(),
+        );
+        if let Some(branch) = self.git_branch.as_deref().filter(|b| !b.is_empty()) {
+            line.push_str(&format!(" ({branch})"));
+        }
+        if let Some(name) = self.session_name.as_deref().filter(|n| !n.is_empty()) {
+            line.push_str(&format!(" • {name}"));
+        }
+        Some(line)
     }
 
     /// Set the trailing hint.
@@ -148,9 +201,46 @@ impl StatusBar {
         Self
     }
 
+    /// How many rows [`StatusBar::render_lines`] draws for this snapshot.
+    ///
+    /// Two when the host supplied a working directory (the location row plus
+    /// the stats row, upstream's `[pwdLine, statsLine]`), one otherwise. The
+    /// App budgets exactly this many rows for the status region, so the
+    /// transcript gives up a row only when there is a row to draw.
+    pub fn line_count(&self, data: &StatusData) -> u16 {
+        if data.location_line().is_some() {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Every footer row as themed spans: the location row (when the host
+    /// supplied a cwd) above [`StatusBar::render_styled_line`]'s stats row.
+    pub fn render_lines(&self, data: &StatusData, width: u16) -> Vec<StyledLine> {
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(2);
+        if let Some(location) = data.location_line() {
+            lines.push(location_span(&location, width));
+        }
+        lines.push(self.render_styled_line(data, width));
+        lines
+    }
+
+    /// [`StatusBar::render_lines`] as plain, space-padded text rows.
+    pub fn render_lines_plain(&self, data: &StatusData, width: u16) -> Vec<String> {
+        self.render_lines(data, width)
+            .iter()
+            .map(|line| plain_text(line))
+            .collect()
+    }
+
     /// Render the status bar as a single string for a given width.
+    ///
+    /// Multi-row output (a location row plus the stats row) is joined with
+    /// `\n`; a snapshot without a working directory is exactly the one row
+    /// this has always returned.
     pub fn render(&self, data: &StatusData, width: u16) -> String {
-        plain_text(&self.render_styled_line(data, width))
+        self.render_lines_plain(data, width).join("\n")
     }
 
     /// Themed variant of [`StatusBar::render`].
@@ -158,15 +248,21 @@ impl StatusBar {
     /// The visible text is identical to the plain render; the model is
     /// `accent`, the session id `muted`, and the token/usage segment `dim`.
     /// Upstream's two-line footer dims the whole stats line
-    /// (`footer.ts:236-240`); this single-line bar keeps the model readable by
-    /// putting it in `accent` instead — a deliberate simplification.
+    /// (`footer.ts:236-240`); this bar keeps the model readable by putting it
+    /// in `accent` instead — a deliberate simplification. The location row is
+    /// dim, like upstream's `theme.fg("dim", pwd)`. Multi-row output is
+    /// joined with `\n`.
     pub fn render_themed(
         &self,
         data: &StatusData,
         width: u16,
         styles: &SelectListStyles<'_>,
     ) -> String {
-        themed_text(&self.render_styled_line(data, width), styles.theme())
+        self.render_lines(data, width)
+            .iter()
+            .map(|line| themed_text(line, styles.theme()))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Lay the bar out as theme-slot spans within `width` columns.
@@ -262,11 +358,7 @@ impl StatusBar {
             ));
         }
         let right_len = line_width(&right);
-        let session = match data.session_name.as_deref().filter(|name| !name.is_empty()) {
-            Some(name) => format!("  {name}  "),
-            None if data.session_id.is_empty() => String::new(),
-            None => format!("  {}  ", data.session_id),
-        };
+        let session = session_segment(data, data.location_line().is_some());
 
         let left_len = line_width(&left);
         let session_len = columns(&session);
@@ -306,8 +398,13 @@ impl StatusBar {
         area: ratatui::layout::Rect,
         buf: &mut ratatui::buffer::Buffer,
     ) {
-        let line = self.render(data, area.width);
-        write_plain_row(buf, area.x, area.y, area.width, &line);
+        for (offset, line) in self.render_lines_plain(data, area.width).iter().enumerate() {
+            let y = area.y + offset as u16;
+            if y >= area.y + area.height {
+                break;
+            }
+            write_plain_row(buf, area.x, y, area.width, line);
+        }
     }
 
     /// Themed variant of [`StatusBar::render_to_buffer`]: each written cell
@@ -320,8 +417,13 @@ impl StatusBar {
         buf: &mut ratatui::buffer::Buffer,
         theme: &Theme,
     ) {
-        let line = self.render_styled_line(data, area.width);
-        write_styled_line(buf, area.x, area.y, area.width, &line, theme);
+        for (offset, line) in self.render_lines(data, area.width).iter().enumerate() {
+            let y = area.y + offset as u16;
+            if y >= area.y + area.height {
+                break;
+            }
+            write_styled_line(buf, area.x, y, area.width, line, theme);
+        }
     }
 }
 
@@ -425,11 +527,12 @@ fn narrow_zones(data: &StatusData) -> Vec<Zone> {
         zones.push(Zone::Busy);
     }
     zones.push(Zone::Model);
-    if data
+    let has_name = data
         .session_name
         .as_deref()
-        .is_some_and(|name| !name.is_empty())
-        || !data.session_id.is_empty()
+        .is_some_and(|name| !name.is_empty());
+    if (has_name || !data.session_id.is_empty())
+        && !session_segment(data, data.location_line().is_some()).is_empty()
     {
         zones.push(Zone::Session);
     }
@@ -498,6 +601,79 @@ fn zone_body(data: &StatusData, zone: Zone) -> StyledLine {
             data.hint.clone().unwrap_or_default(),
             SpanStyle::fg(ThemeColor::Dim),
         )],
+    }
+}
+
+/// The stats row's middle identity segment.
+///
+/// Upstream's `FooterComponent` has no such segment: the session name lives on
+/// the `pwd` row (`footer.ts:122-126`) and the stats row is stats + model. This
+/// port keeps the segment for the unnamed case — a single-row footer with no
+/// location row still has to say which session it is — but suppresses it when
+/// the location row is drawn *and* carries the name, so `/name` never appears
+/// twice on adjacent rows.
+fn session_segment(data: &StatusData, location_present: bool) -> String {
+    let name = data.session_name.as_deref().filter(|name| !name.is_empty());
+    if location_present && name.is_some() {
+        return String::new();
+    }
+    match name {
+        Some(name) => format!("  {name}  "),
+        None if data.session_id.is_empty() => String::new(),
+        None => format!("  {}  ", data.session_id),
+    }
+}
+
+/// The footer's location row as one dim span, truncated to `width` columns
+/// with the crate's `…` marker when the path does not fit.
+fn location_span(location: &str, width: u16) -> StyledLine {
+    let width = width as usize;
+    if width == 0 {
+        return StyledLine::new();
+    }
+    if columns(location) <= width {
+        return vec![StyledSpan::new(
+            location.to_string(),
+            SpanStyle::fg(ThemeColor::Dim),
+        )];
+    }
+    let (prefix, _) = prefix_columns(location, width.saturating_sub(1));
+    vec![StyledSpan::new(
+        format!("{prefix}{ELLIPSIS}"),
+        SpanStyle::fg(ThemeColor::Dim),
+    )]
+}
+
+/// Fold a working directory's home prefix to `~` — upstream
+/// `formatCwdForFooter` (`footer.ts:38-51`).
+///
+/// Upstream resolves both paths and then asks `path.relative` whether the cwd
+/// is inside the home directory. This port compares the two strings after
+/// normalizing separators to `/` and dropping a trailing one, which is the
+/// same predicate for the absolute paths every host supplies. A path that
+/// merely *starts with* the home string (`/home/ada2` vs `/home/ada`) is not
+/// folded, just like upstream.
+///
+/// Deliberate deviation: the folded form uses `/` on every platform rather
+/// than the platform separator. The rest of the footer already speaks in
+/// terminal columns, and a Windows path reads the same to a human either way.
+pub fn format_cwd_for_footer(cwd: &str, home: Option<&str>) -> String {
+    let Some(home) = home.filter(|home| !home.is_empty()) else {
+        return cwd.to_string();
+    };
+    let normalize = |path: &str| path.replace('\\', "/");
+    let trimmed = |path: String| path.trim_end_matches('/').to_string();
+    let cwd_norm = trimmed(normalize(cwd));
+    let home_norm = trimmed(normalize(home));
+    if home_norm.is_empty() {
+        return cwd.to_string();
+    }
+    if cwd_norm == home_norm {
+        return "~".to_string();
+    }
+    match cwd_norm.strip_prefix(&format!("{home_norm}/")) {
+        Some(rest) if !rest.is_empty() => format!("~/{rest}"),
+        _ => cwd.to_string(),
     }
 }
 
@@ -685,6 +861,97 @@ mod tests {
         let line = bar.render(&data, 60);
         assert!(line.contains("my session"), "{line}");
         assert!(!line.contains("abc-123"), "{line}");
+    }
+
+    // -----------------------------------------------------------------
+    // LUM-1466 — upstream's two-row footer: `pwd (branch) • name` above the
+    // stats row (`footer.ts:119-127,230-231`).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn folds_the_home_prefix_like_upstream() {
+        // `footer.ts:38-51`.
+        assert_eq!(
+            format_cwd_for_footer("/home/ada/repo", Some("/home/ada")),
+            "~/repo"
+        );
+        assert_eq!(format_cwd_for_footer("/home/ada", Some("/home/ada")), "~");
+        assert_eq!(
+            format_cwd_for_footer("/home/ada/repo/", Some("/home/ada/")),
+            "~/repo"
+        );
+        // No home, or a path outside it, stays absolute.
+        assert_eq!(format_cwd_for_footer("/srv/repo", None), "/srv/repo");
+        assert_eq!(format_cwd_for_footer("/srv/repo", Some("")), "/srv/repo");
+        // A sibling that merely starts with the home string is not folded.
+        assert_eq!(
+            format_cwd_for_footer("/home/ada2/repo", Some("/home/ada")),
+            "/home/ada2/repo"
+        );
+        // Windows separators fold too, and the folded form reads in `/`.
+        assert_eq!(
+            format_cwd_for_footer("C:\\Users\\ada\\repo", Some("C:\\Users\\ada")),
+            "~/repo"
+        );
+    }
+
+    #[test]
+    fn a_cwd_gives_the_footer_a_location_row() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "abc-123")
+            .with_cwd("/srv/repo")
+            .with_git_branch("main")
+            .with_session_name("demo");
+        assert_eq!(bar.line_count(&data), 2);
+        assert_eq!(
+            data.location_line().as_deref(),
+            Some("/srv/repo (main) • demo")
+        );
+        let lines = bar
+            .render(&data, 80)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "/srv/repo (main) • demo");
+        // The name moved up, so the stats row does not repeat it…
+        assert!(!lines[1].contains("demo"), "{}", lines[1]);
+        // …but it still carries the model and the counters.
+        assert!(lines[1].starts_with("gpt-4o"), "{}", lines[1]);
+        assert!(lines[1].contains("in 0 out 0"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn without_a_cwd_the_footer_stays_one_row() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "abc-123")
+            .with_git_branch("main")
+            .with_session_name("demo");
+        // A branch with no directory to hang it on renders nothing extra.
+        assert_eq!(bar.line_count(&data), 1);
+        assert_eq!(data.location_line(), None);
+        assert_eq!(bar.render(&data, 80).lines().count(), 1);
+        // An unnamed session keeps its id on the stats row even with a cwd.
+        let data = StatusData::new("gpt-4o", "abc-123").with_cwd("/srv/repo");
+        let lines = bar.render(&data, 80);
+        assert!(lines.contains("abc-123"), "{lines}");
+        assert!(!lines.contains('('), "no branch, no suffix: {lines}");
+    }
+
+    #[test]
+    fn a_long_location_row_is_marked_when_it_is_cut() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "s")
+            .with_cwd("/home/ada/very/deep/inside/a/long/repository")
+            .with_git_branch("feature/a-long-branch");
+        let lines = bar
+            .render(&data, 20)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines[0].chars().count(), 20, "{}", lines[0]);
+        assert!(lines[0].ends_with('…'), "{}", lines[0]);
+        assert!(lines[1].starts_with("gpt-4o"), "{}", lines[1]);
     }
 
     #[test]

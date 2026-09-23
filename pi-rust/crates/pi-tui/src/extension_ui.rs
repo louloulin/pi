@@ -28,7 +28,8 @@
 //!
 //! Height budgeting (`plan_chrome`):
 //!
-//! * The status row (1 row) and at least one message row are reserved first;
+//! * The status region (1 row, or 2 when the host supplied a working
+//!   directory — LUM-1466) and at least one message row are reserved first;
 //!   the message view therefore never disappears, however tall the extension
 //!   regions are.
 //! * The editor region is reserved **next**, before the header. The prompt is
@@ -47,7 +48,8 @@
 //!   list, the composer and three transcript rows, and says so on one dim row
 //!   (LUM-1266). The tail-dropping rule below still governs an extension header
 //!   installed with `ctx.ui.setHeader`.
-//! * The status row (1 row) and at least one message row are reserved first;
+//! * The status region (1 row, or 2 when the host supplied a working
+//!   directory — LUM-1466) and at least one message row are reserved first;
 //!   the message view therefore never disappears, however tall the extension
 //!   regions are.
 //! * The editor region is reserved **next**, before the header. The prompt is
@@ -319,6 +321,7 @@ impl ExtensionUi {
             footer: render_optional(self.footer.as_deref(), width),
             editor: self.editor_lines(width),
             overlay: self.overlay_layer(width),
+            status: 1,
         }
     }
 
@@ -403,6 +406,12 @@ pub(crate) struct ExtensionFrame {
     pub(crate) editor: Option<Vec<StyledLine>>,
     /// The topmost `custom` overlay, if one is visible.
     pub(crate) overlay: Option<OverlayLayer>,
+    /// Rows the built-in status bar asked for (1, or 2 when it has a
+    /// location row to draw). The App sets this from
+    /// [`crate::status::StatusBar::line_count`]; [`plan_chrome`] reserves
+    /// exactly this many rows so a host that never supplies a working
+    /// directory keeps the single-row geometry.
+    pub(crate) status: u16,
 }
 
 /// A visible `custom` overlay and the options that place it.
@@ -435,8 +444,9 @@ pub(crate) struct ChromeLayout {
 /// extension regions.
 ///
 /// See the module docs for the policy; the short version is "reserve the
-/// status row, the prompt and one message row, then hand out the rest in
-/// render order, truncating the tail".
+/// status region ([`ExtensionFrame::status`] rows), the prompt and one
+/// message row, then hand out the rest in render order, truncating the
+/// tail".
 ///
 /// `editor_min_rows` is the smallest number of rows the built-in prompt
 /// needs to render its current buffer at the App's current width. Pass
@@ -449,7 +459,9 @@ pub(crate) fn plan_chrome(
     frame: &ExtensionFrame,
     editor_min_rows: u16,
 ) -> ChromeLayout {
-    let status = 1u16.min(total);
+    // `frame.status` is the built-in status bar's own row count: 1, or 2 when
+    // it draws upstream's `pwd` row above the stats row (LUM-1466).
+    let status = frame.status.max(1).min(total);
     // One row stays with the message view so it never vanishes.
     let mut budget = total.saturating_sub(status).saturating_sub(1);
     let mut take = |want: u16| {
@@ -758,6 +770,7 @@ mod tests {
             footer: lines(footer),
             editor: editor.map(lines),
             overlay: None,
+            status: 1,
         }
     }
 
