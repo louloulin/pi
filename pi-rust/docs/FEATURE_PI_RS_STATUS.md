@@ -15837,3 +15837,55 @@ LUM-1461 / LUM-1263 为 `in_review`（**本轮已合入**）。因此合并后�
 （上游 `footer.ts:243-251`；Rust 侧仍是 `ERR_PI_UI_UNSUPPORTED`）。创建为 `backlog`，
 等 LUM-1467 合入、本轮推送成功后再提升为 `todo`（两条都要动 `status.rs` / `plan_chrome`，不并发）。
 未派第二条的理由与「同一屏几何不并发」的判据写在 `docs/LUM1469_PENDING_QUEUE.md` §7。
+
+## LUM-1481 round — `ctx.ui.setStatus` 落地为 footer 第三行（插件生态 × TUI 交叉点）+ 并入两条未推交付；`pi-tui` 1198/0；零派发（槽位 5/3 已超）
+
+### 一、本轮做了什么（issue 点名的四件事）
+
+1. **TUI 审计**：对照上游 pi-ts 第一手源码，定位「扩展状态行」这一面：
+   `ctx.ui.setStatus(key, text)` 的文本进 `FooterDataProvider.extensionStatuses`
+   （`core/footer-data-provider.ts:132-147`，`undefined` 删键），footer 把它 push 成**第三行**
+   （`components/footer.ts:236-251`：按 key 排序 → `sanitizeStatusText` → 空格连接 →
+   `truncateToWidth`）。Rust 端口此前把它记成 unsupported：`pi-ext-shim.mjs:1100` 的
+   unsupported 列表 + `pi-tui/src/app.rs` 的 `ctx.ui` 对照表，`git grep setStatus -- pi-rust/crates`
+   只有「不支持」的文档与告警 —— 即**插件报状态的通道在 Rust 端口完全不存在**。
+2. **缺口修复**：`StatusData::extension_statuses` + `StatusBar::line_count`/`render_lines`
+   的数据驱动第三行；`UiRegionHost::set_status` + `RegionCommand::Status` +
+   `handle_region_call("setStatus")`；shim 的 `setStatus` 真正转发并从 unsupported 列表移出，
+   同一份 map 喂给 `footerData.getExtensionStatuses()`；`RegionOp::Status` → `App::set_extension_status`。
+3. **截图**：3 张 frame-buffer（100×30 有状态 / 100×30 清空回归 / 44×16 超宽截断）。
+4. **推送合并**：本轮分支合入 `feature/pi.rs`，**并把两条 `in_review` 但从未推入远程的交付救回**：
+   LUM-1467（footer stats 行，`fe8b6d35e`）与 LUM-1469（排队输入可见面，`4a60bb5da`）。
+
+### 二、门禁与数字（本机实测）
+
+* `cargo test --offline -p pi-tui -j 8`：**1198 passed / 0 failed**
+  （同机同工具链基线 `377e1aa3c` = **1186/0** → 本轮 **+12**）。
+* `cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast`：**844 / 33**
+  （基线 843 / 33，37 个失败名 `comm` 双向为空 → **新增失败 0**）；新增通过 1 条 = 本轮驱动级用例。
+* `cargo test --offline -p pi-extensions -j 8 --no-fail-fast`：**132 / 5**
+  （5 条 panic 全是 `ENOENT: open '/dev/urandom'`，Windows 环境类，与本轮面无关；本轮新用例 ok）。
+* `cargo fmt --all -- --check` clean；`cargo clippy --offline -p pi-tui --all-targets -- -D warnings` **exit 0**。
+* **反向验证**：删掉 `StatusBar::line_count` 的扩展状态增量 → 帧测试 **7 条里 5 条红** +
+  驱动级用例红；恢复后全绿。
+* 新增测试 **14 条**、新增帧 **3 张**；`docs/LUM1481_EXTENSION_STATUS.md` 是本轮审计全文。
+
+### 三、Rust↔TS 口径复测
+
+* 纯代码规模 **94.6%**（144,896 / 153,106；本轮自身 +258 行 src）；测试 **51.9%**（2,887 / 5,563）。
+* `app.*` 接线 **44/44 = 100%**；扩展事件 36/36 声明 + 36/36 构造点；TUI 模块 36/42 = 85.7%。
+* 本轮**新量**一条以前没人量过的轴：`ctx.ui` 显示通路 —— **区域类 5/5**（本轮把 `setStatus`
+  从缺变成接通），**文本类 0/3**（`setTitle` / `setEditorText` / `setTheme` 仍是 no-op）。
+* 加权完成度 **87.2%**（87.1 → 87.155）。**诚实读法**：+0.05pt 全部来自测试轴；
+  第 9 轴（扩展宿主能力 95%）与第 6 轴（视觉保真 90%）**都不上调**，理由写在
+  `RUST_TS_PARITY_METRICS.md` §0.22。
+
+### 四、槽位 / 派发
+
+开工时 `multica daemon status --output json` 实测 `running_task_count = 5`（≥「最多 3 个任务
+同时运行」的上限）；本仓在办面是 LUM-1467 与 LUM-1469，**两条本轮都已合入**。
+
+**零派发**：槽位已超上限，且本轮的面（`status.rs` 的行数预算）与任何 footer / chrome 面
+正面冲突。下一轮第一顺位（不派 run）已单子化在 `docs/LUM1481_EXTENSION_STATUS.md` §7：
+`setTitle`（`OSC 2`，复用 `hyperlink.rs` 的写序列先例）→ `footerData.getGitBranch()` 的
+host→JS 查询通道。

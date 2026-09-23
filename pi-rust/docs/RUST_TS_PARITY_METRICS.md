@@ -1182,3 +1182,53 @@ all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input
 **诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，证明「画在哪一格、
 内容是什么」，**不证明按键/字节时序**；时序与几何由 17 条 App/驱动级用例覆盖。
 本轮审计全文见 `docs/LUM1469_PENDING_QUEUE.md`（含 §6.1 两条顺带发现的既有缺陷与 §8 五条有意偏差）。
+
+### 0.22 LUM-1481 复测：`ctx.ui.setStatus` 落地为 footer 第三行（区域类显示通路 5/5）；加权 **87.2%**（87.155%）
+
+**量的是什么**：上游 `ctx.ui.setStatus(key, text)` 的显示通路。上游把它渲染成 footer 的
+**第三行**（`footer.ts:243-251`：按 key 排序、`sanitizeStatusText`、空格连接、`truncateToWidth`），
+宿主保持规范 map（`footer-data-provider.ts:140-147`：`undefined` 删键）。Rust 端口此前把
+`setStatus` 记成 inert no-op（shim 的 unsupported 列表 + `ctx.ui` 对照表），本轮把它接通到
+真 TUI，并让自定义 footer 通过 `footerData.getExtensionStatuses()` 读到同一份（副本）map。
+
+基线 = `377e1aa3c`（本分支并入 LUM-1467 / LUM-1469 之后的 tip，两条 `in_review` 交付此前
+**从未推入远程**）。
+
+| 口径 | 本轮 | 基线 `377e1aa3c` |
+|---|---|---|
+| 纯代码规模（src↔src） | **94.6%**（144,896 / 153,106） | 94.5%（144,638 / 153,106） |
+| 测试规模（#\[test\] vs `it(`/`test(`） | **51.9%**（2,887 / 5,563） | 51.7%（2,873 / 5,563） |
+| `pi-tui` 全量 | **1,198 / 0** | 1,186 / 0 |
+| `pi-coding-agent` 全量 | **844 / 33** | 843 / 33（失败名逐条相同） |
+| `pi-extensions` 全量 | 132 / 5（全为 `/dev/urandom` 环境类） | 同 |
+| TUI 模块面 | 36 / 42 = 85.7% | 同 |
+| `app.*` 接线 | 44 / 44 = 100% | 同 |
+| 扩展生命周期事件 | 36/36 声明 + 36/36 构造点 | 同 |
+| **`ctx.ui` 显示通路**（本轮新量） | 区域类 **5/5**（`setWidget`/`setHeader`/`setFooter`/`setEditorComponent`/`setStatus`）、文本类 **0/3** | 区域类 4/5 |
+| 轴 5 TUI 交互面 | (0.857 + 1.000)/2 = **92.9%** | 同 |
+| 轴 12 测试与门禁强度 | 2,887 / 5,563 = **0.5190** | 2,873 / 5,563 = 0.5165 |
+| 加权完成度 | **87.2%**（87.155%） | 87.1%（87.111%） |
+
+**为什么总分只动 +0.05pt**：本轮把一条**显示通路**从「不存在」变成「接通」，但它不落在
+13 轴里任何「有没有这个能力」的轴上——第 5 轴量的是模块率与 `app.*` 接线率（两者本轮都没动），
+第 9 轴量的是扩展宿主能力（`setWidget` 等区域早已在位，`setStatus` 是同一层的又一个方法）。
+把它抬到 97% 只值 +0.16pt，且会掩盖真正剩下的缺口（文本类 `setTitle`/`setEditorText`/`setTheme`
+与 host→JS 的 `getGitBranch()` 查询通道）。按 §0.8 / LUM-1418 §6 的规矩，本轮**不改口径**，
+只把新量出来的一行（`ctx.ui` 显示通路）写进上表。
+
+```
+5×1.000 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×0.519 + 3×0.95 = 87.155% ≈ 87.2%
+```
+
+**门禁**（本机 Windows / cargo 1.97.1 / `--offline`）：`cargo fmt --all -- --check` 干净；
+`cargo clippy -p pi-tui --all-targets -- -D warnings` **exit 0**；
+`cargo test -p pi-tui` **1198/0**（基线 1186/0 → +12）；
+`cargo test -p pi-coding-agent --no-fail-fast` **844/33**（基线 843/33，失败集合逐条相同）；
+`cargo test -p pi-extensions --no-fail-fast` **132/5**（5 条 `/dev/urandom`）。
+**反向验证**：删掉 `StatusBar::line_count` 的扩展状态增量 → 帧测试 7 条里 5 条 + 驱动级 1 条红。
+
+**证据分级**：3 张 `docs/screenshots/lum1481-extension-status-*.png`(+`.txt`) 是 frame-buffer
+冻结帧（本机无 `pty`），证明几何与字段内容，**不证明按键时序**；交互时序由 `status.rs` 的
+5 条单测、`tests/lum1481_extension_status.rs` 的 7 条与 `pi-extensions/tests/host.rs` 的
+端到端用例覆盖。本轮细节、上游取证、已知偏差见 `docs/LUM1481_EXTENSION_STATUS.md`。
