@@ -9,7 +9,8 @@ use pi_coding_agent::cli::{Cli, Command};
 use pi_coding_agent::commands::session::new_session_id;
 use pi_coding_agent::config::{
     load_agent_retry_policy_default, load_compaction_settings_default,
-    load_provider_retry_policy_default, load_quiet_startup_default,
+    load_fullscreen_exit_output_default, load_provider_retry_policy_default,
+    load_quiet_startup_default,
 };
 use pi_coding_agent::extensions::ui_bridge::TuiUi;
 use pi_coding_agent::extensions::wiring::{self, ExtensionLoadOptions};
@@ -225,6 +226,10 @@ fn main() -> ExitCode {
                 // `/settings` — the header is a layout decision taken before
                 // the first frame, so it has to be resolved at this point.
                 quiet_startup: cli.no_header || load_quiet_startup_default(),
+                // `fullscreenExitOutput` (`settings.json`) decides what the
+                // session leaves on the terminal when it exits; read here, at
+                // construction, like the rest of the UI slice.
+                exit_output: load_fullscreen_exit_output_default(),
             };
             match runtime.block_on(run_interactive(options)) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -487,11 +492,13 @@ fn load_prompt_templates_for(
     loaded.templates
 }
 
+/// The default session directory (`--session-dir`'s default).
+///
+/// Moved to [`pi_coding_agent::paths::default_session_dir`] so the interactive
+/// exit hint can tell a default directory from a custom one without a second
+/// copy of the rule.
 fn default_session_dir() -> std::path::PathBuf {
-    home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".pi")
-        .join("sessions")
+    pi_coding_agent::paths::default_session_dir()
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {

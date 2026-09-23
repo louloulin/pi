@@ -802,6 +802,65 @@ App 级 `paste_burst` **默认关闭**（驱动 `interactive.rs` 打开），避
 2,755/5,563 = 0.4954 计算，合并后实测 2,782/5,563 = 0.5001 应给 +0.03pt，而不是 +0.05pt；
 剩下的 0.12pt 是它把「口径修正」与「新增用例」一起记到了轴上）。本表只登记**实测**，不重估别轮。
 
+### 0.20 LUM-1455 复测：退出时会话保留（`fullscreenExitOutput` 从「静默忽略」到「真生效」）；加权仍 **86.9%**
+
+**量的是什么**：上游默认「退出后终端里留下整段 transcript + 一行 resume 提示」这条契约，pi-rust 有没有。
+基线取证（限定路径）：
+
+```bash
+$ git grep -n "To resume" b7d93acb5 -- pi-rust/crates | wc -l
+0
+$ git grep -n "fullscreenExitOutput" b7d93acb5 -- pi-rust/crates | wc -l
+0
+$ git grep -n "fullscreen_exit_output" b7d93acb5 -- pi-rust/crates | wc -l
+0
+```
+
+对照上游三处：`interactive-mode.ts:790-812`（`transcript` 时切到 regular 渲染一次再退）、`:3988`（退出后无条件打印
+`chalk.dim("To resume this session:")`）、`core/settings-manager.ts:1259`（getter：只有 `"resume-hint"` 例外）。
+
+| 口径 | 本轮 | 上一快照（LUM-1464） |
+|---|---|---|
+| 纯代码规模（src↔src） | **92.4%**（141,478 / 153,106） | 92.0%（140,894 / 153,106） |
+| 测试规模（新口径） | **49.8%**（2,773 / 5,572） | 49.5%（2,755 / 5,563） |
+| `fullscreenExitOutput` 消费 | **是**（transcript / resume-hint 两模式 + `/settings` 行） | 否（`config.rs` 里 0 命中） |
+| 退出时会话保留 | **有**（默认 `transcript`，写回普通屏幕） | **0** |
+| `/settings` 行 | **7** | 6 |
+| `tui.*` / `app.*` 接线 | 49/49 · 43/44 | 49/49 · 43/44 |
+| 提示面硬编码 chord | 0 硬编码（5 条知会项） | 0 |
+| 扩展生命周期事件 | 36/36 | 36/36 |
+| 加权完成度 | **86.9%** | 86.9% |
+
+> **口径声明（诚实读法）**：§4.1 的 13 条轴里**没有「退出行为」这一格**，所以加权分一分没动——本轮不靠重估旧轴抬分，
+> 价值登记在两条**新的、可反证**的轴上（上表第 3、4 行）。另外 `app.*` 仍是 43/44：
+> LUM-1263（`app.tree.editLabel`）的提交 `271cb109f` 停在 `origin/work/LUM-1263`（已推、未并入 `feature/pi.rs`），
+> 合并面与在飞的 LUM-1457/1466 及本轮重叠，登记为下一轮的收编项（见 `docs/LUM1455_EXIT_TRANSCRIPT.md` §5.4）。
+
+**门禁**：`cargo fmt --all -- --check` exit 0；`cargo clippy -p pi-tui --all-targets -D warnings` 0 告警
+（`-p pi-coding-agent` 被既存 `pi-extensions/src/host.rs:3383 signal_name is never used` 挡在 `-D warnings` 前，本轮未碰该文件）；
+`cargo test -p pi-tui` **1096 / 0**（基线 1090/0 → +6）；`cargo test -p pi-coding-agent --lib` **593 / 8**
+（基线 584/8，8 条**逐条同名**，Windows 环境类）；四个扫描门禁全部 in sync。
+
+**证据分级**：3 张 `docs/screenshots/lum1455-exit-*.png`(+`.txt`) 是**真实退出输出字节**的 frame-buffer 渲染，
+证明终端收到什么，**不是 PTY 实拍**（本机无 `pty`），也不证明按键时序；行为契约由 14 条新单测覆盖。
+本轮审计与缺口清单见 `docs/LUM1455_EXIT_TRANSCRIPT.md`。
+
+#### 0.20.1 合并后复测（`feature/pi.rs` = LUM-1460 + LUM-1464 + LUM-1457 + LUM-1466 + 本轮）
+
+分支合并基：`origin/feature/pi.rs` = `c7a7b5878`；冲突 1 处（本文 §0.19 两节同名，**两节都留**，本轮顺延为 §0.20）。
+
+| 量 | 合并后实测 | 本轮自测（仅我的提交） | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **92.4%**（141,478 / 153,106） | 同 | 我的改动 +约 200 行 src |
+| 测试规模（新口径） | **50.2%**（2,800 / 5,572） | 49.8%（2,773 / 5,572） | 合并带入 LUM-1457/1466 的用例 |
+| `pi-tui` 全量 | **1,119 passed / 0 failed** | 1,096 / 0（基线 1,090/0 → +6） | +14（LUM-1466）+9（LUM-1457）+6（本轮） = 1,119 ✓ |
+| `pi-coding-agent --lib` | **597 / 8** | 593 / 8（基线 584/8） | 8 条与前两份基线**逐条同名**（Windows 环境类） |
+| 本轮新 frames target | **3 / 0** | 3 / 0 | `--test lum1455_exit_output_frames` |
+| `/settings` 行 | **7** | 7 | 合并后仍 7 行 |
+
+合并后 8 条 `--lib` 失败名单与基线逐字相同（`commands::export::…`、`export::session_file::…`、
+`extensions::js_loader::…`、`paths::absolute_paths_stay_absolute`、`resource_loader::…`、
+`tools::mod_ignore::…`、`trust::…` ×2）——即合并与新一轮改动都没有新增产品缺陷。
 
 ## 1. 方法与口径
 

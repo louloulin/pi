@@ -14,7 +14,7 @@
 //! Errors during rendering or the agent turn fall back to print mode
 //! so the terminal never hangs (Stage 4 acceptance criterion).
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ use crate::commands::{handle_command, SlashCommand};
 use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
 };
-use crate::config::{self, ConfigSources};
+use crate::config::{self, ConfigSources, FullscreenExitOutput};
 use crate::extensions::events::ExtensionEventMapper;
 use crate::extensions::lifecycle::{ExtensionLifecycleHooks, UiPromptObserver};
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
@@ -183,6 +183,15 @@ pub struct InteractiveOptions {
     /// exposes the same thing as `--no-header`. The App still honours the
     /// runtime `app.header` chord either way.
     pub quiet_startup: bool,
+    /// `fullscreenExitOutput` — what this session leaves on the terminal when
+    /// it exits ([`exit_screen_output`]).
+    ///
+    /// Upstream reads it from the settings manager *at stop time*
+    /// (`interactive-mode.ts:6601`), so a mid-session change counts; this port
+    /// keeps the same live semantics by updating the field from `/settings`
+    /// ([`apply_setting_change`]). `main.rs` seeds it from `settings.json`
+    /// while the options are built.
+    pub exit_output: FullscreenExitOutput,
 }
 
 impl std::fmt::Debug for InteractiveOptions {
@@ -208,6 +217,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("retry", &self.retry)
             .field("pickers", &self.pickers)
             .field("quiet_startup", &self.quiet_startup)
+            .field("exit_output", &self.exit_output)
             .finish()
     }
 }
@@ -236,6 +246,7 @@ impl Default for InteractiveOptions {
             clipboard: None,
             pickers: PickerState::default(),
             quiet_startup: false,
+            exit_output: config::DEFAULT_FULLSCREEN_EXIT_OUTPUT,
         }
     }
 }
@@ -383,12 +394,34 @@ pub async fn run_interactive(options: InteractiveOptions) -> anyhow::Result<Inte
 
     let outcome = run_loop(&mut terminal, agent, options, config).await;
 
+    // Leave the alternate screen *before* writing the exit output: the
+    // transcript has to land on the normal screen, which is exactly what keeps
+    // it in the terminal's own scrollback instead of disappearing with the alt
+    // screen. Upstream gets the same ordering from
+    // `TuiAltScreen.afterTerminalStop` + `stopInteractiveTui`
+    // (`packages/tui/src/tui-alt-screen.ts:374-395`,
+    // `interactive-mode.ts:790-812`).
     let teardown = teardown_terminal(&mut terminal);
     if let Err(err) = teardown {
         eprintln!("pi: TUI teardown failed: {err}");
     }
 
-    outcome
+    let outcome = outcome?;
+    write_exit_output(&outcome.exit_output);
+
+    Ok(outcome.exit)
+}
+
+/// What one interactive run hands back to [`run_interactive`].
+struct RunOutcome {
+    /// Why the loop stopped.
+    exit: InteractiveExit,
+    /// Bytes the driver writes to stdout *after* leaving the alternate screen
+    /// — empty when the session asked to leave nothing behind.
+    ///
+    /// Composed inside the loop because that is the only place holding both the
+    /// live `App` (the transcript) and the resolved settings (the mode).
+    exit_output: String,
 }
 
 /// Install the composer's command / file completion provider, plus the
@@ -485,7 +518,7 @@ async fn run_loop(
     agent: Arc<AsyncMutex<Agent>>,
     mut options: InteractiveOptions,
     config: AppConfig,
-) -> anyhow::Result<InteractiveExit> {
+) -> anyhow::Result<RunOutcome> {
     // Build the App on the stack first so we can drop it before
     // tearing down the terminal.
     let mut app = App::new(&*agent.lock().await, config.clone());
@@ -812,7 +845,159 @@ async fn run_loop(
         )
         .await;
     }
-    Ok(InteractiveExit::UserExit)
+
+    // Exit output (`fullscreenExitOutput`): the driver prints this after it has
+    // left the alternate screen, so the transcript stays in the terminal's
+    // scrollback. Composed here because the App (the transcript) and the
+    // settings (the mode) are both still in scope.
+    //
+    // The width mirrors the last frame's; a failed size query falls back to the
+    // 80-column default the rest of the loop uses.
+    let width = terminal.size().map(|area| area.width).unwrap_or(80);
+    let transcript = match options.exit_output {
+        FullscreenExitOutput::Transcript => app.transcript_text(width),
+        FullscreenExitOutput::ResumeHint => String::new(),
+    };
+    let resume = resume_command(&options);
+    let exit_output = exit_screen_output(
+        options.exit_output,
+        (!transcript.is_empty()).then_some(transcript.as_str()),
+        resume.as_deref(),
+    );
+
+    Ok(RunOutcome {
+        exit: InteractiveExit::UserExit,
+        exit_output,
+    })
+}
+
+/// Compose the bytes the driver leaves on the terminal when an interactive
+/// session exits (upstream `fullscreenExitOutput`,
+/// `packages/coding-agent/docs/settings.md:70`).
+///
+/// | mode | what the terminal ends up with |
+/// |---|---|
+/// | `transcript` (default) | the final transcript, then the resume hint |
+/// | `resume-hint` | the previous screen, then the resume hint |
+///
+/// The hint is printed in **both** modes — the setting only decides whether the
+/// transcript is restored alongside it (`interactive-mode.ts:6601` passes the
+/// mode into `stop()`, and `:3988` prints the hint unconditionally afterwards).
+///
+/// Kept a free function over its three inputs so the byte-exact contract is
+/// testable without a terminal.
+pub fn exit_screen_output(
+    output: FullscreenExitOutput,
+    transcript: Option<&str>,
+    resume: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    if output == FullscreenExitOutput::Transcript {
+        if let Some(transcript) = transcript.filter(|text| !text.trim().is_empty()) {
+            out.push_str(transcript.trim_end());
+            out.push('\n');
+        }
+    }
+    if let Some(resume) = resume.filter(|command| !command.trim().is_empty()) {
+        // `chalk.dim("To resume this session:")` — SGR 2 / SGR 22 is the pair
+        // chalk emits for `dim` (`interactive-mode.ts:3988`).
+        out.push_str("\u{1b}[2mTo resume this session:\u{1b}[22m ");
+        out.push_str(resume);
+        out.push('\n');
+    }
+    out
+}
+
+/// The resume hint for this session, or `None` when there is nothing the user
+/// could actually resume with it.
+///
+/// Upstream gates the hint on `stdout.isTTY` + `isPersisted()` + the session
+/// file existing (`interactive-mode.ts:271-277`). This port's interactive
+/// sessions start JSONL-only: the SQLite session appears on `/new`, `/resume`,
+/// `/fork`, `/clone` or `/name`, and `--resume <id>` resolves SQLite sessions
+/// only (`commands/resume.rs::resolve`). So the database *is* the
+/// `isPersisted()` test here — printing a resume command that would fail is
+/// exactly the "advertised but does nothing" class this project keeps closing.
+fn resume_command(options: &InteractiveOptions) -> Option<String> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    resume_command_for(
+        &options.session_id,
+        options.session_database.as_deref(),
+        &crate::paths::default_session_dir(),
+    )
+}
+
+/// [`resume_command`] minus the TTY gate, so the two conditions that make a
+/// hint *true* can be asserted without a terminal: the session has a database
+/// (`--resume` resolves SQLite sessions only) and the file is still on disk.
+fn resume_command_for(
+    session_id: &str,
+    database: Option<&Path>,
+    default_dir: &Path,
+) -> Option<String> {
+    let database = database?;
+    if !database.is_file() {
+        return None;
+    }
+    // `--session-dir` has to name the directory `--resume` will search, which
+    // is where the database actually lives.
+    format_resume_command(session_id, database.parent()?, default_dir)
+}
+
+/// Upstream `formatResumeCommand` (`interactive-mode.ts:271-284`): the command
+/// that reopens this session.
+///
+/// The Rust CLI resumes with `--resume <id>` (`--session` is print-mode only,
+/// see `cli.rs`), and `--session-dir` is prepended only when the session lives
+/// outside the default directory — the same two-condition shape upstream uses.
+pub fn format_resume_command(
+    session_id: &str,
+    session_dir: &Path,
+    default_dir: &Path,
+) -> Option<String> {
+    if session_id.trim().is_empty() {
+        return None;
+    }
+    let mut args = vec!["pi".to_string()];
+    if crate::paths::normalize_lexically(session_dir)
+        != crate::paths::normalize_lexically(default_dir)
+    {
+        args.push("--session-dir".to_string());
+        args.push(quote_if_needed(&session_dir.to_string_lossy()));
+    }
+    args.push("--resume".to_string());
+    args.push(quote_if_needed(session_id));
+    Some(args.join(" "))
+}
+
+/// Upstream `quoteIfNeeded` (`interactive-mode.ts:264-269`): bare when every
+/// character is safe for a POSIX shell, otherwise single-quoted with the
+/// embedded-quote escape.
+fn quote_if_needed(value: &str) -> String {
+    let safe = !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '~' | ':' | '@')
+        });
+    if safe {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Write the composed exit output, best effort.
+///
+/// Upstream writes it with `process.stdout.write` and does not let an I/O error
+/// fail the exit (`interactive-mode.ts:3988`); a closed pipe (`pi | head`) must
+/// not turn a quit into a crash.
+fn write_exit_output(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let mut out = std::io::stdout();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
 }
 
 /// Apply one `app.clipboard.pasteImage` clipboard read to the composer.
@@ -3780,7 +3965,8 @@ fn open_settings(app: &mut App, options: &InteractiveOptions, sources: &ConfigSo
         .or(ui.theme)
         .unwrap_or_else(|| DEFAULT_THEME_NAME.to_string());
 
-    let items = vec![
+    let items =
+        vec![
         SettingItem::new("autocompact", "Auto-compact")
             .with_description("Automatically compact context when it gets too large")
             .with_values(["true", "false"], boolean(options.compaction.enabled)),
@@ -3790,6 +3976,16 @@ fn open_settings(app: &mut App, options: &InteractiveOptions, sources: &ConfigSo
                 pi_tui::keybindings::key_text_or("app.message.copy", "Ctrl+X")
             ))
             .with_values(["true", "false"], boolean(app.copy_on_select())),
+        // LUM-1455: `fullscreenExitOutput` — upstream's row
+        // (`components/settings-selector.ts:685-690`, label and description
+        // verbatim). The effect is this session's own exit, so the value the
+        // row reads back is the one the driver will use
+        // ([`exit_screen_output`]).
+        SettingItem::new("fullscreen-exit-output", "Fullscreen exit output")
+            .with_description(
+                "Print the transcript or only a session resume hint when exiting fullscreen mode",
+            )
+            .with_values(["transcript", "resume-hint"], ui.fullscreen_exit_output.as_str()),
         SettingItem::new("theme", "Theme")
             .with_description("Color theme for the interface")
             .with_values(["dark", "light"], theme),
@@ -3879,6 +4075,20 @@ fn apply_setting_change(
                 Value::Bool(enabled),
                 format!("copy on select → {value}"),
                 "",
+            )
+        }
+        // The exit output is read when the session ends, so a change applies to
+        // *this* run's exit — the same live semantics upstream gets by reading
+        // the settings manager inside `stop()`
+        // (`interactive-mode.ts:6601`).
+        "fullscreen-exit-output" => {
+            let mode = FullscreenExitOutput::parse(value);
+            options.exit_output = mode;
+            (
+                "fullscreenExitOutput",
+                Value::String(mode.as_str().to_string()),
+                format!("fullscreen exit output → {}", mode.as_str()),
+                " (applies to this session's exit)",
             )
         }
         "theme" => match app.set_theme_by_name(value) {
@@ -5242,6 +5452,12 @@ mod tests {
             vec![
                 ("autocompact".to_string(), "false".to_string()),
                 ("fullscreen-copy-on-select".to_string(), "false".to_string()),
+                // LUM-1455 row: reads the mode the driver will actually use on
+                // exit, which is the default here.
+                (
+                    "fullscreen-exit-output".to_string(),
+                    "transcript".to_string()
+                ),
                 ("theme".to_string(), "dark".to_string()),
                 // LUM-1310 rows. `settings_app()` builds with the AppConfig
                 // default (`startup_header: false`), so the quiet-startup row
@@ -5324,6 +5540,141 @@ mod tests {
             .collect()
     }
 
+    /// `fullscreenExitOutput: "transcript"` (the upstream default) leaves the
+    /// session in the terminal and then names the command that reopens it.
+    #[test]
+    fn transcript_mode_prints_the_transcript_and_then_the_hint() {
+        let out = exit_screen_output(
+            FullscreenExitOutput::Transcript,
+            Some("hello\nworld\n"),
+            Some("pi --resume abc"),
+        );
+        assert_eq!(
+            out,
+            "hello\nworld\n\u{1b}[2mTo resume this session:\u{1b}[22m pi --resume abc\n"
+        );
+    }
+
+    /// `resume-hint` restores the previous screen: the transcript is dropped,
+    /// the hint is not (`docs/settings.md:70`).
+    #[test]
+    fn resume_hint_mode_prints_only_the_hint() {
+        let out = exit_screen_output(
+            FullscreenExitOutput::ResumeHint,
+            Some("hello\nworld\n"),
+            Some("pi --resume abc"),
+        );
+        assert_eq!(
+            out,
+            "\u{1b}[2mTo resume this session:\u{1b}[22m pi --resume abc\n"
+        );
+    }
+
+    #[test]
+    fn exit_output_writes_nothing_when_there_is_nothing_to_leave() {
+        for transcript in [None, Some(""), Some("   \n")] {
+            assert_eq!(
+                exit_screen_output(FullscreenExitOutput::Transcript, transcript, None),
+                "",
+                "{transcript:?}"
+            );
+        }
+        assert_eq!(
+            exit_screen_output(FullscreenExitOutput::ResumeHint, Some("kept\n"), None),
+            "",
+            "resume-hint mode must not print the transcript"
+        );
+        // A blank command is not a hint.
+        assert_eq!(
+            exit_screen_output(FullscreenExitOutput::Transcript, None, Some("  ")),
+            ""
+        );
+        // A transcript that already ends in blank lines is not padded with more.
+        assert_eq!(
+            exit_screen_output(FullscreenExitOutput::Transcript, Some("a\n\n\n"), None),
+            "a\n"
+        );
+    }
+
+    #[test]
+    fn format_resume_command_omits_the_session_dir_for_the_default_directory() {
+        let dir = Path::new("/home/u/.pi/sessions");
+        assert_eq!(
+            format_resume_command("sess-1", dir, dir).as_deref(),
+            Some("pi --resume sess-1")
+        );
+        // Lexical noise (a trailing slash, a `.` component) is still default.
+        assert_eq!(
+            format_resume_command(
+                "sess-1",
+                Path::new("/home/u/.pi/sessions/"),
+                Path::new("/home/u/./.pi/sessions")
+            )
+            .as_deref(),
+            Some("pi --resume sess-1")
+        );
+    }
+
+    #[test]
+    fn format_resume_command_names_and_quotes_a_custom_session_dir() {
+        assert_eq!(
+            format_resume_command(
+                "sess 1",
+                Path::new("/tmp/my sessions"),
+                Path::new("/home/u/.pi/sessions")
+            )
+            .as_deref(),
+            Some("pi --session-dir '/tmp/my sessions' --resume 'sess 1'")
+        );
+        // Upstream's safe set (`interactive-mode.ts:265`): these stay bare.
+        assert_eq!(
+            quote_if_needed("/tmp/a-b_c.d/e~f:g@h"),
+            "/tmp/a-b_c.d/e~f:g@h"
+        );
+        assert_eq!(quote_if_needed("a'b"), "'a'\\''b'");
+        assert_eq!(quote_if_needed(""), "''");
+        // Nothing to resume without an id.
+        assert_eq!(
+            format_resume_command("  ", Path::new("/tmp"), Path::new("/tmp")),
+            None
+        );
+    }
+
+    /// The hint is only printed when `pi --resume <id>` would actually work.
+    /// Upstream's `isPersisted()` + file-exists gate
+    /// (`interactive-mode.ts:271-277`); here the SQLite database is that test,
+    /// because a fresh interactive session is JSONL-only and `resolve()`
+    /// searches SQLite files.
+    #[test]
+    fn the_resume_hint_never_advertises_a_session_that_cannot_be_resumed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default_dir = Path::new("/home/u/.pi/sessions");
+
+        // No database at all (a fresh session) — nothing to print.
+        assert_eq!(resume_command_for("sess-1", None, default_dir), None);
+        // A database path that no longer exists — same answer.
+        assert_eq!(
+            resume_command_for("sess-1", Some(&dir.path().join("gone.sqlite")), default_dir),
+            None
+        );
+        // A real file: the default directory needs no `--session-dir`.
+        let database = dir.path().join("sess-1.sqlite");
+        std::fs::write(&database, b"").expect("touch database");
+        assert_eq!(
+            resume_command_for("sess-1", Some(&database), dir.path()).as_deref(),
+            Some("pi --resume sess-1")
+        );
+        assert_eq!(
+            resume_command_for("sess-1", Some(&database), default_dir).as_deref(),
+            Some(
+                &format!(
+                    "pi --session-dir {} --resume sess-1",
+                    quote_if_needed(&dir.path().to_string_lossy())
+                )[..]
+            )
+        );
+    }
+
     #[test]
     fn startup_ui_settings_apply_thinking_visibility_and_the_dropdown_height() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -5387,11 +5738,11 @@ mod tests {
             compaction: settings(true),
             ..InteractiveOptions::default()
         };
-        // Put the cursor on `hide-thinking` (row 4 of 6).
+        // Put the cursor on `hide-thinking` (row 5 of 7).
         open_settings(&mut app, &options, &sources);
-        press(&mut app, &mut options, &sources, KeyCode::Down);
-        press(&mut app, &mut options, &sources, KeyCode::Down);
-        press(&mut app, &mut options, &sources, KeyCode::Down);
+        for _ in 0..4 {
+            press(&mut app, &mut options, &sources, KeyCode::Down);
+        }
 
         assert!(app.thinking_visible());
         press(&mut app, &mut options, &sources, KeyCode::Enter);
@@ -5414,8 +5765,8 @@ mod tests {
             ..InteractiveOptions::default()
         };
         open_settings(&mut app, &options, &sources);
-        // Row 5 of 6.
-        for _ in 0..4 {
+        // Row 6 of 7.
+        for _ in 0..5 {
             press(&mut app, &mut options, &sources, KeyCode::Down);
         }
         assert_eq!(app.autocomplete_max_visible(), 5);
@@ -5448,8 +5799,8 @@ mod tests {
         );
         let mut options = options;
         open_settings(&mut app, &options, &sources);
-        // Row 6 of 6.
-        for _ in 0..5 {
+        // Row 7 of 7.
+        for _ in 0..6 {
             press(&mut app, &mut options, &sources, KeyCode::Down);
         }
         assert!(app.header_visible());
@@ -5504,7 +5855,12 @@ mod tests {
         press(&mut app, &mut options, &sources, KeyCode::Enter);
         assert!(!app.copy_on_select());
 
-        // Row 3: theme `dark` → `light`.
+        // Row 3: fullscreen exit output `transcript` → `resume-hint`.
+        press(&mut app, &mut options, &sources, KeyCode::Down);
+        press(&mut app, &mut options, &sources, KeyCode::Enter);
+        assert_eq!(options.exit_output, FullscreenExitOutput::ResumeHint);
+
+        // Row 4: theme `dark` → `light`.
         press(&mut app, &mut options, &sources, KeyCode::Down);
         press(&mut app, &mut options, &sources, KeyCode::Enter);
         assert_eq!(app.theme().name(), Some("light"));
@@ -5517,10 +5873,18 @@ mod tests {
         .expect("json");
         assert_eq!(parsed["theme"], serde_json::json!("light"));
         assert_eq!(parsed["fullscreenCopyOnSelect"], serde_json::json!(false));
+        assert_eq!(
+            parsed["fullscreenExitOutput"],
+            serde_json::json!("resume-hint")
+        );
         assert_eq!(parsed["compaction"]["enabled"], serde_json::json!(false));
         let reloaded = config::load_ui_settings(&sources);
         assert_eq!(reloaded.theme.as_deref(), Some("light"));
         assert!(!reloaded.fullscreen_copy_on_select);
+        assert_eq!(
+            reloaded.fullscreen_exit_output,
+            FullscreenExitOutput::ResumeHint
+        );
         assert!(!config::load_compaction_settings(&sources).enabled);
     }
 

@@ -60,6 +60,45 @@ pub const DEFAULT_AUTO_COMPACT: bool = DEFAULT_COMPACTION_SETTINGS.enabled;
 /// (`core/settings-manager.ts:1280`).
 pub const DEFAULT_FULLSCREEN_COPY_ON_SELECT: bool = true;
 
+/// Upstream `FullscreenExitOutput` (`core/settings-manager.ts:50`): what an
+/// interactive session leaves on the terminal when it exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FullscreenExitOutput {
+    /// `"transcript"` (the default): print the final transcript so the session
+    /// stays in the terminal's scrollback.
+    #[default]
+    Transcript,
+    /// `"resume-hint"`: restore the previous screen and print only the resume
+    /// hint.
+    ResumeHint,
+}
+
+impl FullscreenExitOutput {
+    /// Parse the settings value. Upstream's getter is
+    /// `this.settings.fullscreenExitOutput === "resume-hint" ? "resume-hint"
+    /// : "transcript"` (`core/settings-manager.ts:1259`), so anything that is
+    /// not the one known literal resolves to the default rather than failing.
+    pub fn parse(value: &str) -> Self {
+        if value == "resume-hint" {
+            Self::ResumeHint
+        } else {
+            Self::Transcript
+        }
+    }
+
+    /// The value written back to `settings.json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transcript => "transcript",
+            Self::ResumeHint => "resume-hint",
+        }
+    }
+}
+
+/// Default for `fullscreenExitOutput` — upstream `?? "transcript"`
+/// (`core/settings-manager.ts:1259`).
+pub const DEFAULT_FULLSCREEN_EXIT_OUTPUT: FullscreenExitOutput = FullscreenExitOutput::Transcript;
+
 /// Default for `hideThinkingBlock` — upstream `?? false`
 /// (`core/settings-manager.ts:961`), so reasoning is visible unless the
 /// reader asks for it to be collapsed.
@@ -130,6 +169,9 @@ pub struct UiSettings {
     pub theme: Option<String>,
     /// `fullscreenCopyOnSelect`.
     pub fullscreen_copy_on_select: bool,
+    /// `fullscreenExitOutput` — what the driver leaves on the terminal when
+    /// the interactive session exits.
+    pub fullscreen_exit_output: FullscreenExitOutput,
     /// `hideThinkingBlock` — collapse thinking blocks in assistant messages.
     pub hide_thinking_block: bool,
     /// `autocompleteMaxVisible` — dropdown height in rows. Stored raw; the
@@ -145,6 +187,7 @@ impl Default for UiSettings {
         Self {
             theme: None,
             fullscreen_copy_on_select: DEFAULT_FULLSCREEN_COPY_ON_SELECT,
+            fullscreen_exit_output: DEFAULT_FULLSCREEN_EXIT_OUTPUT,
             hide_thinking_block: DEFAULT_HIDE_THINKING_BLOCK,
             autocomplete_max_visible: DEFAULT_AUTOCOMPLETE_MAX_VISIBLE,
             quiet_startup: DEFAULT_QUIET_STARTUP,
@@ -169,6 +212,7 @@ pub fn load_ui_settings(sources: &ConfigSources) -> UiSettings {
             "fullscreenCopyOnSelect",
             DEFAULT_FULLSCREEN_COPY_ON_SELECT,
         ),
+        fullscreen_exit_output: read_fullscreen_exit_output(&merged),
         hide_thinking_block: read_bool(&merged, "hideThinkingBlock", DEFAULT_HIDE_THINKING_BLOCK),
         autocomplete_max_visible: read_autocomplete_max_visible(&merged),
         quiet_startup: read_bool(&merged, "quietStartup", DEFAULT_QUIET_STARTUP),
@@ -389,6 +433,44 @@ pub fn save_enabled_models(
 }
 
 /// Read a top-level boolean setting, warning on a malformed value.
+/// Load `fullscreenExitOutput` from the default locations under the current
+/// working directory.
+///
+/// Read by `main.rs` while it builds [`InteractiveOptions`](crate::interactive)
+/// so the exit path knows what to print before the first frame is drawn.
+pub fn load_fullscreen_exit_output_default() -> FullscreenExitOutput {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_ui_settings(&ConfigSources::discover(&cwd)).fullscreen_exit_output
+}
+
+/// `fullscreenExitOutput`: a string key whose only two values upstream
+/// accepts; an unknown literal or a non-string warns and keeps the default
+/// rather than failing the launch.
+fn read_fullscreen_exit_output(merged: &Map<String, Value>) -> FullscreenExitOutput {
+    match merged.get("fullscreenExitOutput") {
+        None => DEFAULT_FULLSCREEN_EXIT_OUTPUT,
+        Some(Value::String(value)) => {
+            let parsed = FullscreenExitOutput::parse(value);
+            if parsed.as_str() != value {
+                warn(&format!(
+                    "fullscreenExitOutput must be \"transcript\" or \"resume-hint\" (got {value:?}); using {}",
+                    DEFAULT_FULLSCREEN_EXIT_OUTPUT.as_str()
+                ));
+                return DEFAULT_FULLSCREEN_EXIT_OUTPUT;
+            }
+            parsed
+        }
+        Some(other) => {
+            warn(&format!(
+                "fullscreenExitOutput must be a string (got {}); using {}",
+                json_kind(other),
+                DEFAULT_FULLSCREEN_EXIT_OUTPUT.as_str()
+            ));
+            DEFAULT_FULLSCREEN_EXIT_OUTPUT
+        }
+    }
+}
+
 fn read_bool(merged: &Map<String, Value>, key: &str, default: bool) -> bool {
     match merged.get(key) {
         None => default,
@@ -1105,6 +1187,68 @@ mod tests {
             project: None,
         });
         assert!(settings.quiet_startup);
+    }
+
+    #[test]
+    fn fullscreen_exit_output_round_trips_through_its_settings_spelling() {
+        assert_eq!(
+            FullscreenExitOutput::parse("resume-hint"),
+            FullscreenExitOutput::ResumeHint
+        );
+        assert_eq!(
+            FullscreenExitOutput::parse("transcript"),
+            FullscreenExitOutput::Transcript
+        );
+        // Upstream's getter is `=== "resume-hint" ? … : "transcript"`, so any
+        // other literal is the default rather than an error.
+        assert_eq!(
+            FullscreenExitOutput::parse("elsewhere"),
+            FullscreenExitOutput::Transcript
+        );
+        assert_eq!(FullscreenExitOutput::ResumeHint.as_str(), "resume-hint");
+        assert_eq!(FullscreenExitOutput::Transcript.as_str(), "transcript");
+        assert_eq!(
+            DEFAULT_FULLSCREEN_EXIT_OUTPUT,
+            FullscreenExitOutput::Transcript
+        );
+    }
+
+    #[test]
+    fn ui_settings_read_fullscreen_exit_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = write(
+            dir.path(),
+            "user.json",
+            r#"{"fullscreenExitOutput":"resume-hint"}"#,
+        );
+        let settings = load_ui_settings(&ConfigSources {
+            user: Some(user),
+            project: None,
+        });
+        assert_eq!(
+            settings.fullscreen_exit_output,
+            FullscreenExitOutput::ResumeHint
+        );
+    }
+
+    #[test]
+    fn ui_settings_keep_the_default_exit_output_for_unusable_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for value in [r#""weird""#, "42", "null"] {
+            let user = write(
+                dir.path(),
+                "user.json",
+                &format!(r#"{{"fullscreenExitOutput":{value}}}"#),
+            );
+            let settings = load_ui_settings(&ConfigSources {
+                user: Some(user),
+                project: None,
+            });
+            assert_eq!(
+                settings.fullscreen_exit_output, DEFAULT_FULLSCREEN_EXIT_OUTPUT,
+                "{value} must not select a mode the driver cannot honour"
+            );
+        }
     }
 
     #[test]
