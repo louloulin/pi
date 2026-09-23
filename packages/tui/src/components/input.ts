@@ -119,6 +119,8 @@ export class Input implements Component, Focusable {
 	setValue(value: string): void {
 		this.value = value;
 		this.cursor = Math.min(this.cursor, value.length);
+		// Invalidate visual layout cache when value changes
+		this.cachedLayout = null;
 	}
 
 	handleInput(data: string): void {

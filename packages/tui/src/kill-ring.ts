@@ -4,6 +4,9 @@
  * Tracks killed (deleted) text entries. Consecutive kills can accumulate
  * into a single entry. Supports yank (paste most recent) and yank-pop
  * (cycle through older entries).
+ *
+ * The ring stores entries with newest at the end (index = length-1).
+ * Yank-pop cycles through entries from newest to oldest.
  */
 export class KillRing {
 	private ring: string[] = [];
@@ -27,14 +30,26 @@ export class KillRing {
 		}
 	}
 
-	/** Get most recent entry without modifying the ring. */
+	/**
+	 * Get the current entry for yanking.
+	 * The newest entry is at index ring.length - 1.
+	 */
 	peek(): string | undefined {
 		return this.ring.length > 0 ? this.ring[this.ring.length - 1] : undefined;
 	}
 
-	/** Move last entry to front (for yank-pop cycling). */
+	/**
+	 * Move current entry pointer backward (toward older entries) for yank-pop.
+	 * After yank-pop, the next peek() should return the previous entry.
+	 *
+	 * This is achieved by moving the last element (newest) to the front,
+	 * so subsequent peek() calls return older entries.
+	 */
 	rotate(): void {
 		if (this.ring.length > 1) {
+			// Move the last element (newest) to the front.
+			// This makes the second-newest become the last element,
+		// so peek() returns the older entry next time.
 			const last = this.ring.pop()!;
 			this.ring.unshift(last);
 		}
