@@ -39,9 +39,16 @@ export class Input implements Component, Focusable {
 	private pasteBuffer: string = "";
 	private isInPaste: boolean = false;
 
+	// Paste burst detection - classify rapid chars as paste vs human typing
+	private lastCharTime: number = 0;
+	private burstBuffer: string = "";
+	private burstStartTime: number = 0;
+	private readonly pasteBurstThresholdMs: number = 12; // chars arriving <12ms apart = paste burst
+	private readonly pasteBurstMaxGap: number = 15; // max gap between chars to continue burst
+
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
-	private lastAction: "kill" | "yank" | "type-word" | null = null;
+	private lastAction: "kill" | "yank" | "type-word" | "burst" | null = null;
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
@@ -115,6 +122,8 @@ export class Input implements Component, Focusable {
 
 		// Submit
 		if (kb.matches(data, "tui.input.submit") || data === "\n") {
+			// Flush any pending burst before submit
+			if (this.burstBuffer.length > 0) this.flushBurst();
 			if (this.onSubmit) this.onSubmit(this.value);
 			return;
 		}
@@ -184,12 +193,16 @@ export class Input implements Component, Focusable {
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
+			// Flush burst before cursor movement
+			if (this.burstBuffer.length > 0) this.flushBurst();
 			this.lastAction = null;
 			this.cursor = 0;
 			return;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
+			// Flush burst before cursor movement
+			if (this.burstBuffer.length > 0) this.flushBurst();
 			this.lastAction = null;
 			this.cursor = this.value.length;
 			return;
@@ -245,17 +258,70 @@ export class Input implements Component, Focusable {
 	}
 
 	private insertCharacter(char: string): void {
-		// Undo coalescing: consecutive word chars coalesce into one undo unit
-		if (isWhitespaceChar(char) || this.lastAction !== "type-word") {
-			this.pushUndo();
-		}
-		this.lastAction = "type-word";
+		const now = performance.now();
+		const timeSinceLast = now - this.lastCharTime;
+		this.lastCharTime = now;
 
-		this.value = this.value.slice(0, this.cursor) + char + this.value.slice(this.cursor);
-		this.cursor += char.length;
+		// Paste burst detection: rapid characters indicate a paste
+		// Flush any ongoing burst if gap is too large
+		if (this.burstBuffer.length > 0 && timeSinceLast > this.pasteBurstMaxGap) {
+			this.flushBurst();
+		}
+
+		// Classify as burst if arriving quickly
+		const isBurstChar = timeSinceLast < this.pasteBurstThresholdMs;
+
+		if (isBurstChar && this.burstBuffer.length === 0) {
+			// First char of potential burst - save undo state
+			this.pushUndo();
+			this.burstStartTime = now;
+		}
+
+		if (isBurstChar || this.burstBuffer.length > 0) {
+			// Add to burst buffer
+			this.burstBuffer += char;
+			this.lastAction = "burst";
+		} else {
+			// Normal typing - flush any pending burst first
+			if (this.burstBuffer.length > 0) {
+				this.flushBurst();
+			}
+
+			// Undo coalescing: consecutive word chars coalesce into one undo unit
+			if (isWhitespaceChar(char) || this.lastAction !== "type-word") {
+				this.pushUndo();
+			}
+			this.lastAction = "type-word";
+
+			this.value = this.value.slice(0, this.cursor) + char + this.value.slice(this.cursor);
+			this.cursor += char.length;
+		}
+	}
+
+	/**
+	 * Flush accumulated burst buffer as a single paste operation.
+	 */
+	private flushBurst(): void {
+		if (this.burstBuffer.length === 0) return;
+
+		const burstText = this.burstBuffer;
+		this.burstBuffer = "";
+
+		// Insert the burst as a single undo unit
+		// Clean newlines and tabs from pasted text
+		const cleanText = burstText.replace(/\r?\n/g, "").replace(/\t/g, "    ");
+		if (cleanText.length > 0) {
+			this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
+			this.cursor += cleanText.length;
+		}
+		this.lastAction = "burst";
 	}
 
 	private handleBackspace(): void {
+		// Flush any pending burst before editing
+		if (this.burstBuffer.length > 0) {
+			this.flushBurst();
+		}
 		this.lastAction = null;
 		if (this.cursor > 0) {
 			this.pushUndo();
