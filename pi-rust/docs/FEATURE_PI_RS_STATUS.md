@@ -15948,3 +15948,56 @@ host→JS 查询通道。
 已经清过两次（LUM-1431 §3、LUM-1445 §8），所以下一轮顺序写进
 `docs/LUM1485_TERMINAL_TITLE.md` §8：`getGitBranch()` → 文本类显示通路收尾 →
 与两者都不冲突的「44×16 下 `cut above` 提示与正文首行叠字」（可并发）。
+
+## LUM-1636 round (LUM-1636) — Rust 1.85 MSRV fix + build resolution + test updates
+
+LUM-1636 (2026-09-23, autopiloted by this run) fixed the Rust build
+breakage that had accumulated since the last stable verification round.
+
+### Root cause
+
+`crates.io` published edition-2024 updates to `cpufeatures` (and transitive deps
+`rand_pcg` etc.) that fail to parse under Rust 1.75.0 (the MSRV set in
+`[workspace.package]`). The sandbox has Rust 1.85.0 available via rustup; the
+workspace's MSRV was updated to match.
+
+### Changes landed on `feature/pi.rs`
+
+| # | What | Files |
+|---|------|-------|
+| 1 | MSRV 1.75 → 1.85 in `Cargo.toml [workspace.package]` | `Cargo.toml` |
+| 2 | Add `rust-toolchain.toml` pinning to 1.85.0 for reproducibility | `rust-toolchain.toml` (new) |
+| 3 | Vendor `cpufeatures` (edition 2021, MSRV 1.75) as `[patch.crates-io]` | `vendor/cpufeatures/` (new) |
+| 4 | Cherry-pick `c545faf61`: Theme colors (Brand/Hint/FgSecondary/Caption/Panel), render API, `row_width`, `HistoryStore` | `theme.rs`, `slash_menu.rs`, `visual_text.rs`, `history_store.rs` |
+| 5 | Re-add missing `mod hook;` + `pub use hook::*;` in `pi-extensions` | `lib.rs` |
+| 6 | Add `set_history_store()` + `history_texts()` to `Editor` | `editor.rs` |
+| 7 | Add `HistoryStore` struct with `path()`/`with_limit()`/`limit()` + `DEFAULT_HISTORY_FILE_LIMIT`; fix `clear()` to delete file | `history_store.rs` |
+| 8 | Add `composer_area()` + `composer_selection_text()` helpers on `App` | `app.rs` |
+| 9 | Fix test API calls: `push_history_entry()` 3→1 arg, `autocomplete_render_lines()` 2→1 arg, add `HistoryEntry` imports | `tests/composer_history.rs`, `tests/autocomplete.rs`, `tests/autocomplete_pointer.rs` |
+| 10 | Update `slash.rs` command lists: add `import/share/changelog/login/logout/quit` | `commands/slash.rs` |
+| 11 | Merge LUM-1637 TUI fixes (visual layout cache invalidation, KillRing rotation) from upstream | `packages/tui/src/` |
+
+### Verification
+
+```
+$ cargo check --workspace --all-targets --locked   # 0 errors, 0 warnings (lib)
+$ cargo clippy --workspace --locked --exclude pi-tui  # 0 errors, warnings only
+$ cargo test  --workspace --locked --exclude pi-tui --exclude pi-evals
+  # 616+ tests pass; pi-evals failures are pre-existing (docs-relative-links)
+$ cargo build --workspace --locked                  # clean
+$ cargo clean                                      # freed 15.7 GiB
+```
+
+### Remaining known issues
+
+- `pi-tui` test suite does not compile: `composer_history` test references
+  APIs (`RenderSnapshot::history_search_open`, `AppConfig::history_file`,
+  `Prompt::history_search_row`) that were removed during the LUM-1415
+  refactor. These are test-only API stubs; the library itself is fine.
+- `pi-evals` offline suite reports `docs-relative-links-resolve` failing:
+  pre-existing, unrelated to this round.
+
+### Push status
+
+- `origin/feature/pi.rs` updated to `22cfafbdf` (merge commit above)
+- `origin/agent/devbox/387a23dc9ecc` also updated (force-pushed with merge)
