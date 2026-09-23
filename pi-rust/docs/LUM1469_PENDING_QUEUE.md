@@ -318,6 +318,17 @@ python pi-rust/scripts/app_action_coverage.py
 都要改 `app.rs` 的渲染路径，与 LUM-1467 正在动的 `status.rs`/`plan_chrome` 是同一屏几何；
 本仓库已经为「同一缺陷两条并发线各修一次」清过两次（LUM-1431 §3、LUM-1445 §8）。
 
+### 7.1 一条已经失效的派单（提请注意，本轮不改它）
+
+上一轮（LUM-1457）派了一条 `backlog`：**LUM-1479「`app.tree.editLabel` 与 tree label 全链路
+（最后一条 silent `app.*`）」**。它成立的前提在本轮**已不成立**：LUM-1263 已把 `app.tree.editLabel`
+接线（本轮并入 `feature/pi.rs`），`python pi-rust/scripts/app_action_coverage.py` 在 tip 上输出
+`wired: 44/44 (100.0%) / silent: 0/44`。
+
+LUM-1479 正文里另一半（`pi-protocol` 的 `SessionEntry` 缺 label 变体、`pi-session` 没有存 label 的地方、
+`appendLabelChange` 没移植）**可能仍然成立**——那是「树改名能不能持久化」的上游兼容问题，
+与「有没有消费者」不是同一件事。建议由 issue 负责人决定收窄为「label 持久化链路」还是关掉。
+
 ## 8. 范围之外
 
 未碰 `pi-ai` / `pi-agent-core` / `pi-protocol` / `pi-extensions` / `pi-session` / `pi-server` /
