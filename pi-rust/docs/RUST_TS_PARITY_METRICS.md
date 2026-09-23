@@ -662,8 +662,80 @@ pi-rust 本轮补齐，并保留「任何其它键先关掉它、再照常处理
 **证据分级**：4 张 `docs/screenshots/lum1464-hints-*.png`(+`.txt`) 是 frame-buffer 冻结帧
 （本机无 `pty`），证明几何与内容，**不证明按键时序**；时序由 `tests/shortcut_overlay.rs` 的 11 条覆盖。
 本轮审计与缺口清单见 `docs/LUM1464_SHORTCUT_OVERLAY.md`。
+### 0.19 LUM-1461：composer `paste_burst` 兜底 + marker 按词原子 + 历史 marker 降级
 
-### 0.19 LUM-1457 复测：Windows 真 PTY 打通 + 「每次按键执行两遍」修复；加权 **86.8%**（86.81%）
+三个切片都是 LUM-1460 收尾清单里的项（§4.1 偏差、§5 偏差 1/4、§10 顺位 1–3）。
+`paste_burst` 是 **codex 独有**的能力（参考实现 `codex-rs/tui/src/bottom_pane/paste_burst.rs`，
+上游 pi-ts 只认 bracketed paste 事件），因此它**不是 pi-ts 对等面上的格子**；
+按 LUM-1450 的规矩，它只作**新登记、可反证的量**公开（`docs/LUM1461_PASTE_BURST.md` §0/§4），
+不擅自加轴进 §4.1 公式。逐行对照、两条有意偏差（不做“持首字符”、不做 retro 的
+`looks_pastey` 启发式）与 frame-buffer 截图见交付文档。
+
+| 量 | 本轮实测 | 基线 `c37d80742` | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **92.5%**（141,557 / 153,106） | 91.8%（140,615） | `python pi-rust/scripts/measure_loc.py`；+942 行 src |
+| 测试规模 | **52.1%**（2,764 / 5,309） | 51.6%（2,740） | `grep -rhoE '#\[(tokio::)?test\]' pi-rust/crates --include=*.rs \| wc -l`，+24 |
+| `pi-tui` 全量 | **1099 passed / 0 failed** | 1075 / 0 | `cargo test --offline -p pi-tui`（75 target），+24 = `lum1461_paste_burst`（11）+ `lum1461_burst_frames`（3）+ `input.rs`（6）+ `word_navigation.rs`（4）|
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 无新模块 |
+| **`paste_burst` 兜底（本期新登记，codex 独有）** | **1 / 1** | 0 / 1 | 11 条行为用例 + 3 帧，见交付文档 §4 |
+| composer 粘贴能力面（LUM-1460 §4 登记轴） | 7 / 7 | 7 / 7 | marker 按词原子接上后不变；`Alt+B`/`Alt+F` 一格 |
+
+**加权完成度**：13 条轴里仍然只有第 12 轴（测试）动，`2740/5309 = 0.5161` →
+`2764/5309 = 0.5206`：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×(2764/5309) + 3×0.95 = 86.85% → **86.9%**
+```
+
+**本轮的门禁与证据（可复跑）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 粘贴突发行为 | `cargo test --offline -p pi-tui --test lum1461_paste_burst` | **11 / 0**（窗口内/外、换行不提交、误判不丢字、和弦打断、按词原子、历史降级正反各一） |
+| 帧 | `cargo test --offline -p pi-tui --test lum1461_burst_frames` | **3 / 0** |
+| 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；`pi-tui` 0 告警，本轮文件在 `pi-coding-agent` 0 命中 |
+| 帧截图 | `docs/screenshots/lum1461-burst-{marker,two-markers,stale-recall}-120x24.png`(+`.txt`) | 3 帧，120×24，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 既有失败（未处置） | `cargo test --offline -p pi-coding-agent` | 本机 `--lib` 8 条（Windows 路径分隔符 / trust / export / js_loader / resource_loader）+ `--test cli_extensions` 10 条（mock provider `transport error` / trust），均与粘贴无关，失败文件本轮一行未碰；跳过它们后其余 558 条全绿 |
+
+**诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，
+不证明按键/字节时序；时序由 11 条注入了显式 `Instant` 的驱动级用例覆盖。
+App 级 `paste_burst` **默认关闭**（驱动 `interactive.rs` 打开），避免合成事件同毫秒
+被 `App` 级测试误判为粘贴。
+### 0.20 LUM-1263 复测：`/tree` 改名 UI 接线，`app.*` **43/44 → 44/44**（`silent` / `advertised` 双清零）；门禁工具修正恒真缺陷
+
+本轮把最后一个未消费的 `app.*`（`app.tree.editLabel`）接上线：`Shift+L` 进入标签编辑态
+（输入框复用 `Editor`，不是第二套输入框），`Enter` 提交/`Esc` 取消，空值 = 删除标签，
+提交后标签以 `[label] ` 前缀画在树上并写回会话文件（`custom` 条目 `kind = "label"`）。
+逐行对照、偏差清单、截图见 `docs/LUM1263_TREE_RENAME.md`。
+
+| 量 | 本轮实测 | 基线 `c37d80742` | 说明 |
+|---|---|---|---|
+| `app.*` 接线 | **44 / 44 = 100%**，`silent` 0，`advertised` 0 | 43 / 44 = 97.7%（silent 1：`app.tree.editLabel`） | `python pi-rust/scripts/app_action_coverage.py pi-rust --check-consumed` → `44 entries; measured wired: 44 / in sync` |
+| `tui.*` 消费面 / 死键位 | **49 / 49 + 44 / 44**，`0 known-unconsumed` | 49/49 + 43/44，`1 known-unconsumed` | `python pi-rust/scripts/keybinding_coverage.py pi-rust --check` → exit 0 |
+| `pi-tui` lib | **438 passed / 0 failed** | 429 / 0 | +9 = 7 `tree` + 2 `selector` |
+| `pi-coding-agent` lib | **590 passed / 8 failed** | 584 / 8 | +6 用例；8 条失败与基线**逐条相同**（Windows 环境类：真 `bash`/`/tmp`/绝对路径/node fs） |
+| 既有失败集合 | **28 条，与基线 `diff` 为空** | 28 条 | 同一条 `cargo test --offline -p pi-tui -p pi-coding-agent` |
+
+**反向验证（写进交付文档）**：只摘掉 `interactive.rs:2252` 的 `editLabel` 分支，
+`app_action_coverage.py --check-consumed` 报 `FALSE AD app.tree.editLabel` 且 exit 1，
+`keybinding_coverage.py --check` 报 `NEW DEAD ID(S)` 且 exit 1；复原后双双 exit 0。
+为此**修了工具**：`app_action_coverage.py` 原先把自己 `CONSUMED_APP_ACTIONS` 的字面量
+也算作 handler 证据，使 `--check-consumed` 恒真（列在表里 = 已接线），反向验证根本挂不了；
+现在 `scan()` 与 `keybinding_coverage.py` 的消费扫描都跳过 `crates/pi-tui/src/keybindings.rs`
+这张注册表。修完 44/44 不变（已核对没有任何 id 只靠注册表一处“消费”）。
+
+**门禁**：`cargo fmt --all -- --check` exit 0；`cargo clippy --offline -p pi-tui -p pi-coding-agent
+--all-targets` 本两包 **0 告警**（只剩 `rquickjs-core`(vendor) 13 条与 `pi-extensions` 1 条的既有告警）。
+**截图**：`docs/screenshots/lum1263-tree-rename-{idle,editing,committed}.{txt,png}`，三帧 80×24，
+真 `App::render_to_buffer`；本机无 PTY，是 **frame-buffer 冻结帧**，caption 已写明。
+
+**诚实条目**：`print_mode.rs::sigint_or_clean_exit` 在合并跑时偶发
+`unexpected exit code: Some(1)`（带改动 4 次合并跑出现 2 次；单跑 3/3、`-p pi-coding-agent`
+整包跑 2/2 都通过）；判定为负载敏感的环境抖动，与本轮改动无关，上表引用的对比取
+两边都无该抖动的那一对 log。
+
+### 0.21 LUM-1457 复测：Windows 真 PTY 打通 + 「每次按键执行两遍」修复；加权 **86.8%**（86.81%）
 
 基线与 §0.16.1 相同（`origin/feature/pi.rs` = `815b21d13`），本轮从它起。改动面：
 `pi-tui`（`app.rs` 的事件翻译 + 1 个新测试文件）、`pi-coding-agent`（`interactive.rs` 一处调用点）、
@@ -730,7 +802,7 @@ pi-rust 本轮补齐，并保留「任何其它键先关掉它、再照常处理
 2,755/5,563 = 0.4954 计算，合并后实测 2,782/5,563 = 0.5001 应给 +0.03pt，而不是 +0.05pt；
 剩下的 0.12pt 是它把「口径修正」与「新增用例」一起记到了轴上）。本表只登记**实测**，不重估别轮。
 
-### 0.20 LUM-1455 复测：退出时会话保留（`fullscreenExitOutput` 从「静默忽略」到「真生效」）；加权仍 **86.9%**
+### 0.22 LUM-1455 复测：退出时会话保留（`fullscreenExitOutput` 从「静默忽略」到「真生效」）；加权仍 **86.9%**
 
 **量的是什么**：上游默认「退出后终端里留下整段 transcript + 一行 resume 提示」这条契约，pi-rust 有没有。
 基线取证（限定路径）：
@@ -1003,3 +1075,71 @@ LUM-1259 另测的 19/44 = 43.2% 同样低报。）**
 2. 补 `models.* / session.* / tree.*` 快捷键接线（+2.9pt），顺手修 `@` 补全首行重复。
 3. 补 CLI 的 `--theme/--thinking/--tools/--provider/--offline` 与 4 个高价值 slash 命令。
 4. 补测试：把 Rust 用例数从 2,232 往 5,309 靠（当前 42%，是最大的"隐藏债务"）。
+
+### 0.23 LUM-1469 复测：排队输入的可见面（位置 + 形状 + 取回提示）+ 两条 `in_review` 交付并入；加权 **86.9% → 87.1%**
+
+**量的是什么**：排队输入（`App::submit` 忙碌时走 `MessageView::push_pending`）在屏幕上的**位置、形状、
+以及「怎么处置它」的提示**。基线取证（限定路径，不重蹈 LUM-1460 的整树假阳性）：
+
+```bash
+$ git grep -n 'Steering: ' fc18cb09e -- pi-rust/crates/pi-tui/src/message.rs
+fc18cb09e:pi-rust/crates/pi-tui/src/message.rs:1140:  ("Steering: ", &self.pending_steering),   # 画在日志尾部
+$ git grep -c 'to edit all queued messages' fc18cb09e -- pi-rust/crates/pi-tui/src
+0                                              # 上下文取回提示 0 命中（只有 locale.rs 的启动 header 广告行）
+```
+
+对照三家（本机第一手）：pi-ts `interactive-mode.ts:4366-4385`（`Spacer(1)` + 每条一行 + `↳ <chord> to edit
+all queued messages`，容器在 editor 区 `:876-892`）、codex `pending_input_preview.rs:84-160`（composer 上方，
+3 行预览 + `…` + `alt+up edit last queued message`）、Martty `src/app.rs:4841-4845`（transcript cell +
+`queued — lands after this turn · ctrl+x would send now` 一次性 tip）与 `src/ui.rs:707-709`（meta 行计数）。
+**三家都有紧邻输入框的可见面 + 处置提示**；pi-rust 是唯一两者都缺的。本轮按 pi-ts 形状补齐，
+并把块从日志里搬出去（此前它可滚动、可框选、可被 `/transcript` 导出）。
+
+| 口径 | 本轮 | 上一快照（LUM-1466） |
+|---|---|---|
+| 纯代码规模（src↔src） | **94.1%**（144,101 / 153,106） | 92.3%（141,365 / 153,106） |
+| 测试规模 | **51.3%**（2,856 / 5,563） | 49.8%（2,773 / 5,563） |
+| `app.*` 接线 | **44/44 = 100%**（silent 0 / advertised 0） | 43/44 = 97.7% |
+| 扩展生命周期事件 | 36/36 声明 + 36/36 构造点 | 同 |
+| TUI 模块 | 36/42 = 85.7% | 同 |
+| TUI 交互+视觉轴 | 轴 5 = (0.857 + **1.000**)/2 = **92.9%**；轴 6 = 90% | 轴 5 = 91.7% |
+| 加权完成度 | **87.1%**（86.9 → 87.14，tip `lum1469-tui`） | 86.9% |
+
+**增量归属（必须说清，否则这一个百分点会被误读）**：
+
+* `app.*` 43/44 → 44/44 与 `pi-coding-agent --lib` 588/8 → 594/8 来自**并入 LUM-1263**
+  （`origin/work/LUM-1263` = `271cb109f`，`/tree` 改名 UI）；`input.rs`/`word_navigation.rs` 的行数与
+  `pi-tui` 的 +24 条来自**并入 LUM-1461**（`origin/work/LUM-1461` = `4eec9a628`，composer `paste_burst`）。
+  两者都是 `in_review` 但从未进入 `feature/pi.rs` 的交付，本轮按 issue 的「都合并 feature/pi.rs」救回。
+* 推送前 `origin/feature/pi.rs` 已先走到 `c7a7b5878`（LUM-1457：Windows 真 PTY + 「按键执行两遍」修复）
+  与 `9b008633b`（LUM-1455：退出时会话保留 + `visible_lines` 哨兵溢出），本轮两次一并合入
+  （测试标记 `fc18cb09e` 2773 → `origin/feature/pi.rs` **2800**，见 `docs/LUM1469_PENDING_QUEUE.md` §0.2）。
+* 本轮自身只写 **+256 行 src**（`app.rs` +80/-2、`extension_ui.rs` +58/-1、`message.rs` +140/-19）
+  与 **+17 条测试**（9 `lum1469_pending_block` + 1 `lum1469_pending_chord` + 4 `message.rs` 单测
+  + 2 `extension_ui.rs` 单测 + 1 驱动级）。轴 12 因此从 0.4985 走到 0.5085（**+0.05pt**）。
+* 轴 6（TUI 视觉保真）**不上调**：本轮把「排队输入的位置/形状/提示」从「不符上游」变成「符合上游」，
+  属证据/可信度修复，口径沿用 LUM-1418 §6，不重估。
+
+加权重算：
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.929 + 8×0.90 + 7×0.78 + 7×0.70
++ 8×0.95 + 7×1.00 + 9×0.85 + 5×(2856/5563) + 3×0.95 = 87.14% → **87.1%**
+```
+
+**本轮的门禁与证据（可复跑）**：
+
+| 证据 | 命令 | 结果 |
+|---|---|---|
+| 排队块行为 | `cargo test --offline -p pi-tui --test lum1469_pending_block` | **9 / 0**（位置 / 顺序 / 几何 / 空队列回归 / `…` 标记 / 矮终端 / 3 帧） |
+| 提示跟随键位 | `cargo test --offline -p pi-tui --test lum1469_pending_chord` | **1 / 0**（未知 id → 平台默认；覆盖 → 生效键位；未绑定 → 不广告死键位） |
+| 真实提交路径 | `cargo test --offline -p pi-tui --test pending_messages` | **5 / 0**（含 +1：忙碌时画、清空后不画） |
+| 驱动级 | `cargo test --offline -p pi-coding-agent --lib follow_up_queues_while_busy` | **1 / 0**（帧里有 `Follow-up:` 行与 `↳` 提示行） |
+| 全量 | `cargo test --offline -p pi-tui -j 8`；`cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast` | **1169 / 0**（本轮 +17，其余来自并入轮）；**848 / 28**（`--lib` 603/8，基线 588/8 同一组名字；28 条同集合，全 Windows 环境类） |
+| 格式 / lint | `cargo fmt --all -- --check`；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets` | fmt exit 0；改动文件 0 告警（其余落在 `pi-extensions` 与 vendored `rquickjs-core`） |
+| 帧截图 | `docs/screenshots/lum1469-{queued-prompts-100x24,cut-queued-draft-44x16,no-queue-100x24}.png`(+`.txt`) | 3 帧，真 `App::render_to_buffer`；`python pi-rust/scripts/frame_to_png.py` 上色 |
+| 反向验证 | 把 `composed_frame` 的 `frame.pending` 硬写成 `0` | 9 条帧测试里 **7 条红** + `pending_messages` **2 条红**；恢复后全绿 |
+
+**诚实说明**：本机（Windows runner）**没有 PTY**，三张截图是 frame-buffer 冻结帧，证明「画在哪一格、
+内容是什么」，**不证明按键/字节时序**；时序与几何由 17 条 App/驱动级用例覆盖。
+本轮审计全文见 `docs/LUM1469_PENDING_QUEUE.md`（含 §6.1 两条顺带发现的既有缺陷与 §8 五条有意偏差）。

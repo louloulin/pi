@@ -1,0 +1,26 @@
+FRAME DUMP cols=100 rows=24
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     │|
+|> turn 2: explain the queue                                                                        │|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     │|
+|> turn 3: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 4: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 5: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 6: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 7: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 8: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 9: explain the queue                                                                        ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 10: explain the queue                                                                       ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> turn 11: explain the queue                                                                       ┃|
+|  Prompts typed while a turn is running wait in the queue until the turn ends.                     ┃|
+|> Ready.                                                                                           ┃|
+|> type a prompt — /help for commands                                                                |
+|Faux  lum1469-pending                                                  in 0 out 0 ?/8.2k  ? for help|
+END FRAME DUMP

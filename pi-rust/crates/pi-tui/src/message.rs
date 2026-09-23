@@ -261,6 +261,21 @@ pub enum PendingMessageKind {
     FollowUp,
 }
 
+/// Label a steering prompt renders under in the queued-messages block.
+/// Verbatim upstream (`interactive-mode.ts:4373`).
+///
+/// Upstream has no `i18n` table for this block (unlike the startup header), so
+/// the Rust port keeps the literal English labels rather than inventing a
+/// translation pair the reference implementation does not have.
+pub const PENDING_STEER_LABEL: &str = "Steering: ";
+/// Label a follow-up prompt renders under (upstream `interactive-mode.ts:4378`).
+pub const PENDING_FOLLOW_UP_LABEL: &str = "Follow-up: ";
+/// Lead-in glyph of the queued-messages hint row (upstream `interactive-mode.ts:4382`).
+pub const PENDING_HINT_LEAD: &str = "\u{21b3} ";
+/// Hint copy that follows the `app.message.dequeue` chord (upstream
+/// `interactive-mode.ts:4382`).
+pub const PENDING_HINT_TEXT: &str = "to edit all queued messages";
+
 /// Conversation log rendered by the TUI. Holds an ordered list of
 /// [`MessageItem`] entries and supports incremental updates so the
 /// TUI redraws only the tail while the assistant streams.
@@ -304,8 +319,10 @@ pub struct MessageView {
     /// Prompts the user submitted while a turn was in flight, waiting to be
     /// delivered once it ends. Upstream keeps two queues
     /// (`session.getSteeringMessages()` / `getFollowUpMessages()`) and shows
-    /// them above the editor; the port renders them as dim
-    /// `Steering:` / `Follow-up:` lines at the tail of the log.
+    /// them in a container above the editor
+    /// (`updatePendingMessagesDisplay`, `interactive-mode.ts:4366-4385`); the
+    /// port renders the same block through [`MessageView::pending_lines`] and
+    /// `App::paint_pending_block`.
     pending_steering: Vec<String>,
     /// See [`MessageView::pending_steering`].
     pending_follow_up: Vec<String>,
@@ -570,6 +587,66 @@ impl MessageView {
                     .map(|text| (PendingMessageKind::FollowUp, text.as_str())),
             )
             .collect()
+    }
+
+    /// Rows the queued-messages block occupies for the current queues: the
+    /// blank spacer row upstream inserts, one row per queued prompt, and the
+    /// `… to edit all queued messages` hint row. Zero when nothing is queued,
+    /// so a host with an empty queue keeps the frame geometry it had before
+    /// LUM-1469.
+    ///
+    /// Upstream builds the same shape in `updatePendingMessagesDisplay`
+    /// (`interactive-mode.ts:4366-4385`: `Spacer(1)`, one `TruncatedText` per
+    /// steering prompt, same for follow-ups, then the hint).
+    pub fn pending_block_rows(&self) -> u16 {
+        if self.pending_is_empty() {
+            0
+        } else {
+            u16::try_from(self.pending_len() + 2).unwrap_or(u16::MAX)
+        }
+    }
+
+    /// Upstream's queued-messages block, as styled lines: a blank spacer, one
+    /// line per queued prompt (`Steering: …` then `Follow-up: …`, the same
+    /// delivery order as [`MessageView::pending`]), then the
+    /// `↳ <chord> to edit all queued messages` hint.
+    ///
+    /// Every line is dim and **one row tall**: upstream renders each entry
+    /// through `TruncatedText(text, 1, 0)`, which keeps only the text before
+    /// the first newline and clips the rest to the available width. The clip
+    /// mark is added by the painter
+    /// ([`crate::styled::write_styled_line_ellipsized`]), so a queued draft
+    /// that does not fit is marked rather than silently cut (LUM-1412).
+    ///
+    /// `dequeue_chord` is the resolved `app.message.dequeue` display text; an
+    /// empty string means the reader unbound the chord, and the hint then
+    /// drops the dead chord instead of advertising it.
+    pub fn pending_lines(&self, dequeue_chord: &str) -> Vec<StyledLine> {
+        if self.pending_is_empty() {
+            return Vec::new();
+        }
+        let dim = SpanStyle::fg(ThemeColor::Dim);
+        let mut lines: Vec<StyledLine> = Vec::with_capacity(self.pending_len() + 2);
+        // Upstream's `Spacer(1)`: one blank row separates the block from the
+        // transcript tail.
+        lines.push(Vec::new());
+        for (kind, text) in self.pending() {
+            let label = match kind {
+                PendingMessageKind::Steer => PENDING_STEER_LABEL,
+                PendingMessageKind::FollowUp => PENDING_FOLLOW_UP_LABEL,
+            };
+            let mut line = String::with_capacity(label.len() + text.len());
+            line.push_str(label);
+            line.push_str(text.split('\n').next().unwrap_or(""));
+            lines.push(vec![StyledSpan::new(line, dim)]);
+        }
+        let hint = if dequeue_chord.is_empty() {
+            format!("{PENDING_HINT_LEAD}{PENDING_HINT_TEXT}")
+        } else {
+            format!("{PENDING_HINT_LEAD}{dequeue_chord} {PENDING_HINT_TEXT}")
+        };
+        lines.push(vec![StyledSpan::new(hint, dim)]);
+        lines
     }
 
     /// Remove and return the next queued prompt, steering before follow-up.
@@ -1059,23 +1136,12 @@ impl MessageView {
             out.extend(self.item_lines(item, text_width, hyperlinks));
         }
 
-        if !self.pending_is_empty() {
-            let dim = SpanStyle::fg(ThemeColor::Dim);
-            for (label, text) in [
-                ("Steering: ", &self.pending_steering),
-                ("Follow-up: ", &self.pending_follow_up),
-            ] {
-                for entry in text {
-                    let body = format!("{label}{entry}");
-                    out.extend(
-                        wrap_text(&body, width as usize)
-                            .into_iter()
-                            .map(|line| vec![StyledSpan::new(line, dim)]),
-                    );
-                }
-            }
-        }
-
+        // Queued prompts are **not** part of the log: they render in the
+        // composer-adjacent block ([`MessageView::pending_lines`]), exactly
+        // where upstream keeps `pendingMessagesContainer`
+        // (`interactive-mode.ts:878-892`). Before LUM-1469 they were appended
+        // here, at the tail of the transcript, which made a not-yet-sent
+        // prompt scrollable, selectable transcript content.
         if out.is_empty() {
             out.push(Vec::new());
         }
@@ -2014,5 +2080,60 @@ mod tests {
         assert_eq!(view.item_index_at_line(ranges[1].0, 40), Some(1));
         assert_eq!(view.item_index_at_line(ranges[1].1 - 1, 40), Some(1));
         assert_eq!(view.item_index_at_line(999, 40), None);
+    }
+
+    /// LUM-1469: the queued-messages block is upstream's `Spacer(1)` +
+    /// one row per prompt + the hint row — zero rows when nothing is queued.
+    #[test]
+    fn pending_block_rows_follow_the_queue() {
+        let mut view = MessageView::new();
+        assert_eq!(view.pending_block_rows(), 0);
+        assert!(view.pending_lines("Alt+Up").is_empty());
+        view.push_pending(PendingMessageKind::Steer, "steer me");
+        assert_eq!(view.pending_block_rows(), 3);
+        view.push_pending(PendingMessageKind::FollowUp, "then me");
+        assert_eq!(view.pending_block_rows(), 4);
+        view.take_all_pending();
+        assert_eq!(view.pending_block_rows(), 0);
+    }
+
+    /// The block's shape: blank spacer, `Steering:` rows, `Follow-up:` rows,
+    /// then the hint — the order upstream builds (`interactive-mode.ts:4370-4383`).
+    #[test]
+    fn pending_lines_render_labels_then_the_dequeue_hint() {
+        let mut view = MessageView::new();
+        view.push_pending(PendingMessageKind::FollowUp, "follow me");
+        view.push_pending(PendingMessageKind::Steer, "steer me");
+        let lines = view.pending_lines("Alt+Up");
+        let text: Vec<String> = lines.iter().map(|line| plain_text(line)).collect();
+        assert_eq!(text[0], "");
+        // Steering first, whatever the insertion order (delivery order).
+        assert_eq!(text[1], "Steering: steer me");
+        assert_eq!(text[2], "Follow-up: follow me");
+        assert_eq!(text[3], "\u{21b3} Alt+Up to edit all queued messages");
+    }
+
+    /// A queued draft is one row: only the text before the first newline is
+    /// kept, exactly like upstream's `TruncatedText(text, 1, 0)`.
+    #[test]
+    fn pending_lines_keep_only_the_first_line_of_a_draft() {
+        let mut view = MessageView::new();
+        view.push_pending(PendingMessageKind::Steer, "first\nsecond\nthird");
+        let lines = view.pending_lines("Alt+Up");
+        assert_eq!(plain_text(&lines[1]), "Steering: first");
+        assert_eq!(lines.len(), 3);
+    }
+
+    /// An unbound `app.message.dequeue` must not leave a dead chord on the
+    /// hint row (the rule LUM-1447 set for every other hint surface).
+    #[test]
+    fn the_dequeue_hint_drops_an_unbound_chord() {
+        let mut view = MessageView::new();
+        view.push_pending(PendingMessageKind::Steer, "queued");
+        let lines = view.pending_lines("");
+        assert_eq!(
+            plain_text(lines.last().expect("hint row")),
+            "\u{21b3} to edit all queued messages"
+        );
     }
 }

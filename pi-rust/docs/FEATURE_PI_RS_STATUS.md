@@ -15791,3 +15791,53 @@ LUM-1461（composer `paste_burst`，`编程助手-winpi`）、LUM-1434（CLI fla
 
 > 加权在合并前后都落在 86.8%，与本轮「平台通路缺陷不在 13 轴里」的判断一致：
 > 本轮真正涨的是**证据可信度**（Windows 首次可真 PTY 断言）与**一条 P0 缺陷的消失**。
+## LUM-1469 round — 排队输入的可见面（composer 上方 `Steering:`/`Follow-up:` 块 + `↳ <chord>` 取回提示）+ 并入两条 `in_review` 交付与 LUM-1457/1455；`pi-tui` 1169/0；派发 1 条（槽位 2/3）
+
+### 一、本轮做了什么（issue 点名的四件事）
+
+1. **TUI 审计**：对照 pi-ts / codex / Martty 三家第一手源码，定位「排队输入」这一面：
+   位置（三家的块都紧邻输入框，pi-rust 画在**日志尾部**）、形状（pi-ts 每条 1 行、codex 每条 ≤3 行 + `…`，
+   pi-rust 被 `wrap_text` 折成 N 行）、提示（三家都有处置提示，pi-rust **0 命中**）。
+2. **缺口修复**：`MessageView::pending_lines` / `pending_block_rows` + `ExtensionFrame::pending`
+   （数据驱动行数）+ `plan_chrome` 在 editor 之后预留 + `App::paint_pending_block`；
+   块从 `render_styled_lines` 里搬出（不再计入日志/选择/滚动）；
+   `↳` 提示的键位走**生效键位表**（`app.message.dequeue`，未装表退回平台默认 `Alt+Up`/`Alt+Q`）。
+3. **截图**：3 张 frame-buffer（100×24 正常块 / 44×16 超宽草稿 `…` 标记 / 100×24 无排队回归）。
+4. **推送合并**：本轮分支合入 `feature/pi.rs`，**并把两条 `in_review` 但从未合入的交付救回**：
+   LUM-1461（composer `paste_burst`，`4eec9a628`）与 LUM-1263（`/tree` 改名 UI，`271cb109f`）；
+   推送前又把已先落在 `origin/feature/pi.rs` 的 LUM-1457（`c7a7b5878`）与 LUM-1455（`9b008633b`）
+   一并合入（第一次只有状态文档一处冲突，第二次干净）。
+
+### 二、门禁与数字（本机实测）
+
+* `cargo test --offline -p pi-tui -j 8`：**1169 passed / 0 failed**
+  （本轮自身 **+17**；其余来自并入的 LUM-1461/1263 与 LUM-1457/1455 —— 测试标记
+  `fc18cb09e` 2773 → `origin/feature/pi.rs` 2800 → tip 2856）。
+* `cargo test --offline -p pi-coding-agent -j 4 --no-fail-fast`：**848 / 28**
+  （28 条逐条核对为同一集合，全 Windows 环境类 → **新增失败 0**）；
+  `--lib` 单跑 **603/8**（基线 588/8，同一组 8 条名字）。
+* `cargo fmt --all -- --check` clean；`cargo clippy --offline -p pi-tui -p pi-coding-agent --all-targets`
+  改动文件 **0 告警**（其余落在 `pi-extensions` 与 vendored `rquickjs-core`）。
+* **反向验证**：把 `composed_frame` 的 `frame.pending` 硬写成 `0` → 9 条帧测试里 **7 条红**，
+  `pending_messages` **2 条红**；恢复后全绿。
+* 新增测试 **17 条**、新增帧 **3 张**；`docs/LUM1469_PENDING_QUEUE.md` 是本轮审计全文。
+
+### 三、Rust↔TS 口径复测
+
+* 纯代码规模 **94.1%**（144,101 / 153,106）；测试 **51.3%**（2,856 / 5,563）。
+* `app.*` 接线 **44/44 = 100%**（silent 0 / advertised 0，由 LUM-1263 关闭最后一格）；
+  扩展事件 36/36 声明 + 36/36 构造点；TUI 模块 36/42 = 85.7%。
+* 加权完成度 **87.1%**（86.9 → 87.14）。**诚实读法**：这一个多百分点里，`app.*` 与 `--lib` 的增量来自
+  **并入的 LUM-1263**，`input.rs`/`word_navigation.rs` 的行数来自**并入的 LUM-1461**，
+  另有 +27 条测试标记来自**并入的 LUM-1457/1455**；本轮自身是 **+256 行 src / +17 条测试**
+  （轴 12 +0.06pt）与一次**证据修复**（轴 6 不上调）。
+
+### 四、槽位 / 派发
+
+开工时 board：LUM-1467（footer stats 行，`in_progress`，`编程助手-winpi`）为唯一在办面；
+LUM-1461 / LUM-1263 为 `in_review`（**本轮已合入**）。因此合并后槽位回落到 **2/3**，**有余量**。
+
+**派发 1 条**：**LUM-1470** —— 扩展 `ctx.ui.setStatus(key, text)` 落地为 footer 第 3 行
+（上游 `footer.ts:243-251`；Rust 侧仍是 `ERR_PI_UI_UNSUPPORTED`）。创建为 `backlog`，
+等 LUM-1467 合入、本轮推送成功后再提升为 `todo`（两条都要动 `status.rs` / `plan_chrome`，不并发）。
+未派第二条的理由与「同一屏几何不并发」的判据写在 `docs/LUM1469_PENDING_QUEUE.md` §7。

@@ -81,6 +81,7 @@ const SELECTOR_SCOPED: &[&str] = &[
     "app.session.deleteNoninvasive",
     "app.tree.foldOrUp",
     "app.tree.unfoldOrDown",
+    "app.tree.editLabel",
     "app.tree.toggleLabelTimestamp",
     "app.tree.filter.default",
     "app.tree.filter.noTools",

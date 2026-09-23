@@ -1,0 +1,26 @@
+FRAME DUMP cols=120 rows=24
+|> Ready — recall a prompt from the previous session.                                                                    |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|> [paste #1 +12 lines]▍                                                                                                 |
+|Faux  burst                    in 0 out 0 ?/1.0k  Pasted content recalled from a previous session is no longer available|
+END FRAME DUMP

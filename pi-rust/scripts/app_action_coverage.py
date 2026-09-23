@@ -39,8 +39,10 @@ Counting rules (kept deliberately strict so the number cannot flatter us):
   brace-aware (a naive "cut at the first `#[cfg(test)]`" truncates
   `interactive.rs`, which has test items before its tree-selector input
   handling and would under-report by ~17 actions);
-* `crates/pi-coding-agent/src/keybindings.rs` and `crates/pi-tui/src/locale.rs`
-  are never counted as consumers.
+* `crates/pi-coding-agent/src/keybindings.rs` (the definitions) and
+  `crates/pi-tui/src/keybindings.rs` (the consumed-hint list) are never counted
+  as consumers. The second one matters: a literal in the list itself must not
+  satisfy the check, or `--check-consumed` can never fail (LUM-1263).
 
 Usage:
     python3 pi-rust/scripts/app_action_coverage.py               # human table
@@ -65,7 +67,9 @@ DEFINITIONS = pathlib.Path("crates/pi-coding-agent/src/keybindings.rs")
 #: The hand-maintained list the startup header filters its hints through
 #: (LUM-1240/LUM-1245). `--check-consumed` keeps it honest: a chord listed here
 #: but not actually resolved is a false ad, and a wired chord missing from here
-#: is a hint the header silently drops.
+#: is a hint the header silently drops. It is **not** a consumer: counting the
+#: list's own literals would make the check tautological (every listed id would
+#: measure as wired), so [`scan`] skips it too. LUM-1263 found and fixed that.
 CONSUMED_LIST = pathlib.Path("crates/pi-tui/src/keybindings.rs")
 ADVERTISING = pathlib.Path("crates/pi-tui/src/locale.rs")
 ROOTS = (pathlib.Path("crates"),)
@@ -180,7 +184,7 @@ def scan(repo: pathlib.Path, actions: list[str]) -> dict[str, dict[str, list[str
     for root in ROOTS:
         for path in sorted((repo / root).rglob("*.rs")):
             rel = path.relative_to(repo)
-            if rel in (DEFINITIONS,) or "tests" in rel.parts:
+            if rel in (DEFINITIONS, CONSUMED_LIST) or "tests" in rel.parts:
                 continue
             product = strip_test_items(path.read_text(encoding="utf-8", errors="replace"))
             for action in actions:
