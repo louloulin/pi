@@ -82,19 +82,31 @@ from __future__ import annotations
 
 import argparse
 import copy
-import fcntl
 import hashlib
 import json
 import os
-import pty
 import re
 import select
 import shutil
 import signal
 import struct
 import sys
-import termios
 import time
+
+try:
+    import fcntl
+    import pty
+    import termios
+except ImportError:  # pragma: no cover - Windows has none of the three
+    # The POSIX backend below (`spawn` / `pump` / `drain`) needs them, but
+    # everything else in this module — key encoding, the pyte renderer, the
+    # panel assertions — is platform neutral and shared with
+    # `pty_capture_win.py`, the ConPTY backend. Keeping the import soft is
+    # what lets that module `import pty_capture` on Windows instead of
+    # forking a second copy of the renderer. On POSIX nothing changes.
+    fcntl = None
+    pty = None
+    termios = None
 
 try:
     import pyte
@@ -225,31 +237,68 @@ def parse_color(value, fallback):
 # ------------------------------------------------------------- render
 
 
-def load_font(size: int):
-    for name in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
-        if os.path.exists(name):
-            return ImageFont.truetype(name, size)
-    return ImageFont.load_default()
+# Monospace candidates, first match wins. The Windows entries keep the
+# harness usable from the ConPTY backend (`pty_capture_win.py`), where the
+# Linux paths do not exist and `ImageFont.load_default()` would render the
+# frames in a proportional bitmap face that breaks the cell grid.
+_MONO_FONTS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/consola.ttf",
+    "C:/Windows/Fonts/lucon.ttf",
+)
+_MONO_BOLD_FONTS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    "C:/Windows/Fonts/consolab.ttf",
+)
+# CJK-capable faces, preferred whenever the frames contain wide glyphs — a
+# monospace face without CJK draws every `你好` cell as a `.notdef` box, and
+# a screenshot that shows boxes is not evidence about a Chinese draft.
+_CJK_FONTS = (
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+)
+_CJK_BOLD_FONTS = ("C:/Windows/Fonts/msyhbd.ttc",) + _CJK_FONTS
 
 
-def load_bold_font(size: int):
-    for name in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
-    ):
+def _needs_cjk(text: str) -> bool:
+    return any(ord(ch) > 0x2E7F for ch in text)
+
+
+def _first_font(names, size):
+    for name in names:
         if os.path.exists(name):
-            return ImageFont.truetype(name, size)
-    return load_font(size)
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:  # a .ttc whose face index is unusable — try the next
+                continue
+    return None
+
+
+def load_font(size: int, text: str = ""):
+    names = (*_CJK_FONTS, *_MONO_FONTS) if _needs_cjk(text) else _MONO_FONTS
+    font = _first_font(names, size)
+    return font if font is not None else ImageFont.load_default()
+
+
+def load_bold_font(size: int, text: str = ""):
+    names = (*_CJK_BOLD_FONTS, *_MONO_BOLD_FONTS) if _needs_cjk(text) else _MONO_BOLD_FONTS
+    font = _first_font(names, size)
+    return font if font is not None else load_font(size, text)
 
 
 class Renderer:
-    def __init__(self, font_size: int = 16, scale: int = 2):
-        self.font = load_font(font_size * scale)
-        self.bold = load_bold_font(font_size * scale)
+    def __init__(self, font_size: int = 16, scale: int = 2, text: str = ""):
+        # `text` is the concatenated frame content of the run; it only picks
+        # the font family (monospace vs CJK-capable), the grid stays driven by
+        # the cell metrics of whichever face won.
+        self.font = load_font(font_size * scale, text)
+        self.bold = load_bold_font(font_size * scale, text)
         self.scale = scale
         adv = self.font.getlength("M")
         self.cell_w = int(round(adv))
@@ -427,6 +476,50 @@ def snapshot(screen) -> str:
         lines.pop()
     body = "\n".join(lines)
     return body
+
+
+# The VT sequence a full-screen app sends to switch to the alternate screen.
+_ALT_SCREEN_ENTER = "\x1b[?1049h"
+
+
+class AltScreenFeeder:
+    r"""Feed raw terminal bytes into a `pyte` screen, one alt-screen switch aware.
+
+    `pyte` 0.8.x has no alternate-screen buffer: mode 1049 is an unknown
+    private mode, so a `\\x1b[?1049h` is *ignored* and everything the app
+    printed to the main screen stays on the grid. A full-screen app then
+    paints only the cells it owns — its renderer is differential, it assumes
+    the terminal shows its previous frame — so the two screens end up
+    interleaved. Measured, not theorised: on Windows the main-screen
+    `Use “pi --approve” for this run…` banner showed through the alt-screen
+    header, and a frame read
+
+    ```text
+    pi v0.1.0ers\ADMINI~1\AppData\Local\Temp\…\pi-pty-cwd-1343
+    ```
+
+    i.e. the banner's path tail left over in columns the app never wrote.
+    Panels captured like that are wrong about what a user sees, which is the
+    one thing a screenshot must not be.
+
+    The feeder therefore clears the emulated grid when the app enters the
+    alternate screen. `Screen.reset()` is used in place, so the `screen`
+    object keeps its identity and every caller can keep holding it. Leaving
+    the alternate screen (`1049l`) is left alone: a capture ends inside the
+    alt screen, and re-showing the main screen would be a different session.
+    """
+
+    def __init__(self, screen):
+        self.screen = screen
+        self.stream = pyte.Stream(screen)
+
+    def feed(self, text: str) -> None:
+        while _ALT_SCREEN_ENTER in text:
+            head, _, text = text.partition(_ALT_SCREEN_ENTER)
+            self.stream.feed(head)
+            self.screen.reset()
+            self.screen.set_mode(pyte.modes.LNM)
+        self.stream.feed(text)
 
 
 # ------------------------------------------------------- panel assertions
@@ -729,7 +822,10 @@ def main() -> int:
 
     screen = pyte.Screen(cols, rows)
     screen.set_mode(pyte.modes.LNM)  # CRLF semantics like a real terminal
-    stream = pyte.Stream(screen)
+    # `AltScreenFeeder` clears the grid on `\x1b[?1049h` (pyte has no
+    # alternate-screen buffer); it feeds the same `screen` object, so every
+    # `snapshot` / `deepcopy` below is unchanged.
+    stream = AltScreenFeeder(screen)
     master, pid = spawn(os.path.abspath(args.bin), scenario.get("args", []), cwd, env, cols, rows)
 
     cards = []
@@ -836,7 +932,13 @@ def main() -> int:
             if args.cwd is None:
                 shutil.rmtree(cwd, ignore_errors=True)
 
-    renderer = Renderer(font_size=args.font_size, scale=args.scale)
+    renderer = Renderer(
+        font_size=args.font_size,
+        scale=args.scale,
+        # Wide glyphs need a CJK-capable face; the frames know whether any
+        # appeared, so the font choice is per-run rather than per-platform.
+        text="".join(body for _, body, *_ in cards),
+    )
     images = [renderer.render_panel(frame, head) for head, _, frame, _, _, _ in cards]
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     composite = (
