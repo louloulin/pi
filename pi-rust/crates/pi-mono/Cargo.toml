@@ -1,0 +1,30 @@
+[package]
+name = "pi-mono"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Workspace glue for the Pi Rust port (provider selection, default config)."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+pi-ai = { path = "../pi-ai" }
+pi-agent-core = { path = "../pi-agent-core" }
+pi-extensions = { path = "../pi-extensions" }
+pi-telemetry = { path = "../pi-telemetry" }
+pi-chord = { path = "../pi-chord" }
+
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+# The eval harness is native-only (loopback fixtures + filesystem), so it is
+# not linked into wasm builds of the glue crate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pi-evals = { path = "../pi-evals" }
+# The server binds sockets and runs blocking service dispatch, so it is
+# likewise native-only.
+pi-server = { path = "../pi-server" }

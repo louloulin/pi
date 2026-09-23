@@ -1,0 +1,21 @@
+[package]
+name = "pi-chord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Application composition runtime: replicated state deltas, facet lifecycle and host context (Rust port of packages/chord core)."
+
+[lints]
+workspace = true
+
+# The crate is runtime-agnostic: no filesystem, clock, thread or socket access,
+# so the core layer compiles on native and `wasm32-unknown-unknown` alike.
+# Remote service transports (Stage 18) will be a feature of the crates that
+# depend on it, not of this one.
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true

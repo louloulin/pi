@@ -1,0 +1,20 @@
+FRAME DUMP cols=76 rows=18
+|> Which model should this session use?                                      |
+|Pick a model                                                                |
+|────────────────────────────────────────                                    |
+|  faux-a                          first model                               |
+|  faux-b                          second model                              |
+|❯ faux-c                          third model                               |
+|  faux-d                          fourth model                              |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> type a prompt — /help for commands                                        |
+|Faux  lum1445-modal-pointer-frames             in 0 out 0 ?/2.0k  ? for help|
+END FRAME DUMP

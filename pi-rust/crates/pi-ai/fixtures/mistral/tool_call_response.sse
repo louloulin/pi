@@ -1,0 +1,12 @@
+data: {"id":"cmpl-tool","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"cmpl-tool","choices":[{"index":0,"delta":{"content":"Let me check. "},"finish_reason":null}]}
+
+data: {"id":"cmpl-tool","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_abc","index":0,"type":"function","function":{"name":"read","arguments":"{\"pa"}}]},"finish_reason":null}]}
+
+data: {"id":"cmpl-tool","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"th\": \"a.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"cmpl-tool","choices":[{"index":0,"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":40,"completion_tokens":12,"total_tokens":52}}
+
+data: [DONE]
+

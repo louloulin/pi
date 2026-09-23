@@ -1,0 +1,227 @@
+# lum1288-current-state.png — chars, 120x34 cells
+
+===== LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.  |  [1] 1. idle at 120x34: header hints + onboarding + composer + footer metrics  (cursor 120,33, frame 83acac5abacb, px c0a47eadff7a, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d73c915a2cbe70                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+  assert PASS   expect       'Faux test model'
+
+===== LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.  |  [2] 2. type / -> slash completion dropdown opens above the composer  (cursor 36,32, frame 0e91e887e1bc, px 379e617aaea7, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ help  Show this help text
+  clear  Clear the message view
+  new  Start a new session
+  copy  Copy last agent message to clipboard
+  name  <name> — Set session display name
+  (1/19)
+> /▍
+Faux test model  session-18d73c915a2cbe70                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '/'
+  assert XFAIL  probe        '/help'
+  assert XFAIL  probe        '/copy'
+
+===== LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.  |  [3] 3. Ctrl+U clears, then @ -> file completion  (cursor 3,32, frame 3be4e8d27e4c, px 1fe7f500d903, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+❯ src/  src
+  README.md  README.md
+  main.rs  src/main.rs
+> @▍
+Faux test model  session-18d73c915a2cbe70                                                  in 0 out 0 ?/8.2k  ? for help
+  assert XFAIL  probe        'Cargo.toml'
+  assert PASS   probe        'README.md'
+
+===== LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.  |  [4] 4. Ctrl+U clears, then /help submits so we have real scrollback  (cursor 36,32, frame ffc4ea1d7ff8, px 5e99e71224e6, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 21 lines above · Home                                                                                               │
+·   Enter       submit prompt                                                                                          │
+·   Up / Down   navigate prompt history                                                                                │
+·   PgUp/PgDn   scroll the chat log one page                                                                           │
+·   Home / End  jump to the start / end of the chat log                                                                │
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      │
+·   Ctrl+D      exit on an empty prompt                                                                                │
+·   Ctrl+L      open the model selector                                                                                ┃
+·   Ctrl+U      clear the prompt buffer                                                                                ┃
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d73c915a2cbe70                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '/help'
+
+===== LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.  |  [5] 5. /hotkeys adds the keybinding table so log has real overflow  (cursor 54,30, frame 491012d47131, px 90c651cf4ced, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 63 lines above · Home  the selection down                                                                           │
+·   PgUp             selection page up                                                                                 │
+·   PgDn             selection page down                                                                               │
+·   Enter            confirm the selection                                                                             │
+·   Esc / Ctrl+C     close the selection list                                                                          │
+·   Tab              path completion / accept autocomplete                                                             │
+·                                                                                                                      │
+· commands:                                                                                                            │
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        │
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d73c915a2cbe70                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.  |  [6] 6. PgUp detaches -> jump-to-latest pill appears on the viewport's last row  (cursor 120,31, frame dc72cfef7baa, px 871c20a14343, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                │
+·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          │
+·   Ctrl+L           open the model selector                                                                           │
+·   Alt+N            start a new session                                                                               │
+·   Alt+T            open the session tree                                                                             │
+·   Alt+F            fork a session from a message                                                                     │
+·   Alt+R            resume a session                                                                                  │
+·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             │
+·                                                                                                                      ┃
+· selectors and completion:                                                                                            ┃
+·   Up               move the selection up  ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d73c915a2cbe70                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Jump to latest'

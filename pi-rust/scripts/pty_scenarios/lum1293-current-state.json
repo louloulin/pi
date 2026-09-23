@@ -1,0 +1,71 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1293 current TUI state on feature/pi.rs tip 1a24bae74 — idle startup frame, slash completion (LUM-1282 multi-line composer on the input), file completion, jump-to-latest pill after detach. Same scenario ran on the latest pi-rust binary; the picture + text dump is the load-bearing evidence that the TUI is on par with the codex / pi-ts class.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "src/main.rs",
+    "README.md"
+  ],
+  "notes": [
+    "Three scenes in one session: (a) idle, (b) slash + file completion, (c) jump-to-latest pill.",
+    "Same harness / same parser / same binary path as LUM-1286 — no mocked rendering."
+  ],
+  "panels": [
+    {
+      "label": "1. idle at 120x34: header hints + onboarding + composer + footer metrics",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "type a prompt",
+        "Faux test model"
+      ]
+    },
+    {
+      "label": "2. type / -> slash completion dropdown opens above the composer",
+      "send": "/",
+      "wait": 1.2,
+      "expect": [
+        "/"
+      ],
+      "probe": [
+        "/help",
+        "/copy"
+      ]
+    },
+    {
+      "label": "3. Ctrl+U clears, then @ -> file completion",
+      "send": "<C-u>@",
+      "wait": 1.2,
+      "probe": [
+        "Cargo.toml",
+        "README.md"
+      ]
+    },
+    {
+      "label": "4. Ctrl+U clears, then /help submits so we have real scrollback",
+      "send": "<C-u>/help<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "/help"
+      ]
+    },
+    {
+      "label": "5. /hotkeys adds the keybinding table so log has real overflow",
+      "send": "/hotkeys<Enter>",
+      "wait": 1.8
+    },
+    {
+      "label": "6. PgUp detaches -> jump-to-latest pill appears on the viewport's last row",
+      "send": "<PgUp>",
+      "wait": 1.0,
+      "expect": [
+        "Jump to latest"
+      ]
+    }
+  ]
+}

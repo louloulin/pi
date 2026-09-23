@@ -1,0 +1,56 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "env": {
+    "EDITOR": "./editor.sh",
+    "VISUAL": ""
+  },
+  "fixtures": {
+    "editor.sh": "#!/bin/sh\n# Fake $EDITOR for the app.editor.external (Ctrl+G) scenario.\n#\n# pi-rust hands the editor one argument: the path of its temp\n# `prompt.md` draft (crates/pi-coding-agent/src/external_editor.rs). The\n# sleep is deliberate — it keeps the normal screen (with the launch banner)\n# up long enough for panel 2 to capture it before panel 3 sees the repaint.\nsleep 1.2\nprintf 'EDITED BY EXTERNAL EDITOR #1\\nsecond line\\n' > \"$1\"\n"
+  },
+  "notes": [
+    "A/B for app.editor.external, the chord LUM-1308 wired: the draft is typed, Ctrl+G hands the terminal to $EDITOR, and the editor's contents come back into the composer.",
+    "panel 1: the draft as typed.",
+    "panel 2: 0.5s into a 1.2s editor run — the app has left the alternate screen and printed its banner, which is what the user sees while the editor owns the tty.",
+    "panel 3: after the editor exits, the app re-enters the alternate screen and the composer holds the editor's file contents, not the typed draft.",
+    "Same binary and HOME as the other LUM-1308 captures."
+  ],
+  "final_send": "<C-d>",
+  "caption": "LUM-1308 — Ctrl+G (app.editor.external) end to end in a real PTY: draft → $EDITOR → draft replaced. Panels 2-3 are two moments of one run.",
+  "panels": [
+    {
+      "label": "1. draft typed into the composer",
+      "send": "original draft typed by the user",
+      "wait": 0.8,
+      "expect": [
+        "original draft typed by the user"
+      ]
+    },
+    {
+      "label": "2. Ctrl+G → the tty is handed to $EDITOR (normal screen, banner up)",
+      "send": "<C-g>",
+      "wait": 0.5,
+      "expect": [
+        "Launching external editor: ./editor.sh",
+        "Pi will resume when the editor exits."
+      ]
+    },
+    {
+      "label": "3. editor exited 0 → composer holds the edited file",
+      "wait": 1.6,
+      "wait_for": "EDITED BY EXTERNAL EDITOR #1",
+      "wait_timeout": 8.0,
+      "expect": [
+        "EDITED BY EXTERNAL EDITOR #1",
+        "second line"
+      ],
+      "excludes": [
+        "original draft typed by the user"
+      ]
+    }
+  ]
+}

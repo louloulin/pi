@@ -1,0 +1,24 @@
+{
+  "cols": 120,
+  "rows": 23,
+  "caption": "LUM-1260 tip b5769b585 at 120x23 — composer still off-screen",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "src/main.rs"
+  ],
+  "panels": [
+    {
+      "label": "1. idle at 120x23",
+      "send": "",
+      "wait": 2.5
+    },
+    {
+      "label": "2. a draft is typed at 120x23",
+      "send": "typed blind",
+      "wait": 1.0
+    }
+  ]
+}

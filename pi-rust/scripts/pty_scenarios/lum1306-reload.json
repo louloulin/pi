@@ -1,0 +1,55 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1306/home-reload` so the child reads the prepared agent dir.",
+    "Every `expect` string is text the binary itself painted into the VT grid."
+  ],
+  "caption": "LUM-1306 — `/reload` in the real pi-rust TUI, captured on feature/pi.rs after the merge. The child runs with a prepared HOME (`--home /tmp/lum1306/home-reload`) holding `~/.pi/agent/keybindings.json` (cursorUp->Ctrl+P) and `~/.pi/agent/settings.json` (theme=light, fullscreenCopyOnSelect=false). Panels: (1) idle, (2) /hotkeys showing the on-disk override live, (3) /help, (4) /reload re-reading both files — the summary line names the file and the override count, the palette flips to the stored light theme, and the scope note states what is NOT re-read. Real binary + real PTY + pyte VT emulator; nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — default palette; overrides on disk, nothing applied yet",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "Faux test model"
+      ]
+    },
+    {
+      "label": "2. /clear + /hotkeys + Home — the on-disk override is live before any reload (Ctrl+P)",
+      "send": "/clear<Enter>/hotkeys<Enter><Home>",
+      "wait": 1.8,
+      "expect": [
+        "previous line / prompt history",
+        "Ctrl+P"
+      ]
+    },
+    {
+      "label": "3. /clear + /help + Home — the head of the command list",
+      "send": "/clear<Enter>/help<Enter><Home>",
+      "wait": 1.5,
+      "expect": [
+        "slash commands:",
+        "/clear",
+        "/model"
+      ]
+    },
+    {
+      "label": "4. /clear + /reload — keybindings + settings re-read; light theme applied live; honest scope note",
+      "send": "/clear<Enter>/reload<Enter>",
+      "wait": 2.0,
+      "expect": [
+        "/reload:",
+        "override(s)",
+        "theme → light",
+        "not re-read"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

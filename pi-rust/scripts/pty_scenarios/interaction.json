@@ -1,0 +1,17 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1241 tip af3aa30a4",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs", "src/lib.rs", "README.md", "Cargo.toml"],
+  "panels": [
+    {"label": "1. idle startup frame: header hints + onboarding + composer + footer metrics", "send": "", "wait": 2.5},
+    {"label": "2. type / -> slash-command completion opens above the composer", "send": "/", "wait": 1.2},
+    {"label": "3. type mo -> fuzzy narrows the candidate list", "send": "mo", "wait": 0.8},
+    {"label": "4. Down -> selection marker moves to the next candidate", "send": "<Down>", "wait": 0.6},
+    {"label": "5. Tab -> applies the SELECTED candidate (/copy), dropdown closes", "send": "<Tab>", "wait": 0.8},
+    {"label": "6. Ctrl+U clears, @ -> file completion", "send": "<C-u>@", "wait": 1.2},
+    {"label": "7. @src -> file candidates narrow", "send": "src", "wait": 0.8},
+    {"label": "8. Tab -> composes @src/", "send": "<Tab>", "wait": 0.8}
+  ]
+}

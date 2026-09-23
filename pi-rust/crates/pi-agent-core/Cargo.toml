@@ -1,0 +1,88 @@
+[package]
+name = "pi-agent-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stateful agent runtime with tool execution and event streaming."
+
+[lints]
+workspace = true
+
+# `wasm-bindgen` outputs are produced via the `cdylib` crate type. We
+# only emit the `cdylib` when the wasm feature is enabled so native
+# builds do not pay the overhead of two crate types in the same
+# package.
+[lib]
+# `wasm-bindgen` outputs are produced via the `cdylib` crate type. The
+# extra crate type adds a small amount of overhead on native targets
+# (two output files in `target/` per build) but keeps the WASM build
+# straightforward: `wasm-pack build -p pi-agent-core --target web`
+# finds the cdylib automatically without per-target overrides.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# `wasm` enables the `wasm-bindgen` exports — `AgentHandle` and the
+# `wasm.rs` module the JS host consumes. Native builds leave it off so the
+# agent crate stays a pure-Rust library with no WASM surface area.
+default = []
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:serde-wasm-bindgen",
+    "pi-protocol/wasm",
+    "pi-ai/wasm",
+]
+
+# When the wasm feature is on, also emit a `cdylib` so `wasm-pack` can
+# post-process the build. Keeping the `rlib` lets the rest of the
+# workspace continue linking against the crate on native targets.
+[package.metadata.cargo-all-features]
+denylist = ["wasm"]
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+pi-ai = { path = "../pi-ai" }
+pi-telemetry = { path = "../pi-telemetry" }
+
+# Tokio feature set is target-conditional: the workspace dep pulls `full`
+# (which transitively depends on `mio`), and `mio` does not compile on
+# `wasm32-unknown-unknown`. We declare tokio only in the per-target
+# sections so the wasm target can pick a minimal feature set.
+futures.workspace = true
+async-trait.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+
+parking_lot.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.38", default-features = false, features = ["sync", "macros", "rt", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+serde-wasm-bindgen.workspace = true
+getrandom.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+# Optional wasm dependencies that the `wasm` feature unlocks — declared so
+# Cargo registers the feature names. The actual linking happens in the
+# `[target.cfg(target_arch = "wasm32")]` section above.
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+serde-wasm-bindgen = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

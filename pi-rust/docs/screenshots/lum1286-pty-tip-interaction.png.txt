@@ -1,0 +1,289 @@
+# lum1286-pty-tip-interaction.png — chars, 120x34 cells
+
+===== LUM-1241 tip af3aa30a4  |  [1] 1. idle startup frame: header hints + onboarding + composer + footer metrics  (cursor 120,33, frame 68164b658bc2, px f90471c1522d, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [2] 2. type / -> slash-command completion opens above the composer  (cursor 36,32, frame 2bd9a965a01c, px 23bbf54b32f6, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ help  Show this help text
+  clear  Clear the message view
+  new  Start a new session
+  copy  Copy last agent message to clipboard
+  name  <name> — Set session display name
+  (1/19)
+> /▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [3] 3. type mo -> fuzzy narrows the candidate list  (cursor 6,32, frame d2d7af39e8e9, px 1266621e71a3, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ model  <provider/model> — Select model (opens selector UI)
+  copy  Copy last agent message to clipboard
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  compact  [instructions] — Manually compact the session context
+  (1/7)
+> /mo▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [4] 4. Down -> selection marker moves to the next candidate  (cursor 4,31, frame bf9133c9a17d, px 204ac4fe5c31, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+  model  <provider/model> — Select model (opens selector UI)
+❯ copy  Copy last agent message to clipboard
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  compact  [instructions] — Manually compact the session context
+  (2/7)
+> /mo▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [5] 5. Tab -> applies the SELECTED candidate (/copy), dropdown closes  (cursor 8,32, frame abdc5139810a, px 6a02556a64e8, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> /copy▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [6] 6. Ctrl+U clears, @ -> file completion  (cursor 8,32, frame a51d25854fc6, px 48a8bd8e365f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+❯ src/  src
+  README.md  README.md
+  Cargo.toml  Cargo.toml
+  lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [7] 7. @src -> file candidates narrow  (cursor 7,32, frame 32d81ba0c29a, px cf02b3043963, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+❯ src/  src
+  lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @src▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1241 tip af3aa30a4  |  [8] 8. Tab -> composes @src/  (cursor 8,32, frame 7ca5c2877327, px 645f949daee1, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> @src/▍
+Faux test model  session-18d7372b58888c80                                                  in 0 out 0 ?/8.2k  ? for help

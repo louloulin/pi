@@ -1,0 +1,73 @@
+# lum1266-before-short-22.png — chars, 120x22 cells
+
+===== LUM-1266: 120x22 — the composer is on screen even though the startup hint list cannot fit  |  [1] 1. idle at 120x22: the header folds its hint list into one line and the composer + status bar stay on screen (LUM-1260 shipped 0 composer rows here)  (cursor 120,21, frame b8cc5d2c6d1b, px 3fe6ff12dfba, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+> type a prompt — /help for commands
+Faux test model  session-18d72717abe2d809                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x22 — the composer is on screen even though the startup hint list cannot fit  |  [2] 2. a draft typed at 120x22 is visible in the composer instead of being typed blind  (cursor 36,20, frame be33e4823f3b, px 24a3a1372973, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+> typed at 22 rows▍
+Faux test model  session-18d72717abe2d809                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x22 — the composer is on screen even though the startup hint list cannot fit  |  [3] 3. Enter runs the turn: the reply lands in the transcript and the composer is still there  (cursor 49,21, frame 6748e8214493, px 16a8970ecea7, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+  faux-model (faux) hello                                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d72717abe2d809                                                  in 0 out 0 ?/8.2k  ? for help

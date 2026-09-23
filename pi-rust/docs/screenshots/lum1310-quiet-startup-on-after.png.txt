@@ -1,0 +1,43 @@
+# lum1310-quiet-startup-on-after.png — chars, 120x34 cells
+
+===== LUM-1310 — quietStartup=true: the same binary paints no startup header on frame one, and the composer still owns the bottom. Compare with lum1310-quiet-startup-off.json. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [1] 1. idle 120x34 — settings.json quietStartup:true, so the header is suppressed at startup  (cursor 120,33, frame ec2337a1f202, px 1ef030c94768, alive=True) =====
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d761aee3f75bee                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'type a prompt'
+  assert PASS   reject       'Esc to interrupt'
+  assert PASS   reject       'Ctrl+C to clear'
+  assert PASS   probe        'Esc to interrupt' (x0)  — LUM-1310 quietStartup startup effect
+  assert PASS   probe        'Ctrl+C to clear' (x0)  — LUM-1310 quietStartup startup effect
+  assert PASS   probe        'pi v0.1.0' (x0)  — LUM-1310 quietStartup startup effect

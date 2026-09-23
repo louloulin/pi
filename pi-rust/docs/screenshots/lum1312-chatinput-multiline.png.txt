@@ -1,0 +1,356 @@
+# lum1312-chatinput-multiline.png — chars, 76x26 cells
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [1] 1. idle: one composer row, `? for help` in the header  (cursor 76,25, frame ee65ef52f4b1, px dd74fba15b0c, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [2] 2. Ctrl+J inserts a newline: the composer grows to two rows and does NOT submit  (cursor 36,24, frame ca2dd755f851, px 902af15f60c2, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this code
+  and add a test▍
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> explain this code'  — the first line keeps the label
+  assert PASS   probe        '  and add a test'  — the second line is a real draft row, indented like a wrapped continuation row
+  assert PASS   probe        'and add a test▍'  — the cursor sits at the end of the new line
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [3] 3. Up moves one visual row and keeps the display column (14 columns here, the width of the second line)  (cursor 17,24, frame 3b73d15c5e3c, px 90f4c56d75db, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this c▍ode
+  and add a test
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        'explain this c▍ode'  — Up left the second row, so no `and add a test▍`; the caret is on the first row, 14 columns in — the sticky column codex and pi both implement
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [4] 4. Down comes back to the row it left  (cursor 17,24, frame ca2dd755f851, px 902af15f60c2, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this code
+  and add a test▍
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        'and add a test▍'  — Down returns to the second row
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [5] 5. Ctrl+A is scoped to the current line: line 2's start, line 1 untouched. (Bare Home is the chat-log jump, as upstream binds it: `tui.altScreen.top`.)  (cursor 17,24, frame 6afd72043158, px b8c5e97f517b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this code
+  ▍and add a test
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '  ▍and add a test'  — the caret is at the start of line 2, not at the start of the draft
+  assert PASS   probe        '> explain this code'  — line 1 is untouched
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [6] 6. Ctrl+U kills to the start of the current line only  (cursor 34,24, frame e8e936757a90, px 62cfcdbc4db3, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this code▍and add a test
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> explain this code'  — the first line survives — Ctrl+U is line-scoped, not a buffer clear
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [7] 7. Ctrl+Y yanks the killed line back at the cursor  (cursor 34,24, frame 6afd72043158, px b8c5e97f517b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this code
+  ▍and add a test
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '▍and add a test'  — the kill ring round-trips the line: the restored text sits at the cursor, which is at the start of line 2
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [8] 8. Enter submits the two-line draft as one prompt  (cursor 36,24, frame 1c8d1884d7b4, px 31d62b2c7caa, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> explain this code
+> and add a test
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> explain this code'  — the submitted prompt is echoed in the transcript
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [9] 9. Up on the empty composer recalls the two-line prompt from the history  (cursor 36,24, frame 590290f7a12a, px f679f291eda4, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> explain this code
+> and add a test
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> explain this code
+  and add a test▍
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> explain this code'  — the recall restores the whole multi-line draft...
+  assert PASS   probe        '  and add a test'  — ...including its second row
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [10] 10. a 95-character draft on line 2 wraps across three composer rows at 76 columns  (cursor 25,24, frame 912eb344c19b, px 183d976412fc, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> explain this code
+> and add a test
+  faux-model (faux) hello
+> explain this code
+> and add a test
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 01234567890123456789012345678901234567890123456789012345678901234567890123
+  4567890123456789012345▍
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> 0123456789'  — row 1 keeps the label
+  assert PASS   probe        '  4567890'  — characters past the body width (74 columns) continue on an indented row: character 74 is the 5th of the repeating 0-9 run
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [11] 11. Up inside the wrapped draft moves the caret one row up, keeping the label row intact  (cursor 25,24, frame 7a1f916cb2d9, px c9171fd62fed, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> explain this code
+> and add a test
+  faux-model (faux) hello
+> explain this code
+> and add a test
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 0123456789012345678901▍234567890123456789012345678901234567890123456789012
+  4567890123456789012345
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '▍'  — the caret is still drawn somewhere in the composer
+  assert PASS   probe        '> 0123456789'  — the labelled row is unchanged by the move
+
+===== LUM-1312 chat-input parity: a multi-line draft with codex-style editing. Ctrl+J (Shift+Enter on kitty-protocol terminals) opens a new line instead of submitting; Up/Down move by visual row and keep the display column; Ctrl+A/Ctrl+E are scoped to the current line; Ctrl+U/Ctrl+K kill to the line edges; the prompt history is reached from the top row; a trailing backslash + Enter inserts a newline in a terminal that cannot report Shift+Enter at all. Every frame is a real PTY at 76x26 driving the debug binary built from this commit.  |  [12] 12. /help advertises the chords that reach the editor in the real app  (cursor 36,24, frame cf9f5f4d7f00, px 6bced5e15bd9, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+ ⋯ 16 lines above · Home high|xhigh|max)                                   │
+·   /trust    show or set project trust (/trust yes|no)                    │
+·   /compact  summarize the conversation prefix to free context            │
+·   /hotkeys  list the keyboard shortcuts                                  │
+·   /extensions list loaded extensions and what they register              │
+·   /reload   re-read keybindings.json and the interface settings          │
+·   /exit     quit the interactive session                                 │
+·                                                                          │
+· keys:                                                                    │
+·   Enter       submit prompt                                              │
+·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
+·   Up / Down move within the draft, then prompt history at the top / botto┃
+·   PgUp/PgDn   scroll the chat log one page                               ┃
+·   Home / End  jump to the start / end of the chat log                    ┃
+·   Ctrl+A / E  jump to the start / end of the current line                ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
+·   Ctrl+D      exit on an empty prompt                                    ┃
+·   Ctrl+L      open the model selector                                    ┃
+·   Esc         close selector / cancel turn                               ┃
+·                                                                          ┃
+  faux-model (faux) hello                                                  ┃
+> type a prompt — /help for commands
+Faux test model  session-18d763b87240f82d      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        'insert a new line'  — Ctrl+J is advertised as the newline chord, because it is the one every terminal can deliver
+  assert PASS   probe        'delete to the end of the line'  — the line-scoped kills are advertised instead of the old buffer clear

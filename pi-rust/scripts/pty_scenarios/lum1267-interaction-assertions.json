@@ -1,0 +1,291 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "src/main.rs",
+    "src/lib.rs",
+    "README.md",
+    "Cargo.toml"
+  ],
+  "distinct_panels": true,
+  "notes": [
+    "Assertion kinds: expect/reject gate the run; probe records A/B evidence (XFAIL when a binary does not have a behaviour yet); xfail/xfail_reject are markers for known defects and fail the run when they unexpectedly pass.",
+    "Panels 3-4 document the completion filter's over-broad candidate set (LUM-1260 §2): `mo` matches substring in the description too, upstream matches the name only, so those needles are xfail_reject — they must move to `reject` when LUM-1263 lands.",
+    "LUM-1271 revision (why panels 15-18 differ from LUM-1267's original 15-17): LUM-1261's wrap fix (c8bc6785a) made the /help and /hotkeys bodies wrap per source line instead of being hard-clipped at the right margin, so each block is now taller than the ~11 transcript rows a 34-row frame leaves after the expanded startup header. A bottom-anchored log therefore shows the block's TAIL, and the old head needles ('slash commands:', 'Ctrl+L open the model selector', ...) can only pass on the pre-fix renderer that silently truncated every row (e.g. '... /exit quit the interactive session keys: Enter submit promp'). The head needles are not dropped: they move to the two <Home> panels (16 / 18), which assert the same content is REACHABLE by scrolling. Panels 15/17 additionally `reject` the pre-fix clipping artifacts, so this gate fails on the b5769b585 baseline and passes on the merged tip - measured both ways in LUM-1271's docs/TUI_*.md.",
+    "Panel 8 is legitimately byte-identical to panel 6 (closing the model-selector overlay returns to the same placeholder frame); the harness prints that as a WARN, not a failure.",
+    "Column padding is part of the wrapped layout: the aligned rows are '·   <key><pad><text>', so the needles here deliberately start after the padding ('open the model selector', not the pre-fix 'Ctrl+L open the model selector' which was the unaligned clipped form). Rows are newline-joined and right-stripped, so a needle must fit inside one row; the wrapper breaks on whitespace, so single tokens such as '/thinking' survive any break."
+  ],
+  "panels": [
+    {
+      "label": "1. idle: product line, hint table, onboarding line, composer placeholder, status line",
+      "send": "",
+      "wait": 4.0,
+      "wait_for": "type a prompt",
+      "expect": [
+        "pi v0.1.0",
+        "Pi can explain its own features",
+        "  / for commands",
+        "  ! to run bash",
+        "  Alt+H to hide this header",
+        "> type a prompt — /help for commands",
+        "Faux test model",
+        "? for help"
+      ]
+    },
+    {
+      "label": "2. type / -> the command completion opens with a live counter and the first candidate selected",
+      "send": "/",
+      "wait": 1.0,
+      "wait_for": "Show this help text",
+      "expect": [
+        "❯ help",
+        "Show this help text",
+        {
+          "regex": "\\(1/\\d+\\)",
+          "why": "candidate counter, first item selected"
+        }
+      ]
+    },
+    {
+      "label": "3. type mo -> /model stays selected and the over-broad candidate set is visible (see the xfail_reject markers)",
+      "send": "mo",
+      "wait": 1.0,
+      "wait_for": "❯ model",
+      "expect": [
+        "> /mo",
+        "❯ model",
+        {
+          "regex": "\\(1/\\d+\\)",
+          "why": "candidate counter"
+        }
+      ],
+      "xfail_reject": [
+        {
+          "text": "Copy last agent message to clipboard",
+          "why": "LUM-1263: upstream filters candidates by command name only; matching the description too is a deviation and must go"
+        },
+        {
+          "text": "Create a new fork from a previous user message",
+          "why": "LUM-1263: same over-broad filter"
+        }
+      ]
+    },
+    {
+      "label": "4. Down -> the selection marker moves to the next candidate and the counter agrees",
+      "send": "<Down>",
+      "wait": 0.8,
+      "expect": [
+        {
+          "text": "❯ copy",
+          "count": 1
+        },
+        {
+          "regex": "\\(2/\\d+\\)",
+          "why": "counter follows the marker"
+        }
+      ]
+    },
+    {
+      "label": "5. Tab -> the selected candidate is applied to the composer and the list closes",
+      "send": "<Tab>",
+      "wait": 0.8,
+      "expect": [
+        {
+          "text": "> /copy",
+          "count": 1
+        }
+      ],
+      "reject": [
+        {
+          "regex": "\\(\\d+/\\d+\\)",
+          "why": "the completion list must be gone once a candidate is accepted"
+        }
+      ]
+    },
+    {
+      "label": "6. Enter -> the slash command runs and reports its result in the transcript",
+      "send": "<Enter>",
+      "wait": 1.5,
+      "wait_for": "nothing to copy yet",
+      "expect": [
+        "> nothing to copy yet"
+      ]
+    },
+    {
+      "label": "7. /model + Enter -> the model selector overlay lists real models with their providers",
+      "send": "<C-u>/model<Enter>",
+      "wait": 1.5,
+      "wait_for": "Pick a model",
+      "expect": [
+        "Pick a model",
+        "anthropic",
+        {
+          "text": "─",
+          "why": "overlay frame"
+        }
+      ]
+    },
+    {
+      "label": "8. Esc -> the overlay closes and the composer is back to its placeholder",
+      "send": "<Esc>",
+      "wait": 1.0,
+      "reject": [
+        "Pick a model"
+      ],
+      "expect": [
+        "> type a prompt — /help for commands"
+      ]
+    },
+    {
+      "label": "9. @ -> file-path completion over the fixture tree, with paths resolved relative to the cwd",
+      "send": "<C-u>@",
+      "wait": 1.2,
+      "wait_for": "❯ src/",
+      "expect": [
+        "❯ src/",
+        "Cargo.toml",
+        "README.md",
+        "> @"
+      ]
+    },
+    {
+      "label": "10. src -> candidates narrow to that subtree; the unfiltered fixtures are gone",
+      "send": "src",
+      "wait": 0.8,
+      "wait_for": "❯ src/",
+      "expect": [
+        "> @src"
+      ],
+      "reject": [
+        "Cargo.toml",
+        "README.md"
+      ]
+    },
+    {
+      "label": "11. Tab -> the path token is composed into the composer and the list closes",
+      "send": "<Tab>",
+      "wait": 0.8,
+      "expect": [
+        "> @src/"
+      ],
+      "reject": [
+        "❯ src/"
+      ]
+    },
+    {
+      "label": "12. a real turn through the provider: the prompt and the reply both land in the transcript",
+      "send": "<C-u>hi<Enter>",
+      "wait": 3.0,
+      "wait_for": "hello",
+      "expect": [
+        "> hi",
+        "faux-model (faux) hello"
+      ]
+    },
+    {
+      "label": "13. !bash -> the command, its output and its duration are reported as one tool block",
+      "send": "!echo pty-harness-ok<Enter>",
+      "wait": 3.0,
+      "wait_for": "pty-harness-ok",
+      "expect": [
+        "* bash echo pty-harness-ok",
+        "* pty-harness-ok",
+        {
+          "regex": "\\* Took \\d",
+          "why": "elapsed time is reported"
+        }
+      ]
+    },
+    {
+      "label": "14. Ctrl+O -> the status line reports the tool-output expansion state",
+      "send": "<C-o>",
+      "wait": 1.0,
+      "wait_for": "Tool output",
+      "expect": [
+        "Tool output: expanded"
+      ]
+    },
+    {
+      "label": "15. /help -> the wrapped reference renders; the bottom-anchored log shows its tail and no row is hard-clipped at the right margin",
+      "send": "<C-u>/help<Enter>",
+      "wait": 1.5,
+      "wait_for": "keys:",
+      "expect": [
+        "· keys:",
+        "submit prompt",
+        "·   Ctrl+U      clear the prompt buffer"
+      ],
+      "reject": [
+        {
+          "text": "keys: Enter submit promp",
+          "why": "pre-fix the 32 source lines were clipped into 11 hard-cut rows and a cut landed inside a word ('promp'); this needle only exists in that truncated rendering"
+        }
+      ]
+    },
+    {
+      "label": "16. Home -> window 1 of the reference: the command table's head is reachable (needles are kept off the window edges: the window shifts by a row when the bash block renders one line more)",
+      "send": "<Home>",
+      "wait": 1.2,
+      "wait_for": "slash commands:",
+      "expect": [
+        "slash commands:",
+        "/help     show this help text",
+        "/clear    clear the message view",
+        "/new      start a new session"
+      ]
+    },
+    {
+      "label": "17. PgDn -> window 2 of the reference: the middle of the command table is reachable",
+      "send": "<PgDn>",
+      "wait": 1.2,
+      "wait_for": "/thinking",
+      "expect": [
+        "/resume   resume a previous session",
+        "/thinking set the reasoning level",
+        "/trust    show or set project trust"
+      ]
+    },
+    {
+      "label": "18. /hotkeys -> the chord table renders bottom-anchored; the tail is on screen and not hard-clipped",
+      "send": "<End><C-u>/hotkeys<Enter>",
+      "wait": 1.8,
+      "wait_for": "· commands:",
+      "expect": [
+        "· commands:",
+        "path completion / accept autocomplete",
+        "close the selector / overlay first"
+      ],
+      "reject": [
+        {
+          "text": "accept autocomplete commands:",
+          "why": "the pre-fix clip landed exactly there ('... / accept autocomplete commands: / slash'); the needle spans the cut, so it can only match the truncated rendering"
+        }
+      ]
+    },
+    {
+      "label": "19. PgUp -> one page back and the chord table's app + selector sections are there",
+      "send": "<PgUp>",
+      "wait": 1.3,
+      "wait_for": "selectors and completion:",
+      "expect": [
+        "open the model selector",
+        "open the session tree",
+        "selectors and completion:"
+      ]
+    },
+    {
+      "label": "20. End then PgUp -> the log follows the bottom again and scrolling back brings up the jump-to-latest pill",
+      "send": "<End><PgUp><PgUp>",
+      "wait": 1.5,
+      "wait_for": "Jump to latest",
+      "expect": [
+        "↓ Jump to latest message"
+      ]
+    }
+  ]
+}

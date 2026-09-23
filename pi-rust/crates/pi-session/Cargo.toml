@@ -1,0 +1,24 @@
+[package]
+name = "pi-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite session backend for the Pi Rust port. Reads both the upstream `packages/session-backends/sqlite-node` format (AgentHarness storage format 4) and its own Stage 5 layout; writing the upstream layout is a later slice."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+
+rusqlite.workspace = true
+zstd.workspace = true
+parking_lot.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

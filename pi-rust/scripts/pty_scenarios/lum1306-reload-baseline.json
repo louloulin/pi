@@ -1,0 +1,52 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1306/home-reload` so the child reads the prepared agent dir.",
+    "Every `expect` string is text the binary itself painted into the VT grid."
+  ],
+  "caption": "LUM-1306 — the A side: the *same* prepared HOME and the *same* keystrokes against the pre-change binary (origin/feature/pi.rs tip 4208bd843). Panels 1-3 are unchanged; panel 4 is the parser rejecting the command that did not exist yet.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — default palette; overrides on disk, nothing applied yet",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "Faux test model"
+      ]
+    },
+    {
+      "label": "2. /clear + /hotkeys + Home — the on-disk override is live before any reload (Ctrl+P)",
+      "send": "/clear<Enter>/hotkeys<Enter><Home>",
+      "wait": 1.8,
+      "expect": [
+        "previous line / prompt history",
+        "Ctrl+P"
+      ]
+    },
+    {
+      "label": "3. /clear + /help + Home — the head of the command list",
+      "send": "/clear<Enter>/help<Enter><Home>",
+      "wait": 1.5,
+      "expect": [
+        "slash commands:",
+        "/clear",
+        "/model"
+      ]
+    },
+    {
+      "label": "4. /reload on the pre-change binary — the parser does not know the command",
+      "send": "/clear<Enter>/reload<Enter>",
+      "wait": 1.5,
+      "expect": [
+        "unknown command /reload"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

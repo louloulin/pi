@@ -1,0 +1,113 @@
+# lum1308-external-editor.png — chars, 120x34 cells
+
+===== LUM-1308 — Ctrl+G (app.editor.external) end to end in a real PTY: draft → $EDITOR → draft replaced. Panels 2-3 are two moments of one run.  |  [1] 1. draft typed into the composer  (cursor 36,32, frame f37abe17bebf, px fbabbe9f8b47, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> original draft typed by the user▍
+Faux test model  session-18d75ce1d760ddaf                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'original draft typed by the user'
+
+===== LUM-1308 — Ctrl+G (app.editor.external) end to end in a real PTY: draft → $EDITOR → draft replaced. Panels 2-3 are two moments of one run.  |  [2] 2. Ctrl+G → the tty is handed to $EDITOR (normal screen, banner up)  (cursor 0,33, frame 72640861b969, px b92f6e95a1ae, alive=True) =====
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+> original draft typed by the user▍ Launching external editor: ./editor.sh
+Pi will resume when the editor exits.ddaf                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Launching external editor: ./editor.sh'
+  assert PASS   expect       'Pi will resume when the editor exits.'
+
+===== LUM-1308 — Ctrl+G (app.editor.external) end to end in a real PTY: draft → $EDITOR → draft replaced. Panels 2-3 are two moments of one run.  |  [3] 3. editor exited 0 → composer holds the edited file  (cursor 120,33, frame b4c1a5f5e5e7, px bf0df5c7e0ea, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+> EDITED BY EXTERNAL EDITOR #1
+  second line▍
+Faux test model  session-18d75ce1d760ddaf                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'EDITED BY EXTERNAL EDITOR #1'
+  assert PASS   expect       'second line'

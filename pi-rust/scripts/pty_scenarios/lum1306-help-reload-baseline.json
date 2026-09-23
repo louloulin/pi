@@ -1,0 +1,28 @@
+{
+  "cols": 120,
+  "rows": 62,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "62 rows so the whole 32-line /help block fits one viewport without scrolling."
+  ],
+  "final_send": "<C-d>",
+  "caption": "LUM-1306 — the A side of the /help A/B: the pre-change binary at 120x62 lists every command it has, and /reload is absent.",
+  "panels": [
+    {
+      "label": "1. /clear + /help 120x62 on the pre-change binary — no /reload row",
+      "send": "/clear<Enter>/help<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "slash commands:",
+        "/extensions",
+        "/exit"
+      ],
+      "reject": [
+        "/reload"
+      ]
+    }
+  ]
+}

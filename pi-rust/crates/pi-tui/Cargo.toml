@@ -1,0 +1,30 @@
+[package]
+name = "pi-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Terminal UI primitives for the Pi Rust port."
+
+[lints]
+workspace = true
+
+[dependencies]
+pi-protocol = { path = "../pi-protocol" }
+pi-agent-core = { path = "../pi-agent-core" }
+pi-ai = { path = "../pi-ai" }
+
+serde.workspace = true
+serde_json.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+pi-ai = { path = "../pi-ai" }

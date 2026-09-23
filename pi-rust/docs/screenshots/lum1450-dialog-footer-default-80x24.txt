@@ -1,0 +1,26 @@
+FRAME DUMP cols=80 rows=24
+|Confirm: Deploy                                                                 |
+|────────────────────────────────────────                                        |
+|Ship the release?                                                               |
+|                                                                                |
+|[Enter/y] accept    [n/Esc/Ctrl+C] deny                                         |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|> type a prompt — /help for commands                                            |
+|Faux  lum1450-dialog-frames                        in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP

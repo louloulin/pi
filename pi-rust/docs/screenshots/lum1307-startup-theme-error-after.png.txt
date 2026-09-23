@@ -1,0 +1,77 @@
+# after-error.png — chars, 120x34 cells
+
+===== LUM-1307 — the unresolvable-theme arm: `settings.json` says `theme: solarized`, which no scheme in this build answers to. Post-fix the startup path says so in the transcript (`theme → not applied`) and keeps the default dark palette, which `/settings` then reports as `dark`. The pre-fix binary says nothing at all and still shows `dark`, so the only thing that changes is whether the user is told. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [1] 1. idle 120x34 — startup reports the rejected theme name instead of silently keeping the default  (cursor 120,33, frame 91bfd8cf79c4, px 19eeb69d57eb, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> theme → not applied: Theme not found: solarized
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d74493dc88091b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   probe        'theme → not applied'  — LUM-1307 startup settings
+
+===== LUM-1307 — the unresolvable-theme arm: `settings.json` says `theme: solarized`, which no scheme in this build answers to. Post-fix the startup path says so in the transcript (`theme → not applied`) and keeps the default dark palette, which `/settings` then reports as `dark`. The pre-fix binary says nothing at all and still shows `dark`, so the only thing that changes is whether the user is told. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [2] 2. /settings — the rejected name left the default palette installed rather than a themeless App  (cursor 56,9, frame 26c5b8a5430e, px 4bf9102e3dd3, alive=True) =====
+pi v0.1.0
+>
+
+→ Auto-compact               true
+  Fullscreen copy on select  true
+  Theme                      dark
+
+  Automatically compact context when it gets too large
+
+  Type to search · Enter/Space to change · Esc to cancel
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> theme → not applied: Theme not found: solarized
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d74493dc88091b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Theme'
+  assert PASS   probe        '^  Theme\\s+dark$'  — LUM-1307 startup settings

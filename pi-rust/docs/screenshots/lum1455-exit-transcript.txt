@@ -1,0 +1,12 @@
+FRAME DUMP cols=100 rows=10
+|[38;2;138;190;183m> [39m[38;2;212;212;212m退出后还能看到这次会话吗？[39m|
+|  能。[38;2;138;190;183mfullscreenExitOutput[39m 默认|
+|  [38;2;138;190;183mtranscript[39m，退出时把整段记录写回普通屏幕，滚动缓冲里就留下了它，随后打印一行 dim 的 resume 提示。|
+||
+|  设置为 [38;2;138;190;183mresume-hint[39m 时相反：屏幕恢复原样，只留那一行提示。|
+|[38;2;128;128;128m* [39m[38;2;128;128;128mread pi-rust/crates/pi-tui/src/app.rs[39m|
+|[38;2;138;190;183m> [39m[38;2;212;212;212m那 resume 命令从哪来？[39m|
+|  只有真的能 resume 的会话才打印：[38;2;138;190;183m--resume <id>[39m 只认 SQLite 会话，所以全新会话（仅|
+|  JSONL）不会广告一条注定失败的命令。|
+|[2mTo resume this session:[22m pi --resume lum1455-exit|
+END FRAME DUMP

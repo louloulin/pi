@@ -1,0 +1,1404 @@
+//! `node:*` builtin virtual module tests — LUM-1100.
+//!
+//! Upstream extensions run on Node, so they import `node:fs` /
+//! `node:fs/promises` / `node:os` / `node:buffer` / `node:crypto` and read
+//! the `process` global directly. These tests drive that surface through
+//! the real host: an extension registered from source, executed through
+//! [`JsExtensionHost::execute_tool`], with a scratch directory standing in
+//! for the session working tree.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use pi_extensions::{ExtensionEntry, HostOptions, JsExtensionHost, ToolContext};
+use serde_json::json;
+
+static SCRATCH_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+}
+
+/// A unique scratch directory, removed when the test ends.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pi_node_builtins/{}-{name}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        Self(dir)
+    }
+
+    fn as_str(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn entry_at(id: &str, path: &str) -> ExtensionEntry {
+    ExtensionEntry {
+        source: PathBuf::from(path),
+        id: id.to_string(),
+        label: None,
+    }
+}
+
+/// Build a host whose session cwd is the scratch directory, so
+/// `process.cwd()` / `path.resolve` resolve relative paths the way a real
+/// session would.
+async fn host_with_cwd(cwd: &str) -> JsExtensionHost {
+    JsExtensionHost::with_options(HostOptions {
+        tool_context: ToolContext {
+            mode: "print".to_string(),
+            has_ui: false,
+            cwd: cwd.to_string(),
+        },
+        ..HostOptions::default()
+    })
+    .await
+    .expect("host")
+}
+
+/// The sync `node:fs` / `node:buffer` / `node:os` / `node:crypto` /
+/// `node:process` surface, exercised by one ESM extension and asserted as a
+/// single details object.
+#[test]
+fn node_builtins_sync_surface_round_trips_files() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("fs-sync");
+        let host = host_with_cwd(&scratch.as_str()).await;
+
+        let source = r#"
+            import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+            import { join } from "node:path";
+            import { EOL, arch, homedir, platform, release, tmpdir, type } from "node:os";
+            import { Buffer } from "node:buffer";
+            import { randomBytes, randomInt, randomUUID } from "node:crypto";
+            import process from "node:process";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "fs_probe",
+                    label: "fs probe",
+                    description: "exercises the node:* builtin virtual modules",
+                    parameters: { type: "object", properties: { dir: { type: "string" } } },
+                    execute: (args, ctx) => {
+                        const dir = args.dir;
+                        const nested = join(dir, "nested", "deep");
+                        mkdirSync(nested, { recursive: true });
+
+                        const file = join(nested, "hello.txt");
+                        writeFileSync(file, "héllo\n");
+                        appendFileSync(file, Buffer.from(" world"));
+
+                        const text = readFileSync(file, "utf8");
+                        const raw = readFileSync(file);
+
+                        const copy = join(dir, "copy.txt");
+                        copyFileSync(file, copy);
+                        const moved = join(dir, "moved.txt");
+                        renameSync(copy, moved);
+
+                        const bytes = Buffer.from("héllo\n world", "utf8");
+                        const expectedEol = process.platform === "win32" ? "\r\n" : "\n";
+                        const entriesBeforeUnlink = readdirSync(dir).sort();
+                        unlinkSync(moved);
+                        const entriesAfterUnlink = readdirSync(dir).sort();
+
+                        return {
+                            content: [{ type: "text", text }],
+                            details: {
+                                text,
+                                byteLength: raw.length,
+                                isBuffer: Buffer.isBuffer(raw),
+                                utf8Length: Buffer.byteLength("héllo", "utf8"),
+                                hexRoundTrip: Buffer.from(bytes.toString("hex"), "hex").toString("utf8") === text,
+                                base64RoundTrip: Buffer.from(bytes.toString("base64"), "base64").equals(bytes),
+                                latin1: Buffer.from("abc").toString("latin1"),
+                                concat: Buffer.concat([Buffer.from("a"), Buffer.from("b")]).toString("utf8"),
+                                heap: Buffer.alloc(3, 7).toString("hex"),
+                                compare: Buffer.compare(Buffer.from("a"), Buffer.from("b")),
+                                dirent: readdirSync(nested, { withFileTypes: true }).map(
+                                    (entry) => entry.name + ":" + entry.isFile(),
+                                ),
+                                rootEntriesBeforeUnlink: entriesBeforeUnlink,
+                                rootEntriesAfterUnlink: entriesAfterUnlink,
+                                entryIsFile: statSync(file).isFile(),
+                                entryIsDir: statSync(nested).isDirectory(),
+                                size: statSync(file).size,
+                                lstatIsFile: (() => {
+                                    const meta = lstatSync(file);
+                                    return meta.isFile() && !meta.isSymbolicLink();
+                                })(),
+                                realpathResolved: realpathSync(file).endsWith("hello.txt"),
+                                existsBefore: existsSync(file),
+                                unlinkedGone: !existsSync(moved),
+                                os: {
+                                    tmpOk: tmpdir().length > 0,
+                                    homeOk: homedir().length > 0,
+                                    platformMatchesProcess: platform() === process.platform,
+                                    arch: arch(),
+                                    type: type(),
+                                    releaseOk: release().length > 0,
+                                    eolMatchesProcess: EOL === expectedEol,
+                                },
+                                process: {
+                                    cwdMatchesCtx: process.cwd() === ctx.cwd,
+                                    pidPositive: process.pid > 0,
+                                    version: process.version,
+                                    hasEnv: Object.keys(process.env).length > 0,
+                                    exitCode: process.exitCode,
+                                },
+                                crypto: {
+                                    uuidShape: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                                        randomUUID(),
+                                    ),
+                                    randomBytesLength: randomBytes(8).length,
+                                    randomIntInRange: (() => {
+                                        const value = randomInt(1, 4);
+                                        return value >= 1 && value < 4;
+                                    })(),
+                                },
+                                rmDir: (() => {
+                                    rmSync(join(dir, "nested"), { recursive: true, force: true });
+                                    return !existsSync(nested);
+                                })(),
+                            },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("fs_probe", "/tmp/pi_node_builtins/fs_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load fs probe extension");
+
+        let outcome = host
+            .execute_tool("fs_probe", &json!({ "dir": scratch.as_str() }).to_string())
+            .await
+            .expect("execute fs probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(details["text"], "héllo\n world");
+        assert_eq!(details["byteLength"], 13);
+        assert_eq!(details["utf8Length"], 6);
+        assert_eq!(details["isBuffer"], true);
+        assert_eq!(details["hexRoundTrip"], true);
+        assert_eq!(details["base64RoundTrip"], true);
+        assert_eq!(details["latin1"], "abc");
+        assert_eq!(details["concat"], "ab");
+        assert_eq!(details["heap"], "070707");
+        assert_eq!(details["compare"], -1);
+        assert_eq!(details["dirent"], json!(["hello.txt:true"]));
+        assert_eq!(details["rootEntriesBeforeUnlink"], json!(["moved.txt", "nested"]));
+        assert_eq!(details["rootEntriesAfterUnlink"], json!(["nested"]));
+        assert_eq!(details["entryIsFile"], true);
+        assert_eq!(details["entryIsDir"], true);
+        assert_eq!(details["size"], 13);
+        assert_eq!(details["lstatIsFile"], true);
+        assert_eq!(details["realpathResolved"], true);
+        assert_eq!(details["existsBefore"], true);
+        assert_eq!(details["unlinkedGone"], true);
+        assert_eq!(details["os"]["tmpOk"], true);
+        assert_eq!(details["os"]["homeOk"], true);
+        assert_eq!(details["os"]["platformMatchesProcess"], true);
+        assert_eq!(details["os"]["releaseOk"], true);
+        assert_eq!(details["os"]["eolMatchesProcess"], true);
+        assert_eq!(details["process"]["cwdMatchesCtx"], true);
+        assert_eq!(details["process"]["pidPositive"], true);
+        assert_eq!(details["process"]["version"], "v0.0.0-pi-rust");
+        assert_eq!(details["process"]["hasEnv"], true);
+        assert_eq!(details["process"]["exitCode"], 0);
+        assert_eq!(details["crypto"]["uuidShape"], true);
+        assert_eq!(details["crypto"]["randomBytesLength"], 8);
+        assert_eq!(details["crypto"]["randomIntInRange"], true);
+        assert_eq!(details["rmDir"], true);
+
+        // The probe wrote real files, so the session tree reflects exactly
+        // what the assertions above observed: the nested tree was removed
+        // recursively, the copy was renamed then unlinked.
+        let leftover: Vec<String> = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftover, Vec::<String>::new());
+    });
+}
+
+/// `node:fs/promises` and the callback forms, reached from CommonJS via the
+/// `require("node:fs")` shim, with Node-shaped error codes on failure.
+#[test]
+fn node_fs_promises_and_callbacks_reach_the_same_bridge() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("fs-promises");
+        let host = host_with_cwd(&scratch.as_str()).await;
+
+        let source = r#"
+            const fs = require("node:fs");
+            const fsp = require("node:fs/promises");
+            const { join } = require("node:path");
+
+            module.exports = function (pi) {
+                pi.registerTool({
+                    name: "async_probe",
+                    label: "async probe",
+                    description: "exercises fs/promises + node-style callbacks",
+                    parameters: { type: "object", properties: { dir: { type: "string" } } },
+                    execute: async (args, ctx) => {
+                        const target = join(args.dir, "async.txt");
+                        await fsp.writeFile(target, "async payload", "utf8");
+                        const read = await fsp.readFile(target, "utf8");
+                        const viaCallback = await new Promise((resolve, reject) => {
+                            fs.readFile(target, "utf8", (err, data) => (err ? reject(err) : resolve(data)));
+                        });
+                        const meta = await fsp.stat(target);
+                        const listing = (await fsp.readdir(args.dir)).sort();
+                        const missingDir = join(args.dir, "missing-dir");
+
+                        let asyncCode = null;
+                        try {
+                            await fsp.readFile(target + ".missing");
+                        } catch (err) {
+                            asyncCode = err.code;
+                        }
+
+                        let syncCode = null;
+                        let syncSyscall = null;
+                        try {
+                            fs.readFileSync(target + ".missing");
+                        } catch (err) {
+                            syncCode = err.code;
+                            syncSyscall = err.syscall;
+                        }
+
+                        let mkdirCode = null;
+                        try {
+                            await fsp.readFile(missingDir);
+                        } catch (err) {
+                            mkdirCode = err.code;
+                        }
+
+                        await fsp.mkdir(missingDir, { recursive: true });
+                        const mkdirCreated = fs.existsSync(missingDir);
+                        await fsp.copyFile(target, join(missingDir, "copy.txt"));
+                        const copyRead = await fsp.readFile(join(missingDir, "copy.txt"), "utf8");
+                        await fsp.rename(join(missingDir, "copy.txt"), join(missingDir, "renamed.txt"));
+                        const renamed = await fsp.readdir(missingDir);
+                        await fsp.unlink(join(missingDir, "renamed.txt"));
+                        const afterUnlink = await fsp.readdir(missingDir);
+                        await fsp.rm(missingDir, { recursive: true, force: true });
+                        const stillExists = fs.existsSync(missingDir);
+                        await fsp.rm(target);
+
+                        return {
+                            content: [{ type: "text", text: read }],
+                            details: {
+                                read,
+                                viaCallback,
+                                readIsString: typeof read === "string",
+                                size: meta.size,
+                                isFile: meta.isFile(),
+                                listing,
+                                asyncCode,
+                                syncCode,
+                                syncSyscall,
+                                mkdirCode,
+                                mkdirCreated,
+                                copyRead,
+                                renamed,
+                                afterUnlink,
+                                stillExists,
+                                existsAfterRm: fs.existsSync(target),
+                                realpathIsFunction: typeof fsp.realpath === "function",
+                            },
+                        };
+                    },
+                });
+            };
+        "#;
+
+        host.load(
+            entry_at("async_probe", "/tmp/pi_node_builtins/async_probe.cjs"),
+            source,
+        )
+        .await
+        .expect("load async probe extension");
+
+        let outcome = host
+            .execute_tool("async_probe", &json!({ "dir": scratch.as_str() }).to_string())
+            .await
+            .expect("execute async probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(details["read"], "async payload");
+        assert_eq!(details["viaCallback"], "async payload");
+        assert_eq!(details["readIsString"], true);
+        assert_eq!(details["size"], 13);
+        assert_eq!(details["isFile"], true);
+        assert_eq!(details["listing"], json!(["async.txt"]));
+        assert_eq!(details["asyncCode"], "ENOENT");
+        assert_eq!(details["syncCode"], "ENOENT");
+        assert_eq!(details["syncSyscall"], "open");
+        assert_eq!(details["mkdirCode"], "ENOENT");
+        assert_eq!(details["mkdirCreated"], true);
+        assert_eq!(details["copyRead"], "async payload");
+        assert_eq!(details["renamed"], json!(["renamed.txt"]));
+        assert_eq!(details["afterUnlink"], json!([]));
+        assert_eq!(details["stillExists"], false);
+        assert_eq!(details["existsAfterRm"], false);
+        assert_eq!(details["realpathIsFunction"], true);
+
+        let leftover: Vec<String> = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftover, Vec::<String>::new());
+    });
+}
+
+/// `fs.createReadStream` — the read side of the blocking bridge, wrapped as a
+/// `Readable`-shaped stream. This is the named blocker on
+/// `git-merge-and-resolve.ts`, which reads a file into `readline`, so that
+/// pairing is asserted end to end alongside the raw stream events.
+#[test]
+fn node_fs_create_read_stream_replays_the_file() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("read-stream");
+        let host = host_with_cwd(&scratch.as_str()).await;
+        let file = scratch.path().join("input.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").expect("write fixture");
+
+        let source = r#"
+            import { createReadStream, ReadStream } from "node:fs";
+            import { createInterface } from "node:readline";
+            import { join } from "node:path";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "read_stream_probe",
+                    label: "read stream probe",
+                    description: "exercises fs.createReadStream",
+                    parameters: { type: "object", properties: { dir: { type: "string" } } },
+                    execute: async (args) => {
+                        const file = join(args.dir, "input.txt");
+
+                        // The blocked extension's exact shape:
+                        // createReadStream -> readline.createInterface.
+                        const lines = await new Promise((resolve, reject) => {
+                            const stream = createReadStream(file, "utf-8");
+                            const rl = createInterface({ input: stream });
+                            const seen = [];
+                            rl.on("line", (line) => seen.push(line));
+                            rl.on("close", () => resolve(seen));
+                            stream.on("error", reject);
+                        });
+
+                        // Raw byte mode: `open` / `data` / `end` / `close`.
+                        const byteMode = await new Promise((resolve, reject) => {
+                            const stream = createReadStream(file);
+                            const chunks = [];
+                            const events = [];
+                            stream.on("open", () => events.push("open"));
+                            stream.on("data", (chunk) => {
+                                events.push("data");
+                                chunks.push(chunk);
+                            });
+                            stream.on("end", () => events.push("end"));
+                            stream.on("close", () => {
+                                events.push("close");
+                                resolve({
+                                    events,
+                                    text: Buffer.concat(chunks).toString("utf8"),
+                                    bytesRead: stream.bytesRead,
+                                    isBuffer: Buffer.isBuffer(chunks[0]),
+                                    path: stream.path,
+                                    readableEnded: stream.readableEnded,
+                                });
+                            });
+                            stream.on("error", reject);
+                        });
+
+                        // `for await` drains the same buffer.
+                        let iterated = "";
+                        for await (const chunk of createReadStream(file)) {
+                            iterated += chunk.toString("utf8");
+                        }
+
+                        // `start` / `end` are byte offsets, `end` inclusive.
+                        const slice = await new Promise((resolve, reject) => {
+                            const stream = createReadStream(file, { start: 6, end: 9, encoding: "utf8" });
+                            let text = "";
+                            stream.on("data", (chunk) => { text += chunk; });
+                            stream.on("end", () => resolve(text));
+                            stream.on("error", reject);
+                        });
+
+                        // A missing file surfaces as an async `error`, not a throw.
+                        const missing = await new Promise((resolve) => {
+                            const stream = createReadStream(join(args.dir, "missing.txt"));
+                            stream.on("error", (err) => resolve({ code: err.code, syscall: err.syscall }));
+                            stream.on("close", () => resolve({ code: "closed", syscall: null }));
+                        });
+
+                        // The documented refusals throw at the call site.
+                        let badFlag = null;
+                        try { createReadStream(file, { flag: "w" }); }
+                        catch (err) { badFlag = err.message.includes("only supports read flags"); }
+                        let badEncoding = null;
+                        try { createReadStream(file).setEncoding("nope"); }
+                        catch (err) { badEncoding = err.name; }
+
+                        const instance = createReadStream(file);
+                        const isReadStream = instance instanceof ReadStream;
+                        instance.destroy();
+
+                        return {
+                            content: [{ type: "text", text: JSON.stringify({ lines, byteMode, iterated, slice, missing }) }],
+                            details: { lines, byteMode, iterated, slice, missing, badFlag, badEncoding, isReadStream },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("read_stream_probe", "/tmp/pi_node_builtins/read_stream_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load read stream probe extension");
+
+        let outcome = host
+            .execute_tool("read_stream_probe", &json!({ "dir": scratch.as_str() }).to_string())
+            .await
+            .expect("execute read stream probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        // The `git-merge-and-resolve.ts` pairing.
+        assert_eq!(details["lines"], json!(["alpha", "beta", "gamma"]), "{details}");
+        // Raw events, in order, and the byte accounting.
+        assert_eq!(
+            details["byteMode"]["events"],
+            json!(["open", "data", "end", "close"]),
+            "{details}"
+        );
+        assert_eq!(details["byteMode"]["text"], "alpha\nbeta\ngamma\n", "{details}");
+        assert_eq!(details["byteMode"]["bytesRead"], 17, "{details}");
+        assert_eq!(details["byteMode"]["isBuffer"], true, "{details}");
+        assert_eq!(
+            details["byteMode"]["path"],
+            file.to_string_lossy().as_ref(),
+            "{details}"
+        );
+        assert_eq!(details["byteMode"]["readableEnded"], true, "{details}");
+        assert_eq!(details["iterated"], "alpha\nbeta\ngamma\n", "{details}");
+        assert_eq!(details["slice"], "beta", "{details}");
+        assert_eq!(details["missing"]["code"], "ENOENT", "{details}");
+        assert_eq!(details["missing"]["syscall"], "open", "{details}");
+        assert_eq!(details["badFlag"], true, "{details}");
+        assert_eq!(details["badEncoding"], "TypeError", "{details}");
+        assert_eq!(details["isReadStream"], true, "{details}");
+    });
+}
+
+/// `fs.createWriteStream` — the write side of the blocking bridge. Chunks are
+/// accepted into memory and flushed in one `fs.writeFile` / `fs.appendFile`
+/// hop on `end()`, so `finish` (and the `end()` callback) are the only
+/// "it is on disk now" signals; the file is read back from the real filesystem
+/// to prove it, instead of trusting `details`.
+#[test]
+fn node_fs_create_write_stream_flushes_on_end() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("write-stream");
+        let host = host_with_cwd(&scratch.as_str()).await;
+        let truncate_file = scratch.path().join("truncate.txt");
+        let append_file = scratch.path().join("append.txt");
+        std::fs::write(&truncate_file, "old contents\n").expect("write truncate fixture");
+        std::fs::write(&append_file, "first\n").expect("write append fixture");
+
+        let source = r#"
+            import { createWriteStream, existsSync, readFileSync, WriteStream } from "node:fs";
+            import { join } from "node:path";
+            import { Buffer } from "node:buffer";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "write_stream_probe",
+                    label: "write stream probe",
+                    description: "exercises fs.createWriteStream",
+                    parameters: { type: "object", properties: { dir: { type: "string" } } },
+                    execute: async (args) => {
+                        const dir = args.dir;
+
+                        // "w" truncates; string and Buffer chunks both land; and
+                        // the `write` callbacks precede `finish`, which precedes
+                        // the `end()` callback, which precedes `close`.
+                        const events = [];
+                        const writeCallbacks = [];
+                        const closedDestroyed = [];
+                        const truncate = createWriteStream(join(dir, "truncate.txt"));
+                        const instance = truncate instanceof WriteStream;
+                        truncate.on("open", () => events.push("open"));
+                        truncate.on("ready", () => events.push("ready"));
+                        truncate.on("finish", () => events.push("finish"));
+                        truncate.on("close", () => {
+                            events.push("close");
+                            closedDestroyed.push(truncate.destroyed);
+                        });
+                        const result = await new Promise((resolve, reject) => {
+                            truncate.on("error", reject);
+                            const first = truncate.write("new ", () => writeCallbacks.push("one"));
+                            const second = truncate.write(Buffer.from("bytes"), () => writeCallbacks.push("two"));
+                            const noBackpressure = first && second;
+                            truncate.end(() => {
+                                events.push("endCallback");
+                                resolve({
+                                    noBackpressure,
+                                    bytesWritten: truncate.bytesWritten,
+                                    writableEnded: truncate.writableEnded,
+                                    writableFinished: truncate.writableFinished,
+                                    destroyed: truncate.destroyed,
+                                    path: truncate.path,
+                                    flags: truncate.flags,
+                                });
+                            });
+                        });
+
+                        // "a" keeps the existing content and appends.
+                        const append = await new Promise((resolve, reject) => {
+                            const stream = createWriteStream(join(dir, "append.txt"), { flags: "a" });
+                            stream.on("error", reject);
+                            stream.write("second\n");
+                            stream.on("finish", () => resolve(stream.bytesWritten));
+                            stream.end();
+                        });
+
+                        // The flush is the only thing that can fail, and it must
+                        // surface both ways: `error` event and `end()` callback.
+                        const failure = await new Promise((resolve) => {
+                            const stream = createWriteStream(join(dir, "missing-dir", "x.txt"));
+                            let eventCode = null;
+                            let finished = false;
+                            stream.on("error", (err) => { eventCode = err.code; });
+                            stream.on("finish", () => { finished = true; });
+                            stream.write("data");
+                            stream.end((err) => resolve({
+                                eventCode,
+                                callbackCode: err ? err.code : null,
+                                finished,
+                            }));
+                        });
+
+                        // The documented refusal throws at the call site.
+                        let badFlag = null;
+                        try { createWriteStream(join(dir, "x.txt"), { flags: "r" }); }
+                        catch (err) { badFlag = err.message.includes("only supports the `w`"); }
+
+                        // destroy() drops the buffered bytes and emits close.
+                        const destroyed = [];
+                        const abandoned = createWriteStream(join(dir, "abandoned.txt"));
+                        abandoned.on("close", () => destroyed.push("close"));
+                        abandoned.write("never flushed");
+                        abandoned.destroy();
+
+                        return {
+                            content: [{ type: "text", text: "write stream probe" }],
+                            details: {
+                                events,
+                                writeCallbacks,
+                                result,
+                                append,
+                                failure,
+                                badFlag,
+                                destroyed,
+                                closedDestroyed,
+                                instance,
+                                truncateText: readFileSync(join(dir, "truncate.txt"), "utf8"),
+                                appendText: readFileSync(join(dir, "append.txt"), "utf8"),
+                                abandonedExists: existsSync(join(dir, "abandoned.txt")),
+                            },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("write_stream_probe", "/tmp/pi_node_builtins/write_stream_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load write stream probe extension");
+
+        let outcome = host
+            .execute_tool("write_stream_probe", &json!({ "dir": scratch.as_str() }).to_string())
+            .await
+            .expect("execute write stream probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(
+            details["events"],
+            json!(["open", "ready", "finish", "endCallback", "close"]),
+            "{details}"
+        );
+        assert_eq!(details["writeCallbacks"], json!(["one", "two"]), "{details}");
+        assert_eq!(details["result"]["noBackpressure"], true, "{details}");
+        assert_eq!(details["result"]["bytesWritten"], 9, "{details}");
+        assert_eq!(details["result"]["writableEnded"], true, "{details}");
+        assert_eq!(details["result"]["writableFinished"], true, "{details}");
+        // Auto-destroy lands after the `end()` callback, exactly like Node:
+        // the stream is torn down only once `finish` listeners have run.
+        assert_eq!(details["result"]["destroyed"], false, "{details}");
+        assert_eq!(details["closedDestroyed"], json!([true]), "{details}");
+        assert_eq!(details["result"]["flags"], "w", "{details}");
+        assert_eq!(
+            details["result"]["path"],
+            truncate_file.to_string_lossy().as_ref(),
+            "{details}"
+        );
+        assert_eq!(details["append"], 7, "{details}");
+        assert_eq!(details["failure"]["eventCode"], "ENOENT", "{details}");
+        assert_eq!(details["failure"]["callbackCode"], "ENOENT", "{details}");
+        assert_eq!(details["failure"]["finished"], false, "{details}");
+        assert_eq!(details["badFlag"], true, "{details}");
+        assert_eq!(details["destroyed"], json!(["close"]), "{details}");
+        assert_eq!(details["instance"], true, "{details}");
+        assert_eq!(details["abandonedExists"], false, "{details}");
+        assert_eq!(details["truncateText"], "new bytes", "{details}");
+        assert_eq!(details["appendText"], "first\nsecond\n", "{details}");
+
+        // The same content, read straight off the filesystem.
+        assert_eq!(
+            std::fs::read_to_string(&truncate_file).expect("read truncate"),
+            "new bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&append_file).expect("read append"),
+            "first\nsecond\n"
+        );
+        assert!(!scratch.path().join("abandoned.txt").exists());
+    });
+}
+
+/// `Buffer` / `process` are globals on Node, so an extension that never
+/// imports them must still find them — and a builtin that is *not* bridged
+/// must fail loudly, naming what is available.
+#[test]
+fn node_globals_are_installed_and_unsupported_builtins_are_reported() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+
+        host.load(
+            entry_at("global_probe", "/tmp/pi_node_builtins/global_probe.cjs"),
+            r#"
+                module.exports = function (pi) {
+                    pi.registerTool({
+                        name: "global_probe",
+                        label: "global probe",
+                        description: "reads Buffer / process without importing them",
+                        parameters: { type: "object" },
+                        execute: () => ({
+                            content: [{ type: "text", text: String(Buffer.byteLength("héllo", "utf8")) }],
+                            details: {
+                                byteLength: Buffer.byteLength("héllo", "utf8"),
+                                isBuffer: Buffer.isBuffer(Buffer.from([1, 2])),
+                                fromHex: Buffer.from("c3a9", "hex").toString("latin1"),
+                                platform: process.platform,
+                                hasEnv: typeof process.env === "object" && Object.keys(process.env).length > 0,
+                                version: process.version,
+                                cwdIsString: typeof process.cwd() === "string",
+                                stdoutWrite: process.stdout.write("global probe wrote\n"),
+                            },
+                        }),
+                    });
+                };
+            "#,
+        )
+        .await
+        .expect("load global probe extension");
+
+        let outcome = host
+            .execute_tool("global_probe", "{}")
+            .await
+            .expect("execute global probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(details["byteLength"], 6);
+        assert_eq!(details["isBuffer"], true);
+        assert_eq!(details["fromHex"], "Ã©");
+        assert!(details["platform"].as_str().is_some(), "{details}");
+        assert_eq!(details["hasEnv"], true);
+        assert_eq!(details["version"], "v0.0.0-pi-rust");
+        assert_eq!(details["cwdIsString"], true);
+        assert_eq!(details["stdoutWrite"], true);
+
+        // `process.stdout.write` never touches the real stdout — the `pi`
+        // process owns that stream (JSON-RPC) — so it is reported through
+        // the host log; the write returning `true` is what extension code
+        // observes.
+        // `node:stream` is still unbridged (see KNOWN_UNBRIDGED in the
+        // compatibility gate below), so the import has to fail loudly and
+        // name the modules that do exist.
+        let err = host
+            .load(
+                entry_at("stream", "/tmp/pi_node_builtins/stream.mjs"),
+                r#"
+                    import { Readable } from "node:stream";
+                    export default function (pi) {
+                        pi.appendEntry("loaded", { ok: true });
+                    }
+                "#,
+            )
+            .await
+            .expect_err("node:stream is not bridged yet");
+        let message = err.to_string();
+        assert!(message.contains("node:stream"), "{message}");
+        assert!(message.contains("node:fs"), "{message}");
+        assert!(message.contains("node:fs/promises"), "{message}");
+
+        // `node:readline` and `node:module` are bridged (LUM-1129), so the
+        // same imports have to load instead of failing.
+        host
+            .load(
+                entry_at("module_readline", "/tmp/pi_node_builtins/module_readline.mjs"),
+                r#"
+                    import { createRequire, isBuiltin } from "node:module";
+                    import { createInterface } from "node:readline";
+                    export default function (pi) {
+                        pi.appendEntry("loaded", {
+                            require: typeof createRequire,
+                            builtin: isBuiltin("node:fs"),
+                            interface: typeof createInterface,
+                        });
+                    }
+                "#,
+            )
+            .await
+            .expect("node:module / node:readline are bridged");
+
+        // `node:child_process` is bridged now (LUM-1110), so the same import
+        // has to load instead of failing.
+        host.load(
+            entry_at("child_process", "/tmp/pi_node_builtins/child_process.mjs"),
+            r#"
+                import { execSync } from "node:child_process";
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "child_process_probe",
+                        label: "child process probe",
+                        description: "imports node:child_process",
+                        parameters: { type: "object" },
+                        execute: () => ({
+                            content: [{ type: "text", text: execSync("printf ok", { encoding: "utf8" }) }],
+                            details: { ok: true },
+                        }),
+                    });
+                }
+            "#,
+        )
+        .await
+        .expect("node:child_process is bridged");
+
+        let outcome = host
+            .execute_tool("child_process_probe", "{}")
+            .await
+            .expect("execute child_process probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+        assert_eq!(outcome.details.expect("details")["ok"], true);
+    });
+}
+
+/// The pure-JS `node:util` surface — LUM-1105. No host op backs it, so a
+/// single extension exercises every export and the assertions read the
+/// returned details object. The expected strings were captured from Node
+/// v22.23.2 (`util.format` / `util.inspect` / `util.styleText`), so a shim
+/// regression that drifts from upstream output fails here.
+#[test]
+fn node_util_surface_matches_node() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let scratch = Scratch::new("util");
+        let host = host_with_cwd(&scratch.as_str()).await;
+
+        let source = r#"
+            import util from "node:util";
+            import {
+                format, formatWithOptions, inspect, isDeepStrictEqual,
+                promisify, callbackify, inherits, deprecate,
+                stripVTControlCharacters, styleText, types,
+                TextEncoder, TextDecoder,
+            } from "node:util";
+
+            export default function (pi) {
+                pi.registerTool({
+                    name: "util_probe",
+                    label: "util probe",
+                    description: "exercises the node:util virtual module",
+                    parameters: { type: "object" },
+                    execute: async () => {
+                        const double = (value, callback) => {
+                            Promise.resolve().then(() => callback(null, value * 2));
+                        };
+                        const doubled = await promisify(double)(21);
+
+                        const fail = (callback) => {
+                            Promise.resolve().then(() => callback(new Error("boom")));
+                        };
+                        let rejected = false;
+                        try {
+                            await promisify(fail)();
+                        } catch (err) {
+                            rejected = err.message === "boom";
+                        }
+
+                        const custom = (callback) => callback(null, "plain");
+                        custom[util.promisify.custom] = () => Promise.resolve("custom");
+                        const customValue = await promisify(custom)();
+
+                        const asyncFn = async (value) => value + 1;
+                        const viaCallback = await new Promise((resolve, reject) => {
+                            callbackify(asyncFn)(41, (err, value) =>
+                                err ? reject(err) : resolve(value),
+                            );
+                        });
+
+                        const circular = {};
+                        circular.self = circular;
+
+                        function Base() {}
+                        Base.prototype.kind = "base";
+                        function Child() {}
+                        inherits(Child, Base);
+                        const child = new Child();
+
+                        let calls = 0;
+                        const deprecated = deprecate(
+                            (value) => {
+                                calls += 1;
+                                return value + 1;
+                            },
+                            "old",
+                            "DEP0001",
+                        );
+
+                        const encoded = new TextEncoder().encode("héllo");
+
+                        return {
+                            content: [{ type: "text", text: "util probe" }],
+                            details: {
+                                doubled,
+                                rejected,
+                                customValue,
+                                viaCallback,
+                                formatted: format("%s|%d|%i|%f|%j|%%", "hi", "42", "3.9", "2.5", { a: 1 }),
+                                extra: format("plain", "arg", 7),
+                                withOptions: formatWithOptions({ depth: 0 }, "%O", { a: { b: 1 } }),
+                                inspected: inspect({ a: [1, 2], b: "x" }),
+                                inspectedDepth: inspect({ a: { b: { c: { d: 1 } } } }),
+                                inspectedCircular: inspect(circular),
+                                inspectedMaxArray: inspect([1, 2, 3, 4, 5], { maxArrayLength: 2 }),
+                                inspectedColors: inspect({ a: 1 }, { colors: true }),
+                                inspectedCustom: inspect({ [util.inspect.custom]: () => "<custom>" }),
+                                typeChecks: [
+                                    types.isDate(new Date(0)),
+                                    types.isRegExp(/x/),
+                                    types.isNativeError(new TypeError("x")),
+                                    !types.isNativeError({}),
+                                    types.isPromise(Promise.resolve()),
+                                    types.isUint8Array(new Uint8Array(1)),
+                                    types.isTypedArray(new Float64Array(1)),
+                                    !types.isTypedArray(new DataView(new ArrayBuffer(4))),
+                                    types.isMap(new Map()),
+                                    types.isSet(new Set()),
+                                    types.isBoxedPrimitive(new Number(1)),
+                                    !types.isBoxedPrimitive(1),
+                                    types.isAnyArrayBuffer(new ArrayBuffer(1)),
+                                    types.isInt32Array(new Int32Array(1)),
+                                    types.isAsyncFunction(async () => {}),
+                                ],
+                                deepEqual: [
+                                    isDeepStrictEqual({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] }),
+                                    isDeepStrictEqual(
+                                        new Map([[1, 2], [3, 4]]),
+                                        new Map([[3, 4], [1, 2]]),
+                                    ),
+                                    isDeepStrictEqual(new Set([1, 1, 2]), new Set([2, 2, 1])),
+                                    isDeepStrictEqual(new Date(0), new Date(0)),
+                                    isDeepStrictEqual(NaN, NaN),
+                                    isDeepStrictEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2])),
+                                    !isDeepStrictEqual({ a: 1 }, { a: 2 }),
+                                    !isDeepStrictEqual({ a: 1 }, { a: 1, b: 2 }),
+                                    !isDeepStrictEqual(0, -0),
+                                    !isDeepStrictEqual(Object.create(null), {}),
+                                    !isDeepStrictEqual([1], Object.assign([1], { extra: 2 })),
+                                ],
+                                stripped: stripVTControlCharacters("\u001b[31mred\u001b[39m plain"),
+                                styled: styleText(["bold", "red"], "x", { validateStream: false }),
+                                styledBg: styleText("bgBlue", "x", { validateStream: false }),
+                                inherited:
+                                    child.kind === "base" &&
+                                    child instanceof Base &&
+                                    Child.super_ === Base,
+                                deprecatedValue: deprecated(1) + deprecated(1),
+                                deprecationCalls: calls,
+                                decoded: new TextDecoder().decode(encoded),
+                                encodedBytes: Array.from(encoded).join(","),
+                                latin1: new TextDecoder("latin1").decode(new Uint8Array([0x68, 0xe9])),
+                                utf16le: new TextDecoder("utf-16le").decode(
+                                    new Uint8Array([0x68, 0x00, 0xe9, 0x00]),
+                                ),
+                                encodeInto: new TextEncoder().encodeInto("héllo", new Uint8Array(4)),
+                                globals:
+                                    typeof globalThis.TextEncoder === "function" &&
+                                    typeof globalThis.TextDecoder === "function",
+                                defaultExport: util.default === util && typeof util.inspect === "function",
+                            },
+                        };
+                    },
+                });
+            }
+        "#;
+
+        host.load(
+            entry_at("util_probe", "/tmp/pi_node_builtins/util_probe.mjs"),
+            source,
+        )
+        .await
+        .expect("load util probe extension");
+
+        let outcome = host
+            .execute_tool("util_probe", "{}")
+            .await
+            .expect("execute util probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(details["doubled"], 42);
+        assert_eq!(details["rejected"], true);
+        assert_eq!(details["customValue"], "custom");
+        assert_eq!(details["viaCallback"], 42);
+        assert_eq!(details["formatted"], "hi|42|3|2.5|{\"a\":1}|%");
+        assert_eq!(details["extra"], "plain arg 7");
+        assert_eq!(details["withOptions"], "{ a: [Object] }");
+        assert_eq!(details["inspected"], "{ a: [ 1, 2 ], b: 'x' }");
+        assert_eq!(details["inspectedDepth"], "{ a: { b: { c: [Object] } } }");
+        assert_eq!(details["inspectedCircular"], "<ref *1> { self: [Circular *1] }");
+        assert_eq!(details["inspectedMaxArray"], "[ 1, 2, ... 3 more items ]");
+        assert_eq!(details["inspectedColors"], "{ a: \u{1b}[33m1\u{1b}[39m }");
+        assert_eq!(details["inspectedCustom"], "<custom>");
+        for check in details["typeChecks"].as_array().expect("typeChecks") {
+            assert_eq!(*check, true, "typeChecks: {details}");
+        }
+        for check in details["deepEqual"].as_array().expect("deepEqual") {
+            assert_eq!(*check, true, "deepEqual: {details}");
+        }
+        assert_eq!(details["stripped"], "red plain");
+        assert_eq!(details["styled"], "\u{1b}[1m\u{1b}[31mx\u{1b}[39m\u{1b}[22m");
+        assert_eq!(details["styledBg"], "\u{1b}[44mx\u{1b}[49m");
+        assert_eq!(details["inherited"], true);
+        assert_eq!(details["deprecatedValue"], 4);
+        assert_eq!(details["deprecationCalls"], 2);
+        assert_eq!(details["decoded"], "héllo");
+        assert_eq!(details["encodedBytes"], "104,195,169,108,108,111");
+        assert_eq!(details["latin1"], "hé");
+        assert_eq!(details["utf16le"], "hé");
+        assert_eq!(details["encodeInto"], json!({"read": 3, "written": 4}));
+        assert_eq!(details["globals"], true);
+        assert_eq!(details["defaultExport"], true);
+    });
+}
+
+/// Recursively collect files under `dir` (the example trees are shallow).
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Quoted `"node:…"` / `'node:…'` specifiers in a source file.
+///
+/// Quote-anchored on purpose: minified bundles contain text like
+/// `nextInode:1` or `node:current`, which is not an import.
+fn node_specifiers(source: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let bytes = source.as_bytes();
+    for (index, _) in source.match_indices("node:") {
+        let Some(quote) = index
+            .checked_sub(1)
+            .map(|i| bytes[i])
+            .filter(|b| *b == b'"' || *b == b'\'')
+        else {
+            continue;
+        };
+        let rest = &source[index + "node:".len()..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '/')
+            .collect();
+        let closes = rest.as_bytes().get(name.len()).copied() == Some(quote);
+        if closes && name.contains(|c: char| c.is_ascii_alphabetic()) {
+            found.insert(format!("node:{name}"));
+        }
+    }
+    found
+}
+
+/// Compatibility gate: every `node:*` specifier the upstream extension
+/// examples import is either bridged by the shim or explicitly listed as a
+/// known, documented frontier gap. A new upstream import therefore fails
+/// here instead of silently outrunning the bridge.
+///
+/// The bridged set is read out of `runtime/pi-ext-shim.mjs` (the source of
+/// truth) rather than restated, and the scan is skipped when the upstream
+/// example directories are not part of the checkout.
+#[test]
+fn upstream_node_imports_are_all_bridged_or_documented() {
+    use std::collections::BTreeSet;
+
+    /// Builtins the upstream examples reach for that are not bridged yet.
+    /// Every entry must appear in `docs/NODE_BUILTINS.md` under
+    /// "Not bridged", and must *not* be in the shim's map.
+    ///
+    /// Empty since LUM-1129 bridged `node:module` / `node:readline`, the last
+    /// two specifiers the scanned upstream examples import. The list stays as
+    /// the gate's escape hatch: the next upstream import that lands in the
+    /// checkout fails the test below until it is either bridged or listed and
+    /// documented here.
+    const KNOWN_UNBRIDGED: [&str; 0] = [];
+
+    fn shim_specifiers() -> BTreeSet<String> {
+        let shim = include_str!("../runtime/pi-ext-shim.mjs");
+        let start = shim
+            .find("globalThis.__pi_virtual_modules = Object.freeze({")
+            .expect("virtual module map in the shim");
+        let block = &shim[start..];
+        let end = block.find("});").expect("end of the virtual module map");
+        let mut specifiers = BTreeSet::new();
+        for line in block[..end].lines().skip(1) {
+            let line = line.trim();
+            // Keys are either quoted (`"node:fs": …`) or bare (`fs: …`).
+            let (key, _) = if let Some(rest) = line.strip_prefix('"') {
+                match rest.split_once("\": ") {
+                    Some(pair) => pair,
+                    None => continue,
+                }
+            } else {
+                match line.split_once(": ") {
+                    Some(pair) => pair,
+                    None => continue,
+                }
+            };
+            if !key.is_empty() {
+                specifiers.insert(key.to_string());
+            }
+        }
+        specifiers
+    }
+
+    // `crates/pi-extensions` → the repository root, where the upstream
+    // examples live.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut scanned_files = 0usize;
+    let mut upstream = BTreeSet::new();
+    for dir in [
+        ".pi/extensions",
+        "packages/coding-agent/examples/extensions",
+    ] {
+        let dir = root.join(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in walk(&dir) {
+            let is_source = entry
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| matches!(ext, "ts" | "mts" | "js" | "mjs"));
+            if !is_source {
+                continue;
+            }
+            scanned_files += 1;
+            let source = std::fs::read_to_string(&entry).expect("read upstream example");
+            upstream.extend(node_specifiers(&source));
+        }
+    }
+    if scanned_files == 0 {
+        // Nothing to compare against in this checkout.
+        return;
+    }
+
+    eprintln!("SCANNED {} files upstream={:?}", scanned_files, upstream);
+    let bridged = shim_specifiers();
+    let documented = include_str!("../docs/NODE_BUILTINS.md");
+    let known: BTreeSet<&str> = KNOWN_UNBRIDGED.into_iter().collect();
+
+    for specifier in &upstream {
+        if bridged.contains(specifier) {
+            // The bare alias has to exist as well, for `import … from "fs"`.
+            if let Some(bare) = specifier.strip_prefix("node:") {
+                assert!(
+                    bridged.contains(bare),
+                    "`{specifier}` is bridged but its bare alias `{bare}` is not"
+                );
+            }
+        } else {
+            assert!(
+                known.contains(specifier.as_str()),
+                "upstream examples import `{specifier}`, which is neither bridged nor listed in \
+                 KNOWN_UNBRIDGED — bridge it or document it in docs/NODE_BUILTINS.md"
+            );
+            assert!(
+                documented.contains(specifier.as_str()),
+                "`{specifier}` is a known gap but docs/NODE_BUILTINS.md does not name it"
+            );
+        }
+    }
+
+    // The documented gap list must not rot: once a builtin is bridged, its
+    // entry leaves KNOWN_UNBRIDGED (and the doc table) in the same commit.
+    for specifier in KNOWN_UNBRIDGED {
+        assert!(
+            !bridged.contains(specifier),
+            "`{specifier}` is now bridged: drop it from KNOWN_UNBRIDGED and the frontier table"
+        );
+    }
+
+    assert!(
+        upstream.len() >= 5,
+        "expected several node builtins in the upstream examples, found {upstream:?}"
+    );
+}
+
+/// The WHATWG `URL` global (LUM-1177): the whole reason it exists is the
+/// upstream `custom-provider-gitlab-duo` example, whose OAuth callback is
+/// read with `new URL(callbackUrl).searchParams.get("code")`. The probe
+/// covers that exact shape plus the parser, resolver, serializer and
+/// mutators an extension is likely to touch.
+#[test]
+fn node_url_global_parses_resolves_serializes_and_mutates() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let host = JsExtensionHost::new().await.expect("host");
+
+        host.load(
+            entry_at("url_probe", "/tmp/pi_node_builtins/url_probe.mjs"),
+            r##"
+                export default function (pi) {
+                    pi.registerTool({
+                        name: "url_probe",
+                        label: "url probe",
+                        description: "exercises the URL global",
+                        parameters: { type: "object" },
+                        execute: () => {
+                            const parsed = new URL("https://user:pass@Example.COM:8443/a/b/../c?x=1&y=2#frag");
+                            const callback = new URL(
+                                "/oauth/callback?code=abc&state=xyz",
+                                "https://gitlab.example.com/oauth/authorize",
+                            );
+                            const resolved = new URL("sub/page", "https://h/a/b");
+                            const up = new URL("../up", "https://h/a/b/");
+                            const queryOnly = new URL("?only=1", "https://h/a/b?old=2#f");
+                            const fragmentOnly = new URL("#only", "https://h/a/b?q=1");
+                            const opaque = new URL("mailto:someone@example.com?subject=hi%20there");
+                            const encoded = new URL("https://h/a b?q=a b#c d");
+                            const defaultPort = new URL("https://h:443/p");
+
+                            const mutated = new URL("https://h/p?x=1");
+                            mutated.searchParams.set("x", "2");
+                            mutated.searchParams.append("y", "3");
+                            mutated.pathname = "/other";
+                            mutated.hash = "frag";
+
+                            const removed = new URL("https://h/p?x=1");
+                            removed.searchParams.delete("x");
+
+                            let invalid = null;
+                            try { new URL("not a url"); } catch (err) { invalid = err.name; }
+                            let badPort = null;
+                            try { new URL("https://h:abc/"); } catch (err) { badPort = err.name; }
+
+                            return {
+                                content: [{ type: "text", text: "url probe" }],
+                                details: {
+                                    parsed: {
+                                        href: parsed.href,
+                                        origin: parsed.origin,
+                                        protocol: parsed.protocol,
+                                        username: parsed.username,
+                                        password: parsed.password,
+                                        host: parsed.host,
+                                        hostname: parsed.hostname,
+                                        port: parsed.port,
+                                        pathname: parsed.pathname,
+                                        search: parsed.search,
+                                        hash: parsed.hash,
+                                        hasCode: callback.searchParams.has("code"),
+                                        code: callback.searchParams.get("code"),
+                                    },
+                                    callbackHref: callback.href,
+                                    resolvedHref: resolved.href,
+                                    upHref: up.href,
+                                    queryOnlyHref: queryOnly.href,
+                                    queryOnlyPathname: queryOnly.pathname,
+                                    queryOnlySearch: queryOnly.search,
+                                    fragmentOnlyHref: fragmentOnly.href,
+                                    fragmentOnlyHash: fragmentOnly.hash,
+                                    opaque: {
+                                        href: opaque.href,
+                                        protocol: opaque.protocol,
+                                        pathname: opaque.pathname,
+                                        search: opaque.search,
+                                        host: opaque.host,
+                                        origin: opaque.origin,
+                                    },
+                                    encoded: {
+                                        pathname: encoded.pathname,
+                                        search: encoded.search,
+                                        hash: encoded.hash,
+                                    },
+                                    defaultPort: {
+                                        port: defaultPort.port,
+                                        host: defaultPort.host,
+                                        href: defaultPort.href,
+                                    },
+                                    mutatedHref: mutated.href,
+                                    mutatedSearch: mutated.search,
+                                    removedHref: removed.href,
+                                    removedSearch: removed.search,
+                                    invalid,
+                                    badPort,
+                                    isURL: parsed instanceof URL,
+                                    canParse: [URL.canParse("https://h/x"), URL.canParse("x"), URL.canParse("/x", "https://h")],
+                                    staticParse: URL.parse("https://h/x").href,
+                                    staticParseNull: URL.parse("nope") === null,
+                                    json: JSON.parse(JSON.stringify(mutated)),
+                                    toStringTag: Object.prototype.toString.call(parsed),
+                                },
+                            };
+                        },
+                    });
+                }
+            "##,
+        )
+        .await
+        .expect("load url probe extension");
+
+        let outcome = host
+            .execute_tool("url_probe", &json!({}).to_string())
+            .await
+            .expect("execute url probe");
+        assert!(!outcome.is_error, "{outcome:?}");
+
+        let details = outcome.details.expect("details");
+        assert_eq!(
+            details["parsed"]["href"],
+            "https://user:pass@example.com:8443/a/c?x=1&y=2#frag",
+            "{details}"
+        );
+        assert_eq!(details["parsed"]["origin"], "https://example.com:8443", "{details}");
+        assert_eq!(details["parsed"]["protocol"], "https:", "{details}");
+        assert_eq!(details["parsed"]["username"], "user", "{details}");
+        assert_eq!(details["parsed"]["password"], "pass", "{details}");
+        assert_eq!(details["parsed"]["host"], "example.com:8443", "{details}");
+        assert_eq!(details["parsed"]["hostname"], "example.com", "{details}");
+        assert_eq!(details["parsed"]["port"], "8443", "{details}");
+        assert_eq!(details["parsed"]["pathname"], "/a/c", "{details}");
+        assert_eq!(details["parsed"]["search"], "?x=1&y=2", "{details}");
+        assert_eq!(details["parsed"]["hash"], "#frag", "{details}");
+
+        // The blocked example's exact shape.
+        assert_eq!(details["parsed"]["hasCode"], true, "{details}");
+        assert_eq!(details["parsed"]["code"], "abc", "{details}");
+        assert_eq!(
+            details["callbackHref"],
+            "https://gitlab.example.com/oauth/callback?code=abc&state=xyz",
+            "{details}"
+        );
+
+        // Relative resolution.
+        assert_eq!(details["resolvedHref"], "https://h/a/sub/page", "{details}");
+        assert_eq!(details["upHref"], "https://h/a/up", "{details}");
+        assert_eq!(details["queryOnlyHref"], "https://h/a/b?only=1", "{details}");
+        assert_eq!(details["queryOnlyPathname"], "/a/b", "{details}");
+        assert_eq!(details["queryOnlySearch"], "?only=1", "{details}");
+        assert_eq!(details["fragmentOnlyHref"], "https://h/a/b?q=1#only", "{details}");
+        assert_eq!(details["fragmentOnlyHash"], "#only", "{details}");
+
+        // Opaque (non-special) schemes keep their path verbatim and have no
+        // authority / origin.
+        assert_eq!(
+            details["opaque"]["href"],
+            "mailto:someone@example.com?subject=hi%20there",
+            "{details}"
+        );
+        assert_eq!(details["opaque"]["protocol"], "mailto:", "{details}");
+        assert_eq!(details["opaque"]["pathname"], "someone@example.com", "{details}");
+        assert_eq!(details["opaque"]["search"], "?subject=hi%20there", "{details}");
+        assert_eq!(details["opaque"]["host"], "", "{details}");
+        assert_eq!(details["opaque"]["origin"], "null", "{details}");
+
+        // Percent-encoding per component.
+        assert_eq!(details["encoded"]["pathname"], "/a%20b", "{details}");
+        assert_eq!(details["encoded"]["search"], "?q=a%20b", "{details}");
+        assert_eq!(details["encoded"]["hash"], "#c%20d", "{details}");
+
+        // A default port is dropped from the serialization.
+        assert_eq!(details["defaultPort"]["port"], "", "{details}");
+        assert_eq!(details["defaultPort"]["host"], "h", "{details}");
+        assert_eq!(details["defaultPort"]["href"], "https://h/p", "{details}");
+
+        // `searchParams` is live, and the other setters round-trip.
+        assert_eq!(details["mutatedHref"], "https://h/other?x=2&y=3#frag", "{details}");
+        assert_eq!(details["mutatedSearch"], "?x=2&y=3", "{details}");
+        assert_eq!(details["removedHref"], "https://h/p", "{details}");
+        assert_eq!(details["removedSearch"], "", "{details}");
+
+        assert_eq!(details["invalid"], "TypeError", "{details}");
+        assert_eq!(details["badPort"], "TypeError", "{details}");
+        assert_eq!(details["isURL"], true, "{details}");
+        assert_eq!(details["canParse"], json!([true, false, true]), "{details}");
+        assert_eq!(details["staticParse"], "https://h/x", "{details}");
+        assert_eq!(details["staticParseNull"], true, "{details}");
+        assert_eq!(details["json"], "https://h/other?x=2&y=3#frag", "{details}");
+        assert_eq!(details["toStringTag"], "[object URL]", "{details}");
+    });
+}

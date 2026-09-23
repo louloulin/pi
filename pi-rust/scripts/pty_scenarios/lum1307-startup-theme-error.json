@@ -1,0 +1,45 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "Run with `--home /tmp/lum1307/home-bogus` (settings.json: theme=solarized — a name this build cannot resolve).",
+    "Documents the other half of the startup contract: a stored theme that does not resolve must be *reported*, not silently swallowed, and must leave the previous palette installed rather than a themeless App.",
+    "`probe` rows are post-fix behaviour, so the pre-fix binary reports XFAIL for them instead of failing the run."
+  ],
+  "caption": "LUM-1307 — the unresolvable-theme arm: `settings.json` says `theme: solarized`, which no scheme in this build answers to. Post-fix the startup path says so in the transcript (`theme → not applied`) and keeps the default dark palette, which `/settings` then reports as `dark`. The pre-fix binary says nothing at all and still shows `dark`, so the only thing that changes is whether the user is told. Real binary + real PTY + pyte VT emulator; nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle 120x34 — startup reports the rejected theme name instead of silently keeping the default",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0"
+      ],
+      "probe": [
+        {
+          "text": "theme → not applied",
+          "why": "LUM-1307 startup settings"
+        }
+      ]
+    },
+    {
+      "label": "2. /settings — the rejected name left the default palette installed rather than a themeless App",
+      "send": "/settings<Enter>",
+      "wait": 1.5,
+      "expect": [
+        "Theme"
+      ],
+      "probe": [
+        {
+          "regex": "^  Theme\\s+dark$",
+          "why": "LUM-1307 startup settings"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

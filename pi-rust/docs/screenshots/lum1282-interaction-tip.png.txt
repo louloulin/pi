@@ -1,0 +1,781 @@
+# lum1282-interaction-tip.png — chars, 120x34 cells
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [1] 1. idle: product line, hint table, onboarding line, composer placeholder, status line  (cursor 120,33, frame fade997b285b, px 98910e9c12b5, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'Pi can explain its own features'
+  assert PASS   expect       '  / for commands'
+  assert PASS   expect       '  ! to run bash'
+  assert PASS   expect       '  Alt+H to hide this header'
+  assert PASS   expect       '> type a prompt — /help for commands'
+  assert PASS   expect       'Faux test model'
+  assert PASS   expect       '? for help'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [2] 2. type / -> the command completion opens with a live counter and the first candidate selected  (cursor 36,32, frame 02b86f45e21a, px 135264632d2b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ help  Show this help text
+  clear  Clear the message view
+  new  Start a new session
+  copy  Copy last agent message to clipboard
+  name  <name> — Set session display name
+  (1/19)
+> /▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ help'
+  assert PASS   expect       'Show this help text'
+  assert PASS   expect       '\\(1/\\d+\\)'  — candidate counter, first item selected
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [3] 3. type mo -> /model stays selected and the over-broad candidate set is visible (see the xfail_reject markers)  (cursor 6,32, frame 04d7e51e1ce7, px 51e40a0da265, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+❯ model  <provider/model> — Select model (opens selector UI)
+  copy  Copy last agent message to clipboard
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  compact  [instructions] — Manually compact the session context
+  (1/7)
+> /mo▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> /mo'
+  assert PASS   expect       '❯ model'
+  assert PASS   expect       '\\(1/\\d+\\)'  — candidate counter
+  assert XFAIL  xfail_reject 'Copy last agent message to clipboard'  — LUM-1263: upstream filters candidates by command name only; matching the description too is a deviation and must go
+  assert XFAIL  xfail_reject 'Create a new fork from a previous user message'  — LUM-1263: same over-broad filter
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [4] 4. Down -> the selection marker moves to the next candidate and the counter agrees  (cursor 4,31, frame 94fd7d999360, px cc61887f6273, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+  model  <provider/model> — Select model (opens selector UI)
+❯ copy  Copy last agent message to clipboard
+  export  [path] — Export session (HTML default, or a .jsonl path)
+  fork  Create a new fork from a previous user message
+  compact  [instructions] — Manually compact the session context
+  (2/7)
+> /mo▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ copy' (x1)
+  assert PASS   expect       '\\(2/\\d+\\)'  — counter follows the marker
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [5] 5. Tab -> the selected candidate is applied to the composer and the list closes  (cursor 8,32, frame 4240e3ecf48c, px 7d56ee06dd0f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> /copy▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> /copy' (x1)
+  assert PASS   reject       '\\(\\d+/\\d+\\)'  — the completion list must be gone once a candidate is accepted
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [6] 6. Enter -> the slash command runs and reports its result in the transcript  (cursor 36,32, frame 473a3c6ca8ed, px 7c7633e11af5, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> nothing to copy yet'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [7] 7. /model + Enter -> the model selector overlay lists real models with their providers  (cursor 56,31, frame 81492103b517, px 77eb93ea5929, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+Pick a model
+────────────────────────────────────────
+❯ Ling 2.6 1T                     ant-ling
+  Ling 2.6 Flash                  ant-ling
+  Ring 2.6 1T                     ant-ling
+  Claude Haiku 4.5                anthropic
+  Claude Opus 4.5                 anthropic
+  Claude Sonnet 4.5               anthropic
+  GPT-4                           azure-openai-responses
+  GPT-4 Turbo                     azure-openai-responses
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Pick a model'
+  assert PASS   expect       'anthropic'
+  assert PASS   expect       '─'  — overlay frame
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [8] 8. Esc -> the overlay closes and the composer is back to its placeholder  (cursor 56,31, frame 473a3c6ca8ed, px 39514e8cc4eb, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> type a prompt — /help for commands'
+  assert PASS   reject       'Pick a model'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [9] 9. @ -> file-path completion over the fixture tree, with paths resolved relative to the cwd  (cursor 36,32, frame 28a91512e30d, px ed56c4e74821, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+❯ src/  src
+  README.md  README.md
+  Cargo.toml  Cargo.toml
+  lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '❯ src/'
+  assert PASS   expect       'Cargo.toml'
+  assert PASS   expect       'README.md'
+  assert PASS   expect       '> @'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [10] 10. src -> candidates narrow to that subtree; the unfiltered fixtures are gone  (cursor 7,32, frame 8f2e9df5367c, px 9050a54717bf, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+❯ src/  src
+  lib.rs  src/lib.rs
+  main.rs  src/main.rs
+> @src▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> @src'
+  assert PASS   reject       'Cargo.toml'
+  assert PASS   reject       'README.md'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [11] 11. Tab -> the path token is composed into the composer and the list closes  (cursor 8,32, frame 4a768a7a6808, px 4d0e4b14af9f, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+
+
+
+
+
+
+
+
+
+
+> @src/▍
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> @src/'
+  assert PASS   reject       '❯ src/'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [12] 12. a real turn through the provider: the prompt and the reply both land in the transcript  (cursor 36,32, frame a86c670d0ff7, px aefe9339c606, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+> hi
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> hi'
+  assert PASS   expect       'faux-model (faux) hello'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [13] 13. !bash -> the command, its output and its duration are reported as one tool block  (cursor 11,26, frame 2d5d503bbad4, px 79328fda7174, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+> hi
+  faux-model (faux) hello
+* bash echo pty-harness-ok
+* pty-harness-ok
+* Took 0.0s
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '* bash echo pty-harness-ok'
+  assert PASS   expect       '* pty-harness-ok'
+  assert PASS   expect       '\\* Took \\d'  — elapsed time is reported
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [14] 14. Ctrl+O -> the status line reports the tool-output expansion state  (cursor 120,33, frame 59296a701b49, px 3238c63564ff, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet
+> hi
+  faux-model (faux) hello
+* bash echo pty-harness-ok
+* pty-harness-ok
+* Took 0.0s
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                       in 0 out 0 ?/8.2k  Tool output: expanded
+  assert PASS   expect       'Tool output: expanded'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [15] 15. /help -> the wrapped reference renders; the bottom-anchored log shows its tail and no row is hard-clipped at the right margin  (cursor 120,33, frame f0a46fe66935, px db99dad2939b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 21 lines above · Home                                                                                               │
+·   Enter       submit prompt                                                                                          │
+·   Up / Down   navigate prompt history                                                                                │
+·   PgUp/PgDn   scroll the chat log one page                                                                           │
+·   Home / End  jump to the start / end of the chat log                                                                │
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      │
+·   Ctrl+D      exit on an empty prompt                                                                                │
+·   Ctrl+L      open the model selector                                                                                │
+·   Ctrl+U      clear the prompt buffer                                                                                ┃
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert FAIL   expect       '· keys:'
+  assert PASS   expect       'submit prompt'
+  assert PASS   expect       '·   Ctrl+U      clear the prompt buffer'
+  assert PASS   reject       'keys: Enter submit promp'  — pre-fix the 32 source lines were clipped into 11 hard-cut rows and a cut landed inside a word ('promp'); this needle only exists in that truncated rendering
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [16] 16. Home -> window 1 of the reference: the command table's head is reachable (needles are kept off the window edges: the window shifts by a row when the bash block renders one line more)  (cursor 120,31, frame 27f0dadd63f2, px 2489739c8c90, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> nothing to copy yet                                                                                                  ┃
+> hi                                                                                                                   ┃
+  faux-model (faux) hello                                                                                              ┃
+* bash echo pty-harness-ok                                                                                             │
+* pty-harness-ok                                                                                                       │
+* Took 0.0s                                                                                                            │
+· slash commands:                                                                                                      │
+·   /help     show this help text                                                                                      │
+·   /clear    clear the message view                                                                                   │
+·   /new      start a new session                                                                                      │
+·   /copy     copy the last assistant messa ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'slash commands:'
+  assert PASS   expect       '/help     show this help text'
+  assert PASS   expect       '/clear    clear the message view'
+  assert PASS   expect       '/new      start a new session'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [17] 17. PgDn -> window 2 of the reference: the middle of the command table is reachable  (cursor 43,31, frame 670a64e43fef, px a868d65ab1d0, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+·   /name [name] show or set the session display name                                                                  │
+·   /model    pick a model (opens selector)                                                                            │
+·   /session  show the current session info                                                                            │
+·   /export [path] export the session (HTML, or JSONL for a .jsonl path)                                               ┃
+·   /resume   resume a previous session                                                                                ┃
+·   /tree     navigate the session tree and switch branches                                                            ┃
+·   /fork     branch a new session from a user message                                                                 │
+·   /clone    copy the current session into a new session file                                                         │
+·   /settings show or change interface settings                                                                        │
+·   /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)                                │
+·   /trust    show or set project trust (/t ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '/resume   resume a previous session'
+  assert PASS   expect       '/thinking set the reasoning level'
+  assert PASS   expect       '/trust    show or set project trust'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [18] 18. /hotkeys -> the chord table renders bottom-anchored; the tail is on screen and not hard-clipped  (cursor 120,31, frame 82882520dbe7, px 23087a1ce122, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+ ⋯ 63 lines above · Home  the selection down                                                                           │
+·   PgUp             selection page up                                                                                 │
+·   PgDn             selection page down                                                                               │
+·   Enter            confirm the selection                                                                             │
+·   Esc / Ctrl+C     close the selection list                                                                          │
+·   Tab              path completion / accept autocomplete                                                             │
+·                                                                                                                      │
+· commands:                                                                                                            │
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        │
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '· commands:'
+  assert PASS   expect       'path completion / accept autocomplete'
+  assert PASS   expect       'close the selector / overlay first'
+  assert PASS   reject       'accept autocomplete commands:'  — the pre-fix clip landed exactly there ('... / accept autocomplete commands: / slash'); the needle spans the cut, so it can only match the truncated rendering
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [19] 19. PgUp -> one page back and the chord table's app + selector sections are there  (cursor 120,31, frame 7465d97cf390, px 3c25ed7918a3, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                │
+·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          │
+·   Ctrl+L           open the model selector                                                                           │
+·   Alt+N            start a new session                                                                               │
+·   Alt+T            open the session tree                                                                             │
+·   Alt+F            fork a session from a message                                                                     │
+·   Alt+R            resume a session                                                                                  │
+·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             │
+·                                                                                                                      ┃
+· selectors and completion:                                                                                            ┃
+·   Up               move the selection up  ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'open the model selector'
+  assert PASS   expect       'open the session tree'
+  assert PASS   expect       'selectors and completion:'
+
+===== LUM-1267 interaction assertions (120x34), revised by LUM-1271 for the post-LUM-1261 wrapping layout. Run against a binary built from feature/pi.rs; every panel asserts the interaction a codex/pi-class TUI owes the user.  |  [20] 20. End then PgUp -> the log follows the bottom again and scrolling back brings up the jump-to-latest pill  (cursor 43,31, frame 03d728141274, px 7f6623d42f6b, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· app:                                                                                                                 │
+·   Esc              cancel autocomplete / abort streaming                                                             │
+·   Ctrl+C           clear the prompt (twice: exit)                                                                    │
+·   Ctrl+D           exit when the prompt is empty                                                                     │
+·   Shift+Tab        cycle the thinking level                                                                          │
+·   Ctrl+P           cycle to the next model                                                                           │
+·   Shift+Ctrl+P     cycle to the previous model                                                                       │
+·   Ctrl+X           copy the last assistant message                                                                   ┃
+·   Alt+Enter        queue a follow-up message                                                                         ┃
+·   Alt+Up           restore queued messages to the editor                                                             │
+·   Ctrl+T           show or hide thinking  ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d7364978fbc35b                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '↓ Jump to latest message'

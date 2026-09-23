@@ -1,0 +1,78 @@
+# before-light.png — chars, 120x34 cells
+
+===== LUM-1307 — startup application of settings.json (theme + fullscreenCopyOnSelect) in the real pi-rust TUI. Same keys, same prepared HOME (`theme=light`, `fullscreenCopyOnSelect=false`); the only difference is the build. Pre-fix: the first frame is the dark palette and `/settings` reports copy-on-select ON. Post-fix: the first frame carries the stored light palette and `/settings` reports the stored OFF. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [1] 1. idle 120x34 — the frame painted before any command: stored light palette applied at startup  (cursor 120,33, frame 2510a80adf80, px 0209ad48b622, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7449ab2a6d893                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+
+===== LUM-1307 — startup application of settings.json (theme + fullscreenCopyOnSelect) in the real pi-rust TUI. Same keys, same prepared HOME (`theme=light`, `fullscreenCopyOnSelect=false`); the only difference is the build. Pre-fix: the first frame is the dark palette and `/settings` reports copy-on-select ON. Post-fix: the first frame carries the stored light palette and `/settings` reports the stored OFF. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [2] 2. /settings — live rows read the running App: theme and copy-on-select come from the file, not from the built-in defaults  (cursor 56,9, frame 7a8aedc2f08a, px 3d250d24ba10, alive=True) =====
+pi v0.1.0
+>
+
+→ Auto-compact               true
+  Fullscreen copy on select  true
+  Theme                      dark
+
+  Automatically compact context when it gets too large
+
+  Type to search · Enter/Space to change · Esc to cancel
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7449ab2a6d893                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'Theme'
+  assert XFAIL  probe        '^  Theme\\s+light$'  — LUM-1307 startup settings
+  assert XFAIL  probe        '^  Fullscreen copy on select\\s+false$'  — LUM-1307 startup settings

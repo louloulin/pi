@@ -1,0 +1,86 @@
+# lum1286-pty-truncated-above.png — chars, 80x24 cells
+
+===== LUM-1273 truncation affordance (80x24): when the block at the top edge of the transcript is cut, row 0 says so (`⋯ N lines above · Home`); pressing the key it advertises reaches the head of the block; and scrolling away hands the job back to the jump-to-latest pill instead of stacking two pieces of furniture. Panels 1 and 3 are asserted with `probe`, so the same scenario is a machine-readable A/B: the pre-fix binary (c3134c87f) reports XFAIL for the hint, the tip reports PASS.  |  [1] 1. /help at the tail — the cut block announces that its head is above the screen  (cursor 80,21, frame 11b11b605404, px 92797bf725e1, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+ ⋯ 13 lines above · Home nge interface settings                                │
+·   /thinking set the reasoning level (/thinking                               │
+· off|minimal|low|medium|high|xhigh|max)                                       │
+·   /trust    show or set project trust (/trust yes|no)                        │
+·   /compact  summarize the conversation prefix to free context                │
+·   /hotkeys  list the keyboard shortcuts                                      │
+·   /extensions list loaded extensions and what they register                  │
+·   /exit     quit the interactive session                                     │
+·                                                                              ┃
+· keys:                                                                        ┃
+·   Enter       submit prompt                                                  ┃
+·   Up / Down   navigate prompt history                                        ┃
+·   PgUp/PgDn   scroll the chat log one page                                   ┃
+·   Home / End  jump to the start / end of the chat log                        ┃
+·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits)   ┃
+·   Ctrl+D      exit on an empty prompt                                        ┃
+·   Ctrl+L      open the model selector                                        ┃
+·   Ctrl+U      clear the prompt buffer                                        ┃
+·   Esc         close selector / cancel turn                                   ┃
+·                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d73730b86bd1aa          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '⋯'
+  assert PASS   probe        'lines above'
+  assert PASS   probe        '· Home'
+
+===== LUM-1273 truncation affordance (80x24): when the block at the top edge of the transcript is cut, row 0 says so (`⋯ N lines above · Home`); pressing the key it advertises reaches the head of the block; and scrolling away hands the job back to the jump-to-latest pill instead of stacking two pieces of furniture. Panels 1 and 3 are asserted with `probe`, so the same scenario is a machine-readable A/B: the pre-fix binary (c3134c87f) reports XFAIL for the hint, the tip reports PASS.  |  [2] 2. Home — the advertised key reaches the head of the block row 0 announced  (cursor 80,21, frame 9eaf46353375, px c2971d114263, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+· slash commands:                                                              ┃
+·   /help     show this help text                                              ┃
+·   /clear    clear the message view                                           ┃
+·   /new      start a new session                                              ┃
+·   /copy     copy the last assistant message to the clipboard                 ┃
+·   /name [name] show or set the session display name                          ┃
+·   /model    pick a model (opens selector)                                    ┃
+·   /session  show the current session info                                    ┃
+·   /export [path] export the session (HTML, or JSONL for a .jsonl path)       ┃
+·   /resume   resume a previous session                                        ┃
+·   /tree     navigate the session tree and switch branches                    ┃
+·   /fork     branch a new session from a user message                         ┃
+·   /clone    copy the current session into a new session file                 │
+·   /settings show or change interface settings                                │
+·   /thinking set the reasoning level (/thinking                               │
+· off|minimal|low|medium|high|xhigh|max)                                       │
+·   /trust    show or set project trust (/trust yes|no)                        │
+·   /compact  summarize the conversation prefix to free context                │
+·   /hotkeys  list the keyboard shortcuts                                      │
+·   /extensions list lo ↓ Jump to latest message · End gister                  │
+> type a prompt — /help for commands
+Faux test model  session-18d73730b86bd1aa          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'slash commands:'
+  assert PASS   expect       '/help     show this help text'
+
+===== LUM-1273 truncation affordance (80x24): when the block at the top edge of the transcript is cut, row 0 says so (`⋯ N lines above · Home`); pressing the key it advertises reaches the head of the block; and scrolling away hands the job back to the jump-to-latest pill instead of stacking two pieces of furniture. Panels 1 and 3 are asserted with `probe`, so the same scenario is a machine-readable A/B: the pre-fix binary (c3134c87f) reports XFAIL for the hint, the tip reports PASS.  |  [3] 3. End — back at the tail, the cut-above hint returns, the pill stands down  (cursor 80,21, frame 11b11b605404, px 92797bf725e1, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+ ⋯ 13 lines above · Home nge interface settings                                │
+·   /thinking set the reasoning level (/thinking                               │
+· off|minimal|low|medium|high|xhigh|max)                                       │
+·   /trust    show or set project trust (/trust yes|no)                        │
+·   /compact  summarize the conversation prefix to free context                │
+·   /hotkeys  list the keyboard shortcuts                                      │
+·   /extensions list loaded extensions and what they register                  │
+·   /exit     quit the interactive session                                     │
+·                                                                              ┃
+· keys:                                                                        ┃
+·   Enter       submit prompt                                                  ┃
+·   Up / Down   navigate prompt history                                        ┃
+·   PgUp/PgDn   scroll the chat log one page                                   ┃
+·   Home / End  jump to the start / end of the chat log                        ┃
+·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits)   ┃
+·   Ctrl+D      exit on an empty prompt                                        ┃
+·   Ctrl+L      open the model selector                                        ┃
+·   Ctrl+U      clear the prompt buffer                                        ┃
+·   Esc         close selector / cancel turn                                   ┃
+·                                                                              ┃
+> type a prompt — /help for commands
+Faux test model  session-18d73730b86bd1aa          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'lines above'
+  assert PASS   reject       'Jump to latest message'

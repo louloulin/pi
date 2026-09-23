@@ -1,0 +1,151 @@
+[workspace]
+resolver = "2"
+# `vendor/rquickjs-core` is a path dependency (see `[patch.crates-io]` below),
+# so Cargo would otherwise pick it up as a workspace member and run
+# `fmt`/`clippy`/tests over the third-party sources. Keep it out of the
+# workspace; it is still built as a normal dependency of `pi-extensions`.
+exclude = ["vendor/rquickjs-core"]
+members = [
+    "crates/pi-ai",
+    "crates/pi-agent-core",
+    "crates/pi-coding-agent",
+    "crates/pi-tui",
+    "crates/pi-protocol",
+    "crates/pi-extensions",
+    "crates/pi-session",
+    "crates/pi-mono",
+    "crates/pi-evals",
+    "crates/pi-telemetry",
+    "crates/pi-chord",
+    "crates/pi-server",
+    "crates/pi-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/louloulin/pi.git"
+description = "Rust rewrite of the Pi coding agent harness with WASM plugin compatibility"
+
+[workspace.dependencies]
+# Async runtime — native builds pull the full feature set; `wasm` consumers
+# request a stripped-down feature list (no `net`, `process`, `rt-multi-thread`,
+# `signal`, etc.) so the resulting crate can compile on `wasm32-unknown-unknown`.
+tokio = { version = "1.38", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+bytes = "1.7"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Errors / logging
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI / args
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# HTTP (multi-provider LLM calls)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Schema / validation (mirrors TypeBox/JSON Schema usage in pi)
+jsonschema = "0.18"
+
+# WASM plugin host
+wasmtime = { version = "22.0", features = ["component-model"] }
+wasi = "0.13"
+
+# TUI rendering (cross-platform terminal control)
+crossterm = "0.28"
+ratatui = "0.28"
+
+# SQLite (session storage) — locked to a specific version so the bundled
+# sqlite is byte-compatible across machines (the Stage 5 pi-session crate
+# reads files produced by the TS port and vice-versa).
+rusqlite = { version = "=0.31", features = ["bundled"] }
+# zstd compression — used to compress the messages payload column.
+zstd = "=0.13"
+
+# WASM bindings — used by the `wasm` feature on `pi-ai` and `pi-agent-core`.
+# These crates are pure rust + small generated shims, so they build on both
+# native and wasm32-unknown-unknown targets.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
+
+# Misc
+# Unicode word boundaries — used by `pi-tui` word navigation
+# (`packages/tui/src/word-navigation.ts` ports to UAX #29 boundaries).
+# This crate is already in the dependency graph (pulled in by `ratatui`
+# via `unicode-truncate`), so pinning it directly adds no new package to
+# the lockfile and keeps `--offline` builds working.
+unicode-segmentation = "=1.13.3"
+# Terminal column widths — `pi-tui`'s single width rule (`crate::width`).
+# Upstream measures with `visibleWidth` (`packages/tui/src/utils.ts`), which is
+# `get-east-asian-width` + the `string-width` rules; `unicode-width` implements
+# the same UAX #11 / UTS #51 tables. This crate is already in the dependency
+# graph (pulled in by `ratatui` as an older major), so the direct dependency is
+# the only way to get the 0.2 API that resolves emoji presentation; `--offline`
+# builds work because the crate is in the local registry cache.
+unicode-width = "=0.2.2"
+# NFKC normalization — the `edit` tool's fuzzy matcher (`normalizeForFuzzyMatch`)
+# applies `String.prototype.normalize("NFKC")` before its smart-quote / dash /
+# space folding. Already in the graph transitively via `idna_adapter`, so
+# pinning it directly adds no new package to the lockfile.
+unicode-normalization = "=0.1.25"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "2.3", features = ["serde"] }
+parking_lot = "=0.12"
+walkdir = "2.5"
+# Regex matching — required by the Stage 9 `grep` tool. `regex-automata`
+# and `regex-syntax` are already present transitively via `tracing-subscriber`,
+# so adding the top-level crate is essentially free.
+regex = "1"
+notify = "6.1"
+dirs = "5.0"
+which = "6.0"
+
+# Dependency patches
+#
+# `rquickjs-core` 0.9.0 (latest 0.9.x) double-drops the mutex lock future in
+# `WithFuture::poll` (see `vendor/rquickjs-core/PATCH.md`), which randomly kills
+# `pi --rpc` with `free(): double free detected in tcache 2` / SIGSEGV whenever
+# the QuickJS runtime mutex is contended (i.e. whenever an extension host
+# `async_with!` call races the runtime drive task). Upstream fixed it in 0.12.0
+# but 0.12+ requires `AsyncFnOnce` (MSRV 1.85) and rewrites the `async_with!`
+# API; this workspace is `rust-version = "1.75"`. We therefore keep 0.9.0 and
+# vendor a copy carrying the upstream fix verbatim.
+[patch.crates-io]
+rquickjs-core = { path = "vendor/rquickjs-core" }
+
+# Shared `[profile.release]` overrides for WASM builds — apply the
+# size-minimisation recipe from the Stage 6 plan to any wasm build done
+# with `cargo build --target wasm32-unknown-unknown --release`.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Debug builds (default `cargo build`) keep unwind so panics surface as
+# a `unreachable` trap in wasm with a useful location instead of
+# opaque aborts. Release still aborts to keep the binary size small.
+[profile.dev]
+panic = "unwind"
+
+# Test
+[workspace.lints.rust]
+unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"

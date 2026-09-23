@@ -1,0 +1,13 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1266: 120x34 — control: a terminal that fits the hint list still shows the expanded header, plus a real turn and /help",
+  "args": ["--model", "faux/faux-model"],
+  "fixtures": ["src/main.rs"],
+  "distinct_panels": true,
+  "panels": [
+    {"label": "1. 8s idle at 120x34: the expanded hint list is back (fold only kicks in when the rows are not there), composer + status bar unchanged", "send": "", "wait": 8.0},
+    {"label": "2. a real faux turn: reply in the transcript", "send": "hi<Enter>", "wait": 4.0},
+    {"label": "3. /help<Enter> -> the same wrapping the 23-row capture shows, at full height", "send": "/help<Enter>", "wait": 2.0}
+  ]
+}

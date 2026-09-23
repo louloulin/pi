@@ -1,0 +1,99 @@
+//! Agent state — system prompt, model, and message log.
+
+use std::sync::Arc;
+
+use pi_ai::stream::SharedStreamFn;
+use pi_protocol::{Context, Message, Model, ToolDefinition, ToolExecutionMode};
+use pi_telemetry::TelemetryContext;
+
+use crate::retry::RetryPolicy;
+use crate::tools::ToolExecutor;
+
+/// Runtime configuration that is fixed for the lifetime of an [`Agent`](crate::Agent).
+#[derive(Clone)]
+pub struct AgentConfig {
+    /// Streaming implementation. `Models::stream_simple` from `pi-ai` satisfies this.
+    pub stream_fn: SharedStreamFn,
+    /// Default model the agent picks when none is supplied at call time.
+    pub model: Model,
+    /// Optional tool executor. When set, the loop advertises
+    /// [`ToolExecutor::definitions`] on every turn and dispatches each tool
+    /// call to it. `None` keeps the Stage 2 stub behaviour so callers that
+    /// predate tool execution still work.
+    pub tool_executor: Option<Arc<dyn ToolExecutor>>,
+    /// How the loop dispatches a batch of tool calls that contains no
+    /// `Sequential` tool.
+    ///
+    /// Mirrors `AgentLoopConfig.toolExecution` in
+    /// `packages/agent/src/types.ts`: [`ToolExecutionMode::Parallel`] (the
+    /// default) runs the batch's calls concurrently, while
+    /// [`ToolExecutionMode::Sequential`] forces one call at a time no matter
+    /// what the tools declare. A batch that contains a tool whose
+    /// [`ToolExecutor::execution_mode`] is `Sequential` is serialized
+    /// regardless of this setting.
+    pub tool_execution: ToolExecutionMode,
+    /// Optional telemetry parent for the spans the loop emits.
+    ///
+    /// `None` (the default) records nothing and adds no work to the hot
+    /// path. When set, every [`AgentLoop::run`](crate::AgentLoop::run)
+    /// invocation emits `pi.harness.run`, each turn emits `pi.harness.turn`,
+    /// each provider call emits `pi.ai.request` and each tool call emits
+    /// `pi.harness.tool`; see [`crate::telemetry`] for the vocabulary.
+    pub telemetry: Option<Arc<dyn TelemetryContext>>,
+    /// Agent-level retry budget for the assistant call.
+    ///
+    /// Mirrors `settings.retry` in the TypeScript build: when enabled and a
+    /// provider attempt fails with a transient error (429/5xx, transport
+    /// drop, premature stream ending — see
+    /// [`is_retryable_error_message`](crate::is_retryable_error_message)), the
+    /// loop retries the assistant call with exponential backoff, up to
+    /// `max_retries` times. Quota / billing exhaustion is never retried.
+    ///
+    /// [`RetryPolicy::default`] holds the upstream defaults (enabled, 3
+    /// retries, 2 s base, 60 s cap); [`RetryPolicy::disabled`] turns the loop
+    /// into a passthrough.
+    pub retry: RetryPolicy,
+}
+
+impl AgentConfig {
+    /// Tool definitions this configuration advertises to the model.
+    ///
+    /// Returns an empty list when no executor is registered, preserving the
+    /// pre-tool-execution behaviour.
+    pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tool_executor
+            .as_ref()
+            .map(|executor| executor.definitions())
+            .unwrap_or_default()
+    }
+}
+
+/// Mutable agent state — what changes between turns.
+#[derive(Debug, Clone, Default)]
+pub struct AgentState {
+    /// System prompt.
+    pub system_prompt: String,
+    /// Conversation log.
+    pub messages: Vec<Message>,
+    /// Optional per-turn override.
+    pub model_override: Option<Model>,
+}
+
+impl AgentState {
+    /// Build the [`Context`] snapshot fed to the streaming layer.
+    ///
+    /// The tool list comes from the configuration's executor, so the model
+    /// sees exactly the tools the loop can actually run.
+    pub fn context(&self, config: &AgentConfig) -> Context {
+        Context {
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages.clone(),
+            tools: config.tool_definitions(),
+        }
+    }
+
+    /// Resolve the model for the next turn.
+    pub fn model<'a>(&'a self, config: &'a AgentConfig) -> &'a Model {
+        self.model_override.as_ref().unwrap_or(&config.model)
+    }
+}

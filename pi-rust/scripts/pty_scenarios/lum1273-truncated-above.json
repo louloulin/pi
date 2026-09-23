@@ -1,0 +1,54 @@
+{
+  "cols": 80,
+  "rows": 24,
+  "caption": "LUM-1273 truncation affordance (80x24): when the block at the top edge of the transcript is cut, row 0 says so (`⋯ N lines above · Home`); pressing the key it advertises reaches the head of the block; and scrolling away hands the job back to the jump-to-latest pill instead of stacking two pieces of furniture. Panels 1 and 3 are asserted with `probe`, so the same scenario is a machine-readable A/B: the pre-fix binary (c3134c87f) reports XFAIL for the hint, the tip reports PASS.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "src/main.rs",
+    "README.md"
+  ],
+  "distinct_panels": true,
+  "notes": [
+    "Why 80x24: the defect LUM-1271 measured is a short-viewport one. At 24 rows the expanded startup header (~20 rows) is folded by LUM-1266, so the transcript window is ~14 rows while the wrapped /help body is ~34 — the head of the block is necessarily off-screen and the top edge necessarily lands inside it.",
+    "`probe` (not `expect`) is used for the hint needles: probe is the harness's A/B primitive, and the pre-fix binary must report XFAIL rather than making the whole scenario red — the control panel 2 still has to run on it.",
+    "Panel 2 is the control that the advice in the hint is real: `Home` is the key `tui.altScreen.top` resolves to, and one press puts the head of the block on screen.",
+    "Panel 3 is the symmetric control: from the head of the block, `End` returns to the tail, the cut-above hint comes back, and the pill (which owns the detached case) stands down. The contrast between panel 1 and panel 3 is that the head of `/help` is visible in panel 3 (Home was reversed), while the bottom of `/help` is visible in panel 1."
+  ],
+  "panels": [
+    {
+      "label": "1. /help at the tail — the cut block announces that its head is above the screen",
+      "send": "<C-u>/help<Enter>",
+      "wait": 2.0,
+      "wait_for": "keys:",
+      "probe": [
+        "⋯",
+        "lines above",
+        "· Home"
+      ]
+    },
+    {
+      "label": "2. Home — the advertised key reaches the head of the block row 0 announced",
+      "send": "<Home>",
+      "wait": 1.0,
+      "wait_for": "slash commands:",
+      "expect": [
+        "slash commands:",
+        "/help     show this help text"
+      ]
+    },
+    {
+      "label": "3. End — back at the tail, the cut-above hint returns, the pill stands down",
+      "send": "<End>",
+      "wait": 1.0,
+      "expect": [
+        "lines above"
+      ],
+      "reject": [
+        "Jump to latest message"
+      ]
+    }
+  ]
+}

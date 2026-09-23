@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|> how do I read a paste marker?                                                                     |
+|> Ready — press ? for the shortcut list.                                                            |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|  Keyboard shortcuts  ? / Esc to close                                                              |
+|────────────────────────────────────────                                                            |
+|  Esc                 to interrupt                  Alt+H               to hide this header         |
+|  Ctrl+C              to clear                      Ctrl+T              to expand thinking          |
+|  Ctrl+C twice        to exit                       Ctrl+G              for external editor         |
+|  Ctrl+D              to exit (empty)               /                   for commands                |
+|  Ctrl+Z              to suspend                    !                   to run bash                 |
+|  Ctrl+K              to delete to end              !!                  to run bash (no context)    |
+|  Shift+Tab           to cycle thinking level       Alt+Enter           to queue follow-up          |
+|  Ctrl+P/Shift+Ctrl+P to cycle models               Alt+Up              to edit all queued messages |
+|  Ctrl+L              to select model               Ctrl+V              to paste image (with text f…|
+|  Ctrl+O              to expand tools               drop files          to attach                   |
+|                                                                                                    |
+|Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.               |
+|> type a prompt — /help for commands                                                                |
+|Faux  lum1464-hints                                              in 0 out 0 ?/8.2k  ? / Esc to close|
+END FRAME DUMP

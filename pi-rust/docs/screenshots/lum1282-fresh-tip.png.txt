@@ -1,0 +1,138 @@
+# lum1282-fresh-tip.png — chars, 60x24 cells
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [1] 1. idle at 60x24: a single-line prompt placeholder, cursor on the only row  (cursor 60,23, frame 6dd2cede0e6d, px 57855be39a3b, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7362860f2f54c  in 0 out 0 ?/8.2k
+  assert PASS   expect       '> type a prompt'
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [2] 2. short draft: one composer row, cursor at end of buffer  (cursor 36,22, frame 1e60155c3d7d, px 6e5d912e7695, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> hello world▍
+Faux test model  session-18d7362860f2f54c  in 0 out 0 ?/8.2k
+  assert PASS   expect       '> hello world'
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [3] 3. long draft wraps to multiple composer rows; first row owns the label, continuation rows are indented  (cursor 46,22, frame 186ec4a1a502, px e1bf68262d5a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa▍
+Faux test model  session-18d7362860f2f54c  in 0 out 0 ?/8.2k
+  assert PASS   probe        '> aaa'  — LUM-1282 F1 fix: label row is first, body starts on the same row
+  assert PASS   probe        '  aaa'  — continuation rows are indented (2 spaces), not labelled
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [4] 4. cursor `▍` is on the row the user is typing into (last row when buffer is longer than the cap)  (cursor 46,22, frame 186ec4a1a502, px e1bf68262d5a, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa▍
+Faux test model  session-18d7362860f2f54c  in 0 out 0 ?/8.2k
+  assert PASS   expect       '▍'
+
+===== LUM-1282 multi-line composer: a draft past one row wraps, the prompt grows, the label stays on the first row, and the cursor `▍` is on the row the user is typing into. Pre-fix (LUM-1262 F1) the buffer was hard-clipped at the right margin and the user could not see what they had typed.  |  [5] 5. a paste of 80 columns wraps to two rows at 60 cols wide; the message view shrinks rather than the composer disappearing  (cursor 46,22, frame 5478540e892b, px 604fcc659037, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> 0123456789012345678901234567890123456789012345678901234567
+  8901234567890123456789▍
+Faux test model  session-18d7362860f2f54c  in 0 out 0 ?/8.2k
+  assert PASS   probe        '  8901234567'  — wrap continuation: chars 58+ land on row 2 with the indent
+  assert PASS   probe        '  6789' (x0)  — the body after the indent starts with 8, not 6, so `  6789` is not on the grid anywhere

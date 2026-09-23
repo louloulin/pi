@@ -1,0 +1,18 @@
+FRAME DUMP cols=78 rows=16
+|-- 1. CJK query in a 40-column bar — the query is truncated by columns -------|
+|┌──────────────────────────────────────┐                                      |
+|│ 搜索中文查询串很长很长很  No matches │                                      |
+|└──────────── ↑ Shift+Enter · ↓ Enter ─┘                                      |
+|                                                                              |
+|-- 2. CJK transcript + Ctrl+F `needle` — `~` marks the highlighted cells -----|
+|  中文标题，然后 needle 出现在这里                                            |
+|                 ~~~~~~                                                       |
+|                           ┌──────────────────────────────┐                   |
+|                           │ needle                   1/1 │                   |
+|                           └──── ↑ Shift+Enter · ↓ Enter ─┘                   |
+|                                                                              |
+|                                                                              |
+|> type a prompt — /help for commands                                          |
+|Faux  lum1422-search-frames    in 0 out 0 ?/2.0k  ? for help                  |
+|                                                                              |
+END FRAME DUMP

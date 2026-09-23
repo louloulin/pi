@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|> how do I read a paste marker?                                                                     |
+|> Ready — press ? for the shortcut list.                                                            |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> type a prompt — /help for commands                                                                |
+|Faux  lum1464-hints                                                    in 0 out 0 ?/8.2k  ? for help|
+END FRAME DUMP

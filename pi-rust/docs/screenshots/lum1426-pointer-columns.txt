@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|> 你[0m[7m好[0m[7;1m世界[0m，这是一段中文文本                                                                        [0m|
+|> 第二行：混合 mixed 中英文 content                        ┌──────────────────────────────────────┐ [0m|
+|                                                           │ 世界                               1/1 [0m|
+|                                                           └──────────── ↑ Shift+Enter · ↓ Enter ─┘ [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|                                                                                                    [0m|
+|> type a prompt — /help for commands                                                                [0m|
+|Faux  lum1426-pointer-columns                                          in 0 out 0 ?/1.0k  ? for help[0m|
+END FRAME DUMP

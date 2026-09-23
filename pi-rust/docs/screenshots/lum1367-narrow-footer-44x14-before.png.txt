@@ -1,0 +1,17 @@
+# before-44.png — chars, 44x14 cells
+
+===== [1] idle 44x14  (cursor 44,13, frame 12743be68a7f, px 6d7eac707d45, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H sho
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d79d8eb888c4fc  i

@@ -1,0 +1,55 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1241 tip af3aa30a4",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "src/main.rs",
+    "README.md"
+  ],
+  "panels": [
+    {
+      "label": "1. Ctrl+U, /model + Enter -> model selector overlay (faux + builtin providers)",
+      "send": "<C-u>/model<Enter>",
+      "wait": 1.5
+    },
+    {
+      "label": "2. Esc closes the selector, composer is restored",
+      "send": "<Esc>",
+      "wait": 0.8
+    },
+    {
+      "label": "3. a real turn through the faux provider streams into the transcript",
+      "send": "hi<Enter>",
+      "wait": 3.0
+    },
+    {
+      "label": "4. !local bash runs in-process and its output lands in the transcript",
+      "send": "!echo pty-harness-ok && pwd<Enter>",
+      "wait": 2.5
+    },
+    {
+      "label": "5. /help renders the implemented command surface + key list",
+      "send": "/help<Enter>",
+      "wait": 1.5
+    },
+    {
+      "label": "6. /hotkeys renders the keybinding table",
+      "send": "/hotkeys<Enter>",
+      "wait": 1.5
+    },
+    {
+      "label": "7. PgUp scrolls the transcript back to the head of the /hotkeys message",
+      "send": "<PgUp><PgUp>",
+      "wait": 1.0
+    },
+    {
+      "label": "8. known gap: # has no provider behind it, so no candidates appear",
+      "send": "<C-u>#",
+      "wait": 1.0
+    }
+  ]
+}

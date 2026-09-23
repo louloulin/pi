@@ -1,0 +1,84 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1305 — pi-rust TUI: the composer's autocomplete dropdown now renders through the shared SelectList row layout (label column + aligned description column) instead of the editor's own `label  description` renderer. Both captures run this one scenario against two binaries built on the same tree: BEFORE = origin/feature/pi.rs (LUM-1274 tip), AFTER = LUM-1305 rebased onto it. Real binary + real PTY + pyte; the `probe` rows are the A/B markers (XFAIL on BEFORE, PASS on AFTER) and the `reject` rows name the layout the fix removed.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "Cargo.toml",
+    "README.md",
+    "src/main.rs"
+  ],
+  "notes": [
+    "Panel 2/3 are the `/` command menu: upstream's SLASH_COMMAND_SELECT_LIST_LAYOUT (12..32) makes the primary column `widest command name + 2`, so the description column **moves with the command list** — 14 with the pre-LUM-1274 list, 17 once `/scoped-models` (13 chars) exists. The robust discriminator is therefore the `reject` row: the old renderer always emitted exactly two blanks (`❯ help  Show this help text`), the shared SelectList layout never does.",
+    "Panel 4 is the `@` file menu: non-slash completions use the SelectList default (a fixed 32-column primary column), so the description starts at column 34 — the same offsets the modal `/model` picker uses.",
+    "No mocked rendering: the dropdown is painted by App::paint_autocomplete into the ratatui buffer, the PTY stream is parsed by pyte and the frozen grid is what the assertions read."
+  ],
+  "panels": [
+    {
+      "label": "1. idle 120x34 (faux model) — no dropdown",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "type a prompt"
+      ],
+      "reject": [
+        "❯ "
+      ]
+    },
+    {
+      "label": "2. type `/` — the command menu opens; description column = widest command + 2 (slash layout)",
+      "send": "/",
+      "wait": 1.2,
+      "expect": [
+        "❯ help",
+        "Show this help text",
+        "(1/",
+        "  clear          Clear the message view"
+      ],
+      "probe": [
+        "❯ help           Show this help text"
+      ],
+      "reject": [
+        "❯ help  Show this help text",
+        "  clear  Clear the message view"
+      ]
+    },
+    {
+      "label": "3. type `mo` — the menu narrows; the primary column does not move",
+      "send": "mo",
+      "wait": 1.0,
+      "expect": [
+        "Select model (opens selector UI)",
+        "(1/",
+        "❯ model          <provider/model> — Select model (opens selector UI)"
+      ],
+      "probe": [
+        "❯ model          <provider/model> — Select model (opens selector UI)"
+      ],
+      "reject": [
+        "❯ model  <provider/model>"
+      ]
+    },
+    {
+      "label": "4. Ctrl+U clears, then `@` — the file menu uses the default 32-column primary column (description at column 34)",
+      "send": "<C-u>@",
+      "wait": 1.5,
+      "expect": [
+        "Cargo.toml",
+        "README.md",
+        "  Cargo.toml                      Cargo.toml"
+      ],
+      "probe": [
+        "❯ src/                            src",
+        "  main.rs                         src/main.rs"
+      ],
+      "reject": [
+        "❯ src/  src"
+      ]
+    }
+  ]
+}

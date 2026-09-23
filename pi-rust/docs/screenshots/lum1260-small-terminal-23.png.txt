@@ -1,0 +1,51 @@
+# lum1260-small-terminal-23.png — chars, 120x23 cells
+
+===== LUM-1260 tip b5769b585 at 120x23 — composer still off-screen  |  [1] 1. idle at 120x23  (cursor 120,22, frame e50e4e9331dd, px 89a6d6f885d6, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Faux test model  session-18d721b5e8ff27d9                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1260 tip b5769b585 at 120x23 — composer still off-screen  |  [2] 2. a draft is typed at 120x23  (cursor 120,22, frame e50e4e9331dd, px 7b40429a217e, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Faux test model  session-18d721b5e8ff27d9                                                  in 0 out 0 ?/8.2k  ? for help

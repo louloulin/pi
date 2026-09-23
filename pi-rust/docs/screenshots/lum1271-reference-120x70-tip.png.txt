@@ -1,0 +1,257 @@
+# tall-tip.png — chars, 120x70 cells
+
+===== LUM-1271 reference completeness (120x70): the /help and /hotkeys bodies must render in full, with no row hard-clipped at the right margin. This scenario removes the scroll window from the question, so it asserts the content invariant; lum1267-interaction-assertions.json asserts the 34-row scroll/tail interaction.  |  [1] 1. /help -> the whole slash-command reference and the key table in one frame  (cursor 2,52, frame 027b3467b2b3, px 360c52e13e17, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· slash commands:
+·   /help     show this help text
+·   /clear    clear the message view
+·   /new      start a new session
+·   /copy     copy the last assistant message to the clipboard
+·   /name [name] show or set the session display name
+·   /model    pick a model (opens selector)
+·   /session  show the current session info
+·   /export [path] export the session (HTML, or JSONL for a .jsonl path)
+·   /resume   resume a previous session
+·   /tree     navigate the session tree and switch branches
+·   /fork     branch a new session from a user message
+·   /clone    copy the current session into a new session file
+·   /settings show or change interface settings
+·   /thinking set the reasoning level (/thinking off|minimal|low|medium|high|xhigh|max)
+·   /trust    show or set project trust (/trust yes|no)
+·   /compact  summarize the conversation prefix to free context
+·   /hotkeys  list the keyboard shortcuts
+·   /extensions list loaded extensions and what they register
+·   /exit     quit the interactive session
+·
+· keys:
+·   Enter       submit prompt
+·   Up / Down   navigate prompt history
+·   PgUp/PgDn   scroll the chat log one page
+·   Home / End  jump to the start / end of the chat log
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)
+·   Ctrl+D      exit on an empty prompt
+·   Ctrl+L      open the model selector
+·   Ctrl+U      clear the prompt buffer
+·   Esc         close selector / cancel turn
+·
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d72a8d5388f1e5                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'slash commands:'
+  assert PASS   expect       '/help     show this help text'
+  assert PASS   expect       '/clear    clear the message view'
+  assert PASS   expect       '/new      start a new session'
+  assert PASS   expect       '/copy     copy the last assistant message to the clipboard'
+  assert PASS   expect       '/model    pick a model (opens selector)'
+  assert PASS   expect       '/session  show the current session info'
+  assert PASS   expect       '/export [path] export the session'
+  assert PASS   expect       '/resume   resume a previous session'
+  assert PASS   expect       '/tree     navigate the session tree and switch branches'
+  assert PASS   expect       '/fork     branch a new session from a user message'
+  assert PASS   expect       '/clone    copy the current session into a new session file'
+  assert PASS   expect       '/settings show or change interface settings'
+  assert PASS   expect       '/thinking set the reasoning level'
+  assert PASS   expect       '/trust    show or set project trust'
+  assert PASS   expect       '/compact  summarize the conversation prefix to free context'
+  assert PASS   expect       '/hotkeys  list the keyboard shortcuts'
+  assert PASS   expect       '/extensions list loaded extensions and what they register'
+  assert PASS   expect       '/exit     quit the interactive session'
+  assert PASS   expect       'keys:'
+  assert PASS   expect       'Enter       submit prompt'
+  assert PASS   expect       'Home / End  jump to the start / end of the chat log'
+  assert PASS   expect       'Ctrl+U      clear the prompt buffer'
+  assert PASS   reject       'Jump to latest'  — the whole reference fits in the ~48-row window, so the log stays at the bottom and the jump-to-latest pill must not be rendered
+  assert PASS   reject       'keys: Enter submit promp'  — pre-fix the reference was clipped into hard-cut rows and this merges what are now the separate 'keys:' heading and 'Enter submit prompt' rows
+
+===== LUM-1271 reference completeness (120x70): the /help and /hotkeys bodies must render in full, with no row hard-clipped at the right margin. This scenario removes the scroll window from the question, so it asserts the content invariant; lum1267-interaction-assertions.json asserts the 34-row scroll/tail interaction.  |  [2] 2. /clear -> the message view is emptied  (cursor 2,52, frame fd89a2def81f, px 0371949b4b06, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d72a8d5388f1e5                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '? for help'
+  assert PASS   reject       'slash commands:'
+  assert PASS   reject       'keys:'
+
+===== LUM-1271 reference completeness (120x70): the /help and /hotkeys bodies must render in full, with no row hard-clipped at the right margin. This scenario removes the scroll window from the question, so it asserts the content invariant; lum1267-interaction-assertions.json asserts the 34-row scroll/tail interaction.  |  [3] 3. /hotkeys -> the whole chord table in one frame  (cursor 120,67, frame 35120e0d329e, px 247969c9bd72, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+·   Ctrl+-           undo                                                                                              │
+·                                                                                                                      │
+· chat log:                                                                                                            │
+·   PgUp             scroll up one page                                                                                │
+·   PgDn             scroll down one page                                                                              │
+·   Home             jump to the start of the chat log                                                                 │
+·   End              jump to the end of the chat log                                                                   │
+·   Ctrl+Shift+Up / Ctrl+Up jump to the previous prompt                                                                │
+·   Ctrl+Shift+Down / Ctrl+Down jump to the next prompt                                                                │
+·   Ctrl+Shift+F     search the chat log                                                                               │
+·   Enter / Ctrl+G   next search hit                                                                                   │
+·   Shift+Enter / Ctrl+Shift+G previous search hit                                                                     │
+·   Esc              close the search bar                                                                              │
+·                                                                                                                      │
+· app:                                                                                                                 │
+·   Esc              cancel autocomplete / abort streaming                                                             │
+·   Ctrl+C           clear the prompt (twice: exit)                                                                    │
+·   Ctrl+D           exit when the prompt is empty                                                                     ┃
+·   Shift+Tab        cycle the thinking level                                                                          ┃
+·   Ctrl+P           cycle to the next model                                                                           ┃
+·   Shift+Ctrl+P     cycle to the previous model                                                                       ┃
+·   Ctrl+X           copy the last assistant message                                                                   ┃
+·   Alt+Enter        queue a follow-up message                                                                         ┃
+·   Alt+Up           restore queued messages to the editor                                                             ┃
+·   Ctrl+T           show or hide thinking blocks                                                                      ┃
+·   Ctrl+O           expand or collapse tool output (Ctrl+O by default)                                                ┃
+·   Alt+H            expand or collapse the startup header (Alt+H by default)                                          ┃
+·   Ctrl+L           open the model selector                                                                           ┃
+·   Alt+N            start a new session                                                                               ┃
+·   Alt+T            open the session tree                                                                             ┃
+·   Alt+F            fork a session from a message                                                                     ┃
+·   Alt+R            resume a session                                                                                  ┃
+·   Ctrl+V           attach a clipboard image (falls back to pasting text)                                             ┃
+·                                                                                                                      ┃
+· selectors and completion:                                                                                            ┃
+·   Up               move the selection up                                                                             ┃
+·   Down             move the selection down                                                                           ┃
+·   PgUp             selection page up                                                                                 ┃
+·   PgDn             selection page down                                                                               ┃
+·   Enter            confirm the selection                                                                             ┃
+·   Esc / Ctrl+C     close the selection list                                                                          ┃
+·   Tab              path completion / accept autocomplete                                                             ┃
+·                                                                                                                      ┃
+· commands:                                                                                                            ┃
+·   /               slash commands (/help, /model, /hotkeys, …)                                                        ┃
+·   Esc             close the selector / overlay first                                                                 ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d72a8d5388f1e5                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'app:'
+  assert PASS   expect       'Ctrl+C           clear the prompt (twice: exit)'
+  assert PASS   expect       'Shift+Tab        cycle the thinking level'
+  assert PASS   expect       'Ctrl+L           open the model selector'
+  assert PASS   expect       'Ctrl+O           expand or collapse tool output'
+  assert PASS   expect       'Alt+H            expand or collapse the startup header'
+  assert PASS   expect       'selectors and completion:'
+  assert PASS   expect       'Tab              path completion / accept autocomplete'
+  assert PASS   expect       'commands:'
+  assert PASS   expect       'slash commands (/help, /model, /hotkeys, …)'
+  assert PASS   expect       'close the selector / overlay first'
+  assert PASS   reject       'accept autocomplete commands:'  — pre-fix the clip landed here: the truncated rendering joined the chord row 'Tab ... path completion / accept autocomplete' with the section heading 'commands:', which only exists in that clipped rendering

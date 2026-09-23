@@ -1,0 +1,70 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1298 — pi-rust TUI parity: long-paste multi-line composer (LUM-1282 F1) + /model picker open + jump-to-latest pill after detach. Captured against the post-LUM-1293 binary on feature/pi.rs tip bc5a7b935; same harness / parser / binary as LUM-1286/1293/1294.",
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "fixtures": [
+    "Cargo.toml",
+    "README.md"
+  ],
+  "notes": [
+    "Three scenes, all on the same session: (a) idle (after startup fold), (b) long paste that wraps to multiple lines in the composer, (c) /model picker open with the head of the 27-provider list, (d) PgUp to detach viewport -> jump-to-latest pill.",
+    "No mocked rendering: real binary + real PTY + pyte VT emulator.",
+    "The /model picker scene is the new evidence for LUM-1298 — earlier rounds had /, @, /help, /hotkeys, but not the picker-driven model switch surface (which is what the upstream pi-ts TUI exposes as `/model`)."
+  ],
+  "panels": [
+    {
+      "label": "1. idle 120x34 after startup fold (plan_chrome reserved hint row)",
+      "send": "",
+      "wait": 2.5,
+      "expect": [
+        "pi v0.1.0",
+        "type a prompt",
+        "Faux test model"
+      ]
+    },
+    {
+      "label": "2. long paste wraps into multi-line composer (LUM-1282 F1)",
+      "send": "Please refactor the agent_loop in pi-agent-core so that the shouldStopAfterTurn hook can be expressed as a Rust trait method and the prepareNextTurn hook can be awaited without the HRTB lifetime we hit in stage 1. Keep the wire format compatible with the upstream pi-ts TUI.",
+      "wait": 2.0,
+      "expect": [
+        "shouldStopAfterTurn",
+        "prepareNextTurn"
+      ]
+    },
+    {
+      "label": "3. Ctrl+U clears, then /model opens the picker (real picker UI replaces the composer)",
+      "send": "<C-u>/model<Enter>",
+      "wait": 1.6,
+      "expect": [
+        "Pick a model"
+      ],
+      "probe": [
+        "anthropic",
+        "openai"
+      ]
+    },
+    {
+      "label": "4. Esc closes picker; Ctrl+U clears; /hotkeys fills the chat so PgUp has real scrollback",
+      "send": "<Esc><Esc><C-u>/hotkeys<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "page",
+        "selection",
+        "slash commands",
+        "lines above"
+      ]
+    },
+    {
+      "label": "5. PgUp detaches the viewport -> jump-to-latest pill appears on the last row",
+      "send": "<PgUp>",
+      "wait": 1.0,
+      "expect": [
+        "Jump to latest"
+      ]
+    }
+  ]
+}

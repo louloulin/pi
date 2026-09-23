@@ -1,0 +1,104 @@
+# lum1312-full-tui.png — chars, 100x30 cells
+
+===== LUM-1312 full-TUI frame: the whole alt-screen surface after a real turn, with a two-line draft in the composer. Header hints, transcript (user prompt, assistant reply), the multi-line composer with its label on the first row and an indent on the continuation row, and the status/footer line — captured in a real PTY at 100x30 driving the debug binary built from this commit.  |  [1] 1. idle 100x30: full header hint set, one composer row, footer status  (cursor 100,29, frame 52aeca16a064, px 6288855eb363, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d763bd05f84ff7                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'type a prompt'
+  assert PASS   expect       'Faux test model'
+
+===== LUM-1312 full-TUI frame: the whole alt-screen surface after a real turn, with a two-line draft in the composer. Header hints, transcript (user prompt, assistant reply), the multi-line composer with its label on the first row and an indent on the continuation row, and the status/footer line — captured in a real PTY at 100x30 driving the debug binary built from this commit.  |  [2] 2. a real turn: the prompt is echoed, the faux provider answers, the composer is empty again  (cursor 49,29, frame 293065fefce0, px 533c8fad734c, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> summarise what changed in the composer
+  faux-model (faux) hello
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d763bd05f84ff7                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> summarise what changed in the composer'
+
+===== LUM-1312 full-TUI frame: the whole alt-screen surface after a real turn, with a two-line draft in the composer. Header hints, transcript (user prompt, assistant reply), the multi-line composer with its label on the first row and an indent on the continuation row, and the status/footer line — captured in a real PTY at 100x30 driving the debug binary built from this commit.  |  [3] 3. the whole TUI with a two-line draft: header, transcript, multi-row composer, footer  (cursor 36,28, frame 40123730f47f, px 6f868a9e96b3, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+Z to suspend
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  Ctrl+G for external editor
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> summarise what changed in the composer
+  faux-model (faux) hello
+
+
+> and now a second line
+  with the caret on it▍
+Faux test model  session-18d763bd05f84ff7                              in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '> and now a second line'  — composer row 1 keeps the label
+  assert PASS   probe        '  with the caret on it▍'  — composer row 2 is a real draft row
+  assert PASS   probe        'Ctrl+K to delete to end'  — the header hint for the editor's line-scoped kill is on screen in the same frame

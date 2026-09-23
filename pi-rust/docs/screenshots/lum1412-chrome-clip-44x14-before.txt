@@ -1,0 +1,27 @@
+# LUM-1412 — 44x14 frame, BEFORE the fix (silent clip)
+
+Same frame with row 1 replaced by what the plain writer
+(`styled::write_styled_line`) painted before this round: the first 44
+characters of the 51-character folded header row, no mark. Byte-for-byte the
+string `styled.rs::tests::the_plain_writer_still_clips_without_a_mark` pins.
+  `hints hidden on a short terminal — Alt+H sho`
+Derived from the after-dump rather than captured, because the pre-fix binary is
+not the tree under test; the derivation is the plain writer's documented
+contract (write while `col < max_width`), asserted in that unit test.
+
+FRAME DUMP cols=44 rows=14
+|pi v0.1.0                                   |
+|hints hidden on a short terminal — Alt+H sho|
+|> hello                                     |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|> type a prompt — /help for commands        |
+|Faux  lum1412-chrome-clip  in 0 out 0 ?/1.0k|
+END FRAME DUMP

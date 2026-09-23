@@ -1,0 +1,109 @@
+# lum1266-tall-34.png — chars, 120x34 cells
+
+===== LUM-1266: 120x34 — control: a terminal that fits the hint list still shows the expanded header, plus a real turn and /help  |  [1] 1. 8s idle at 120x34: the expanded hint list is back (fold only kicks in when the rows are not there), composer + status bar unchanged  (cursor 120,33, frame f5f947a0bc0d, px 15816671d7c7, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d727f2a825fa10                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x34 — control: a terminal that fits the hint list still shows the expanded header, plus a real turn and /help  |  [2] 2. a real faux turn: reply in the transcript  (cursor 25,22, frame df292842f2bf, px 1a36bd6739b1, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> hi
+  faux-model (faux) hello
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d727f2a825fa10                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1266: 120x34 — control: a terminal that fits the hint list still shows the expanded header, plus a real turn and /help  |  [3] 3. /help<Enter> -> the same wrapping the 23-row capture shows, at full height  (cursor 120,31, frame 9be46707c9f4, px f8aa4e2ed933, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· keys:                                                                                                                │
+·   Enter       submit prompt                                                                                          │
+·   Up / Down   navigate prompt history                                                                                │
+·   PgUp/PgDn   scroll the chat log one page                                                                           │
+·   Home / End  jump to the start / end of the chat log                                                                │
+·   Ctrl+C      abort the current turn (or clear the prompt on idle; twice exits)                                      │
+·   Ctrl+D      exit on an empty prompt                                                                                │
+·   Ctrl+L      open the model selector                                                                                ┃
+·   Ctrl+U      clear the prompt buffer                                                                                ┃
+·   Esc         close selector / cancel turn                                                                           ┃
+·                                                                                                                      ┃
+> type a prompt — /help for commands
+Faux test model  session-18d727f2a825fa10                                                  in 0 out 0 ?/8.2k  ? for help

@@ -1,0 +1,35 @@
+{
+  "cols": 100,
+  "rows": 30,
+  "caption": "LUM-1312 full-TUI frame: the whole alt-screen surface after a real turn, with a two-line draft in the composer. Header hints, transcript (user prompt, assistant reply), the multi-line composer with its label on the first row and an indent on the continuation row, and the status/footer line — captured in a real PTY at 100x30 driving the debug binary built from this commit.",
+  "args": ["--model", "faux/faux-model"],
+  "panels": [
+    {
+      "label": "1. idle 100x30: full header hint set, one composer row, footer status",
+      "send": "",
+      "wait": 2.0,
+      "wait_for": "? for help",
+      "expect": ["pi v0.1.0", "type a prompt", "Faux test model"]
+    },
+    {
+      "label": "2. a real turn: the prompt is echoed, the faux provider answers, the composer is empty again",
+      "send": "summarise what changed in the composer<Enter>",
+      "wait": 2.5,
+      "expect": ["> summarise what changed in the composer"]
+    },
+    {
+      "label": "3. the whole TUI with a two-line draft: header, transcript, multi-row composer, footer",
+      "send": "and now a second line<C-j>with the caret on it",
+      "wait": 1.0,
+      "probe": [
+        { "text": "> and now a second line", "why": "composer row 1 keeps the label" },
+        { "text": "  with the caret on it▍", "why": "composer row 2 is a real draft row" },
+        {
+          "text": "Ctrl+K to delete to end",
+          "why": "the header hint for the editor's line-scoped kill is on screen in the same frame"
+        }
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

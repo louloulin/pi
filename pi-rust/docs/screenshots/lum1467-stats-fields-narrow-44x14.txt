@@ -1,0 +1,16 @@
+FRAME DUMP cols=44 rows=14
+|> which stats does the footer show?         |
+|> Ready.                                    |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|                                            |
+|> type a prompt — /help for commands        |
+|/srv/repo (main) • demo                     |
+|32.0%/200k (auto)  claude-sonnet-4 • high…  |
+END FRAME DUMP

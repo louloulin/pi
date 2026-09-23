@@ -1,0 +1,81 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "args": [
+    "--model",
+    "faux/faux-model"
+  ],
+  "notes": [
+    "One capture that answers 'does the Rust TUI actually do codex/pi-style interaction?' with the real binary.",
+    "Panels walk the interactive surface: startup frame → /settings (6 rows, LUM-1310) → Esc back to the composer → /help reference block → /hotkeys keybinding table → fuzzy `/set` filtering over the slash-command set.",
+    "Uses the repo's established harness idiom: `<C-u>` (Ctrl+U, clear the composer line) before each command and `<Esc>` to close an overlay, matching scripts/pty_scenarios/lum1267-interaction-assertions.json. A bare `/` after a previous command is racy — an earlier version of this file did that and the /settings panel rendered a reset transcript.",
+    "Every panel asserts on the character grid, so a regression turns this into a FAIL rather than a silently different picture.",
+    "Honest note on the /help panel: the reference block is bottom-anchored, so in 120x34 only its tail is on screen — `/settings` (near the top of the command list) is NOT visible there. The panel asserts `/help` only; `/settings` is asserted where it belongs, via `/set` filtering in panel 6 and the modal in panel 2."
+  ],
+  "caption": "LUM-1310 — the pi-rust TUI interaction surface, real binary + real PTY (120x34) + pyte. Panel 1: startup frame with the key-hint header and composer. Panel 2: `/settings` with the six wired rows (LUM-1310 added the last three). Panel 3: Esc closes the modal and the composer is restored. Panel 4: `/help` reference block (source-line-aware wrapping). Panel 5: `/hotkeys` chord table. Panel 6: `/set` fuzzy-filters the slash-command set down to `settings`. Nothing mocked.",
+  "panels": [
+    {
+      "label": "1. idle — startup header + composer + status bar",
+      "send": "",
+      "wait": 3.0,
+      "expect": [
+        "pi v0.1.0",
+        "Esc to interrupt",
+        "Ctrl+T to expand thinking",
+        "type a prompt"
+      ]
+    },
+    {
+      "label": "2. /settings — the six wired rows (LUM-1310 added Hide thinking / Autocomplete max items / Quiet startup)",
+      "send": "<C-u>/settings<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "Auto-compact",
+        "Fullscreen copy on select",
+        "Theme",
+        "Hide thinking",
+        "Autocomplete max items",
+        "Quiet startup"
+      ]
+    },
+    {
+      "label": "3. Esc — the settings modal closes and the composer is back",
+      "send": "<Esc>",
+      "wait": 1.2,
+      "expect": [
+        "type a prompt"
+      ],
+      "reject": [
+        "Autocomplete max items"
+      ]
+    },
+    {
+      "label": "4. /help — command reference block, wrapped per source line (bottom-anchored: only the tail is visible in 120x34)",
+      "send": "<C-u>/help<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "/help"
+      ]
+    },
+    {
+      "label": "5. /hotkeys — the chord table including the app.* section",
+      "send": "<C-u>/hotkeys<Enter>",
+      "wait": 1.8,
+      "expect": [
+        "Ctrl+T"
+      ]
+    },
+    {
+      "label": "6. `/set` — fuzzy slash-command filtering narrows the list to `settings`",
+      "send": "<C-u>/set",
+      "wait": 1.2,
+      "expect": [
+        "settings"
+      ],
+      "reject": [
+        "Show this help text"
+      ]
+    }
+  ],
+  "final_send": "<C-d>"
+}

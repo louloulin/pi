@@ -1,0 +1,106 @@
+{
+  "cols": 100,
+  "rows": 26,
+  "caption": "LUM-1490 footerData (the host->JS query channel) through the real bridge. The harness starts a real git repository in the child's cwd (`git_init`, branch `lum1490-main`) and an extension installs a custom footer that prints what `footerData` answered. Panel 1: `getGitBranch()`/`getAvailableProviderCount()` are queried from inside `render()` and return the driver's snapshot (`branch=lum1490-main`), not the hardcoded `undefined` this stub used to return. Panel 2: `! git checkout -b lum1490-side` moves HEAD outside the app and the footer follows without a restart, because the driver re-reads HEAD every tick and the shim fires the `onBranchChange` subscribers it registered the way upstream's own example does (`changes=1`). Panel 3: `/default-footer` restores the built-in footer, which shows `(lum1490-side)` - the same tracker feeds it, so the built-in footer follows an external checkout too (before LUM-1490 it was resolved once at startup). Panel 4: `git checkout --detach HEAD` then the custom footer again reads `branch=null`, upstream's answer for a detached HEAD / a session outside a repo. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 100x26, real pi.exe, real keystrokes, real repaints.",
+  "args": ["--model", "faux/faux-model"],
+  "extensions": ["scripts/pty_scenarios/lum1490-footer-data.js"],
+  "git_init": { "branch": "lum1490-main" },
+  "final_send": "<C-d>",
+  "distinct_panels": true,
+  "panels": [
+    {
+      "label": "1. the custom footer reads footerData: branch=lum1490-main, providers=N",
+      "send": "",
+      "wait": 2.5,
+      "wait_for": "custom-footer branch=lum1490-main",
+      "expect": [
+        {
+          "text": "custom-footer branch=lum1490-main",
+          "why": "`getGitBranch()` answered the branch of the repository the session runs in: the driver pushed it (`sync_footer_data`) and the shim queried it back from inside `render()`"
+        },
+        {
+          "text": "custom-footer changes=0",
+          "why": "the initial snapshot is not a branch *transition*: a subscriber must not be told about a value it never saw change (upstream's `onBranchChange` fires on a HEAD move)"
+        },
+        {
+          "regex": "custom-footer providers=[1-9][0-9]*",
+          "why": "`getAvailableProviderCount()` answers the same count the built-in footer's `(provider) ` prefix is built from; 0 would mean the snapshot was never seeded"
+        }
+      ],
+      "reject": [
+        {
+          "text": "custom-footer branch=undefined",
+          "why": "the pre-LUM-1490 shim hardcoded `getGitBranch: () => undefined`; that string is the regression marker for the stub coming back"
+        }
+      ]
+    },
+    {
+      "label": "2. `! git checkout -b lum1490-side`: the footer follows HEAD without a restart",
+      "send": ["!git checkout -b lum1490-side", { "pause": 0.4 }, "<Enter>"],
+      "wait": 2.5,
+      "wait_for": "custom-footer branch=lum1490-side",
+      "expect": [
+        {
+          "text": "custom-footer branch=lum1490-side",
+          "why": "the driver re-reads `.git/HEAD` every tick (upstream watches the file), so a checkout performed by a child process reaches both the App and the `footerData` snapshot"
+        },
+        {
+          "text": "custom-footer changes=1",
+          "why": "`onBranchChange` fired exactly once for one move - the channel is live, and it is not double-firing per frame"
+        }
+      ],
+      "reject": [
+        {
+          "text": "custom-footer branch=lum1490-main",
+          "why": "a stale branch here would mean the snapshot is resolved once at startup (the pre-LUM-1490 driver behaviour)"
+        }
+      ]
+    },
+    {
+      "label": "3. `/default-footer`: the built-in footer shows (lum1490-side) as well",
+      "send": ["/default-footer", { "pause": 0.4 }, "<Enter>"],
+      "wait": 2.0,
+      "wait_for": "default footer restored",
+      "expect": [
+        {
+          "text": "default footer restored",
+          "why": "the handler ran; the footer row below is the evidence, this line only proves dispatch"
+        },
+        {
+          "text": "(lum1490-side)",
+          "why": "the built-in footer's location row joins its own branch from the *same* tracker, so it follows an external checkout too (LUM-1466 resolved it once at startup)"
+        }
+      ]
+    },
+    {
+      "label": "4. detached HEAD: `branch=null`, upstream's no-branch answer",
+      "send": [
+        "!git checkout --detach HEAD",
+        { "pause": 0.4 },
+        "<Enter>",
+        { "pause": 0.6 },
+        "/custom-footer",
+        { "pause": 0.4 },
+        "<Enter>"
+      ],
+      "wait": 2.5,
+      "wait_for": "custom-footer branch=null",
+      "expect": [
+        {
+          "text": "custom-footer branch=null",
+          "why": "upstream's `getGitBranch()` is `string | null` and resolves a detached HEAD to `null` (`footer-data-provider.ts:126-131`); the shim folds the host's absent value into that same `null`"
+        },
+        {
+          "text": "custom-footer changes=1",
+          "why": "the footer was uninstalled while the detach happened and the re-install only queries, so no transition is invented: `1` is still the single move from panel 2"
+        }
+      ],
+      "reject": [
+        {
+          "text": "custom-footer branch=undefined",
+          "why": "a detached HEAD is `null` upstream, not `undefined`: if the shim stopped folding the host's absent value into `null`, the frame would say so"
+        }
+      ]
+    }
+  ]
+}

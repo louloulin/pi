@@ -1,0 +1,32 @@
+FRAME DUMP cols=100 rows=30
+|pi v0.1.0                                                                                           |
+|  Ctrl+K to delete to end                                                                           |
+|  / for commands                                                                                    |
+|  ! to run bash                                                                                     |
+|  !! to run bash (no context)                                                                       |
+|  drop files to attach                                                                              |
+|                                                                                                    |
+|Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.               |
+|> 帮我按终端列宽重排这段中文，谢谢。                                                                |
+|  结论                                                                                              |
+|                                                                                                    |
+|  中文、全角字符与 emoji 都占 两列，所以换行必须按列宽计算。                                        |
+|                                                                                                    |
+|  - 你 好 世 界：四个汉字 = 8 列                                                                    |
+|  - code 中英混排                                                                                   |
+|                                                                                                    |
+|  │ 引用块里的中文同样按列宽折行，不会再溢出终端。                                                  |
+|                                                                                                    |
+|  ┌──────┬──────────────┐                                                                           |
+|  │ 名称 │ 说明         │                                                                           |
+|  ├──────┼──────────────┤                                                                           |
+|  │ 列宽 │ 两列一个汉字 │                                                                           |
+|  └──────┴──────────────┘                                                                           |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|                                                                                                    |
+|> 中文草稿：按列宽换行，光标不能跑出屏幕。▍                                                         |
+|Faux  lum1418-column-width                                             in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP

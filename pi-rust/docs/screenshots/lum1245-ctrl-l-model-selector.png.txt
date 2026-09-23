@@ -1,0 +1,181 @@
+# lum1245-ctrl-l-model-selector.png — chars, 120x34 cells
+
+===== LUM-1245 tip: app.model.select (Ctrl+L) opens the model selector  |  [1] 1. idle startup frame: header still advertises Ctrl+L to select model; app.suspend / app.editor.external are gone  (cursor 120,33) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d713f03857a9a7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1245 tip: app.model.select (Ctrl+L) opens the model selector  |  [2] 2. Ctrl+L -> the model selector overlay opens (before this fix Ctrl+L silently wiped the transcript)  (cursor 56,31) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Pick a model
+────────────────────────────────────────
+❯ Ling 2.6 1T                     ant-ling
+  Ling 2.6 Flash                  ant-ling
+  Ring 2.6 1T                     ant-ling
+  Claude Haiku 4.5                anthropic
+  Claude Opus 4.5                 anthropic
+  Claude Sonnet 4.5               anthropic
+  GPT-4                           azure-openai-responses
+  GPT-4 Turbo                     azure-openai-responses
+> type a prompt — /help for commands
+Faux test model  session-18d713f03857a9a7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1245 tip: app.model.select (Ctrl+L) opens the model selector  |  [3] 3. Down -> selection moves inside the model list  (cursor 42,25) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+Pick a model
+────────────────────────────────────────
+  Ling 2.6 1T                     ant-ling
+❯ Ling 2.6 Flash                  ant-ling
+  Ring 2.6 1T                     ant-ling
+  Claude Haiku 4.5                anthropic
+  Claude Opus 4.5                 anthropic
+  Claude Sonnet 4.5               anthropic
+  GPT-4                           azure-openai-responses
+  GPT-4 Turbo                     azure-openai-responses
+> type a prompt — /help for commands
+Faux test model  session-18d713f03857a9a7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1245 tip: app.model.select (Ctrl+L) opens the model selector  |  [4] 4. Esc -> selector closes; the transcript is still there  (cursor 56,31) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d713f03857a9a7                                                  in 0 out 0 ?/8.2k  ? for help
+
+===== LUM-1245 tip: app.model.select (Ctrl+L) opens the model selector  |  [5] 5. /hotkeys -> app group no longer lists unimplemented chords  (cursor 120,31) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> Ctrl+Shift+Down / Ctrl+Down jump to the next prompt Ctrl+Shift+F search the chat log Enter / Ctrl+G next search hit  │
+> Shift+Enter / Ctrl+Shift+G previous search hit Esc close the search bar app: Esc cancel autocomplete / abort streamin│
+> Ctrl+C clear the prompt (twice: exit) Ctrl+D exit when the prompt is empty Ctrl+P cycle to the next model Shift+Ctrl+│
+> cycle to the previous model Ctrl+X copy the last assistant message Alt+Enter queue a follow-up message Alt+Up restore│
+> queued messages to the editor Ctrl+T show or hide thinking blocks Ctrl+O expand or collapse tool output (Ctrl+O by   │
+> default) Alt+H expand or collapse the startup header (Alt+H by default) Ctrl+L open the model selector Alt+N start a ┃
+> new session Alt+T open the session tree Alt+F fork a session from a message Alt+R resume a session Ctrl+V attach a   ┃
+> clipboard image (falls back to pasting text) selectors and completion: Up move the selection up Down move the        ┃
+> selection down PgUp selection page up PgDn selection page down Enter confirm the selection Esc / Ctrl+C close the    ┃
+> selection list Tab path completion / accept autocomplete commands: / slash commands (/help, /model, /hotkeys, …) Esc ┃
+> close the selector / overlay first                                                                                   ┃
+> type a prompt — /help for commands
+Faux test model  session-18d713f03857a9a7                                                  in 0 out 0 ?/8.2k  ? for help

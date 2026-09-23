@@ -1,0 +1,15 @@
+{
+  "cols": 120,
+  "rows": 34,
+  "caption": "LUM-1230 Stage 67 — thinking level, reasoning model",
+  "args": ["--model", "anthropic/claude-sonnet-4-5"],
+  "panels": [
+    {"label": "1. idle: footer shows 'Claude Sonnet 4.5 • medium', prompt label in thinkingMedium", "send": "", "wait": 2.5},
+    {"label": "2. Shift+Tab cycles medium -> high, footer follows", "send": "<BackTab>", "wait": 0.8},
+    {"label": "3. Shift+Tab again -> xhigh", "send": "<BackTab>", "wait": 0.8},
+    {"label": "4. /thinking max -> set directly, no selector", "send": "/thinking max<Enter>", "wait": 0.8},
+    {"label": "5. /thinking -> selector, current level pre-selected", "send": "/thinking<Enter>", "wait": 0.8},
+    {"label": "6. Down Down -> cursor wraps past off onto minimal", "send": "<Down><Down>", "wait": 0.6},
+    {"label": "7. Ctrl+S saves the highlighted level as defaultThinkingLevel", "send": "<C-s>", "wait": 0.8}
+  ]
+}

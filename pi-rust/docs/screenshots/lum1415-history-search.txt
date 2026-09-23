@@ -1,0 +1,50 @@
+FRAME DUMP cols=76 rows=48
+|-- 1. a draft is being typed; 3 prompts already in history -----------------|
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> deploy the stg env▍                                                       |
+|Faux  lum1415-search                           in 0 out 0 ?/1.0k  ? for help|
+|                                                                            |
+|-- 2. Ctrl+R opens the search: empty query, draft untouched ----------------|
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> deploy the stg env▍                                                       |
+|Faux  lum1415-search                   in 0 out 0 ?/1.0k  reverse-i-search: |
+|                                                                            |
+|-- 3. typing deploy: footer is the query, composer previews the newest match|
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> deploy the release▍                                                       |
+|Faux  in 0 out 0 ?/1.0k  reverse-i-search: deploy  Enter accept · Esc cancel|
+|                                                                            |
+|-- 4. Ctrl+R again: step to an older match ---------------------------------|
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> review the deploy script▍                                                 |
+|Faux  in 0 out 0 ?/1.0k  reverse-i-search: deploy  Enter accept · Esc cancel|
+|                                                                            |
+|-- 5. Esc cancels: the draft comes back byte for byte, chrome is gone ------|
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> deploy the stg env▍                                                       |
+|Faux  lum1415-search                           in 0 out 0 ?/1.0k  ? for help|
+|                                                                            |
+|-- 6. no match: the footer says so and the draft comes back too ------------|
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|                                                                            |
+|> deploy the stg env▍                                                       |
+|Faux  lum1415-search      in 0 out 0 ?/1.0k  reverse-i-search: zzz  no match|
+|                                                                            |
+END FRAME DUMP

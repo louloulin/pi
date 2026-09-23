@@ -1,0 +1,156 @@
+# after-reload.png — chars, 120x34 cells
+
+===== LUM-1306 — `/reload` in the real pi-rust TUI, captured on feature/pi.rs after the merge. The child runs with a prepared HOME (`--home /tmp/lum1306/home-reload`) holding `~/.pi/agent/keybindings.json` (cursorUp->Ctrl+P) and `~/.pi/agent/settings.json` (theme=light, fullscreenCopyOnSelect=false). Panels: (1) idle, (2) /hotkeys showing the on-disk override live, (3) /help, (4) /reload re-reading both files — the summary line names the file and the override count, the palette flips to the stored light theme, and the scope note states what is NOT re-read. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [1] 1. idle 120x34 — default palette; overrides on disk, nothing applied yet  (cursor 120,33, frame 14185188c512, px e708314c64c2, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7427d51d5e4c2                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'pi v0.1.0'
+  assert PASS   expect       'Faux test model'
+
+===== LUM-1306 — `/reload` in the real pi-rust TUI, captured on feature/pi.rs after the merge. The child runs with a prepared HOME (`--home /tmp/lum1306/home-reload`) holding `~/.pi/agent/keybindings.json` (cursorUp->Ctrl+P) and `~/.pi/agent/settings.json` (theme=light, fullscreenCopyOnSelect=false). Panels: (1) idle, (2) /hotkeys showing the on-disk override live, (3) /help, (4) /reload re-reading both files — the summary line names the file and the override count, the palette flips to the stored light theme, and the scope note states what is NOT re-read. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [2] 2. /clear + /hotkeys + Home — the on-disk override is live before any reload (Ctrl+P)  (cursor 120,31, frame 766a0376f724, px 38ca732377a7, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· keyboard shortcuts:                                                                                                  ┃
+·                                                                                                                      ┃
+· navigation:                                                                                                          │
+·   Ctrl+P           previous line / prompt history                                                                    │
+·   Down             next line / prompt history                                                                        │
+·   Left / Ctrl+B    move cursor left                                                                                  │
+·   Right / Ctrl+F   move cursor right                                                                                 │
+·   Alt+Left / Ctrl+Left / Alt+B move by word (left)                                                                   │
+·   Alt+Right / Ctrl+Right / Alt+F move by word (right)                                                                │
+·   Home / Ctrl+Home / Ctrl+A start of line                                                                            │
+·   End / Ctrl+End / Ctrl+E end of line     ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d7427d51d5e4c2                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'previous line / prompt history'
+  assert PASS   expect       'Ctrl+P'
+
+===== LUM-1306 — `/reload` in the real pi-rust TUI, captured on feature/pi.rs after the merge. The child runs with a prepared HOME (`--home /tmp/lum1306/home-reload`) holding `~/.pi/agent/keybindings.json` (cursorUp->Ctrl+P) and `~/.pi/agent/settings.json` (theme=light, fullscreenCopyOnSelect=false). Panels: (1) idle, (2) /hotkeys showing the on-disk override live, (3) /help, (4) /reload re-reading both files — the summary line names the file and the override count, the palette flips to the stored light theme, and the scope note states what is NOT re-read. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [3] 3. /clear + /help + Home — the head of the command list  (cursor 43,31, frame 431ecceba9c8, px 11f58b69011d, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+· slash commands:                                                                                                      ┃
+·   /help     show this help text                                                                                      ┃
+·   /clear    clear the message view                                                                                   ┃
+·   /new      start a new session                                                                                      ┃
+·   /copy     copy the last assistant message to the clipboard                                                         │
+·   /name [name] show or set the session display name                                                                  │
+·   /model    pick a model (opens selector)                                                                            │
+·   /session  show the current session info                                                                            │
+·   /export [path] export the session (HTML, or JSONL for a .jsonl path)                                               │
+·   /resume   resume a previous session                                                                                │
+·   /tree     navigate the session tree and ↓ Jump to latest message · End                                             │
+> type a prompt — /help for commands
+Faux test model  session-18d7427d51d5e4c2                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'slash commands:'
+  assert PASS   expect       '/clear'
+  assert PASS   expect       '/model'
+
+===== LUM-1306 — `/reload` in the real pi-rust TUI, captured on feature/pi.rs after the merge. The child runs with a prepared HOME (`--home /tmp/lum1306/home-reload`) holding `~/.pi/agent/keybindings.json` (cursorUp->Ctrl+P) and `~/.pi/agent/settings.json` (theme=light, fullscreenCopyOnSelect=false). Panels: (1) idle, (2) /hotkeys showing the on-disk override live, (3) /help, (4) /reload re-reading both files — the summary line names the file and the override count, the palette flips to the stored light theme, and the scope note states what is NOT re-read. Real binary + real PTY + pyte VT emulator; nothing mocked.  |  [4] 4. /clear + /reload — keybindings + settings re-read; light theme applied live; honest scope note  (cursor 120,33, frame 2cfebb70e740, px 4987a770fc79, alive=True) =====
+pi v0.1.0
+  Esc to interrupt
+  Ctrl+C to clear
+  Ctrl+C twice to exit
+  Ctrl+D to exit (empty)
+  Ctrl+K to delete to end
+  Shift+Tab to cycle thinking level
+  Ctrl+P/Shift+Ctrl+P to cycle models
+  Ctrl+L to select model
+  Ctrl+O to expand tools
+  Alt+H to hide this header
+  Ctrl+T to expand thinking
+  / for commands
+  ! to run bash
+  !! to run bash (no context)
+  Alt+Enter to queue follow-up
+  Alt+Up to edit all queued messages
+  Ctrl+V to paste image (with text fallback)
+  drop files to attach
+
+Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+> /reload: keybindings → 1 override(s) from /tmp/lum1306/home-reload/.pi/agent/keybindings.json; theme → light
+> /reload: extensions, skills, prompts and context files are read at startup and are not re-read here (use /new for a
+> fresh session)
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7427d51d5e4c2                                                  in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '/reload:'
+  assert PASS   expect       'override(s)'
+  assert PASS   expect       'theme → light'
+  assert PASS   expect       'not re-read'
