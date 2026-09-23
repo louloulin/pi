@@ -1,6 +1,6 @@
 # lum1317-composer-paging.png — chars, 76x26 cells
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [1] 1. idle: one composer row, `? for help` in the header  (cursor 76,25, frame fa8b7107acee, px 3dd67637ba2d, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [1] 1. idle: one composer row, `? for help` in the header  (cursor 76,25, frame 699e1426c124, px f0b9947a2953, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 
@@ -23,26 +23,24 @@ hints hidden on a short terminal — Alt+H shows them
 
 
 
-
-
+────────────────────────────────────────────────────────────────────────────
 > type a prompt — /help for commands
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
   assert PASS   expect       '> type a prompt'
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [2] 2. /help fills the transcript past one viewport (the transcript is what PageUp used to own)  (cursor 76,23, frame e61d56b3192a, px 247e480bb396, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [2] 2. /help fills the transcript past one viewport (the transcript is what PageUp used to own)  (cursor 76,21, frame 345be28a82d9, px 5cc4458215a8, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 15 lines above · Home soning level (/thinking                           │
-· off|minimal|low|medium|high|xhigh|max)                                   │
-·   /trust    show or set project trust (/trust yes|no)                    │
+ ⋯ 17 lines above · Home  project trust (/trust yes|no)                    │
 ·   /compact  summarize the conversation prefix to free context            │
 ·   /hotkeys  list the keyboard shortcuts                                  │
 ·   /extensions list loaded extensions and what they register              │
 ·   /reload   re-read keybindings.json and the interface settings          │
 ·   /exit     quit the interactive session                                 │
 ·                                                                          │
-· keys:                                                                    ┃
-·   Enter       submit prompt                                              ┃
+· keys:                                                                    │
+·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)┃
 ·   Up / Down move within the draft, then prompt history at the top / botto┃
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box ┃
@@ -54,28 +52,29 @@ hints hidden on a short terminal — Alt+H shows them
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
+────────────────────────────────────────────────────────────────────────────
 > type a prompt — /help for commands
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [3] 3. a 12-row draft: the composer window shows 8 rows, so 4 are hidden above the caret and `↑4` says so  (cursor 36,24, frame c43338197b8c, px a8b37c9a930d, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [3] 3. a 12-row draft: the composer window shows 8 rows, so 4 are hidden above the caret and the top rule says so (` ↑ 4 more `)  (cursor 36,23, frame f1524248f18a, px 8827e24ca9fa, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 22 lines above · Home teractive session                                 │
-·                                                                          │
-· keys:                                                                    │
+ ⋯ 24 lines above · Home                                                   │
 ·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto│
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box │
 ·   Home / End  jump to the start / end of the chat log                    │
 ·   Ctrl+A / E  jump to the start / end of the current line                │
-·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       │
 ·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
 ·   Ctrl+D      exit on an empty prompt                                    ┃
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
-↑4row 05
+───────────────────────────────── ↑ 4 more ─────────────────────────────────
+  row 05
   row 06
   row 07
   row 08
@@ -83,120 +82,125 @@ hints hidden on a short terminal — Alt+H shows them
   row 10
   row 11
   row 12▍
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
   assert PASS   reject       'row 01'  — the head of the draft is scrolled off, not painted
   assert PASS   reject       'Jump to latest message'  — typing did not detach the transcript; the viewport still follows the tail
-  assert PASS   probe        '↑4row 05'  — the window starts on draft row 4 and marks the 4 rows it is hiding above
+  assert PASS   probe        '↑ 4 more'  — the window starts on draft row 4 and the top rule reports the 4 rows it is hiding above (upstream `createScrollBorder`)
+  assert PASS   probe        'row 05'  — the window's first draft row is visible under the rule
   assert PASS   probe        'row 12▍'  — the caret is on the draft's last row, inside the window
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [4] 4. PgUp with an overflowing draft: the caret jumps one page (11 → 3) and the window follows it one row (4 → 3); the transcript does NOT move  (cursor 9,24, frame efab54b7843b, px 90c44f9ec8ca, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [4] 4. PgUp with an overflowing draft: the caret jumps one page (11 → 3) and the window follows it one row (4 → 3); the transcript does NOT move  (cursor 43,24, frame 6d4ed23db239, px 2dc4fcc090a6, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 22 lines above · Home teractive session                                 │
-·                                                                          │
-· keys:                                                                    │
+ ⋯ 24 lines above · Home                                                   │
 ·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto│
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box │
 ·   Home / End  jump to the start / end of the chat log                    │
 ·   Ctrl+A / E  jump to the start / end of the current line                │
-·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       │
 ·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
 ·   Ctrl+D      exit on an empty prompt                                    ┃
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
-↑3row 04▍
+───────────────────────────────── ↑ 3 more ─────────────────────────────────
+  row 04▍
   row 05
   row 06
   row 07
   row 08
   row 09
   row 10
-↓1row 11
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
-  assert PASS   reject       '↑4'  — the window followed the caret instead of staying at the tail
+  row 11
+───────────────────────────────── ↓ 1 more ─────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   reject       '↑ 4 more'  — the window followed the caret instead of staying at the tail
   assert PASS   reject       'Jump to latest message'  — the load-bearing one: PgUp paged the composer, so the chat log never detached
-  assert PASS   probe        '↑3row 04▍'  — page 8 rows up lands the caret on draft row 3, which the marker row also carries
+  assert PASS   probe        '↑ 3 more'  — page 8 rows up lands the caret on draft row 3 and the top rule reports 3 hidden rows
+  assert PASS   probe        'row 04▍'  — the caret's own row is the window's first draft row
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [5] 5. one Up: the window moves exactly one row (3 → 2), not a page  (cursor 8,24, frame a11db607af89, px c440cf20c9fa, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [5] 5. one Up: the window moves exactly one row (3 → 2), not a page  (cursor 37,24, frame da7ed43ea424, px 693e31090311, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 22 lines above · Home teractive session                                 │
-·                                                                          │
-· keys:                                                                    │
+ ⋯ 24 lines above · Home                                                   │
 ·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto│
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box │
 ·   Home / End  jump to the start / end of the chat log                    │
 ·   Ctrl+A / E  jump to the start / end of the current line                │
-·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       │
 ·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
 ·   Ctrl+D      exit on an empty prompt                                    ┃
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
-↑2row 03▍
+───────────────────────────────── ↑ 2 more ─────────────────────────────────
+  row 03▍
   row 04
   row 05
   row 06
   row 07
   row 08
   row 09
-↓2row 10
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
-  assert PASS   probe        '↑2row 03▍'  — one keystroke, one row of scroll — the caret left the window's top row
+  row 10
+───────────────────────────────── ↓ 2 more ─────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '↑ 2 more'  — one keystroke, one row of scroll — the caret left the window's top row
+  assert PASS   probe        'row 03▍'  — the caret is on draft row 3
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [6] 6. one more Up: the last visible row now reports the rows below the window (`↓3`)  (cursor 8,24, frame 8ca269cb6525, px 4e6f1d401ed2, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [6] 6. one more Up: the last visible row now reports the rows below the window (`↓3`)  (cursor 37,24, frame 28539b063e66, px 464b3fd53f50, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 22 lines above · Home teractive session                                 │
-·                                                                          │
-· keys:                                                                    │
+ ⋯ 24 lines above · Home                                                   │
 ·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto│
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box │
 ·   Home / End  jump to the start / end of the chat log                    │
 ·   Ctrl+A / E  jump to the start / end of the current line                │
-·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       │
 ·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
 ·   Ctrl+D      exit on an empty prompt                                    ┃
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
-↑1row 02▍
+───────────────────────────────── ↑ 1 more ─────────────────────────────────
+  row 02▍
   row 03
   row 04
   row 05
   row 06
   row 07
   row 08
-↓3row 09
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
-  assert PASS   probe        '↑1row 02▍'  — the caret is on draft row 1
-  assert PASS   probe        '↓3row 09'  — draft rows 9..11 are hidden below the window
+  row 09
+───────────────────────────────── ↓ 3 more ─────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
+  assert PASS   probe        '↑ 1 more'  — the caret is on draft row 1
+  assert PASS   probe        'row 02▍'  — the caret's row is the window's first draft row
+  assert PASS   probe        '↓ 3 more'  — draft rows 9..11 are hidden below the window
+  assert PASS   probe        'row 09'  — …the first of them is the window's last draft row
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [7] 7. Up onto draft row 0: the first row keeps the `> ` label and `↓4` closes the window  (cursor 8,24, frame 425afee77cfc, px 0da37195e7a9, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [7] 7. Up onto draft row 0: the first row keeps the `> ` label and `↓4` closes the window  (cursor 37,24, frame 54bae268ba1d, px 9b03c0059314, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 22 lines above · Home teractive session                                 │
-·                                                                          │
-· keys:                                                                    │
+ ⋯ 24 lines above · Home                                                   │
 ·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto│
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box │
 ·   Home / End  jump to the start / end of the chat log                    │
 ·   Ctrl+A / E  jump to the start / end of the current line                │
-·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       │
 ·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
 ·   Ctrl+D      exit on an empty prompt                                    ┃
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
+────────────────────────────────────────────────────────────────────────────
 > row 01▍
   row 02
   row 03
@@ -204,57 +208,59 @@ hints hidden on a short terminal — Alt+H shows them
   row 05
   row 06
   row 07
-↓4row 08
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+  row 08
+───────────────────────────────── ↓ 4 more ─────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
   assert PASS   reject       '↑'  — nothing is hidden above the window any more
   assert PASS   probe        '> row 01▍'  — the draft's own first row always keeps the label
-  assert PASS   probe        '↓4row 08'  — 4 rows are hidden below the window's last row
+  assert PASS   probe        '↓ 4 more'  — 4 rows are hidden below the window's last row
+  assert PASS   probe        'row 08'  — the window's last draft row
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [8] 8. PgDn from row 0 still pages the draft (0 → 8, a windowful) and the transcript still does not move  (cursor 9,24, frame b6f58c4cf426, px af47c25d11c5, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [8] 8. PgDn from row 0 still pages the draft (0 → 8, a windowful) and the transcript still does not move  (cursor 37,24, frame 811aa9949f40, px 907263ab8df4, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 22 lines above · Home teractive session                                 │
-·                                                                          │
-· keys:                                                                    │
+ ⋯ 24 lines above · Home                                                   │
 ·   Enter       submit prompt                                              │
 ·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto│
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box │
 ·   Home / End  jump to the start / end of the chat log                    │
 ·   Ctrl+A / E  jump to the start / end of the current line                │
-·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       ┃
+·   Ctrl+K      delete to the end of the line (Ctrl+U: to its start)       │
 ·   Ctrl+C abort the current turn (or clear the prompt on idle; twice exits┃
 ·   Ctrl+D      exit on an empty prompt                                    ┃
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
-↑1row 02
+───────────────────────────────── ↑ 1 more ─────────────────────────────────
+  row 02
   row 03
   row 04
   row 05
   row 06
   row 07
   row 08
-↓3row 09▍
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+  row 09▍
+───────────────────────────────── ↓ 3 more ─────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
   assert PASS   reject       'Jump to latest message'  — the chat log was not the thing that paged
-  assert PASS   probe        '↑1row 02'  — the window starts one row down
-  assert PASS   probe        '↓3row 09▍'  — the caret is on the window's last row, which is also where the ↓ marker lives
+  assert PASS   probe        '↑ 1 more'  — the window starts one row down
+  assert PASS   probe        'row 02'  — the window's first draft row
+  assert PASS   probe        '↓ 3 more'  — the bottom rule reports the rows below the window
+  assert PASS   probe        'row 09▍'  — the caret is on the window's last draft row
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [9] 9. Ctrl+C clears the 12-row draft and a fresh two-row draft fits the window, so it paints no marker (the cleared one-row state is panel 1)  (cursor 10,24, frame efc742dfbcd5, px 497a180247e5, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [9] 9. Ctrl+C clears the 12-row draft and a fresh two-row draft fits the window, so it paints no marker (the cleared one-row state is panel 1)  (cursor 43,24, frame b22da65c36b5, px f8a237030d83, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
- ⋯ 16 lines above · Home high|xhigh|max)                                   │
-·   /trust    show or set project trust (/trust yes|no)                    │
-·   /compact  summarize the conversation prefix to free context            │
+ ⋯ 18 lines above · Home he conversation prefix to free context            │
 ·   /hotkeys  list the keyboard shortcuts                                  │
 ·   /extensions list loaded extensions and what they register              │
 ·   /reload   re-read keybindings.json and the interface settings          │
 ·   /exit     quit the interactive session                                 │
 ·                                                                          │
 · keys:                                                                    │
-·   Enter       submit prompt                                              ┃
-·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)┃
+·   Enter       submit prompt                                              │
+·   Ctrl+J      insert a new line (Shift+Enter on kitty-protocol terminals)│
 ·   Up / Down move within the draft, then prompt history at the top / botto┃
 ·   PgUp/PgDn page the chat log, or the draft when it does not fit the box ┃
 ·   Home / End  jump to the start / end of the chat log                    ┃
@@ -265,16 +271,18 @@ hints hidden on a short terminal — Alt+H shows them
 ·   Ctrl+L      open the model selector                                    ┃
 ·   Esc         close selector / cancel turn                               ┃
 ·                                                                          ┃
+────────────────────────────────────────────────────────────────────────────
 > fits 01
   fits 02▍
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
   assert PASS   reject       '↑'  — a draft that fits hides nothing, so it paints no marker
   assert PASS   reject       '↓'  — and reports nothing below it either
   assert PASS   reject       'row 12'  — the 12-row draft is gone
   assert PASS   probe        '> fits 01'  — the label row of a composer the window can hold
   assert PASS   probe        'fits 02▍'  — the caret is on the second and last row, nothing is windowed
 
-===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [10] 10. the same PgUp with a fitting draft scrolls the chat log instead: the jump-to-latest pill appears and the composer stays put  (cursor 76,22, frame 2c39ae1a1ba6, px 932204c621d4, alive=True) =====
+===== LUM-1317 composer paging: a draft taller than the composer window (12 rows in an 8-row window) owns PageUp/PageDown, so the key pages the draft while the transcript stays on the tail; the window follows the caret one row at a time and reports the rows it hides (`↑N` above, `↓N` below) in the label column. The last two panels show the other owner: once the draft fits again the very same chord scrolls the chat log and the jump-to-latest pill appears. Every frame is a real PTY at 76x26 driving the debug binary built from this commit; `↑`/`↓` are asserted on the pyte grid.  |  [10] 10. the same PgUp with a fitting draft scrolls the chat log instead: the jump-to-latest pill appears and the composer stays put  (cursor 76,20, frame 32546665f54d, px fd80ba6c04c6, alive=True) =====
 pi v0.1.0
 hints hidden on a short terminal — Alt+H shows them
 · slash commands:                                                          ┃
@@ -287,19 +295,19 @@ hints hidden on a short terminal — Alt+H shows them
 ·   /scoped-models configure which models Ctrl+P cycles                    ┃
 ·   /session  show the current session info                                ┃
 ·   /export [path] export the session (HTML, or JSONL for a .jsonl path)   ┃
-·   /resume   resume a previous session                                    ┃
-·   /tree     navigate the session tree and switch branches                ┃
+·   /resume   resume a previous session                                    │
+·   /tree     navigate the session tree and switch branches                │
 ·   /fork     branch a new session from a user message                     │
 ·   /clone    copy the current session into a new session file             │
 ·   /settings show or change interface settings                            │
 ·   /thinking set the reasoning level (/thinking                           │
 · off|minimal|low|medium|high|xhigh|max)                                   │
 ·   /trust    show or set project trust (/trust yes|no)                    │
-·   /compact  summarize the conversation prefix to free context            │
-·   /hotkeys  list the keyboard shortcuts                                  │
-·   /extensions list  ↓ Jump to latest message · End register              │
+·   /compact  summari ↓ Jump to latest message · End ee context            │
+────────────────────────────────────────────────────────────────────────────
 > fits 01
   fits 02▍
-Faux test model  session-18d768a14a466ee6      in 0 out 0 ?/8.2k  ? for help
+────────────────────────────────────────────────────────────────────────────
+Faux test model  session-18d78e1b9e61f762      in 0 out 0 ?/8.2k  ? for help
   assert PASS   probe        'Jump to latest message'  — the transcript detached: the key went to tui.altScreen.pageUp as before LUM-1317
   assert PASS   probe        '> fits 01'  — the composer did not move

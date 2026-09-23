@@ -89,7 +89,7 @@ pub use message::{
     ToolBlockRenderer, TOOL_PREVIEW_LINES,
 };
 pub use mouse_region::{MouseRegion, MouseRegionPoint};
-pub use prompt::{Prompt, PromptAction};
+pub use prompt::{Prompt, PromptAction, PromptFrame, PromptRow, PromptRowKind, PROMPT_BORDER_ROWS};
 pub use search::{
     apply_query_key, find_matches, normalize_query, render_search_bar, search_bar_rect,
     search_bar_text, SearchBar, SearchBarLayout, SearchIndex, SearchMatch, SearchResult,
