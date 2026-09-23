@@ -299,9 +299,45 @@ pub enum InputEvent {
     Ignored,
 }
 
+/// True when a `crossterm` `Enter` event is really the `Ctrl+J` chord.
+///
+/// `0x0A` is simultaneously the line-feed byte and the key code for `Ctrl+J`,
+/// and the two platforms that matter report it differently:
+///
+/// * crossterm's **Unix** parser folds it into `Char('j') + CONTROL` — its own
+///   source says so (“`\n` = 0xA, which is also the keycode for Ctrl+J … it's
+///   better to use Ctrl+J”, `event/sys/unix/parse.rs`).
+/// * its **Win32** console backend reports the console record instead: a
+///   `KEY_EVENT` whose unicode character is `\n` and whose virtual key is
+///   `VK_RETURN`, which crossterm normalises to `Enter + CONTROL`. Measured on
+///   Windows 10 under ConPTY: writing `0x0A` to the pty produces exactly that
+///   event, and pre-fix the chord was silently dropped — `tui.input.newLine`
+///   is `"ctrl+j"`, i.e. `Char('j') + CONTROL`, so `Enter + CONTROL` matched
+///   no binding and was discarded as an unmatched control chord.
+///
+/// Normalising here (rather than teaching `key_matches` a second spelling)
+/// keeps [`InputEvent`] identical on both platforms, which is what the rest of
+/// the port assumes: `pi-tui` has one editor, one keybinding table and one
+/// meaning for the chord it documents as the portable multiline path.
+///
+/// A real kitty-protocol `Ctrl+Enter` (`CSI 13;5u`) decodes to `Enter +
+/// CONTROL` as well and is therefore read as `Ctrl+J` too. Upstream's byte
+/// matcher has the same blind spot in reverse (it never matches kitty's
+/// `Ctrl+Enter` at all), no binding here uses `ctrl+enter`, and the outcome is
+/// the same line break either way — recorded so the choice is visible.
+fn is_ctrl_j(modifiers: &CtModifiers) -> bool {
+    modifiers.contains(CtModifiers::CONTROL)
+        && !modifiers.contains(CtModifiers::SHIFT)
+        && !modifiers.contains(CtModifiers::ALT)
+        && !modifiers.contains(CtModifiers::SUPER)
+        && !modifiers.contains(CtModifiers::META)
+}
+
 impl From<CtKeyEvent> for InputEvent {
     fn from(event: CtKeyEvent) -> Self {
         let code = match event.code {
+            // `\n` is a key code, not a newline; see [`ctrl_j_from_enter`].
+            CtKeyCode::Enter if is_ctrl_j(&event.modifiers) => KeyCode::Char('j'),
             CtKeyCode::Backspace => KeyCode::Backspace,
             CtKeyCode::Enter => KeyCode::Enter,
             CtKeyCode::Left => KeyCode::Left,

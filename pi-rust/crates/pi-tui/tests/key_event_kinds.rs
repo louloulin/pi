@@ -196,3 +196,109 @@ fn non_key_events_keep_their_translation() {
         InputEvent::key(KeyCode::Char('w'), KeyModifiers::CONTROL)
     );
 }
+
+// ---------------------------------------------------------------- Ctrl+J
+//
+// LUM-1485: the same physical chord arrives as two different `crossterm`
+// key codes depending on the backend. `0x0A` is both the line-feed byte and
+// `Ctrl+J`; crossterm's Unix parser folds it into `Char('j') + CONTROL`,
+// while its Win32 console backend reports `Enter + CONTROL` (measured under
+// ConPTY with a temporary trace of `App::translate_event`'s input).
+// `tui.input.newLine` is bound to the *Unix* spelling, so before the fix the
+// Windows event matched no binding and was dropped as an unmatched control
+// chord:
+//
+// ```text
+// # ConPTY, pre-fix: type "ab", then write 0x0A
+// > ab|           <- no second row and no submit: the key did nothing
+// ```
+
+/// The raw console record a Windows ConPTY turns `0x0A` into.
+fn console_ctrl_j(kind: KeyEventKind) -> CtEvent {
+    CtEvent::Key(KeyEvent::new_with_kind(
+        CtKeyCode::Enter,
+        CtModifiers::CONTROL,
+        kind,
+    ))
+}
+
+#[test]
+fn a_windows_ctrl_j_translates_to_the_ctrl_j_chord() {
+    assert_eq!(
+        App::translate_event(console_ctrl_j(KeyEventKind::Press)),
+        Some(InputEvent::key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+        "0x0A is Ctrl+J on every backend, whatever key code crossterm names it"
+    );
+    assert_eq!(
+        App::translate_event(console_ctrl_j(KeyEventKind::Release)),
+        None,
+        "the release record of the same chord still carries no input"
+    );
+}
+
+#[test]
+fn plain_enter_and_shift_enter_keep_their_own_codes() {
+    // Only the exact Ctrl+J spelling is folded: `Enter` must still submit
+    // and `Shift+Enter` must still be its own chord.
+    for (modifiers, expected) in [
+        (CtModifiers::NONE, KeyModifiers::NONE),
+        (CtModifiers::SHIFT, KeyModifiers::SHIFT),
+        (CtModifiers::ALT | CtModifiers::CONTROL, KeyModifiers::ALT),
+    ] {
+        let event = CtEvent::Key(KeyEvent::new_with_kind(
+            CtKeyCode::Enter,
+            modifiers,
+            KeyEventKind::Press,
+        ));
+        if modifiers.contains(CtModifiers::ALT) {
+            // `Ctrl+Alt+Enter` is not in the vocabulary either way; what this
+            // case pins is that it is not silently read as Ctrl+J.
+            assert_ne!(
+                App::translate_event(event),
+                Some(InputEvent::key(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            );
+            continue;
+        }
+        let mut expected_mods = KeyModifiers::NONE;
+        expected_mods.shift = expected.shift;
+        assert_eq!(
+            App::translate_event(event),
+            Some(InputEvent::key(KeyCode::Enter, expected_mods)),
+            "{modifiers:?} must keep its own key code"
+        );
+    }
+}
+
+#[test]
+fn ctrl_j_opens_a_second_composer_row_on_a_windows_console() {
+    // The user-visible half: the chord must reach `tui.input.newLine` rather
+    // than falling out of the editor as an unmatched control chord.
+    let mut stream = tap('a');
+    stream.push(console_ctrl_j(KeyEventKind::Press));
+    stream.push(console_ctrl_j(KeyEventKind::Release));
+    stream.extend(tap('b'));
+
+    assert_eq!(
+        typed(stream).text(),
+        "a\nb",
+        "Ctrl+J must insert a hard line break, not be dropped"
+    );
+}
+
+#[test]
+fn windows_ctrl_enter_still_submits() {
+    // The chord this normalisation must NOT break: a Windows console reports
+    // `\r` as `Enter` with no modifier, which stays a submit.
+    let mut stream = tap('h');
+    stream.push(console_key(CtKeyCode::Enter, KeyEventKind::Press));
+    stream.push(console_key(CtKeyCode::Enter, KeyEventKind::Release));
+
+    let mut editor = Editor::new();
+    let mut submitted = None;
+    for event in App::translate_events(stream) {
+        if let EditorAction::Submit(text) = editor.handle_event(event) {
+            submitted = Some(text);
+        }
+    }
+    assert_eq!(submitted.as_deref(), Some("h"));
+}
