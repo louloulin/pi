@@ -1,8 +1,23 @@
-# TUI ChatInput Gap Analysis — LUM-1634 Real Audit (2026-09-23)
+# TUI ChatInput Gap Analysis — LUM-1681 Real Audit (2026-09-24)
 
 ## Executive Summary
 
-Based on real code analysis comparing three implementations: **pi TypeScript**, **pi-rust**, and **Martty**.
+Based on real code analysis comparing three implementations: **pi TypeScript**, **pi-rust**, and **Martty**. This report updates LUM-1634 findings with the latest state as of 2026-09-24.
+
+## Rust vs TypeScript Gap Summary
+
+| Metric | Rust pi-tui | TypeScript pi | Gap |
+|--------|-------------|---------------|-----|
+| Total TUI LOC | 42,832 | 6,208 | **7x larger** |
+| editor.rs/editor.ts | 4,515 | 2,461 | **~55% parity** |
+| input.rs/input.ts | 1,236 | 957 | **~77% parity** |
+| markdown.rs/markdown.ts | 1,974 | 1,015 | **~51% parity** |
+| autocomplete.rs | 1,467 | N/A | TS uses built-in |
+| PasteBurst | ✅ 1,236 LOC | ❌ | **Unique to Rust** |
+| KillRing | ✅ 6,128 LOC | ✅ | **Parity** |
+| Jump Mode | ✅ | ✅ | **Parity** |
+| Visual Layout | ✅ | ✅ | **Parity** |
+| Multi-line | ✅ (chips + nl) | ⚠️ (Editor only) | **Intentional** |
 
 ### Implementation State
 
@@ -91,8 +106,10 @@ Based on real code analysis comparing three implementations: **pi TypeScript**, 
 
 ---
 
-*Updated by 编程助手devbox — LUM-1634 audit (2026-09-23)*
+*Updated by 编程助手devbox — LUM-1681 audit (2026-09-24)*
 *Code examined: martty/src/input/editor.rs (394L), packages/tui/src/components/input.ts (955L), pi-rust/crates/pi-tui/src/editor.rs (4501L)*
+*Rust TUI total: 42,832 LOC across 31 modules*
+*TypeScript TUI total: 6,208 LOC across 18 files*
 
 ## Real Gap Analysis
 
