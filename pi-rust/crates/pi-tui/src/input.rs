@@ -21,6 +21,27 @@
 //! that reads bytes itself (and the tests) gets the same [`InputEvent`]s
 //! without a terminal backend, and the X10 path is pinned by tests instead
 //! of only being exercised by whatever terminal happened to be attached.
+//!
+//! # Paste bursts
+//!
+//! [`PasteBurst`] is the port of codex's `paste_burst`
+//! (`codex-rs/tui/src/bottom_pane/paste_burst.rs`): a terminal that does not
+//! send bracketed paste (an old emulator, some SSH / multiplexer relays)
+//! delivers a paste as a fast run of `KeyCode::Char` / `Enter` / `Tab`
+//! events, and this classifier turns such a run back into one paste. Upstream
+//! pi-ts has no counterpart — it only ever sees the `paste` event.
+//!
+//! The port keeps codex's timing model (an inter-character window plus an
+//! idle timeout before the buffer flushes) but drops its "hold the first
+//! character" flicker suppression: holding a character means the draft can
+//! only show it after a timer tick, and this port has no guaranteed ticker
+//! between keystrokes. Every character is therefore inserted immediately and
+//! a confirmed burst *retroactively* absorbs the prefix it already typed
+//! ([`BurstDecision::BeginBurst`]). A misclassification can merge a few
+//! characters into one paste unit, but it can never drop one
+//! ([`PasteBurst::abort`] hands the whole buffer back).
+
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode as CtKeyCode, KeyEvent as CtKeyEvent, KeyModifiers as CtModifiers};
 
@@ -512,6 +533,255 @@ fn decode_mouse_report(cb: u8, x: u16, y: u16, release: bool) -> InputEvent {
     InputEvent::MouseGesture(MouseGesture::new(kind, x, y, alt))
 }
 
+// ---------------------------------------------------------------------------
+// Paste-burst detection (codex `paste_burst`)
+// ---------------------------------------------------------------------------
+
+/// Largest delay between two plain characters for them to count as one
+/// burst. codex `PASTE_BURST_CHAR_INTERVAL`
+/// (`codex-rs/tui/src/bottom_pane/paste_burst.rs`).
+///
+/// 8 ms is far below any human typing rate (a fast typist is ~100 ms per
+/// key), which is exactly what keeps normal input out of the burst path.
+pub const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
+
+/// Plain characters a run must reach, each within
+/// [`PASTE_BURST_CHAR_INTERVAL`] of the previous, before the run is treated
+/// as a paste (codex `PASTE_BURST_MIN_CHARS`).
+pub const PASTE_BURST_MIN_CHARS: u16 = 3;
+
+/// How long after the last burst character a lone `Enter` is still read as a
+/// newline *inside* the paste rather than a submit (codex
+/// `PASTE_ENTER_SUPPRESS_WINDOW`).
+///
+/// A paste that ends in a newline is the case this exists for: without the
+/// window, the final newline of a burst would submit the draft the paste was
+/// just poured into.
+pub const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
+
+/// Idle time after the last burst character before the accumulated text is
+/// flushed as one paste (codex `PASTE_BURST_ACTIVE_IDLE_TIMEOUT`).
+///
+/// Windows terminals have been observed to deliver slower bursts, so the
+/// port keeps codex's platform split.
+#[cfg(windows)]
+pub const PASTE_BURST_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_millis(60);
+/// Idle time after the last burst character before the accumulated text is
+/// flushed as one paste (codex `PASTE_BURST_ACTIVE_IDLE_TIMEOUT`).
+#[cfg(not(windows))]
+pub const PASTE_BURST_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_millis(8);
+
+/// What the caller must do with a plain character handed to
+/// [`PasteBurst::on_plain_char`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BurstDecision {
+    /// Not paste-like: insert the character as ordinary typing.
+    Typed,
+    /// The run just became paste-like and the current character is already
+    /// in the burst buffer. Remove the last `retro_chars` characters before
+    /// the cursor and hand them to [`PasteBurst::absorb_retro`], so the whole
+    /// burst sits in one buffer; when the cursor cannot yield them, call
+    /// [`PasteBurst::abort`] and insert what it returns as ordinary text.
+    BeginBurst {
+        /// How many already-typed characters belong to the burst.
+        retro_chars: usize,
+    },
+    /// The character is in the burst buffer; nothing to insert.
+    Buffered,
+}
+
+/// codex's `paste_burst` classifier: turns a fast run of plain characters
+/// into one paste when the terminal sends no bracketed-paste event.
+///
+/// Pure state machine over an injected [`Instant`] — it owns timing and
+/// classification, never the text buffer. The caller feeds it plain
+/// characters and applies the returned [`BurstDecision`]; when the burst goes
+/// quiet, [`PasteBurst::flush_if_due`] hands back the accumulated text to be
+/// inserted through the ordinary paste path (so the marker folding, the undo
+/// unit and the registry are all reused).
+///
+/// A run only becomes a burst when **three** characters arrive within
+/// [`PASTE_BURST_CHAR_INTERVAL`] of each other, so ordinary typing never
+/// reaches it; and every character is inserted as typing first, so a
+/// misclassification degrades to "a few characters inserted together"
+/// rather than a lost keystroke.
+#[derive(Debug, Clone, Default)]
+pub struct PasteBurst {
+    /// When the previous plain character arrived.
+    last_plain_char: Option<Instant>,
+    /// Plain characters in the current run, each within the window of the
+    /// previous one.
+    consecutive: u16,
+    /// While `now <= window_until`, `Enter` still belongs to the burst even
+    /// after the buffer has been flushed.
+    window_until: Option<Instant>,
+    /// Text accumulated behind the marker while a burst is active.
+    buffer: String,
+    /// True while characters are being accumulated into `buffer`.
+    active: bool,
+}
+
+impl PasteBurst {
+    /// A fresh, idle classifier.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one plain character (no Control / Alt / Meta modifier) at `now`.
+    pub fn on_plain_char(&mut self, c: char, now: Instant) -> BurstDecision {
+        let within_window = self
+            .last_plain_char
+            .is_some_and(|last| now.saturating_duration_since(last) <= PASTE_BURST_CHAR_INTERVAL);
+        self.consecutive = if within_window {
+            self.consecutive.saturating_add(1)
+        } else {
+            1
+        };
+        self.last_plain_char = Some(now);
+
+        if self.active {
+            self.buffer.push(c);
+            self.window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+            return BurstDecision::Buffered;
+        }
+        if within_window && self.consecutive >= PASTE_BURST_MIN_CHARS {
+            self.active = true;
+            self.buffer.push(c);
+            self.window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+            return BurstDecision::BeginBurst {
+                retro_chars: usize::from(self.consecutive - 1),
+            };
+        }
+        BurstDecision::Typed
+    }
+
+    /// Fold the already-typed prefix of a burst into its buffer.
+    ///
+    /// The prefix is prepended because the current character is already
+    /// buffered, and buffer order is the order the bytes arrived in.
+    pub fn absorb_retro(&mut self, prefix: &str) {
+        if !prefix.is_empty() {
+            self.buffer.insert_str(0, prefix);
+        }
+    }
+
+    /// Abandon an active burst, returning everything buffered.
+    ///
+    /// This is the no-character-is-ever-lost fallback: when the caller
+    /// cannot absorb the prefix, it inserts the returned text as ordinary
+    /// typing.
+    pub fn abort(&mut self) -> String {
+        self.active = false;
+        self.window_until = None;
+        self.consecutive = 0;
+        std::mem::take(&mut self.buffer)
+    }
+
+    /// True while characters are being accumulated into a burst.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// The text accumulated so far (empty unless [`PasteBurst::is_active`]).
+    pub fn buffered(&self) -> &str {
+        &self.buffer
+    }
+
+    /// Whether `Enter` should insert a newline instead of submitting.
+    ///
+    /// True while a burst accumulates and for
+    /// [`PASTE_ENTER_SUPPRESS_WINDOW`] after the last burst character, so the
+    /// trailing newline of a paste never submits the draft it was pasted
+    /// into.
+    pub fn newline_should_insert(&self, now: Instant) -> bool {
+        self.active || self.window_until.is_some_and(|until| now <= until)
+    }
+
+    /// Append a newline / tab to the active burst.
+    ///
+    /// Returns `false` when no burst is accumulating, in which case the key
+    /// keeps its ordinary meaning (submit / complete). A control character
+    /// only ever *joins* a burst that is already open: it never starts one.
+    pub fn append_control_if_active(&mut self, c: char, now: Instant) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.buffer.push(c);
+        self.last_plain_char = Some(now);
+        self.window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+        true
+    }
+
+    /// Flush the burst once it has gone quiet, returning the text to insert
+    /// as one paste.
+    ///
+    /// `None` while the burst is still accumulating or when there is nothing
+    /// buffered.
+    pub fn flush_if_due(&mut self, now: Instant) -> Option<String> {
+        if !self.active {
+            return None;
+        }
+        let quiet = self.last_plain_char.is_some_and(|last| {
+            now.saturating_duration_since(last) > PASTE_BURST_ACTIVE_IDLE_TIMEOUT
+        });
+        if !quiet {
+            return None;
+        }
+        Some(self.finish())
+    }
+
+    /// End the burst now, whatever the clock says — a key that cannot belong
+    /// to a paste is about to be handled.
+    pub fn flush_now(&mut self) -> Option<String> {
+        if !self.active && self.buffer.is_empty() {
+            return None;
+        }
+        let buffer = self.finish();
+        (!buffer.is_empty()).then_some(buffer)
+    }
+
+    /// Flush and forget the classification window in one step: the next
+    /// keystroke starts a fresh run instead of joining the one just ended.
+    pub fn flush_now_and_clear(&mut self) -> Option<String> {
+        let flushed = self.flush_now();
+        self.clear_window();
+        flushed
+    }
+
+    /// Forget the classification window (the buffer is untouched).
+    ///
+    /// Used after an authoritative bracketed paste or a non-character key:
+    /// the next keystroke must start a fresh run rather than being grouped
+    /// with a burst that has already ended.
+    pub fn clear_window(&mut self) {
+        self.last_plain_char = None;
+        self.consecutive = 0;
+        self.window_until = None;
+    }
+
+    /// When an active burst will be flushable, for a driver that polls.
+    ///
+    /// `None` when no burst is accumulating.
+    pub fn flush_deadline(&self) -> Option<Instant> {
+        if !self.active {
+            return None;
+        }
+        self.last_plain_char
+            .map(|last| last + PASTE_BURST_ACTIVE_IDLE_TIMEOUT)
+    }
+
+    /// Reset the active state, handing the buffer back.
+    ///
+    /// `window_until` deliberately survives: codex's enter-suppress window
+    /// outlives the buffer, so the trailing newline of a paste is still read
+    /// as a newline right after the text has been handed over.
+    fn finish(&mut self) -> String {
+        self.active = false;
+        self.consecutive = 0;
+        std::mem::take(&mut self.buffer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +1051,150 @@ mod tests {
             assert!(!is_mouse_sequence(sequence), "{sequence:?} is not a report");
             assert_eq!(parse_mouse_sequence(sequence), None);
         }
+    }
+
+    // -- paste burst ---------------------------------------------------
+
+    /// A clock the tests advance by hand: `Instant` cannot be constructed
+    /// from a fixed value, so every step is built by adding to one base.
+    fn at(base: Instant, millis: u64) -> Instant {
+        base + Duration::from_millis(millis)
+    }
+
+    #[test]
+    fn three_fast_characters_become_one_burst() {
+        let base = Instant::now();
+        let mut burst = PasteBurst::new();
+        // The first two characters are ordinary typing; nothing is held.
+        assert_eq!(burst.on_plain_char('l', at(base, 0)), BurstDecision::Typed);
+        assert_eq!(burst.on_plain_char('o', at(base, 2)), BurstDecision::Typed);
+        // The third one, inside the window, confirms the burst and names the
+        // two characters already typed as its prefix.
+        assert_eq!(
+            burst.on_plain_char('g', at(base, 4)),
+            BurstDecision::BeginBurst { retro_chars: 2 }
+        );
+        assert!(burst.is_active());
+        assert_eq!(burst.buffered(), "g");
+        burst.absorb_retro("lo");
+        assert_eq!(burst.buffered(), "log");
+        // Every further fast character joins the buffer instead of typing.
+        assert_eq!(
+            burst.on_plain_char('s', at(base, 6)),
+            BurstDecision::Buffered
+        );
+        assert_eq!(burst.buffered(), "logs");
+    }
+
+    #[test]
+    fn characters_outside_the_window_stay_ordinary_typing() {
+        let base = Instant::now();
+        let mut burst = PasteBurst::new();
+        assert_eq!(burst.on_plain_char('h', at(base, 0)), BurstDecision::Typed);
+        // 120 ms later is human typing, not a paste.
+        assert_eq!(
+            burst.on_plain_char('e', at(base, 120)),
+            BurstDecision::Typed
+        );
+        assert_eq!(
+            burst.on_plain_char('y', at(base, 240)),
+            BurstDecision::Typed
+        );
+        assert!(!burst.is_active(), "slow typing never opens a burst");
+        assert_eq!(burst.flush_now(), None);
+    }
+
+    #[test]
+    fn a_burst_flushes_only_after_the_idle_timeout() {
+        let base = Instant::now();
+        let mut burst = PasteBurst::new();
+        let mut typed = String::new();
+        for (index, c) in "log line".chars().enumerate() {
+            match burst.on_plain_char(c, at(base, index as u64)) {
+                BurstDecision::Typed => typed.push(c),
+                BurstDecision::BeginBurst { retro_chars } => {
+                    // The caller's half: move the already-typed prefix (ASCII
+                    // here, so bytes and chars coincide) into the burst.
+                    let split = typed.len() - retro_chars;
+                    let prefix = typed[split..].to_string();
+                    typed.truncate(split);
+                    burst.absorb_retro(&prefix);
+                }
+                BurstDecision::Buffered => {}
+            }
+        }
+        assert!(
+            typed.is_empty(),
+            "the retro-grab moved every typed character into the burst"
+        );
+        // Still warm: nothing to flush yet.
+        assert_eq!(
+            burst.flush_if_due(at(base, 10)),
+            None,
+            "the burst is still accumulating"
+        );
+        let idle = PASTE_BURST_ACTIVE_IDLE_TIMEOUT + Duration::from_millis(1);
+        let now = at(base, 7) + idle;
+        assert_eq!(burst.flush_if_due(now).as_deref(), Some("log line"));
+        assert!(!burst.is_active());
+        assert_eq!(burst.buffered(), "");
+        // The window is spent: a later character starts a fresh run.
+        let later = now + Duration::from_millis(50);
+        assert_eq!(burst.on_plain_char('x', later), BurstDecision::Typed);
+    }
+
+    #[test]
+    fn enter_inside_a_burst_is_a_newline_and_the_window_outlives_the_buffer() {
+        let base = Instant::now();
+        let mut burst = PasteBurst::new();
+        let _ = burst.on_plain_char('a', at(base, 0));
+        let _ = burst.on_plain_char('b', at(base, 1));
+        assert_eq!(
+            burst.on_plain_char('c', at(base, 2)),
+            BurstDecision::BeginBurst { retro_chars: 2 }
+        );
+        burst.absorb_retro("ab");
+        assert!(burst.append_control_if_active('\n', at(base, 3)));
+        assert!(burst.newline_should_insert(at(base, 4)));
+        let flushed = burst.flush_now().expect("the burst flushes");
+        assert_eq!(flushed, "abc\n");
+        // The suppress window is still open: a fast trailing Enter stays a
+        // newline instead of submitting the paste. But a control character
+        // never *starts* a burst, so it is rejected here.
+        assert!(burst.newline_should_insert(at(base, 10)));
+        assert!(!burst.append_control_if_active('\n', at(base, 10)));
+        assert!(!burst.newline_should_insert(at(base, 500)));
+    }
+
+    #[test]
+    fn abort_hands_every_buffered_character_back() {
+        let base = Instant::now();
+        let mut burst = PasteBurst::new();
+        let _ = burst.on_plain_char('a', at(base, 0));
+        let _ = burst.on_plain_char('b', at(base, 1));
+        let _ = burst.on_plain_char('c', at(base, 2));
+        let recovered = burst.abort();
+        assert_eq!(recovered, "c", "the current char is never lost");
+        assert!(!burst.is_active());
+        assert_eq!(burst.buffered(), "");
+    }
+
+    #[test]
+    fn the_flush_deadline_tracks_the_active_burst() {
+        let base = Instant::now();
+        let mut burst = PasteBurst::new();
+        assert_eq!(burst.flush_deadline(), None);
+        for (index, c) in "abc".chars().enumerate() {
+            let _ = burst.on_plain_char(c, at(base, index as u64));
+        }
+        assert_eq!(
+            burst.flush_deadline(),
+            Some(at(base, 2) + PASTE_BURST_ACTIVE_IDLE_TIMEOUT)
+        );
+        burst.clear_window();
+        assert!(burst.is_active(), "clearing the window keeps the buffer");
+        assert_eq!(burst.flush_now_and_clear().as_deref(), Some("c"));
+        assert_eq!(burst.flush_deadline(), None);
+        assert!(!burst.newline_should_insert(base + Duration::from_secs(1)));
     }
 }

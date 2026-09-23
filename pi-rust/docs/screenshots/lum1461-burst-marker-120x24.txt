@@ -1,0 +1,26 @@
+FRAME DUMP cols=120 rows=24
+|> Ready — paste a log into a terminal that sends no paste event.                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|                                                                                                                        |
+|> [paste #1 +12 lines]▍                                                                                                 |
+|Faux  burst                                                                                in 0 out 0 ?/1.0k  ? for help|
+END FRAME DUMP

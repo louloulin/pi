@@ -224,7 +224,10 @@ use crate::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
 use crate::theme::ThemeColor;
 use crate::undo_stack::UndoStack;
 use crate::visual_text::VisualLayout;
-use crate::word_navigation::{find_word_backward, find_word_forward};
+use crate::word_navigation::{
+    find_word_backward, find_word_backward_with_atoms, find_word_forward,
+    find_word_forward_with_atoms,
+};
 
 #[cfg(test)]
 use crate::input::KeyModifiers;
@@ -577,6 +580,13 @@ pub struct Editor {
     pastes: BTreeMap<u32, String>,
     /// Id handed to the next paste marker; monotonic per editor instance.
     paste_counter: u32,
+    /// A recall put a marker into the draft whose content this editor never
+    /// had (a marker that only ever existed in the cross-session history
+    /// file). The caller can surface one hint about it.
+    stale_paste_notice: bool,
+    /// Whether the stale-marker hint has already been shown this session, so
+    /// recalling the same marker again stays quiet.
+    stale_paste_notified: bool,
 }
 
 impl Default for Editor {
@@ -614,6 +624,8 @@ impl Editor {
             images: Vec::new(),
             pastes: BTreeMap::new(),
             paste_counter: 0,
+            stale_paste_notice: false,
+            stale_paste_notified: false,
         }
     }
 
@@ -665,6 +677,13 @@ impl Editor {
         self.images = entry.images.clone();
         self.last_action = LastAction::Other;
         self.cancel_autocomplete();
+        // A marker restored from the cross-session history file has no
+        // registry entry behind it (the file stores text only), so it is
+        // ordinary text now. Raise the one-shot hint the first time it
+        // happens in a session.
+        if !self.stale_paste_notified && !self.unresolved_paste_marker_ids().is_empty() {
+            self.stale_paste_notice = true;
+        }
     }
 
     /// Clear the buffer without touching history, and drop the undo
@@ -1367,6 +1386,82 @@ impl Editor {
         self.pastes.keys().copied().collect()
     }
 
+    /// Ids of the markers standing in the draft whose content this editor
+    /// does not have.
+    ///
+    /// A recall from the cross-session history file is the way this happens:
+    /// the file stores the marker text only (see [`crate::history_store`]),
+    /// so after a restart the `[paste #1 +12 lines]` comes back with no
+    /// registry entry behind it. Such a marker is **ordinary text** — it is
+    /// not atomic and [`Editor::expanded_text`] leaves it literal — and
+    /// [`Editor::take_stale_paste_notice`] reports the first recall that
+    /// brought one in.
+    pub fn unresolved_paste_marker_ids(&self) -> Vec<u32> {
+        paste_marker_spans(&self.buffer)
+            .into_iter()
+            .map(|span| span.id)
+            .filter(|id| !self.pastes.contains_key(id))
+            .collect()
+    }
+
+    /// Consume the "a recalled marker has no content" notice.
+    ///
+    /// Returns `true` at most once per editor instance, so a caller can
+    /// flash one hint however many times the same orphan marker is recalled.
+    pub fn take_stale_paste_notice(&mut self) -> bool {
+        if !self.stale_paste_notice {
+            return false;
+        }
+        self.stale_paste_notice = false;
+        self.stale_paste_notified = true;
+        true
+    }
+
+    /// Spans of the paste markers inside `slice` whose content is still in
+    /// the registry, as byte ranges relative to `slice`.
+    ///
+    /// This is the Rust stand-in for upstream's `validPasteIds()` +
+    /// `segmentWithMarkers`: only a marker with a live registry entry is
+    /// atomic (a stale one from a restored history entry is plain text).
+    fn atomic_paste_spans(&self, slice: &str) -> Vec<(usize, usize)> {
+        paste_marker_spans(slice)
+            .into_iter()
+            .filter(|span| self.pastes.contains_key(&span.id))
+            .map(|span| (span.start, span.end))
+            .collect()
+    }
+
+    /// Remove the last `chars` characters before the cursor and return them.
+    ///
+    /// Used when a paste burst is confirmed ([`crate::input::PasteBurst`]):
+    /// the characters already inserted as ordinary typing are folded into the
+    /// burst so the whole paste goes through [`Editor::insert_paste`] in one
+    /// piece. The cut is its own undo unit — a misclassified burst can be
+    /// undone back to plain text — and it never drops anything: the returned
+    /// string carries every byte that was removed.
+    pub fn cut_chars_before_cursor(&mut self, chars: usize) -> String {
+        if chars == 0 || self.cursor == 0 {
+            return String::new();
+        }
+        let mut start = self.cursor;
+        for _ in 0..chars {
+            let prev = self.prev_char_boundary(start);
+            if prev == start {
+                break;
+            }
+            start = prev;
+        }
+        let taken = self.buffer[start..self.cursor].to_string();
+        self.push_undo_snapshot();
+        self.remove_images_in_range(start..self.cursor);
+        self.buffer.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        self.preferred_col = None;
+        self.last_action = LastAction::Other;
+        self.reset_history_navigation();
+        taken
+    }
+
     /// The draft with every paste marker replaced by the text it stands
     /// for: [`Editor::display_text`] with the pastes put back.
     ///
@@ -1780,8 +1875,10 @@ impl Editor {
     /// Move the cursor one word to the left (`Alt+B`, `Alt+Left` or
     /// `Ctrl+Left`, `tui.editor.cursorWordLeft`). Trailing whitespace is
     /// skipped, then the cursor stops at the next word / punctuation
-    /// boundary; at the start of a logical line it steps onto the end of
-    /// the previous one (upstream `moveWordBackwards`).
+    /// boundary; a `[paste #N …]` marker is one atomic word, so a single
+    /// step crosses all of it (upstream `moveWordBackwards` with
+    /// `isAtomicSegment`). At the start of a logical line it steps onto the
+    /// end of the previous one.
     pub fn move_word_left(&mut self) -> EditorAction {
         if self.cursor == 0 {
             return EditorAction::None;
@@ -1792,7 +1889,9 @@ impl Editor {
             // which is the newline's own offset.
             start - 1
         } else {
-            start + find_word_backward(&self.buffer[start..self.cursor], self.cursor - start)
+            let slice = &self.buffer[start..self.cursor];
+            let atoms = self.atomic_paste_spans(slice);
+            start + find_word_backward_with_atoms(slice, self.cursor - start, &atoms)
         };
         if target == self.cursor {
             return EditorAction::None;
@@ -1807,8 +1906,8 @@ impl Editor {
     /// Move the cursor one word to the right (`Alt+F`, `Alt+Right` or
     /// `Ctrl+Right`, `tui.editor.cursorWordRight`). Leading whitespace is
     /// skipped, then the cursor stops at the next word / punctuation
-    /// boundary; at the end of a logical line it steps onto the start of
-    /// the next one (upstream `moveWordForwards`).
+    /// boundary; a `[paste #N …]` marker is one atomic word. At the end of a
+    /// logical line it steps onto the start of the next one.
     pub fn move_word_right(&mut self) -> EditorAction {
         if self.cursor >= self.buffer.len() {
             return EditorAction::None;
@@ -1823,7 +1922,9 @@ impl Editor {
                 end
             }
         } else {
-            start + find_word_forward(&self.buffer[start..end], self.cursor - start)
+            let slice = &self.buffer[start..end];
+            let atoms = self.atomic_paste_spans(slice);
+            start + find_word_forward_with_atoms(slice, self.cursor - start, &atoms)
         };
         if target == self.cursor {
             return EditorAction::None;
