@@ -31,6 +31,17 @@ interface VisualLayoutResult {
 	rows: number;
 }
 
+/**
+ * Visual candidate for cursor positioning: index, row, column, and wrap end affinity.
+ * Mirrors Martty's visual_candidates() entry.
+ */
+interface VisualCandidate {
+	index: number;
+	row: number;
+	col: number;
+	wrapEnd: boolean;
+}
+
 export interface InputOptions {
 	prompt?: string;
 	placeholder?: string;
@@ -63,9 +74,17 @@ export class Input implements Component, Focusable {
 	// When moving up/down in multi-line, preserve the original display column.
 	private preferredVisualCol: number | null = null;
 
+	// Wrap end affinity - when cursor is at a soft wrap boundary, this tracks
+	// whether it should prefer the previous row's end position instead of the next row's start.
+	// Mirrors Martty's `cursor_at_wrap_end` field.
+	private cursorAtWrapEnd: boolean = false;
+
+	// Last render width - used for vertical movement calculations.
+	private lastRenderWidth: number = 80;
+
 	// Cached visual layout for current width.
-	private cachedLayoutWidth: number = 0;
 	private cachedLayout: VisualLayoutResult | null = null;
+	private cachedLayoutWidth: number = 0;
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
 
@@ -230,17 +249,26 @@ export class Input implements Component, Focusable {
 
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.lastAction = null;
-			this.cursor = 0;
-			// Reset preferred column
-			this.preferredVisualCol = null;
+			this.moveToVisualLineStart(this.lastRenderWidth);
 			return;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
 			this.lastAction = null;
-			this.cursor = this.value.length;
-			// Reset preferred column
-			this.preferredVisualCol = null;
+			this.moveToVisualLineEnd(this.lastRenderWidth);
+			return;
+		}
+
+		// Vertical movement - mirrors Martty's move_vertical()
+		if (kb.matches(data, "tui.editor.cursorUp")) {
+			this.lastAction = null;
+			this.moveVertical(this.lastRenderWidth, -1);
+			return;
+		}
+
+		if (kb.matches(data, "tui.editor.cursorDown")) {
+			this.lastAction = null;
+			this.moveVertical(this.lastRenderWidth, 1);
 			return;
 		}
 
@@ -315,6 +343,7 @@ export class Input implements Component, Focusable {
 		this.lastAction = null;
 		// Reset preferred column on mouse click positioning
 		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 		return { handled: true, focus: true };
 	}
 
@@ -332,6 +361,7 @@ export class Input implements Component, Focusable {
 		this.cachedLayout = null;
 		// Reset preferred column on edit
 		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	private handleBackspace(): void {
@@ -346,6 +376,7 @@ export class Input implements Component, Focusable {
 			this.cursor -= graphemeLength;
 			this.cachedLayout = null;
 			this.preferredVisualCol = null;
+			this.cursorAtWrapEnd = false;
 		}
 	}
 
@@ -360,6 +391,7 @@ export class Input implements Component, Focusable {
 			this.value = this.value.slice(0, this.cursor) + this.value.slice(this.cursor + graphemeLength);
 			this.cachedLayout = null;
 			this.preferredVisualCol = null;
+			this.cursorAtWrapEnd = false;
 		}
 	}
 
@@ -380,6 +412,8 @@ export class Input implements Component, Focusable {
 		this.killRing.push(deletedText, { prepend: false, accumulate: this.lastAction === "kill" });
 		this.lastAction = "kill";
 		this.value = this.value.slice(0, this.cursor);
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	private deleteWordBackwards(): void {
@@ -401,6 +435,8 @@ export class Input implements Component, Focusable {
 
 		this.value = this.value.slice(0, deleteFrom) + this.value.slice(this.cursor);
 		this.cursor = deleteFrom;
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	private deleteWordForward(): void {
@@ -421,6 +457,8 @@ export class Input implements Component, Focusable {
 		this.lastAction = "kill";
 
 		this.value = this.value.slice(0, this.cursor) + this.value.slice(deleteTo);
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	private yank(): void {
@@ -432,6 +470,8 @@ export class Input implements Component, Focusable {
 		this.value = this.value.slice(0, this.cursor) + text + this.value.slice(this.cursor);
 		this.cursor += text.length;
 		this.lastAction = "yank";
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	private yankPop(): void {
@@ -450,6 +490,8 @@ export class Input implements Component, Focusable {
 		this.value = this.value.slice(0, this.cursor) + text + this.value.slice(this.cursor);
 		this.cursor += text.length;
 		this.lastAction = "yank";
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	private pushUndo(): void {
@@ -478,6 +520,173 @@ export class Input implements Component, Focusable {
 		this.cursor = findWordForward(this.value, this.cursor);
 		// Reset preferred column on explicit cursor movement
 		this.preferredVisualCol = null;
+	}
+
+	/**
+	 * Move by one visual row while preserving the original display column.
+	 * Mirrors Martty's `move_vertical()` method.
+	 * @param width - The terminal width for calculating visual layout
+	 * @param direction - -1 for up, +1 for down
+	 */
+	private moveVertical(width: number, direction: number): void {
+		const effectiveWidth = Math.max(1, width);
+		const { candidates, rows } = this.computeVisualCandidates(effectiveWidth);
+		const { row, col } = this.getVisualCursor(effectiveWidth);
+
+		// Set preferred column on first vertical move
+		const goal = this.preferredVisualCol ?? col;
+		this.preferredVisualCol = goal;
+
+		// Calculate target row
+		let targetRow: number | null;
+		if (direction < 0) {
+			targetRow = row > 0 ? row - 1 : null;
+		} else if (direction > 0 && row + 1 < rows) {
+			targetRow = row + 1;
+		} else {
+			targetRow = null;
+		}
+
+		if (targetRow === null) {
+			return;
+		}
+
+		// Find the best candidate on the target row (closest column to goal)
+		let best: { index: number; distance: number; wrapEnd: boolean } | null = null;
+		for (const candidate of candidates) {
+			if (candidate.row !== targetRow) {
+				continue;
+			}
+			const distance = Math.abs(candidate.col - goal);
+			if (best === null || distance < best.distance) {
+				best = { index: candidate.index, distance, wrapEnd: candidate.wrapEnd };
+			}
+		}
+
+		if (best !== null) {
+			this.cursor = best.index;
+			this.cursorAtWrapEnd = best.wrapEnd;
+		}
+	}
+
+	/**
+	 * Move to the beginning of the current rendered row, not the beginning
+	 * of the whole text. Mirrors Martty's `move_to_visual_line_start()` method.
+	 * @param width - The terminal width for calculating visual layout
+	 */
+	private moveToVisualLineStart(width: number): void {
+		const effectiveWidth = Math.max(1, width);
+		const { candidates } = this.computeVisualCandidates(effectiveWidth);
+		const currentRow = this.getVisualCursor(effectiveWidth).row;
+
+		// Find the leftmost position on the current row
+		let bestIndex = 0;
+		let bestCol = Infinity;
+		for (const candidate of candidates) {
+			if (candidate.row === currentRow && candidate.col < bestCol) {
+				bestCol = candidate.col;
+				bestIndex = candidate.index;
+			}
+		}
+
+		this.cursor = bestIndex;
+		this.cursorAtWrapEnd = false;
+		this.preferredVisualCol = null;
+	}
+
+	/**
+	 * Move to the end of the current rendered row. A soft-wrap boundary has
+	 * two visual affinities; retain the upstream one so the cursor remains
+	 * visibly at this row's end instead of appearing on the next row.
+	 * Mirrors Martty's `move_to_visual_line_end()` method.
+	 * @param width - The terminal width for calculating visual layout
+	 */
+	private moveToVisualLineEnd(width: number): void {
+		const effectiveWidth = Math.max(1, width);
+		const { candidates } = this.computeVisualCandidates(effectiveWidth);
+		const currentRow = this.getVisualCursor(effectiveWidth).row;
+
+		// Find the rightmost position on the current row
+		let bestIndex = 0;
+		let bestCol = -1;
+		let bestWrapEnd = false;
+		for (const candidate of candidates) {
+			if (candidate.row === currentRow && candidate.col > bestCol) {
+				bestCol = candidate.col;
+				bestIndex = candidate.index;
+				bestWrapEnd = candidate.wrapEnd;
+			}
+		}
+
+		this.cursor = bestIndex;
+		this.cursorAtWrapEnd = bestWrapEnd;
+		this.preferredVisualCol = null;
+	}
+
+	/**
+	 * Compute visual candidates with wrap end affinity.
+	 * Mirrors Martty's `visual_candidates()` method.
+	 */
+	private computeVisualCandidates(width: number): { candidates: VisualCandidate[]; rows: number } {
+		const layout = this.computeVisualLayout(width);
+		const chars: string[] = [...this.value];
+		const candidates: VisualCandidate[] = [];
+
+		for (let index = 0; index < layout.carets.length; index++) {
+			const caret = layout.carets[index]!;
+			candidates.push({
+				index,
+				row: caret.row,
+				col: caret.col,
+				wrapEnd: false,
+			});
+
+			// Check for wrap end affinity
+			const wrapEndPos = this.getWrapEndPosition(index, chars, layout.carets);
+			if (wrapEndPos !== null) {
+				candidates.push({
+					index,
+					row: wrapEndPos.row,
+					col: wrapEndPos.col,
+					wrapEnd: true,
+				});
+			}
+		}
+
+		return { candidates, rows: layout.rows };
+	}
+
+	/**
+	 * Get the wrap end position for a character boundary.
+	 * Returns the position just after the last character of the previous row
+	 * (visual row end affinity). Mirrors Martty's `wrap_end_position()` method.
+	 */
+	private getWrapEndPosition(
+		index: number,
+		chars: string[],
+		carets: VisualCaret[],
+	): { row: number; col: number } | null {
+		if (index === 0) {
+			return null;
+		}
+
+		const previous = chars[index - 1];
+		if (previous === undefined || previous === "\n") {
+			return null;
+		}
+
+		const currentCaret = carets[index];
+		const prevCaret = carets[index - 1];
+		if (currentCaret.row > prevCaret.row) {
+			// This is a wrap boundary
+			const charWidth = visibleWidth(previous);
+			return {
+				row: prevCaret.row,
+				col: prevCaret.col + Math.max(charWidth, 1),
+			};
+		}
+
+		return null;
 	}
 
 	/**
@@ -557,6 +766,7 @@ export class Input implements Component, Focusable {
 		// Invalidate visual layout cache
 		this.cachedLayout = null;
 		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	/**
@@ -607,18 +817,30 @@ export class Input implements Component, Focusable {
 
 	/**
 	 * Get the current visual cursor position as (row, column).
+	 * Respects wrap end affinity, mirroring Martty's `visual_cursor()` method.
 	 */
 	getVisualCursor(width: number): VisualCaret {
 		const layout = this.computeVisualLayout(width);
 		const index = Math.min(this.cursor, layout.carets.length - 1);
+
+		// Check wrap end affinity
+		if (this.cursorAtWrapEnd) {
+			const chars: string[] = [...this.value];
+			const wrapEndPos = this.getWrapEndPosition(index, chars, layout.carets);
+			if (wrapEndPos !== null) {
+				return wrapEndPos;
+			}
+		}
+
 		return layout.carets[index]!;
 	}
 
 	/**
-	 * Get the total visual row count at the given width.
+	 * Get the visual row count at the given width.
+	 * Mirrors Martty's `visual_row_count()` method.
 	 */
 	getVisualRowCount(width: number): number {
-		return this.computeVisualLayout(width).rows;
+		return this.computeVisualLayout(Math.max(1, width)).rows;
 	}
 
 	/**
@@ -627,6 +849,16 @@ export class Input implements Component, Focusable {
 	 */
 	resetPreferredVisualCol(): void {
 		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
+	}
+
+	/**
+	 * Reset the vertical goal (preferred column and wrap end affinity).
+	 * Mirrors Martty's `reset_vertical_goal()` method.
+	 */
+	resetVerticalGoal(): void {
+		this.preferredVisualCol = null;
+		this.cursorAtWrapEnd = false;
 	}
 
 	invalidate(): void {
@@ -634,6 +866,9 @@ export class Input implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		// Store the render width for vertical movement calculations
+		this.lastRenderWidth = width;
+
 		// Calculate visible window
 		const availableWidth = width - visibleWidth(this.prompt);
 
