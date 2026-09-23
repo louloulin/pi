@@ -1,0 +1,178 @@
+# lum1457-win-key-release-after-80x26.png — chars, 80x26 cells (Windows ConPTY backend)
+
+===== LUM-1457 Windows key-release defect: a ConPTY run of the real pi.exe. crossterm's Win32 backend reports a `Release` record after every key press, and `App::translate_event` used to map both kinds to an InputEvent — so every keystroke ran its handler twice. Panels 2-4 are the A/B: the pre-fix binary renders `> aallpphhaa  bbeettaa` after typing `alpha beta`, and one Backspace deletes two characters. Panel 5 submits a draft and shows the reply landing exactly once. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 80x26.  |  [1] 1. idle: composer holds `type a prompt`  (cursor 80,25, frame 65beab9dbd04, px e42d305f7b02, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7cb9521d9fb44          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> type a prompt'  — the composer starts empty with its placeholder
+
+===== LUM-1457 Windows key-release defect: a ConPTY run of the real pi.exe. crossterm's Win32 backend reports a `Release` record after every key press, and `App::translate_event` used to map both kinds to an InputEvent — so every keystroke ran its handler twice. Panels 2-4 are the A/B: the pre-fix binary renders `> aallpphhaa  bbeettaa` after typing `alpha beta`, and one Backspace deletes two characters. Panel 5 submits a draft and shows the reply landing exactly once. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 80x26.  |  [2] 2. type `alpha beta`: one physical keystroke, one character  (cursor 36,24, frame a421c2047ac9, px f572ead27473, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha beta▍
+Faux test model  session-18d7cb9521d9fb44          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> alpha beta▍'  — the draft is exactly what was typed, caret at the end
+  assert PASS   reject       'aallpphhaa'  — the pre-fix binary doubled every character (press + release both mapped). This row is a hard FAIL on that binary and the reason this scenario exists.
+
+===== LUM-1457 Windows key-release defect: a ConPTY run of the real pi.exe. crossterm's Win32 backend reports a `Release` record after every key press, and `App::translate_event` used to map both kinds to an InputEvent — so every keystroke ran its handler twice. Panels 2-4 are the A/B: the pre-fix binary renders `> aallpphhaa  bbeettaa` after typing `alpha beta`, and one Backspace deletes two characters. Panel 5 submits a draft and shows the reply landing exactly once. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 80x26.  |  [3] 3. one Backspace deletes one character  (cursor 13,24, frame 024361d6b612, px 70069b76fa87, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha bet▍
+Faux test model  session-18d7cb9521d9fb44          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> alpha bet▍'  — `a` removed once
+  assert PASS   reject       'aallpphhaa'  — a doubled stream shows doubled text here too
+
+===== LUM-1457 Windows key-release defect: a ConPTY run of the real pi.exe. crossterm's Win32 backend reports a `Release` record after every key press, and `App::translate_event` used to map both kinds to an InputEvent — so every keystroke ran its handler twice. Panels 2-4 are the A/B: the pre-fix binary renders `> aallpphhaa  bbeettaa` after typing `alpha beta`, and one Backspace deletes two characters. Panel 5 submits a draft and shows the reply landing exactly once. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 80x26.  |  [4] 4. one Ctrl+W kills one word  (cursor 12,24, frame e98700c5e456, px 0237ff89d1f9, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> alpha ▍
+Faux test model  session-18d7cb9521d9fb44          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> alpha ▍'  — `bet` is gone; the trailing space is kept because the caret sits after it
+
+===== LUM-1457 Windows key-release defect: a ConPTY run of the real pi.exe. crossterm's Win32 backend reports a `Release` record after every key press, and `App::translate_event` used to map both kinds to an InputEvent — so every keystroke ran its handler twice. Panels 2-4 are the A/B: the pre-fix binary renders `> aallpphhaa  bbeettaa` after typing `alpha beta`, and one Backspace deletes two characters. Panel 5 submits a draft and shows the reply landing exactly once. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 80x26.  |  [5] 5. Enter submits the draft once and the reply lands once  (cursor 30,3, frame a8334d18ce3b, px 22fb8eae3e92, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hi
+  f          hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7cb9521d9fb44          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       'hello' (x1)  — the faux model's reply (`(faux) hello`, rendered as the dim provider label plus the reply text) landed, so the submit really reached the agent
+  assert PASS   reject       'hhii'  — a doubled keystroke stream submits `hhii` instead of `hi`
+
+===== LUM-1457 Windows key-release defect: a ConPTY run of the real pi.exe. crossterm's Win32 backend reports a `Release` record after every key press, and `App::translate_event` used to map both kinds to an InputEvent — so every keystroke ran its handler twice. Panels 2-4 are the A/B: the pre-fix binary renders `> aallpphhaa  bbeettaa` after typing `alpha beta`, and one Backspace deletes two characters. Panel 5 submits a draft and shows the reply landing exactly once. Captured with scripts/pty_capture_win.py on Windows 10 (ConPTY), 80x26.  |  [6] 6. the composer is empty again after the submit  (cursor 30,3, frame a8334d18ce3b, px 22fb8eae3e92, alive=True) =====
+pi v0.1.0
+hints hidden on a short terminal — Alt+H shows them
+> hi
+  f          hello
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+> type a prompt — /help for commands
+Faux test model  session-18d7cb9521d9fb44          in 0 out 0 ?/8.2k  ? for help
+  assert PASS   expect       '> type a prompt'  — the draft was handed over, the placeholder is back

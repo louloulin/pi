@@ -571,6 +571,44 @@ bash 忙提示与 `/settings` 描述），无丢失。
 差额来自 §0.15 自己就记过的**同一命令在不同轮次给出 ±51** 的口径差（它当时只在 2,670 上加增量，
 没有重估历史轴）。本轮同样**不重估** §0.14/§0.15 的旧值，只把合并后实测量登记在这里。
 
+### 0.17 LUM-1457 复测：Windows 真 PTY 打通 + 「每次按键执行两遍」修复；加权 **86.8%**（86.81%）
+
+基线与 §0.16.1 相同（`origin/feature/pi.rs` = `815b21d13`），本轮从它起。改动面：
+`pi-tui`（`app.rs` 的事件翻译 + 1 个新测试文件）、`pi-coding-agent`（`interactive.rs` 一处调用点）、
+`scripts/`（ConPTY 后端 + 场景 + 共享渲染器）。
+
+| 量 | 本轮实测 | §0.16.1 | 说明 |
+|---|---|---|---|
+| 纯代码规模（src↔src） | **91.5%**（140,063 / 153,106） | 91.5%（140,032） | `python pi-rust/scripts/measure_loc.py`；+31 行 src（事件翻译） |
+| 测试规模 | **51.2%**（2,720 / 5,309） | 51.1%（2,711） | +9 = `key_event_kinds.rs` |
+| TUI 模块面 | 35 / 42 = 83.3% | 同 | 无新模块 |
+| `app.*` 接线 | 43 / 44 = 97.7% | 同 | `app.tree.editLabel` 仍是缺组件，见 `LUM1457_WIN_KEY_RELEASE.md` §6.3 |
+| `tui.*` 消费面 | 49 / 49 = 100% | 同 | 口径缺陷（§6.4 同） |
+| 扩展生命周期事件 | 36 / 36 | 同 | 未动 |
+| `pi-tui` 全量 | **1,054 passed / 0 failed** | 1,045 / 0 | +9 |
+| `pi-coding-agent --lib` | **584 / 8** | 584 / 8 | 8 条逐字同名（Windows 环境类） |
+| 真 ConPTY 场景 | 9/9、15 PASS+1 XFAIL、8 帧 | ——（Windows 无法跑真 PTY） | `scripts/pty_capture_win.py`，见 §0.17.1 |
+
+```text
+5×1.00 + 13×0.90 + 8×1.00 + 6×0.70 + 14×0.905 + 8×0.90 + 7×0.783 + 7×0.70
+  + 8×0.95 + 7×1.000 + 9×0.85 + 5×0.5123 + 3×0.95 = 86.81% → **86.8%**
+```
+
+**为什么只走了 +0.01pt（诚实条目）**：本轮关掉的是 Windows 上「每个按键执行两遍」的 P0 缺陷，
+而它落在第 1 轴「可构建/可测/可运行」，该轴**修复前也是 100%**——Linux 上构建、测试、运行都正常，
+缺陷只在 Windows 真终端里可见。也就是说**这个 13 轴口径对平台通路类缺陷不敏感**；
+本轮不擅自加轴（新轴要先把测量做实，§0.16 同规矩），只把候选轴登记在
+`docs/LUM1457_WIN_KEY_RELEASE.md` §8 第 1 条。
+
+#### 0.17.1 本轮的真机证据（Windows ConPTY，首次）
+
+`scripts/pty_capture_win.py` 是 `pty_capture.py` 的 ConPTY 后端（只重写 spawn/pump/drain 三个原语，
+`encode_keys` / `Renderer` / 断言 schema / 场景 JSON 全部复用），因此**为 Linux 写的场景可原样在 Windows 跑**：
+`lum1360-chatinput-audit.json` → 15 PASS / 0 FAIL / 1 XFAIL；`interaction.json` → 8 帧全 TUI 交互；
+`lum1457-win-key-release.json` → 修复后 9 PASS（修复前 3 PASS / 6 FAIL，同一二进制对同一份场景）。
+附带修掉捕获器自身缺陷：`pyte` 无备用屏缓冲，`\x1b[?1049h` 被忽略导致主屏残留与备用屏首帧重叠
+（`AltScreenFeeder`，`scripts/pty_capture.py:485`）。
+
 ## 1. 方法与口径
 
 ### 1.1 测量命令（可复现）

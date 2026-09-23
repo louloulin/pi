@@ -275,6 +275,7 @@ fn gestures_translate_from_crossterm_with_coordinates() {
             row: 3,
             modifiers: KeyModifiers::SHIFT,
         }))
+        .unwrap()
     };
     assert_eq!(
         translate(MouseEventKind::Down(CtMouseButton::Left)),

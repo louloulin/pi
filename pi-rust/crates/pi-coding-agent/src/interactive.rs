@@ -699,7 +699,12 @@ async fn run_loop(
         // (see `drain_ready_events`).
         if ct_event::poll(config.event_poll_interval)? {
             for event in drain_ready_events(ct_event::poll, ct_event::read)? {
-                let translated = App::translate_event(event);
+                // `translate_event` drops Windows key *release* events, which
+                // carry no input but would otherwise replay every keystroke
+                // (see its doc comment).
+                let Some(translated) = App::translate_event(event) else {
+                    continue;
+                };
                 if let Some(action) =
                     handle_input_event(&mut app, &agent, &mut options, &mut bash, translated)
                         .await?

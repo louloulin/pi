@@ -15651,3 +15651,71 @@ Rust↔TS 复测（详见 `RUST_TS_PARITY_METRICS.md` §0.13）：本条 tip 上
 （`f2c22534`）并启动（run `01a0cac6-2294` queued，文件面 `pi-coding-agent/src/cli/` 与本轮零重叠）；
 收编＝**LUM-1432**（扩展事件）已完成但停在 `work/LUM-1432`，本轮并入 `feature/pi.rs`（§三）。
 不派第四条：`docs/LUM1445_MODAL_POINTER.md` §8 的 2、3 条与在办线共享 `pi-coding-agent`。
+
+## LUM-1457 round — Windows 真 PTY 打通（`scripts/pty_capture_win.py`，ConPTY）→ 当场抓到并修掉「每次按键执行两遍」（`pi-tui` 1054/0）；加权 **86.8%**
+
+### 一、本轮交付
+
+* **证据通道**：`scripts/pty_capture_win.py`（新）＝ `pty_capture.py` 的 ConPTY 后端，只重写
+  `spawn`/`pump`/`drain` 三个 OS 原语，`encode_keys` / `Renderer` / 断言 schema / 场景 JSON 全部复用。
+  Windows 上第一次能跑**真终端 + 真按键 + 真重绘**；为 Linux 写的 14 面板场景在 Windows 上原样跑通。
+  为此把 `pty_capture.py` 的 `fcntl`/`pty`/`termios` 改为软 import（Windows 无此三模块），
+  并补 Windows 等宽/CJK 字体候选。
+* **顺带修掉捕获器缺陷**：`pyte` 0.8.x 没有备用屏缓冲，`\x1b[?1049h` 被忽略 → 主屏的
+  `pi: <cwd> is not trusted` 警告与备用屏首帧叠在一行。新增 `AltScreenFeeder`
+  （`scripts/pty_capture.py:485`）在进入备用屏处原地清屏；Linux 后端一并修掉。
+* **P0 缺陷（本轮发现并修复）**：Windows 控制台为**每次按键**发 press + release 两条记录，
+  crossterm 两条都产出 `Event::Key`，而 `App::translate_event` 不看 `key.kind` →
+  **每个按键执行两遍**：打 `alpha` 出 `aallpphhaa`、一次 `Backspace` 删两个字符、一次 Enter 提交两次。
+  修复：`translate_event` 返回 `Option<InputEvent>`，丢弃 `Release`，保留 `Press`/`Repeat`
+  （`crates/pi-tui/src/app.rs:6147`；驱动侧 `crates/pi-coding-agent/src/interactive.rs:705`）。
+  这是**对齐上游**（Node readline 永不投递 release）而非平台特例；全仓无 chord 消费 `KeyEventKind`。
+* **9 条回归**（`crates/pi-tui/tests/key_event_kinds.rs`）：从 `CtEvent::Key` 起步（删掉过滤即红），
+  到编辑器草稿可见行为（一个字符 / 一次 Backspace / 一次提交 / 一次 Ctrl+W / 长按重复 / 鼠标路径未误伤）。
+* **反向验证**：把过滤改回「两个 kind 都映射」→ 9 条里 **7 条立刻红**，其中一条的断言正是
+  `left: "aallpphhaa"` vs `right: "alpha"`。
+
+### 二、门禁
+
+* `cargo test -p pi-tui --no-fail-fast`：**1054 passed / 0 failed**（基线 `815b21d13` 实测 1045/0 → +9）。
+* `cargo test -p pi-coding-agent --lib --no-fail-fast`：**584 / 8**（与基线**逐字同名**的 8 条 Windows 环境类：
+  绝对路径、trust、node fs、`resource_loader`）；定向 `-- drain_ready input_event interactive handle_input` → **107 / 0**。
+* `cargo fmt --all -- --check` 干净；`cargo clippy -p pi-tui --all-targets -- -D warnings` 0 warning。
+* `cargo build -p pi-coding-agent --bin pi` 成功（PTY 用的就是它）。
+
+### 三、真机证据（Windows ConPTY 现场截图 + 可 grep 的字符网格 dump）
+
+* `docs/screenshots/lum1457-win-key-release-before-80x26.png`(+`.txt`) — 修复前 **3 PASS / 6 FAIL**，
+  面板 2 的画面是 `> aallpphhaa  bbeettaa▍`。
+* `docs/screenshots/lum1457-win-key-release-after-80x26.png`(+`.txt`) — 修复后 **9 PASS / 0 FAIL**，
+  `> alpha beta▍` → 一次 Backspace → 一次 Ctrl+W → 提交 `hi` + 回复 1 次。
+* `docs/screenshots/lum1457-tui-interaction-conpty-120x34.png`(+`.txt`) — 8 帧全 TUI 交互
+  （启动头 17 行键位 / onboarding / `/` 模糊补全下拉 + `(1/21)` / `@` 文件补全 / composer / footer 计量）。
+  本仓库**第一张在 Windows 由真 PTY 会话产生**的多帧交互截图。
+* `docs/screenshots/lum1457-chatinput-audit-conpty-80x26.png`(+`.txt`) — LUM-1360 的 14 面板
+  chatinput 审计场景在 ConPTY 上原样跑：**15 PASS / 0 FAIL / 1 XFAIL**。
+
+### 四、新增发现（未修的两条已派发）
+
+1. **`Ctrl+J` 在 Windows 上是 `Ctrl+Enter`**（探针实测：写 `\n` 得到 `KeyCode::Enter + CONTROL`）。
+   `tui.input.newLine` 的出货键位是 `shift+enter`/`ctrl+j`，`ctrl+enter` 无人认领 →
+   该 chord 在 Windows 上按下去没反应（§三 chatinput 场景的 1 条 XFAIL 就是它）。
+2. **hyperlink 打开时助手行掉格**：`begin_assistant_stream` 写的 `[faux-model]` 与流式文本
+   `(faux) hello` 被 markdown 配成链接（label `faux-model`、URL `faux`）——**平台无关**：
+  kitty/ghostty/wezterm/Windows Terminal 上模型名会变成一个指向 `faux` 的可点链接、provider 名消失；
+  Linux 侧既有 dump 之所以正常，是因为那些终端没触发 hyperlink 探测。ConPTY 上还多一层
+  「10 个链接格只写出 1 个」的格丢失（对照实验排除了「ConPTY 不认逐格 OSC 8」与 pyte 解析，
+  根因未定位）。
+3. **`app.tree.editLabel` 不是键位问题**：`pi-protocol` 的 `SessionEntry` 没有 label 变体、
+   `pi-session` 没有它的存储，`TreeFilter::LabeledOnly` 一直拿 `Extension` 顶替——
+  补它 = 会话模型加 label + 树视图 + 内联 `LabelInput` + 持久化，跨 4 个 crate。
+
+### 五、槽位 / 派发
+
+**1 件自做 + 3 条 backlog（不启动 run）**：自做＝ConPTY 后端 + 事件翻译修复 + 回归 + 截图；
+新立 backlog＝① Windows 键位通路（`Ctrl+J` → `Ctrl+Enter`，需 Linux 侧交叉验证）② hyperlink 助手行掉格
+③ `app.tree.editLabel` 全链路。加上在办的 LUM-1434（CLI flag）与 backlog 的 LUM-1453（提示面残留），
+并发保持在「最多 3 个」上限内，本轮不新起第四条 run。
+
+**加权 86.8%（86.81%）— 与上一轮同一小数**，原因写在 `RUST_TS_PARITY_METRICS.md` §0.17：
+这类平台通路缺陷正好落在那 13 轴测不到的缝里（第 1 轴在修复前后都是 100%）。

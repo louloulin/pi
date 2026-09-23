@@ -81,15 +81,15 @@ fn mouse(kind: MouseEventKind, modifiers: KeyModifiers) -> CtEvent {
 #[test]
 fn scroll_up_and_down_translate_to_mouse_events() {
     assert_eq!(
-        App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::NONE)),
+        App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::NONE)).unwrap(),
         InputEvent::wheel(true, false, 1, 1)
     );
     assert_eq!(
-        App::translate_event(mouse(MouseEventKind::ScrollDown, KeyModifiers::NONE)),
+        App::translate_event(mouse(MouseEventKind::ScrollDown, KeyModifiers::NONE)).unwrap(),
         InputEvent::wheel(false, false, 1, 1)
     );
     assert_eq!(
-        App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::ALT)),
+        App::translate_event(mouse(MouseEventKind::ScrollUp, KeyModifiers::ALT)).unwrap(),
         InputEvent::wheel(true, true, 1, 1)
     );
 }
@@ -101,7 +101,7 @@ fn non_wheel_mouse_events_translate_to_gestures() {
     // `tests/mouse_selection.rs`).
     let expect = |kind: MouseEventKind, gesture: MouseGestureKind| {
         assert_eq!(
-            App::translate_event(mouse(kind, KeyModifiers::NONE)),
+            App::translate_event(mouse(kind, KeyModifiers::NONE)).unwrap(),
             InputEvent::MouseGesture(MouseGesture::new(gesture, 1, 1, false)),
             "{kind:?}"
         );
@@ -126,7 +126,7 @@ fn non_wheel_mouse_events_translate_to_gestures() {
 
     // The Alt modifier rides along on gestures too.
     assert_eq!(
-        App::translate_event(mouse(MouseEventKind::Moved, KeyModifiers::ALT)),
+        App::translate_event(mouse(MouseEventKind::Moved, KeyModifiers::ALT)).unwrap(),
         InputEvent::MouseGesture(MouseGesture::new(MouseGestureKind::Move, 1, 1, true))
     );
 }
