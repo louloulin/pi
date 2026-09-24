@@ -466,6 +466,8 @@ pub enum HistorySearchDirection {
 /// need for — the whole history is already in memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistorySearchStatus {
+    /// Search is open but no query has been typed yet; nothing is previewed.
+    Idle,
     /// A query is typed but nothing matches it; the original draft is back.
     NoMatch,
     /// A history entry is being previewed in the composer.
@@ -943,6 +945,18 @@ impl Editor {
         self.history_search = None;
     }
 
+    /// Clear persisted history (the file behind the attached history path).
+    ///
+    /// A `/clear-history` command calls this; it is a no-op when no path is
+    /// attached.
+    pub fn clear_persisted_history(&mut self) {
+        if let Some(path) = &self.history_path {
+            let store = crate::history_store::HistoryStore::new(path);
+            let _ = store.clear();
+        }
+        self.clear_history();
+    }
+
     /// Read-only access to history (oldest first).
     pub fn history(&self) -> impl Iterator<Item = &HistoryEntry> {
         self.history.iter()
@@ -957,7 +971,12 @@ impl Editor {
     /// history. Entries are prepended to the in-memory list so the store's
     /// newest entry appears most recently.
     pub fn set_history_store(&mut self, store: &crate::history_store::HistoryStore) {
-        for text in crate::history_store::load(store.path()).into_iter().rev() {
+        // Set the path so writes go to the right place
+        self.history_path = Some(store.path().to_path_buf());
+        for text in crate::history_store::load_with_limit(store.path(), store.limit())
+            .into_iter()
+            .rev()
+        {
             if self.history.len() >= HISTORY_LIMIT {
                 break;
             }
@@ -1039,6 +1058,8 @@ impl Editor {
         self.history_search.as_ref().map(|search| {
             if search.selected.is_some() {
                 HistorySearchStatus::Match
+            } else if search.query.is_empty() {
+                HistorySearchStatus::Idle
             } else {
                 HistorySearchStatus::NoMatch
             }

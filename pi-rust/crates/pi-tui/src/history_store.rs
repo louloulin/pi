@@ -41,7 +41,7 @@ pub const DEFAULT_HISTORY_FILE_LIMIT: usize = HISTORY_LIMIT;
 /// Cross-session composer history manager.
 ///
 /// Wraps the file-based history operations into a simple interface.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HistoryStore {
     path: PathBuf,
     limit: usize,
@@ -134,6 +134,15 @@ fn home_dir() -> Option<PathBuf> {
 /// Compaction is best-effort: a failure is ignored, because a read-only or
 /// locked file must not stop the TUI from starting.
 pub fn load(path: &Path) -> VecDeque<String> {
+    load_with_limit(path, HISTORY_LIMIT)
+}
+
+/// Read the persisted prompts, oldest first, capped at `limit`.
+///
+/// A missing file yields an empty list; unparsable lines are skipped. The
+/// cap keeps only the tail, because the newest entries are the ones a user
+/// recalls.
+pub fn load_with_limit(path: &Path, limit: usize) -> VecDeque<String> {
     let Ok(file) = fs::File::open(path) else {
         return VecDeque::new();
     };
@@ -145,7 +154,7 @@ pub fn load(path: &Path) -> VecDeque<String> {
             continue;
         };
         lines.push_back(text);
-        if lines.len() > HISTORY_LIMIT {
+        if lines.len() > limit {
             lines.pop_front();
             dropped = true;
         }

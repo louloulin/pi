@@ -47,7 +47,8 @@ async fn new_app() -> App {
         session_id: "title".into(),
         ..AppConfig::default()
     };
-    App::new(&*agent.lock().await, config)
+    let agent_ref = agent.lock().await;
+    App::new(&*agent_ref, config)
 }
 
 #[tokio::test]

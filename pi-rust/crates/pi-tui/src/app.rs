@@ -1156,6 +1156,8 @@ pub struct RenderSnapshot {
     pub search_open: bool,
     /// Current search query (empty while the overlay is closed).
     pub search_query: String,
+    /// Current history search query (empty while history search is closed).
+    pub history_search_query: String,
     /// Rendered search-bar lines (when open).
     pub search_lines: Vec<String>,
     /// Status bar snapshot.
@@ -7086,6 +7088,12 @@ impl App {
                 .as_ref()
                 .map(|state| state.bar.query().to_string())
                 .unwrap_or_default(),
+            history_search_query: self
+                .prompt
+                .editor()
+                .history_search_query()
+                .unwrap_or("")
+                .to_string(),
             search_lines: self
                 .search
                 .as_ref()
