@@ -479,13 +479,28 @@ pub fn apply_composer_selection_highlight(
         }
 
         let row_len = visual.text.chars().count();
+        // `start` and `end` are byte offsets (from `cursor_at`), but `visual.start`
+        // is a character index.  Binary-search `source` to find the character position
+        // of each byte offset within this row.
+        let byte_to_char_idx = |byte_offset: usize| -> usize {
+            // `source` stores byte offsets of characters in the full display string.
+            // Find the rightmost i where `source[i] <= byte_offset`.
+            match visual.source.binary_search(&byte_offset) {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1),
+            }
+        };
+        let start_char = byte_to_char_idx(start);
+        let end_char = byte_to_char_idx(end);
         let from = if row_idx == start_row {
-            start.saturating_sub(visual.start).min(row_len)
+            start_char.min(row_len)
         } else {
             0
         };
         let to = if row_idx == end_row {
-            (end - visual.start).min(row_len)
+            // `end` is inclusive; +1 moves past the last char so its trailing cell
+            // is highlighted. Clamp at `row_len` for the trailing-position case.
+            (end_char + 1).min(row_len)
         } else {
             row_len
         };

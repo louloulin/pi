@@ -549,8 +549,12 @@ fn a_chip_in_the_draft_keeps_the_cells_and_the_text_in_step() {
 
     app.step(press(from_x, y));
     app.step(drag(to_x, y));
+    let sel = app.composer_selection_text();
+    eprintln!("DEBUG: from_x={from_x}, to_x={to_x}, expected={expected:?} ({} chars), sel={sel:?} ({} chars)", expected.len(), sel.as_ref().map(|s| s.len()).unwrap_or(0));
+    eprintln!("DEBUG: row_text={:?}", row_text(&buf, y));
+    let sel_text = sel.as_deref();
     assert_eq!(
-        app.composer_selection_text().as_deref(),
+        sel_text,
         Some(expected.as_str()),
         "the selected text is exactly the highlighted cells"
     );

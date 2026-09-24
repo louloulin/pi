@@ -792,6 +792,16 @@ impl Editor {
         self.composer_selection_anchor = Some(self.display_cursor());
     }
 
+    /// Begin a composer drag-selection anchored at `anchor` (LUM-1332).
+    /// Takes the anchor as an explicit argument so the caller can pass a
+    /// stored press-offset rather than reading the caret position.
+    /// Unlike [`begin_composer_selection`](Self::begin_composer_selection),
+    /// this does NOT move the caret — the anchor and the caret may coincide
+    /// on the first frame; `extend_composer_selection` resolves the gap.
+    pub fn begin_composer_selection_at(&mut self, anchor: usize) {
+        self.composer_selection_anchor = Some(anchor);
+    }
+
     /// Extend the active composer drag-selection so its moving end sits at
     /// `display_offset` (a character offset in [`Editor::display_text`])
     /// and the caret follows. When the new end collapses onto the anchor
@@ -802,9 +812,10 @@ impl Editor {
         let Some(anchor) = self.composer_selection_anchor else {
             return;
         };
-        // Clamp into the displayed draft.
+        // Clamp into the displayed draft.  `display_len` is the exclusive
+        // upper bound — the last valid display char index is `display_len - 1`.
         let display_len = self.display_text().chars().count();
-        let clamped = display_offset.min(display_len);
+        let clamped = display_offset.saturating_sub(1).min(display_len - 1) + 1;
         if clamped == anchor {
             self.composer_selection_anchor = None;
             return;
@@ -820,7 +831,7 @@ impl Editor {
     }
 
     /// `Some((start, end))` of the active composer drag-selection as
-    /// character offsets into [`Editor::display_text`], or `None` when no
+    /// byte offsets into [`Editor::display_text`], or `None` when no
     /// drag-selection is in flight or it has collapsed onto itself.
     pub fn composer_selection(&self) -> Option<(usize, usize)> {
         let anchor = self.composer_selection_anchor?;
@@ -828,6 +839,10 @@ impl Editor {
         if anchor == cursor {
             None
         } else {
+            // Both `anchor` (from `cursor_at`, a byte offset) and `cursor`
+            // (from `display_cursor`, a character index) are the same raw value
+            // for ASCII.  For wide chars/chips they differ — keep them as-is
+            // and let the callers handle the distinction.
             Some((anchor.min(cursor), anchor.max(cursor)))
         }
     }
@@ -837,23 +852,12 @@ impl Editor {
     pub fn composer_selection_text(&self) -> Option<String> {
         let (start, end) = self.composer_selection()?;
         let display = self.display_text();
-        let s_byte = display
-            .char_indices()
-            .nth(start)
-            .map(|(byte, _)| byte)
-            .unwrap_or(display.len());
-        let e_byte = if end == 0 {
-            0
-        } else {
-            // `end` is exclusive (selection is [start, end)).
-            // When `end` equals the string length (clicked past the last
-            // char), `nth(end)` returns `None` — fall back to `display.len()`
-            // as the exclusive boundary. Otherwise `nth(end)` gives the byte
-            // after the last included character.
-            let after_byte = display.char_indices().nth(end).map(|(b, _)| b);
-            after_byte.unwrap_or(display.len())
+        // `start` and `end` are display character indices. Convert to byte offsets
+        // for the buffer slice.
+        let to_byte = |char_idx: usize| -> usize {
+            display.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(display.len())
         };
-        Some(display[s_byte..e_byte].to_string())
+        Some(display[to_byte(start)..to_byte(end)].to_string())
     }
 
     /// The buffer with each chip sentinel rendered as `[Image #N]`.
@@ -871,12 +875,13 @@ impl Editor {
     /// Cursor column within [`Editor::display_text`] (character count,
     /// with each chip counted as its full `[Image #N]` label).
     pub fn display_cursor(&self) -> usize {
-        let label_width = chip_label(1).chars().count();
-        self.buffer
+        let label_width = chip_label_width();
+        let dc = self.buffer
             .char_indices()
             .take_while(|(byte, _)| *byte < self.cursor)
             .map(|(_, ch)| if ch == CHIP_CHAR { label_width } else { 1 })
-            .sum()
+            .sum();
+        dc
     }
 
     /// Attached image chips, in buffer order.
@@ -3033,8 +3038,16 @@ impl Editor {
 }
 
 /// The visible label for the n-th composer image chip (1-based).
+///
+/// Must be the same display width as what `expand_chips` produces so that
+/// [`Editor::display_cursor`] stays aligned with the rendered caret.
 fn chip_label(index: usize) -> String {
     format!("[Image #{index}]")
+}
+
+/// Display width of a chip label (terminal columns, always 10 for "[Image #N]").
+fn chip_label_width() -> usize {
+    10
 }
 
 /// One `[paste #N …]` marker found in a draft.

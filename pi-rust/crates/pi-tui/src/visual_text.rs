@@ -50,6 +50,9 @@ pub(crate) struct VisualRow {
     pub start: usize,
     /// For each character of [`VisualRow::text`], its character offset in
     /// the draft. Sorted ascending; `source.len() == text.chars().count()`.
+    /// When the draft contains chips, these are the display character indices
+    /// (so a chip's sentinel is index N for all N chars of its display
+    /// label), not the underlying raw buffer offsets.
     pub source: Vec<usize>,
 }
 
@@ -128,8 +131,7 @@ impl VisualLayout {
         self.rows.len()
     }
 
-    /// Index of the row a cursor at `cursor` (a character offset into the
-    /// draft) is drawn on.
+    /// Index of the row a cursor at `cursor` (a byte offset into the draft) is drawn on.
     ///
     /// The row whose `start` is the largest one `<= cursor`. Because the
     /// rows partition the draft's characters (every character lands on
@@ -154,8 +156,9 @@ impl VisualLayout {
     /// `(row, column)` of a cursor at `cursor` — the pair the renderer
     /// draws the `▍` marker at.
     ///
-    /// The column counts the row's rendered characters that start before
-    /// the cursor.
+    /// `cursor` is a byte offset into the draft (matching the raw buffer).
+    /// `source` stores display character indices, so `take_while(|s| *s < cursor)` counts
+    /// characters whose indices are less than the byte offset.
     pub(crate) fn caret(&self, cursor: usize) -> (usize, usize) {
         let row = self.row_of(cursor);
         let column = self
@@ -170,17 +173,31 @@ impl VisualLayout {
     ///
     /// Columns past the row's content land just after its last rendered
     /// character, which is where the caret is drawn for "end of row".
+    ///
+    /// `source` stores the display character index for each character in the
+    /// row text, so binary search correctly maps a column to the right index
+    /// even when chips have a different display width than their raw chars.
     pub(crate) fn cursor_at(&self, row: usize, column: usize) -> usize {
-        let Some(row) = self.rows.get(row) else {
+        let Some(vrow) = self.rows.get(row) else {
             return 0;
         };
-        if let Some(offset) = row.source.get(column) {
-            return *offset;
+        let len = vrow.source.len();
+        if column >= len {
+            // Click past the last character of this row: return the position
+            // after the last character.  `source.last()` is the display character
+            // index of the last char; +1 moves past it.
+            return vrow.start + vrow.source.last().copied().unwrap_or(0) + 1;
         }
-        row.source
-            .last()
-            .map(|offset| offset + 1)
-            .unwrap_or(row.start)
+        // `column` is a display column (terminal position).  `source[i]` is
+        // the display character index of the character at column `i` in this
+        // row.  Binary search: find the character that STARTS at or before
+        // `column`.  `binary_search(&column)` returns `Ok(i)` when
+        // `source[i] == column`, or `Err(i)` as insertion point when
+        // `column` falls between character starts.  In both cases `i`
+        // is the correct character index — the character at `source[i]`
+        // starts at or before `column`.
+        let i = vrow.source[column];
+        vrow.start + i
     }
 
     /// Characters the row renders.
@@ -309,11 +326,14 @@ fn push_chunk(rows: &mut Vec<VisualRow>, chars: &[char], start: usize, from: usi
 
 /// Build a row from an absolute `[from, to)` character range.
 fn row_from(chars: &[char], from: usize, to: usize) -> VisualRow {
+    // `chars` are the display text characters (chips already expanded).
+    // `source` stores the display character indices, so `cursor_at` can map a
+    // terminal cell column to the corresponding character index.
     let mut text = String::with_capacity(to.saturating_sub(from));
     let mut source = Vec::with_capacity(to.saturating_sub(from));
-    for (offset, ch) in chars[from..to].iter().enumerate() {
-        text.push(*ch);
-        source.push(from + offset);
+    for i in from..to {
+        text.push(chars[i]);
+        source.push(i);
     }
     VisualRow {
         text,
@@ -442,12 +462,12 @@ mod tests {
                 VisualRow {
                     text: "aa ".into(),
                     start: 0,
-                    source: vec![0, 1, 2]
+                    source: vec![0, 1, 2],
                 },
                 VisualRow {
                     text: " bb".into(),
                     start: 3,
-                    source: vec![3, 4, 5]
+                    source: vec![3, 4, 5],
                 },
             ]
         );

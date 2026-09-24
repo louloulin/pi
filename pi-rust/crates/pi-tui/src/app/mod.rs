@@ -1232,7 +1232,7 @@ pub struct App {
     /// Absolute cell of a left press that landed inside the composer, kept
     /// until its release so only a click that starts and ends on the same
     /// cell moves the caret (upstream's `isClick` gate).
-    prompt_mouse_press: Option<(u16, u16)>,
+    prompt_mouse_press: Option<(u16, u16, usize)>,
     /// Absolute cell and candidate index of a left press that landed on an
     /// autocomplete row, kept until its release so only a click that starts
     /// and ends on the same cell applies the completion (upstream's
@@ -4066,7 +4066,8 @@ impl App {
 
     /// Returns the selected text in the composer, if any (LUM-1332).
     pub fn composer_selection_text(&self) -> Option<String> {
-        self.prompt.editor().composer_selection_text()
+        let sel = self.prompt.editor().composer_selection_text();
+        sel
     }
 
     /// Returns the last recorded composer area as `(x, y, width, height)`,
@@ -4549,27 +4550,43 @@ impl App {
         let text = self.prompt.text();
         let width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
         let layout = VisualLayout::new(&text, width);
-        let row = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
         let rows = layout.rows();
-        let visual = rows.get(row)?;
-        // A click on the label column reads as column 0 of the draft row.
-        let cell = body_col.saturating_sub(label);
-        let column = crate::width::char_index_at_column(&visual.text, cell);
-        // When `cell` maps to a column past the last character of this row
-        // AND this row is not the last row of the draft, park the caret on
-        // the last character of this row instead of letting it spill onto
-        // the first character of the next row (upstream's `isLastSegment`
-        // correction). For a single-char cell, column == row_len means the
-        // click landed on the character's *trailing* position — clamp it to
-        // the character's own position so the caret lands on it.
-        let row_len = visual.text.chars().count();
-        let column = if column > row_len && row + 1 < rows.len() {
-            row_len.saturating_sub(1)
+
+        // The visual row the pointer is over.
+        let row_in_draft = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
+        let visual = rows.get(row_in_draft)?;
+
+        // Measure the pointer's column in display characters from the row's
+        // start. `columns_before` accumulates terminal-cell widths, matching
+        // how the renderer lays out the row; this is the same column space
+        // `caret` counts in.  Subtract the label so the column is relative to
+        // the body text, not the whole painted row.
+        let col_in_row = crate::width::columns_before(&visual.text, body_col.saturating_sub(label));
+
+        // When the pointer landed past the last character of a soft-wrapped
+        // row (not the last row of its hard line), park the caret on that
+        // row's last character instead of letting it spill onto the next row
+        // (upstream's `isLastSegment` correction). A click on a single-char
+        // cell's trailing half also lands here and needs the same correction.
+        let row_char_count = visual.text.chars().count();
+        let is_last_row_of_draft = row_in_draft + 1 >= rows.len();
+        // Only clamp when the column is STRICTLY past the row (not on its
+        // trailing position, which is a valid place to click).
+        let col_in_row = if col_in_row > row_char_count && !is_last_row_of_draft {
+            row_char_count.saturating_sub(1)
         } else {
-            column
+            col_in_row
         };
-        let cursor = layout.cursor_at(row, column);
-        Some(cursor)
+
+        // `caret` gives `(row, col)` for a display cursor, and
+        // `cursor_at(row, col)` is its inverse — so we can find the
+        // display cursor position by starting from the visual row's char
+        // offset: `visual.start + col_in_row` gives the cursor that
+        // `caret` would put at this row and column.
+        println!("DEBUG cco: x={}, ox={}, body_col={}, label={}, col_in_row={}, text={:?}, source={:?}", x, ox, body_col, label, col_in_row, visual.text, visual.source);
+        let cursor_offset = layout.cursor_at(row_in_draft, col_in_row);
+        println!("DEBUG cco: cursor_at({}, {}) = {}", row_in_draft, col_in_row, cursor_offset);
+        Some(cursor_offset)
     }
 
     /// Place the composer caret at the clicked cell.
@@ -4595,6 +4612,10 @@ impl App {
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
                 if !self.composer_contains(gesture.x, gesture.y) {
+                    // A press outside the composer is a new gesture: the composer's
+                    // selection goes away (upstream re-anchors on every press).
+                    self.prompt.editor_mut().clear_composer_selection();
+                    self.prompt_mouse_press = None;
                     return None;
                 }
                 // Upstream's `Editor.handleMouse` press branch places the
@@ -4604,10 +4625,11 @@ impl App {
                 // the cursor where it already is, no repaint is owed:
                 // the prior click already moved it there, and a second
                 // press on the same cell is a no-op.
+                let press_offset = self.composer_cursor_offset(gesture.x, gesture.y);
+                self.prompt_mouse_press = press_offset.map(|o| (gesture.x, gesture.y, o));
                 let cursor_before = self.prompt.editor().cursor();
                 let _ = self.place_prompt_cursor(gesture.x, gesture.y);
                 let cursor_after = self.prompt.editor().cursor();
-                self.prompt_mouse_press = Some((gesture.x, gesture.y));
                 if cursor_before == cursor_after {
                     Some(StepOutcome::Idle)
                 } else {
@@ -4616,17 +4638,16 @@ impl App {
             }
             MouseGestureKind::Release(MouseButton::Left) => {
                 let pressed = self.prompt_mouse_press.take();
-                // The press arming the composer drag-selection is now
-                // resolved; the selection itself can stay — the user's
-                // next keystroke will replace it — but a release that
-                // was a click (no drag) should not leave an empty anchor
-                // around. Clear unconditionally so a click-after-press
-                // path stays tidy.
-                self.prompt.editor_mut().clear_composer_selection();
                 if !self.composer_contains(gesture.x, gesture.y) {
                     return None;
                 }
-                if pressed == Some((gesture.x, gesture.y)) {
+                // A plain click (press coords match release coords): clear the
+                // anchor so a click-after-press path stays tidy.  A drag-release
+                // (coords differ) keeps the selection — the user's next keystroke
+                // replaces it.
+                let is_click = pressed.map(|(x, y, _)| (x, y)) == Some((gesture.x, gesture.y));
+                if is_click {
+                    self.prompt.editor_mut().clear_composer_selection();
                     Some(self.place_prompt_cursor(gesture.x, gesture.y))
                 } else {
                     Some(StepOutcome::Idle)
@@ -4644,16 +4665,21 @@ impl App {
                 let Some(offset) = self.composer_drag_offset(gesture.x, gesture.y) else {
                     return Some(StepOutcome::Idle);
                 };
+                let press_offset = self.prompt_mouse_press
+                    .map(|(_, _, o)| o)
+                    .unwrap_or_else(|| self.composer_cursor_offset(gesture.x, gesture.y).unwrap_or(0));
+                println!("DEBUG DRAG: offset={}, press_offset={}", offset, press_offset);
                 {
                     let editor = self.prompt.editor_mut();
+                    println!("DEBUG DRAG: before begin, sel={:?}", editor.composer_selection());
                     if editor.composer_selection().is_none() {
-                        // Anchor at the press position (where the cursor
-                        // was placed on press). The cursor may already
-                        // equal the anchor — extend_composer_selection
-                        // collapses back to `None` in that case.
-                        editor.begin_composer_selection();
+                        // Anchor at the press position — not the caret's current
+                        // position, which may have been moved by a prior drag.
+                        editor.begin_composer_selection_at(press_offset);
+                        println!("DEBUG DRAG: after begin, sel={:?}", editor.composer_selection());
                     }
                     editor.extend_composer_selection(offset);
+                    println!("DEBUG DRAG: after extend, sel={:?}", editor.composer_selection());
                 }
                 Some(StepOutcome::Redraw)
             }
