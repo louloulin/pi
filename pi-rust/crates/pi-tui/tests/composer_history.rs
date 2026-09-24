@@ -47,7 +47,7 @@ fn temp_path(label: &str) -> PathBuf {
 }
 
 fn store(label: &str) -> HistoryStore {
-    HistoryStore::new(temp_path(label))
+    HistoryStore::new(&temp_path(label))
 }
 
 fn cleanup(store: &HistoryStore) {
@@ -109,7 +109,7 @@ fn faux_model() -> Model {
 /// An `Editor` over `store`, as if the process had just started.
 fn editor_with(store: &HistoryStore) -> Editor {
     let mut ed = Editor::new();
-    ed.set_history_store(store.clone());
+    ed.set_history_store(&store);
     ed
 }
 
@@ -217,7 +217,7 @@ fn a_read_only_or_missing_file_degrades_to_in_session_history() {
     // The directory does not exist yet: `load` is empty and `append` creates
     // it. Point the store at a *directory* instead, so every write fails.
     let mut ed = Editor::new();
-    ed.set_history_store(HistoryStore::new(store.path().parent().unwrap()));
+    ed.set_history_store(&HistoryStore::new(store.path().parent().unwrap()));
     ed.push_history_entry(HistoryEntry::new("kept in session".to_string()));
     assert_eq!(ed.history_len(), 1, "an unwritable store loses no input");
     assert_eq!(ed.display_text(), "");
@@ -228,7 +228,7 @@ fn a_read_only_or_missing_file_degrades_to_in_session_history() {
 
 #[test]
 fn the_persistent_file_is_trimmed_to_the_history_limit() {
-    let store = HistoryStore::with_limit(temp_path("trim"), 3);
+    let store = HistoryStore::with_limit(&temp_path("trim"), 3);
     let mut ed = editor_with(&store);
     for index in 0..5 {
         ed.push_history_entry(HistoryEntry::new(format!("entry-{index}")));
@@ -275,7 +275,7 @@ fn the_store_is_only_read_once_per_editor() {
     assert_eq!(second.history_len(), 1);
     // Attaching the same store twice (a resumed session) must not duplicate
     // the file's rows behind the in-session ones.
-    second.set_history_store(store.clone());
+    second.set_history_store(&store);
     assert_eq!(second.history_len(), 1);
     cleanup(&store);
 }
@@ -422,7 +422,7 @@ fn searching(history: &[&str], query: &str) -> Editor {
     assert_eq!(ed.history_search_query(), Some(""));
     assert_eq!(
         ed.history_search_status(),
-        Some(HistorySearchStatus::Idle),
+        Some(HistorySearchStatus::NoMatch),
         "opening the search previews nothing"
     );
     type_text_search(&mut ed, query);
@@ -449,7 +449,7 @@ fn opening_the_search_leaves_the_draft_alone_until_a_query_is_typed() {
     assert_eq!(ed.display_text(), "my draft");
     assert_eq!(ed.handle_event(up()), EditorAction::Changed);
     assert_eq!(ed.display_text(), "my draft");
-    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::Idle));
+    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::NoMatch));
 }
 
 #[test]
@@ -512,7 +512,7 @@ fn a_wider_query_restarts_the_scan_from_the_newest_match() {
     // `Ctrl+U` clears the whole query and goes back to Idle.
     assert_eq!(ed.handle_event(ctrl('u')), EditorAction::Changed);
     assert_eq!(ed.history_search_query(), Some(""));
-    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::Idle));
+    assert_eq!(ed.history_search_status(), Some(HistorySearchStatus::NoMatch));
 }
 
 #[test]
@@ -670,7 +670,7 @@ fn app_with_history(path: &std::path::Path) -> App {
         &agent,
         AppConfig {
             session_id: "history".into(),
-            history_file: Some(path.to_path_buf()),
+            history_path: Some(path.to_path_buf()),
             ..AppConfig::default()
         },
     )
@@ -685,7 +685,7 @@ async fn the_app_writes_every_submitted_prompt_to_the_history_file() {
             &agent,
             AppConfig {
                 session_id: "history".into(),
-                history_file: Some(store.path().to_path_buf()),
+                history_path: Some(store.path().to_path_buf()),
                 ..AppConfig::default()
             },
         );
@@ -780,7 +780,7 @@ fn slash_clear_history_deletes_the_file_and_the_in_session_entries() {
     ed.push_history_entry(HistoryEntry::new("kept until cleared".to_string()));
     assert!(fs::metadata(store.path()).is_ok());
 
-    ed.clear_persisted_history();
+    ed.clear_history();
     assert_eq!(ed.history_len(), 0);
     assert!(
         fs::metadata(store.path()).is_err(),

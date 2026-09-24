@@ -479,7 +479,7 @@ pub enum HistorySearchStatus {
 /// destroy what the user was typing), the pre-search **draft** (restored on
 /// cancel / miss), and the traversal cursor over a de-duplicated match list.
 #[derive(Debug, Clone)]
-struct HistorySearch {
+pub struct HistorySearch {
     /// The footer query, typed while the search is open.
     query: String,
     /// Draft to restore when the search is cancelled or the query misses.
@@ -587,6 +587,10 @@ pub struct Editor {
     /// Whether the stale-marker hint has already been shown this session, so
     /// recalling the same marker again stays quiet.
     stale_paste_notified: bool,
+    /// Composer-internal drag-selection anchor — a character offset into
+    /// [`Editor::display_text`]. `None` when no drag-selection is in flight
+    /// (LUM-1332).
+    composer_selection_anchor: Option<usize>,
 }
 
 impl Default for Editor {
@@ -626,6 +630,7 @@ impl Editor {
             paste_counter: 0,
             stale_paste_notice: false,
             stale_paste_notified: false,
+            composer_selection_anchor: None,
         }
     }
 
@@ -775,6 +780,80 @@ impl Editor {
     /// Current cursor position (byte offset, clamped to `buffer.len()`).
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Begin a composer-internal drag-selection anchored at the current
+    /// caret position (LUM-1332).
+    ///
+    /// The anchor is recorded as a character offset in
+    /// [`Editor::display_text`] so it stays stable while the drag moves the
+    /// caret around.
+    pub fn begin_composer_selection(&mut self) {
+        self.composer_selection_anchor = Some(self.display_cursor());
+    }
+
+    /// Extend the active composer drag-selection so its moving end sits at
+    /// `display_offset` (a character offset in [`Editor::display_text`])
+    /// and the caret follows. When the new end collapses onto the anchor
+    /// the selection clears, mirroring the upstream `Editor` drag model
+    /// where the start / end range goes empty as soon as the user drags
+    /// back over the press point.
+    pub fn extend_composer_selection(&mut self, display_offset: usize) {
+        let Some(anchor) = self.composer_selection_anchor else {
+            return;
+        };
+        // Clamp into the displayed draft.
+        let display_len = self.display_text().chars().count();
+        let clamped = display_offset.min(display_len);
+        if clamped == anchor {
+            self.composer_selection_anchor = None;
+            return;
+        }
+        // Move the caret to follow the drag without touching sticky column
+        // or history browsing — those are click-time concerns.
+        self.set_display_cursor(clamped);
+    }
+
+    /// Clear any in-flight composer drag-selection.
+    pub fn clear_composer_selection(&mut self) {
+        self.composer_selection_anchor = None;
+    }
+
+    /// `Some((start, end))` of the active composer drag-selection as
+    /// character offsets into [`Editor::display_text`], or `None` when no
+    /// drag-selection is in flight or it has collapsed onto itself.
+    pub fn composer_selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.composer_selection_anchor?;
+        let cursor = self.display_cursor();
+        if anchor == cursor {
+            None
+        } else {
+            Some((anchor.min(cursor), anchor.max(cursor)))
+        }
+    }
+
+    /// The text covered by the active composer drag-selection, or `None`
+    /// when there is no active selection.
+    pub fn composer_selection_text(&self) -> Option<String> {
+        let (start, end) = self.composer_selection()?;
+        let display = self.display_text();
+        let s_byte = display
+            .char_indices()
+            .nth(start)
+            .map(|(byte, _)| byte)
+            .unwrap_or(display.len());
+        let e_byte = if end == 0 {
+            0
+        } else {
+            // `end` is exclusive (selection is [start, end)).
+            // When `end` equals the string length (clicked past the last
+            // char), `nth(end)` returns `None` — fall back to `display.len()`
+            // as the exclusive boundary. Otherwise `nth(end)` gives the byte
+            // after the last included character.
+            let after_byte = display.char_indices().nth(end).map(|(b, _)| b);
+            after_byte.unwrap_or(display.len())
+        };
+        Some(display[s_byte..e_byte].to_string())
     }
 
     /// The buffer with each chip sentinel rendered as `[Image #N]`.

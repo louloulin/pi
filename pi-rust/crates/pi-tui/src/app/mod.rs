@@ -273,8 +273,19 @@
 //! JS factory → Rust component bridge is a later task: nothing in this
 //! module executes extension JavaScript.
 
+// Submodules: each owns a focused group of `impl App` methods. They all add
+// methods to the [`App`] type from outside this file (Rust allows
+// multi-file `impl` blocks), so the public surface stays identical to the
+// pre-split port. Submodules access private fields through `use super::*`.
+mod agent_events;
+mod step_dialog;
+mod step_key;
+mod step_mouse;
+mod step_paste;
+mod step_search;
+
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -282,12 +293,10 @@ use crossterm::event::{
     MouseEventKind as CtMouseEventKind,
 };
 use parking_lot::Mutex;
-use pi_agent_core::{Agent, AgentEvent, AssistantMessageUpdate, ThinkingLevel};
-use pi_protocol::{Content, Message, StopReason, Usage};
+use pi_agent_core::{Agent, AgentEvent, ThinkingLevel};
+use pi_protocol::{Message, StopReason, Usage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::prelude::Widget;
-use ratatui::style::Modifier;
 use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -296,11 +305,11 @@ use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::component::{Component, CustomHandle, CustomOptions, OverlayAnchor, WidgetPlacement};
-use crate::dialog::{Dialog, DialogAction, DialogKind};
+use crate::dialog::{Dialog, DialogKind};
 use crate::editor::{EditorAction, HistoryEntry, HistorySearchStatus};
 use crate::extension_ui::{plan_chrome, ChromeLayout, ExtensionFrame, ExtensionUi};
 use crate::input::{
-    BurstDecision, InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture,
+    InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture,
     MouseGestureKind, PasteBurst,
 };
 use crate::keybindings::{get_keybindings, key_text_or, matches_with_fallback, KeybindingsManager};
@@ -319,27 +328,28 @@ use crate::search::{
 };
 use crate::selector::{Selector, SelectorAction, SelectorItem};
 use crate::settings::{SettingsAction, SettingsList};
-use crate::slash_menu::{SlashMenu, SlashMenuWidget};
+use crate::slash_menu::SlashMenu;
 use crate::status::{StatusBar, StatusData};
+use crate::viewport::{ScrollbarDrag, ViewportGeometry};
+pub use crate::viewport::ScrollbarGeometry;
 use crate::styled::{
-    buffer_row_text, plain_text, themed_text, write_plain_row, write_styled_line,
-    write_styled_line_ellipsized, SpanStyle, StyledLine, StyledSpan,
+    buffer_row_text, plain_text, themed_text, write_plain_row, write_styled_line, SpanStyle, StyledLine, StyledSpan,
 };
 use crate::theme::{
-    builtin_theme, load_theme, thinking_border_color, ColorMode, Theme, ThemeBg, ThemeColor,
+    builtin_theme, load_theme, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
 };
 use crate::visual_text::VisualLayout;
-use crate::width::{char_columns, columns, truncate_columns};
+use crate::width::{columns, truncate_columns};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
-const WHEEL_SCROLL_LINES: usize = 1;
+pub(super) const WHEEL_SCROLL_LINES: usize = 1;
 
 /// Alt+wheel multiplies the per-notch step by this factor, matching
 /// upstream's `ALT_WHEEL_SCROLL_MULTIPLIER`
 /// (`packages/tui/src/tui-alt-screen.ts:75,968-971`).
-const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
+pub(super) const ALT_WHEEL_SCROLL_MULTIPLIER: usize = 5;
 
 /// Chords are left-aligned into at least this many columns on a `?` overlay
 /// row, so the descriptions line up (codex draws the same table in
@@ -746,13 +756,13 @@ enum SelectionGranularity {
 /// *between* cells, so the end column is exclusive, while a character
 /// focus column is inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SelectionPoint {
+pub(crate) struct SelectionPoint {
     /// Index of a line in [`MessageView::render_styled_lines`].
-    line: usize,
+    pub(crate) line: usize,
     /// Character column within that line.
-    col: usize,
+    pub(crate) col: usize,
     /// True when `col` is an exclusive end (a word / line range edge).
-    boundary: bool,
+    pub(crate) boundary: bool,
 }
 
 impl SelectionPoint {
@@ -789,7 +799,7 @@ impl SelectionPoint {
 /// makes a selection survive scrolling and trailing output: the same text
 /// stays selected while the viewport moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Selection {
+pub(crate) struct Selection {
     /// Where the drag started (or the start of the press range).
     anchor: SelectionPoint,
     /// Where the pointer currently is (or the end of the press range).
@@ -836,7 +846,7 @@ impl Selection {
     /// empty — upstream's `getSelectionBounds`
     /// (`packages/tui/src/tui-alt-screen.ts:1381-1397`) treats an
     /// anchor equal to the focus as "no selection".
-    fn bounds(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+    pub(crate) fn bounds(&self) -> Option<(SelectionPoint, SelectionPoint)> {
         if self.anchor.order() == self.focus.order() {
             return None;
         }
@@ -932,15 +942,15 @@ fn selection_end_column(end: &SelectionPoint, len: usize) -> usize {
 /// lookup is anchored to, and how the *next* refresh should recompute the
 /// selection.
 #[derive(Debug)]
-struct SearchState {
+pub(crate) struct SearchState {
     /// Cached corpus + matches for the rendered transcript.
     index: SearchIndex,
     /// The query bar and its result counter.
     bar: SearchBar,
     /// Matches from the last refresh.
-    matches: Vec<SearchMatch>,
+    pub(crate) matches: Vec<SearchMatch>,
     /// Index into [`SearchState::matches`] of the selected match.
-    selected_index: Option<usize>,
+    pub(crate) selected_index: Option<usize>,
     /// [`SearchMatch::key`] of the selected match, so a re-index keeps it.
     selected_key: Option<String>,
     /// Row the `Query` selection mode anchors to.
@@ -972,7 +982,7 @@ impl SearchState {
 /// overlay itself holds focus
 /// (`packages/tui/src/tui-alt-screen.ts:644-645,1806-1811`).
 #[derive(Debug, Clone)]
-enum SearchKeyOutcome {
+pub(super) enum SearchKeyOutcome {
     /// The overlay consumed the key.
     Handled(StepOutcome),
     /// `App::step_key`'s global handling must still see the key.
@@ -1081,43 +1091,6 @@ pub enum FollowUpOutcome {
     RefusedImages,
 }
 
-/// Geometry of the chat-log scrollbar, in absolute terminal cells.
-///
-/// The port of upstream's `ScrollbarGeometry`
-/// (`packages/tui/src/layout.ts:44-51`), computed by
-/// [`App::scrollbar_geometry`]. Upstream resolves it per `ScrollView` from
-/// the layout box under the pointer; this port has a single scrollable
-/// region (the message log), so one geometry covers it — see the module
-/// docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScrollbarGeometry {
-    /// Absolute column the bar is painted in — the viewport's right edge.
-    pub column: u16,
-    /// Absolute row of the track's first cell.
-    pub track_top: u16,
-    /// Rows the track spans; the viewport height.
-    pub track_height: u16,
-    /// Absolute row of the thumb's first cell.
-    pub thumb_top: u16,
-    /// Rows the thumb spans — at least two, at most the whole track.
-    pub thumb_height: u16,
-    /// Largest valid top-relative scroll offset (`content - viewport`).
-    pub max_scroll: usize,
-}
-
-/// In-flight scrollbar drag — upstream's `ScrollbarDrag`
-/// (`packages/tui/src/tui-alt-screen.ts:129-138`). The App has a single
-/// scroll view, so the convergence drops the view handle and keeps only the
-/// grab offset; the geometry is re-read from the current viewport on every
-/// drag event, exactly like upstream's `getScrollViewBox` lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScrollbarDrag {
-    /// Rows between the pointer and the thumb's top when the press landed.
-    /// A press on the track uses half the thumb height, so the thumb centres
-    /// on the pointer.
-    grab_offset: u16,
-}
-
 /// Snapshot of the rendered App for tests.
 #[derive(Debug, Clone)]
 pub struct RenderSnapshot {
@@ -1158,6 +1131,8 @@ pub struct RenderSnapshot {
     pub search_query: String,
     /// Rendered search-bar lines (when open).
     pub search_lines: Vec<String>,
+    /// Current history-search query (empty while the search is closed).
+    pub history_search_query: String,
     /// Status bar snapshot.
     pub status: StatusData,
 }
@@ -1234,92 +1209,9 @@ pub struct App {
     /// press within [`CLEAR_EXIT_WINDOW`] exits; see [`App::step_key_at`].
     /// `None` before the first press of the session.
     last_clear_at: Option<Instant>,
-    /// Geometry of the jump-to-latest indicator painted on the viewport's
-    /// bottom edge, in absolute terminal cells. `width == 0` means the
-    /// last frame did not paint one (the viewport was following the tail),
-    /// which is also what the mouse hit test reads.
-    /// Width of the message viewport as of the last render. Scroll keys use
-    /// it to wrap the log exactly like the renderer does, so a "page" is a
-    /// real screenful.
-    viewport_width: AtomicU16,
-    /// Columns of the frame's right edge the scrollbar took out of
-    /// [`App::viewport_width`] on the last render.
-    ///
-    /// The transcript is laid out one column narrower while the bar is
-    /// visible, so the bar never lands on the last character of a wrapped
-    /// line; pointer and scroll math that needs the bar itself adds this back.
-    viewport_reserved: AtomicU16,
-    /// Height of the message viewport as of the last render; the page size
-    /// for `PageUp` / `PageDown`.
-    viewport_height: AtomicU16,
-    /// Width of the composer body as of the last render, i.e. the columns
-    /// [`App::paint_prompt`] word-wrapped the draft into. The editor needs
-    /// it *before* a key is handled — vertical cursor motion has to measure
-    /// the draft exactly like the renderer did — and `render_lines` takes
-    /// `&self`, so the frame records it here for
-    /// [`App::step_key_at`] to hand over.
-    composer_body_width: AtomicU16,
-    /// First draft row the composer window showed as of the last render —
-    /// the composer's scroll offset. It lives on the App rather than in
-    /// [`crate::Prompt`] because it has to survive between frames while
-    /// `render_lines` stays a `&self` render, and because `render_snapshot`
-    /// (also `&self`) must advance it exactly like a live frame does. The
-    /// frame stores what [`crate::Prompt::render_lines`] returned; the key
-    /// path only reads it.
-    ///
-    /// A draft that fits the window always resolves back to `0`, so the
-    /// offset cannot leak from one draft to the next.
-    composer_scroll: AtomicUsize,
-    /// Rows the composer window could show as of the last render, i.e. the
-    /// height [`App::paint_prompt`] was given after the
-    /// [`AppConfig::composer_max_rows`] clamp. This is the capacity a draft
-    /// overflows, and therefore the capacity that hands `PageUp` /
-    /// `PageDown` to the editor (see [`App::composer_overflows`]).
-    composer_window: AtomicU16,
-    /// Rectangle of the composer (prompt) area as of the last render, as
-    /// `(x, y)` and `(width, height)`. A click inside it places the caret
-    /// (upstream's `Editor.handleMouse` click branch,
-    /// `packages/tui/src/components/editor.ts:620-666`), and the pointer
-    /// arrives between renders, so the geometry is recorded rather than
-    /// recomputed. `width == 0` means the last frame had no composer (a
-    /// custom editor component replaced it).
-    composer_origin: (AtomicU16, AtomicU16),
-    composer_size: (AtomicU16, AtomicU16),
-    /// Rectangle of the composer's autocomplete dropdown as of the last
-    /// render, as `(x, y)` and `(width, height)`. The rows are borrowed from
-    /// the transcript above the editor, so this is the only record of where
-    /// the list actually landed; `width == 0` means the last frame painted
-    /// none. Upstream keeps the same rectangle inside the editor
-    /// (`renderedAutocompleteHeight`,
-    /// `packages/tui/src/components/editor.ts:605-616`).
-    autocomplete_origin: (AtomicU16, AtomicU16),
-    autocomplete_size: (AtomicU16, AtomicU16),
-    /// Index of the first candidate the dropdown painted and how many
-    /// candidate rows followed it (the trailing `(n/m)` counter row is not a
-    /// candidate and is excluded). Together with
-    /// [`App::autocomplete_origin`] this maps a pointer cell back onto a
-    /// candidate — upstream `SelectList.handleMouse` maps `event.y` through
-    /// `getVisibleRange()`.
-    autocomplete_first_item: AtomicUsize,
-    autocomplete_item_rows: AtomicUsize,
-    /// Row geometry of the modal list the last frame painted, for the pointer
-    /// hit test: which list ([`MODAL_LIST_SELECTOR`] / [`MODAL_LIST_DIALOG`] /
-    /// [`MODAL_LIST_SETTINGS`] / [`MODAL_LIST_NONE`]), the absolute row its
-    /// first *item* row landed on, the filtered index that row carries, and
-    /// how many item rows followed. Title / rule / `(n/m)` counter / hint rows
-    /// are deliberately excluded: upstream's `SelectList::handleMouse` maps a
-    /// click through `getVisibleRange()` and an unhandled row leaves the event
-    /// to `shouldDeferViewportInputToOverlay`
-    /// (`packages/tui/src/components/select-list.ts:110-140`,
-    /// `packages/tui/src/tui-alt-screen.ts:645-694`).
-    ///
-    /// The modals are drawn straight into the buffer and the pointer arrives
-    /// between renders, so the frame records the geometry here; `kind == 0`
-    /// means the last frame painted no clickable list.
-    modal_list_kind: AtomicU8,
-    modal_list_first_row: AtomicU16,
-    modal_list_first_item: AtomicUsize,
-    modal_list_rows: AtomicUsize,
+    /// Per-frame geometry — the rectangles the renderer paints and the
+    /// pointer / key paths read back. See [`ViewportGeometry`].
+    viewport: ViewportGeometry,
     /// Value a pointer click selected in the open picker, waiting for the
     /// driver to apply it with [`App::take_selector_commit`].
     ///
@@ -1329,23 +1221,6 @@ pub struct App {
     /// click therefore records the same intent the key path would have
     /// produced, and the driver consumes it right after the step.
     pending_selector_commit: Option<String>,
-    /// Top-left cell of the message viewport as of the last render. Pointer
-    /// coordinates are absolute, so selection has to map them back into the
-    /// viewport the reader was actually looking at.
-    viewport_origin: (AtomicU16, AtomicU16),
-    /// Rectangle of the "jump to latest" pill as of the last render:
-    /// `(row, column, width)`. `width == 0` means it was not painted (the
-    /// viewport is following the tail), which is also how the pointer
-    /// hit-test knows there is nothing to hit. Upstream keeps the same
-    /// record in `scrollToEndIndicatorRect`
-    /// (`packages/tui/src/tui-alt-screen.ts:222,1618-1634`).
-    scroll_to_end: (AtomicU16, AtomicU16, AtomicU16),
-    /// Rectangle of the "cut above" hint as of the last render:
-    /// `(row, column, width)`. `width == 0` means it was not painted —
-    /// either the top edge is a block boundary or the reader has scrolled
-    /// away from the tail. Same shape as [`App::scroll_to_end`] for the
-    /// same reason: the pointer reads it between renders.
-    truncated_above: (AtomicU16, AtomicU16, AtomicU16),
     /// Active chat-log text selection, if any.
     selection: Option<Selection>,
     /// Region-local cell of a left press that landed inside a modal overlay,
@@ -1458,6 +1333,17 @@ pub struct App {
     /// not consume, so [`App::step_key_at`] can turn an otherwise idle
     /// outcome into a redraw.
     burst_flush_pending: bool,
+    /// Set by the driver when a state change happened that did not go through
+    /// `step` / `step_paste` (e.g. an async transcript append, a queued modal).
+    /// The pacer reads it via [`App::dirty`] and clears it via
+    /// [`App::clear_dirty`] after a successful paint.
+    dirty_redraw: bool,
+    /// JS extensions can ask for a dialog (`ctx.ui.confirm` / `input` /
+    /// `select`) at any time; they sit in a channel drained by
+    /// [`App::poll_ui_dialogs`]. Tracked here so the pacer keeps redrawing
+    /// until the channel is empty — a dialog appearing must paint, even
+    /// if nothing else changed.
+    pending_dialogs: Vec<Dialog>,
     /// Session thinking level — what the next provider call requests
     /// (upstream `session.thinkingLevel`). Seeded from the persisted
     /// `defaultThinkingLevel` by the driver, then moved by
@@ -1538,26 +1424,8 @@ impl App {
             terminal_title: None,
             pending_terminal_title: None,
             last_clear_at: None,
-            viewport_width: AtomicU16::new(0),
-            viewport_reserved: AtomicU16::new(0),
-            viewport_height: AtomicU16::new(0),
-            composer_body_width: AtomicU16::new(0),
-            composer_scroll: AtomicUsize::new(0),
-            composer_window: AtomicU16::new(0),
-            composer_origin: (AtomicU16::new(0), AtomicU16::new(0)),
-            composer_size: (AtomicU16::new(0), AtomicU16::new(0)),
-            autocomplete_origin: (AtomicU16::new(0), AtomicU16::new(0)),
-            autocomplete_size: (AtomicU16::new(0), AtomicU16::new(0)),
-            autocomplete_first_item: AtomicUsize::new(0),
-            autocomplete_item_rows: AtomicUsize::new(0),
-            modal_list_kind: AtomicU8::new(MODAL_LIST_NONE),
-            modal_list_first_row: AtomicU16::new(0),
-            modal_list_first_item: AtomicUsize::new(0),
-            modal_list_rows: AtomicUsize::new(0),
+            viewport: ViewportGeometry::new(),
             pending_selector_commit: None,
-            viewport_origin: (AtomicU16::new(0), AtomicU16::new(0)),
-            scroll_to_end: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
-            truncated_above: (AtomicU16::new(0), AtomicU16::new(0), AtomicU16::new(0)),
             selection: None,
             search: None,
             modal_mouse_press: None,
@@ -1584,6 +1452,8 @@ impl App {
             header_expanded,
             paste_burst: PasteBurst::new(),
             burst_flush_pending: false,
+            dirty_redraw: false,
+            pending_dialogs: Vec::new(),
             thinking_level: ThinkingLevel::Medium,
             thinking_supported: false,
             slash_menu: SlashMenu::new(),
@@ -2130,7 +2000,7 @@ impl App {
     /// the first frame). Exposed for tests and audits: it is the state that
     /// makes the window scroll smoothly instead of jumping by pages.
     pub fn composer_scroll(&self) -> usize {
-        self.composer_scroll.load(Ordering::Relaxed)
+        self.viewport.composer_scroll.load(Ordering::Relaxed)
     }
 
     /// Mutable borrow of the prompt.
@@ -2480,6 +2350,53 @@ impl App {
         self.exit_requested
     }
 
+    /// Whether the next frame would draw anything different from the
+    /// last one. The driver's [`FramePacer`](
+    /// crates/pi-coding-agent::interactive::FramePacer) uses this to
+    /// decide whether the next poll slice is the slow 50 ms idle
+    /// path or the bounded next-frame target; a scene that says
+    /// "nothing changed" lets the pacer hand the tty thread its
+    /// quiet window.
+    ///
+    /// The flag is OR'd across all the sources that can dirty a
+    /// frame: an in-flight background turn (the spinner), a pending
+    /// paste burst that has not yet flushed, the selection / scroll
+    /// hover state, and the modal/extension dialog queues. The set
+    /// is conservative: a no-op redraw costs a buffer write, not
+    /// correctness.
+    pub fn dirty(&self) -> bool {
+        if self.turn_busy.load(Ordering::SeqCst) {
+            return true;
+        }
+        if self.paste_burst_deadline().is_some() {
+            return true;
+        }
+        if self.dirty_redraw {
+            return true;
+        }
+        if self.dialog.is_some()
+            || self.settings.is_some()
+            || self.selector.is_some()
+            || !self.pending_dialogs.is_empty()
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Set the dirty flag explicitly. Drivers call this after they
+    /// step the App (the step result is already tracked) and after
+    /// they hand a delta to the App that did not go through `step`
+    /// (a transcript append, a queued modal, etc.).
+    pub fn mark_dirty(&mut self) {
+        self.dirty_redraw = true;
+    }
+
+    /// Clear the dirty flag. Called after a successful paint.
+    pub fn clear_dirty(&mut self) {
+        self.dirty_redraw = false;
+    }
+
     /// Whether a background agent turn is currently in flight.
     pub fn is_busy(&self) -> bool {
         self.turn_busy.load(Ordering::SeqCst)
@@ -2514,172 +2431,7 @@ impl App {
         agent.set_model(model);
     }
 
-    /// Drain any pending agent events into the message view. The
-    /// caller calls this on every render tick — the App drains
-    /// synchronously, so the TUI never blocks on the agent.
-    pub fn drain_agent_events(&mut self) -> bool {
-        let mut changed = false;
-        loop {
-            let event = match self.event_rx.as_mut() {
-                None => break,
-                Some(rx) => match rx.try_recv() {
-                    Ok(event) => event,
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        self.cancel_token = None;
-                        self.event_rx = None;
-                        changed = true;
-                        break;
-                    }
-                },
-            };
-            changed = true;
-            self.apply_event(event);
-        }
-        changed
-    }
-
-    /// Apply one [`AgentEvent`] to the message view and status bar.
-    ///
-    /// [`App::drain_agent_events`] funnels every queued event through this;
-    /// it is public so a driver (or a test) can inject a synthetic event —
-    /// the faux provider only streams text, so a thinking or tool event has
-    /// no other way in (the render loop itself goes through
-    /// [`App::drain_agent_events`]).
-    pub fn apply_agent_event(&mut self, event: AgentEvent) {
-        self.apply_event(event);
-    }
-
-    /// Apply a single [`AgentEvent`] to the message view + status bar.
-    fn apply_event(&mut self, event: AgentEvent) {
-        match event {
-            AgentEvent::TurnStart => {}
-            AgentEvent::MessageStart { model } => {
-                self.tool_call_ids.clear();
-                self.messages.begin_assistant_stream(&model);
-            }
-            AgentEvent::MessageUpdate(update) => match update {
-                AssistantMessageUpdate::TextDelta { delta } => {
-                    self.messages.append_assistant_delta(&delta);
-                }
-                AssistantMessageUpdate::ThinkingDelta { delta } => {
-                    self.messages.append_thinking_delta(&delta);
-                }
-                AssistantMessageUpdate::ToolCallDelta {
-                    index,
-                    id,
-                    name,
-                    arguments_delta,
-                } => {
-                    // The first delta for a call carries the provider id;
-                    // the rest only carry argument fragments. Remember the
-                    // id by index so every fragment lands in one block.
-                    let call_id = match id {
-                        Some(id) => {
-                            self.tool_call_ids.insert(index, id.clone());
-                            id
-                        }
-                        None => self
-                            .tool_call_ids
-                            .get(&index)
-                            .cloned()
-                            .unwrap_or_else(|| format!("tool-{index}")),
-                    };
-                    self.messages.begin_tool_stream(&call_id, name.as_deref());
-                    if let Some(delta) = arguments_delta {
-                        self.messages.append_tool_stream_args(&call_id, &delta);
-                    }
-                }
-            },
-            AgentEvent::MessageEnd { message } => {
-                self.messages.end_assistant_stream();
-                // Tool execution events that follow carry their own call id,
-                // so the index map has done its job and can be dropped.
-                self.tool_call_ids.clear();
-                // Cumulative session totals plus the latest turn's context
-                // size, which drives the footer's context gauge.
-                let usage = message.usage;
-                self.status_data.add_usage(&usage);
-                let context_used = if usage.total > 0 {
-                    usage.total
-                } else {
-                    usage.input + usage.output + usage.cache_read + usage.cache_write
-                };
-                self.status_data.set_context_used(context_used);
-            }
-            AgentEvent::ToolExecutionStart { call } => {
-                if let Some(renderer) = self.tool_block_renderer.as_mut() {
-                    renderer.begin_tool(&call);
-                }
-                let args = if call.arguments.is_null() {
-                    String::new()
-                } else {
-                    call.arguments.to_string()
-                };
-                self.messages
-                    .start_tool_execution(&call.id, &call.name, &args);
-            }
-            AgentEvent::ToolExecutionUpdate {
-                tool_call_id: _,
-                delta,
-            } => {
-                self.messages.append_assistant_delta(&delta);
-            }
-            AgentEvent::ToolExecutionEnd {
-                result,
-                duration_ms,
-            } => {
-                let is_error = result.is_error;
-                let body = match result.content.as_ref() {
-                    Content::Text(t) => t.text.clone(),
-                    _ => "(binary result)".to_string(),
-                };
-                // Let the driver's renderer style the block against the
-                // viewport we last painted at. Before the first render there
-                // is no width, so fall back to a sane 80 columns.
-                let width = {
-                    let w = self.viewport_width.load(Ordering::Relaxed);
-                    if w == 0 {
-                        80
-                    } else {
-                        w
-                    }
-                };
-                let styled = self
-                    .tool_block_renderer
-                    .as_mut()
-                    .and_then(|renderer| renderer.finish_tool(&result, width));
-                self.messages.finish_tool_execution_with_lines(
-                    &result.tool_call_id,
-                    duration_ms,
-                    &body,
-                    is_error,
-                    styled,
-                );
-            }
-            AgentEvent::TurnEnd {
-                message,
-                tool_results,
-            } => {
-                if message.stop_reason == pi_protocol::StopReason::Error {
-                    self.pending_error = Some("provider returned an error".into());
-                }
-                self.last_turn_usage = Some(TurnUsage {
-                    usage: message.usage,
-                    stop_reason: message.stop_reason,
-                    trailing: tool_results,
-                });
-            }
-            AgentEvent::UserMessage(_) => {}
-            // Run brackets. The TUI renders turn/message state, not the run
-            // boundary itself, so these need no UI work — but the extension
-            // fan-out hook (if installed) still sees them.
-            AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {}
-            AgentEvent::Error(message) => {
-                self.pending_error = Some(message);
-            }
-        }
-    }
+    // Agent event drain / apply — see `app/agent_events.rs`.
 
     /// Pop the last pending error (if any). The TUI prints this on
     /// the next render so the user sees the agent surface error.
@@ -3009,42 +2761,6 @@ impl App {
         self.pending_setting_activation.take()
     }
 
-    /// Route one key while the settings modal is open.
-    fn step_settings(&mut self, key: Key) -> StepOutcome {
-        let Some(list) = self.settings.as_mut() else {
-            return StepOutcome::Idle;
-        };
-        match list.handle_key(key) {
-            SettingsAction::None => StepOutcome::Idle,
-            SettingsAction::Changed => StepOutcome::Redraw,
-            SettingsAction::ValueChanged { id, value } => {
-                self.pending_setting_change = Some((id, value));
-                StepOutcome::Redraw
-            }
-            SettingsAction::Activated(id) => {
-                self.pending_setting_activation = Some(id);
-                StepOutcome::Redraw
-            }
-            SettingsAction::Cancelled => {
-                self.settings = None;
-                StepOutcome::Redraw
-            }
-        }
-    }
-
-    /// Route a wheel event to the open settings list. Returns `None` when
-    /// no settings modal is open, so the caller can fall through to the
-    /// transcript.
-    fn step_settings_wheel(&mut self, up: bool, alt: bool) -> Option<StepOutcome> {
-        let list = self.settings.as_mut()?;
-        let lines = WHEEL_SCROLL_LINES * if alt { ALT_WHEEL_SCROLL_MULTIPLIER } else { 1 };
-        let delta = if up { -(lines as i32) } else { lines as i32 };
-        Some(match list.scroll_by(delta) {
-            SettingsAction::Changed => StepOutcome::Redraw,
-            _ => StepOutcome::Idle,
-        })
-    }
-
     // -----------------------------------------------------------------
     // Extension UI host surface (upstream `ctx.ui.*`)
     //
@@ -3340,28 +3056,8 @@ impl App {
     /// The modal layers keep their priority: while a dialog, the settings
     /// modal or a selector owns the keyboard, a paste is dropped instead of
     /// editing the frozen composer underneath it.
-    pub fn step_paste(&mut self, text: &str) -> StepOutcome {
-        if self.exit_requested {
-            return StepOutcome::Exit;
-        }
-        // A real bracketed paste is authoritative: any burst still being
-        // classified is flushed first (so byte order is preserved) and the
-        // classification window is dropped, so the keystrokes that follow the
-        // paste cannot be grouped with it.
-        self.flush_paste_burst_now();
-        if self.dialog.is_some()
-            || self.settings.is_some()
-            || self.selector.is_some()
-            || self.custom_open()
-        {
-            return StepOutcome::Idle;
-        }
-        match self.prompt.editor_mut().insert_paste(text) {
-            crate::editor::PasteInsertOutcome::Ignored => StepOutcome::Idle,
-            crate::editor::PasteInsertOutcome::Inserted
-            | crate::editor::PasteInsertOutcome::Marker(_) => StepOutcome::Redraw,
-        }
-    }
+    // step_paste lives in `app/step_paste.rs`; this comment is kept as a
+    // module-level signpost for grep users.
 
     /// True when `key` triggers an `app.*` id.
     ///
@@ -3379,546 +3075,11 @@ impl App {
         matches_with_fallback(kb, event, keybinding, builtin)
     }
 
-    /// Process a single [`Key`]. Public so tests can step the App
-    /// with explicit keys. Equivalent to [`App::step_key_at`] with the
-    /// current wall clock; the production render loop goes through here.
-    pub fn step_key(&mut self, key: Key) -> StepOutcome {
-        self.step_key_at(key, Instant::now())
-    }
-
-    /// Process a single [`Key`] at the caller-supplied instant.
-    ///
-    /// The instant is what the `app.clear` (`Ctrl+C`) double-press window is
-    /// measured against, so tests can drive the window without sleeping;
-    /// nothing else reads it except the paste-burst classifier
-    /// (`AppConfig::paste_burst`). `Instant::now()` must not appear in the
-    /// decision itself (LUM-1238 acceptance 2).
-    pub fn step_key_at(&mut self, key: Key, now: Instant) -> StepOutcome {
-        // A burst that a non-burst key flushed changes the draft even when
-        // the key itself is a no-op: `Ctrl+R` must still open the search,
-        // but the frame it opens on has to show the flushed paste text.
-        self.burst_flush_pending = false;
-        let outcome = self.step_key_inner(key, now);
-        if self.burst_flush_pending && matches!(outcome, StepOutcome::Idle) {
-            StepOutcome::Redraw
-        } else {
-            outcome
-        }
-    }
-
-    /// [`App::step_key_at`]'s body, after the burst-flush bookkeeping.
-    fn step_key_inner(&mut self, key: Key, now: Instant) -> StepOutcome {
-        // A transient status message lives for exactly one key press
-        // (upstream's `showStatus` clears on a timer; this port has no timer
-        // in the App, and a key press is the next thing the reader does).
-        self.status_flash = None;
-        // A reverse history search (`Ctrl+R`) owns the composer for the whole
-        // session. codex's `handle_history_search_key` keeps its facade's
-        // chords out for the same reason: a stray `Ctrl+O` / `Alt+V` / `PageUp`
-        // must not fire on a keystroke the user meant as a search query, and
-        // nothing may touch the preview `Esc` is there to undo.
-        if self.history_search_active() {
-            return self.step_composer(key);
-        }
-        // A visible custom overlay is the outermost layer; see [`App::step`].
-        if self.extension.handle_overlay_input(key) {
-            return StepOutcome::Redraw;
-        }
-        // A modal dialog swallows every key — including Ctrl+C / Esc,
-        // which cancel the dialog instead of the turn or the App.
-        if self.dialog.is_some() {
-            return self.step_dialog(key);
-        }
-        // The settings modal is the next-outermost layer.
-        if self.settings.is_some() {
-            return self.step_settings(key);
-        }
-        // `?` on an empty composer toggles the shortcut overlay (codex
-        // `ChatComposer::handle_shortcut_overlay_key`,
-        // `bottom_pane/chat_composer.rs:3149`); any other key closes it and is
-        // handled normally below (codex's `reset_mode_after_activity`), so a
-        // reader who opened help by reflex and then types is not stuck. The
-        // gates mirror the layers above — the transcript search overlay and an
-        // extension-owned input surface (`custom`, in either placement) keep
-        // the keyboard, and a draft (or an attached image) means `?` is text,
-        // not a chord.
-        let plain_question = key.code == KeyCode::Char('?') && key.modifiers.is_empty();
-        if self.shortcut_overlay {
-            if plain_question || key.code == KeyCode::Esc {
-                self.shortcut_overlay = false;
-                return StepOutcome::Redraw;
-            }
-            self.shortcut_overlay = false;
-        } else if plain_question
-            && self.search.is_none()
-            && !self.extension.custom_visible()
-            && !self.extension.has_editor_component()
-            && !self.prompt.editor().is_showing_autocomplete()
-            && self.prompt.is_empty()
-            && self.prompt.images().is_empty()
-        {
-            self.shortcut_overlay = true;
-            return StepOutcome::Redraw;
-        }
-
-        // Slash menu: ↑/↓ navigate, Enter executes, Tab completes, Escape closes.
-        // The menu owns vertical arrows while it is visible.
-        if self.slash_menu.is_visible() {
-            match key.code {
-                KeyCode::Up => {
-                    self.slash_menu.move_up();
-                    return StepOutcome::Redraw;
-                }
-                KeyCode::Down => {
-                    self.slash_menu.move_down();
-                    return StepOutcome::Redraw;
-                }
-                KeyCode::PageUp => {
-                    self.slash_menu.page_up(5);
-                    return StepOutcome::Redraw;
-                }
-                KeyCode::PageDown => {
-                    self.slash_menu.page_down(5);
-                    return StepOutcome::Redraw;
-                }
-                KeyCode::Esc => {
-                    self.slash_menu.hide();
-                    return StepOutcome::Redraw;
-                }
-                // Enter, Tab, and other keys fall through to composer handling
-                // (Enter will submit if the menu is closed, Tab will complete)
-                _ => {
-                    self.slash_menu.hide();
-                }
-            }
-        }
-
-        // Paste-burst classification (LUM-1461, codex `paste_burst`): a
-        // terminal without bracketed paste delivers a paste as a fast run of
-        // key events, and this is where such a run is recognized. It runs
-        // after the modal layers (which own the keyboard outright) and before
-        // the `app.*` chords, because a chord is not paste content: it ends
-        // the burst, flushing whatever was buffered first. A plain character
-        // that is not (yet) paste-like falls through to the ordinary path.
-        if let Some(outcome) = self.step_composer_burst(key, now) {
-            return outcome;
-        }
-        // Global keys. Resolved through the keybinding registry so an
-        // installed override reaches the App; with nothing installed the
-        // registry serves the defaults, so the behaviour below is the
-        // pre-keybinding behaviour (see the module docs).
-        let kb = get_keybindings();
-        let event = InputEvent::Key(key);
-        // The transcript search overlay owns the keyboard while it is open,
-        // except for the chords the viewport keeps for itself
-        // (`shouldDeferViewportInputToOverlay`,
-        // `packages/tui/src/tui-alt-screen.ts:644-645`).
-        if self.search.is_some() {
-            match self.step_search_key(key) {
-                SearchKeyOutcome::Handled(outcome) => return outcome,
-                SearchKeyOutcome::PassThrough => {}
-            }
-        }
-        // `tui.altScreen.search` opens the overlay; while it is open the
-        // overlay itself consumes the chord above (upstream checks the chord
-        // before it checks whether the overlay holds focus,
-        // `packages/tui/src/tui-alt-screen.ts:705-708`).
-        if kb.matches(&event, "tui.altScreen.search") {
-            return if self.open_search() {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            };
-        }
-        // `app.interrupt` (`Escape`): cancel the in-flight turn. When the
-        // App is idle the chord falls through to the prompt, which is the
-        // pre-keybinding behaviour (selectors/settings got the key above).
-        if Self::matches_app_key(&kb, &event, "app.interrupt", &["escape"]) && self.is_busy() {
-            self.cancel();
-            return StepOutcome::Redraw;
-        }
-        // `app.clear` (`Ctrl+C`): cancel while a turn is in flight; when
-        // idle, clear the composer on the first press and exit on a second
-        // press inside [`CLEAR_EXIT_WINDOW`] — upstream `handleCtrlC`
-        // (`interactive-mode.ts:3931-3939`). Only the composer is touched by
-        // the clearing press (`Prompt::clear` drops the draft text, chips,
-        // history browsing and undo stack), so nothing else about the
-        // session changes.
-        if Self::matches_app_key(&kb, &event, "app.clear", &["ctrl+c"]) {
-            if self.is_busy() {
-                self.cancel();
-                return StepOutcome::Redraw;
-            }
-            let double_press = self
-                .last_clear_at
-                .is_some_and(|last| now.saturating_duration_since(last) < CLEAR_EXIT_WINDOW);
-            if double_press {
-                self.exit_requested = true;
-                return StepOutcome::Exit;
-            }
-            self.last_clear_at = Some(now);
-            self.prompt.clear();
-            return StepOutcome::Redraw;
-        }
-        // `app.model.select` (`Ctrl+L`) is **not** claimed here. Upstream's
-        // `app.model.select` means "open the model selector"
-        // (`packages/coding-agent/src/core/keybindings.ts:116`), and this port's
-        // selector lives in the coding-agent driver, which claims the chord
-        // before the App sees the key. Clearing the transcript is `/clear`'s
-        // job; a hardcoded `Ctrl+L` here would shadow the driver's chord (see
-        // the module docs).
-        // `app.thinking.toggle` (`Ctrl+T`): collapse / expand every assistant
-        // reasoning block (upstream's `toggleThinkingBlockVisibility`,
-        // `interactive-mode.ts:4239`, which also reports the new state through
-        // `showStatus`).
-        if Self::matches_app_key(&kb, &event, "app.thinking.toggle", &["ctrl+t"]) {
-            let visible = self.toggle_thinking_visibility();
-            self.flash_status(format!(
-                "Thinking blocks: {}",
-                if visible { "visible" } else { "hidden" }
-            ));
-            return StepOutcome::Redraw;
-        }
-        // `app.tools.expand` (`Ctrl+O`): expand / collapse every tool block
-        // (upstream's `setToolsExpanded` / `toggleToolOutputExpansion`,
-        // `interactive-mode.ts:4231-4246`, which also reports the new state
-        // through `showStatus`). The rich bodies were rendered by the driver
-        // at execution end; this only flips how much of them the App paints.
-        if Self::matches_app_key(&kb, &event, "app.tools.expand", &["ctrl+o"]) {
-            let expanded = self.toggle_tools_expanded();
-            self.flash_status(format!(
-                "Tool output: {}",
-                if expanded { "expanded" } else { "collapsed" }
-            ));
-            return StepOutcome::Redraw;
-        }
-        // `app.clipboard.pasteImage` (`Alt+V`): attach a clipboard image to
-        // the draft. The App cannot read the system clipboard, so it records
-        // the request and the driver answers it with [`App::paste_image`]
-        // (or the text fallback, [`App::paste_text`]) — the same seam as
-        // copy-on-select. A key press always redraws so the "reading…" frame
-        // and the restored status hint stay honest.
-        if Self::matches_app_key(&kb, &event, "app.clipboard.pasteImage", &["alt+v"]) {
-            self.pending_image_paste = true;
-            return StepOutcome::Redraw;
-        }
-        // `app.header` (`Alt+H`): fold / unfold the built-in startup header.
-        // A Rust-port addition — upstream ties the header's expansion to
-        // `app.tools.expand` — so it is resolved with the same
-        // registry-first / builtin-fallback rule as every other `app.*` chord
-        // and reported through `showStatus` (`flash_status`).
-        if Self::matches_app_key(&kb, &event, "app.header", &["alt+h"]) {
-            let expanded = self.toggle_header();
-            let chord = kb
-                .get_keys("app.header")
-                .first()
-                .map(|chord| format_chord(chord))
-                .unwrap_or_else(|| format_chord("alt+h"));
-            self.flash_status(format!(
-                "Startup header: {}{}",
-                if expanded { "expanded" } else { "collapsed" },
-                if expanded {
-                    String::new()
-                } else {
-                    format!(" ({chord} to show)")
-                }
-            ));
-            return StepOutcome::Redraw;
-        }
-        // Fullscreen chat-log scrolling. Upstream deliberately shadows
-        // the bare editor bindings for these chords in fullscreen mode
-        // (`packages/tui/src/keybindings.ts:159-165,208-209`: "These
-        // intentionally shadow the unmodified editor bindings in
-        // fullscreen mode"); `Ctrl+A` / `Ctrl+E` still reach the editor
-        // for start / end of line.
-        //
-        // LUM-1317: the shadowing is unconditional in the transcript's
-        // favour only while the composer has nothing hidden. A draft taller
-        // than the composer window is content the user cannot reach any
-        // other way, so `PageUp` / `PageDown` page *it* then —
-        // `tui.editor.pageUp` / `pageDown` — and the transcript keeps them
-        // when it fits (see [`App::composer_overflows`]).
-        if kb.matches(&event, "tui.altScreen.pageUp") && !self.composer_overflows() {
-            let page = self.message_page();
-            return if self.scroll_viewport_up(page) {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            };
-        }
-        if kb.matches(&event, "tui.altScreen.pageDown") && !self.composer_overflows() {
-            let page = self.message_page();
-            return if self.scroll_viewport_down(page) {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            };
-        }
-        // `tui.altScreen.top` / `tui.altScreen.bottom`.
-        if kb.matches(&event, "tui.altScreen.top") {
-            return if self.scroll_viewport_to_top() {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            };
-        }
-        if kb.matches(&event, "tui.altScreen.bottom") {
-            return if self.scroll_viewport_to_bottom() {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            };
-        }
-
-        // The editor region's component (a non-overlay `custom` session or a
-        // custom editor component) gets the key before the prompt. The
-        // app-level chords above already had their chance, so an extension
-        // editor cannot shadow interrupt / clear / scrolling.
-        if self.extension.handle_editor_input(key) {
-            return StepOutcome::Redraw;
-        }
-
-        // The composer's wrap width is a rendering fact the editor needs
-        // while it handles the key: `Up` / `Down` move by visual row, and a
-        // different width would move the caret to a row the frame did not
-        // draw it on. `0` (no frame yet) leaves the draft on one row per
-        // hard line. The page height is the same story for `PageUp` /
-        // `PageDown`, which move the caret by a windowful.
-        self.step_composer(key)
-    }
-
-    /// Hand a key to the composer.
-    ///
-    /// Split out of [`App::step_key_at`] so a reverse history search can route
-    /// here directly: while the search is open it owns the keyboard, and the
-    /// `app.*` chords above (expand tools, paste an image, fold the header,
-    /// page the transcript) must not fire on a keystroke the user means as a
-    /// search query.
-    ///
-    /// Paste-burst classification happens in [`App::step_key_at`], ahead of
-    /// the `app.*` chords, so this only ever sees a character the classifier
-    /// left alone.
-    fn step_composer(&mut self, key: Key) -> StepOutcome {
-        let composer_width = self.composer_body_width.load(Ordering::Relaxed) as usize;
-        let composer_page = self.composer_window_rows();
-        self.prompt.editor_mut().set_visual_width(composer_width);
-        self.prompt.editor_mut().set_page_rows(composer_page);
-
-        let action = self.prompt.handle_key(key);
-        // A recall from the cross-session history file can bring back a
-        // marker whose content this session never had; say so once.
-        if self.prompt.editor_mut().take_stale_paste_notice() {
-            self.flash_status(
-                "Pasted content recalled from a previous session is no longer available",
-            );
-        }
-        match action {
-            PromptAction::None => StepOutcome::Idle,
-            PromptAction::Changed => StepOutcome::Redraw,
-            PromptAction::Submit(text) => {
-                // Caller is responsible for invoking `submit` with an
-                // `Arc<AsyncMutex<Agent>>` — we just announce the submitted
-                // draft (text plus any pasted image chips) and clear the
-                // buffer. The images are captured before `clear()` wipes
-                // them.
-                let images = self.prompt.images().to_vec();
-                if self.turn_busy.load(Ordering::SeqCst) && !images.is_empty() {
-                    // Refuse *before* clearing: the Stage 61 pending queue is
-                    // text-only, so accepting would silently drop the chips.
-                    // Nothing is consumed — the draft (text and chips) stays
-                    // in the editor for the next attempt.
-                    self.flash_status("Cannot attach images while a turn is running");
-                    return StepOutcome::Redraw;
-                }
-                let submitted = Submission {
-                    text,
-                    images,
-                    draft: Some(self.prompt.editor().text().to_string()),
-                };
-                self.prompt.clear();
-                StepOutcome::Submitted(submitted)
-            }
-            PromptAction::Interrupt => {
-                self.cancel();
-                StepOutcome::Redraw
-            }
-            PromptAction::Eof => {
-                self.exit_requested = true;
-                StepOutcome::Exit
-            }
-        }
-    }
 
     // -----------------------------------------------------------------
-    // Paste burst (codex `paste_burst`)
+    // Paste burst (codex `paste_burst`) — see `app/step_paste.rs`.
     // -----------------------------------------------------------------
-
-    /// Feed a key that has reached the composer into the paste-burst
-    /// detector.
-    ///
-    /// `None` means "not consumed — handle the key normally"; `Some(outcome)`
-    /// means the key joined a burst (or a due burst was flushed), so the
-    /// ordinary composer path must not see it.
-    ///
-    /// Every character is inserted as ordinary typing until a run proves to
-    /// be paste-like, so nothing is ever held back waiting for a tick; when
-    /// the run is confirmed, the prefix is *retroactively* folded into the
-    /// burst ([`Editor::cut_chars_before_cursor`](crate::Editor::cut_chars_before_cursor)).
-    /// A misclassification therefore degrades to "a few characters inserted
-    /// together" and never to a lost keystroke.
-    fn step_composer_burst(&mut self, key: Key, now: Instant) -> Option<StepOutcome> {
-        // A reverse search owns the composer: its query is not a paste, and
-        // its `Esc` must not be swallowed by a burst either.
-        if !self.config.paste_burst || self.history_search_active() {
-            return None;
-        }
-        // A burst that has gone quiet is flushed before this key is read, so
-        // a chord never lands on top of half a paste.
-        if self.flush_paste_burst_if_due(now) {
-            self.burst_flush_pending = true;
-        }
-
-        if let Some(c) = Self::burst_plain_char(key) {
-            return match self.paste_burst.on_plain_char(c, now) {
-                // Not paste-like: let the ordinary path insert it. A due
-                // flush, if any, is reported by the flag.
-                BurstDecision::Typed => None,
-                BurstDecision::BeginBurst { retro_chars } => {
-                    let prefix = self
-                        .prompt
-                        .editor_mut()
-                        .cut_chars_before_cursor(retro_chars);
-                    if prefix.chars().count() == retro_chars {
-                        self.paste_burst.absorb_retro(&prefix);
-                    } else {
-                        // The cursor had fewer characters than the run: the
-                        // prefix cannot be absorbed, so fall back to plain
-                        // insertion rather than dropping the buffered text.
-                        let recovered = self.paste_burst.abort();
-                        let text = format!("{prefix}{recovered}");
-                        if !text.is_empty() {
-                            self.prompt.editor_mut().insert_str(&text);
-                        }
-                    }
-                    Some(StepOutcome::Redraw)
-                }
-                BurstDecision::Buffered => Some(StepOutcome::Idle),
-            };
-        }
-
-        // `Enter` / `Tab` inside a burst stay inside the paste: the newline
-        // of a pasted block must never submit the draft it was pasted into.
-        if let Some(c) = Self::burst_control_char(key) {
-            if self.paste_burst.append_control_if_active(c, now) {
-                return Some(StepOutcome::Idle);
-            }
-        }
-
-        // Any other key ends the burst context: flush whatever was buffered
-        // and forget the window, so the next keystroke starts a fresh run
-        // instead of being grouped with this one. The key itself is **not**
-        // consumed — `Ctrl+R` must still open the search.
-        if self.flush_paste_burst_now() {
-            self.burst_flush_pending = true;
-        }
-        None
-    }
-
-    /// The character a plain text-producing key carries, if any.
-    ///
-    /// Shifted characters count — a capital letter is ordinary text — while
-    /// Control / Alt / Meta combinations are chords, never paste content.
-    fn burst_plain_char(key: Key) -> Option<char> {
-        if key.modifiers.control || key.modifiers.alt || key.modifiers.meta {
-            return None;
-        }
-        match key.code {
-            KeyCode::Char(c) => Some(c),
-            _ => None,
-        }
-    }
-
-    /// The control character a paste can carry, if `key` is one.
-    fn burst_control_char(key: Key) -> Option<char> {
-        if key.modifiers.control || key.modifiers.alt || key.modifiers.meta {
-            return None;
-        }
-        match key.code {
-            KeyCode::Enter => Some('\n'),
-            KeyCode::Tab => Some('\t'),
-            _ => None,
-        }
-    }
-
-    /// Flush a burst that has gone quiet, returning whether the draft
-    /// changed.
-    fn flush_paste_burst_if_due(&mut self, now: Instant) -> bool {
-        match self.paste_burst.flush_if_due(now) {
-            Some(text) => self.insert_paste_burst_text(&text),
-            None => false,
-        }
-    }
-
-    /// Flush an active burst immediately (a key that cannot belong to the
-    /// paste is about to be handled).
-    fn flush_paste_burst_now(&mut self) -> bool {
-        match self.paste_burst.flush_now_and_clear() {
-            Some(text) => self.insert_paste_burst_text(&text),
-            None => false,
-        }
-    }
-
-    /// Route burst content through the composer's paste entry point, so a
-    /// folded marker, its registry entry and its undo unit are the very same
-    /// ones a bracketed paste produces.
-    fn insert_paste_burst_text(&mut self, text: &str) -> bool {
-        match self.prompt.editor_mut().insert_paste(text) {
-            crate::editor::PasteInsertOutcome::Ignored => false,
-            crate::editor::PasteInsertOutcome::Inserted
-            | crate::editor::PasteInsertOutcome::Marker(_) => true,
-        }
-    }
-
-    /// Flush a paste burst that has gone quiet, driven by the render loop's
-    /// beat.
-    ///
-    /// A burst becomes visible only when it is flushed, and the flush is
-    /// time-based, so a driver must call this on every loop iteration;
-    /// `pi-coding-agent`'s `run_loop` does, and uses
-    /// [`App::paste_burst_deadline`] to shorten its poll timeout while a
-    /// burst is accumulating. Returns whether the draft changed.
-    pub fn tick_paste_burst(&mut self, now: Instant) -> bool {
-        if !self.config.paste_burst {
-            return false;
-        }
-        self.flush_paste_burst_if_due(now)
-    }
-
-    /// When [`App::tick_paste_burst`] next has something to flush, if a burst
-    /// is accumulating. `None` when the classifier is off or idle.
-    pub fn paste_burst_deadline(&self) -> Option<Instant> {
-        if !self.config.paste_burst {
-            return None;
-        }
-        self.paste_burst.flush_deadline()
-    }
-
-    /// Route a key to the open dialog.
-    fn step_dialog(&mut self, key: Key) -> StepOutcome {
-        let Some(dialog) = self.dialog.as_mut() else {
-            return StepOutcome::Idle;
-        };
-        match dialog.handle_key(key) {
-            DialogAction::None => StepOutcome::Idle,
-            DialogAction::Changed => StepOutcome::Redraw,
-            // The answer already travelled to the host over the
-            // dialog's reply channel; the modal just closes.
-            DialogAction::Resolved(_) => {
-                self.dialog = None;
-                StepOutcome::Redraw
-            }
-        }
-    }
+    // Modal dialog / settings list step handlers — see `app/step_dialog.rs`.
 
     /// Mark the App for exit (e.g. after `/exit`).
     pub fn request_exit(&mut self) {
@@ -4026,59 +3187,6 @@ impl App {
         // A step that lands on a match already on screen still changed the
         // selection, so it still needs a redraw.
         revealed || self.search_match_index() != before
-    }
-
-    /// Route a key to the open search overlay.
-    fn step_search_key(&mut self, key: Key) -> SearchKeyOutcome {
-        let bindings = get_keybindings();
-        let event = InputEvent::Key(key);
-        if bindings.matches(&event, "tui.altScreen.searchClose")
-            || bindings.matches(&event, "tui.altScreen.search")
-        {
-            return SearchKeyOutcome::Handled(if self.close_search() {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            });
-        }
-        if bindings.matches(&event, "tui.altScreen.searchNext") {
-            return SearchKeyOutcome::Handled(if self.navigate_search(1) {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            });
-        }
-        if bindings.matches(&event, "tui.altScreen.searchPrevious") {
-            return SearchKeyOutcome::Handled(if self.navigate_search(-1) {
-                StepOutcome::Redraw
-            } else {
-                StepOutcome::Idle
-            });
-        }
-
-        // The viewport scroll chords and the process-global keys keep
-        // working while the bar has focus.
-        match key {
-            Key {
-                code: KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End,
-                modifiers,
-            } if modifiers.is_empty() => return SearchKeyOutcome::PassThrough,
-            Key {
-                code: KeyCode::Char('c' | 'l'),
-                modifiers,
-            } if modifiers == KeyModifiers::CONTROL => return SearchKeyOutcome::PassThrough,
-            _ => {}
-        }
-
-        let Some(state) = self.search.as_mut() else {
-            return SearchKeyOutcome::Handled(StepOutcome::Idle);
-        };
-        if apply_query_key(&mut state.bar, key) {
-            self.search_query_changed();
-            SearchKeyOutcome::Handled(StepOutcome::Redraw)
-        } else {
-            SearchKeyOutcome::Handled(StepOutcome::Idle)
-        }
     }
 
     /// Re-run the search against the current transcript and re-select the
@@ -4249,152 +3357,7 @@ impl App {
         true
     }
 
-    /// Paint the search matches into the already-rendered message area.
-    ///
-    /// Non-current matches get an underline, the current one bold + reverse —
-    /// upstream's `searchMatchStyle` / `searchCurrentMatchStyle`
-    /// (`packages/tui/src/tui-alt-screen.ts:118-121`). The port keeps the
-    /// themed foreground already in the cell instead of replacing it, so a
-    /// highlighted token stays readable in any theme.
-    fn apply_search_highlight(&self, area: Rect, buf: &mut Buffer) {
-        let Some(state) = self.search.as_ref() else {
-            return;
-        };
-        if state.matches.is_empty() || area.width == 0 || area.height == 0 {
-            return;
-        }
-        let (visible_start, lines) = self.messages.visible_lines(area.width, area.height);
-        let visible_end = visible_start + lines.len();
-        for (index, search_match) in state.matches.iter().enumerate() {
-            let modifier = if Some(index) == state.selected_index {
-                Modifier::BOLD | Modifier::REVERSED
-            } else {
-                Modifier::UNDERLINED
-            };
-            for segment in &search_match.segments {
-                if segment.row < visible_start || segment.row >= visible_end {
-                    continue;
-                }
-                let row = segment.row - visible_start;
-                let text = plain_text(&lines[row]);
-                // Search segments are terminal-cell spans (see
-                // [`crate::search`]); the buffer is addressed in cells too, so
-                // the clamp is a cell width, not a character count.
-                let len = crate::width::columns(&text);
-                let to = segment.end_col.min(len);
-                let from = segment.start_col.min(to);
-                let y = area.y + row as u16;
-                for col in from..to {
-                    let x = area.x + col as u16;
-                    if x >= area.x + area.width {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.modifier |= modifier;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Paint the chat-log scrollbar into the message viewport's last column.
-    ///
-    /// Upstream's `paintScrollbar` / `renderScrollView`
-    /// (`packages/tui/src/layout.ts:280-326`): the track is a dim vertical
-    /// rule, the thumb a heavier block. While the bar is hovered or dragged
-    /// the thumb switches to a solid block and both parts go bold — see the
-    /// module docs on why the port adds the modifier. The bar is a no-op when
-    /// the transcript fits the viewport ([`App::scrollbar_geometry`] is
-    /// `None`).
-    fn apply_scrollbar(&self, area: Rect, buf: &mut Buffer) {
-        let Some(geometry) = self.scrollbar_geometry() else {
-            return;
-        };
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        let active = self.scrollbar_hover || self.scrollbar_drag.is_some();
-        let thumb_end = geometry.thumb_top.saturating_add(geometry.thumb_height);
-        for row in 0..geometry.track_height {
-            let y = geometry.track_top + row;
-            let in_thumb = y >= geometry.thumb_top && y < thumb_end;
-            let (glyph, slot) = if in_thumb {
-                (if active { '█' } else { '┃' }, ThemeColor::ScrollbarThumb)
-            } else {
-                ('│', ThemeColor::ScrollbarTrack)
-            };
-            let style = if active {
-                SpanStyle::fg(slot).bold()
-            } else {
-                SpanStyle::fg(slot)
-            };
-            if let Some(cell) = buf.cell_mut((geometry.column, y)) {
-                cell.set_char(glyph);
-                cell.set_style(style.to_style(&self.theme));
-            }
-        }
-    }
-
     /// Give an open search overlay the mouse first, exactly like the modal
-    /// overlays: a gesture inside the bar's rectangle is consumed by the bar
-    /// (hover clears, a press on a navigation button navigates) and never
-    /// falls through to the chat-log selection underneath
-    /// (`getSearchNavigationDirectionAt` / `handleSearchMouseEvent`,
-    /// `packages/tui/src/tui-alt-screen.ts:541-568`).
-    ///
-    /// Returns `None` when the overlay is closed, has no rectangle yet, or the
-    /// gesture landed outside it, so the caller keeps routing normally.
-    fn step_search_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
-        self.search.as_ref()?;
-        let (width, height) = self.viewport();
-        let (origin_x, origin_y) = self.viewport_origin();
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let rect = search_bar_rect(Rect::new(origin_x, origin_y, width, height))?;
-        let inside = gesture.x >= rect.x
-            && gesture.x < rect.x + rect.width
-            && gesture.y >= rect.y
-            && gesture.y < rect.y + rect.height;
-        let (row, col) = (
-            gesture.y as i64 - rect.y as i64,
-            gesture.x as i64 - rect.x as i64,
-        );
-        let direction = if inside {
-            self.search
-                .as_ref()
-                .and_then(|state| state.bar.navigation_direction_at(rect.width, row, col))
-        } else {
-            None
-        };
-        let changed = self
-            .search
-            .as_mut()
-            .map(|state| state.bar.set_hovered(direction))
-            .unwrap_or(false);
-        if !inside {
-            // The pointer left the bar: clear any stale hover and let the
-            // gesture reach the chat log.
-            return if changed {
-                Some(StepOutcome::Redraw)
-            } else {
-                None
-            };
-        }
-        if let (Some(direction), true) = (
-            direction,
-            matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)),
-        ) {
-            if self.navigate_search(direction) {
-                return Some(StepOutcome::Redraw);
-            }
-        }
-        Some(if changed {
-            StepOutcome::Redraw
-        } else {
-            StepOutcome::Idle
-        })
-    }
 
     /// Append a free-form info line to the message view (used by
     /// slash commands to print help / errors).
@@ -4413,8 +3376,8 @@ impl App {
     /// before the first one.
     pub fn viewport(&self) -> (u16, u16) {
         (
-            self.viewport_width.load(Ordering::Relaxed),
-            self.viewport_height.load(Ordering::Relaxed),
+            self.viewport.viewport_width.load(Ordering::Relaxed),
+            self.viewport.viewport_height.load(Ordering::Relaxed),
         )
     }
 
@@ -4422,8 +3385,8 @@ impl App {
     /// coordinates are absolute, so this is what maps them back in.
     pub fn viewport_origin(&self) -> (u16, u16) {
         (
-            self.viewport_origin.0.load(Ordering::Relaxed),
-            self.viewport_origin.1.load(Ordering::Relaxed),
+            self.viewport.viewport_origin.0.load(Ordering::Relaxed),
+            self.viewport.viewport_origin.1.load(Ordering::Relaxed),
         )
     }
 
@@ -4431,101 +3394,23 @@ impl App {
     /// `None` when the viewport was following the tail and no pill was
     /// painted.
     pub fn scroll_to_end_rect(&self) -> Option<Rect> {
-        let width = self.scroll_to_end.2.load(Ordering::Relaxed);
+        let width = self.viewport.scroll_to_end.2.load(Ordering::Relaxed);
         (width > 0).then(|| Rect {
-            x: self.scroll_to_end.1.load(Ordering::Relaxed),
-            y: self.scroll_to_end.0.load(Ordering::Relaxed),
+            x: self.viewport.scroll_to_end.1.load(Ordering::Relaxed),
+            y: self.viewport.scroll_to_end.0.load(Ordering::Relaxed),
             width,
             height: 1,
         })
-    }
-
-    /// The pill's label: ` ↓ Jump to latest message · <shortcut> `, exactly
-    /// upstream's string (down to the leading space) with the shortcut
-    /// resolved from `tui.altScreen.bottom`
-    /// (`packages/coding-agent/src/modes/interactive/tui-renderer.ts:29-33`).
-    ///
-    /// An unbound action drops the ` · <shortcut>` half rather than
-    /// rendering an empty shortcut, which is the same rule `/hotkeys`
-    /// follows.
-    fn scroll_to_end_label(&self) -> StyledSpan {
-        let shortcut = get_keybindings()
-            .get_keys("tui.altScreen.bottom")
-            .iter()
-            .map(|chord| format_chord(chord))
-            .collect::<Vec<_>>()
-            .join("/");
-        let text = if shortcut.is_empty() {
-            SCROLL_TO_END_LABEL.to_string()
-        } else {
-            format!("{SCROLL_TO_END_LABEL}· {shortcut} ")
-        };
-        StyledSpan {
-            text,
-            style: SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg),
-            link: None,
-        }
-    }
-
-    /// Composite the pill onto the bottom row of the message viewport when
-    /// the reader has scrolled away from the tail, and record where it
-    /// landed for the pointer.
-    ///
-    /// Upstream's `compositeScrollToEndIndicator`
-    /// (`packages/tui/src/tui-alt-screen.ts:1617-1637`): only when the scroll
-    /// view follows the end but is not at it, drawn on the viewport's last
-    /// row, horizontally centred, truncated at — and never wider than — the
-    /// space left of the scrollbar column.
-    fn paint_scroll_to_end(&self, message_area: Rect, buf: &mut Buffer) {
-        // Every path out of here clears the record, so a stale rectangle can
-        // never keep swallowing clicks after the pill is gone.
-        self.scroll_to_end.2.store(0, Ordering::Relaxed);
-        if message_area.width == 0 || message_area.height == 0 {
-            return;
-        }
-        // Nothing to jump to when the transcript already fits, and no pill
-        // while the viewport is pinned to the tail.
-        if self.messages.is_following() || self.max_scroll() == 0 {
-            return;
-        }
-        let available = match self.scrollbar_geometry() {
-            Some(geometry) if geometry.column > message_area.x => {
-                (geometry.column - message_area.x).min(message_area.width)
-            }
-            _ => message_area.width,
-        };
-        let label = self.scroll_to_end_label();
-        let label_width = crate::hyperlink::visible_width(&label.text) as u16;
-        if label_width == 0 || available == 0 {
-            return;
-        }
-        let width = label_width.min(available);
-        let column = message_area.x + (available - width) / 2;
-        let row = message_area.y + message_area.height - 1;
-        // Blank the covered cells first: the pill is shorter than the
-        // transcript line underneath it, and ratatui only emits the cells
-        // this buffer changed, so an unblanked row left the old text bleeding
-        // through (`reset` also drops the covered cells' colours).
-        for offset in 0..width {
-            if let Some(cell) = buf.cell_mut((column + offset, row)) {
-                cell.reset();
-            }
-        }
-        let line = [label];
-        write_styled_line_ellipsized(buf, column, row, width, &line, &self.theme);
-        self.scroll_to_end.0.store(row, Ordering::Relaxed);
-        self.scroll_to_end.1.store(column, Ordering::Relaxed);
-        self.scroll_to_end.2.store(width, Ordering::Relaxed);
     }
 
     /// Rectangle of the "cut above" hint as of the last render, or `None`
     /// when the top edge of the viewport is a block boundary (or the reader
     /// has scrolled away from the tail) and nothing was painted.
     pub fn truncated_above_rect(&self) -> Option<Rect> {
-        let width = self.truncated_above.2.load(Ordering::Relaxed);
+        let width = self.viewport.truncated_above.2.load(Ordering::Relaxed);
         (width > 0).then(|| Rect {
-            x: self.truncated_above.1.load(Ordering::Relaxed),
-            y: self.truncated_above.0.load(Ordering::Relaxed),
+            x: self.viewport.truncated_above.1.load(Ordering::Relaxed),
+            y: self.viewport.truncated_above.0.load(Ordering::Relaxed),
             width,
             height: 1,
         })
@@ -4565,79 +3450,6 @@ impl App {
             .find(|(from, to)| *from <= start && start < *to)?;
         let hidden = start - item_start;
         (hidden > 0).then_some(hidden)
-    }
-
-    /// The hint's label: ` ⋯ <n> line(s) above · <shortcut> ` — the prompt
-    /// half of the affordance, resolved from `tui.altScreen.top` (the key it
-    /// actually points at) with the same unbound-action rule
-    /// [`App::scroll_to_end_label`] follows.
-    fn truncated_above_label(&self, hidden: usize) -> StyledSpan {
-        let shortcut = get_keybindings()
-            .get_keys("tui.altScreen.top")
-            .iter()
-            .map(|chord| format_chord(chord))
-            .collect::<Vec<_>>()
-            .join("/");
-        let noun = if hidden == 1 { "line" } else { "lines" };
-        let base = format!("{TRUNCATED_ABOVE_LEAD}{hidden} {noun} above ");
-        let text = if shortcut.is_empty() {
-            base
-        } else {
-            format!("{base}· {shortcut} ")
-        };
-        StyledSpan {
-            text,
-            style: SpanStyle::fg(ThemeColor::Muted),
-            link: None,
-        }
-    }
-
-    /// Disclose that the block at the top edge of the viewport continues
-    /// above it, on the viewport's first row, left-aligned and never wider
-    /// than the space left of the scrollbar column.
-    ///
-    /// The covered row is a continuation row of a block the reader cannot see
-    /// the head of, so the trade is one unreadable old line for knowing that
-    /// there is something to look for — the alternative (paint nothing, as
-    /// upstream does) leaves a cut block looking like a block that starts
-    /// there.
-    fn paint_truncated_above(&self, message_area: Rect, buf: &mut Buffer) {
-        // Every path out clears the record, so a stale rectangle can never
-        // keep swallowing clicks after the hint is gone.
-        self.truncated_above.2.store(0, Ordering::Relaxed);
-        if message_area.width == 0 || message_area.height < 2 {
-            return;
-        }
-        let Some(hidden) = self.truncated_above_lines() else {
-            return;
-        };
-        let available = match self.scrollbar_geometry() {
-            Some(geometry) if geometry.column > message_area.x => {
-                (geometry.column - message_area.x).min(message_area.width)
-            }
-            _ => message_area.width,
-        };
-        let label = self.truncated_above_label(hidden);
-        let label_width = crate::hyperlink::visible_width(&label.text) as u16;
-        if label_width == 0 || available == 0 {
-            return;
-        }
-        let width = label_width.min(available);
-        let column = message_area.x;
-        let row = message_area.y;
-        // Blank the covered cells first, for the same reason the pill does:
-        // ratatui only emits the cells this buffer changed, so an unblanked
-        // row would let the covered text bleed through the hint's tail.
-        for offset in 0..width {
-            if let Some(cell) = buf.cell_mut((column + offset, row)) {
-                cell.reset();
-            }
-        }
-        let line = [label];
-        write_styled_line_ellipsized(buf, column, row, width, &line, &self.theme);
-        self.truncated_above.0.store(row, Ordering::Relaxed);
-        self.truncated_above.1.store(column, Ordering::Relaxed);
-        self.truncated_above.2.store(width, Ordering::Relaxed);
     }
 
     /// Whether the pointer currently rests on the chat-log scrollbar.
@@ -4696,7 +3508,7 @@ impl App {
             // frame while the bar is visible: the bar owns the frame's right
             // edge, not the text's last column (see
             // [`App::viewport_for_render`]).
-            column: origin_x + width + self.viewport_reserved.load(Ordering::Relaxed) - 1,
+            column: origin_x + width + self.viewport.viewport_reserved.load(Ordering::Relaxed) - 1,
             track_top: origin_y,
             track_height: height,
             thumb_top,
@@ -4774,67 +3586,6 @@ impl App {
     /// and once a drag is in flight every non-wheel gesture belongs to it
     /// until the release — so a stray click cannot start a selection
     /// mid-drag.
-    fn step_scrollbar_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
-        // A drag owns every non-wheel gesture until the button comes back up
-        // (upstream's `if (this.scrollbarDrag) { … return true; }`), so a
-        // stray press cannot start a selection mid-drag.
-        if let Some(drag) = self.scrollbar_drag {
-            return Some(match gesture.kind {
-                MouseGestureKind::Release(_) => {
-                    self.scrollbar_drag = None;
-                    StepOutcome::Idle
-                }
-                MouseGestureKind::Drag(_) => {
-                    // The geometry is recomputed from the live viewport, so a
-                    // log that grows mid-drag still maps correctly.
-                    let scrolled = self.scrollbar_geometry().is_some_and(|geometry| {
-                        self.scroll_scrollbar_to_pointer(&geometry, gesture.y, drag.grab_offset)
-                    });
-                    if scrolled {
-                        StepOutcome::Redraw
-                    } else {
-                        StepOutcome::Idle
-                    }
-                }
-                _ => StepOutcome::Idle,
-            });
-        }
-
-        let left = MouseButton::Left;
-        match gesture.kind {
-            MouseGestureKind::Press(button) if button == left => {
-                let geometry = self.scrollbar_geometry_at(gesture.x, gesture.y)?;
-                let on_thumb = gesture.y >= geometry.thumb_top
-                    && gesture.y < geometry.thumb_top.saturating_add(geometry.thumb_height);
-                let grab_offset = if on_thumb {
-                    gesture.y - geometry.thumb_top
-                } else {
-                    geometry.thumb_height / 2
-                };
-                // The bar takes the pointer: drop the text selection and the
-                // pending double-click, and cancel any drag autoscroll
-                // (upstream's `clearTextSelection()` / `stopSelectionAutoScroll()`).
-                self.selection = None;
-                self.selection_dragging = false;
-                self.stop_selection_autoscroll();
-                self.last_click = None;
-                self.scrollbar_hover = true;
-                self.scrollbar_drag = Some(ScrollbarDrag { grab_offset });
-                let scrolled = if on_thumb {
-                    false
-                } else {
-                    self.scroll_scrollbar_to_pointer(&geometry, gesture.y, grab_offset)
-                };
-                Some(if scrolled {
-                    StepOutcome::Redraw
-                } else {
-                    StepOutcome::Idle
-                })
-            }
-            _ => None,
-        }
-    }
-
     /// Feed a non-wheel mouse gesture to the App: start, extend, finish or
     /// clear the chat-log text selection.
     ///
@@ -4864,99 +3615,6 @@ impl App {
     /// `clickCount` field; gestures that press outside the message viewport
     /// (the prompt and status rows) are ignored, though an in-flight drag is
     /// clamped back into the viewport so edge autoscroll keeps tracking.
-    pub fn step_mouse_gesture(&mut self, gesture: MouseGesture) -> StepOutcome {
-        // A modal owns the mouse exactly as it owns the keyboard
-        // (`step_key`): gestures are hit-tested against the open overlays'
-        // rectangles and never reach the chat log underneath.
-        if self.dialog.is_some() || self.settings.is_some() || self.selector.is_some() {
-            // A modal covers the chat log, so the bar behind it is neither
-            // hovered nor draggable while one is up (upstream's `hasOverlay()`
-            // guard in `getScrollbarTargetAt`).
-            self.scrollbar_hover = false;
-            self.scrollbar_drag = None;
-            return self.step_modal_mouse_gesture(gesture);
-        }
-        // The search bar is an overlay too, but it lives alongside the chat
-        // log instead of over a modal, so it gets the same first pass.
-        if let Some(outcome) = self.step_search_mouse_gesture(&gesture) {
-            // The bar was consumed by the search bar's own rows.
-            self.scrollbar_hover = false;
-            self.scrollbar_drag = None;
-            return outcome;
-        }
-        // No modal is up, so a modal click cannot still be pending.
-        self.modal_mouse_press = None;
-        // The composer's autocomplete dropdown is painted over the transcript
-        // rows directly above the editor, so it owns the pointer there —
-        // upstream hit-tests the list rectangle inside the editor's own
-        // `handleMouse` before the screen-level text selection
-        // (`packages/tui/src/components/editor.ts:618-638`). Without this a
-        // click on a candidate selected the transcript text behind it.
-        if let Some(outcome) = self.autocomplete_mouse_gesture(&gesture) {
-            self.scrollbar_hover = false;
-            self.scrollbar_drag = None;
-            return outcome;
-        }
-        // The pill is the first thing on the transcript to get the pointer
-        // (upstream `handleScrollToEndIndicatorMouseEvent`, tested before the
-        // scrollbar and the selection, `packages/tui/src/tui-alt-screen.ts:1017-1024`):
-        // a left press on it jumps to the tail instead of starting a
-        // selection of the pill's own text.
-        if let Some(rect) = self.scroll_to_end_rect() {
-            let on_pill = gesture.y == rect.y
-                && gesture.x >= rect.x
-                && gesture.x < rect.x.saturating_add(rect.width);
-            if on_pill && matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)) {
-                self.stop_selection_autoscroll();
-                self.selection = None;
-                self.selection_dragging = false;
-                self.scrollbar_hover = false;
-                self.scrollbar_drag = None;
-                self.messages.set_following(true);
-                return StepOutcome::Redraw;
-            }
-        }
-        // The "cut above" hint is the second piece of transcript furniture to
-        // get the pointer: it advertises `tui.altScreen.top`, so a left press
-        // on it does exactly what that key does — never a selection of cells
-        // the hint is covering.
-        if let Some(rect) = self.truncated_above_rect() {
-            let on_hint = gesture.y == rect.y
-                && gesture.x >= rect.x
-                && gesture.x < rect.x.saturating_add(rect.width);
-            if on_hint && matches!(gesture.kind, MouseGestureKind::Press(MouseButton::Left)) {
-                self.stop_selection_autoscroll();
-                self.selection = None;
-                self.selection_dragging = false;
-                self.scrollbar_hover = false;
-                self.scrollbar_drag = None;
-                self.scroll_viewport_to_top();
-                return StepOutcome::Redraw;
-            }
-        }
-        // The scrollbar is hit-tested before the selection path, exactly
-        // like upstream (`handleScrollbarMouseEvent` runs before
-        // `handleSelectionMouseEvent`). While a drag owns the pointer the
-        // hover flag stays set; otherwise it follows the pointer.
-        let handled = self.step_scrollbar_mouse_gesture(&gesture);
-        let hover_changed = if self.scrollbar_drag.is_some() {
-            false
-        } else {
-            self.update_scrollbar_hover(gesture.x, gesture.y)
-        };
-        let outcome = match handled {
-            Some(outcome) => outcome,
-            None => match self.prompt_mouse_gesture(&gesture) {
-                Some(outcome) => outcome,
-                None => self.step_selection_mouse_gesture(&gesture),
-            },
-        };
-        if matches!(outcome, StepOutcome::Idle) && hover_changed {
-            StepOutcome::Redraw
-        } else {
-            outcome
-        }
-    }
 
     /// Route a non-wheel gesture through the chat-log text selection: start,
     /// extend, finish or clear it. Upstream's `handleSelectionMouseEvent`
@@ -5147,71 +3805,6 @@ impl App {
             }
         }
         regions
-    }
-
-    /// Route a gesture to the open modal overlays.
-    ///
-    /// Upstream dispatches to the topmost overlay under the pointer and only
-    /// falls back to the layout underneath when no overlay rectangle contains
-    /// the event (`packages/tui/src/tui.ts:824-847`,
-    /// `tui-alt-screen.ts:912-922`). This port swallows the gesture either
-    /// way: LUM-1124 already made an open modal own the mouse
-    /// (`tests/mouse_selection.rs::an_open_modal_swallows_gestures`) and the
-    /// chat log is not a layout component here, but a hit on a modal's
-    /// rectangle is a click *on* that modal.
-    ///
-    /// A click only counts when the left press and the left release land on
-    /// the same cell — upstream's `isClick`
-    /// (`packages/tui/src/tui-alt-screen.ts:1312-1315`) — and committing one
-    /// drops the chat-log selection, like upstream's click path
-    /// (`packages/tui/src/tui-alt-screen.ts:1330-1339`). A press on its own
-    /// does *not* clear: upstream clears once a handled press starts a
-    /// component gesture (`tui-alt-screen.ts:925-930`), but this port has no
-    /// press-capture target yet, and clearing on press would throw the
-    /// selection away even when the pointer is dragged off the modal before
-    /// releasing. A hit click never queues a clipboard request — copy-on-select
-    /// belongs to the chat log, not to a modal.
-    fn step_modal_mouse_gesture(&mut self, gesture: MouseGesture) -> StepOutcome {
-        let hit = self
-            .mouse_regions()
-            .into_iter()
-            .find_map(|region| region.capture(gesture));
-        let Some(point) = hit else {
-            // Outside every overlay rectangle the modal still swallows the
-            // gesture; a press that missed cannot become a click.
-            if matches!(gesture.kind, MouseGestureKind::Release(MouseButton::Left)) {
-                self.modal_mouse_press = None;
-            }
-            return StepOutcome::Idle;
-        };
-        match gesture.kind {
-            MouseGestureKind::Press(MouseButton::Left) => {
-                self.modal_mouse_press = Some(point);
-                // The press highlights the row under the pointer, exactly like
-                // upstream's `SelectList` / `SettingsList` press branch; the
-                // release only *activates* it.
-                self.modal_list_press(gesture.y)
-            }
-            MouseGestureKind::Release(MouseButton::Left) => {
-                let clicked = self.modal_mouse_press.take() == Some(point);
-                if clicked {
-                    // A click on a list row activates it (upstream
-                    // `SelectList::handleMouse` click branch).
-                    if let Some(outcome) = self.modal_list_click(gesture.y) {
-                        return outcome;
-                    }
-                }
-                if clicked && self.has_selection() {
-                    self.clear_selection();
-                    StepOutcome::Redraw
-                } else {
-                    StepOutcome::Idle
-                }
-            }
-            // Drags inside a modal, bare moves and the other buttons are
-            // consumed without changing anything.
-            _ => StepOutcome::Idle,
-        }
     }
 
     /// Move the selection focus, returning whether the rendered highlight
@@ -5471,20 +4064,19 @@ impl App {
         Some((start + row, col))
     }
 
-    /// Returns the selected text in the composer, if any.
-    /// Currently the composer has no selection model, so this always returns `None`.
+    /// Returns the selected text in the composer, if any (LUM-1332).
     pub fn composer_selection_text(&self) -> Option<String> {
-        None
+        self.prompt.editor().composer_selection_text()
     }
 
     /// Returns the last recorded composer area as `(x, y, width, height)`,
     /// or `(0, 0, 0, 0)` if no frame has been painted yet.
     pub fn composer_area(&self) -> (u16, u16, u16, u16) {
         (
-            self.composer_origin.0.load(Ordering::Relaxed),
-            self.composer_origin.1.load(Ordering::Relaxed),
-            self.composer_size.0.load(Ordering::Relaxed),
-            self.composer_size.1.load(Ordering::Relaxed),
+            self.viewport.composer_origin.0.load(Ordering::Relaxed),
+            self.viewport.composer_origin.1.load(Ordering::Relaxed),
+            self.viewport.composer_size.0.load(Ordering::Relaxed),
+            self.viewport.composer_size.1.load(Ordering::Relaxed),
         )
     }
 
@@ -5493,12 +4085,12 @@ impl App {
     fn record_composer_area(&self, rect: Option<Rect>) {
         match rect {
             Some(rect) => {
-                self.composer_origin.0.store(rect.x, Ordering::Relaxed);
-                self.composer_origin.1.store(rect.y, Ordering::Relaxed);
-                self.composer_size.0.store(rect.width, Ordering::Relaxed);
-                self.composer_size.1.store(rect.height, Ordering::Relaxed);
+                self.viewport.composer_origin.0.store(rect.x, Ordering::Relaxed);
+                self.viewport.composer_origin.1.store(rect.y, Ordering::Relaxed);
+                self.viewport.composer_size.0.store(rect.width, Ordering::Relaxed);
+                self.viewport.composer_size.1.store(rect.height, Ordering::Relaxed);
             }
-            None => self.composer_size.0.store(0, Ordering::Relaxed),
+            None => self.viewport.composer_size.0.store(0, Ordering::Relaxed),
         }
     }
 
@@ -5513,23 +4105,23 @@ impl App {
     fn record_autocomplete_area(&self, rect: Option<Rect>, first_item: usize, item_rows: usize) {
         match rect {
             Some(rect) => {
-                self.autocomplete_origin.0.store(rect.x, Ordering::Relaxed);
-                self.autocomplete_origin.1.store(rect.y, Ordering::Relaxed);
-                self.autocomplete_size
+                self.viewport.autocomplete_origin.0.store(rect.x, Ordering::Relaxed);
+                self.viewport.autocomplete_origin.1.store(rect.y, Ordering::Relaxed);
+                self.viewport.autocomplete_size
                     .0
                     .store(rect.width, Ordering::Relaxed);
-                self.autocomplete_size
+                self.viewport.autocomplete_size
                     .1
                     .store(rect.height, Ordering::Relaxed);
-                self.autocomplete_first_item
+                self.viewport.autocomplete_first_item
                     .store(first_item, Ordering::Relaxed);
-                self.autocomplete_item_rows
+                self.viewport.autocomplete_item_rows
                     .store(item_rows, Ordering::Relaxed);
             }
             None => {
-                self.autocomplete_size.0.store(0, Ordering::Relaxed);
-                self.autocomplete_size.1.store(0, Ordering::Relaxed);
-                self.autocomplete_item_rows.store(0, Ordering::Relaxed);
+                self.viewport.autocomplete_size.0.store(0, Ordering::Relaxed);
+                self.viewport.autocomplete_size.1.store(0, Ordering::Relaxed);
+                self.viewport.autocomplete_item_rows.store(0, Ordering::Relaxed);
             }
         }
     }
@@ -5537,21 +4129,63 @@ impl App {
     /// Candidate index under a screen cell, or `None` for a cell that is not
     /// a dropdown candidate row (outside the list, or on its `(n/m)` counter).
     fn autocomplete_item_at(&self, x: u16, y: u16) -> Option<usize> {
-        let width = self.autocomplete_size.0.load(Ordering::Relaxed);
-        let height = self.autocomplete_size.1.load(Ordering::Relaxed);
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let ox = self.autocomplete_origin.0.load(Ordering::Relaxed);
-        let oy = self.autocomplete_origin.1.load(Ordering::Relaxed);
+        let (ox, oy, width, height, first_item, item_rows) = self.autocomplete_hit_geometry()?;
         if x < ox || x >= ox.saturating_add(width) || y < oy || y >= oy.saturating_add(height) {
             return None;
         }
         let row = (y - oy) as usize;
-        if row >= self.autocomplete_item_rows.load(Ordering::Relaxed) {
+        if row >= item_rows {
             return None;
         }
-        Some(self.autocomplete_first_item.load(Ordering::Relaxed) + row)
+        Some(first_item + row)
+    }
+
+    /// True when (x, y) is inside the autocomplete dropdown's painted
+    /// rectangle. Distinct from [`Self::autocomplete_item_at`], which only
+    /// fires for actual candidate rows; the rectangle also covers the
+    /// `(n/m)` indicator row, and a click there must be swallowed by the
+    /// dropdown rather than reach the transcript selection path
+    /// (LUM-1327 upstream parity).
+    fn autocomplete_contains(&self, x: u16, y: u16) -> bool {
+        let Some((ox, oy, width, height, _, _)) = self.autocomplete_hit_geometry() else {
+            return false;
+        };
+        x >= ox && y >= oy && x < ox.saturating_add(width) && y < oy.saturating_add(height)
+    }
+
+    /// Geometry the autocomplete handler needs to hit-test a pointer gesture:
+    /// origin (ox, oy), width, height, first visible item, and how many item
+    /// rows the painted window covers. The rectangle is recomputed from the
+    /// composer's *current* state instead of the cached `autocomplete_origin`
+    /// alone, because the list hangs off the composer's top edge — when the
+    /// draft grows without an intervening frame, the whole list shifts up by
+    /// the composer's growth and the cached origin would route clicks to the
+    /// wrong row (LUM-1327).
+    fn autocomplete_hit_geometry(&self) -> Option<(u16, u16, u16, u16, usize, usize)> {
+        let width = self.viewport.autocomplete_size.0.load(Ordering::Relaxed);
+        let height = self.viewport.autocomplete_size.1.load(Ordering::Relaxed);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let cached_oy = self.viewport.autocomplete_origin.1.load(Ordering::Relaxed);
+        let cached_composer_height = self.viewport.composer_size.1.load(Ordering::Relaxed);
+        let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        let current_height = if body_width == 0 {
+            cached_composer_height
+        } else {
+            VisualLayout::new(&self.prompt.text(), body_width)
+                .rows()
+                .len() as u16
+        };
+        // Composer extends up by `delta` rows when the draft grew since the
+        // last paint; the list, which is pinned to the composer's top edge,
+        // shifts up by the same amount.
+        let delta = current_height.saturating_sub(cached_composer_height);
+        let oy = cached_oy.saturating_sub(delta);
+        let ox = self.viewport.autocomplete_origin.0.load(Ordering::Relaxed);
+        let first_item = self.viewport.autocomplete_first_item.load(Ordering::Relaxed);
+        let item_rows = self.viewport.autocomplete_item_rows.load(Ordering::Relaxed);
+        Some((ox, oy, width, height, first_item, item_rows))
     }
 
     /// Record where the last frame painted the open modal's item rows, or
@@ -5563,12 +4197,12 @@ impl App {
     /// takes `&self`), hence the atomics — the same seam as
     /// [`App::record_autocomplete_area`].
     fn record_modal_list(&self, kind: u8, first_row: u16, first_item: usize, rows: usize) {
-        self.modal_list_kind.store(kind, Ordering::Relaxed);
-        self.modal_list_first_row
+        self.viewport.modal_list_kind.store(kind, Ordering::Relaxed);
+        self.viewport.modal_list_first_row
             .store(first_row, Ordering::Relaxed);
-        self.modal_list_first_item
+        self.viewport.modal_list_first_item
             .store(first_item, Ordering::Relaxed);
-        self.modal_list_rows.store(rows, Ordering::Relaxed);
+        self.viewport.modal_list_rows.store(rows, Ordering::Relaxed);
     }
 
     /// The modal list row under the absolute row `y`, as
@@ -5583,22 +4217,22 @@ impl App {
     /// column (`packages/tui/src/components/select-list.ts:110-140`,
     /// `packages/tui/src/components/settings-list.ts:179-210`).
     fn modal_list_hit(&self, y: u16) -> Option<(u8, usize)> {
-        let kind = self.modal_list_kind.load(Ordering::Relaxed);
+        let kind = self.viewport.modal_list_kind.load(Ordering::Relaxed);
         if kind == MODAL_LIST_NONE {
             return None;
         }
-        let rows = self.modal_list_rows.load(Ordering::Relaxed);
+        let rows = self.viewport.modal_list_rows.load(Ordering::Relaxed);
         if rows == 0 {
             return None;
         }
-        let first_row = self.modal_list_first_row.load(Ordering::Relaxed);
+        let first_row = self.viewport.modal_list_first_row.load(Ordering::Relaxed);
         if y < first_row || y >= first_row.saturating_add(rows as u16) {
             return None;
         }
         let row = (y - first_row) as usize;
         Some((
             kind,
-            self.modal_list_first_item.load(Ordering::Relaxed) + row,
+            self.viewport.modal_list_first_item.load(Ordering::Relaxed) + row,
         ))
     }
 
@@ -5766,9 +4400,22 @@ impl App {
     ///
     /// `None` leaves the gesture to the rest of the pointer path.
     fn autocomplete_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        // The dropdown owns every gesture inside its rectangle, even rows
+        // that are not candidates (e.g. the `(n/m)` counter). Without that
+        // guard a click on the indicator row falls through to the transcript
+        // selection path, which starts a selection through the list and
+        // moves the highlight (LUM-1327 upstream parity).
+        if !self.autocomplete_contains(gesture.x, gesture.y) {
+            return None;
+        }
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
-                let index = self.autocomplete_item_at(gesture.x, gesture.y)?;
+                let Some(index) = self.autocomplete_item_at(gesture.x, gesture.y) else {
+                    // In rectangle but on the indicator: the click completes
+                    // nothing — same as upstream's "not a candidate" branch
+                    // — so we swallow it without starting a selection.
+                    return Some(StepOutcome::Idle);
+                };
                 // The press takes the pointer exactly like the pill / the
                 // scrollbar do: the transcript selection behind the list is
                 // dropped, and the cell is remembered so only a release on it
@@ -5784,7 +4431,14 @@ impl App {
                 Some(StepOutcome::Redraw)
             }
             MouseGestureKind::Release(MouseButton::Left) => {
-                let pressed = self.autocomplete_mouse_press.take()?;
+                let Some(pressed) = self.autocomplete_mouse_press.take() else {
+                    // No pending press means the press landed on the
+                    // indicator row (or on no candidate at all). Either
+                    // way the dropdown owns the release — it must not
+                    // reach the transcript selection path, so swallow
+                    // it as Idle.
+                    return Some(StepOutcome::Idle);
+                };
                 if pressed.0 != gesture.x || pressed.1 != gesture.y {
                     // The pointer moved off the pressed row: upstream drops the
                     // gesture (and with it the click) instead of applying a
@@ -5837,11 +4491,11 @@ impl App {
         // The list rectangle, not just a candidate row: upstream tests the
         // wheel against `renderedAutocompleteHeight`, which includes the
         // `(n/m)` counter, so a notch on the counter row steers the list too.
-        let height = self.autocomplete_size.1.load(Ordering::Relaxed);
+        let height = self.viewport.autocomplete_size.1.load(Ordering::Relaxed);
         if height == 0 {
             return None;
         }
-        let origin_y = self.autocomplete_origin.1.load(Ordering::Relaxed);
+        let origin_y = self.viewport.autocomplete_origin.1.load(Ordering::Relaxed);
         if y < origin_y || y >= origin_y.saturating_add(height) {
             return None;
         }
@@ -5864,13 +4518,13 @@ impl App {
     /// True when the pointer cell is inside the composer rectangle the last
     /// frame painted.
     fn composer_contains(&self, x: u16, y: u16) -> bool {
-        let width = self.composer_size.0.load(Ordering::Relaxed);
-        let height = self.composer_size.1.load(Ordering::Relaxed);
+        let width = self.viewport.composer_size.0.load(Ordering::Relaxed);
+        let height = self.viewport.composer_size.1.load(Ordering::Relaxed);
         if width == 0 || height == 0 {
             return false;
         }
-        let ox = self.composer_origin.0.load(Ordering::Relaxed);
-        let oy = self.composer_origin.1.load(Ordering::Relaxed);
+        let ox = self.viewport.composer_origin.0.load(Ordering::Relaxed);
+        let oy = self.viewport.composer_origin.1.load(Ordering::Relaxed);
         x >= ox && y >= oy && x < ox.saturating_add(width) && y < oy.saturating_add(height)
     }
 
@@ -5887,28 +4541,35 @@ impl App {
         if !self.composer_contains(x, y) {
             return None;
         }
-        let ox = self.composer_origin.0.load(Ordering::Relaxed) as usize;
-        let oy = self.composer_origin.1.load(Ordering::Relaxed) as usize;
+        let ox = self.viewport.composer_origin.0.load(Ordering::Relaxed) as usize;
+        let oy = self.viewport.composer_origin.1.load(Ordering::Relaxed) as usize;
         let label = columns(self.prompt.label());
         let body_col = (x as usize).saturating_sub(ox);
         let row_in_window = (y as usize).saturating_sub(oy);
         let text = self.prompt.text();
-        let width = self.composer_body_width.load(Ordering::Relaxed) as usize;
+        let width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
         let layout = VisualLayout::new(&text, width);
-        let row = self.composer_scroll.load(Ordering::Relaxed) + row_in_window;
+        let row = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
         let rows = layout.rows();
         let visual = rows.get(row)?;
         // A click on the label column reads as column 0 of the draft row.
         let cell = body_col.saturating_sub(label);
-        let mut column = crate::width::char_index_at_column(&visual.text, cell);
-        if column == visual.text.chars().count() && !visual.text.is_empty() && row + 1 < rows.len()
-        {
-            // Past the end of a row that is not the last row of the draft:
-            // park the caret on the row the pointer actually landed on
-            // (upstream's `isLastSegment` correction).
-            column -= 1;
-        }
-        Some(layout.cursor_at(row, column))
+        let column = crate::width::char_index_at_column(&visual.text, cell);
+        // When `cell` maps to a column past the last character of this row
+        // AND this row is not the last row of the draft, park the caret on
+        // the last character of this row instead of letting it spill onto
+        // the first character of the next row (upstream's `isLastSegment`
+        // correction). For a single-char cell, column == row_len means the
+        // click landed on the character's *trailing* position — clamp it to
+        // the character's own position so the caret lands on it.
+        let row_len = visual.text.chars().count();
+        let column = if column > row_len && row + 1 < rows.len() {
+            row_len.saturating_sub(1)
+        } else {
+            column
+        };
+        let cursor = layout.cursor_at(row, column);
+        Some(cursor)
     }
 
     /// Place the composer caret at the clicked cell.
@@ -5936,11 +4597,32 @@ impl App {
                 if !self.composer_contains(gesture.x, gesture.y) {
                     return None;
                 }
+                // Upstream's `Editor.handleMouse` press branch places the
+                // caret right away (the click is a single press → place →
+                // release → confirm flow), which means the cursor moves
+                // on press — not on release. When the press would leave
+                // the cursor where it already is, no repaint is owed:
+                // the prior click already moved it there, and a second
+                // press on the same cell is a no-op.
+                let cursor_before = self.prompt.editor().cursor();
+                let _ = self.place_prompt_cursor(gesture.x, gesture.y);
+                let cursor_after = self.prompt.editor().cursor();
                 self.prompt_mouse_press = Some((gesture.x, gesture.y));
-                Some(StepOutcome::Idle)
+                if cursor_before == cursor_after {
+                    Some(StepOutcome::Idle)
+                } else {
+                    Some(StepOutcome::Redraw)
+                }
             }
             MouseGestureKind::Release(MouseButton::Left) => {
                 let pressed = self.prompt_mouse_press.take();
+                // The press arming the composer drag-selection is now
+                // resolved; the selection itself can stay — the user's
+                // next keystroke will replace it — but a release that
+                // was a click (no drag) should not leave an empty anchor
+                // around. Clear unconditionally so a click-after-press
+                // path stays tidy.
+                self.prompt.editor_mut().clear_composer_selection();
                 if !self.composer_contains(gesture.x, gesture.y) {
                     return None;
                 }
@@ -5953,10 +4635,68 @@ impl App {
             MouseGestureKind::Drag(_) | MouseGestureKind::Move
                 if self.prompt_mouse_press.is_some() =>
             {
-                Some(StepOutcome::Idle)
+                // LUM-1332: a drag from a composer press belongs to the
+                // composer. Resolve the offset the pointer is over — and
+                // when the pointer has wandered past the right edge of
+                // the composer on a composer row, clamp it to the end of
+                // that row so the drag can never spill onto the
+                // transcript behind it.
+                let Some(offset) = self.composer_drag_offset(gesture.x, gesture.y) else {
+                    return Some(StepOutcome::Idle);
+                };
+                {
+                    let editor = self.prompt.editor_mut();
+                    if editor.composer_selection().is_none() {
+                        // Anchor at the press position (where the cursor
+                        // was placed on press). The cursor may already
+                        // equal the anchor — extend_composer_selection
+                        // collapses back to `None` in that case.
+                        editor.begin_composer_selection();
+                    }
+                    editor.extend_composer_selection(offset);
+                }
+                Some(StepOutcome::Redraw)
             }
             _ => None,
         }
+    }
+
+    /// Offset the composer caret should sit at for a *drag* pointer at
+    /// `(x, y)` (LUM-1332).
+    ///
+    /// When the pointer is inside the composer this is just
+    /// [`App::composer_cursor_offset`]. When it has wandered outside the
+    /// composer's rectangle — past the right edge, above its first row,
+    /// or below its last — the offset is clamped to the end of the last
+    /// row of the composer's draft, so the drag keeps extending the
+    /// composer's own selection instead of bleeding into the transcript
+    /// behind it. The drag always belongs to the composer when the press
+    /// that armed it did, even if the pointer leaves the rectangle.
+    fn composer_drag_offset(&self, _x: u16, _y: u16) -> Option<usize> {
+        if let Some(offset) = self.composer_cursor_offset(_x, _y) {
+            return Some(offset);
+        }
+        let height = self.viewport.composer_size.1.load(Ordering::Relaxed);
+        if height == 0 {
+            return None;
+        }
+        // Off-composer drag → clamp to the end of the composer's last row.
+        // A pointer that left vertically picks the row it actually landed
+        // on when that row is inside the composer; otherwise (the test's
+        // (20, 1) case, far above a composer parked near the bottom of
+        // the viewport) we clamp to the last row.
+        let width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        let text = self.prompt.text();
+        let layout = VisualLayout::new(&text, width);
+        let rows = layout.rows();
+        let last_row = rows.len().saturating_sub(1);
+        rows.get(last_row).map(|visual| {
+            visual
+                .source
+                .last()
+                .map(|offset| offset + 1)
+                .unwrap_or(visual.start)
+        })
     }
 
     /// Start / end of the active selection in rendered-log coordinates, or
@@ -6123,50 +4863,12 @@ impl App {
     /// Paint the active selection into the already-rendered message area by
     /// adding the reversed-video modifier to the selected cells.
     fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {
-        let Some((start, end)) = self.selection.and_then(|selection| selection.bounds()) else {
-            return;
-        };
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        let (visible_start, lines) = self.messages.visible_lines(area.width, area.height);
-        let visible_end = visible_start + lines.len();
-        let first = start.line.max(visible_start);
-        let last = end.line.min(visible_end.saturating_sub(1));
-        if first > last {
-            return;
-        }
-        for line_idx in first..=last {
-            let row = (line_idx - visible_start) as u16;
-            let y = area.y + row;
-            let text = crate::styled::plain_text(&lines[row as usize]);
-            let len = text.chars().count();
-            let from = if line_idx == start.line {
-                start.col.min(len)
-            } else {
-                0
-            };
-            let to = if line_idx == end.line {
-                selection_end_column(&end, len)
-            } else {
-                len
-            };
-            // `from` / `to` are character offsets; the buffer is addressed in
-            // terminal cells. A wide glyph covers two cells, so painting one
-            // reversed cell per character would leave the right half of every
-            // CJK glyph unhighlighted and drift left of the text.
-            let from = crate::width::columns_before(&text, from);
-            let to = crate::width::columns_before(&text, to);
-            for col in from..to {
-                let x = area.x + col as u16;
-                if x >= area.x + area.width {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.modifier |= Modifier::REVERSED;
-                }
-            }
-        }
+        crate::render_helpers::apply_selection_highlight(
+            &self.messages,
+            self.selection.as_ref(),
+            area,
+            buf,
+        );
     }
 
     /// Lines per page — one message-viewport height, but never zero so a
@@ -6184,7 +4886,7 @@ impl App {
     /// a terminal tall enough to grant it, so a key pressed before any
     /// paint takes the branch it would take one frame later.
     pub fn composer_window_rows(&self) -> usize {
-        let rows = self.composer_window.load(Ordering::Relaxed) as usize;
+        let rows = self.viewport.composer_window.load(Ordering::Relaxed) as usize;
         if rows == 0 {
             self.config.composer_max_rows.max(1)
         } else {
@@ -6401,15 +5103,15 @@ impl App {
     /// `reserved` is the width [`App::viewport_for_render`] took off `area`
     /// for the scrollbar, kept only so the bar can find its own column.
     fn record_viewport(&self, message_area: Rect, reserved: u16) {
-        self.viewport_width
+        self.viewport.viewport_width
             .store(message_area.width, Ordering::Relaxed);
-        self.viewport_reserved.store(reserved, Ordering::Relaxed);
-        self.viewport_height
+        self.viewport.viewport_reserved.store(reserved, Ordering::Relaxed);
+        self.viewport.viewport_height
             .store(message_area.height, Ordering::Relaxed);
-        self.viewport_origin
+        self.viewport.viewport_origin
             .0
             .store(message_area.x, Ordering::Relaxed);
-        self.viewport_origin
+        self.viewport.viewport_origin
             .1
             .store(message_area.y, Ordering::Relaxed);
     }
@@ -6512,8 +5214,8 @@ impl App {
             self.paint_scroll_to_end(message_area, buf);
             self.paint_truncated_above(message_area, buf);
         } else {
-            self.scroll_to_end.2.store(0, Ordering::Relaxed);
-            self.truncated_above.2.store(0, Ordering::Relaxed);
+            self.viewport.scroll_to_end.2.store(0, Ordering::Relaxed);
+            self.viewport.truncated_above.2.store(0, Ordering::Relaxed);
         }
 
         // The queued-messages block sits between the transcript and the
@@ -6543,6 +5245,18 @@ impl App {
             }
             None => {
                 self.paint_prompt(editor_area, buf);
+                // Paint composer drag-selection REVERSED on top of the cells
+                // that `paint_prompt` just drew.
+                let scroll = self.viewport.composer_scroll.load(Ordering::Relaxed);
+                let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+                crate::render_helpers::apply_composer_selection_highlight(
+                    self.prompt.editor(),
+                    editor_area,
+                    body_width,
+                    scroll,
+                    self.prompt.label(),
+                    buf,
+                );
                 self.paint_autocomplete(message_area, editor_area, buf);
             }
         }
@@ -6739,22 +5453,7 @@ impl App {
     /// content, and a mark on the region's last row would be confusable with
     /// a width clip.
     fn paint_extension_lines(&self, rect: Rect, lines: &[StyledLine], buf: &mut Buffer) {
-        if rect.width == 0 || rect.height == 0 {
-            return;
-        }
-        for (row, line) in lines.iter().enumerate() {
-            if row as u16 >= rect.height {
-                break;
-            }
-            write_styled_line_ellipsized(
-                buf,
-                rect.x,
-                rect.y + row as u16,
-                rect.width,
-                line,
-                &self.theme,
-            );
-        }
+        crate::render_helpers::paint_extension_lines(rect, lines, &self.theme, buf);
     }
 
     /// Paint the built-in prompt into the editor region. The region may be
@@ -6793,97 +5492,19 @@ impl App {
     /// the line is written: this region is carved out of what the transcript
     /// painted last frame, and the block's spacer row is genuinely empty.
     fn paint_pending_block(&self, rect: Rect, buf: &mut Buffer) {
-        if rect.width == 0 || rect.height == 0 {
-            return;
-        }
-        let lines = self.messages.pending_lines(&self.dequeue_chord());
-        for (row, line) in lines.iter().enumerate() {
-            let row = u16::try_from(row).unwrap_or(u16::MAX);
-            if row >= rect.height {
-                break;
-            }
-            let y = rect.y + row;
-            for col in 0..rect.width {
-                if let Some(cell) = buf.cell_mut((rect.x + col, y)) {
-                    cell.reset();
-                }
-            }
-            // `…` in the last column the line did not fit in, instead of the
-            // silent clip every pre-LUM-1412 region performed.
-            write_styled_line_ellipsized(buf, rect.x, y, rect.width, line, &self.theme);
-        }
+        crate::render_helpers::paint_pending_block(&self.messages, rect, &self.theme, buf);
     }
 
     fn paint_prompt(&self, rect: Rect, buf: &mut Buffer) {
-        if rect.width == 0 || rect.height == 0 {
-            return;
-        }
-        // The composer's rectangle is the pointer's click target for the
-        // caret (see [`App::prompt_mouse_gesture`]), and the pointer arrives
-        // between renders.
-        self.record_composer_area(Some(rect));
-        let max_rows = (rect.height as usize).min(self.config.composer_max_rows.max(1));
-        // Record the body width the wrap uses, so the next key press measures
-        // the draft the same way this frame did (see
-        // [`App::composer_body_width`]).
-        self.composer_body_width
-            .store(self.prompt.body_width(rect.width) as u16, Ordering::Relaxed);
-        self.composer_window
-            .store(max_rows as u16, Ordering::Relaxed);
-        let scroll = self.composer_scroll.load(Ordering::Relaxed);
-        let (lines, scroll) = self.prompt.render_lines(rect.width, max_rows, scroll);
-        self.composer_scroll.store(scroll, Ordering::Relaxed);
-        // Upstream paints the editor chrome in `bashMode` while the buffer is
-        // a `!` submission, otherwise in the thinking level's border colour
-        // (`updateEditorBorderColor`,
-        // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
-        // the label carries the colour instead: bash mode wins, the thinking
-        // level colours everything else.
-        let label_slot = if crate::editor::is_bash_mode(&self.prompt.text()) {
-            ThemeColor::BashMode
-        } else {
-            thinking_border_color(self.thinking_level)
-        };
-        let label_style = Some(SpanStyle::fg(label_slot).to_style(&self.theme));
-        let label_width = columns(self.prompt.label()) as u16;
-        for (row, line) in lines.iter().enumerate() {
-            let y = rect.y + row as u16;
-            if y >= rect.y + rect.height {
-                break;
-            }
-            // This loop paints cells directly (the label owns a style of its
-            // own, so it cannot go through `write_styled_line`), which means
-            // it has to advance by **columns**: a CJK or emoji glyph occupies
-            // two cells, and the cell its second column covers must be
-            // blanked so a stale glyph from the previous frame cannot show
-            // through. Without this a Chinese draft was written one cell per
-            // character and the row collapsed to a fraction of the draft
-            // (`> 中` for a 44-column draft, LUM-1418).
-            let mut col = 0usize;
-            for ch in line.chars() {
-                let glyph_width = char_columns(ch);
-                if col + glyph_width > rect.width as usize {
-                    break;
-                }
-                let x = rect.x + col as u16;
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
-                    if let Some(style) = label_style {
-                        // Only the first row owns the label; subsequent rows
-                        // are blank-padded with spaces.
-                        if row == 0 && col < label_width as usize {
-                            cell.set_style(style);
-                        }
-                    }
-                }
-                for offset in 1..glyph_width {
-                    if let Some(cell) = buf.cell_mut((rect.x + (col + offset) as u16, y)) {
-                        cell.reset();
-                    }
-                }
-                col += glyph_width;
-            }
-        }
+        crate::render_helpers::paint_prompt(
+            &self.prompt,
+            self.config.composer_max_rows,
+            self.thinking_level,
+            &self.viewport,
+            rect,
+            &self.theme,
+            buf,
+        );
     }
 
     /// Paint the composer's autocomplete dropdown into the rows directly
@@ -6904,66 +5525,15 @@ impl App {
     /// the highlighted row — instead of the App re-deriving a style from the
     /// text.
     fn paint_autocomplete(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
-        let editor = self.prompt.editor();
-        if !editor.is_showing_autocomplete() || editor_area.width == 0 {
-            // No dropdown (or no editor row to anchor it to): clear the hit
-            // box so the pointer cannot land on a rectangle no longer drawn.
-            self.record_autocomplete_area(None, 0, 0);
-            return;
-        }
-        // The dropdown borrows rows from the transcript viewport: never
-        // paint over the header / above-editor regions, and never over the
-        // editor row itself.
-        let available = editor_area.y.saturating_sub(message_area.y) as usize;
-        if available == 0 {
-            self.record_autocomplete_area(None, 0, 0);
-            return;
-        }
-        let width = editor_area.width as usize;
-        // The candidate window the renderer is about to draw, so the pointer
-        // hit test reads the same arithmetic the paint did. The `(n/m)`
-        // counter row is not a candidate: it is excluded from `item_rows`.
-        let (window_start, window_end) = editor.autocomplete_window();
-        let candidate_rows = window_end.saturating_sub(window_start);
-        let mut rows = editor.autocomplete_render_styled_lines(width);
-        if rows.is_empty() {
-            self.record_autocomplete_area(None, 0, 0);
-            return;
-        }
-        // On a short terminal keep the candidates nearest the prompt. The
-        // list is already windowed around the selection, so the tail is the
-        // part the user is actually steering — the rows dropped here shift
-        // the first painted candidate, which the hit test has to know.
-        let dropped = rows.len().saturating_sub(available);
-        if dropped > 0 {
-            rows.drain(..dropped);
-        }
-        let first_row = editor_area.y - rows.len() as u16;
-        self.record_autocomplete_area(
-            Some(Rect {
-                x: editor_area.x,
-                y: first_row,
-                width: editor_area.width,
-                height: rows.len() as u16,
-            }),
-            window_start + dropped,
-            candidate_rows.saturating_sub(dropped),
+        crate::render_helpers::paint_autocomplete(
+            &self.messages,
+            &self.prompt,
+            &self.viewport,
+            message_area,
+            editor_area,
+            &self.theme,
+            buf,
         );
-        for (offset, line) in rows.iter().enumerate() {
-            let y = first_row + offset as u16;
-            // Blank the borrowed row first: a candidate is shorter than the
-            // transcript line it covers, and ratatui only emits the cells this
-            // buffer changed — an unblanked row left the old output bleeding
-            // through on the right of the dropdown. `reset` also drops the
-            // covered cell's colours, so the row behind cannot tint the one on
-            // top. Same rule as the selector overlay below.
-            for col in 0..editor_area.width {
-                if let Some(cell) = buf.cell_mut((editor_area.x + col, y)) {
-                    cell.reset();
-                }
-            }
-            write_styled_line(buf, editor_area.x, y, editor_area.width, line, &self.theme);
-        }
     }
 
     /// Paint the slash menu overlay directly above the editor.
@@ -6971,11 +5541,8 @@ impl App {
     /// The menu appears when the user types `/` in the editor and shows
     /// matching slash commands with descriptions. Mirrors Martty's slash menu UI.
     fn paint_slash_menu(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
-        if !self.slash_menu.is_visible() || editor_area.width == 0 {
-            return;
-        }
-        let widget = SlashMenuWidget::new(&self.slash_menu, editor_area, &self.theme);
-        widget.render(editor_area, buf);
+        let _ = message_area; // kept for signature compatibility
+        crate::render_helpers::paint_slash_menu(&self.slash_menu, editor_area, &self.theme, buf);
     }
 
     /// Paint the `?` shortcut overlay directly above the composer.
@@ -6987,35 +5554,15 @@ impl App {
     /// reflow the conversation the reader was looking at, and closing it
     /// restores the same frame.
     fn paint_shortcut_overlay(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
-        if !self.shortcut_overlay || editor_area.width == 0 {
-            return;
-        }
-        let available = editor_area.y.saturating_sub(message_area.y) as usize;
-        if available == 0 {
-            return;
-        }
-        let mut lines = self.shortcut_overlay_lines(editor_area.width as usize);
-        if lines.is_empty() {
-            return;
-        }
-        // A short terminal keeps the head (title + the first chords); the tail
-        // is the `…`-free part a reader can reach with a taller window, and
-        // `/hotkeys` remains the exhaustive list.
-        lines.truncate(available);
-        let first_row = editor_area.y - lines.len() as u16;
-        for (offset, line) in lines.iter().enumerate() {
-            let y = first_row + offset as u16;
-            // Blank the borrowed row first: overlay rows are shorter than the
-            // transcript lines they cover, and ratatui only emits the cells
-            // this buffer changed — an unblanked row leaves the transcript
-            // bleeding through (same rule as the dropdown and the modals).
-            for col in 0..editor_area.width {
-                if let Some(cell) = buf.cell_mut((editor_area.x + col, y)) {
-                    cell.reset();
-                }
-            }
-            write_styled_line(buf, editor_area.x, y, editor_area.width, line, &self.theme);
-        }
+        crate::render_helpers::paint_shortcut_overlay(
+            self.shortcut_overlay,
+            &self.hint_entries(),
+            &self.config.locale,
+            editor_area,
+            message_area,
+            &self.theme,
+            buf,
+        );
     }
 
     /// Render the App into a flat snapshot (used by the snapshot tests
@@ -7085,6 +5632,12 @@ impl App {
                 .search
                 .as_ref()
                 .map(|state| state.bar.query().to_string())
+                .unwrap_or_default(),
+            history_search_query: self
+                .prompt
+                .editor()
+                .history_search_query()
+                .map(String::from)
                 .unwrap_or_default(),
             search_lines: self
                 .search
@@ -7333,7 +5886,8 @@ mod tool_stream_tests {
     use crate::message::Role;
     use pi_agent_core::AgentOptions;
     use pi_ai::providers::faux::FauxProvider;
-    use pi_protocol::{Api, AssistantMessage, Model, ProviderId, ToolCall, ToolResult};
+    use pi_protocol::{Api, AssistantMessage, Content, Model, ProviderId, ToolCall, ToolResult};
+    use pi_agent_core::{AgentEvent, AssistantMessageUpdate};
 
     fn faux_model() -> Model {
         Model {
@@ -7391,14 +5945,14 @@ mod tool_stream_tests {
     #[test]
     fn repeated_deltas_for_one_call_render_one_block() {
         let mut app = test_app();
-        app.apply_event(AgentEvent::MessageStart {
+        app.apply_agent_event(AgentEvent::MessageStart {
             model: "faux-model".into(),
         });
         // First fragment carries id + name; later fragments only arguments.
-        app.apply_event(tool_delta(0, Some("call_1"), Some("read"), "{\"path\":"));
-        app.apply_event(tool_delta(0, None, None, "\"/tmp/x\""));
-        app.apply_event(tool_delta(0, None, None, "}"));
-        app.apply_event(AgentEvent::MessageEnd {
+        app.apply_agent_event(tool_delta(0, Some("call_1"), Some("read"), "{\"path\":"));
+        app.apply_agent_event(tool_delta(0, None, None, "\"/tmp/x\""));
+        app.apply_agent_event(tool_delta(0, None, None, "}"));
+        app.apply_agent_event(AgentEvent::MessageEnd {
             message: finished_message(),
         });
 
@@ -7429,7 +5983,7 @@ mod tool_stream_tests {
             cache_write: 5,
             total: 0,
         };
-        app.apply_event(AgentEvent::MessageEnd { message });
+        app.apply_agent_event(AgentEvent::MessageEnd { message });
 
         let status = app.status_data();
         assert_eq!(status.input_tokens, 300);
@@ -7443,22 +5997,22 @@ mod tool_stream_tests {
     #[test]
     fn execution_and_result_land_in_the_streamed_block() {
         let mut app = test_app();
-        app.apply_event(AgentEvent::MessageStart {
+        app.apply_agent_event(AgentEvent::MessageStart {
             model: "faux-model".into(),
         });
-        app.apply_event(tool_delta(0, Some("call_1"), Some("read"), "{\"path\":"));
-        app.apply_event(tool_delta(0, None, None, "\"/tmp/x\"}"));
-        app.apply_event(AgentEvent::MessageEnd {
+        app.apply_agent_event(tool_delta(0, Some("call_1"), Some("read"), "{\"path\":"));
+        app.apply_agent_event(tool_delta(0, None, None, "\"/tmp/x\"}"));
+        app.apply_agent_event(AgentEvent::MessageEnd {
             message: finished_message(),
         });
-        app.apply_event(AgentEvent::ToolExecutionStart {
+        app.apply_agent_event(AgentEvent::ToolExecutionStart {
             call: ToolCall {
                 id: "call_1".into(),
                 name: "read".into(),
                 arguments: serde_json::json!({ "path": "/tmp/x" }),
             },
         });
-        app.apply_event(AgentEvent::ToolExecutionEnd {
+        app.apply_agent_event(AgentEvent::ToolExecutionEnd {
             result: ToolResult {
                 tool_call_id: "call_1".into(),
                 content: Box::new(Content::text("ok")),
@@ -7479,12 +6033,12 @@ mod tool_stream_tests {
     #[test]
     fn separate_calls_keep_separate_blocks() {
         let mut app = test_app();
-        app.apply_event(AgentEvent::MessageStart {
+        app.apply_agent_event(AgentEvent::MessageStart {
             model: "faux-model".into(),
         });
-        app.apply_event(tool_delta(0, Some("call_a"), Some("read"), "{}"));
-        app.apply_event(tool_delta(1, Some("call_b"), Some("list"), "{}"));
-        app.apply_event(AgentEvent::MessageEnd {
+        app.apply_agent_event(tool_delta(0, Some("call_a"), Some("read"), "{}"));
+        app.apply_agent_event(tool_delta(1, Some("call_b"), Some("list"), "{}"));
+        app.apply_agent_event(AgentEvent::MessageEnd {
             message: finished_message(),
         });
 
@@ -7499,7 +6053,7 @@ mod tool_stream_tests {
         // A replayed / synthetic turn can deliver only the result event; the
         // old standalone-block behaviour must survive.
         let mut app = test_app();
-        app.apply_event(AgentEvent::ToolExecutionEnd {
+        app.apply_agent_event(AgentEvent::ToolExecutionEnd {
             result: ToolResult {
                 tool_call_id: "orphan".into(),
                 content: Box::new(Content::text("done")),

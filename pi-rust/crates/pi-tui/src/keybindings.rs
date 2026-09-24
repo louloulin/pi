@@ -125,6 +125,10 @@ pub struct KeybindingsConfig {
     entries: Vec<(String, Vec<String>)>,
 }
 
+/// TS pi-tui parity: a flat list of `(id, definition)` pairs the way
+/// `tui.ts` exports them, as opposed to the runtime [`KeybindingsManager`].
+pub type TuiKeybindingDefinitions = Vec<(String, KeybindingDefinition)>;
+
 impl KeybindingsConfig {
     /// An empty override set.
     pub fn new() -> Self {

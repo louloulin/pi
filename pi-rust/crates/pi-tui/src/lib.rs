@@ -41,14 +41,22 @@ pub mod styled;
 pub mod styles;
 pub mod terminal_image;
 pub mod terminal_title;
+pub mod terminal;
 pub mod theme;
 pub mod tree;
+pub mod ts_compat;
 pub mod undo_stack;
+pub mod viewport;
+pub(crate) mod render_helpers;
 pub(crate) mod visual_text;
 pub mod width;
 pub mod word_navigation;
+pub mod keys;
+pub mod utils;
+pub mod raw_tty;
 
-pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot, ScrollbarGeometry};
+pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot};
+pub use viewport::ScrollbarGeometry;
 pub use autocomplete::{
     compose_autocomplete_providers, ArgumentCompletions, AutocompleteItem, AutocompleteProvider,
     AutocompleteProviderFactory, AutocompleteSuggestions, CombinedAutocompleteProvider,
@@ -61,7 +69,7 @@ pub use component::{
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use editor::{
     is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, HistoryEntry,
-    HistorySearchDirection, HistorySearchStatus, JumpDirection,
+    HistorySearch, HistorySearchDirection, HistorySearchStatus, JumpDirection,
 };
 pub use extension_ui::ExtensionUi;
 pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
@@ -118,6 +126,7 @@ pub use terminal_image::{
 pub use terminal_title::{
     auto_title, path_basename, sanitize_title, title_sequence, TITLE_CLOSE, TITLE_OPEN,
 };
+pub use terminal::{ProcessTerminal, Terminal, TerminalError};
 pub use theme::{
     available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,
     default_theme_name, is_light_theme, load_theme, load_theme_from_path, parse_auto_theme_setting,
@@ -125,9 +134,27 @@ pub use theme::{
     ThemeController, ThemeError, ThemeJson,
 };
 pub use tree::{flatten_tree, tree_selector_items, TreeItem, TreeRow};
+pub use ts_compat::{
+    composite_tui_line, get_native_clipboard, is_focusable, is_viewport_tui, parse_osc11_background_color,
+    parse_terminal_color_scheme_report, render_latex, Box, CancellableLoader, Container, CURSOR_MARKER,
+    DefaultTextStyle, EditorComponent, EditorOptions, EditorTheme, Focusable, HStack, Input,
+    JUMP_DIRECTION, Keybinding, KeybindingDefinitions, Keybindings, Loader,
+    LoaderIndicatorOptions, Markdown, MarkdownOptions, MarkdownTheme, Marked, MouseRegionHandler,
+    NativeClipboard, OverlayBounds, OverlayHandle, OverlayMargin, OverlayOptions, OverlayUnfocusOptions,
+    RenderLatexOptions, RgbColor,
+    ScrollView, ScrollViewOptions, ScrollViewScrollbar, ScrollViewScrollToOptions,
+    SelectListTheme, SelectListTruncatePrimaryContext, SettingsListTheme, SizeValue, Spacer, StackChild,
+    StackEntry, StackEntryOptions, StackOptions, StdinBuffer, StdinBufferEventMap, StdinBufferOptions,
+    TerminalColorScheme, Text, Tokens, TruncatedText, TUI, TUI_KEYBINDINGS, TuiAltScreen,
+    TuiAltScreenOptions, TuiInputListener, TuiInputListenerResult, TuiMainScreen, TuiMainScreenRenderState,
+    TuiMode, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType, TuiStopOptions,
+    ViewportTUI, VStack,
+};
 pub use undo_stack::UndoStack;
 pub use width::{char_columns, columns, prefix_columns, truncate_columns};
 pub use word_navigation::{find_word_backward, find_word_forward};
+pub use keys::{decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key, set_kitty_protocol_active, KeyEventType, KeyId};
+pub use utils::{get_osc8_link_at_column, slice_by_column, strip_terminal_sequences, wrap_text_with_ansi};
 
 /// Re-export of the underlying terminal backend so binaries can pin a
 /// single version of `crossterm`.
