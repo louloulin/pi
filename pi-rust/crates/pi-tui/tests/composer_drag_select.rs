@@ -244,6 +244,7 @@ fn a_drag_selects_the_characters_under_the_pointer_and_highlights_them() {
     // "llo wo": the first `l` of `llo` through the `o` of `wor`.
     let (from_x, y) = cell_of(&buf, "llo");
     let (to_x, _) = cell_of(&buf, "orld");
+    eprintln!("DEBUG test: from_x={from_x}, to_x={to_x}, row_text={:?}", row_text(&buf, y));
 
     assert_eq!(app.step(press(from_x, y)), StepOutcome::Redraw);
     assert_eq!(

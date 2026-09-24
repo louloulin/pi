@@ -1233,6 +1233,11 @@ pub struct App {
     /// until its release so only a click that starts and ends on the same
     /// cell moves the caret (upstream's `isClick` gate).
     prompt_mouse_press: Option<(u16, u16, usize)>,
+    /// Snapped display-char index for the drag anchor (LUM-1332).  Unlike
+    /// `prompt_mouse_press` (the raw caret position), this is the offset
+    /// past the glyph the user pressed on — used to compute the selection
+    /// text so dragging over the first glyph starts the selection after it.
+    prompt_mouse_drag_anchor: Option<usize>,
     /// Absolute cell and candidate index of a left press that landed on an
     /// autocomplete row, kept until its release so only a click that starts
     /// and ends on the same cell applies the completion (upstream's
@@ -1430,6 +1435,7 @@ impl App {
             search: None,
             modal_mouse_press: None,
             prompt_mouse_press: None,
+            prompt_mouse_drag_anchor: None,
             autocomplete_mouse_press: None,
             selection_dragging: false,
             last_click: None,
@@ -4615,6 +4621,7 @@ impl App {
                     // A press outside the composer is a new gesture: the composer's
                     // selection goes away (upstream re-anchors on every press).
                     self.prompt.editor_mut().clear_composer_selection();
+                    self.prompt_mouse_drag_anchor = None;
                     self.prompt_mouse_press = None;
                     return None;
                 }
@@ -4626,7 +4633,14 @@ impl App {
                 // the prior click already moved it there, and a second
                 // press on the same cell is a no-op.
                 let press_offset = self.composer_cursor_offset(gesture.x, gesture.y);
+                // Also store the snapped anchor — the offset past the glyph
+                // the user pressed, needed so the drag starts from after that
+                // glyph (matching the text the user selected).
+                let snapped = self.composer_drag_press_offset(gesture.x, gesture.y);
                 self.prompt_mouse_press = press_offset.map(|o| (gesture.x, gesture.y, o));
+                if let (Some(raw), Some(snapped)) = (press_offset, snapped) {
+                    self.prompt_mouse_drag_anchor = Some(snapped);
+                }
                 let cursor_before = self.prompt.editor().cursor();
                 let _ = self.place_prompt_cursor(gesture.x, gesture.y);
                 let cursor_after = self.prompt.editor().cursor();
@@ -4648,6 +4662,7 @@ impl App {
                 let is_click = pressed.map(|(x, y, _)| (x, y)) == Some((gesture.x, gesture.y));
                 if is_click {
                     self.prompt.editor_mut().clear_composer_selection();
+                    self.prompt_mouse_drag_anchor = None;
                     Some(self.place_prompt_cursor(gesture.x, gesture.y))
                 } else {
                     Some(StepOutcome::Idle)
@@ -4667,15 +4682,18 @@ impl App {
                 };
                 let press_offset = self.prompt_mouse_press
                     .map(|(_, _, o)| o)
-                    .unwrap_or_else(|| self.composer_cursor_offset(gesture.x, gesture.y).unwrap_or(0));
-                println!("DEBUG DRAG: offset={}, press_offset={}", offset, press_offset);
+                    .unwrap_or_else(|| self.composer_drag_press_offset(gesture.x, gesture.y).unwrap_or(0));
+                let snapped_anchor = self.prompt_mouse_drag_anchor.unwrap_or(press_offset);
+                // The caret is at the non-snapped press position; the snapped
+                // anchor is what we need for the selection text to start after
+                // the glyph the user pressed on.
+                let raw_caret = self.prompt.editor().cursor();
+                println!("DEBUG DRAG: offset={}, press_offset={}, raw_caret={}, snapped_anchor={}", offset, press_offset, raw_caret, snapped_anchor);
                 {
                     let editor = self.prompt.editor_mut();
                     println!("DEBUG DRAG: before begin, sel={:?}", editor.composer_selection());
                     if editor.composer_selection().is_none() {
-                        // Anchor at the press position — not the caret's current
-                        // position, which may have been moved by a prior drag.
-                        editor.begin_composer_selection_at(press_offset);
+                        editor.begin_composer_selection_at(snapped_anchor, raw_caret);
                         println!("DEBUG DRAG: after begin, sel={:?}", editor.composer_selection());
                     }
                     editor.extend_composer_selection(offset);
@@ -4685,6 +4703,53 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Like [`composer_cursor_offset`] but snaps the press anchor to the
+    /// character *after* the glyph the pointer is on.  Without this snap,
+    /// clicking on the left cell of a glyph would anchor on that glyph
+    /// itself, making a drag-to-the-right miss the first character.  The
+    /// snap is applied only here (not in `composer_cursor_offset`) so that
+    /// plain clicks still place the caret on the glyph the user clicked.
+    fn composer_drag_press_offset(&self, x: u16, y: u16) -> Option<usize> {
+        if !self.composer_contains(x, y) {
+            return None;
+        }
+        let ox = self.viewport.composer_origin.0.load(Ordering::Relaxed) as usize;
+        let oy = self.viewport.composer_origin.1.load(Ordering::Relaxed) as usize;
+        let label = columns(self.prompt.label());
+        let body_col = (x as usize).saturating_sub(ox);
+        let row_in_window = (y as usize).saturating_sub(oy);
+        let text = self.prompt.text();
+        let width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        let layout = VisualLayout::new(&text, width);
+        let rows = layout.rows();
+        let row_in_draft = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
+        let visual = rows.get(row_in_draft)?;
+
+        let raw_col = body_col.saturating_sub(label);
+        let char_idx = crate::width::char_index_at_column(&visual.text, raw_col);
+        // If the previous column also lands on this glyph, the pointer is on
+        // its trailing cell and we are already past it — no adjustment needed.
+        // If it lands on a different glyph (the left cell case), we need to
+        // advance to the next character so the caret ends up to the right of
+        // the glyph the user clicked.
+        let is_trailing_cell = raw_col > 0
+            && crate::width::char_index_at_column(&visual.text, raw_col - 1) == char_idx;
+        let col_in_row = crate::width::columns_before(
+            &visual.text,
+            char_idx + if is_trailing_cell { 0 } else { 1 },
+        );
+
+        let row_char_count = visual.text.chars().count();
+        let is_last_row_of_draft = row_in_draft + 1 >= rows.len();
+        let col_in_row = if col_in_row > row_char_count && !is_last_row_of_draft {
+            row_char_count.saturating_sub(1)
+        } else {
+            col_in_row
+        };
+
+        Some(layout.cursor_at(row_in_draft, col_in_row))
     }
 
     /// Offset the composer caret should sit at for a *drag* pointer at
@@ -4699,7 +4764,8 @@ impl App {
     /// behind it. The drag always belongs to the composer when the press
     /// that armed it did, even if the pointer leaves the rectangle.
     fn composer_drag_offset(&self, _x: u16, _y: u16) -> Option<usize> {
-        if let Some(offset) = self.composer_cursor_offset(_x, _y) {
+        // Use the snapped version so dragging over a glyph advances past it.
+        if let Some(offset) = self.composer_drag_press_offset(_x, _y) {
             return Some(offset);
         }
         let height = self.viewport.composer_size.1.load(Ordering::Relaxed);

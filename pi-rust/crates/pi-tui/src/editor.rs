@@ -589,7 +589,8 @@ pub struct Editor {
     stale_paste_notified: bool,
     /// Composer-internal drag-selection anchor — a character offset into
     /// [`Editor::display_text`]. `None` when no drag-selection is in flight
-    /// (LUM-1332).
+    /// (LUM-1332).  Stored as a display character index (snapped past the
+    /// glyph the user pressed on), matching what `display_cursor()` returns.
     composer_selection_anchor: Option<usize>,
 }
 
@@ -792,12 +793,10 @@ impl Editor {
         self.composer_selection_anchor = Some(self.display_cursor());
     }
 
-    /// Begin a composer drag-selection anchored at `anchor` (LUM-1332).
-    /// Takes the anchor as an explicit argument so the caller can pass a
-    /// stored press-offset rather than reading the caret position.
-    /// Unlike [`begin_composer_selection`](Self::begin_composer_selection),
-    /// this does NOT move the caret — the anchor and the caret may coincide
-    /// on the first frame; `extend_composer_selection` resolves the gap.
+    /// Begin a composer drag-selection anchored at the caret position
+    /// `anchor` (LUM-1332).  `anchor` is a display character index — the
+    /// selection starts at this character and runs through whatever end
+    /// `extend_composer_selection` next sets.
     pub fn begin_composer_selection_at(&mut self, anchor: usize) {
         self.composer_selection_anchor = Some(anchor);
     }
@@ -816,7 +815,9 @@ impl Editor {
         // upper bound — the last valid display char index is `display_len - 1`.
         let display_len = self.display_text().chars().count();
         let clamped = display_offset.saturating_sub(1).min(display_len - 1) + 1;
-        if clamped == anchor {
+        // Clear only when the *raw* display offset collapsed to the anchor —
+        // a clamped drag-end (offset past the last char) is still a valid drag.
+        if display_offset == anchor {
             self.composer_selection_anchor = None;
             return;
         }
@@ -839,10 +840,6 @@ impl Editor {
         if anchor == cursor {
             None
         } else {
-            // Both `anchor` (from `cursor_at`, a byte offset) and `cursor`
-            // (from `display_cursor`, a character index) are the same raw value
-            // for ASCII.  For wide chars/chips they differ — keep them as-is
-            // and let the callers handle the distinction.
             Some((anchor.min(cursor), anchor.max(cursor)))
         }
     }
