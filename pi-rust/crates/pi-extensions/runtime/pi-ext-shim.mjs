@@ -2505,7 +2505,15 @@ function __pi_analyze_module(source) {
         isEsm = true;
         hasDefaultExport = true;
         edits.push({ start: token.start, end: next.end, text: "__pi_default_export =" });
+        continue;
       }
+      // `export const X = ...` / `export let X = ...` / `export var X = ...`
+      // `export function X() {}` / `export class X {}` / `export async function X() {}`
+      // — drop the `export ` keyword entirely; the binding becomes a
+      // module-local. This matches what an ESM bundler would emit for
+      // a downstream CJS consumer.
+      isEsm = true;
+      edits.push({ start: token.start, end: token.end, text: "" });
       continue;
     }
     if (word !== "import" || depth > 0) continue;

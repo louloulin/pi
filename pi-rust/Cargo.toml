@@ -67,6 +67,18 @@ wasi = "0.13"
 crossterm = "0.28"
 ratatui = "0.28"
 
+# TypeScript / JavaScript transpilation (used by `pi-extensions` to
+# load upstream `.ts`/`.tsx` extensions unchanged). Versions pinned
+# to the snapshot already vendored by `pi_agent_rust`, so `--offline`
+# builds keep working without a registry round trip.
+swc_common = "26.0.0"
+swc_ecma_ast = "29.0.0"
+swc_ecma_codegen = "32.0.0"
+swc_ecma_parser = "45.0.0"
+swc_ecma_transforms_base = "49.0.0"
+swc_ecma_transforms_typescript = "55.0.0"
+swc_ecma_visit = "29.0.0"
+
 # SQLite (session storage) — locked to a specific version so the bundled
 # sqlite is byte-compatible across machines (the Stage 5 pi-session crate
 # reads files produced by the TS port and vice-versa).
@@ -103,6 +115,11 @@ unicode-width = "=0.2.2"
 # space folding. Already in the graph transitively via `idna_adapter`, so
 # pinning it directly adds no new package to the lockfile.
 unicode-normalization = "=0.1.25"
+# SHA-256 hashing — used by `pi-extensions::module_cache` to key the
+# persistent transpiled-source cache. `sha2` is already in the
+# dependency graph (pulled in by `pi-chord` for content-addressed
+# keys), so adding the direct dep is essentially free.
+sha2 = "0.10"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.3", features = ["serde"] }

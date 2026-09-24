@@ -33,7 +33,24 @@ walkdir.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 indexmap.workspace = true
+sha2.workspace = true
 once_cell = "1"
+# WASM extension host — the user-requested wasmtime integration lets
+# `.wasm` files live next to `.ts` files in extension directories.
+# Same `wasmtime` version already in the workspace `[workspace.dependencies]`
+# block (the `pi-server` crate uses it too, so this adds no crate to
+# `Cargo.lock`).
+wasmtime.workspace = true
+# TypeScript transpilation — turn upstream `.ts` / `.tsx` extension
+# sources into ESM JavaScript before they hit QuickJS. Same pinned
+# versions as the workspace `[workspace.dependencies]` block.
+swc_common       = { workspace = true }
+swc_ecma_ast     = { workspace = true }
+swc_ecma_codegen = { workspace = true }
+swc_ecma_parser  = { workspace = true }
+swc_ecma_transforms_base       = { workspace = true }
+swc_ecma_transforms_typescript = { workspace = true }
+swc_ecma_visit   = { workspace = true }
 # `node:zlib`'s zstd family. Already in the workspace dependency graph
 # (`pi-session` compresses its payload column with it), so this adds no
 # crate to `Cargo.lock` — important for `--offline` builds.

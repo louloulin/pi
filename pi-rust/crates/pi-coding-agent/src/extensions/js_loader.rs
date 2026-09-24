@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use pi_extensions::{
     ExtensionBridge, ExtensionCapabilities, ExtensionEntry, ExtensionSearchPaths,
-    JsExtensionBridge, JsExtensionHost,
+    JsExtensionBridge, JsExtensionHost, SourceKind, cjs_to_esm, json_to_esm, transpile_with_cache,
 };
 use pi_protocol::ExtensionEvent;
 use thiserror::Error;
@@ -118,7 +118,7 @@ fn expand_explicit(path: &Path) -> Vec<PathBuf> {
             .into_iter()
             .filter_map(Result::ok)
             .map(|entry| entry.path().to_path_buf())
-            .filter(|entry| js_kind_for(entry).is_some())
+            .filter(|entry| SourceKind::for_path(entry).is_some())
             .collect()
     } else {
         vec![path.to_path_buf()]
@@ -141,7 +141,7 @@ async fn load_candidates(
     let mut seen = std::collections::HashSet::new();
 
     for path in candidates {
-        let kind = match js_kind_for(&path) {
+        let kind = match SourceKind::for_path(&path) {
             Some(k) => k,
             None => continue,
         };
@@ -162,17 +162,13 @@ async fn load_candidates(
                 continue;
             }
         };
-        // Strip TypeScript type annotations by delegating to a tiny
-        // pass that drops `: Type` style annotations on
-        // registerTool / registerCommand argument lists. Real-world
-        // TS source goes through the upstream `tsc` pipeline before
-        // being put on disk, so the heuristic only covers the most
-        // common shapes the tests ship.
-        let source = if kind == JsKind::TypeScript {
-            strip_simple_types(&source)
-        } else {
-            source
-        };
+        // Compile the source to ESM JavaScript before handing it to
+        // the QuickJS host. TS / TSX goes through SWC's `strip` pass
+        // (`pi_extensions::transpile`); CJS-flavored sources get a
+        // lightweight rewrite of `module.exports` / `require` to
+        // their ESM equivalents. JSON files become an `export
+        // default <parsed>` module.
+        let source = compile_source(&source, &path, kind);
         let entry = ExtensionEntry {
             source: path.clone(),
             id: id.clone(),
@@ -243,32 +239,43 @@ fn _caps_keepalive() -> ExtensionCapabilities {
 }
 
 // ---------------------------------------------------------------------------
-// File-kind detection + minimal TypeScript stripping.
+// Source compilation pipeline.
 //
-// Stage 3 keeps the TS pipeline intentionally tiny: the canonical
-// upstream extensions are written in TS and compiled to JS before
-// being put on disk. When the loader encounters a `.ts` file we run
-// a small regex-based strip pass that handles the two most common
-// TypeScript constructs upstream extensions use:
-//   - `: Type` annotations on parameters (e.g. `args: ExtensionAPI`)
-//   - generic-typed return types on registerTool/execute
-//
-// Anything more exotic (enums, namespaces, decorators) falls back to
-// QuickJS's strict syntax error, which the agent surfaces to the
-// user through `JsLoadOutcome::errors`.
+// The loader used to call a tiny `strip_simple_types` regex pass that
+// only knew how to drop `import type` lines. That left every real
+// upstream extension — which uses full TypeScript — un-loadable. We
+// now route `.ts` / `.tsx` through SWC's `strip` transform (see
+// `pi_extensions::ts_transpiler`) and `.cjs` through a CJS → ESM
+// rewrite before handing the source to the QuickJS host.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JsKind {
-    JavaScript,
-    TypeScript,
-}
-
-fn js_kind_for(path: &Path) -> Option<JsKind> {
-    match path.extension().and_then(|s| s.to_str()) {
-        Some("js") | Some("mjs") | Some("cjs") => Some(JsKind::JavaScript),
-        Some("ts") => Some(JsKind::TypeScript),
-        _ => None,
+fn compile_source(source: &str, path: &Path, kind: SourceKind) -> String {
+    let path_display = path.to_string_lossy().into_owned();
+    // Persistent transpiled-source cache. A `None` cache dir disables
+    // caching (useful for tests / `--offline` first builds); a `Some`
+    // turns repeated loads into a cheap disk lookup. We pass the
+    // cache dir at the call site so `compile_source` itself stays
+    // pure / unit-testable.
+    let cache_dir = module_cache_dir();
+    match kind {
+        SourceKind::TypeScript | SourceKind::TypeScriptJsx => {
+            match transpile_with_cache(source, &path_display, kind, cache_dir.as_deref()) {
+                Ok(transpiled) => cjs_to_esm::rewrite(&transpiled),
+                Err(err) => {
+                    tracing::warn!(target: "pi_extension", path = %path_display, error = %err, "TS transpile failed; passing source through unchanged");
+                    source.to_string()
+                }
+            }
+        }
+        SourceKind::Cjs => cjs_to_esm::rewrite(source),
+        SourceKind::Json => match json_to_esm(source, &path_display) {
+            Ok(esm) => esm,
+            Err(err) => {
+                tracing::warn!(target: "pi_extension", path = %path_display, error = %err, "JSON module conversion failed; passing source through");
+                source.to_string()
+            }
+        },
+        SourceKind::JavaScript | SourceKind::JavaScriptJsx => cjs_to_esm::rewrite(source),
     }
 }
 
@@ -279,37 +286,24 @@ fn id_for_path(path: &Path) -> String {
         .to_string()
 }
 
-/// Strip a couple of common TypeScript constructs so the upstream
-/// `.ts` source can run through QuickJS unchanged.
-///
-/// This is a deliberately tiny pass — a real TypeScript pipeline
-/// (swc / tsc) is added in a later stage. For now, removing `: Type`
-/// annotations on common shapes is enough to keep the upstream
-/// `hello.ts` / `notify.ts` / `commands.ts` examples loadable.
-fn strip_simple_types(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    while let Some(c) = chars.next() {
-        // Drop `import type { ... } from "..."` and `import { type Foo }`
-        // lines: QuickJS would fail on the `type` keyword.
-        if c == 'i' {
-            let mut rest = String::new();
-            for next in chars.by_ref() {
-                rest.push(next);
-                if next == '\n' {
-                    break;
-                }
-            }
-            if rest.starts_with("mport type") || rest.starts_with("mport { type ") {
-                continue;
-            }
-            out.push(c);
-            out.push_str(&rest);
-            continue;
+/// Resolve the on-disk cache directory for transpiled module sources.
+/// Reads `PI_EXTENSION_CACHE_DIR` first (lets operators redirect the
+/// cache to a scratch volume), then falls back to
+/// `$XDG_CACHE_HOME/pi/extensions` or `$HOME/.cache/pi/extensions`.
+/// Returns `None` when no home directory is available — caching is a
+/// best-effort optimisation, never a hard requirement.
+fn module_cache_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("PI_EXTENSION_CACHE_DIR") {
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir));
         }
-        out.push(c);
     }
-    out
+    if let Some(mut dir) = dirs::cache_dir() {
+        dir.push("pi");
+        dir.push("extensions");
+        return Some(dir);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -318,10 +312,11 @@ mod tests {
 
     #[test]
     fn kind_for_known_extensions() {
-        assert_eq!(js_kind_for(Path::new("/x/y.ts")), Some(JsKind::TypeScript));
-        assert_eq!(js_kind_for(Path::new("/x/y.js")), Some(JsKind::JavaScript));
-        assert_eq!(js_kind_for(Path::new("/x/y.mjs")), Some(JsKind::JavaScript));
-        assert_eq!(js_kind_for(Path::new("/x/y.json")), None);
+        assert_eq!(SourceKind::for_path(Path::new("/x/y.ts")), Some(SourceKind::TypeScript));
+        assert_eq!(SourceKind::for_path(Path::new("/x/y.js")), Some(SourceKind::JavaScript));
+        assert_eq!(SourceKind::for_path(Path::new("/x/y.mjs")), Some(SourceKind::JavaScript));
+        assert_eq!(SourceKind::for_path(Path::new("/x/y.tsx")), Some(SourceKind::TypeScriptJsx));
+        assert_eq!(SourceKind::for_path(Path::new("/x/y.json")), Some(SourceKind::Json));
     }
 
     #[test]
@@ -330,18 +325,38 @@ mod tests {
     }
 
     #[test]
-    fn strips_type_only_imports() {
-        let src = "import type { Foo } from \"./foo\";\nconst x = 1;\n";
-        let out = strip_simple_types(src);
-        assert!(out.contains("const x = 1;"));
-        assert!(!out.contains("import type"));
+    fn compiles_typescript_through_swc_strip() {
+        // Real-world TS shape: type annotation + interface + import type.
+        // The SWC pipeline must drop the type-only bits and keep the
+        // value-only ones so the QuickJS host can compile it.
+        let src = r#"
+            import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+            interface Box<T> { value: T }
+            const pi = {} as unknown as ExtensionAPI;
+            const x: number = 1;
+            export default function (pi: unknown) { return pi; };
+        "#;
+        let out = compile_source(src, Path::new("/tmp/sample.ts"), SourceKind::TypeScript);
+        assert!(!out.contains("interface"), "interface leaked: {out}");
+        assert!(!out.contains(": number"), "annotation leaked: {out}");
+        assert!(!out.contains("import type"), "import type leaked: {out}");
+        assert!(out.contains("export default"), "default missing: {out}");
     }
 
     #[test]
-    fn keeps_regular_imports() {
-        let src = "import { bar } from \"./bar\";\n";
-        let out = strip_simple_types(src);
-        assert_eq!(out, src);
+    fn compiles_cjs_to_esm() {
+        let src = "module.exports = function (pi) { return pi; };";
+        let out = compile_source(src, Path::new("/tmp/sample.cjs"), SourceKind::Cjs);
+        assert!(out.contains("export default"), "default missing: {out}");
+        assert!(!out.contains("module.exports ="), "module.exports leaked: {out}");
+    }
+
+    #[test]
+    fn compiles_json_to_default_export() {
+        let src = r#"{"name": "x"}"#;
+        let out = compile_source(src, Path::new("/tmp/sample.json"), SourceKind::Json);
+        assert!(out.contains("export default"), "default missing: {out}");
+        assert!(out.contains("\"name\""), "value missing: {out}");
     }
 
     #[tokio::test]

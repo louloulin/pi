@@ -46,6 +46,29 @@ impl ExtensionRegistry {
         self.by_id.values().flat_map(|c| c.tools.iter())
     }
 
+    /// Find the extension id that owns a tool by its tool `name`.
+    /// Used by `extension_isolation::execute_tool` to route a tool
+    /// call to the per-extension runtime that registered it.
+    pub fn tool_owner(&self, name: &str) -> Option<String> {
+        self.by_id
+            .iter()
+            .find(|(_, caps)| caps.tools.iter().any(|t| t.name == name))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Iterator over `(tool_name, owning_extension_id)` pairs.
+    /// Used by `extension_isolation::registered_tool_names` and
+    /// `registered_tools` to attribute every tool to the extension
+    /// that registered it.
+    pub fn tool_pairs(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.by_id.iter().flat_map(|(id, caps)| {
+            let id = id.clone();
+            caps.tools
+                .iter()
+                .map(move |t| (t.name.clone(), id.clone()))
+        })
+    }
+
     /// Iterator over registered extension entries.
     pub fn extensions(&self) -> impl Iterator<Item = &ExtensionEntry> {
         self.entries.iter()

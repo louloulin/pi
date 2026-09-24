@@ -148,7 +148,7 @@ pub struct ScriptedUiAnswers {
 }
 
 /// Envelope for a UI request flowing from a JS extension to the host.
-struct UiRequestEnvelope {
+pub(crate) struct UiRequestEnvelope {
     /// What the extension wants.
     request: UiRequest,
     /// Channel the host writes the answer into.
@@ -1232,7 +1232,7 @@ pub trait UiRegionHost: Send + Sync + 'static {
 }
 
 /// One queued region mutation from the shim to the [`UiRegionHost`].
-enum RegionCommand {
+pub(crate) enum RegionCommand {
     /// Install / clear the widget registered under `key`.
     Widget {
         key: String,
@@ -1692,75 +1692,86 @@ pub struct JsExtensionHost {
 /// Live `node:child_process` children, keyed by the shim-visible handle.
 type Children = Arc<Mutex<HashMap<u64, Arc<ChildEntry>>>>;
 
-struct Inner {
+/// Shared host services used by both the single-runtime [`JsExtensionHost`]
+/// and the per-extension isolation layer (`extension_isolation`).
+///
+/// `pub(crate)` so `extension_isolation` can install the same shim +
+/// host imports into a freshly allocated `AsyncContext` per extension,
+/// reusing the existing state / UI / exec / provider plumbing instead
+/// of duplicating ~1700 lines of host import bindings.
+pub(crate) struct Inner {
     /// Kept alive so the [`AsyncContext`](rquickjs_core::AsyncContext)
     /// below remains valid; the context holds a clone of the runtime
     /// but dropping the original would invalidate it.
+    ///
+    /// In isolated mode (`extension_isolation`) each extension owns its
+    /// own runtime+context stored in `ExtensionSlot`; this field still
+    /// exists to keep the type uniform but is unused.
     #[allow(dead_code)]
-    runtime: rquickjs_core::AsyncRuntime,
+    pub(crate) runtime: rquickjs_core::AsyncRuntime,
     /// Live `node:child_process` children, keyed by the handle the shim
     /// passes back. [`Drop`] kills whatever is left so a detached child
     /// can never outlive the host that started it.
-    children: Children,
+    pub(crate) children: Children,
     /// Allocates the `node:child_process` handles above.
-    next_child: Arc<AtomicU64>,
-    context: rquickjs_core::AsyncContext,
-    ui_tx: mpsc::UnboundedSender<UiRequestEnvelope>,
-    state: Arc<Mutex<HostState>>,
-    timeout: Duration,
+    pub(crate) next_child: Arc<AtomicU64>,
+    pub(crate) context: rquickjs_core::AsyncContext,
+    pub(crate) ui_tx: mpsc::UnboundedSender<UiRequestEnvelope>,
+    pub(crate) state: Arc<Mutex<HostState>>,
+    pub(crate) timeout: Duration,
     /// Context handed to tool executions (see [`ToolContext`]).
-    tool_context: ToolContext,
+    pub(crate) tool_context: ToolContext,
     /// Runner behind the JS `create*Tool` factories (see
     /// [`BuiltinToolRunner`]).
-    builtin_tool_runner: Option<Arc<dyn BuiltinToolRunner>>,
+    pub(crate) builtin_tool_runner: Option<Arc<dyn BuiltinToolRunner>>,
     /// Runner behind the JS `pi-ai/compat` provider factories (see
     /// [`PiAiStreamRunner`]).
-    pi_ai_stream_runner: Option<Arc<dyn PiAiStreamRunner>>,
+    pub(crate) pi_ai_stream_runner: Option<Arc<dyn PiAiStreamRunner>>,
     /// Live built-in provider streams started through
     /// `host_pi_ai_stream_start` (see [`crate::pi_ai`]).
-    pi_ai: PiAiStreamBridge,
+    pub(crate) pi_ai: PiAiStreamBridge,
     /// Wall-clock nanos deadline the JS interrupt handler checks on
     /// every iteration. `u64::MAX` means "no deadline active".
-    deadline_nanos: Arc<AtomicU64>,
+    pub(crate) deadline_nanos: Arc<AtomicU64>,
     /// In-flight `pi.exec` calls: the cancel channel and the deadline
     /// extension (see [`ExecBridge`]).
-    execs: ExecBridge,
+    pub(crate) execs: ExecBridge,
     /// Region mutations queued by the synchronous `host_ui_region` import
     /// and drained by [`region_worker`]. `None` when no
     /// [`UiRegionHost`] was injected: every region call then reports
     /// `ok:false` instead of queueing work nobody will apply.
-    region_tx: Option<mpsc::UnboundedSender<RegionCommand>>,
+    pub(crate) region_tx: Option<mpsc::UnboundedSender<RegionCommand>>,
     /// Allocates the session tokens `ctx.ui.custom` hands back to the shim.
-    next_ui_session: Arc<AtomicU64>,
+    pub(crate) next_ui_session: Arc<AtomicU64>,
     /// Latest `footerData` snapshot the interactive driver pushed. `None`
     /// until the first push: `getGitBranch()` then answers `null`, which is
     /// upstream's "not resolved yet / not in a repo" answer and is what a
     /// non-interactive host keeps returning.
-    footer_data: Arc<Mutex<Option<FooterData>>>,
+    pub(crate) footer_data: Arc<Mutex<Option<FooterData>>>,
     /// Built-in provider the extension's autocomplete wrapper chain
     /// delegates to (see [`AutocompleteBaseProvider`]). `None` when no
     /// interactive adapter was injected.
-    autocomplete_base: Option<Arc<dyn AutocompleteBaseProvider>>,
+    pub(crate) autocomplete_base: Option<Arc<dyn AutocompleteBaseProvider>>,
     /// Bumped every time the shim registers an autocomplete wrapper
     /// (`ctx.ui.addAutocompleteProvider`). The interactive loop compares it
     /// per tick to decide whether the chain — and therefore the editor's
     /// trigger table — has to be rebuilt.
-    autocomplete_generation: Arc<AtomicU64>,
+    pub(crate) autocomplete_generation: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
-struct HostState {
-    registry: ExtensionRegistry,
-    log: RegistrationLog,
+pub(crate) struct HostState {
+    pub(crate) registry: ExtensionRegistry,
+    pub(crate) log: RegistrationLog,
     /// Providers registered via `pi.registerProvider`, in registration
     /// order. A repeated `name` overwrites in place, so the last write
     /// wins without losing the provider's original position — the
     /// application layer reads this once per load pass.
-    providers: Vec<RegisteredProviderConfig>,
+    pub(crate) providers: Vec<RegisteredProviderConfig>,
     /// Index of [`HostState::log::tools`] into [`HostState::registry`]
     /// so `host_register_tool` can attribute tools to the extension
     /// that registered them without widening the host-import ABI.
-    pending_extension: Option<String>,
+    pub(crate) pending_extension: Option<String>,
 }
 
 impl HostState {
@@ -1806,7 +1817,10 @@ impl Drop for Inner {
 impl Inner {
     /// Arm the JS interrupt deadline for one host call and return it, so
     /// the interrupt handler and [`drive_call`] agree on the base.
-    fn arm_deadline(&self) -> Instant {
+    ///
+    /// `pub(crate)` so `extension_isolation` can arm per-extension
+    /// contexts against the shared deadline state.
+    pub(crate) fn arm_deadline(&self) -> Instant {
         let deadline = Instant::now() + self.timeout;
         self.deadline_nanos
             .store(system_time_nanos(deadline), Ordering::Relaxed);
@@ -1815,7 +1829,10 @@ impl Inner {
 
     /// Clear the per-call deadline — both the base and any `pi.exec` /
     /// pi-ai extension armed during the call — once the host call returns.
-    fn disarm_deadline(&self) {
+    ///
+    /// `pub(crate)` so `extension_isolation` can disarm after each
+    /// per-slot dispatch.
+    pub(crate) fn disarm_deadline(&self) {
         self.deadline_nanos.store(u64::MAX, Ordering::Relaxed);
         self.execs.reset_deadline();
         self.pi_ai.reset_deadline();
@@ -1836,7 +1853,7 @@ impl Inner {
 /// flight is killed first, because a `host_exec` (or
 /// `host_pi_ai_stream_next`) future lives on in the QuickJS async pool after
 /// the JS call that awaited it is dropped.
-async fn drive_call<F>(inner: &Inner, base_deadline: Instant, future: F) -> Result<F::Output, ()>
+pub(crate) async fn drive_call<F>(inner: &Inner, base_deadline: Instant, future: F) -> Result<F::Output, ()>
 where
     F: std::future::Future,
 {
@@ -2650,6 +2667,29 @@ pub struct DispatchOutcome {
     pub event: Option<serde_json::Value>,
 }
 
+impl DispatchOutcome {
+    /// Fold per-slot dispatch outcomes into one host-wide summary.
+    /// The isolated host runs `_pi_dispatch` once per extension; this
+    /// collapses the N outcomes into the shape the shared host returns
+    /// (one `handled` flag, the union of subscribers / results, the
+    /// first error, the last mutated event).
+    pub fn aggregate(outcomes: &[DispatchOutcome]) -> DispatchOutcome {
+        let mut out = DispatchOutcome::default();
+        for o in outcomes {
+            out.handled = out.handled || o.handled;
+            out.subscribers += o.subscribers;
+            out.results.extend(o.results.iter().cloned());
+            if out.errored.is_none() && o.errored.is_some() {
+                out.errored = o.errored.clone();
+            }
+            if o.event.is_some() {
+                out.event = o.event.clone();
+            }
+        }
+        out
+    }
+}
+
 /// Failure surfaced by a JS-side handler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchError {
@@ -2912,12 +2952,12 @@ struct ExecOutcome {
 ///   per-call deadline is raised to `timeout + [`EXEC_TIMEOUT_GRACE`]`, and the
 ///   call's own timeout decides the outcome (see [`drive_call`]).
 #[derive(Clone)]
-struct ExecBridge {
+pub(crate) struct ExecBridge {
     state: Arc<Mutex<ExecState>>,
     /// Wall-clock nanos of the furthest explicit exec deadline, in the same
     /// encoding as [`Inner::deadline_nanos`] (`u64::MAX` = unarmed). The JS
     /// interrupt handler takes the later of the two.
-    deadline_nanos: Arc<AtomicU64>,
+    pub(crate) deadline_nanos: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -2948,7 +2988,7 @@ struct ExecSlot {
 }
 
 impl ExecBridge {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ExecState::default())),
             deadline_nanos: Arc::new(AtomicU64::new(u64::MAX)),
@@ -3470,7 +3510,7 @@ impl ChildStream {
 }
 
 /// Live state for one `node:child_process` child.
-struct ChildEntry {
+pub(crate) struct ChildEntry {
     stdout: Arc<ChildStream>,
     stderr: Arc<ChildStream>,
     exit: Mutex<Option<ChildExit>>,
@@ -4127,7 +4167,13 @@ fn node_arg_env(args: &serde_json::Value) -> Result<Option<Vec<(String, String)>
 /// Install the host imports the shim expects. Each function marshals
 /// its arguments as JSON, hands them to the host state, and returns a
 /// QuickJS-friendly value (string / Promise).
-fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<()> {
+/// Install the host import bindings + the shim into `ctx`. The shim
+/// reaches the host via the global `host_*` functions, so this MUST
+/// run before any extension is loaded.
+///
+/// `pub(crate)` so `extension_isolation` can install the same imports
+/// into a freshly allocated `AsyncContext` per isolated extension.
+pub(crate) fn install_imports(ctx: &Ctx<'_>, inner: &Arc<Inner>) -> rquickjs_core::Result<()> {
     let globals = ctx.globals();
 
     // Context tool executions see. Set once here because the host's
