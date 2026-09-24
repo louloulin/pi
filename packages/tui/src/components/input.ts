@@ -99,6 +99,11 @@ export class Input implements Component, Focusable {
 	private killRing = new KillRing();
 	private lastAction: "kill" | "yank" | "type-word" | "burst" | null = null;
 
+	// Paste tracking for markers (mirrors Rust's paste tracking)
+	private pasteCount: number = 0;
+	// Threshold for showing paste markers (in characters)
+	private readonly pasteMarkerThreshold: number = 100;
+
 	// Paste burst detection - classify rapid chars as paste vs human typing
 	// This is disabled for normal typing since bracketed paste mode handles real pastes.
 	// The burst detection here is a fallback for terminals that don't support bracketed paste.
@@ -437,9 +442,20 @@ export class Input implements Component, Focusable {
 		// Insert the burst as a single undo unit
 		// Clean newlines and tabs from pasted text
 		const cleanText = burstText.replace(/\r?\n/g, "").replace(/\t/g, "    ");
-		if (cleanText.length > 0) {
-			this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
-			this.cursor += cleanText.length;
+
+		// Generate paste marker for large bursts (mirrors Rust implementation)
+		let markerText = "";
+		if (cleanText.length >= this.pasteMarkerThreshold) {
+			this.pasteCount++;
+			const lines = (burstText.match(/\n/g) || []).length;
+			markerText = `[paste #${this.pasteCount}${lines > 0 ? ` +${lines} lines` : ""}] `;
+		}
+
+		// Insert marker + text at cursor position
+		const fullText = markerText + cleanText;
+		if (fullText.length > 0) {
+			this.value = this.value.slice(0, this.cursor) + fullText + this.value.slice(this.cursor);
+			this.cursor += fullText.length;
 		}
 		this.lastAction = "burst";
 
@@ -847,9 +863,19 @@ export class Input implements Component, Focusable {
 		// Clean the pasted text - remove newlines and carriage returns
 		const cleanText = pastedText.replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, "").replace(/\t/g, "    ");
 
-		// Insert at cursor position
-		this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
-		this.cursor += cleanText.length;
+		// Generate paste marker for large pastes (mirrors Rust implementation)
+		// This helps identify large pasted content
+		let markerText = "";
+		if (cleanText.length >= this.pasteMarkerThreshold) {
+			this.pasteCount++;
+			const lines = (pastedText.match(/\n/g) || []).length;
+			markerText = `[paste #${this.pasteCount}${lines > 0 ? ` +${lines} lines` : ""}] `;
+		}
+
+		// Insert marker + text at cursor position
+		const fullText = markerText + cleanText;
+		this.value = this.value.slice(0, this.cursor) + fullText + this.value.slice(this.cursor);
+		this.cursor += fullText.length;
 
 		// Invalidate visual layout cache
 		this.cachedLayout = null;
