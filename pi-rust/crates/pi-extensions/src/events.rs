@@ -20,13 +20,14 @@
 ///
 /// Mirrors the `UPSTREAM_EVENT_NAMES` array in `runtime/pi-ext-shim.mjs`; a
 /// unit test fails when the two drift.
-pub const UPSTREAM_EVENT_NAMES: [&str; 36] = [
+pub const UPSTREAM_EVENT_NAMES: [&str; 37] = [
     "project_trust",
     "resources_discover",
     "session_start",
     "session_info_changed",
     "session_before_switch",
     "session_before_fork",
+    "session_fork",
     "session_before_compact",
     "session_compact",
     "session_compact_failed",

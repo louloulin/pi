@@ -249,6 +249,25 @@ pub enum ExtensionEvent {
         /// Whether the anchor entry itself is included.
         position: ForkPosition,
     },
+    /// `session_fork`: a fork was just created. Carries the new
+    /// session id and the parent session id so the extension can
+    /// match them. Mirrors
+    /// `pi_agent_rust`'s `session_before_fork` veto path: the
+    /// upstream `session_before_fork` event lets a plugin refuse a
+    /// fork; this `SessionFork` event lets it observe the success
+    /// path. Subscribed via `pi.on("session_fork", handler)`.
+    SessionFork {
+        /// New session id created by the fork.
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// Parent session id the fork was anchored on.
+        #[serde(rename = "parentId")]
+        parent_id: String,
+        /// Entry the fork was anchored on (same as `entry_id`
+        /// upstream emits on `session_before_fork`).
+        #[serde(rename = "entryId")]
+        entry_id: String,
+    },
     /// Upstream `session_before_compact`: context compaction is about to run.
     /// A handler may return `{ cancel: true }` to stop it.
     SessionBeforeCompact {
@@ -546,6 +565,7 @@ impl ExtensionEvent {
             Self::SessionCompact { .. } => "session_compact",
             Self::SessionBeforeSwitch { .. } => "session_before_switch",
             Self::SessionBeforeFork { .. } => "session_before_fork",
+            Self::SessionFork { .. } => "session_fork",
             Self::SessionBeforeCompact { .. } => "session_before_compact",
             Self::SessionCompactFailed { .. } => "session_compact_failed",
             Self::SessionBeforeTree { .. } => "session_before_tree",
