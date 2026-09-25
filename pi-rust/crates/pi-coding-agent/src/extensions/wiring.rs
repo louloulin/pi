@@ -591,9 +591,7 @@ impl ExtensionRuntime {
             details: result.details.clone(),
         };
 
-        let Some(outcome) = self.dispatch_event(&event).await else {
-            return None;
-        };
+        let outcome = self.dispatch_event(&event).await?;
 
         // Parse the dispatch outcome into our typed patch.
         // The handlers return their decision as the first result.

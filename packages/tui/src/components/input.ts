@@ -100,10 +100,18 @@ export class Input implements Component, Focusable {
 	private lastAction: "kill" | "yank" | "type-word" | "burst" | null = null;
 
 	// Paste burst detection - classify rapid chars as paste vs human typing
+	// This is disabled for normal typing since bracketed paste mode handles real pastes.
+	// The burst detection here is a fallback for terminals that don't support bracketed paste.
 	private lastCharTime: number = 0;
 	private burstBuffer: string = "";
-	private readonly pasteBurstThresholdMs: number = 12; // chars arriving <12ms apart = paste burst
-	private readonly pasteBurstMaxGap: number = 15; // max gap between chars to continue burst
+	private burstConsecutive: number = 0; // Number of consecutive fast chars
+	// chars arriving <5ms apart count as potentially part of a paste burst
+	private readonly pasteBurstWindowMs: number = 5;
+	// Need 20+ consecutive fast chars before classifying as burst (very high threshold
+	// to avoid affecting normal typing; real pastes have 100+ chars typically)
+	private readonly pasteBurstMinChars: number = 20;
+	// Max gap between chars to continue burst
+	private readonly pasteBurstMaxGapMs: number = 10;
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
@@ -368,20 +376,30 @@ export class Input implements Component, Focusable {
 
 		// Paste burst detection: rapid characters indicate a paste
 		// Flush any ongoing burst if gap is too large
-		if (this.burstBuffer.length > 0 && timeSinceLast > this.pasteBurstMaxGap) {
+		if (this.burstBuffer.length > 0 && timeSinceLast > this.pasteBurstMaxGapMs) {
 			this.flushBurst();
 		}
 
-		// Classify as burst if arriving quickly
-		const isBurstChar = timeSinceLast < this.pasteBurstThresholdMs;
-
-		if (isBurstChar && this.burstBuffer.length === 0) {
-			// First char of potential burst - save undo state
-			this.pushUndo();
+		// Classify as fast char if arriving within window
+		const withinWindow = timeSinceLast < this.pasteBurstWindowMs;
+		if (withinWindow) {
+			this.burstConsecutive++;
+		} else {
+			this.burstConsecutive = 1;
 		}
 
-		if (isBurstChar || this.burstBuffer.length > 0) {
-			// Add to burst buffer
+		// Only start buffering when we have pasteBurstMinChars+ consecutive fast chars within window (likely a real paste)
+		// Real pastes typically have 50-100+ chars, while normal typing won't reach this
+		// This ensures normal typing is always inserted immediately
+		const isPasteLikely = this.burstConsecutive >= this.pasteBurstMinChars && withinWindow;
+
+		if (this.burstBuffer.length > 0) {
+			// Already in burst mode - add to buffer
+			this.burstBuffer += char;
+			this.lastAction = "burst";
+		} else if (isPasteLikely) {
+			// Very fast typing detected - start buffering (likely a paste)
+			this.pushUndo();
 			this.burstBuffer += char;
 			this.lastAction = "burst";
 		} else {

@@ -222,6 +222,7 @@ impl VisualLayout {
     /// Unlike [`VisualLayout::cursor_at`] — shared with the keyboard's
     /// vertical motion, where "past the end of the row" must mean the row's
     /// end — this is the pointer's own rule, so the two are kept apart.
+    #[allow(dead_code)]
     pub(crate) fn click_offset(&self, row: usize, column: usize) -> usize {
         let Some(line) = self.rows.get(row) else {
             return 0;

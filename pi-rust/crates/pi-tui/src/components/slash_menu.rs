@@ -214,7 +214,7 @@ fn name_column_width(entries: &[SlashMenuEntry]) -> usize {
         .map(|e| columns(&e.usage))
         .max()
         .unwrap_or(14)
-        .clamp(14, 26) as usize
+        .clamp(14, 26)
 }
 
 /// Render the slash menu widget.
@@ -231,7 +231,7 @@ impl<'a> SlashMenuWidget<'a> {
     }
 }
 
-impl<'a> Widget for SlashMenuWidget<'a> {
+impl Widget for SlashMenuWidget<'_> {
     fn render(self, _area: Rect, buf: &mut Buffer) {
         if !self.menu.is_visible() || self.area.width == 0 || self.area.height == 0 {
             return;
@@ -258,8 +258,7 @@ impl<'a> Widget for SlashMenuWidget<'a> {
         let y = self
             .area
             .y
-            .saturating_sub(h)
-            .max(0);
+            .saturating_sub(h);
         let menu_area = Rect::new(self.area.x + 2, y, w, h);
 
         // Clear the background
@@ -461,7 +460,7 @@ impl SlashMenu {
 
         let h = vis as u16 + 2;
         let w = 64.min(editor_area.width.saturating_sub(2));
-        let y = editor_area.y.saturating_sub(h).max(0);
+        let y = editor_area.y.saturating_sub(h);
 
         Some(SlashMenuHitBox {
             x: editor_area.x + 2,
@@ -557,8 +556,9 @@ mod tests {
     fn test_pad_or_ellipsize() {
         assert_eq!(pad_or_ellipsize("abc", 5), "abc  ");
         assert_eq!(pad_or_ellipsize("abc", 3), "abc");
-        assert_eq!(pad_or_ellipsize("abcdef", 4), "abc… ");
-        assert_eq!(pad_or_ellipsize("abcdefg", 4), "abc… ");
+        // When the ellipsis fills the full width, no trailing space is needed.
+        assert_eq!(pad_or_ellipsize("abcdef", 4), "abc…");
+        assert_eq!(pad_or_ellipsize("abcdefg", 4), "abc…");
     }
 
     #[test]
