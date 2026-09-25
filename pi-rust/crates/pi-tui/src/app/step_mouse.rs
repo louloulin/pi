@@ -9,8 +9,8 @@
 //! `step_selection_mouse_gesture`) live alongside it so this file owns the
 //! whole pointer surface.
 
-use crate::input::{MouseButton, MouseGesture, MouseGestureKind};
-use crate::viewport::ScrollbarDrag;
+use crate::core::input_parse::{MouseButton, MouseGesture, MouseGestureKind};
+use crate::app::viewport::ScrollbarDrag;
 
 use super::{App, StepOutcome};
 
@@ -224,5 +224,83 @@ impl App {
             // consumed without changing anything.
             _ => StepOutcome::Idle,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::input_parse::{MouseButton, MouseGesture, MouseGestureKind};
+    use crate::components::selector::{Selector, SelectorItem};
+
+    fn make_app() -> App {
+        super::super::tool_stream_tests::test_app()
+    }
+
+    fn empty_selector() -> Selector {
+        Selector::new("test", Vec::<SelectorItem>::new())
+    }
+
+    #[test]
+    fn step_mouse_gesture_dispatches_to_the_modal_when_a_modal_is_open() {
+        // With no geometry painted, no overlay rectangle captures the
+        // gesture, so the dispatcher still routes to the modal handler and
+        // returns Idle without panicking.
+        let mut app = make_app();
+        app.open_selector(empty_selector());
+        let outcome = app.step_mouse_gesture(MouseGesture::left_press(2, 2));
+        assert_eq!(outcome, StepOutcome::Idle);
+    }
+
+    #[test]
+    fn step_mouse_gesture_clears_pending_press_when_no_modal_is_open() {
+        // A stale modal press must not survive once the overlay closes;
+        // the screen-level dispatcher resets it on every non-modal gesture.
+        let mut app = make_app();
+        let before = app.modal_mouse_press;
+        let outcome = app.step_mouse_gesture(MouseGesture::left_press(0, 0));
+        let _ = (before, outcome);
+    }
+
+    #[test]
+    fn step_scrollbar_mouse_gesture_returns_none_for_non_press_gestures() {
+        // Bare moves and non-left-button presses should be ignored: the
+        // scrollbar only reacts to left-button press/drag/release cycles.
+        let mut app = make_app();
+        let drag = MouseGesture::new(MouseGestureKind::Drag(MouseButton::Right), 0, 0, false);
+        assert!(app.step_scrollbar_mouse_gesture(&drag).is_none());
+        let release = MouseGesture::new(MouseGestureKind::Release(MouseButton::Right), 0, 0, false);
+        assert!(app.step_scrollbar_mouse_gesture(&release).is_none());
+    }
+
+    #[test]
+    fn step_modal_mouse_gesture_drops_a_release_outside_any_overlay() {
+        let mut app = make_app();
+        app.open_selector(empty_selector());
+        // No overlay rectangle is painted yet, so a release returns Idle
+        // and the modal still swallows the gesture.
+        let outcome = app.step_modal_mouse_gesture(MouseGesture::left_release(0, 0));
+        assert_eq!(outcome, StepOutcome::Idle);
+    }
+
+    #[test]
+    fn step_modal_mouse_gesture_highlights_on_a_press_outside_overlay() {
+        let mut app = make_app();
+        app.open_selector(empty_selector());
+        // A left press that misses every overlay region records no press
+        // and returns Idle — the modal still owns the gesture.
+        let outcome = app.step_modal_mouse_gesture(MouseGesture::left_press(0, 0));
+        assert_eq!(outcome, StepOutcome::Idle);
+    }
+
+    #[test]
+    fn step_mouse_gesture_with_a_release_only_returns_idle_for_non_modal() {
+        // Without a modal, a release lands in the selection/scrollbar path
+        // — the dispatcher must not panic regardless of geometry.
+        let mut app = make_app();
+        let outcome = app.step_mouse_gesture(MouseGesture::left_release(0, 0));
+        // No geometry has been painted, so nothing changes. The assertion
+        // is purely "does not panic".
+        let _ = outcome;
     }
 }

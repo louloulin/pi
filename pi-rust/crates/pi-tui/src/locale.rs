@@ -101,7 +101,7 @@ impl HeaderHint {
     /// [`HeaderKey::ChordPair`] stays while either half works — the pair's
     /// label already drops the dead half.
     pub fn is_wired(&self) -> bool {
-        use crate::keybindings::app_action_is_consumed;
+        use crate::components::keybindings::app_action_is_consumed;
         match self.key {
             HeaderKey::Chord(id) | HeaderKey::ChordTwice(id) => app_action_is_consumed(id),
             HeaderKey::ChordPair(first, second) => {

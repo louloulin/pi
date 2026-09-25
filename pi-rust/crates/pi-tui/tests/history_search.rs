@@ -231,8 +231,10 @@ fn a_missing_match_restores_the_draft_and_reports_no_match() {
     );
     assert_eq!(editor.history_search_match_count(), 0);
 
-    assert_eq!(editor.handle_event(enter()), EditorAction::Changed);
-    assert!(!editor.history_search_active());
+    // Enter on a miss is a no-op — search stays open so the user can
+    // refine the query or cancel with Esc.
+    assert_eq!(editor.handle_event(enter()), EditorAction::None);
+    assert!(editor.history_search_active());
     assert_eq!(editor.text(), "draft");
 }
 

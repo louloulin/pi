@@ -28,7 +28,7 @@
 //! * **Theme stays a host concern.** A [`StyledLine`] carries
 //!   [`SpanStyle`] *slots*, not resolved colours, so the host resolves them
 //!   through the live [`Theme`](crate::Theme) with the same
-//!   [`write_styled_line`](crate::styled::write_styled_line) path every
+//!   [`write_styled_line`](crate::utils::styled::write_styled_line) path every
 //!   built-in component uses. A component can therefore never hard-code a
 //!   colour, and a theme hot-swap takes effect on the next frame without the
 //!   component knowing.
@@ -50,8 +50,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use crate::input::Key;
-use crate::styled::{SpanStyle, StyledLine, StyledSpan};
+use crate::core::input_parse::Key;
+use crate::utils::styled::{SpanStyle, StyledLine, StyledSpan};
 
 /// A hostable UI region.
 ///
@@ -65,7 +65,7 @@ use crate::styled::{SpanStyle, StyledLine, StyledSpan};
 /// (`packages/tui/src/tui.ts:111-134`) minus the mouse and invalidation
 /// hooks, which this host surface does not route yet (see
 /// [`App::open_custom`](crate::App::open_custom)).
-pub trait Component {
+pub trait Component: Send + Sync {
     /// Render the component for a viewport `width` in columns.
     ///
     /// Returns one [`StyledLine`] per screen row. The host clips each line to
@@ -96,6 +96,15 @@ pub trait Component {
     /// (`packages/coding-agent/src/core/extensions/types.ts:175`). The
     /// default is a no-op.
     fn dispose(&mut self) {}
+
+    /// Return the layout node describing how to lay this component out,
+    /// or `None` if the component has no children to layout. Mirrors
+    /// upstream's `Symbol.for("@earendil-works/pi-tui/layout-node")`
+    /// lookup (`packages/tui/src/layout-node.ts:3,48-51`). The default
+    /// returns `None`; layout-aware components override it.
+    fn layout_node(&self) -> Option<crate::app::layout_node::LayoutNode> {
+        None
+    }
 }
 
 /// Where a widget renders relative to the editor region.
@@ -383,8 +392,8 @@ mod tests {
         let component = TextComponent::new(["one", "two"]);
         let lines = component.render(40);
         assert_eq!(lines.len(), 2);
-        assert_eq!(crate::styled::plain_text(&lines[0]), "one");
-        assert_eq!(crate::styled::plain_text(&lines[1]), "two");
+        assert_eq!(crate::utils::styled::plain_text(&lines[0]), "one");
+        assert_eq!(crate::utils::styled::plain_text(&lines[1]), "two");
         assert_eq!(lines[0][0].style, SpanStyle::PLAIN);
     }
 

@@ -25,14 +25,14 @@
 //! marker) into [`SelectorItem`]s the existing [`Selector`](crate::Selector)
 //! renders, filters and windows.
 //!
-//! [`Selector`]: crate::selector::Selector
+//! [`Selector`]: crate::components::selector::Selector
 
 use std::collections::{HashMap, HashSet};
 
-use crate::editor::Editor;
-use crate::input::{InputEvent, Key};
-use crate::keybindings::{get_keybindings, matches_with_fallback};
-use crate::selector::SelectorItem;
+use crate::components::editor::Editor;
+use crate::core::input_parse::{InputEvent, Key};
+use crate::components::keybindings::{get_keybindings, matches_with_fallback};
+use crate::components::selector::SelectorItem;
 
 /// One node of the tree the flattening API accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,8 +349,8 @@ impl TreeLabelEditor {
         let text = self.editor.display_text();
         let cursor = self.editor.display_cursor();
         let (before, after) = split_at_char(&text, cursor);
-        let save = crate::keybindings::key_text_or("tui.select.confirm", "enter");
-        let cancel = crate::keybindings::key_text_or("tui.select.cancel", "escape");
+        let save = crate::components::keybindings::key_text_or("tui.select.confirm", "enter");
+        let cancel = crate::components::keybindings::key_text_or("tui.select.cancel", "escape");
         vec![
             "  Label (empty to remove):".to_string(),
             format!("  {before}\u{258d}{after}"),
@@ -728,8 +728,8 @@ mod tests {
         TreeLabelEditor::new("e1", current)
     }
 
-    fn key(code: crate::input::KeyCode) -> Key {
-        Key::new(code, crate::input::KeyModifiers::NONE)
+    fn key(code: crate::core::input_parse::KeyCode) -> Key {
+        Key::new(code, crate::core::input_parse::KeyModifiers::NONE)
     }
 
     #[test]
@@ -739,12 +739,12 @@ mod tests {
         assert_eq!(editor.text(), "old");
         // The cursor starts at the end, so typing appends.
         assert_eq!(
-            editor.handle_key(key(crate::input::KeyCode::Char('!'))),
+            editor.handle_key(key(crate::core::input_parse::KeyCode::Char('!'))),
             TreeLabelAction::Edited
         );
         assert_eq!(editor.text(), "old!");
         assert_eq!(
-            editor.handle_key(key(crate::input::KeyCode::Enter)),
+            editor.handle_key(key(crate::core::input_parse::KeyCode::Enter)),
             TreeLabelAction::Commit(Some("old!".into()))
         );
     }
@@ -754,13 +754,13 @@ mod tests {
         let mut editor = label_editor(Some("old"));
         for _ in 0.."old".len() {
             assert_eq!(
-                editor.handle_key(key(crate::input::KeyCode::Backspace)),
+                editor.handle_key(key(crate::core::input_parse::KeyCode::Backspace)),
                 TreeLabelAction::Edited
             );
         }
         assert_eq!(editor.text(), "");
         assert_eq!(
-            editor.handle_key(key(crate::input::KeyCode::Enter)),
+            editor.handle_key(key(crate::core::input_parse::KeyCode::Enter)),
             TreeLabelAction::Commit(None),
             "an empty field removes the label, like upstream `value || undefined`"
         );
@@ -770,15 +770,15 @@ mod tests {
         for ch in "  \t ".chars() {
             if ch == '\t' {
                 let _ = blank.handle_key(Key::new(
-                    crate::input::KeyCode::Tab,
-                    crate::input::KeyModifiers::NONE,
+                    crate::core::input_parse::KeyCode::Tab,
+                    crate::core::input_parse::KeyModifiers::NONE,
                 ));
             } else {
-                let _ = blank.handle_key(key(crate::input::KeyCode::Char(ch)));
+                let _ = blank.handle_key(key(crate::core::input_parse::KeyCode::Char(ch)));
             }
         }
         assert_eq!(
-            blank.handle_key(key(crate::input::KeyCode::Enter)),
+            blank.handle_key(key(crate::core::input_parse::KeyCode::Enter)),
             TreeLabelAction::Commit(None)
         );
     }
@@ -786,9 +786,9 @@ mod tests {
     #[test]
     fn escape_cancels_without_touching_the_buffer() {
         let mut editor = label_editor(Some("keep"));
-        let _ = editor.handle_key(key(crate::input::KeyCode::Char('!')));
+        let _ = editor.handle_key(key(crate::core::input_parse::KeyCode::Char('!')));
         assert_eq!(
-            editor.handle_key(key(crate::input::KeyCode::Esc)),
+            editor.handle_key(key(crate::core::input_parse::KeyCode::Esc)),
             TreeLabelAction::Cancel
         );
         assert_eq!(editor.text(), "keep!");
@@ -801,30 +801,30 @@ mod tests {
         // cursor after a Home press.
         let mut editor = label_editor(Some("two words"));
         let _ = editor.handle_key(Key::new(
-            crate::input::KeyCode::Char('w'),
-            crate::input::KeyModifiers::CONTROL,
+            crate::core::input_parse::KeyCode::Char('w'),
+            crate::core::input_parse::KeyModifiers::CONTROL,
         ));
         assert_eq!(editor.text(), "two ");
-        let _ = editor.handle_key(key(crate::input::KeyCode::Home));
-        let _ = editor.handle_key(key(crate::input::KeyCode::Char('X')));
+        let _ = editor.handle_key(key(crate::core::input_parse::KeyCode::Home));
+        let _ = editor.handle_key(key(crate::core::input_parse::KeyCode::Char('X')));
         assert_eq!(editor.text(), "Xtwo ");
     }
 
     #[test]
     fn a_hard_line_break_is_folded_to_a_space_on_commit() {
         let mut editor = label_editor(None);
-        let _ = editor.handle_key(key(crate::input::KeyCode::Char('a')));
+        let _ = editor.handle_key(key(crate::core::input_parse::KeyCode::Char('a')));
         let _ = editor.handle_key(Key::new(
-            crate::input::KeyCode::Enter,
-            crate::input::KeyModifiers {
+            crate::core::input_parse::KeyCode::Enter,
+            crate::core::input_parse::KeyModifiers {
                 shift: true,
                 ..Default::default()
             },
         ));
-        let _ = editor.handle_key(key(crate::input::KeyCode::Char('b')));
+        let _ = editor.handle_key(key(crate::core::input_parse::KeyCode::Char('b')));
         assert!(editor.text().contains('\n'));
         assert_eq!(
-            editor.handle_key(key(crate::input::KeyCode::Enter)),
+            editor.handle_key(key(crate::core::input_parse::KeyCode::Enter)),
             TreeLabelAction::Commit(Some("a b".into()))
         );
     }
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn the_label_editor_renders_upstream_rows_with_a_caret() {
         let mut editor = label_editor(Some("ab"));
-        let _ = editor.handle_key(key(crate::input::KeyCode::Left));
+        let _ = editor.handle_key(key(crate::core::input_parse::KeyCode::Left));
         let lines = editor.render_lines();
         assert_eq!(lines[0], "  Label (empty to remove):");
         assert_eq!(lines[1], "  a\u{258d}b");

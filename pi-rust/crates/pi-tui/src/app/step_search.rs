@@ -12,12 +12,12 @@
 //! `paint_truncated_above`) and their label helpers live here too — they
 //! are part of the same transcript-navigation surface.
 
-use crate::input::{Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
-use crate::keybindings::get_keybindings;
+use crate::core::input_parse::{Key, KeyCode, KeyModifiers, MouseButton, MouseGesture, MouseGestureKind};
+use crate::components::keybindings::get_keybindings;
 use crate::locale::format_chord;
-use crate::search::{apply_query_key, search_bar_rect, SearchSelectionMode};
-use crate::styled::SpanStyle;
-use crate::styled::StyledSpan;
+use crate::components::search::{apply_query_key, search_bar_rect, SearchSelectionMode};
+use crate::utils::styled::SpanStyle;
+use crate::utils::styled::StyledSpan;
 use crate::theme::{ThemeBg, ThemeColor};
 
 use super::{
@@ -28,7 +28,7 @@ impl App {
     /// Route a key to the open search overlay.
     pub(super) fn step_search_key(&mut self, key: Key) -> SearchKeyOutcome {
         let bindings = get_keybindings();
-        let event = crate::input::InputEvent::Key(key);
+        let event = crate::core::input_parse::InputEvent::Key(key);
         if bindings.matches(&event, "tui.altScreen.searchClose")
             || bindings.matches(&event, "tui.altScreen.search")
         {
@@ -84,7 +84,7 @@ impl App {
         area: ratatui::layout::Rect,
         buf: &mut ratatui::buffer::Buffer,
     ) {
-        crate::render_helpers::apply_search_highlight(
+        crate::utils::render_helpers::apply_search_highlight(
             &self.messages,
             self.search.as_ref(),
             area,
@@ -98,7 +98,7 @@ impl App {
         area: ratatui::layout::Rect,
         buf: &mut ratatui::buffer::Buffer,
     ) {
-        crate::render_helpers::apply_scrollbar(
+        crate::utils::render_helpers::apply_scrollbar(
             self.scrollbar_hover,
             self.scrollbar_drag,
             self.scrollbar_geometry(),
@@ -191,7 +191,7 @@ impl App {
         message_area: ratatui::layout::Rect,
         buf: &mut ratatui::buffer::Buffer,
     ) {
-        crate::render_helpers::paint_scroll_to_end(
+        crate::utils::render_helpers::paint_scroll_to_end(
             &self.viewport,
             self.messages.is_following(),
             self.max_scroll(),
@@ -233,7 +233,7 @@ impl App {
         buf: &mut ratatui::buffer::Buffer,
     ) {
         let (width, height) = self.viewport();
-        crate::render_helpers::paint_truncated_above(
+        crate::utils::render_helpers::paint_truncated_above(
             &self.viewport,
             &self.messages,
             self.scrollbar_geometry(),
@@ -244,6 +244,131 @@ impl App {
             message_area,
             &self.theme,
             buf,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::input_parse::{Key, KeyCode, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn make_app() -> App {
+        super::super::tool_stream_tests::test_app()
+    }
+
+    fn char_key(c: char) -> Key {
+        Key::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn step_search_key_is_idle_when_overlay_is_closed() {
+        let mut app = make_app();
+        // No overlay open: any key is "handled" but produces no redraw.
+        let outcome = app.step_search_key(char_key('a'));
+        match outcome {
+            SearchKeyOutcome::Handled(StepOutcome::Idle) => {}
+            other => panic!("expected Handled(Idle), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_search_key_passes_through_unmodified_scroll_chords() {
+        let mut app = make_app();
+        // PageUp / PageDown / Home / End without modifiers must pass
+        // through even when the overlay is closed — the test asserts the
+        // overlay's filter logic does not swallow them.
+        for code in [KeyCode::PageUp, KeyCode::PageDown, KeyCode::Home, KeyCode::End] {
+            let outcome = app.step_search_key(Key::new(code, KeyModifiers::NONE));
+            assert!(
+                matches!(outcome, SearchKeyOutcome::PassThrough),
+                "{code:?} must pass through, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn step_search_key_consumes_text_into_the_query_bar() {
+        let mut app = make_app();
+        assert!(app.open_search(), "open_search should succeed");
+        let outcome = app.step_search_key(char_key('h'));
+        assert!(
+            matches!(outcome, SearchKeyOutcome::Handled(StepOutcome::Redraw)),
+            "typing a character must be Handled(Redraw), got {outcome:?}"
+        );
+        // The query bar should now contain the typed character.
+        let state = app.search.as_ref().expect("search state should be open");
+        assert_eq!(state.bar.query(), "h");
+    }
+
+    #[test]
+    fn apply_scrollbar_is_a_noop_when_geometry_is_zero() {
+        let mut app = make_app();
+        // No geometry has been painted yet; this must not panic.
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.apply_scrollbar(area, &mut buf);
+    }
+
+    #[test]
+    fn apply_search_highlight_is_a_noop_when_overlay_is_closed() {
+        let app = make_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        // Closed overlay: must not panic, must not crash on `search.as_ref()`.
+        app.apply_search_highlight(area, &mut buf);
+    }
+
+    #[test]
+    fn scroll_to_end_label_has_a_fallback_when_no_binding_is_registered() {
+        let app = make_app();
+        let label = app.scroll_to_end_label();
+        // The label must contain the canonical prefix.
+        assert!(label.text.starts_with(SCROLL_TO_END_LABEL));
+    }
+
+    #[test]
+    fn truncated_above_label_singular_for_one_line() {
+        let app = make_app();
+        let label = app.truncated_above_label(1);
+        // The label uses the singular noun "line" for `hidden == 1`.
+        assert!(label.text.contains("1 line above"));
+    }
+
+    #[test]
+    fn truncated_above_label_plural_for_multiple_lines() {
+        let app = make_app();
+        let label = app.truncated_above_label(7);
+        assert!(label.text.contains("7 lines above"));
+    }
+
+    #[test]
+    fn paint_scroll_to_end_does_not_panic_on_an_empty_viewport() {
+        let app = make_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.paint_scroll_to_end(area, &mut buf);
+    }
+
+    #[test]
+    fn paint_truncated_above_does_not_panic_on_an_empty_viewport() {
+        let app = make_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.paint_truncated_above(area, &mut buf);
+    }
+
+    #[test]
+    fn scroll_to_end_label_uses_a_non_empty_style() {
+        let app = make_app();
+        let label = app.scroll_to_end_label();
+        // The pill must carry a non-empty fg/bg so it renders visibly.
+        assert!(
+            label.style.fg.is_some() || label.style.bg.is_some(),
+            "the pill style must paint something, got {:?}",
+            label.style
         );
     }
 }

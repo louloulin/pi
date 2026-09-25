@@ -214,15 +214,19 @@ fn an_open_reverse_search_absorbs_the_composer_pointer() {
         app.step(InputEvent::key(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         StepOutcome::Redraw
     );
+    // The reverse-i-search hint rides on the status bar row — the same
+    // trailing-slot the transient flash uses, so the frame's layout does not
+    // shift mid-search (the transcript / status bar would otherwise jump on
+    // every Ctrl+R). The composer region itself stays one row tall.
     let (search_x, search_y) = cell_of(&frame(&mut app), "reverse-i-search:");
     let (draft_x, draft_y) = cell_of(&frame(&mut app), "world");
-    // The composer region grows *upward* (it is docked at the bottom), so the
-    // search row takes the row the region gained.
     let (_, _, _, height) = app.composer_area();
-    assert_eq!(height, 2, "the search row grew the composer by one row");
-    assert_eq!(search_y + 1, draft_y, "the draft is below the search row");
+    assert_eq!(height, 1, "the composer region is one row tall");
+    assert!(search_y > draft_y, "the search hint rides below the draft");
 
-    // Neither row places a caret while the search is open.
+    // Neither row places a caret while the search is open — the prompt's
+    // own pointer handler short-circuits, and the status bar has no pointer
+    // handler so the hint click is naturally absorbed.
     assert_eq!(click(&mut app, search_x, search_y), StepOutcome::Idle);
     assert_eq!(click(&mut app, draft_x, draft_y), StepOutcome::Idle);
     assert_eq!(

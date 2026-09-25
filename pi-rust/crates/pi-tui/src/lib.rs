@@ -6,110 +6,215 @@
 //! `pi-agent-core` into the rendered message view.
 //!
 //! See `docs/ARCHITECTURE.md` for how the crate fits into the workspace.
+//!
+//! # Module map
+//!
+//! The crate is split into five top-level sub-modules, each owning one
+//! layer of the framework. See the module docs for what each layer owns.
+//!
+//! | Layer | What lives here |
+//! |-------|-----------------|
+//! | [`core`] | Framework primitives — `Component` trait, focus, overlay, the TUI driver, input abstraction |
+//! | [`components`] | Domain widgets — `Editor`, `Prompt`, `MessageView`, `Selector`, `Dialog`, `Markdown`, `Loader`, … |
+//! | [`utils`] | Pure helpers — display width, styled spans, fuzzy match, syntax highlight, OSC 8 hyperlinks |
+//! | [`terminal`] | Backend — `ProcessTerminal`, capabilities, image protocol, title, raw TTY, stdin buffer |
+//! | [`app`] | Orchestration — `App` event loop, step dispatchers, viewport state, layout |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod app;
-pub mod autocomplete;
 pub mod clipboard;
 pub mod component;
-pub mod dialog;
-pub mod editor;
-pub mod extension_ui;
-pub mod fuzzy;
-pub mod highlight;
-pub mod history_store;
-pub mod hyperlink;
-pub mod image;
-pub mod input;
-pub mod keybindings;
-pub mod kill_ring;
-pub mod latex;
-pub mod loader;
+pub mod components;
+pub mod core;
 pub mod locale;
-pub mod markdown;
-pub mod message;
-pub mod mouse_region;
-pub mod prompt;
-pub mod search;
-pub mod selector;
-pub mod slash_menu;
-pub mod settings;
-pub mod status;
-pub mod styled;
 pub mod styles;
-pub mod terminal_image;
-pub mod terminal_title;
 pub mod terminal;
 pub mod theme;
 pub mod tree;
 pub mod ts_compat;
-pub mod undo_stack;
-pub mod viewport;
-pub(crate) mod render_helpers;
-pub(crate) mod visual_text;
-pub mod width;
-pub mod word_navigation;
-pub mod keys;
 pub mod utils;
-pub mod raw_tty;
 
-pub use app::{App, AppConfig, FollowUpOutcome, RenderSnapshot};
-pub use viewport::ScrollbarGeometry;
-pub use autocomplete::{
+// Legacy module aliases — downstream code imports `pi_tui::keybindings`,
+// `pi_tui::input`, etc. These re-export the modules under their old flat
+// names so existing imports continue to resolve while the new modular
+// paths (`pi_tui::components::keybindings`) remain the canonical home.
+pub mod autocomplete {
+    pub use crate::components::autocomplete::*;
+}
+pub mod dialog {
+    pub use crate::components::dialog::*;
+}
+pub mod editor {
+    pub use crate::components::editor::*;
+}
+pub mod extension_ui {
+    pub use crate::components::extension_ui::*;
+}
+pub mod fuzzy {
+    pub use crate::utils::fuzzy::*;
+}
+pub mod highlight {
+    pub use crate::utils::highlight::*;
+}
+pub mod history_store {
+    pub use crate::app::history_store::*;
+}
+pub mod hyperlink {
+    pub use crate::utils::hyperlink::*;
+}
+pub mod image {
+    pub use crate::components::image::*;
+}
+pub mod input {
+    pub use crate::core::input_parse::*;
+}
+pub mod keybindings {
+    pub use crate::components::keybindings::*;
+}
+pub mod kill_ring {
+    pub use crate::components::kill_ring::*;
+}
+pub mod latex {
+    pub use crate::components::latex::*;
+}
+pub mod loader {
+    pub use crate::components::loader::*;
+}
+pub mod markdown {
+    pub use crate::components::markdown::*;
+}
+pub mod message {
+    pub use crate::components::message::*;
+}
+pub mod mouse_region {
+    pub use crate::components::mouse_region::*;
+}
+pub mod prompt {
+    pub use crate::components::prompt::*;
+}
+pub mod search {
+    pub use crate::components::search::*;
+}
+pub mod selector {
+    pub use crate::components::selector::*;
+}
+pub mod settings {
+    pub use crate::components::settings::*;
+}
+pub mod slash_menu {
+    pub use crate::components::slash_menu::*;
+}
+pub mod status {
+    pub use crate::components::status::*;
+}
+pub mod styled {
+    pub use crate::utils::styled::*;
+}
+pub mod terminal_image {
+    pub use crate::terminal::image::*;
+}
+pub mod terminal_title {
+    pub use crate::terminal::title::*;
+}
+pub mod undo_stack {
+    pub use crate::components::undo_stack::*;
+}
+pub mod viewport {
+    pub use crate::app::viewport::*;
+}
+pub mod width {
+    pub use crate::utils::width::*;
+}
+pub mod word_navigation {
+    pub use crate::utils::word_navigation::*;
+}
+pub mod keys {
+    pub use crate::core::keys::*;
+}
+pub mod frame_pacer {
+    pub use crate::terminal::frame_pacer::*;
+}
+pub mod stdin_buffer {
+    pub use crate::terminal::stdin_buffer::*;
+}
+pub mod layout {
+    pub use crate::app::layout::*;
+}
+pub mod layout_node {
+    pub use crate::app::layout_node::*;
+}
+
+// -----------------------------------------------------------------------------
+// Legacy flat re-exports
+// -----------------------------------------------------------------------------
+// The crate used to expose everything at the top level. Downstream crates
+// (notably `pi-coding-agent`) still import from the flat surface, so each
+// public item below is re-exported from its new modular home. New code should
+// prefer the modular paths; these re-exports exist purely for migration.
+
+pub use crate::app::{App, AppConfig, FollowUpOutcome, RenderSnapshot};
+pub use crate::app::viewport::ScrollbarGeometry;
+pub use crate::app::history_store::{append, default_path, load, rewrite, HistoryStore};
+pub use crate::components::autocomplete::{
     compose_autocomplete_providers, ArgumentCompletions, AutocompleteItem, AutocompleteProvider,
     AutocompleteProviderFactory, AutocompleteSuggestions, CombinedAutocompleteProvider,
     CompletionResult, SlashCommand, TriggeredAutocompleteProvider,
 };
-pub use clipboard::{base64_encode, osc52_sequence};
-pub use component::{
+pub use crate::clipboard::{base64_encode, osc52_sequence};
+pub use crate::component::{
     Component, CustomHandle, CustomOptions, OverlayAnchor, TextComponent, WidgetPlacement,
 };
-pub use dialog::{Dialog, DialogAction, DialogKind};
-pub use editor::{
+pub use crate::components::dialog::{Dialog, DialogAction, DialogKind};
+pub use crate::components::editor::{
     is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, HistoryEntry,
     HistorySearch, HistorySearchDirection, HistorySearchStatus, JumpDirection,
 };
-pub use extension_ui::ExtensionUi;
-pub use fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
-pub use highlight::{
+pub use crate::components::extension_ui::ExtensionUi;
+pub use crate::utils::fuzzy::{fuzzy_filter, fuzzy_match, fuzzy_match_all, fuzzy_rank, FuzzyMatch};
+pub use crate::utils::highlight::{
     get_language_from_path, highlight_code, supports_language, tokenize, Token, TokenKind,
 };
-pub use history_store::{append, default_path, load, rewrite, HistoryStore};
-pub use hyperlink::{close_hyperlink, hyperlink, open_hyperlink, visible_width};
-pub use image::{truncate_to_width, Image, ImageOptions, ImageTheme};
-pub use input::{
+pub use crate::utils::hyperlink::{
+    close_hyperlink, hyperlink, open_hyperlink, visible_width,
+};
+pub use crate::components::image::{truncate_to_width, Image, ImageOptions, ImageTheme};
+pub use crate::core::input_parse::{
     is_mouse_sequence, parse_mouse_sequence, InputEvent, Key, KeyModifiers, MouseButton,
     MouseGesture, MouseGestureKind,
 };
-pub use keybindings::{
+pub use crate::components::keybindings::{
     get_keybindings, key_matches, parse_key_id, reset_keybindings, set_keybindings,
     tui_default_keybindings, KeybindingConflict, KeybindingDefinition, KeybindingsConfig,
     KeybindingsManager,
 };
-pub use kill_ring::{KillDirection, KillRing};
-pub use loader::{format_elapsed, indicator_line, Spinner, SPINNER_FRAMES, SPINNER_INTERVAL_MS};
-pub use locale::{Locale, STARTUP_HINTS};
-pub use markdown::{render_markdown, render_markdown_with_links, render_markdown_with_theme};
-pub use message::{
+pub use crate::components::kill_ring::{KillDirection, KillRing};
+pub use crate::components::loader::{
+    format_elapsed, indicator_line, Spinner, SPINNER_FRAMES, SPINNER_INTERVAL_MS,
+};
+pub use crate::locale::{Locale, STARTUP_HINTS};
+pub use crate::components::markdown::{
+    render_markdown, render_markdown_with_links, render_markdown_with_theme,
+};
+pub use crate::components::message::{
     tool_fold_hint, MessageItem, MessageView, PendingMessageKind, Role, ToolBlock,
     ToolBlockRenderer, TOOL_PREVIEW_LINES,
 };
-pub use mouse_region::{MouseRegion, MouseRegionPoint};
-pub use prompt::{Prompt, PromptAction};
-pub use search::{
+pub use crate::components::mouse_region::{MouseRegion, MouseRegionPoint};
+pub use crate::components::prompt::{Prompt, PromptAction};
+pub use crate::components::search::{
     apply_query_key, find_matches, normalize_query, render_search_bar, search_bar_rect,
     search_bar_text, SearchBar, SearchBarLayout, SearchIndex, SearchMatch, SearchResult,
     SearchSegment, SearchSelectionMode,
 };
-pub use selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
-pub use settings::{SettingItem, SettingsAction, SettingsList};
-pub use slash_menu::{SlashMenu, SlashMenuEntry, SlashMenuWidget};
-pub use status::{format_cost, format_tokens, BusyIndicator, StatusBar, StatusData, StatusPricing};
-pub use styled::{SpanStyle, StyledLine, StyledSpan};
-pub use styles::SelectListStyles;
-pub use terminal_image::{
+pub use crate::components::selector::{Selector, SelectorAction, SelectorItem, SelectorLayout};
+pub use crate::components::settings::{SettingItem, SettingsAction, SettingsList};
+pub use crate::components::slash_menu::{SlashMenu, SlashMenuEntry, SlashMenuWidget};
+pub use crate::components::status::{format_cost, format_tokens, BusyIndicator, StatusBar, StatusData, StatusPricing};
+pub use crate::utils::styled::{SpanStyle, StyledLine, StyledSpan};
+pub use crate::styles::SelectListStyles;
+pub use crate::terminal::image::{
     allocate_image_id, apply_env_overrides, calculate_image_cell_size, calculate_image_rows,
     capability_inputs_from_env, crop_kitty_image_line, decoded_base64_len, delete_all_kitty_images,
     delete_all_kitty_placements, delete_kitty_image, detect_capabilities_from_env,
@@ -123,18 +228,18 @@ pub use terminal_image::{
     KittyImagePlacement, Override, RenderImageResult, TerminalCapabilities, ITERM2_PREFIX,
     KITTY_CHUNK_SIZE, KITTY_PREFIX,
 };
-pub use terminal_title::{
+pub use crate::terminal::title::{
     auto_title, path_basename, sanitize_title, title_sequence, TITLE_CLOSE, TITLE_OPEN,
 };
-pub use terminal::{ProcessTerminal, Terminal, TerminalError};
-pub use theme::{
+pub use crate::terminal::process::{ProcessTerminal, Terminal, TerminalError};
+pub use crate::theme::{
     available_themes, builtin_theme, builtin_theme_names, default_custom_themes_dir,
     default_theme_name, is_light_theme, load_theme, load_theme_from_path, parse_auto_theme_setting,
     resolve_theme_setting, ColorMode, ColorValue, TerminalTheme, Theme, ThemeBg, ThemeColor,
     ThemeController, ThemeError, ThemeJson,
 };
-pub use tree::{flatten_tree, tree_selector_items, TreeItem, TreeRow};
-pub use ts_compat::{
+pub use crate::tree::{flatten_tree, tree_selector_items, TreeItem, TreeRow};
+pub use crate::ts_compat::{
     composite_tui_line, get_native_clipboard, is_focusable, is_viewport_tui, parse_osc11_background_color,
     parse_terminal_color_scheme_report, render_latex, Box, CancellableLoader, Container, CURSOR_MARKER,
     DefaultTextStyle, EditorComponent, EditorOptions, EditorTheme, Focusable, HStack, Input,
@@ -150,11 +255,16 @@ pub use ts_compat::{
     TuiMode, TuiMouseButton, TuiMouseEvent, TuiMouseEventResult, TuiMouseEventType, TuiStopOptions,
     ViewportTUI, VStack,
 };
-pub use undo_stack::UndoStack;
-pub use width::{char_columns, columns, prefix_columns, truncate_columns};
-pub use word_navigation::{find_word_backward, find_word_forward};
-pub use keys::{decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key, set_kitty_protocol_active, KeyEventType, KeyId};
-pub use utils::{get_osc8_link_at_column, slice_by_column, strip_terminal_sequences, wrap_text_with_ansi};
+pub use crate::components::undo_stack::UndoStack;
+pub use crate::utils::width::{char_columns, columns, prefix_columns, truncate_columns};
+pub use crate::utils::word_navigation::{find_word_backward, find_word_forward};
+pub use crate::core::keys::{
+    decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key,
+    set_kitty_protocol_active, KeyEventType, KeyId,
+};
+pub use crate::utils::{
+    get_osc8_link_at_column, slice_by_column, strip_terminal_sequences, wrap_text_with_ansi,
+};
 
 /// Re-export of the underlying terminal backend so binaries can pin a
 /// single version of `crossterm`.

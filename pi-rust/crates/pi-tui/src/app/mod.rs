@@ -42,10 +42,10 @@
 //!   The selection is stored as character offsets (see
 //!   [`App::selection_text`]), which is what makes slicing the text exact. A
 //!   pointer cell is snapped to the glyph drawn there on the way in
-//!   ([`crate::width::char_index_at_column`], upstream's
+//!   ([`crate::utils::width::char_index_at_column`], upstream's
 //!   `getGraphemeCellRange`), and the character range is turned back into the
 //!   cell span it covers on the way out
-//!   ([`crate::width::columns_before`]) so the highlight and the search marks
+//!   ([`crate::utils::width::columns_before`]) so the highlight and the search marks
 //!   land on the cells a terminal actually paints. Wide glyphs therefore
 //!   select as one unit from either half of the character.
 //! * **Autoscroll beat.** There is no `setInterval` in Rust and this crate
@@ -94,7 +94,7 @@
 //! # Keybindings
 //!
 //! The global chords in [`App::step_key`] are resolved through the
-//! process-wide registry ([`crate::keybindings::get_keybindings`]), so an
+//! process-wide registry ([`crate::components::keybindings::get_keybindings`]), so an
 //! installed override (`pi-coding-agent`'s `KeybindingsManager::create`)
 //! reaches the App. With nothing installed the registry serves the
 //! defaults, which are the chords the hardcoded judgements spelled out.
@@ -126,7 +126,7 @@
 //!
 //! Two filters guard the startup header and `/hotkeys`: an id must resolve to
 //! a chord **and** name an action with a consumer
-//! ([`crate::keybindings::CONSUMED_APP_ACTIONS`]). Without the second filter a
+//! ([`crate::components::keybindings::CONSUMED_APP_ACTIONS`]). Without the second filter a
 //! default-table entry that nothing answers was still advertised as a working
 //! shortcut (LUM-1240).
 //!
@@ -236,7 +236,7 @@
 //! before the block existed.
 //!
 //! All region rects are computed once per frame by
-//! `crate::extension_ui::plan_chrome`; the message viewport's geometry (and
+//! `crate::components::extension_ui::plan_chrome`; the message viewport's geometry (and
 //! therefore the scroll, selection and search coordinates) follows the
 //! message rect, so extension regions never shift the transcript under the
 //! pointer. Height budgeting reserves the status row and one message row
@@ -250,7 +250,7 @@
 //! component takes the key just before the prompt, so the app-level chords
 //! (interrupt, clear, page up/down, search) keep working. A visible
 //! component is never hidden by a theme swap: the host resolves its
-//! [`crate::styled::SpanStyle`] slots through the live [`Theme`] on every
+//! [`crate::utils::styled::SpanStyle`] slots through the live [`Theme`] on every
 //! frame.
 //!
 //! Deliberate deviations, documented here rather than silently omitted:
@@ -277,7 +277,12 @@
 // methods to the [`App`] type from outside this file (Rust allows
 // multi-file `impl` blocks), so the public surface stays identical to the
 // pre-split port. Submodules access private fields through `use super::*`.
-mod agent_events;
+pub mod agent_events;
+pub mod history_search;
+pub mod history_store;
+pub mod layout;
+pub mod layout_node;
+pub mod viewport;
 mod step_dialog;
 mod step_key;
 mod step_mouse;
@@ -305,42 +310,42 @@ use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::component::{Component, CustomHandle, CustomOptions, OverlayAnchor, WidgetPlacement};
-use crate::dialog::{Dialog, DialogKind};
-use crate::editor::{EditorAction, HistoryEntry, HistorySearchStatus};
-use crate::extension_ui::{plan_chrome, ChromeLayout, ExtensionFrame, ExtensionUi};
-use crate::input::{
+use crate::components::dialog::{Dialog, DialogKind};
+use crate::components::editor::{EditorAction, HistoryEntry, HistorySearchStatus};
+use crate::components::extension_ui::{plan_chrome, ChromeLayout, ExtensionFrame, ExtensionUi};
+use crate::core::input_parse::{
     InputEvent, Key, KeyCode, KeyModifiers, MouseButton, MouseGesture,
     MouseGestureKind, PasteBurst,
 };
-use crate::keybindings::{get_keybindings, key_text_or, matches_with_fallback, KeybindingsManager};
-use crate::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
+use crate::components::keybindings::{get_keybindings, key_text_or, matches_with_fallback, KeybindingsManager};
+use crate::components::loader::{format_elapsed, Spinner, SPINNER_INTERVAL_MS};
 use crate::locale::{
     format_chord, HeaderKey, Locale, EXTENSIONS_DISABLED_EN, EXTENSIONS_DISABLED_ZH,
     HEADER_ONBOARDING_EN, HEADER_ONBOARDING_ZH, HEADER_TITLE, SHORTCUT_OVERLAY_CLOSE_EN,
     SHORTCUT_OVERLAY_CLOSE_ZH, SHORTCUT_OVERLAY_TITLE_EN, SHORTCUT_OVERLAY_TITLE_ZH, STARTUP_HINTS,
 };
-use crate::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
-use crate::mouse_region::{MouseRegion, MouseRegionPoint};
-use crate::prompt::{Prompt, PromptAction};
-use crate::search::{
+use crate::components::message::{MessageItem, MessageView, PendingMessageKind, Role, ToolBlockRenderer};
+use crate::components::mouse_region::{MouseRegion, MouseRegionPoint};
+use crate::components::prompt::{Prompt, PromptAction};
+use crate::components::search::{
     apply_query_key, render_search_bar, search_bar_rect, SearchBar, SearchIndex, SearchMatch,
     SearchSelectionMode,
 };
-use crate::selector::{Selector, SelectorAction, SelectorItem};
-use crate::settings::{SettingsAction, SettingsList};
-use crate::slash_menu::SlashMenu;
-use crate::status::{StatusBar, StatusData};
-use crate::viewport::{ScrollbarDrag, ViewportGeometry};
-pub use crate::viewport::ScrollbarGeometry;
-use crate::styled::{
+use crate::components::selector::{Selector, SelectorAction, SelectorItem};
+use crate::components::settings::{SettingsAction, SettingsList};
+use crate::components::slash_menu::SlashMenu;
+use crate::components::status::{StatusBar, StatusData};
+use crate::app::viewport::{ScrollbarDrag, ViewportGeometry};
+pub use crate::app::viewport::ScrollbarGeometry;
+use crate::utils::styled::{
     buffer_row_text, plain_text, themed_text, write_plain_row, write_styled_line, SpanStyle, StyledLine, StyledSpan,
 };
 use crate::theme::{
     builtin_theme, load_theme, ColorMode, Theme, ThemeBg, ThemeColor,
     ThemeError,
 };
-use crate::visual_text::VisualLayout;
-use crate::width::{columns, truncate_columns};
+use crate::utils::visual_text::VisualLayout;
+use crate::utils::width::{columns, truncate_columns};
 
 /// Lines scrolled per wheel notch. Mirrors the upstream `wheelScrollLines`
 /// option's default (`packages/tui/src/tui-alt-screen.ts:166,264`).
@@ -448,6 +453,48 @@ fn round_div(value: usize, divisor: usize) -> usize {
     (value + divisor / 2) / divisor
 }
 
+/// Slice `text` to the half-open cell range `[start_cell, end_cell)`, in
+/// terminal **columns** rather than characters. Mirrors upstream's
+/// `sliceByColumn(line, start, length, strict=true)`:
+///
+/// * a glyph whose cell range starts at or after `start_cell` and ends at
+///   or before `end_cell` is kept whole;
+/// * a glyph whose cell range straddles `end_cell` (the second cell of a
+///   wide character past the boundary) is dropped — terminals cannot draw
+///   half a glyph and keeping it would push the row past its region;
+/// * a glyph whose cell range starts before `start_cell` (the second cell
+///   of a wide character before the boundary) is also dropped.
+///
+/// `text` is measured with the crate's [`crate::width`] rule, the same one
+/// the prompt uses to lay out the row, so the cells line up with the
+/// rendered frame.
+fn cell_slice_strict(text: &str, start_cell: usize, end_cell: usize) -> String {
+    let mut result = String::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let w = crate::utils::width::char_columns(ch);
+        if col >= end_cell {
+            break;
+        }
+        let in_range = col >= start_cell;
+        let fits = col + w <= end_cell;
+        if w == 0 {
+            // Zero-width glyphs attach to the previous one and are kept
+            // when the previous one was kept; their own `col` does not
+            // advance, so `in_range` / `fits` decide from the anchor cell.
+            if in_range && fits {
+                result.push(ch);
+            }
+            continue;
+        }
+        if in_range && fits {
+            result.push(ch);
+        }
+        col += w;
+    }
+    result
+}
+
 /// The message viewport's rectangle for a planned frame layout.
 ///
 /// It sits below the header and the above-editor widgets, and its height is
@@ -539,7 +586,7 @@ const MIN_TRANSCRIPT_ROWS: u16 = 3;
 
 /// Rows below the message view that are never an extension region's to take:
 /// the composer and the (LUM-1466: one- or two-row) status bar. Mirrors the
-/// reservation in [`crate::extension_ui::plan_chrome`].
+/// reservation in [`crate::components::extension_ui::plan_chrome`].
 const RESERVED_CHROME_ROWS: u16 = 2;
 
 /// Rows the expanded startup header must leave for the rest of the frame.
@@ -596,7 +643,7 @@ pub struct AppConfig {
     /// them.
     ///
     /// `None` (the default) auto-detects from the environment via
-    /// [`crate::hyperlink::supports_hyperlinks`]; `Some(false)` forces the
+    /// [`crate::terminal::capabilities::hyperlinks_supported`]; `Some(false)` forces the
     /// plain `label (url)` fallback and `Some(true)` forces escape output
     /// (useful for tests and for a driver that probed the terminal itself).
     ///
@@ -607,7 +654,7 @@ pub struct AppConfig {
     /// Lines a collapsed tool block previews before showing the
     /// `… (+M lines, Ctrl+O to expand)` hint.
     ///
-    /// Defaults to [`crate::message::TOOL_PREVIEW_LINES`] (4). This is the
+    /// Defaults to [`crate::components::message::TOOL_PREVIEW_LINES`] (4). This is the
     /// injection point for the interactive TUI: the driver maps a user
     /// setting onto it, and tests pin it to make a fold assertion exact. It
     /// only seeds the view — [`App::messages_mut`] exposes the live value.
@@ -703,7 +750,7 @@ impl Default for AppConfig {
             markdown: true,
             copy_on_select: true,
             hyperlinks: None,
-            tool_preview_lines: crate::message::TOOL_PREVIEW_LINES,
+            tool_preview_lines: crate::components::message::TOOL_PREVIEW_LINES,
             startup_header: false,
             startup_header_expanded: true,
             locale: Locale::default(),
@@ -902,7 +949,7 @@ fn word_segments(line: &str) -> Vec<WordSegment> {
     for segment in line.split_word_bounds() {
         let end = start + segment.chars().count();
         let joiner = TERMINAL_WORD_SELECTION_JOINERS.contains(&segment);
-        let selectable = crate::word_navigation::is_word_like(segment) || joiner;
+        let selectable = crate::utils::word_navigation::is_word_like(segment) || joiner;
         segments.push(WordSegment {
             start,
             end,
@@ -1007,7 +1054,7 @@ pub struct Submission {
     /// Pasted images attached to the draft, in buffer order.
     pub images: Vec<pi_protocol::ImageContent>,
     /// The composer buffer the submission was built from, when it came from
-    /// the App's own composer: [`CHIP_CHAR`](crate::editor::CHIP_CHAR)
+    /// the App's own composer: [`CHIP_CHAR`](crate::components::editor::CHIP_CHAR)
     /// sentinels and `[paste #N …]` markers included.
     ///
     /// The prompt history stores this form, not [`Submission::text`], for the
@@ -1232,12 +1279,19 @@ pub struct App {
     /// Absolute cell of a left press that landed inside the composer, kept
     /// until its release so only a click that starts and ends on the same
     /// cell moves the caret (upstream's `isClick` gate).
-    prompt_mouse_press: Option<(u16, u16, usize)>,
-    /// Snapped display-char index for the drag anchor (LUM-1332).  Unlike
-    /// `prompt_mouse_press` (the raw caret position), this is the offset
-    /// past the glyph the user pressed on — used to compute the selection
-    /// text so dragging over the first glyph starts the selection after it.
-    prompt_mouse_drag_anchor: Option<usize>,
+    prompt_mouse_press: Option<(u16, u16)>,
+    /// Cell-based composer drag selection, in absolute buffer cell
+    /// coordinates (LUM-1332). The selection stores the press anchor and
+    /// the current drag focus; the rendered text and highlight are both
+    /// derived from the cell range, matching upstream `tui-alt-screen`'s
+    /// `selectionAnchor` / `selectionFocus` model rather than the editor's
+    /// internal character offsets.
+    composer_drag_selection: Option<((u16, u16), (u16, u16))>,
+    /// Whether the matching press repainted (caret moved to a new cell).
+    /// A click repaints if the press did — the press arms the drag with
+    /// anchor==focus, which renders no highlight, so the release has no
+    /// independent repaint signal of its own.
+    composer_press_moved_caret: bool,
     /// Absolute cell and candidate index of a left press that landed on an
     /// autocomplete row, kept until its release so only a click that starts
     /// and ends on the same cell applies the completion (upstream's
@@ -1310,13 +1364,13 @@ pub struct App {
     /// `pi-tui` cannot depend on the crate that owns the tool renderers, so
     /// the driver installs one with [`App::set_tool_block_renderer`] and the
     /// App hands it each finished [`pi_protocol::ToolResult`] for styling.
-    /// See [`ToolBlockRenderer`](crate::message::ToolBlockRenderer).
+    /// See [`ToolBlockRenderer`](crate::components::message::ToolBlockRenderer).
     tool_block_renderer: Option<Box<dyn ToolBlockRenderer>>,
     /// Cell a left press landed on when it hit a tool block, kept until its
     /// release: a click that starts and ends on the same tool block toggles
     /// that block's expansion instead of starting a text selection.
     tool_press: Option<(u16, u16, usize)>,
-    /// Cursor into [`crate::loader::SPINNER_FRAMES`] for the footer's busy
+    /// Cursor into [`crate::components::loader::SPINNER_FRAMES`] for the footer's busy
     /// indicator. Advanced by [`App::tick_busy_feedback`] from the render
     /// loop's existing beat — there is no timer of its own.
     spinner: Spinner,
@@ -1402,7 +1456,7 @@ impl App {
         let header_expanded = config.startup_header_expanded;
         let hyperlinks = config
             .hyperlinks
-            .unwrap_or_else(crate::hyperlink::supports_hyperlinks);
+            .unwrap_or_else(crate::terminal::capabilities::hyperlinks_supported);
         Self {
             config,
             prompt,
@@ -1435,7 +1489,8 @@ impl App {
             search: None,
             modal_mouse_press: None,
             prompt_mouse_press: None,
-            prompt_mouse_drag_anchor: None,
+            composer_drag_selection: None,
+            composer_press_moved_caret: false,
             autocomplete_mouse_press: None,
             selection_dragging: false,
             last_click: None,
@@ -1549,7 +1604,7 @@ impl App {
     }
 
     /// Show the slash menu with the given entries.
-    pub fn show_slash_menu(&mut self, entries: Vec<crate::slash_menu::SlashMenuEntry>) {
+    pub fn show_slash_menu(&mut self, entries: Vec<crate::components::slash_menu::SlashMenuEntry>) {
         self.slash_menu.show(entries);
     }
 
@@ -1584,7 +1639,7 @@ impl App {
     }
 
     /// Get the currently selected slash menu entry, if any.
-    pub fn slash_menu_selected(&self) -> Option<&crate::slash_menu::SlashMenuEntry> {
+    pub fn slash_menu_selected(&self) -> Option<&crate::components::slash_menu::SlashMenuEntry> {
         self.slash_menu.selected_entry()
     }
 
@@ -1823,7 +1878,7 @@ impl App {
                 SpanStyle::fg(ThemeColor::Accent).bold(),
             ),
             StyledSpan::new(
-                format!("v{}", crate::VERSION),
+                format!("v{}", env!("CARGO_PKG_VERSION", "pi-tui version")),
                 SpanStyle::fg(ThemeColor::Dim),
             ),
         ]);
@@ -2078,7 +2133,7 @@ impl App {
     /// Install the active model's per-token rates so the footer can
     /// accumulate `$cost` from the usage events it already receives
     /// (`footer.ts:137-143`).
-    pub fn set_status_pricing(&mut self, pricing: Option<crate::status::StatusPricing>) {
+    pub fn set_status_pricing(&mut self, pricing: Option<crate::components::status::StatusPricing>) {
         self.status_data.set_pricing(pricing);
     }
 
@@ -2091,7 +2146,7 @@ impl App {
     /// gives up exactly one row while a status exists and gets it back when
     /// the last extension clears its key.
     ///
-    /// [`StatusBar::line_count`]: crate::status::StatusBar::line_count
+    /// [`StatusBar::line_count`]: crate::components::status::StatusBar::line_count
     pub fn set_extension_status(&mut self, key: &str, text: Option<&str>) {
         self.status_data.set_extension_status(key, text);
     }
@@ -2113,7 +2168,7 @@ impl App {
     ///
     /// The title is queued for the driver to write as OSC 0, sanitised first
     /// so a title containing `ESC` / `BEL` cannot escape into a control
-    /// sequence ([`crate::terminal_title::sanitize_title`]). Upstream hands the
+    /// sequence ([`crate::terminal::title::sanitize_title`]). Upstream hands the
     /// string to the terminal verbatim; the difference is deliberate and only
     /// ever drops characters a terminal title has no use for.
     ///
@@ -2121,7 +2176,7 @@ impl App {
     /// change) overwrites it, which is upstream's behaviour too: `setTitle`
     /// owns the title only until the session next changes.
     pub fn set_terminal_title(&mut self, title: impl Into<String>) {
-        self.queue_terminal_title(crate::terminal_title::sanitize_title(&title.into()));
+        self.queue_terminal_title(crate::terminal::title::sanitize_title(&title.into()));
     }
 
     /// Recompute the automatic title — `"<app> - <session name> - <cwd>"`,
@@ -2134,7 +2189,7 @@ impl App {
     /// driver having to remember. Nothing is queued when the composed title is
     /// already the one in effect.
     pub fn sync_terminal_title(&mut self) {
-        let title = crate::terminal_title::auto_title(
+        let title = crate::terminal::title::auto_title(
             crate::locale::HEADER_TITLE,
             self.status_data.session_name.as_deref(),
             self.status_data.cwd.as_deref(),
@@ -2150,7 +2205,7 @@ impl App {
     /// after the driver takes the tty back, where the queued-title dedup in
     /// [`App::queue_terminal_title`] would otherwise swallow the write.
     pub fn reassert_terminal_title(&mut self) {
-        let title = crate::terminal_title::auto_title(
+        let title = crate::terminal::title::auto_title(
             crate::locale::HEADER_TITLE,
             self.status_data.session_name.as_deref(),
             self.status_data.cwd.as_deref(),
@@ -2162,7 +2217,7 @@ impl App {
     /// Take the title the driver still has to write, if any.
     ///
     /// The driver calls this once per tick and writes the result with
-    /// [`crate::terminal_title::title_sequence`]. `None` — the common case —
+    /// [`crate::terminal::title::title_sequence`]. `None` — the common case —
     /// means the terminal title is already correct, so no bytes are written.
     pub fn take_terminal_title(&mut self) -> Option<String> {
         self.pending_terminal_title.take()
@@ -2242,8 +2297,8 @@ impl App {
                 // affordance on its footer line).
                 hint.push_str(&format!(
                     "  {} accept · {} cancel",
-                    crate::keybindings::key_text_or("tui.input.submit", "Enter"),
-                    crate::keybindings::key_text_or("tui.select.cancel", "Esc"),
+                    crate::components::keybindings::key_text_or("tui.input.submit", "Enter"),
+                    crate::components::keybindings::key_text_or("tui.select.cancel", "Esc"),
                 ));
             }
             Some(HistorySearchStatus::NoMatch) if !query.is_empty() => {
@@ -2281,7 +2336,7 @@ impl App {
             data.hint = Some(search);
             // The query is live input, not an acknowledgement: it must survive
             // the narrow footer's sacrifice order (see
-            // [`crate::status::StatusData::hint_pinned`]).
+            // [`crate::components::status::StatusData::hint_pinned`]).
             data.hint_pinned = true;
         } else if let Some(flash) = flash {
             data.hint = Some(flash.to_string());
@@ -2331,7 +2386,7 @@ impl App {
     }
 
     /// Set the autocomplete dropdown height in rows, clamped to
-    /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`](crate::editor::MIN_AUTOCOMPLETE_MAX_VISIBLE)..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`](crate::editor::MAX_AUTOCOMPLETE_MAX_VISIBLE).
+    /// [`MIN_AUTOCOMPLETE_MAX_VISIBLE`](crate::components::editor::MIN_AUTOCOMPLETE_MAX_VISIBLE)..=[`MAX_AUTOCOMPLETE_MAX_VISIBLE`](crate::components::editor::MAX_AUTOCOMPLETE_MAX_VISIBLE).
     ///
     /// Backs the `autocompleteMaxVisible` setting, which upstream reads while
     /// constructing the editor so it is already in effect on the first frame
@@ -3055,7 +3110,7 @@ impl App {
     /// draft three times.
     ///
     /// Paste is a separate entry point rather than an
-    /// [`InputEvent`](crate::input::InputEvent) variant because that enum is
+    /// [`InputEvent`](crate::core::input_parse::InputEvent) variant because that enum is
     /// `Copy` by construction — [`App::step`] matches it by value and still
     /// uses it afterwards — and a heap payload cannot ride in a `Copy` type.
     ///
@@ -3632,6 +3687,12 @@ impl App {
                 // A fresh press invalidates any pending tool-block click.
                 self.tool_press = None;
                 let Some(point) = self.selection_point(gesture.x, gesture.y) else {
+                    // A press outside the viewport cannot arm a drag — if a
+                    // previous gesture left `selection_dragging` on, drop it
+                    // so the next release / drag is no-op until a real press
+                    // lands inside the chat log.
+                    self.selection_dragging = false;
+                    self.last_click = None;
                     return StepOutcome::Idle;
                 };
                 // The click key is always the word under the pointer, even
@@ -3875,7 +3936,7 @@ impl App {
             return None;
         }
         let lines = self.messages.render_styled_lines(width);
-        lines.get(line).map(|line| crate::styled::plain_text(line))
+        lines.get(line).map(|line| crate::utils::styled::plain_text(line))
     }
 
     /// The word range under `point`, or `None` when the line has no
@@ -4062,8 +4123,8 @@ impl App {
         let cell = x.saturating_sub(origin_x) as usize;
         let col = match lines.get(row) {
             Some(line) => {
-                let text = crate::styled::plain_text(line);
-                crate::width::char_index_at_column(&text, cell)
+                let text = crate::utils::styled::plain_text(line);
+                crate::utils::width::char_index_at_column(&text, cell)
             }
             None => 0,
         };
@@ -4071,9 +4132,180 @@ impl App {
     }
 
     /// Returns the selected text in the composer, if any (LUM-1332).
+    ///
+    /// The selection is a cell range on absolute buffer coordinates;
+    /// `composer_selection_text` reconstructs the text by rendering each
+    /// affected row through `Prompt::render_lines`, dropping the `▍` caret
+    /// marker, and slicing the **cells** between the selection start and
+    /// end with the wide-char-aware boundary rule upstream's
+    /// `sliceByColumn(..., strict=true)` enforces — a wide glyph that would
+    /// straddle the end cell is dropped rather than half-drawn, so the
+    /// selection stays a sequence of whole characters.
     pub fn composer_selection_text(&self) -> Option<String> {
-        let sel = self.prompt.editor().composer_selection_text();
-        sel
+        let sel = self.composer_drag_selection?;
+        let ((ax, ay), (fx, fy)) = sel;
+        if ax == fx && ay == fy {
+            return None;
+        }
+        let label = self.prompt.label();
+        let label_width = crate::utils::width::columns(label);
+        let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        let total_width = (label_width + body_width).max(1) as u16;
+        let max_rows = self.viewport.composer_size.1.load(Ordering::Relaxed) as usize;
+        let scroll = self.viewport.composer_scroll.load(Ordering::Relaxed);
+
+        // Upstream's anchor / focus carry the click-semantics cell: the caret
+        // sits *before* the character at that column, so the cell itself is
+        // included in the selection on the click side and excluded on the
+        // other. We keep that semantics for the focus and pick the inclusive
+        // end from whichever endpoint is larger — `+ char_width_at(max)` —
+        // so dragging to a wide glyph captures both of its cells.
+        let (start_row, end_row) = if ay <= fy { (ay, fy) } else { (fy, ay) };
+        let (max_col_x, max_row_y) = if (ax, ay) >= (fx, fy) {
+            (ax, ay)
+        } else {
+            (fx, fy)
+        };
+
+        // Render the composer's current window so we get the line text each
+        // selected row carries.
+        let (lines, _) = self.prompt.render_lines(total_width, max_rows.max(1), scroll);
+        let row_offset = self.viewport.composer_origin.1.load(Ordering::Relaxed) as usize;
+
+        let mut out = String::new();
+        for abs_y in start_row..=end_row {
+            let Some(row) = lines.get((abs_y as usize).saturating_sub(row_offset)) else {
+                if abs_y < end_row {
+                    out.push('\n');
+                }
+                continue;
+            };
+            // Drop the caret glyph — the highlight never carries it through.
+            let line: String = row.chars().filter(|ch| *ch != '▍').collect();
+            let (pre_start, pre_end_inclusive) =
+                self.composer_row_range(abs_y, ay, ax, fy, fx, max_row_y, max_col_x, total_width);
+            let cell_text = cell_slice_strict(&line, pre_start, pre_end_inclusive + 1);
+            out.push_str(&cell_text);
+            if abs_y < end_row {
+                out.push('\n');
+            }
+        }
+        Some(out)
+    }
+
+    /// Pre-caret cell range on `row_y`: `(start, end_inclusive)`. The end
+    /// is the **last** cell the selection covers on this row, not the
+    /// exclusive end — the caller turns it into a half-open range itself.
+    fn composer_row_range(
+        &self,
+        row_y: u16,
+        anchor_y: u16,
+        anchor_x: u16,
+        focus_y: u16,
+        focus_x: u16,
+        max_row_y: u16,
+        max_x: u16,
+        total_width: u16,
+    ) -> (usize, usize) {
+        let label = self.prompt.label();
+        let label_width = crate::utils::width::columns(label);
+        let label_cells = label_width;
+        let last_cell = (total_width.saturating_sub(1)) as usize;
+        let max_end_inclusive = self.max_end_inclusive(max_row_y, max_x);
+        if anchor_y == focus_y {
+            let (lo, hi) = if anchor_x <= focus_x {
+                (anchor_x as usize, max_end_inclusive)
+            } else {
+                (focus_x as usize, max_end_inclusive)
+            };
+            (lo, hi)
+        } else if row_y == anchor_y {
+            if anchor_y < focus_y {
+                // Forward: start at anchor, run through the last cell of the
+                // anchor row's draft content (not the whole padded line).
+                let anchor_end = self.row_last_content_cell(anchor_y);
+                (anchor_x as usize, anchor_end)
+            } else {
+                // Backward: anchor is the bottom of the range; include up
+                // through the last cell of the char at `anchor_x`.
+                (label_cells, max_end_inclusive)
+            }
+        } else if row_y == focus_y {
+            if anchor_y < focus_y {
+                // Forward: focus row, from the label edge through the char.
+                (label_cells, max_end_inclusive)
+            } else {
+                // Backward: focus row, from focus through the last content cell.
+                let focus_end = self.row_last_content_cell(focus_y);
+                (focus_x as usize, focus_end)
+            }
+        } else {
+            // Middle row: from label to last content cell — never the padding.
+            let row_end = self.row_last_content_cell(row_y);
+            (label_cells, row_end.max(last_cell))
+        }
+    }
+
+    /// Last buffer cell the draft occupies on `row_y`. The label takes the
+    /// first `label_width` cells; cells past the last char are padding and
+    /// do not belong to the selection, even though they are inside the
+    /// composer's painted rectangle. An empty row (a window-padded
+    /// continuation past the draft's natural height) reports `label_width -
+    /// 1` so the caller still clamps the pointer to the gutter edge.
+    fn row_last_content_cell(&self, row_y: u16) -> usize {
+        let ox = self.viewport.composer_origin.0.load(Ordering::Relaxed);
+        let width = self.viewport.composer_size.0.load(Ordering::Relaxed);
+        let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        let text = self.prompt.text();
+        let label = self.prompt.label();
+        let label_width = crate::utils::width::columns(label);
+        let layout = crate::utils::visual_text::VisualLayout::new(&text, body_width.max(1));
+        let rows = layout.rows();
+        let oy = self.viewport.composer_origin.1.load(Ordering::Relaxed);
+        let row_in_window = (row_y as usize).saturating_sub(oy as usize);
+        let row_in_draft = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
+        let row_width = rows
+            .get(row_in_draft)
+            .map(|r| crate::utils::width::columns(&r.text))
+            .unwrap_or(0);
+        let max_cell = (ox + width.saturating_sub(1)) as usize;
+        let result = if row_width == 0 {
+            (ox as usize + label_width.saturating_sub(1)).min(max_cell)
+        } else {
+            (ox as usize + label_width + row_width - 1).min(max_cell)
+        };
+        result
+    }
+
+    /// Last pre-caret cell the selection covers on `max_row_y` when the
+    /// larger endpoint sits at `max_x`. For ASCII it is just `max_x`. For a
+    /// wide character that starts at `max_x` it is `max_x + 1` so the
+    /// second cell of the glyph lands in the slice.
+    fn max_end_inclusive(&self, max_row_y: u16, max_x: u16) -> usize {
+        let label = self.prompt.label();
+        let label_width = crate::utils::width::columns(label);
+        let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        let max_rows = self.viewport.composer_size.1.load(Ordering::Relaxed) as usize;
+        let scroll = self.viewport.composer_scroll.load(Ordering::Relaxed);
+        let total_width = (label_width + body_width).max(1) as u16;
+        let (lines, _) = self.prompt.render_lines(total_width, max_rows.max(1), scroll);
+        let row_offset = self.viewport.composer_origin.1.load(Ordering::Relaxed) as usize;
+        let Some(row) = lines.get((max_row_y as usize).saturating_sub(row_offset)) else {
+            return max_x as usize;
+        };
+        let line: String = row.chars().filter(|ch| *ch != '▍').collect();
+        let mut col = 0usize;
+        for ch in line.chars() {
+            let w = crate::utils::width::char_columns(ch);
+            if col == max_x as usize {
+                return max_x as usize + w.saturating_sub(1);
+            }
+            if col > max_x as usize {
+                break;
+            }
+            col += w;
+        }
+        max_x as usize
     }
 
     /// Returns the last recorded composer area as `(x, y, width, height)`,
@@ -4407,12 +4639,18 @@ impl App {
     ///
     /// `None` leaves the gesture to the rest of the pointer path.
     fn autocomplete_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
-        // The dropdown owns every gesture inside its rectangle, even rows
-        // that are not candidates (e.g. the `(n/m)` counter). Without that
-        // guard a click on the indicator row falls through to the transcript
-        // selection path, which starts a selection through the list and
-        // moves the highlight (LUM-1327 upstream parity).
-        if !self.autocomplete_contains(gesture.x, gesture.y) {
+        // A release that follows a press inside the dropdown still belongs to
+        // the dropdown — upstream's `mousePressTarget === "autocomplete"`
+        // owns the entire press / drag / release pair (`editor.ts:618-666`).
+        // Without that ownership the release can wander past the last row
+        // onto the composer (no `(n/m)` counter leaves a row between the
+        // bottom candidate and the editor), the prompt handler then runs its
+        // caret-placement path, and `set_display_cursor` refreshes the
+        // autocomplete and resets the highlight to its best match — the
+        // exact LUM-1327 fix the press branch was written to provide.
+        let pending_autocomplete_press = self.autocomplete_mouse_press.is_some();
+        let inside_dropdown = self.autocomplete_contains(gesture.x, gesture.y);
+        if !inside_dropdown && !pending_autocomplete_press {
             return None;
         }
         match gesture.kind {
@@ -4433,6 +4671,7 @@ impl App {
                 self.scrollbar_hover = false;
                 self.scrollbar_drag = None;
                 self.prompt_mouse_press = None;
+                self.composer_drag_selection = None;
                 self.autocomplete_mouse_press = Some((gesture.x, gesture.y, index));
                 self.prompt.editor_mut().set_autocomplete_selected(index);
                 Some(StepOutcome::Redraw)
@@ -4449,14 +4688,17 @@ impl App {
                 if pressed.0 != gesture.x || pressed.1 != gesture.y {
                     // The pointer moved off the pressed row: upstream drops the
                     // gesture (and with it the click) instead of applying a
-                    // candidate the reader never released on.
+                    // candidate the reader never released on. The press is
+                    // consumed either way so a release past the dropdown
+                    // rect (e.g. onto the composer on a press of the last
+                    // candidate) cannot also reach the prompt path.
                     return Some(StepOutcome::Idle);
                 }
                 self.prompt
                     .editor_mut()
                     .set_autocomplete_selected(pressed.2);
                 Some(match self.prompt.accept_autocomplete() {
-                    crate::prompt::PromptAction::Changed => StepOutcome::Redraw,
+                    crate::components::prompt::PromptAction::Changed => StepOutcome::Redraw,
                     _ => StepOutcome::Idle,
                 })
             }
@@ -4563,11 +4805,14 @@ impl App {
         let visual = rows.get(row_in_draft)?;
 
         // Measure the pointer's column in display characters from the row's
-        // start. `columns_before` accumulates terminal-cell widths, matching
-        // how the renderer lays out the row; this is the same column space
-        // `caret` counts in.  Subtract the label so the column is relative to
-        // the body text, not the whole painted row.
-        let col_in_row = crate::width::columns_before(&visual.text, body_col.saturating_sub(label));
+        // start.  `char_index_at_column` walks terminal cells — the same
+        // column space the renderer uses to lay out the row — and returns
+        // the character index whose first cell sits at or before the
+        // pointer, matching how `cursor_at(row, column)` expects its
+        // `column` to be a display column. Subtract the label so the
+        // column is relative to the body text, not the whole painted row.
+        let col_in_row =
+            crate::utils::width::char_index_at_column(&visual.text, body_col.saturating_sub(label));
 
         // When the pointer landed past the last character of a soft-wrapped
         // row (not the last row of its hard line), park the caret on that
@@ -4576,9 +4821,12 @@ impl App {
         // cell's trailing half also lands here and needs the same correction.
         let row_char_count = visual.text.chars().count();
         let is_last_row_of_draft = row_in_draft + 1 >= rows.len();
-        // Only clamp when the column is STRICTLY past the row (not on its
-        // trailing position, which is a valid place to click).
-        let col_in_row = if col_in_row > row_char_count && !is_last_row_of_draft {
+        let row_cell_count = crate::utils::width::columns(&visual.text);
+        // The column argument is a *cell* column, so compare against the row's
+        // cell width: a click at or past the trailing cell of a non-final
+        // row needs the correction, while a click on a valid cell inside
+        // the row does not.
+        let col_in_row = if body_col.saturating_sub(label) >= row_cell_count && !is_last_row_of_draft {
             row_char_count.saturating_sub(1)
         } else {
             col_in_row
@@ -4589,9 +4837,7 @@ impl App {
         // display cursor position by starting from the visual row's char
         // offset: `visual.start + col_in_row` gives the cursor that
         // `caret` would put at this row and column.
-        println!("DEBUG cco: x={}, ox={}, body_col={}, label={}, col_in_row={}, text={:?}, source={:?}", x, ox, body_col, label, col_in_row, visual.text, visual.source);
         let cursor_offset = layout.cursor_at(row_in_draft, col_in_row);
-        println!("DEBUG cco: cursor_at({}, {}) = {}", row_in_draft, col_in_row, cursor_offset);
         Some(cursor_offset)
     }
 
@@ -4601,7 +4847,7 @@ impl App {
             return StepOutcome::Idle;
         };
         match self.prompt.place_cursor(offset) {
-            crate::prompt::PromptAction::Changed => StepOutcome::Redraw,
+            crate::components::prompt::PromptAction::Changed => StepOutcome::Redraw,
             _ => StepOutcome::Idle,
         }
     }
@@ -4614,36 +4860,43 @@ impl App {
     /// is swallowed so the transcript behind cannot start a text selection
     /// through the composer. `None` leaves the gesture to the transcript
     /// path, which is what a release that left the composer needs.
+    ///
+    /// The selection itself is **cell-based** and lives on the App, mirroring
+    /// upstream's `selectionAnchor` / `selectionFocus` (cell columns on
+    /// `tui-alt-screen`), not the editor's character offsets. The editor
+    /// owns text; the screen owns the cells the user painted over.
     fn prompt_mouse_gesture(&mut self, gesture: &MouseGesture) -> Option<StepOutcome> {
+        // A reverse history search (`Ctrl+R`) owns the editor: its preview is
+        // live state, so a click that drops the caret mid-search would edit
+        // the buffer the reader is about to accept with `Enter` (codex
+        // `Editor.handleMouse` short-circuits on `historySearchActive()`).
+        // Drop any composer press/drag state so the next post-search pointer
+        // event starts from a clean anchor.
+        if self.history_search_active() {
+            self.prompt_mouse_press = None;
+            self.composer_drag_selection = None;
+            return Some(StepOutcome::Idle);
+        }
         match gesture.kind {
             MouseGestureKind::Press(MouseButton::Left) => {
                 if !self.composer_contains(gesture.x, gesture.y) {
                     // A press outside the composer is a new gesture: the composer's
                     // selection goes away (upstream re-anchors on every press).
-                    self.prompt.editor_mut().clear_composer_selection();
-                    self.prompt_mouse_drag_anchor = None;
+                    self.composer_drag_selection = None;
+                    self.composer_press_moved_caret = false;
                     self.prompt_mouse_press = None;
                     return None;
                 }
-                // Upstream's `Editor.handleMouse` press branch places the
-                // caret right away (the click is a single press → place →
-                // release → confirm flow), which means the cursor moves
-                // on press — not on release. When the press would leave
-                // the cursor where it already is, no repaint is owed:
-                // the prior click already moved it there, and a second
-                // press on the same cell is a no-op.
-                let press_offset = self.composer_cursor_offset(gesture.x, gesture.y);
-                // Also store the snapped anchor — the offset past the glyph
-                // the user pressed, needed so the drag starts from after that
-                // glyph (matching the text the user selected).
-                let snapped = self.composer_drag_press_offset(gesture.x, gesture.y);
-                self.prompt_mouse_press = press_offset.map(|o| (gesture.x, gesture.y, o));
-                if let (Some(raw), Some(snapped)) = (press_offset, snapped) {
-                    self.prompt_mouse_drag_anchor = Some(snapped);
-                }
+                // Record the press cell so a release on the same cell is a
+                // click (the editor-only path) and a release elsewhere is the
+                // end of a drag. The drag selection anchors here too — the
+                // first cell the pointer pressed on.
+                self.prompt_mouse_press = Some((gesture.x, gesture.y));
+                self.composer_drag_selection = Some(((gesture.x, gesture.y), (gesture.x, gesture.y)));
                 let cursor_before = self.prompt.editor().cursor();
                 let _ = self.place_prompt_cursor(gesture.x, gesture.y);
                 let cursor_after = self.prompt.editor().cursor();
+                self.composer_press_moved_caret = cursor_before != cursor_after;
                 if cursor_before == cursor_after {
                     Some(StepOutcome::Idle)
                 } else {
@@ -4653,142 +4906,124 @@ impl App {
             MouseGestureKind::Release(MouseButton::Left) => {
                 let pressed = self.prompt_mouse_press.take();
                 if !self.composer_contains(gesture.x, gesture.y) {
+                    // The release wandered off the composer — the App still
+                    // owns the drag selection so a release elsewhere can
+                    // finish it, but the click/release path does not. Drop
+                    // the stale selection so the next gesture starts fresh.
+                    self.composer_drag_selection = None;
+                    self.pending_clipboard = None;
                     return None;
                 }
-                // A plain click (press coords match release coords): clear the
-                // anchor so a click-after-press path stays tidy.  A drag-release
-                // (coords differ) keeps the selection — the user's next keystroke
-                // replaces it.
-                let is_click = pressed.map(|(x, y, _)| (x, y)) == Some((gesture.x, gesture.y));
+                let is_click = pressed == Some((gesture.x, gesture.y));
+                self.composer_press_moved_caret = false;
                 if is_click {
-                    self.prompt.editor_mut().clear_composer_selection();
-                    self.prompt_mouse_drag_anchor = None;
-                    Some(self.place_prompt_cursor(gesture.x, gesture.y))
-                } else {
+                    // A click is neither a selection nor a copy: collapse
+                    // the drag selection down to nothing and place the
+                    // caret on the clicked cell. The press already armed
+                    // the drag with anchor==focus, which renders no
+                    // highlight (see
+                    // `apply_composer_selection_highlight`'s empty-range
+                    // guard), and the caret is already at the clicked cell
+                    // after the press, so the release has no independent
+                    // repaint signal of its own.
+                    let _ = self.place_prompt_cursor(gesture.x, gesture.y);
+                    self.composer_drag_selection = None;
+                    self.pending_clipboard = None;
                     Some(StepOutcome::Idle)
+                } else {
+                    // Terminals coalesce motion: the release can carry the
+                    // last pointer position without a drag event for it, so
+                    // the release has to finish the gesture at *its* cell
+                    // rather than at the last motion sample. Extend the
+                    // selection to the release cell, move the caret there,
+                    // and queue the highlighted fragment for the clipboard
+                    // when copy-on-select is on.
+                    let anchor = pressed.unwrap_or((gesture.x, gesture.y));
+                    self.composer_drag_selection = Some((anchor, (gesture.x, gesture.y)));
+                    let caret_outcome = self.place_prompt_cursor(gesture.x, gesture.y);
+                    if self.config.copy_on_select {
+                        if let Some(text) = self.composer_selection_text() {
+                            self.pending_clipboard = Some(text);
+                        }
+                    }
+                    Some(caret_outcome)
                 }
             }
             MouseGestureKind::Drag(_) | MouseGestureKind::Move
                 if self.prompt_mouse_press.is_some() =>
             {
                 // LUM-1332: a drag from a composer press belongs to the
-                // composer. Resolve the offset the pointer is over — and
-                // when the pointer has wandered past the right edge of
-                // the composer on a composer row, clamp it to the end of
-                // that row so the drag can never spill onto the
-                // transcript behind it.
-                let Some(offset) = self.composer_drag_offset(gesture.x, gesture.y) else {
+                // composer. Resolve the cell the pointer is over — when
+                // the pointer wandered past the composer's rectangle, the
+                // helper clamps it back onto the composer so the drag can
+                // never bleed into the transcript behind it.
+                let Some((cell_x, cell_y)) = self.composer_drag_cell(gesture.x, gesture.y) else {
                     return Some(StepOutcome::Idle);
                 };
-                let press_offset = self.prompt_mouse_press
-                    .map(|(_, _, o)| o)
-                    .unwrap_or_else(|| self.composer_drag_press_offset(gesture.x, gesture.y).unwrap_or(0));
-                let snapped_anchor = self.prompt_mouse_drag_anchor.unwrap_or(press_offset);
-                // The caret is at the non-snapped press position; the snapped
-                // anchor is what we need for the selection text to start after
-                // the glyph the user pressed on.
-                let raw_caret = self.prompt.editor().cursor();
-                println!("DEBUG DRAG: offset={}, press_offset={}, raw_caret={}, snapped_anchor={}", offset, press_offset, raw_caret, snapped_anchor);
-                {
-                    let editor = self.prompt.editor_mut();
-                    println!("DEBUG DRAG: before begin, sel={:?}", editor.composer_selection());
-                    if editor.composer_selection().is_none() {
-                        editor.begin_composer_selection_at(snapped_anchor, raw_caret);
-                        println!("DEBUG DRAG: after begin, sel={:?}", editor.composer_selection());
-                    }
-                    editor.extend_composer_selection(offset);
-                    println!("DEBUG DRAG: after extend, sel={:?}", editor.composer_selection());
-                }
+                let anchor = self
+                    .prompt_mouse_press
+                    .unwrap_or((cell_x, cell_y));
+                self.composer_drag_selection = Some((anchor, (cell_x, cell_y)));
+                // The caret follows the drag so a release on a different
+                // cell leaves the cursor there.  Plain clicks already set
+                // it; the drag only moves it.
+                let _ = self.place_prompt_cursor(cell_x, cell_y);
                 Some(StepOutcome::Redraw)
             }
             _ => None,
         }
     }
 
-    /// Like [`composer_cursor_offset`] but snaps the press anchor to the
-    /// character *after* the glyph the pointer is on.  Without this snap,
-    /// clicking on the left cell of a glyph would anchor on that glyph
-    /// itself, making a drag-to-the-right miss the first character.  The
-    /// snap is applied only here (not in `composer_cursor_offset`) so that
-    /// plain clicks still place the caret on the glyph the user clicked.
-    fn composer_drag_press_offset(&self, x: u16, y: u16) -> Option<usize> {
-        if !self.composer_contains(x, y) {
-            return None;
-        }
-        let ox = self.viewport.composer_origin.0.load(Ordering::Relaxed) as usize;
-        let oy = self.viewport.composer_origin.1.load(Ordering::Relaxed) as usize;
-        let label = columns(self.prompt.label());
-        let body_col = (x as usize).saturating_sub(ox);
-        let row_in_window = (y as usize).saturating_sub(oy);
-        let text = self.prompt.text();
-        let width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
-        let layout = VisualLayout::new(&text, width);
-        let rows = layout.rows();
-        let row_in_draft = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
-        let visual = rows.get(row_in_draft)?;
-
-        let raw_col = body_col.saturating_sub(label);
-        let char_idx = crate::width::char_index_at_column(&visual.text, raw_col);
-        // If the previous column also lands on this glyph, the pointer is on
-        // its trailing cell and we are already past it — no adjustment needed.
-        // If it lands on a different glyph (the left cell case), we need to
-        // advance to the next character so the caret ends up to the right of
-        // the glyph the user clicked.
-        let is_trailing_cell = raw_col > 0
-            && crate::width::char_index_at_column(&visual.text, raw_col - 1) == char_idx;
-        let col_in_row = crate::width::columns_before(
-            &visual.text,
-            char_idx + if is_trailing_cell { 0 } else { 1 },
-        );
-
-        let row_char_count = visual.text.chars().count();
-        let is_last_row_of_draft = row_in_draft + 1 >= rows.len();
-        let col_in_row = if col_in_row > row_char_count && !is_last_row_of_draft {
-            row_char_count.saturating_sub(1)
-        } else {
-            col_in_row
-        };
-
-        Some(layout.cursor_at(row_in_draft, col_in_row))
-    }
-
-    /// Offset the composer caret should sit at for a *drag* pointer at
-    /// `(x, y)` (LUM-1332).
+    /// Cell the *drag* focus should sit at for a pointer at `(x, y)`.
     ///
-    /// When the pointer is inside the composer this is just
-    /// [`App::composer_cursor_offset`]. When it has wandered outside the
-    /// composer's rectangle — past the right edge, above its first row,
-    /// or below its last — the offset is clamped to the end of the last
-    /// row of the composer's draft, so the drag keeps extending the
-    /// composer's own selection instead of bleeding into the transcript
-    /// behind it. The drag always belongs to the composer when the press
-    /// that armed it did, even if the pointer leaves the rectangle.
-    fn composer_drag_offset(&self, _x: u16, _y: u16) -> Option<usize> {
-        // Use the snapped version so dragging over a glyph advances past it.
-        if let Some(offset) = self.composer_drag_press_offset(_x, _y) {
-            return Some(offset);
-        }
+    /// When the pointer is inside the composer this is just the pointer
+    /// itself — the cell range `composer_drag_selection` already stores
+    /// is the cell range the user can see under the caret. When the
+    /// pointer has wandered outside the composer's rectangle, the focus
+    /// is clamped back to the composer's near edge so the drag stays
+    /// inside the prompt: above the first row → first row, below the
+    /// last row → last row, past the left edge → first column, past the
+    /// right edge → last column of the row the pointer is on. The drag
+    /// always belongs to the composer when the press that armed it did,
+    /// even if the pointer leaves the rectangle (LUM-1332).
+    fn composer_drag_cell(&self, x: u16, y: u16) -> Option<(u16, u16)> {
+        let ox = self.viewport.composer_origin.0.load(Ordering::Relaxed);
+        let oy = self.viewport.composer_origin.1.load(Ordering::Relaxed);
+        let width = self.viewport.composer_size.0.load(Ordering::Relaxed);
         let height = self.viewport.composer_size.1.load(Ordering::Relaxed);
-        if height == 0 {
+        if width == 0 || height == 0 {
             return None;
         }
-        // Off-composer drag → clamp to the end of the composer's last row.
-        // A pointer that left vertically picks the row it actually landed
-        // on when that row is inside the composer; otherwise (the test's
-        // (20, 1) case, far above a composer parked near the bottom of
-        // the viewport) we clamp to the last row.
-        let width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
+        // Clamp y to the composer's own row range.
+        let clamped_y = y.max(oy).min(oy + height.saturating_sub(1));
+        // Compute the draft's pre-caret extent on `clamped_y`. Empty rows
+        // (the prompt window showing a blank line because the draft has fewer
+        // rows than the window) have no body cells at all, so a pointer over
+        // them snaps to the label gutter's right edge — i.e. the column just
+        // past the label — and the resulting focus collapses to an empty
+        // selection. That matches upstream's behaviour of dragging past the
+        // draft into empty space producing an empty range.
+        let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
         let text = self.prompt.text();
-        let layout = VisualLayout::new(&text, width);
+        let label = self.prompt.label();
+        let label_width = crate::utils::width::columns(label);
+        let layout = crate::utils::visual_text::VisualLayout::new(&text, body_width.max(1));
         let rows = layout.rows();
-        let last_row = rows.len().saturating_sub(1);
-        rows.get(last_row).map(|visual| {
-            visual
-                .source
-                .last()
-                .map(|offset| offset + 1)
-                .unwrap_or(visual.start)
-        })
+        let row_in_window = (clamped_y as usize).saturating_sub(oy as usize);
+        let row_in_draft = self.viewport.composer_scroll.load(Ordering::Relaxed) + row_in_window;
+        let row_width = rows
+            .get(row_in_draft)
+            .map(|r| crate::utils::width::columns(&r.text))
+            .unwrap_or(0);
+        let row_extent_lo = (ox + label_width as u16).min(ox + width.saturating_sub(1));
+        let row_extent_hi = if row_width == 0 {
+            row_extent_lo
+        } else {
+            (ox + label_width as u16 + row_width as u16 - 1)
+                .min(ox + width.saturating_sub(1))
+        };
+        let clamped_x = x.max(row_extent_lo).min(row_extent_hi);
+        Some((clamped_x, clamped_y))
     }
 
     /// Start / end of the active selection in rendered-log coordinates, or
@@ -4823,7 +5058,7 @@ impl App {
         let end_line = end.line.min(last);
         let mut out: Vec<String> = Vec::new();
         for (idx, line) in lines.iter().enumerate().take(end_line + 1).skip(start.line) {
-            let text = crate::styled::plain_text(line);
+            let text = crate::utils::styled::plain_text(line);
             let len = text.chars().count();
             let from = if idx == start.line {
                 start.col.min(len)
@@ -4911,16 +5146,16 @@ impl App {
     /// (upstream `handleClipboardPaste`'s image branch,
     /// `interactive-mode.ts:2933`, which inserts the saved file path).
     ///
-    /// Returns `false` when [`MAX_IMAGE_ATTACHMENTS`](crate::editor::MAX_IMAGE_ATTACHMENTS)
+    /// Returns `false` when [`MAX_IMAGE_ATTACHMENTS`](crate::components::editor::MAX_IMAGE_ATTACHMENTS)
     /// chips are already attached; the caller surfaces the refusal. The
     /// draft text is left untouched either way.
     pub fn paste_image(&mut self, image: pi_protocol::ImageContent) -> bool {
         match self.prompt.editor_mut().insert_image(image) {
-            crate::editor::ImageInsertOutcome::Inserted => true,
-            crate::editor::ImageInsertOutcome::AtCapacity => {
+            crate::components::editor::ImageInsertOutcome::Inserted => true,
+            crate::components::editor::ImageInsertOutcome::AtCapacity => {
                 self.flash_status(format!(
                     "At most {} images can be attached to a prompt",
-                    crate::editor::MAX_IMAGE_ATTACHMENTS
+                    crate::components::editor::MAX_IMAGE_ATTACHMENTS
                 ));
                 false
             }
@@ -4955,7 +5190,7 @@ impl App {
     /// Paint the active selection into the already-rendered message area by
     /// adding the reversed-video modifier to the selected cells.
     fn apply_selection_highlight(&self, area: Rect, buf: &mut Buffer) {
-        crate::render_helpers::apply_selection_highlight(
+        crate::utils::render_helpers::apply_selection_highlight(
             &self.messages,
             self.selection.as_ref(),
             area,
@@ -5129,7 +5364,7 @@ impl App {
     /// This port has no regular renderer, so the driver prints the same
     /// document from the frame-buffer side: [`MessageView::render_styled_lines`]
     /// is the single layout behind the screen *and* this dump, and each line is
-    /// themed with the live palette by [`crate::styled::themed_text`].
+    /// themed with the live palette by [`crate::utils::styled::themed_text`].
     ///
     /// Empty when there is nothing worth printing (a session quit before its
     /// first line), so the driver writes nothing rather than a screen of
@@ -5227,7 +5462,7 @@ impl App {
     ) {
         // Layout: the extension regions wrap the message view, which keeps at
         // least one row. See the module docs for the order and
-        // [`crate::extension_ui::plan_chrome`] for the budget.
+        // [`crate::components::extension_ui::plan_chrome`] for the budget.
         let message_height = layout.message;
         // The modal list geometry is per-frame: an overlay that is gone this
         // frame must stop owning the pointer (the same rule
@@ -5339,14 +5574,10 @@ impl App {
                 self.paint_prompt(editor_area, buf);
                 // Paint composer drag-selection REVERSED on top of the cells
                 // that `paint_prompt` just drew.
-                let scroll = self.viewport.composer_scroll.load(Ordering::Relaxed);
-                let body_width = self.viewport.composer_body_width.load(Ordering::Relaxed) as usize;
-                crate::render_helpers::apply_composer_selection_highlight(
-                    self.prompt.editor(),
+                crate::utils::render_helpers::apply_composer_selection_highlight(
+                    self.composer_drag_selection,
                     editor_area,
-                    body_width,
-                    scroll,
-                    self.prompt.label(),
+                    crate::utils::width::columns(self.prompt.label()) as u16,
                     buf,
                 );
                 self.paint_autocomplete(message_area, editor_area, buf);
@@ -5545,7 +5776,7 @@ impl App {
     /// content, and a mark on the region's last row would be confusable with
     /// a width clip.
     fn paint_extension_lines(&self, rect: Rect, lines: &[StyledLine], buf: &mut Buffer) {
-        crate::render_helpers::paint_extension_lines(rect, lines, &self.theme, buf);
+        crate::utils::render_helpers::paint_extension_lines(rect, lines, &self.theme, buf);
     }
 
     /// Paint the built-in prompt into the editor region. The region may be
@@ -5584,11 +5815,11 @@ impl App {
     /// the line is written: this region is carved out of what the transcript
     /// painted last frame, and the block's spacer row is genuinely empty.
     fn paint_pending_block(&self, rect: Rect, buf: &mut Buffer) {
-        crate::render_helpers::paint_pending_block(&self.messages, rect, &self.theme, buf);
+        crate::utils::render_helpers::paint_pending_block(&self.messages, rect, &self.theme, buf);
     }
 
     fn paint_prompt(&self, rect: Rect, buf: &mut Buffer) {
-        crate::render_helpers::paint_prompt(
+        crate::utils::render_helpers::paint_prompt(
             &self.prompt,
             self.config.composer_max_rows,
             self.thinking_level,
@@ -5617,7 +5848,7 @@ impl App {
     /// the highlighted row — instead of the App re-deriving a style from the
     /// text.
     fn paint_autocomplete(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
-        crate::render_helpers::paint_autocomplete(
+        crate::utils::render_helpers::paint_autocomplete(
             &self.messages,
             &self.prompt,
             &self.viewport,
@@ -5634,7 +5865,7 @@ impl App {
     /// matching slash commands with descriptions. Mirrors Martty's slash menu UI.
     fn paint_slash_menu(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
         let _ = message_area; // kept for signature compatibility
-        crate::render_helpers::paint_slash_menu(&self.slash_menu, editor_area, &self.theme, buf);
+        crate::utils::render_helpers::paint_slash_menu(&self.slash_menu, editor_area, &self.theme, buf);
     }
 
     /// Paint the `?` shortcut overlay directly above the composer.
@@ -5646,7 +5877,7 @@ impl App {
     /// reflow the conversation the reader was looking at, and closing it
     /// restores the same frame.
     fn paint_shortcut_overlay(&self, message_area: Rect, editor_area: Rect, buf: &mut Buffer) {
-        crate::render_helpers::paint_shortcut_overlay(
+        crate::utils::render_helpers::paint_shortcut_overlay(
             self.shortcut_overlay,
             &self.hint_entries(),
             &self.config.locale,
@@ -5735,7 +5966,7 @@ impl App {
                 .search
                 .as_ref()
                 .map(|state| {
-                    crate::search::search_bar_text(&render_search_bar(&state.bar, width).lines)
+                    crate::components::search::search_bar_text(&render_search_bar(&state.bar, width).lines)
                 })
                 .unwrap_or_default(),
             status: self.status_for_render().into_owned(),
@@ -5975,7 +6206,7 @@ mod selection_tests {
 #[cfg(test)]
 mod tool_stream_tests {
     use super::*;
-    use crate::message::Role;
+    use crate::components::message::Role;
     use pi_agent_core::AgentOptions;
     use pi_ai::providers::faux::FauxProvider;
     use pi_protocol::{Api, AssistantMessage, Content, Model, ProviderId, ToolCall, ToolResult};
@@ -5992,7 +6223,7 @@ mod tool_stream_tests {
         }
     }
 
-    fn test_app() -> App {
+    pub(super) fn test_app() -> App {
         let agent = Agent::new(AgentOptions::new(
             faux_model(),
             Arc::new(FauxProvider::default()),
@@ -6323,5 +6554,514 @@ mod overlay_rect_tests {
                 height: 2,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod public_api_tests {
+    use super::*;
+    use crate::components::slash_menu::SlashMenuEntry;
+
+    fn make_app() -> App {
+        tool_stream_tests::test_app()
+    }
+
+    #[test]
+    fn markdown_round_trips_through_setter() {
+        let mut app = make_app();
+        assert!(app.markdown());
+        app.set_markdown(false);
+        assert!(!app.markdown());
+        app.set_markdown(true);
+        assert!(app.markdown());
+    }
+
+    #[test]
+    fn thinking_visible_round_trips() {
+        let mut app = make_app();
+        let initial = app.thinking_visible();
+        app.set_thinking_visible(!initial);
+        assert_eq!(app.thinking_visible(), !initial);
+    }
+
+    #[test]
+    fn toggle_thinking_visibility_inverts_the_flag() {
+        let mut app = make_app();
+        let before = app.thinking_visible();
+        let new = app.toggle_thinking_visibility();
+        assert_eq!(new, !before);
+        assert_eq!(app.thinking_visible(), !before);
+    }
+
+    #[test]
+    fn tools_expanded_round_trips() {
+        let mut app = make_app();
+        let initial = app.tools_expanded();
+        app.toggle_tools_expanded();
+        assert_eq!(app.tools_expanded(), !initial);
+    }
+
+    #[test]
+    fn slash_menu_is_hidden_by_default() {
+        let app = make_app();
+        assert!(!app.slash_menu_visible());
+        assert_eq!(app.slash_menu_len(), 0);
+        assert!(app.slash_menu_selected().is_none());
+    }
+
+    #[test]
+    fn show_slash_menu_makes_it_visible() {
+        let mut app = make_app();
+        let entries = vec![SlashMenuEntry::new("help", "/help", "show help")];
+        app.show_slash_menu(entries);
+        assert!(app.slash_menu_visible());
+        assert_eq!(app.slash_menu_len(), 1);
+        assert!(app.slash_menu_selected().is_some());
+    }
+
+    #[test]
+    fn hide_slash_menu_keeps_the_entries_but_clears_visibility() {
+        let mut app = make_app();
+        app.show_slash_menu(vec![SlashMenuEntry::new("a", "/a", "A")]);
+        app.hide_slash_menu();
+        assert!(!app.slash_menu_visible());
+        assert_eq!(app.slash_menu_len(), 1);
+    }
+
+    #[test]
+    fn clear_slash_menu_removes_everything() {
+        let mut app = make_app();
+        app.show_slash_menu(vec![
+            SlashMenuEntry::new("a", "/a", "A"),
+            SlashMenuEntry::new("b", "/b", "B"),
+        ]);
+        app.clear_slash_menu();
+        assert_eq!(app.slash_menu_len(), 0);
+        assert!(!app.slash_menu_visible());
+    }
+
+    #[test]
+    fn slash_menu_navigation_walks_within_bounds() {
+        let mut app = make_app();
+        app.show_slash_menu(vec![
+            SlashMenuEntry::new("a", "/a", "A"),
+            SlashMenuEntry::new("b", "/b", "B"),
+            SlashMenuEntry::new("c", "/c", "C"),
+        ]);
+        // `show` resets selection to 0.
+        assert_eq!(
+            app.slash_menu_selected().map(|e| e.name.clone()),
+            Some("a".to_string())
+        );
+
+        app.slash_menu_down();
+        assert_eq!(
+            app.slash_menu_selected().map(|e| e.name.clone()),
+            Some("b".to_string())
+        );
+        app.slash_menu_down();
+        assert_eq!(
+            app.slash_menu_selected().map(|e| e.name.clone()),
+            Some("c".to_string())
+        );
+        // Past the end wraps to 0.
+        app.slash_menu_down();
+        assert_eq!(
+            app.slash_menu_selected().map(|e| e.name.clone()),
+            Some("a".to_string())
+        );
+        // `move_up` from 0 wraps to the last entry.
+        app.slash_menu_up();
+        assert_eq!(
+            app.slash_menu_selected().map(|e| e.name.clone()),
+            Some("c".to_string())
+        );
+    }
+
+    #[test]
+    fn header_visible_round_trips() {
+        let mut app = make_app();
+        let initial = app.header_visible();
+        app.set_header_visible(!initial);
+        assert_eq!(app.header_visible(), !initial);
+    }
+
+    #[test]
+    fn header_expanded_round_trips() {
+        let mut app = make_app();
+        let initial = app.header_expanded();
+        app.set_header_expanded(!initial);
+        assert_eq!(app.header_expanded(), !initial);
+    }
+
+    #[test]
+    fn thinking_level_round_trips() {
+        let mut app = make_app();
+        let initial = app.thinking_level();
+        // Cycle to Medium (always present) and back to the initial.
+        app.set_thinking_level(pi_agent_core::ThinkingLevel::Medium);
+        assert_eq!(app.thinking_level(), pi_agent_core::ThinkingLevel::Medium);
+        app.set_thinking_level(initial);
+        assert_eq!(app.thinking_level(), initial);
+    }
+
+    #[test]
+    fn thinking_supported_round_trips() {
+        let mut app = make_app();
+        let initial = app.thinking_supported();
+        app.set_thinking_supported(!initial);
+        assert_eq!(app.thinking_supported(), !initial);
+    }
+
+    #[test]
+    fn request_exit_sets_the_flag() {
+        let mut app = make_app();
+        assert!(!app.exit_requested);
+        app.request_exit();
+        assert!(app.exit_requested);
+    }
+
+    #[test]
+    fn status_flash_round_trips() {
+        let mut app = make_app();
+        assert!(app.status_flash.is_none());
+        app.flash_status("hello");
+        assert!(app.status_flash.is_some());
+    }
+
+    #[test]
+    fn dirty_flag_round_trip() {
+        let mut app = make_app();
+        // mark_dirty sets the flag.
+        app.mark_dirty();
+        // clear_dirty unsets it.
+        app.clear_dirty();
+        // We don't assert the boolean here because `dirty()` is also
+        // OR'd against modal/turn-busy state, but the round-trip of
+        // the setter pair must compile.
+        let _ = app.dirty();
+    }
+
+    #[test]
+    fn dirty_returns_false_when_no_modals_and_idle() {
+        let mut app = make_app();
+        app.clear_dirty();
+        // No background turn, no modal, no paste burst deadline → not
+        // dirty.
+        assert!(!app.is_busy());
+        assert!(!app.dirty());
+    }
+
+    #[test]
+    fn viewport_returns_some_dimensions() {
+        // Without a real terminal the dimensions are 0x0. The getter
+        // must still be callable and produce a tuple.
+        let app = make_app();
+        let (w, h) = app.viewport();
+        let (ox, oy) = app.viewport_origin();
+        assert_eq!(w, 0);
+        assert_eq!(h, 0);
+        assert_eq!(ox, 0);
+        assert_eq!(oy, 0);
+    }
+
+    #[test]
+    fn composer_scroll_starts_at_zero() {
+        let app = make_app();
+        assert_eq!(app.composer_scroll(), 0);
+    }
+
+    #[test]
+    fn selection_starts_empty() {
+        let app = make_app();
+        assert!(!app.has_selection());
+        assert!(app.selection_text().is_none());
+        assert!(app.selection_bounds().is_none());
+        assert!(app.composer_selection_text().is_none());
+    }
+
+    #[test]
+    fn clear_selection_is_idempotent() {
+        let mut app = make_app();
+        app.clear_selection();
+        app.clear_selection();
+        assert!(!app.has_selection());
+    }
+
+    #[test]
+    fn theme_round_trip_via_json_name() {
+        let mut app = make_app();
+        let initial_name = app.theme().name().map(str::to_string);
+        // Both built-in themes must resolve by name.
+        assert!(app.set_theme_by_name("dark").is_ok());
+        assert!(app.set_theme_by_name("light").is_ok());
+        // Restore the original name if it was one of the built-ins.
+        if let Some(name) = initial_name {
+            let _ = app.set_theme_by_name(&name);
+        }
+    }
+
+    #[test]
+    fn set_theme_by_name_rejects_unknown() {
+        let mut app = make_app();
+        assert!(app.set_theme_by_name("definitely-not-a-real-theme").is_err());
+    }
+
+    #[test]
+    fn copy_on_select_round_trips() {
+        let mut app = make_app();
+        let initial = app.copy_on_select();
+        app.set_copy_on_select(!initial);
+        assert_eq!(app.copy_on_select(), !initial);
+        app.set_copy_on_select(initial);
+        assert_eq!(app.copy_on_select(), initial);
+    }
+
+    #[test]
+    fn autocomplete_max_visible_round_trips() {
+        let mut app = make_app();
+        let initial = app.autocomplete_max_visible();
+        app.set_autocomplete_max_visible(initial.saturating_add(1).max(3));
+        assert_ne!(app.autocomplete_max_visible(), initial);
+        app.set_autocomplete_max_visible(initial);
+        assert_eq!(app.autocomplete_max_visible(), initial);
+    }
+
+    #[test]
+    fn toggle_tools_expanded_inverts() {
+        let mut app = make_app();
+        let initial = app.tools_expanded();
+        let flipped = app.toggle_tools_expanded();
+        assert_eq!(flipped, !initial);
+        assert_eq!(app.tools_expanded(), !initial);
+        app.toggle_tools_expanded();
+        assert_eq!(app.tools_expanded(), initial);
+    }
+
+    #[test]
+    fn shortcut_overlay_default_closed() {
+        let mut app = make_app();
+        assert!(!app.shortcut_overlay_open());
+        // First toggle returns true (new open state).
+        assert!(app.toggle_shortcut_overlay());
+        assert!(app.shortcut_overlay_open());
+        // close_shortcut_overlay returns whether it was open.
+        assert!(app.close_shortcut_overlay());
+        assert!(!app.shortcut_overlay_open());
+        // Already closed → returns false.
+        assert!(!app.close_shortcut_overlay());
+    }
+
+    #[test]
+    fn status_session_metadata_setters_round_trip() {
+        let mut app = make_app();
+        app.set_session_id("sess-1");
+        assert_eq!(app.status_data().session_id, "sess-1");
+        app.set_session_name(Some("demo".into()));
+        assert_eq!(app.status_data().session_name.as_deref(), Some("demo"));
+        app.set_session_name(None);
+        assert!(app.status_data().session_name.is_none());
+
+        app.set_status_cwd(Some("/tmp".into()));
+        assert_eq!(app.status_data().cwd.as_deref(), Some("/tmp"));
+        app.set_status_cwd(None);
+        assert!(app.status_data().cwd.is_none());
+
+        app.set_status_git_branch(Some("main".into()));
+        assert_eq!(app.status_data().git_branch.as_deref(), Some("main"));
+        app.set_status_git_branch(None);
+        assert!(app.status_data().git_branch.is_none());
+    }
+
+    #[test]
+    fn status_provider_count_and_label_round_trip() {
+        let mut app = make_app();
+        app.set_status_provider(2, Some("anthropic".into()));
+        assert_eq!(app.status_data().provider_count, 2);
+        assert_eq!(app.status_data().provider_label.as_deref(), Some("anthropic"));
+        app.set_status_provider(0, None);
+        assert_eq!(app.status_data().provider_count, 0);
+        assert!(app.status_data().provider_label.is_none());
+    }
+
+    #[test]
+    fn status_auto_compact_and_subscription_round_trip() {
+        let mut app = make_app();
+        app.set_status_auto_compact(true);
+        assert!(app.status_data().auto_compact);
+        app.set_status_auto_compact(false);
+        assert!(!app.status_data().auto_compact);
+        app.set_status_subscription(true);
+        assert!(app.status_data().subscription);
+        app.set_status_subscription(false);
+        assert!(!app.status_data().subscription);
+    }
+
+    #[test]
+    fn status_pricing_round_trip() {
+        let mut app = make_app();
+        app.set_status_pricing(Some(crate::components::status::StatusPricing {
+            input_micro_usd: 1_000_000,
+            output_micro_usd: 2_000_000,
+            cache_read_micro_usd: 500_000,
+            cache_write_micro_usd: 250_000,
+        }));
+        assert!(app.status_data().pricing.is_some());
+        app.set_status_pricing(None);
+        assert!(app.status_data().pricing.is_none());
+    }
+
+    #[test]
+    fn extension_status_set_and_clear() {
+        let mut app = make_app();
+        app.set_extension_status("plugin-a", Some("loading"));
+        assert!(
+            app.status_data()
+                .extension_statuses
+                .iter()
+                .any(|(k, v)| k == "plugin-a" && v == "loading")
+        );
+        // Setting to None removes the entry entirely.
+        app.set_extension_status("plugin-a", None);
+        assert!(
+            !app.status_data()
+                .extension_statuses
+                .iter()
+                .any(|(k, _)| k == "plugin-a")
+        );
+
+        app.set_extension_status("plugin-b", Some("ready"));
+        app.clear_extension_statuses();
+        assert!(app.status_data().extension_statuses.is_empty());
+    }
+
+    #[test]
+    fn terminal_title_round_trip() {
+        let mut app = make_app();
+        app.set_terminal_title("hello");
+        // `terminal_title()` reads the in-effect value.
+        assert_eq!(app.terminal_title(), Some("hello"));
+        // `take_terminal_title()` returns the pending title (same
+        // string the first time) and clears the pending slot.
+        assert_eq!(app.take_terminal_title(), Some("hello".to_string()));
+        // Nothing else pending now.
+        assert_eq!(app.take_terminal_title(), None);
+    }
+
+    #[test]
+    fn reassert_terminal_title_overwrites_with_auto() {
+        let mut app = make_app();
+        // Set a custom title.
+        app.set_terminal_title("first");
+        // reassert overwrites with the auto-computed title.
+        app.reassert_terminal_title();
+        let after = app.terminal_title().map(str::to_string);
+        assert!(after.is_some());
+        assert_ne!(after.as_deref(), Some("first"));
+        // sync_terminal_title is idempotent (no-op when nothing
+        // changed).
+        app.sync_terminal_title();
+    }
+
+    #[test]
+    fn mouse_regions_default_empty() {
+        let app = make_app();
+        assert!(app.mouse_regions().is_empty());
+    }
+
+    #[test]
+    fn composer_area_returns_a_rect() {
+        let app = make_app();
+        let (x, y, w, h) = app.composer_area();
+        // Without a real terminal the rect is all zeros; we just assert
+        // the tuple is destructurable.
+        assert_eq!((x, y, w, h), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn take_selector_commit_default_none() {
+        let mut app = make_app();
+        assert!(app.take_selector_commit().is_none());
+        assert!(!app.selector_open());
+    }
+
+    #[test]
+    fn history_search_starts_inactive() {
+        let app = make_app();
+        assert!(!app.history_search_active());
+        assert!(app.history_search_hint().is_none());
+    }
+
+    #[test]
+    fn editor_text_round_trip() {
+        let mut app = make_app();
+        app.set_editor_text("hello world");
+        assert_eq!(app.editor_text(), "hello world");
+        let expanded = app.expanded_editor_text();
+        assert!(expanded.contains("hello"));
+    }
+
+    #[test]
+    fn paste_marker_count_starts_at_zero() {
+        let app = make_app();
+        assert_eq!(app.paste_marker_count(), 0);
+    }
+
+    #[test]
+    fn scrollbar_state_starts_idle() {
+        let app = make_app();
+        assert!(!app.scrollbar_hovered());
+        assert!(!app.scrollbar_dragging());
+        assert!(app.scrollbar_geometry().is_none());
+        assert!(app.scroll_to_end_rect().is_none());
+        assert!(app.truncated_above_rect().is_none());
+        assert!(app.truncated_above_lines().is_none());
+    }
+
+    #[test]
+    fn info_and_info_block_do_not_panic() {
+        let mut app = make_app();
+        app.info("plain note");
+        app.info_block("block note");
+    }
+
+    #[test]
+    fn locale_round_trips() {
+        let mut app = make_app();
+        let initial = app.locale();
+        let other = match initial {
+            crate::locale::Locale::En => crate::locale::Locale::Zh,
+            _ => crate::locale::Locale::En,
+        };
+        app.set_locale(other);
+        assert_eq!(app.locale(), other);
+        app.set_locale(initial);
+        assert_eq!(app.locale(), initial);
+    }
+
+    #[test]
+    fn spinner_starts_visible() {
+        let app = make_app();
+        // Spinner is always constructed; just verify the getter.
+        let _ = app.spinner();
+    }
+
+    #[test]
+    fn status_data_and_mut_accessors_match() {
+        let mut app = make_app();
+        let snapshot = app.status_data().clone();
+        // Mut path lets us poke without triggering any setters.
+        app.status_data_mut().provider_count = 99;
+        assert_eq!(app.status_data().provider_count, 99);
+        // Restore via the public setter so the rest of the test suite
+        // sees the original value.
+        app.set_status_provider(snapshot.provider_count, snapshot.provider_label.clone());
+    }
+
+    #[test]
+    fn messages_accessor_returns_a_view() {
+        let app = make_app();
+        let view = app.messages();
+        let _len = view.len();
     }
 }

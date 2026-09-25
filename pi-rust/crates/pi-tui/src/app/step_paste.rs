@@ -11,8 +11,8 @@
 
 use std::time::Instant;
 
-use crate::editor::PasteInsertOutcome;
-use crate::input::{BurstDecision, Key, KeyCode};
+use crate::components::editor::PasteInsertOutcome;
+use crate::core::input_parse::{BurstDecision, Key, KeyCode};
 
 use super::{App, StepOutcome};
 
@@ -29,7 +29,7 @@ impl App {
     /// draft three times.
     ///
     /// Paste is a separate entry point rather than an
-    /// [`InputEvent`](crate::input::InputEvent) variant because that enum is
+    /// [`InputEvent`](crate::core::input_parse::InputEvent) variant because that enum is
     /// `Copy` by construction — [`App::step`] matches it by value and still
     /// uses it afterwards — and a heap payload cannot ride in a `Copy` type.
     ///
@@ -209,5 +209,81 @@ impl App {
             return None;
         }
         self.paste_burst.flush_deadline()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::input_parse::{Key, KeyCode, KeyModifiers};
+
+    fn make_app() -> App {
+        super::super::tool_stream_tests::test_app()
+    }
+
+    fn char_key(c: char) -> Key {
+        Key::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn step_paste_inserts_text_when_no_modal_is_open() {
+        let mut app = make_app();
+        let before = app.prompt.editor().text().to_string();
+        let outcome = app.step_paste("hello");
+        assert_eq!(outcome, StepOutcome::Redraw);
+        let after = app.prompt.editor().text().to_string();
+        assert!(after.starts_with(&before));
+        assert!(after.contains("hello"));
+    }
+
+    #[test]
+    fn step_paste_returns_exit_when_exit_requested() {
+        let mut app = make_app();
+        app.request_exit();
+        let outcome = app.step_paste("anything");
+        assert_eq!(outcome, StepOutcome::Exit);
+    }
+
+    #[test]
+    fn burst_plain_char_recognises_unshifted_text() {
+        assert_eq!(App::burst_plain_char(char_key('a')), Some('a'));
+        assert_eq!(
+            App::burst_plain_char(Key::new(KeyCode::Char('A'), KeyModifiers::SHIFT)),
+            Some('A')
+        );
+    }
+
+    #[test]
+    fn burst_plain_char_rejects_chords_and_non_chars() {
+        // Ctrl+letter: modifiers prevent it from counting as paste content.
+        assert!(
+            App::burst_plain_char(Key::new(KeyCode::Char('a'), KeyModifiers::CONTROL)).is_none()
+        );
+        // Enter, Esc, Tab, etc. are not plain chars.
+        assert!(App::burst_plain_char(Key::new(KeyCode::Enter, KeyModifiers::NONE)).is_none());
+        assert!(App::burst_plain_char(Key::new(KeyCode::Esc, KeyModifiers::NONE)).is_none());
+        assert!(App::burst_plain_char(Key::new(KeyCode::Tab, KeyModifiers::NONE)).is_none());
+    }
+
+    #[test]
+    fn burst_control_char_recognises_enter_and_tab() {
+        assert_eq!(
+            App::burst_control_char(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some('\n')
+        );
+        assert_eq!(
+            App::burst_control_char(Key::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some('\t')
+        );
+        assert!(App::burst_control_char(char_key('a')).is_none());
+        assert!(App::burst_control_char(Key::new(KeyCode::Esc, KeyModifiers::NONE)).is_none());
+    }
+
+    #[test]
+    fn tick_paste_burst_is_a_noop_for_an_empty_draft() {
+        let mut app = make_app();
+        // No active burst, so ticking is a no-op and reports no change.
+        let changed = app.tick_paste_burst(std::time::Instant::now());
+        assert!(!changed);
     }
 }

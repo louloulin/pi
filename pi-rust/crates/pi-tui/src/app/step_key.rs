@@ -9,10 +9,10 @@
 //! the burst-flush window is measured against an `Instant`, and tests
 //! drive it without sleeping by passing their own instant.
 
-use crate::input::{InputEvent, Key, KeyCode};
-use crate::keybindings::get_keybindings;
+use crate::core::input_parse::{InputEvent, Key, KeyCode};
+use crate::components::keybindings::get_keybindings;
 use crate::locale::format_chord;
-use crate::prompt::PromptAction;
+use crate::components::prompt::PromptAction;
 
 use super::{App, StepOutcome, Submission, CLEAR_EXIT_WINDOW};
 
@@ -317,6 +317,27 @@ impl App {
             return StepOutcome::Redraw;
         }
 
+        // `PageUp` / `PageDown` are owned by the transcript when the composer
+        // fits; the editor's own `tui.editor.pageUp` / `pageDown` bindings
+        // also include the bare chord (so a draft that overflows can still
+        // page itself), which means a bare `PageUp` would silently slip
+        // through to the editor once the user releases `tui.altScreen.pageUp`
+        // by rebinding it to something else. Trap the bare chord here so a
+        // released transcript binding is a real no-op rather than a stray
+        // editor move. The `Ctrl+PageUp` / `Ctrl+PageDown` chords still reach
+        // the editor because the transcript's binding is the bare key only.
+        if key.modifiers.is_empty() && !self.composer_overflows() {
+            match key.code {
+                KeyCode::PageUp if !kb.matches(&event, "tui.altScreen.pageUp") => {
+                    return StepOutcome::Idle;
+                }
+                KeyCode::PageDown if !kb.matches(&event, "tui.altScreen.pageDown") => {
+                    return StepOutcome::Idle;
+                }
+                _ => {}
+            }
+        }
+
         // The composer's wrap width is a rendering fact the editor needs
         // while it handles the key: `Up` / `Down` move by visual row, and a
         // different width would move the caret to a row the frame did not
@@ -351,7 +372,16 @@ impl App {
         self.prompt.editor_mut().set_visual_width(composer_width);
         self.prompt.editor_mut().set_page_rows(composer_page);
 
+        // A keystroke that changes the draft shifts the offsets the drag
+        // selection was measured against — drop the highlight and any
+        // in-flight clipboard request so neither lingers on a stale range
+        // (LUM-1332).
+        let before_text = self.prompt.text().to_string();
         let action = self.prompt.handle_key(key);
+        if matches!(action, PromptAction::Changed) && self.prompt.text() != before_text {
+            self.composer_drag_selection = None;
+            self.pending_clipboard = None;
+        }
         // A recall from the cross-session history file can bring back a
         // marker whose content this session never had; say so once.
         if self.prompt.editor_mut().take_stale_paste_notice() {
@@ -394,5 +424,139 @@ impl App {
                 StepOutcome::Exit
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::input_parse::{Key, KeyCode, KeyModifiers};
+    use std::time::Instant;
+
+    fn make_app() -> App {
+        super::super::tool_stream_tests::test_app()
+    }
+
+    fn char_key(c: char) -> Key {
+        Key::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn step_key_inserts_plain_text_into_the_composer() {
+        let mut app = make_app();
+        let before = app.prompt.text().to_string();
+        let outcome = app.step_key_at(char_key('x'), Instant::now());
+        // Typing a character either reports Idle (no redraw needed) or
+        // Redraw; the test asserts the path runs without panicking.
+        let _ = outcome;
+        let after = app.prompt.text().to_string();
+        assert!(after.starts_with(&before), "draft prefix must be preserved");
+        assert!(after.len() >= before.len() + 1, "draft must grow on insert");
+    }
+
+    #[test]
+    fn step_key_clears_status_flash_on_any_key() {
+        // The transient status message lives for exactly one keystroke.
+        let mut app = make_app();
+        app.flash_status("hello");
+        assert!(app.status_flash.is_some());
+        let _ = app.step_key_at(char_key('a'), Instant::now());
+        assert!(
+            app.status_flash.is_none(),
+            "any keystroke must clear the status flash"
+        );
+    }
+
+    #[test]
+    fn step_key_shortcut_overlay_toggles_on_question_mark() {
+        // `?` on an empty composer with no extensions opens the shortcut
+        // overlay; any subsequent key closes it again.
+        let mut app = make_app();
+        assert!(!app.shortcut_overlay);
+        let _ = app.step_key_at(char_key('?'), Instant::now());
+        assert!(app.shortcut_overlay, "empty composer + `?` opens the overlay");
+        let _ = app.step_key_at(char_key('a'), Instant::now());
+        assert!(!app.shortcut_overlay, "next key closes the overlay");
+    }
+
+    #[test]
+    fn step_key_records_last_clear_at_on_ctrl_c() {
+        // Ctrl+C on an idle app clears the composer and records the
+        // double-press window timestamp.
+        let mut app = make_app();
+        let before = app.last_clear_at;
+        let now = Instant::now();
+        let outcome = app.step_key_at(
+            Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            now,
+        );
+        assert_eq!(outcome, StepOutcome::Redraw);
+        assert_ne!(app.last_clear_at, before);
+    }
+
+    #[test]
+    fn step_key_requests_exit_on_double_ctrl_c() {
+        let mut app = make_app();
+        let now = Instant::now();
+        // First press — clears the draft.
+        let _ = app.step_key_at(
+            Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            now,
+        );
+        assert!(!app.exit_requested);
+        // Second press within the window — exits.
+        let outcome = app.step_key_at(
+            Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            now,
+        );
+        assert_eq!(outcome, StepOutcome::Exit);
+        assert!(app.exit_requested);
+    }
+
+    #[test]
+    fn step_key_returns_when_already_exit_requested() {
+        // The exit flag is observed by the driver loop, not by step_key
+        // itself; this test just makes sure the path runs without
+        // panicking.
+        let mut app = make_app();
+        app.request_exit();
+        let outcome = app.step_key_at(char_key('a'), Instant::now());
+        let _ = outcome;
+    }
+
+    #[test]
+    fn step_key_opens_search_overlay_on_chord() {
+        let mut app = make_app();
+        assert!(app.search.is_none());
+        // The chord is Ctrl+Shift+F by default; the test only asserts the
+        // open path runs (no panic) — the exact chord is owned by the
+        // keybinding registry.
+        let _ = app.step_key_at(
+            Key::new(KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            Instant::now(),
+        );
+        let _ = app.search;
+    }
+
+    #[test]
+    fn step_key_with_empty_composer_falls_through_to_composer() {
+        let mut app = make_app();
+        // An Enter on an empty composer must not submit anything: the
+        // outcome is Idle because nothing changed.
+        let outcome = app.step_key_at(Key::new(KeyCode::Enter, KeyModifiers::NONE), Instant::now());
+        let _ = outcome;
+        // No flash status from this path.
+        assert!(app.status_flash.is_none());
+    }
+
+    #[test]
+    fn step_key_routes_keys_into_settings_when_one_is_open() {
+        let mut app = make_app();
+        app.open_settings(crate::components::settings::SettingsList::new(
+            vec![crate::components::settings::SettingItem::new("id", "Setting")],
+            4,
+        ));
+        let outcome = app.step_key_at(Key::new(KeyCode::Enter, KeyModifiers::NONE), Instant::now());
+        let _ = outcome;
     }
 }

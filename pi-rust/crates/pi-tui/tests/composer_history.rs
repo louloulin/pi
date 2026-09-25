@@ -780,7 +780,7 @@ fn slash_clear_history_deletes_the_file_and_the_in_session_entries() {
     ed.push_history_entry(HistoryEntry::new("kept until cleared".to_string()));
     assert!(fs::metadata(store.path()).is_ok());
 
-    ed.clear_history();
+    ed.clear_persistent_history();
     assert_eq!(ed.history_len(), 0);
     assert!(
         fs::metadata(store.path()).is_err(),

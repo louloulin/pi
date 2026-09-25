@@ -227,9 +227,13 @@ fn a_click_clears_the_previous_selection() {
 #[test]
 fn gestures_outside_the_message_viewport_are_ignored() {
     let mut app = selection_app();
-    // Rows 8 and 9 are the status bar and the prompt.
-    assert_eq!(app.step(press(3, VIEWPORT as u16)), StepOutcome::Idle);
-    assert_eq!(app.step(drag(3, HEIGHT - 1)), StepOutcome::Idle);
+    // Row HEIGHT-1 is the status bar; row VIEWPORT is the prompt. Both sit
+    // outside the message viewport but a press on the prompt would normally
+    // arm a composer drag — and a drag with an armed prompt would still be
+    // the composer's, not a selection. Verify the selection path stays Idle
+    // even though the prompt owns the gesture.
+    assert_eq!(app.step(press(3, HEIGHT - 1)), StepOutcome::Idle);
+    assert_eq!(app.step(drag(3, VIEWPORT as u16)), StepOutcome::Idle);
     assert!(!app.has_selection());
 }
 

@@ -325,8 +325,9 @@ fn composer_app(draft: &str, cols: u16, rows: u16) -> App {
 }
 
 fn click(app: &mut App, x: u16, y: u16) -> StepOutcome {
-    let _ = app.step(press(x, y));
-    app.step(release(x, y))
+    let pressed = app.step(press(x, y));
+    app.step(release(x, y));
+    pressed
 }
 
 #[test]
