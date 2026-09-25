@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::widgets::Widget;
 
 use crate::app::{SearchState, SelectionPoint};
@@ -856,22 +856,40 @@ pub fn paint_prompt(
     // The composer's rectangle is the pointer's click target for the
     // caret (see `App::prompt_mouse_gesture`), and the pointer arrives
     // between renders.
-    record_composer_area(viewport, Some(rect));
-    let max_rows = (rect.height as usize).min(composer_max_rows.max(1));
+    // Phase 2 (G3): when the composer is allowed to wrap, paint a `─`
+    // border above it (TS `interactive-mode.ts` editor border colour, see
+    // `updateEditorBorderColor` and the `editor.ts:498-506` rule). A
+    // single-row composer never paints the border, and the chrome
+    // reservation in `App::render_to_buffer` matches this so the body
+    // shifts down by one row to make room.
+    let has_border = composer_max_rows > 1 && rect.height >= 2;
+    let prompt_rect = if has_border {
+        Rect {
+            x: rect.x,
+            y: rect.y + 1,
+            width: rect.width,
+            height: rect.height - 1,
+        }
+    } else {
+        rect
+    };
+    record_composer_area(viewport, Some(prompt_rect));
+    let max_rows = (prompt_rect.height as usize).min(composer_max_rows.max(1));
     // Record the body width the wrap uses, so the next key press measures
     // the draft the same way this frame did (see
     // `App::composer_body_width`).
-    viewport.composer_body_width.store(prompt.body_width(rect.width) as u16, Ordering::Relaxed);
+    viewport.composer_body_width.store(prompt.body_width(prompt_rect.width) as u16, Ordering::Relaxed);
     viewport.composer_window.store(max_rows as u16, Ordering::Relaxed);
     let scroll = viewport.composer_scroll.load(Ordering::Relaxed);
-    let (lines, scroll) = prompt.render_lines(rect.width, max_rows, scroll);
+    let (lines, scroll) = prompt.render_lines(prompt_rect.width, max_rows, scroll);
     viewport.composer_scroll.store(scroll, Ordering::Relaxed);
     // Upstream paints the editor chrome in `bashMode` while the buffer is
     // a `!` submission, otherwise in the thinking level's border colour
     // (`updateEditorBorderColor`,
-    // `interactive-mode.ts:4166-4174`). The Rust prompt has no border, so
-    // the label carries the colour instead: bash mode wins, the thinking
-    // level colours everything else.
+    // `interactive-mode.ts:4166-4174`). The Rust prompt draws a `─` row
+    // above the composer in that colour when the editor spans more than
+    // one line (single-line composer would otherwise show the border on
+    // top of the empty bottom row of the message view).
     let label_slot = if is_bash_mode(&prompt.text()) {
         ThemeColor::BashMode
     } else {
@@ -879,9 +897,38 @@ pub fn paint_prompt(
     };
     let label_style = Some(SpanStyle::fg(label_slot).to_style(theme));
     let label_width = columns(prompt.label()) as u16;
+    // Paint the border row above the composer (only when the composer is
+    // multi-row). The row keeps the parent's background — the message
+    // viewport above the prompt — and stamps the border colour as the
+    // foreground glyph for every column.
+    if has_border {
+        let border_y = rect.y;
+        let border_style = SpanStyle::fg(label_slot).to_style(theme);
+        for x in rect.x..(rect.x + rect.width) {
+            if let Some(cell) = buf.cell_mut((x, border_y)) {
+                cell.set_char('─');
+                cell.set_style(border_style);
+            }
+        }
+    }
+    // TS pi-tui paints the entire composer row with the `selectedBg` slot
+    // (`interactive-mode.ts` input box wrapping). The Rust port keeps the
+    // label colour and adds the same background underneath, so every cell
+    // in every composer row carries the selected background — label,
+    // text, and the blank padding to the right edge alike.
+    let row_bg_style = SpanStyle {
+        fg: None,
+        bg: Some(ThemeBg::SelectedBg),
+        bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+        inverse: false,
+    }
+    .to_style(theme);
     for (row, line) in lines.iter().enumerate() {
-        let y = rect.y + row as u16;
-        if y >= rect.y + rect.height {
+        let y = prompt_rect.y + row as u16;
+        if y >= prompt_rect.y + prompt_rect.height {
             break;
         }
         // This loop paints cells directly (the label owns a style of its
@@ -892,26 +939,43 @@ pub fn paint_prompt(
         // through. Without this a Chinese draft was written one cell per
         // character and the row collapsed to a fraction of the draft
         // (`> 中` for a 44-column draft, LUM-1418).
+        // Stamp the selectedBg background on every cell of the row first,
+        // so trailing padding and the wrapping rows under the first all
+        // share the same backdrop the way the TS Box does.
+        for x in prompt_rect.x..(prompt_rect.x + prompt_rect.width) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(row_bg_style);
+            }
+        }
         let mut col = 0usize;
         for ch in line.chars() {
             let glyph_width = char_columns(ch);
-            if col + glyph_width > rect.width as usize {
+            if col + glyph_width > prompt_rect.width as usize {
                 break;
             }
-            let x = rect.x + col as u16;
+            let x = prompt_rect.x + col as u16;
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ch);
-                if let Some(style) = label_style {
+                if let Some(mut style) = label_style {
                     // Only the first row owns the label; subsequent rows
-                    // are blank-padded with spaces.
+                    // are blank-padded with spaces. Merge the
+                    // selectedBg background onto the label style so the
+                    // label glyph renders with both colours — the
+                    // background painted above is overwritten by the
+                    // style's bg slot otherwise.
                     if row == 0 && col < label_width as usize {
+                        // Ratatui's Style has no `patch_bg`; drop the
+                        // existing bg (none for label_style here) and
+                        // add the row background.
+                        style = style.bg(row_bg_style.bg.unwrap_or(Color::Reset));
                         cell.set_style(style);
                     }
                 }
             }
             for offset in 1..glyph_width {
-                if let Some(cell) = buf.cell_mut((rect.x + (col + offset) as u16, y)) {
+                if let Some(cell) = buf.cell_mut((prompt_rect.x + (col + offset) as u16, y)) {
                     cell.reset();
+                    cell.set_style(row_bg_style);
                 }
             }
             col += glyph_width;

@@ -20,10 +20,10 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 
 const WIDTH: u16 = 40;
-/// Snapshot height; the message viewport is this minus the status bar and
-/// the prompt row, i.e. 8 rows.
+/// Snapshot height; the message viewport is this minus the status bar,
+/// the prompt row, and the editor border row (Phase 2 / G3), i.e. 7 rows.
 const HEIGHT: u16 = 10;
-const VIEWPORT: usize = (HEIGHT - 2) as usize;
+const VIEWPORT: usize = (HEIGHT - 3) as usize;
 
 fn faux_model() -> Model {
     Model {
@@ -95,16 +95,18 @@ fn reversed(buf: &Buffer, x: u16, y: u16) -> bool {
 #[test]
 fn drag_selects_characters_and_reports_the_text() {
     let mut app = selection_app();
-    // Rows 0 and 7 are the viewport edges, where a drag arms the autoscroll;
-    // row 1 selects plainly. Visible rows are the tail, so row 1 is line 33.
+    // Rows 0 and 6 are the viewport edges, where a drag arms the autoscroll;
+    // row 1 selects plainly. Visible rows are the tail, so row 1 is line 34
+    // (Phase 2 / G3 reserves a row for the editor border, shrinking the
+    // viewport by one row).
     assert_eq!(
         app.step(press(2, 1)),
         StepOutcome::Redraw,
         "a press starts a selection"
     );
     assert_eq!(app.step(drag(8, 1)), StepOutcome::Redraw);
-    // Row 1 is "> line 33": columns 2..=8 are "line 33".
-    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
+    // Row 1 is "> line 34": columns 2..=8 are "line 34".
+    assert_eq!(app.selection_text().as_deref(), Some("line 34"));
 }
 
 #[test]
@@ -114,7 +116,7 @@ fn drag_across_lines_joins_them_with_newlines() {
     app.step(drag(8, 2));
     assert_eq!(
         app.selection_text().as_deref(),
-        Some("line 33\n> line 34"),
+        Some("line 34\n> line 35"),
         "the second entry keeps the rendered prefix"
     );
 }
@@ -124,7 +126,9 @@ fn selection_survives_scrolling_and_follows_the_viewport() {
     let mut app = selection_app();
     app.step(press(2, 1));
     app.step(drag(8, 1));
-    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
+    // Phase 2 / G3 reserves a row for the editor border, so the tail's
+    // top visible line is line 33 (was line 32). Row 1 selects line 34.
+    assert_eq!(app.selection_text().as_deref(), Some("line 34"));
 
     // The selection is anchored to log lines, not screen rows: scrolling
     // keeps the text and carries the highlight along with the content.
@@ -132,7 +136,7 @@ fn selection_survives_scrolling_and_follows_the_viewport() {
         app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
-    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
+    assert_eq!(app.selection_text().as_deref(), Some("line 34"));
     let buf = buffer(&mut app);
     assert!(
         !reversed(&buf, 2, 1),
@@ -152,11 +156,11 @@ fn selection_survives_scrolling_and_follows_the_viewport() {
         )),
         StepOutcome::Redraw
     );
-    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
+    assert_eq!(app.selection_text().as_deref(), Some("line 34"));
     let buf = buffer(&mut app);
     assert!(
         !(0..VIEWPORT as u16).any(|y| reversed(&buf, 2, y)),
-        "line 33 scrolled off the top"
+        "line 34 scrolled off the top"
     );
 }
 
@@ -182,7 +186,7 @@ fn copy_on_select_queues_the_text_on_release() {
     assert_eq!(app.take_clipboard_request(), None, "not copied mid-drag");
 
     assert_eq!(app.step(release(8, 0)), StepOutcome::Idle);
-    assert_eq!(app.take_clipboard_request().as_deref(), Some("line 32"));
+    assert_eq!(app.take_clipboard_request().as_deref(), Some("line 33"));
     assert_eq!(
         app.take_clipboard_request(),
         None,
@@ -190,7 +194,7 @@ fn copy_on_select_queues_the_text_on_release() {
     );
     // Upstream keeps the selection visible after copying.
     assert!(app.has_selection());
-    assert_eq!(app.selection_text().as_deref(), Some("line 32"));
+    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
 }
 
 #[test]
@@ -205,7 +209,7 @@ fn copy_on_select_disabled_keeps_the_selection_without_copying() {
     app.step(release(8, 0));
 
     assert_eq!(app.take_clipboard_request(), None);
-    assert_eq!(app.selection_text().as_deref(), Some("line 32"));
+    assert_eq!(app.selection_text().as_deref(), Some("line 33"));
 }
 
 #[test]

@@ -24,10 +24,11 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 const WIDTH: u16 = 44;
-/// Message viewport is this minus the status bar and the prompt row, i.e.
-/// 8 rows — the pill's row is `VIEWPORT - 1`.
+/// Message viewport is this minus the status bar, the prompt row, and the
+/// editor border row (Phase 2 / G3), i.e. 7 rows — the pill's row is
+/// `VIEWPORT - 1`.
 const HEIGHT: u16 = 10;
-const VIEWPORT: u16 = HEIGHT - 2;
+const VIEWPORT: u16 = HEIGHT - 3;
 const PILL_ROW: u16 = VIEWPORT - 1;
 /// Rightmost column of the viewport = the scrollbar's column.
 const BAR: u16 = WIDTH - 1;

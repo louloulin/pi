@@ -12,8 +12,8 @@
 //! `App::paint_truncated_above` is the one-row hint it paints — see
 //! `docs/TUI_TRUNCATION_AFFORDANCE_LUM1273.md`.
 //!
-//! The viewport in this file is 39x8: `WIDTH` minus the scrollbar column when
-//! the transcript overflows, `HEIGHT` minus the status bar and prompt rows.
+//! The viewport in this file is `BAR`x7: `WIDTH - 1` while the transcript
+//! overflows, `HEIGHT - 3` (status + prompt + Phase 2 / G3 editor border).
 
 use std::sync::Arc;
 
@@ -111,7 +111,7 @@ fn a_pinned_viewport_reports_how_much_of_the_top_block_is_above_it() {
     long_block(&mut app, 12);
     let _ = render(&mut app);
 
-    assert_eq!(app.viewport(), (BAR, HEIGHT - 2));
+    assert_eq!(app.viewport(), (BAR, HEIGHT - 3));
     let hidden = hidden_rows(&app);
     assert!(hidden > 0, "the block must overflow the viewport");
     assert_eq!(
@@ -203,8 +203,9 @@ fn the_hint_names_the_hidden_line_count_and_the_key_that_reaches_it() {
 #[test]
 fn exactly_one_hidden_line_is_singular() {
     let mut app = app();
-    // The viewport is 8 rows; a 9-row block leaves exactly one line above.
-    long_block(&mut app, HEIGHT as usize - 2 + 1);
+    // The viewport is 7 rows (Phase 2 / G3 reserves a row for the editor
+    // border); an 8-row block leaves exactly one line above.
+    long_block(&mut app, HEIGHT as usize - 3 + 1);
     let buf = render(&mut app);
     assert_eq!(app.truncated_above_lines(), Some(1));
     let label = row_text(&buf, app.viewport_origin().1);

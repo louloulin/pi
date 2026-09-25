@@ -6530,6 +6530,8 @@ mod tests {
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            tool_status: Default::default(),
+            notice_lines: None,
         });
         app.messages_mut().push(pi_tui::message::MessageItem {
             role: pi_tui::message::Role::Assistant,
@@ -6539,6 +6541,8 @@ mod tests {
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            tool_status: Default::default(),
+            notice_lines: None,
         });
 
         copy_last_assistant_message(&mut app);

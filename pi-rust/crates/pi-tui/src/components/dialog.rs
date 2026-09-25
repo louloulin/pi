@@ -312,7 +312,12 @@ impl Dialog {
                 lines.push(format!("Confirm: {title}"));
                 lines.push("─".repeat(width.min(40)));
                 lines.extend(wrap(body, width));
-                lines.push(String::new());
+                // ─ row closes the body block before the key hints, mirroring
+                // the `DynamicBorder` line TS paints below `extension-selector`'s
+                // hint text (`extension-selector.ts:75`). The plain string is
+                // used (not styled) because the dialog's `render_lines` path is
+                // the App's primary entry point and is not themed today.
+                lines.push("─".repeat(width.min(40)));
                 lines.push(format!(
                     "{}    {}",
                     dialog_hint(
@@ -338,7 +343,7 @@ impl Dialog {
                     lines.push(format!("({})", self.input.placeholder()));
                 }
                 lines.push(self.input.render_line(width as u16));
-                lines.push(String::new());
+                lines.push("─".repeat(width.min(40)));
                 lines.push(format!(
                     "{}    {}",
                     dialog_hint(
@@ -353,7 +358,7 @@ impl Dialog {
             }
             UiRequest::Select { .. } => {
                 lines.extend(self.selector.render_lines(width as u16));
-                lines.push(String::new());
+                lines.push("─".repeat(width.min(40)));
                 lines.push(format!(
                     "{}    {}    {}",
                     dialog_hint(

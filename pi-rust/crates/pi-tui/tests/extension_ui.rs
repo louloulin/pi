@@ -261,15 +261,18 @@ fn an_over_tall_region_is_truncated_and_the_message_view_survives() {
         "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10",
     ]))));
 
-    // height 5 → status 1 + the composer's row (reserved before the extension
-    // regions, LUM-1261/LUM-1266: the prompt is the one region the user cannot
-    // work without) + one reserved message row leave 2 rows for the chrome, so
-    // the header keeps its first 2 rows and the later chrome regions (Below
-    // widgets, the footer) still get nothing. The prompt is never one of them.
+    // height 5 → status 1 + the composer's row + its border row (Phase 2 /
+    // G3) leave 3 rows for chrome, so the header keeps its first 1 row and
+    // the message gets 1 row, and the header tail is dropped. The prompt is
+    // never one of them.
     let snapshot = app.render_snapshot(30, 5);
     assert_eq!(snapshot.lines[0], "h1");
-    assert_eq!(snapshot.lines[1], "h2");
-    assert_eq!(snapshot.lines[2].trim(), "> hello", "message row survives");
+    assert_eq!(snapshot.lines[1].trim(), "> hello", "message row survives");
+    assert!(
+        snapshot.lines[2].chars().all(|ch| ch == '─' || ch == ' '),
+        "border row sits above the composer, got {:?}",
+        snapshot.lines[2]
+    );
     assert!(
         snapshot.lines[3].starts_with('>'),
         "the composer keeps its row too, got {:?}",
@@ -277,7 +280,7 @@ fn an_over_tall_region_is_truncated_and_the_message_view_survives() {
     );
     assert!(snapshot.lines[4].contains("Faux"));
     assert!(
-        !snapshot.lines.iter().any(|line| line.contains("h3")),
+        !snapshot.lines.iter().any(|line| line.contains("h2")),
         "the header tail must be dropped: {:?}",
         snapshot.lines
     );
@@ -299,18 +302,19 @@ fn custom_overlay_paints_on_top_of_the_message_view() {
     assert!(app.custom_open());
     assert!(app.custom_visible());
 
-    // height 8, width 24 → message rows 0..6; the 2-row box is centred on
-    // rows 3 and 4.
+    // height 8, width 24 → message rows 0..5 (Phase 2 / G3 reserves a row
+    // for the editor border, shrinking the viewport by one); the 2-row box
+    // is centred on rows 3 and 4.
     let snapshot = app.render_snapshot(24, 8);
-    assert_eq!(snapshot.lines[2].trim(), "> line 2");
+    assert_eq!(snapshot.lines[2].trim(), "> line 3", "third visible row sits above the overlay");
     assert_eq!(snapshot.lines[3], "OVR1", "overlay covers its rows");
     assert_eq!(snapshot.lines[4], "OVR2");
     assert!(
         !snapshot
             .lines
             .iter()
-            .any(|line| line.contains("line 3") || line.contains("line 4")),
-        "the overlay must cover the transcript underneath: {:?}",
+            .any(|line| line.contains("line 4") || line.contains("line 5")),
+        "the overlay must cover lines 3 and 4 underneath: {:?}",
         snapshot.lines
     );
 
@@ -318,7 +322,7 @@ fn custom_overlay_paints_on_top_of_the_message_view() {
     // it; showing it again brings it back.
     handle.set_visible(false);
     assert!(!app.custom_visible());
-    assert_eq!(app.render_snapshot(24, 8).lines[3].trim(), "> line 3");
+    assert_eq!(app.render_snapshot(24, 8).lines[3].trim(), "> line 4");
     handle.set_visible(true);
     assert_eq!(app.render_snapshot(24, 8).lines[3], "OVR1");
 }
@@ -326,7 +330,7 @@ fn custom_overlay_paints_on_top_of_the_message_view() {
 #[test]
 fn an_anchored_narrow_overlay_only_covers_its_box() {
     let mut app = app();
-    for i in 0..6 {
+    for i in 0..5 {
         app.messages_mut().push(MessageItem::user(format!("m{i}")));
     }
     let _handle = app.open_custom(
@@ -337,8 +341,8 @@ fn an_anchored_narrow_overlay_only_covers_its_box() {
     );
 
     // The box is 6 wide, 1 tall, at (1, 1) with the default 1-cell margin.
-    // Row 1 is `> m1`; the box blanks columns 1..7 and writes `OVR1` there,
-    // leaving column 0 and the transcript to its right untouched.
+    // Phase 2 / G3 reserves a row for the editor border, so the message
+    // viewport at height 8 has 5 rows: 5 messages fit exactly.
     let snapshot = app.render_snapshot(24, 8);
     assert_eq!(snapshot.lines[0].trim(), "> m0", "row 0 is outside the box");
     assert_eq!(
@@ -480,7 +484,14 @@ fn close_custom_stops_rendering_and_disposes_exactly_once() {
     let mut handle = app.open_custom(Box::new(probe), CustomOptions::overlay().width(8));
 
     assert!(app.custom_open());
-    assert_eq!(app.render_snapshot(20, 5).lines[2].trim(), "OVR");
+    // Phase 2 / G3 reserves a row for the editor border; the centred overlay
+    // can sit on that row, so the surrounding cells may carry `─` glyphs
+    // from the border rather than spaces.
+    assert!(
+        app.render_snapshot(20, 5).lines[2].contains("OVR"),
+        "overlay content visible, got {:?}",
+        app.render_snapshot(20, 5).lines[2]
+    );
 
     assert!(app.close_custom(Some("done".into())));
     assert!(!app.custom_open());
@@ -515,7 +526,11 @@ fn opening_a_second_custom_cancels_the_first() {
     );
     assert_eq!(disposed.load(Ordering::Relaxed), 1);
     assert_eq!(first_handle.try_recv_result(), Some(None));
-    assert_eq!(app.render_snapshot(20, 5).lines[2].trim(), "second");
+    assert!(
+        app.render_snapshot(20, 5).lines[2].contains("second"),
+        "second overlay visible, got {:?}",
+        app.render_snapshot(20, 5).lines[2]
+    );
 }
 
 #[test]

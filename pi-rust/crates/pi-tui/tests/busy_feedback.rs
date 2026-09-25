@@ -278,17 +278,24 @@ fn folding_the_header_gives_its_rows_back_to_the_transcript() {
     assert!(expanded[0].starts_with("pi v"), "{}", expanded[0]);
     assert!(expanded.join("\n").contains("to delete to end"));
 
-    // `app.header` (`Alt+H`) folds it; a folded header costs no rows, so the
-    // hint screen is gone from the frame entirely.
+    // `app.header` (`Alt+H`) folds it. Compact mode keeps the title plus
+    // the upstream `compactOnboarding` row pointing at the chord that
+    // expands it (`interactive-mode.ts:948`); the expanded hint screen is
+    // gone from the frame.
     assert_eq!(app.step_key(alt('h')), StepOutcome::Redraw);
     assert!(!app.header_expanded());
     let folded = app.render_snapshot(WIDTH, HEIGHT).lines;
-    assert!(!folded[0].starts_with("pi v"), "{}", folded[0]);
+    assert!(folded[0].starts_with("pi v"), "title survives: {}", folded[0]);
     let text = folded.join("\n");
     assert!(!text.contains("to delete to end"), "{text}");
     assert!(text.contains("transcript line"), "{text}");
-    // The fold is reported where the reader is looking, with the chord that
-    // brings the header back.
+    // The compact row points at the chord that brings the header back.
+    assert!(
+        text.contains("to show full startup help and loaded resources"),
+        "compactOnboarding row present: {text}"
+    );
+    // The fold is also reported where the reader is looking (status bar),
+    // with the chord that brings the header back.
     assert!(
         text.contains("Startup header: collapsed (Alt+H to show)"),
         "{text}"

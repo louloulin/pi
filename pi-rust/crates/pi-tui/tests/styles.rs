@@ -14,6 +14,9 @@ const MUTED: &str = "\x1b[38;2;128;128;128m";
 const DIM: &str = "\x1b[38;2;102;102;102m";
 const TEXT: &str = "\x1b[38;2;212;212;212m";
 const SELECTED_BG: &str = "\x1b[48;2;58;58;74m";
+const USER_MSG_BG: &str = "\x1b[48;2;52;53;65m";
+// toolSuccessBg (crates/pi-tui/assets/themes/dark.json) is #283228.
+const TOOL_SUCCESS_BG: &str = "\x1b[48;2;40;50;40m";
 const ERROR: &str = "\x1b[38;2;204;102;102m";
 const WARNING: &str = "\x1b[38;2;255;255;0m";
 
@@ -192,10 +195,17 @@ fn message_view_themed_layout_matches_the_plain_render() {
 
     let themed = view.render_lines_themed(40, &styles);
     assert_eq!(strip_ansi_lines(&themed), view.render_lines(40));
-    assert_eq!(themed[0], format!("{ACCENT}> \x1b[39m{TEXT}hello\x1b[39m"));
+    // User messages render with `userMessageBg` so the entire row gets a
+    // background highlight; the SGR order is bg → fg → text → reset.
+    assert_eq!(
+        themed[0],
+        format!("{USER_MSG_BG}{ACCENT}> \x1b[39m\x1b[49m{USER_MSG_BG}{TEXT}hello\x1b[39m\x1b[49m")
+    );
+    // Tool success messages get the full `toolSuccessBg` row tint per Phase 1
+    // (G1) — matches TS `Box(paddingX, 1, theme.bg("toolSuccessBg", …))`.
     assert_eq!(
         themed[2],
-        format!("{MUTED}* \x1b[39m{MUTED}[tool:read] ok\x1b[39m")
+        format!("{TOOL_SUCCESS_BG}{MUTED}* \x1b[39m\x1b[49m{TOOL_SUCCESS_BG}{MUTED}[tool:read] ok\x1b[39m\x1b[49m")
     );
 }
 

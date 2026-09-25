@@ -105,18 +105,19 @@ fn the_folded_header_row_is_marked_at_44_columns() {
 
     assert_eq!(
         header,
-        "hints hidden on a short terminal — Alt+H…",
+        "Press Alt+H to show full startup help and…",
         "the folded header must drop a whole word and say so:\n{}",
         lines.join("\n")
     );
     // The pre-fix frame, byte for byte — the regression net for the silent
     // clip. `sty...` never appears in a marked row.
     assert_ne!(
-        header, "hints hidden on a short terminal — Alt+H sho",
+        header,
+        "Press Alt+H to show full startup help an",
         "{header}"
     );
     assert!(
-        !header.ends_with("sho") && !header.ends_with("sh"),
+        !header.ends_with("reso") && !header.ends_with("res"),
         "no partial word may survive the clip: {header:?}"
     );
     // The rows that follow keep their own content: the composer, the status

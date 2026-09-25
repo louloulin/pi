@@ -787,14 +787,18 @@ fn the_app_paints_the_dropdown_directly_above_the_prompt() {
     // The list is bottom-anchored: its last row is the one directly above
     // the prompt, and it grows from there towards older output.
     assert!(selected_at < prompt_at, "{:?}", snapshot.lines);
-    // The list is laid out by the shared `SelectList` implementation, so the
-    // slash menu's 12-column primary column puts the description at 2 + 12 =
-    // 14 (LUM-1305) instead of the old two-blank separator.
+    // Phase 2 (G3) paints the `─` editor border directly above the prompt,
+    // so the dropdown's bottom row is two cells up instead of one.
     assert_eq!(
-        snapshot.lines[prompt_at - 1].trim_end(),
+        snapshot.lines[prompt_at - 2].trim_end(),
         "  hotkeys     list shortcuts",
         "{:?}",
         snapshot.lines
+    );
+    assert_eq!(
+        snapshot.lines[prompt_at - 1].trim_end(),
+        "────────────────────────────────────────────────",
+        "Phase 2 / G3 border row sits between dropdown and prompt"
     );
 }
 

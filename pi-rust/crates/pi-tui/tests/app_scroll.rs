@@ -15,9 +15,9 @@ use pi_tui::input::{Key, KeyCode, KeyModifiers};
 
 const WIDTH: u16 = 40;
 /// Snapshot height; the message viewport is this minus the status bar and
-/// the prompt row, i.e. 8 rows.
+/// the prompt row plus its border row (Phase 2 / G3), i.e. 7 rows.
 const HEIGHT: u16 = 10;
-const VIEWPORT: usize = (HEIGHT - 2) as usize;
+const VIEWPORT: usize = (HEIGHT - 3) as usize;
 
 fn faux_model() -> Model {
     Model {
@@ -69,36 +69,38 @@ fn key(code: KeyCode) -> Key {
 #[test]
 fn page_up_and_down_move_by_one_viewport() {
     let (mut app, top) = app_with_lines(40);
-    // Pinned to the tail: the last viewport-height lines are visible.
-    assert_eq!(top, "> line 32");
+    // Pinned to the tail: the last VIEWPORT lines are visible (Phase 2 / G3
+    // reserved a row for the editor border, so VIEWPORT == 7 and the top
+    // visible line is the 33rd of 40).
+    assert_eq!(top, "> line 33");
     assert_eq!(app.messages().scroll_offset(), 0);
     assert!(app.messages().is_following());
 
     assert_eq!(app.step_key(key(KeyCode::PageUp)), StepOutcome::Redraw);
     assert_eq!(app.messages().scroll_offset(), VIEWPORT);
-    assert_eq!(top_line(&app), "> line 24");
+    assert_eq!(top_line(&app), "> line 26");
     assert!(!app.messages().is_following());
 
     assert_eq!(app.step_key(key(KeyCode::PageUp)), StepOutcome::Redraw);
     assert_eq!(app.messages().scroll_offset(), 2 * VIEWPORT);
-    assert_eq!(top_line(&app), "> line 16");
+    assert_eq!(top_line(&app), "> line 19");
 
     assert_eq!(app.step_key(key(KeyCode::PageDown)), StepOutcome::Redraw);
-    assert_eq!(top_line(&app), "> line 24");
+    assert_eq!(top_line(&app), "> line 26");
 
     assert_eq!(app.step_key(key(KeyCode::PageDown)), StepOutcome::Redraw);
     // Back at the tail the viewport re-attaches to new output.
     assert_eq!(app.messages().scroll_offset(), 0);
     assert!(app.messages().is_following());
-    assert_eq!(top_line(&app), "> line 32");
+    assert_eq!(top_line(&app), "> line 33");
 }
 
 #[test]
 fn page_scroll_clamps_at_both_ends() {
     let (mut app, _) = app_with_lines(10);
-    // 10 lines in an 8-row viewport leaves only 2 lines of scrollback.
+    // 10 lines in a 7-row viewport (Phase 2 / G3) leaves 3 lines of scrollback.
     assert_eq!(app.step_key(key(KeyCode::PageUp)), StepOutcome::Redraw);
-    assert_eq!(app.messages().scroll_offset(), 2);
+    assert_eq!(app.messages().scroll_offset(), 3);
     assert_eq!(top_line(&app), "> line 0");
     // Already at the top — nothing to redraw.
     assert_eq!(app.step_key(key(KeyCode::PageUp)), StepOutcome::Idle);
@@ -121,10 +123,10 @@ fn home_and_end_jump_to_the_extremes() {
     let offset_at_top = app.messages().scroll_offset();
     assert_eq!(app.step_key(key(KeyCode::PageDown)), StepOutcome::Redraw);
     assert!(app.messages().scroll_offset() < offset_at_top);
-    assert_eq!(top_line(&app), "> line 8");
+    assert_eq!(top_line(&app), "> line 7");
 
     assert_eq!(app.step_key(key(KeyCode::End)), StepOutcome::Redraw);
-    assert_eq!(top_line(&app), "> line 32");
+    assert_eq!(top_line(&app), "> line 33");
     assert!(app.messages().is_following());
     assert_eq!(app.step_key(key(KeyCode::End)), StepOutcome::Idle);
 }
@@ -157,7 +159,7 @@ fn detached_viewport_ignores_streaming_output() {
     app.step_key(key(KeyCode::PageUp));
     let detached_top = top_line(&app);
     let detached_offset = app.messages().scroll_offset();
-    assert_eq!(detached_top, "> line 24");
+    assert_eq!(detached_top, "> line 26");
 
     // A streaming delta on the trailing item (new assistant block) and a
     // finalized message both arrive while the reader is scrolled back.

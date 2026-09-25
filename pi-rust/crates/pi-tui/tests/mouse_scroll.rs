@@ -20,10 +20,10 @@ use pi_tui::styled::{SpanStyle, StyledLine, StyledSpan};
 use pi_tui::theme::ThemeColor;
 
 const WIDTH: u16 = 40;
-/// Snapshot height; the message viewport is this minus the status bar and
-/// the prompt row, i.e. 8 rows.
+/// Snapshot height; the message viewport is this minus the status bar,
+/// the prompt row, and the editor border row (Phase 2 / G3), i.e. 7 rows.
 const HEIGHT: u16 = 10;
-const VIEWPORT: usize = (HEIGHT - 2) as usize;
+const VIEWPORT: usize = (HEIGHT - 3) as usize;
 
 fn faux_model() -> Model {
     Model {
@@ -135,14 +135,17 @@ fn non_wheel_mouse_events_translate_to_gestures() {
 fn wheel_moves_one_line_per_notch() {
     let mut app = app_with_lines(40);
     assert!(app.messages().is_following());
-    assert_eq!(top_line(&app), "> line 32");
+    // Phase 2 / G3 reserves a row for the editor border, so the viewport
+    // shrinks from 8 to 7 — the top visible line at the tail is now the
+    // 33rd of 40 (not 32nd).
+    assert_eq!(top_line(&app), "> line 33");
 
     assert_eq!(
         app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 1);
-    assert_eq!(top_line(&app), "> line 31");
+    assert_eq!(top_line(&app), "> line 32");
     assert!(!app.messages().is_following());
 
     assert_eq!(
@@ -152,7 +155,7 @@ fn wheel_moves_one_line_per_notch() {
     // Back at the tail the viewport re-attaches to new output.
     assert_eq!(app.messages().scroll_offset(), 0);
     assert!(app.messages().is_following());
-    assert_eq!(top_line(&app), "> line 32");
+    assert_eq!(top_line(&app), "> line 33");
 }
 
 #[test]
@@ -164,7 +167,9 @@ fn alt_wheel_multiplies_the_step() {
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 5);
-    assert_eq!(top_line(&app), "> line 27");
+    // Phase 2 / G3 reserves a row for the editor border, so the tail's
+    // top visible line is now line 33, and 5 rows up from there is line 28.
+    assert_eq!(top_line(&app), "> line 28");
 
     // A shorter-than-five-line overscroll clamps at the top instead of
     // wrapping.
@@ -188,19 +193,19 @@ fn alt_wheel_multiplies_the_step() {
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 25);
-    assert_eq!(top_line(&app), "> line 7");
+    assert_eq!(top_line(&app), "> line 8");
     assert_eq!(
         app.step(InputEvent::wheel(true, true, 0, 0)),
         StepOutcome::Redraw
     );
     assert_eq!(app.messages().scroll_offset(), 30);
-    assert_eq!(top_line(&app), "> line 2");
+    assert_eq!(top_line(&app), "> line 3");
     // The final notch clamps at the top instead of overshooting.
     assert_eq!(
         app.step(InputEvent::wheel(true, true, 0, 0)),
         StepOutcome::Redraw
     );
-    assert_eq!(app.messages().scroll_offset(), 32);
+    assert_eq!(app.messages().scroll_offset(), 33);
     assert_eq!(top_line(&app), "> line 0");
 
     // Already at the top — no redraw.
@@ -212,7 +217,8 @@ fn alt_wheel_multiplies_the_step() {
 
 #[test]
 fn wheel_clamps_at_both_ends() {
-    // 10 lines in an 8-row viewport leaves only 2 lines of scrollback.
+    // 10 lines in a 7-row viewport leaves 3 lines of scrollback
+    // (Phase 2 / G3 reserves a row for the editor border).
     let mut app = app_with_lines(10);
 
     assert_eq!(
@@ -227,10 +233,19 @@ fn wheel_clamps_at_both_ends() {
     assert_eq!(app.messages().scroll_offset(), 2);
     assert_eq!(
         app.step(InputEvent::wheel(true, false, 0, 0)),
+        StepOutcome::Redraw
+    );
+    assert_eq!(app.messages().scroll_offset(), 3);
+    assert_eq!(top_line(&app), "> line 0");
+    assert_eq!(
+        app.step(InputEvent::wheel(true, false, 0, 0)),
         StepOutcome::Idle
     );
-    assert_eq!(top_line(&app), "> line 0");
 
+    assert_eq!(
+        app.step(InputEvent::wheel(false, false, 0, 0)),
+        StepOutcome::Redraw
+    );
     assert_eq!(
         app.step(InputEvent::wheel(false, false, 0, 0)),
         StepOutcome::Redraw

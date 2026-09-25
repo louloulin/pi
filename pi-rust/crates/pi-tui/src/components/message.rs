@@ -13,12 +13,16 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
 use pi_protocol::{ToolCall, ToolResult};
 
+use std::boxed::Box as StdBox;
+
+use crate::component::{Component, TextComponent};
+use crate::components::BoxLayout;
 use crate::utils::styled::{
     plain_text, themed_text, write_plain_row, write_styled_line_hyperlinked, SpanStyle, StyledLine,
     StyledSpan,
 };
 use crate::styles::SelectListStyles;
-use crate::theme::{Theme, ThemeColor};
+use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::utils::width::{char_columns, columns, is_cjk_break};
 
 /// Logical role — drives the visual prefix and the message-view
@@ -39,6 +43,50 @@ pub enum Role {
     /// user prompt: before this variant existed `/help`'s body shared the
     /// composer's `> ` prefix (LUM-1238 §15.4).
     Info,
+    /// Free-form notice block — used by the version-update / package-update
+    /// notifications and any future driver-anchored banner.
+    ///
+    /// A notice does not get a per-line prefix; the caller pre-builds the
+    /// styled lines (typically a [`crate::components::DynamicBorder`] on
+    /// top, a bold header, an instruction line, an optional markdown body,
+    /// and a closing border) and the role carries them in
+    /// [`MessageItem::notice_lines`].
+    Notice,
+}
+
+/// Lifecycle of a tool execution; drives the background slot the
+/// message renderer stamps on tool blocks (`toolPendingBg` /
+/// `toolSuccessBg` / `toolErrorBg` in upstream's theme).
+///
+/// Defaults to [`ToolStatus::Success`] on every [`MessageItem`] —
+/// callers that build a finalized tool block keep their existing
+/// rendering without an explicit `with_tool_status(Success)`. Drivers
+/// flip to [`ToolStatus::Pending`] between `ToolExecutionStart` and
+/// `ToolExecutionEnd`, and back to success / error based on the
+/// `is_error` flag upstream's `toolCallStatus` slot reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ToolStatus {
+    /// Call is in flight (`ToolPendingBg` background).
+    Pending,
+    /// Call finished without raising (`ToolSuccessBg` background).
+    #[default]
+    Success,
+    /// Call raised an error (`ToolErrorBg` background).
+    Error,
+}
+
+impl ToolStatus {
+    /// Resolve the upstream `toolCallStatus` → [`crate::theme::ThemeBg`]
+    /// mapping. Mirrors `Box(paddingX, 1, theme.bg(slot, …))` in the
+    /// TS reference — the slot is applied uniformly across the whole
+    /// tool block body via [`crate::utils::styled::paint_bg_lines`].
+    pub fn bg_slot(self) -> ThemeBg {
+        match self {
+            ToolStatus::Pending => ThemeBg::ToolPendingBg,
+            ToolStatus::Success => ThemeBg::ToolSuccessBg,
+            ToolStatus::Error => ThemeBg::ToolErrorBg,
+        }
+    }
 }
 
 /// Label a collapsed thinking block renders in place of its text
@@ -153,6 +201,16 @@ pub struct MessageItem {
     /// True while an assistant message is still streaming (the TUI
     /// shows a caret indicator).
     pub streaming: bool,
+    /// Lifecycle status of a tool block; drives the
+    /// `ToolPendingBg` / `ToolSuccessBg` / `ToolErrorBg` background slot
+    /// the message renderer paints on the block (`Box(paddingX, 1,
+    /// theme.bg(slot, …))` upstream). Defaults to [`ToolStatus::Success`]
+    /// so callers that build a finished tool item — the historical default
+    /// before this field existed — keep their byte-identical rendering.
+    /// Drivers flip it to [`ToolStatus::Pending`] on `ToolExecutionStart`
+    /// and back to [`ToolStatus::Success`] / [`ToolStatus::Error`] on
+    /// `ToolExecutionEnd`, matching upstream's `toolCallStatus` slot.
+    pub tool_status: ToolStatus,
     /// Pre-rendered, already-styled call header for a tool block.
     ///
     /// The driver's [`ToolBlockRenderer`] supplies it alongside
@@ -174,6 +232,14 @@ pub struct MessageItem {
     /// sets `Some(...)`; a global [`MessageView::toggle_tools_expanded`]
     /// clears every override again so one chord really does toggle all.
     pub tool_expanded: Option<bool>,
+    /// Pre-built styled lines for a notice block (Update Available /
+    /// Package Updates Available / driver-defined banners).
+    ///
+    /// Only meaningful when [`MessageItem::role`] is [`Role::Notice`];
+    /// ignored for every other role. The render path returns the lines
+    /// verbatim — no prefix, no wrap — so the caller is responsible for
+    /// whatever margins, borders and colour slots the notice needs.
+    pub notice_lines: Option<Vec<StyledLine>>,
 }
 
 impl MessageItem {
@@ -184,9 +250,11 @@ impl MessageItem {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_status: ToolStatus::Success,
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            notice_lines: None,
         }
     }
 
@@ -197,9 +265,11 @@ impl MessageItem {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_status: ToolStatus::Success,
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            notice_lines: None,
         }
     }
 
@@ -211,9 +281,11 @@ impl MessageItem {
             text: String::new(),
             thinking: String::new(),
             streaming: true,
+            tool_status: ToolStatus::Success,
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            notice_lines: None,
         }
     }
 
@@ -224,9 +296,73 @@ impl MessageItem {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_status: ToolStatus::Success,
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            notice_lines: None,
+        }
+    }
+
+    /// Convenience constructor for an in-flight tool block (the
+    /// status-painted `ToolPendingBg` slot is shown until the call ends).
+    pub fn tool_pending(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            text: text.into(),
+            thinking: String::new(),
+            streaming: false,
+            tool_status: ToolStatus::Pending,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
+            notice_lines: None,
+        }
+    }
+
+    /// Convenience constructor for a tool block that failed.
+    pub fn tool_error(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            text: text.into(),
+            thinking: String::new(),
+            streaming: false,
+            tool_status: ToolStatus::Error,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
+            notice_lines: None,
+        }
+    }
+
+    /// Set the tool lifecycle status (builder form).
+    pub fn with_tool_status(mut self, status: ToolStatus) -> Self {
+        self.tool_status = status;
+        self
+    }
+
+    /// Set the tool lifecycle status in place.
+    pub fn set_tool_status(&mut self, status: ToolStatus) {
+        self.tool_status = status;
+    }
+
+    /// Build a notice block from already-styled lines.
+    ///
+    /// `lines` are rendered verbatim — no prefix, no wrap — so the caller
+    /// builds the layout it wants (typically a [`crate::components::DynamicBorder`]
+    /// on top, a bold header, an instruction line, an optional markdown
+    /// body, and a closing border) using the theme slots it needs.
+    pub fn notice(lines: Vec<StyledLine>) -> Self {
+        Self {
+            role: Role::Notice,
+            text: String::new(),
+            thinking: String::new(),
+            streaming: false,
+            tool_status: ToolStatus::Success,
+            tool_header: None,
+            tool_lines: None,
+            tool_expanded: None,
+            notice_lines: Some(lines),
         }
     }
 }
@@ -275,6 +411,22 @@ pub const PENDING_HINT_LEAD: &str = "\u{21b3} ";
 /// Hint copy that follows the `app.message.dequeue` chord (upstream
 /// `interactive-mode.ts:4382`).
 pub const PENDING_HINT_TEXT: &str = "to edit all queued messages";
+
+/// Header that paints above an in-flight assistant message.
+///
+/// Upstream renders a one-line "~ Working" label with a spinner glyph
+/// (`packages/coding-agent/src/modes/interactive/components/assistant-message.ts`,
+/// upstream's `workingLabel`). The Rust port keeps the same copy and the
+/// glyph advances in lock-step with [`crate::components::loader::Spinner`]:
+/// the App sets the current frame on the [`MessageView`] before each
+/// [`MessageView::render_styled_lines_with_links`] call so the reader sees
+/// the same animation as the busy spinner in the footer.
+pub fn working_header_line(spinner_frame: char) -> Vec<StyledSpan> {
+    vec![StyledSpan::new(
+        format!("{spinner_frame} Working "),
+        SpanStyle::fg(ThemeColor::Dim),
+    )]
+}
 
 /// Conversation log rendered by the TUI. Holds an ordered list of
 /// [`MessageItem`] entries and supports incremental updates so the
@@ -333,6 +485,11 @@ pub struct MessageView {
     tools_expanded: bool,
     /// Lines a collapsed tool block previews. See [`TOOL_PREVIEW_LINES`].
     tool_preview_lines: usize,
+    /// The current frame of the busy spinner, painted as the first glyph of
+    /// the in-flight assistant header. The App sets this before each render
+    /// so the reader sees the same animation as the footer's busy spinner.
+    /// Defaults to [`SPINNER_FRAMES[0]`] so pre-render snapshots stay stable.
+    spinner_frame: char,
 }
 
 impl Default for MessageView {
@@ -351,6 +508,7 @@ impl Default for MessageView {
             pending_follow_up: Vec::new(),
             tools_expanded: false,
             tool_preview_lines: TOOL_PREVIEW_LINES,
+            spinner_frame: crate::components::loader::SPINNER_FRAMES[0],
         }
     }
 }
@@ -371,6 +529,7 @@ impl Clone for MessageView {
             pending_follow_up: self.pending_follow_up.clone(),
             tools_expanded: self.tools_expanded,
             tool_preview_lines: self.tool_preview_lines,
+            spinner_frame: self.spinner_frame,
         }
     }
 }
@@ -441,6 +600,19 @@ impl MessageView {
     /// Show or collapse assistant thinking blocks in place.
     pub fn set_thinking_visible(&mut self, visible: bool) {
         self.hide_thinking = !visible;
+    }
+
+    /// Update the busy spinner frame used by the in-flight assistant header.
+    /// The App calls this from [`App::render_to_buffer`] right after
+    /// [`App::tick_busy_feedback`] advances the cursor, so the working
+    /// header always carries the same glyph as the footer's busy indicator.
+    pub fn set_spinner_frame(&mut self, frame: char) {
+        self.spinner_frame = frame;
+    }
+
+    /// The busy spinner frame this view will paint into the working header.
+    pub fn spinner_frame(&self) -> char {
+        self.spinner_frame
     }
 
     /// Whether tool blocks render expanded (builder form).
@@ -540,6 +712,18 @@ impl MessageView {
     /// Append a finalized message to the log.
     pub fn push(&mut self, item: MessageItem) {
         self.items.push(item);
+        self.repin_if_following();
+    }
+
+    /// Replace the last message in the log with `item`. Useful when a
+    /// driver mutates the most recent item in place (e.g. flipping a
+    /// tool call from `Pending` to `Success` / `Error`).
+    ///
+    /// Panics if the log is empty — callers should check `is_empty()`
+    /// first, or seed the log with a sentinel item.
+    pub fn replace_last(&mut self, item: MessageItem) {
+        let idx = self.items.len() - 1;
+        self.items[idx] = item;
         self.repin_if_following();
     }
 
@@ -985,9 +1169,11 @@ impl MessageView {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_status: ToolStatus::Success,
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            notice_lines: None,
         });
     }
 
@@ -1003,10 +1189,59 @@ impl MessageView {
             text: text.into(),
             thinking: String::new(),
             streaming: false,
+            tool_status: ToolStatus::Success,
             tool_header: None,
             tool_lines: None,
             tool_expanded: None,
+            notice_lines: None,
         });
+    }
+
+    /// Push a pre-styled notice block — Update Available, Package Updates
+    /// Available, or any other driver-built banner.
+    ///
+    /// Mirrors upstream's `showNewVersionNotification` /
+    /// `showPackageUpdateNotification`
+    /// (`packages/coding-agent/src/modes/interactive/interactive-mode.ts:4285-4330`):
+    /// the caller composes the lines (border, header, instruction, optional
+    /// body, closing border) with the colours it wants and the message
+    /// view paints them verbatim — no prefix, no wrap.
+    pub fn push_notice(&mut self, lines: Vec<StyledLine>) {
+        self.push(MessageItem::notice(lines));
+    }
+
+    /// Build and push the standard "Update Available" notice.
+    ///
+    /// Renders two `DynamicBorder` dividers around a bold `Update Available`
+    /// header, the `pi update` action line, the release notes body (if any)
+    /// and a changelog link — matching
+    /// [`showNewVersionNotification`](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L4285).
+    pub fn push_update_notice(
+        &mut self,
+        version: &str,
+        note: Option<&str>,
+        changelog_url: &str,
+        app_name: &str,
+        width: u16,
+    ) {
+        let lines = build_update_notice_lines(version, note, changelog_url, app_name, width);
+        self.push(MessageItem::notice(lines));
+    }
+
+    /// Build and push the standard "Package Updates Available" notice.
+    ///
+    /// Renders the same border + header + instruction pattern as
+    /// [`MessageView::push_update_notice`], then a bullet list of out-of-date
+    /// package names — matching
+    /// [`showPackageUpdateNotification`](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L4314).
+    pub fn push_package_update_notice(
+        &mut self,
+        packages: &[String],
+        app_name: &str,
+        width: u16,
+    ) {
+        let lines = build_package_update_notice_lines(packages, app_name, width);
+        self.push(MessageItem::notice(lines));
     }
 
     /// True when the log is currently pinned to the tail. The TUI
@@ -1184,6 +1419,13 @@ impl MessageView {
         text_width: usize,
         hyperlinks: bool,
     ) -> Vec<StyledLine> {
+        // Notice blocks are returned verbatim — no prefix, no wrap — so the
+        // caller-supplied border / header / body composition lands on screen
+        // unchanged. An empty notice still renders as a single blank row so
+        // the viewport's tail spacing stays correct.
+        if item.role == Role::Notice {
+            return item.notice_lines.clone().unwrap_or_default();
+        }
         let (prefix, prefix_style, body_style) = match item.role {
             Role::User => (
                 "> ",
@@ -1201,6 +1443,9 @@ impl MessageView {
                 SpanStyle::fg(ThemeColor::Muted),
                 SpanStyle::fg(ThemeColor::CustomMessageText),
             ),
+            // Notice blocks returned verbatim above; this branch is
+            // unreachable but the match has to cover every variant.
+            Role::Notice => unreachable!("notice items short-circuit at the top of item_lines"),
         };
 
         let mut out: Vec<StyledLine> = Vec::new();
@@ -1231,12 +1476,72 @@ impl MessageView {
         } else {
             plain_lines(&item.text, text_width, prefix, prefix_style, body_style)
         };
+
+        // TS pi-tui paints a one-line "~ Working" header above any
+        // assistant message that is still streaming, with a spinner
+        // glyph as its first character. The Rust port keeps that
+        // affordance here: it prepends a single dim row to streaming
+        // assistant items so the reader can tell the answer is in
+        // flight. The glyph follows [`crate::components::loader::Spinner`]
+        // — the App sets the current frame on this view right before
+        // rendering, so the header animates in lock-step with the
+        // footer's busy spinner.
         if item.role == Role::Assistant && item.streaming {
-            if let Some(first) = lines.first_mut() {
-                first.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
+            lines.insert(0, working_header_line(self.spinner_frame));
+        }
+        if item.role == Role::Assistant && item.streaming {
+            // The streaming caret `▍` always lands on the **last body
+            // line**, not on the synthetic Working row we just
+            // inserted above the body. Walking from the tail keeps
+            // both the working header and the caret intact even when
+            // an assistant body spans multiple wrap rows.
+            if let Some(last) = lines.iter_mut().rev().find(|line| {
+                !line
+                    .iter()
+                    .all(|span| span.text.trim().is_empty())
+            }) {
+                last.push(StyledSpan::new(" ▍", SpanStyle::fg(ThemeColor::Dim)));
             }
         }
-        out.extend(lines);
+
+        // TS pi-tui wraps every user / custom message in a
+        // `Box(paddingX, 1, theme.bg("userMessageBg", …))`. The Rust port
+        // keeps the existing prefix + wrap behaviour (a Box container
+        // would change the wrap width) and paints the same visual
+        // effect by stamping the configured background slot onto every
+        // span of every line, including the rows that prefix a blank
+        // line above and below the body. Tool panels render their own
+        // chrome and intentionally stay unstamped.
+        //
+        // Tool blocks get the same treatment, but the slot is chosen
+        // from [`MessageItem::tool_status`] so a pending call carries
+        // `ToolPendingBg`, a successful call `ToolSuccessBg`, and a
+        // failed call `ToolErrorBg`. Upstream wraps tool panels in
+        // the same `Box(paddingX, 1, theme.bg(slot, …))` pattern.
+        // TS pi-tui wraps every user / custom / tool message in a
+        // `Box(paddingX, paddingY, theme.bg(slot, …))`. The Rust port
+        // delegates that whole pattern to [`BoxLayout`] so the bg slot,
+        // padding, and `bgFn` are owned by one wrapper instead of being
+        // stamped span-by-span via [`paint_bg_lines`]. The result is the
+        // same cell-level paint (BoxLayout's `paint_bg` helper sets the
+        // same `style.bg` per span), but the slot selection becomes a
+        // declaration in one place.
+        let bg_slot = match item.role {
+            Role::User => Some(ThemeBg::UserMessageBg),
+            Role::Info => Some(ThemeBg::CustomMessageBg),
+            Role::Tool => Some(item.tool_status.bg_slot()),
+            _ => None,
+        };
+        if let Some(slot) = bg_slot {
+            let child: StdBox<dyn Component> = StdBox::new(TextComponent::from_lines(lines));
+            let boxed = BoxLayout::new(vec![child])
+                .with_padding_xy(0, 0)
+                .with_bg(slot);
+            let width = u16::try_from(text_width).unwrap_or(u16::MAX);
+            out.extend(boxed.render(width));
+        } else {
+            out.extend(lines);
+        }
         out
     }
 
@@ -1833,6 +2138,143 @@ fn hard_wrap(word: &str, width: usize) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// Build the styled lines for an "Update Available" notice — a
+/// [`crate::components::DynamicBorder`] divider, the bold "Update Available"
+/// header, the `pi update` action line, an optional markdown release-note
+/// body, the changelog link, and a closing border.
+///
+/// Mirrors
+/// [`showNewVersionNotification`](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L4285).
+fn build_update_notice_lines(
+    version: &str,
+    note: Option<&str>,
+    changelog_url: &str,
+    app_name: &str,
+    width: u16,
+) -> Vec<StyledLine> {
+    let mut out: Vec<StyledLine> = Vec::new();
+    let w = width.max(1);
+    let warning = ThemeColor::Warning;
+    let accent = ThemeColor::Accent;
+    let muted = ThemeColor::Muted;
+
+    // Top divider.
+    out.push(divider_line(w, warning));
+
+    // Header line: bold "Update Available" (warning-coloured).
+    out.push(vec![StyledSpan::new(
+        "Update Available".to_string(),
+        SpanStyle::fg(warning).bold(),
+    )]);
+
+    // Instruction line: "New version <v> is available. Run <app> update".
+    let instruction = format!("New version {version} is available. Run ");
+    let action = format!("{app_name} update");
+    out.push(vec![
+        StyledSpan::new(instruction, SpanStyle::fg(muted)),
+        StyledSpan::new(action, SpanStyle::fg(accent)),
+    ]);
+
+    // Optional release-note body (rendered as plain wrapped text — the
+    // TS path uses Markdown but the port keeps the simple form to avoid
+    // a hard dependency on the markdown renderer for an offline notice).
+    if let Some(note) = note.map(str::trim).filter(|note| !note.is_empty()) {
+        out.push(blank_styled_line());
+        for wrapped in wrap_text(note, w as usize) {
+            out.push(vec![StyledSpan::new(wrapped, SpanStyle::fg(muted))]);
+        }
+        out.push(blank_styled_line());
+    }
+
+    // Changelog link line.
+    out.push(vec![
+        StyledSpan::new("Changelog: ".to_string(), SpanStyle::fg(muted)),
+        StyledSpan::new(changelog_url.to_string(), SpanStyle::fg(accent)),
+    ]);
+
+    // Closing divider.
+    out.push(divider_line(w, warning));
+    out
+}
+
+/// Build the styled lines for a "Package Updates Available" notice.
+///
+/// Mirrors
+/// [`showPackageUpdateNotification`](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L4314):
+/// border, bold header, "Package updates are available. Run `<app> update
+/// --extensions`" instruction, a `- pkg` bullet list, and a closing border.
+fn build_package_update_notice_lines(
+    packages: &[String],
+    app_name: &str,
+    width: u16,
+) -> Vec<StyledLine> {
+    let mut out: Vec<StyledLine> = Vec::new();
+    let w = width.max(1);
+    let warning = ThemeColor::Warning;
+    let accent = ThemeColor::Accent;
+    let muted = ThemeColor::Muted;
+
+    out.push(divider_line(w, warning));
+    out.push(vec![StyledSpan::new(
+        "Package Updates Available".to_string(),
+        SpanStyle::fg(warning).bold(),
+    )]);
+    let instruction = "Package updates are available. Run ".to_string();
+    let action = format!("{app_name} update --extensions");
+    out.push(vec![
+        StyledSpan::new(instruction, SpanStyle::fg(muted)),
+        StyledSpan::new(action, SpanStyle::fg(accent)),
+    ]);
+    if !packages.is_empty() {
+        out.push(vec![StyledSpan::new("Packages:".to_string(), SpanStyle::fg(muted))]);
+        for pkg in packages {
+            out.push(vec![StyledSpan::new(
+                format!("- {pkg}"),
+                SpanStyle::fg(muted),
+            )]);
+        }
+    }
+    out.push(divider_line(w, warning));
+    out
+}
+
+/// One row of `─` glyphs in `color`, used by both notice builders.
+fn divider_line(width: u16, color: ThemeColor) -> StyledLine {
+    let w = width.max(1) as usize;
+    vec![StyledSpan::new(
+        "─".repeat(w),
+        SpanStyle::fg(color),
+    )]
+}
+
+/// One empty styled line — used to separate the header / body / link rows
+/// of an Update Available notice.
+fn blank_styled_line() -> StyledLine {
+    vec![StyledSpan::new(String::new(), SpanStyle::PLAIN)]
+}
+
+/// Stamp every span of `lines` with the given background slot.
+///
+/// Used by [`MessageView::item_lines`] to match the upstream TS visual:
+/// every user / custom-message body is wrapped in a `Box(paddingX, 1,
+/// theme.bg(slot, …))`, which paints the entire block (including its
+/// padding rows) with that background. The Rust port keeps its
+/// prefix-and-wrap pipeline intact and applies the same effect at the
+/// span level so the rendered bytes carry the right SGR codes.
+///
+/// Phase 6 / G7: this helper is now invoked through [`BoxLayout::with_bg`]
+/// (see [`MessageView::item_lines`]); kept here as a single-line shortcut
+/// for the few callers that only need a span-level stamp without a layout
+/// wrapper (e.g. status-bar segments painted directly into a styled line).
+#[allow(dead_code)]
+fn paint_bg_lines(lines: &mut [StyledLine], slot: ThemeBg) {
+    for line in lines.iter_mut() {
+        for span in line.iter_mut() {
+            span.style.bg = Some(slot);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@
  //! from [`crate::components`].
 
 use crate::component::Component;
+use crate::theme::ThemeBg;
 use crate::utils::styled::{SpanStyle, StyledLine, StyledSpan};
 use crate::utils::width::columns;
 use std::boxed::Box as StdBox;
@@ -19,11 +20,22 @@ use std::boxed::Box as StdBox;
 /// `BoxLayout::with_padding(...)` adds a uniform margin around the
 /// children; `BoxLayout::with_style(...)` lets the box render an
 /// optional header line above the children.
+///
+/// `BoxLayout::with_bg(ThemeBg::UserMessageBg)` mirrors the upstream
+/// `Box(paddingX, paddingY, theme.bg("userMessageBg", …))` pattern:
+/// every row of the rendered output (including padding rows) is
+/// painted with the configured background slot. The TS version accepts
+/// an arbitrary `(text) => text` function; Rust uses a [`ThemeBg`]
+/// slot, which is the same thing expressed as a theme lookup — the
+/// effect is identical for every theme the upstream project ships.
 pub struct BoxLayout {
     children: Vec<StdBox<dyn Component>>,
     padding: u16,
+    padding_x: u16,
+    padding_y: u16,
     style: SpanStyle,
     header: Option<String>,
+    bg: Option<ThemeBg>,
 }
 
 impl BoxLayout {
@@ -33,14 +45,30 @@ impl BoxLayout {
         Self {
             children,
             padding: 0,
+            padding_x: 0,
+            padding_y: 0,
             style: SpanStyle::PLAIN,
             header: None,
+            bg: None,
         }
     }
 
     /// Set the inner padding (cells) on all sides.
     pub fn with_padding(mut self, padding: u16) -> Self {
         self.padding = padding;
+        self
+    }
+
+    /// Set the horizontal and vertical padding separately, mirroring
+    /// upstream's `Box(paddingX, paddingY, theme.bg(slot, …))`. User
+    /// blocks use `(1, 0)`; tool blocks use `(1, 1)`.
+    ///
+    /// Calling this overrides [`with_padding`](Self::with_padding) for
+    /// subsequent renders — the last setter wins.
+    pub fn with_padding_xy(mut self, x: u16, y: u16) -> Self {
+        self.padding_x = x;
+        self.padding_y = y;
+        self.padding = 0;
         self
     }
 
@@ -54,6 +82,19 @@ impl BoxLayout {
     pub fn with_header(mut self, header: impl Into<String>) -> Self {
         self.header = Some(header.into());
         self
+    }
+
+    /// Paint the entire box (including padding rows) with the given
+    /// background theme slot. Equivalent to upstream's
+    /// `Box(paddingX, paddingY, theme.bg(slot, …))`.
+    pub fn with_bg(mut self, bg: ThemeBg) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+
+    /// Replace the background slot after construction.
+    pub fn set_bg(&mut self, bg: Option<ThemeBg>) {
+        self.bg = bg;
     }
 
     /// Push a child. Use this when the box outlives the children.
@@ -74,22 +115,24 @@ impl BoxLayout {
 
 impl Component for BoxLayout {
     fn render(&self, width: u16) -> Vec<StyledLine> {
+        let pad_x = if self.padding > 0 { self.padding } else { self.padding_x };
+        let pad_y = if self.padding > 0 { self.padding } else { self.padding_y };
         let mut out = Vec::new();
         if let Some(header) = &self.header {
             let line = vec![StyledSpan::new(header.clone(), self.style)];
-            out.push(line);
+            out.push(paint_bg(line, self.bg));
         }
-        let pad = " ".repeat(self.padding as usize);
-        let child_width = width.saturating_sub(self.padding.saturating_mul(2));
+        let pad = " ".repeat(pad_x as usize);
+        let child_width = width.saturating_sub(pad_x.saturating_mul(2));
         for child in &self.children {
             let lines = child.render(child_width);
             for line in lines {
                 let mut new_line = Vec::new();
-                if self.padding > 0 {
+                if pad_x > 0 {
                     new_line.push(StyledSpan::new(pad.clone(), SpanStyle::PLAIN));
                 }
                 let line_cols: usize = line.iter().map(|s| columns(&s.text)).sum();
-                if line_cols < child_width as usize && self.padding > 0 {
+                if line_cols < child_width as usize && pad_x > 0 {
                     new_line.push(StyledSpan::new(
                         " ".repeat(child_width as usize - line_cols),
                         SpanStyle::PLAIN,
@@ -99,22 +142,47 @@ impl Component for BoxLayout {
                     for span in line {
                         new_line.push(span);
                     }
-                    if self.padding > 0 {
+                    if pad_x > 0 {
                         new_line.push(StyledSpan::new(pad.clone(), SpanStyle::PLAIN));
                     }
                 }
-                out.push(new_line);
+                out.push(paint_bg(new_line, self.bg));
             }
         }
-        // Add top/bottom padding rows.
-        for _ in 0..self.padding {
-            out.insert(0, vec![StyledSpan::new(" ".repeat(width as usize), SpanStyle::PLAIN)]);
+        // Add top/bottom padding rows. Upstream's Box applies bgFn to
+        // these too, so the entire block has a continuous background.
+        for _ in 0..pad_y {
+            out.insert(
+                0,
+                vec![StyledSpan::new(" ".repeat(width as usize), pad_style(self.bg))],
+            );
         }
-        for _ in 0..self.padding {
-            out.push(vec![StyledSpan::new(" ".repeat(width as usize), SpanStyle::PLAIN)]);
+        for _ in 0..pad_y {
+            out.push(vec![StyledSpan::new(
+                " ".repeat(width as usize),
+                pad_style(self.bg),
+            )]);
         }
         out
     }
+}
+
+/// Paint every span in `line` with `bg`, preserving the existing
+/// foreground slot. Equivalent to upstream `theme.bg(slot, line)`.
+fn paint_bg(mut line: StyledLine, bg: Option<ThemeBg>) -> StyledLine {
+    if let Some(slot) = bg {
+        for span in &mut line {
+            span.style.bg = Some(slot);
+        }
+    }
+    line
+}
+
+/// A plain run that still carries the configured background slot.
+fn pad_style(bg: Option<ThemeBg>) -> SpanStyle {
+    let mut s = SpanStyle::PLAIN;
+    s.bg = bg;
+    s
 }
 
 #[cfg(test)]

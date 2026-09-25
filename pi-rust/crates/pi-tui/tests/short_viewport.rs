@@ -13,6 +13,9 @@
 //! No test here installs a keybinding table: `pi-tui`'s own registry has no
 //! `app.*` ids, so the built-in header is short and these assertions do not
 //! depend on the driver's table (`startup_header.rs` covers the tall one).
+//!
+//! The message viewport is [`HEIGHT`] minus the status bar, the prompt row,
+//! and the editor border row (Phase 2 / G3), i.e. `HEIGHT - 3`.
 
 use std::sync::Arc;
 
@@ -138,7 +141,7 @@ fn the_viewport_gives_up_one_column_only_while_the_bar_is_drawn() {
     let mut fitting = app();
     fitting.info("short");
     let _ = render(&mut fitting);
-    assert_eq!(fitting.viewport(), (WIDTH, HEIGHT - 2));
+    assert_eq!(fitting.viewport(), (WIDTH, HEIGHT - 3));
     assert_eq!(fitting.scrollbar_geometry(), None);
 
     // Twenty lines overflow: the bar takes a column out of the text.
@@ -147,7 +150,7 @@ fn the_viewport_gives_up_one_column_only_while_the_bar_is_drawn() {
         overflowing.info(format!("line {i}"));
     }
     let _ = render(&mut overflowing);
-    assert_eq!(overflowing.viewport(), (WIDTH - 1, HEIGHT - 2));
+    assert_eq!(overflowing.viewport(), (WIDTH - 1, HEIGHT - 3));
     let geometry = overflowing
         .scrollbar_geometry()
         .expect("content overflows the viewport");

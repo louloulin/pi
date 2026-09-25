@@ -161,6 +161,26 @@ pub struct StatusData {
     /// driver mirrors it here. Empty by default, which keeps the pre-LUM-1481
     /// one/two-row frames byte-identical.
     pub extension_statuses: Vec<(String, String)>,
+    /// Whether the active model supports a reasoning / thinking level.
+    ///
+    /// When `true`, the right cluster appends ` • <level>` (or
+    /// ` • thinking off` when no level is set) so the reader can tell
+    /// which mode the next answer will arrive in. `false` keeps the
+    /// pre-thinking parity. Matches upstream
+    /// `state.model?.reasoning` (`footer.ts:184-188`).
+    pub model_supports_thinking: bool,
+    /// The reasoning level the host currently has selected, or `None` when
+    /// no level was picked. Upstream's `state.thinkingLevel` is one of
+    /// `off` / `low` / `medium` / `high`; the port keeps the field as a
+    /// free-form `String` so the host can carry its own taxonomy.
+    pub thinking_level: Option<String>,
+    /// When `true`, the stats cluster appends ` • xp` — a dim bullet
+    /// followed by a warning-coloured, bold `xp` token — to advertise
+    /// that experimental features are enabled
+    /// (`packages/coding-agent/src/modes/interactive/components/footer.ts:162-164`,
+    /// `areExperimentalFeaturesEnabled`). `false` keeps the segment off
+    /// and the bar byte-identical to the pre-experimental layout.
+    pub experimental: bool,
 }
 
 impl StatusData {
@@ -189,6 +209,9 @@ impl StatusData {
             hint_pinned: false,
             busy: None,
             extension_statuses: Vec::new(),
+            model_supports_thinking: false,
+            thinking_level: None,
+            experimental: false,
         }
     }
 
@@ -355,6 +378,40 @@ impl StatusData {
     pub fn with_context_window(mut self, window: u32) -> Self {
         self.context_window = window;
         self
+    }
+
+    /// Set whether the active model supports a reasoning / thinking level
+    /// (`footer.ts:184-188`). When `false` the right cluster never carries
+    /// the ` • <level>` suffix.
+    pub fn with_model_supports_thinking(mut self, supports: bool) -> Self {
+        self.model_supports_thinking = supports;
+        self
+    }
+
+    /// Set the current reasoning / thinking level (`state.thinkingLevel`).
+    /// When `model_supports_thinking` is `true` and this is `None` the right
+    /// cluster renders ` • thinking off` — upstream's default
+    /// (`footer.ts:184-188`).
+    pub fn with_thinking_level(mut self, level: Option<String>) -> Self {
+        self.thinking_level = level;
+        self
+    }
+
+    /// Set the experimental-features flag. When `true` the stats cluster
+    /// appends ` • xp` (dim bullet, warning-coloured bold `xp`).
+    pub fn set_experimental(&mut self, experimental: bool) {
+        self.experimental = experimental;
+    }
+
+    /// Builder form of [`StatusData::set_experimental`].
+    pub fn with_experimental(mut self, experimental: bool) -> Self {
+        self.experimental = experimental;
+        self
+    }
+
+    /// Whether the experimental-features indicator is being drawn.
+    pub fn experimental(&self) -> bool {
+        self.experimental
     }
 
     /// Record how many context tokens the most recent turn consumed. The
@@ -608,6 +665,9 @@ enum Zone {
     Session,
     Hint,
     Model,
+    /// `• xp` — the experimental-features indicator (dim bullet + warning
+    /// `xp`); drawn only while [`StatusData::experimental`] is `true`.
+    Xp,
 }
 
 /// The order the narrow layout gives parts up in — least valuable first.
@@ -634,8 +694,12 @@ enum Zone {
 /// * `Busy` is never dropped while it is present — it is the only sign a turn
 ///   is still running, and codex / Martty both keep a live activity indicator
 ///   when space runs short.
-const NARROW_SACRIFICE_ORDER: [Zone; 8] = [
+/// * `Xp` is treated like a hint: it is a transient affordance the reader
+///   can re-enable through `/xp`, so it is the first thing to drop alongside
+///   the regular hint.
+const NARROW_SACRIFICE_ORDER: [Zone; 9] = [
     Zone::Hint,
+    Zone::Xp,
     Zone::CacheHit,
     Zone::Cache,
     Zone::Session,
@@ -652,9 +716,10 @@ const NARROW_SACRIFICE_ORDER: [Zone; 8] = [
 /// [`StatusData::hint_pinned`] hint is the opposite: it is the query the user
 /// is typing into, so it outlives every counter (only the model name, which
 /// says what an answer will come from, is kept past it).
-fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 8] {
+fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 9] {
     if data.hint_pinned {
         [
+            Zone::Xp,
             Zone::CacheHit,
             Zone::Cache,
             Zone::Session,
@@ -690,6 +755,10 @@ fn zone_lead(zone: Zone) -> &'static str {
         Zone::Session => "  ",
         Zone::Hint => "  ",
         Zone::Model => "  ",
+        // `•` already carries its own leading whitespace: upstream joins
+        // `xp` to the previous part with a single space and the bullet is
+        // part of the same fragment, so the lead is empty.
+        Zone::Xp => "",
     }
 }
 
@@ -707,6 +776,7 @@ fn left_cluster(data: &StatusData) -> StyledLine {
         Zone::Cost,
         Zone::Gauge,
         Zone::Hint,
+        Zone::Xp,
     ] {
         let body = zone_body(data, zone);
         if body.is_empty() {
@@ -725,21 +795,31 @@ fn left_cluster(data: &StatusData) -> StyledLine {
 }
 
 /// Upstream's `rightSide` (`footer.ts:178-197`): the model name, optionally
-/// preceded by `(provider) ` when more than one provider is routable.
+/// preceded by `(provider) ` when more than one provider is routable, and
+/// optionally suffixed with ` • <level>` when the model supports a
+/// reasoning mode (`footer.ts:184-188`).
 fn model_right(data: &StatusData, with_provider: bool) -> StyledLine {
-    let text = match (
+    let model_part = match (
         with_provider,
         data.provider_label.as_deref().filter(|p| !p.is_empty()),
     ) {
         (true, Some(provider)) => format!("({provider}) {}", data.model),
         _ => data.model.clone(),
     };
-    vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Accent))]
+    if data.model_supports_thinking {
+        let level = data.thinking_level.as_deref().unwrap_or("thinking off");
+        vec![StyledSpan::new(
+            format!("{model_part} • {level}"),
+            SpanStyle::fg(ThemeColor::Accent),
+        )]
+    } else {
+        vec![StyledSpan::new(model_part, SpanStyle::fg(ThemeColor::Accent))]
+    }
 }
 
 /// The parts present for this snapshot, in visual order.
 fn narrow_zones(data: &StatusData) -> Vec<Zone> {
-    let mut zones: Vec<Zone> = Vec::with_capacity(9);
+    let mut zones: Vec<Zone> = Vec::with_capacity(10);
     if data.busy.is_some() {
         zones.push(Zone::Busy);
     }
@@ -750,6 +830,7 @@ fn narrow_zones(data: &StatusData) -> Vec<Zone> {
         Zone::Cost,
         Zone::Gauge,
         Zone::Hint,
+        Zone::Xp,
     ] {
         if !zone_body(data, zone).is_empty() {
             zones.push(zone);
@@ -875,6 +956,20 @@ fn zone_body(data: &StatusData, zone: Zone) -> StyledLine {
             data.hint.clone().unwrap_or_default(),
             SpanStyle::fg(ThemeColor::Dim),
         )],
+        // ` • xp` — the experimental-features indicator. Upstream paints the
+        // bullet dim and the `xp` token warning + bold; the same colours
+        // land on the bold helper so the renderer does not need a second
+        // per-span style path (`footer.ts:162-164`).
+        Zone::Xp => {
+            if data.experimental {
+                vec![
+                    StyledSpan::new(" • ", SpanStyle::fg(ThemeColor::Dim)),
+                    StyledSpan::new("xp", SpanStyle::fg(ThemeColor::Warning).bold()),
+                ]
+            } else {
+                StyledLine::new()
+            }
+        }
     }
 }
 
@@ -1839,6 +1934,38 @@ mod tests {
         assert!(bar
             .render(&data, 30)
             .contains("(anthropic) claude-sonnet-4"));
+    }
+
+    #[test]
+    fn thinking_level_is_off_by_default_for_a_supporting_model() {
+        let bar = StatusBar::new();
+        // `state.model.reasoning` true with no `thinkingLevel` set:
+        // upstream prints ` • thinking off` (`footer.ts:184-188`).
+        let data = StatusData::new("claude-sonnet-4", "")
+            .with_model_supports_thinking(true);
+        let line = bar.render(&data, 40);
+        assert!(line.contains("claude-sonnet-4 • thinking off"), "{line}");
+    }
+
+    #[test]
+    fn thinking_level_renders_the_selected_level() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("claude-sonnet-4", "")
+            .with_model_supports_thinking(true)
+            .with_thinking_level(Some("medium".into()));
+        let line = bar.render(&data, 40);
+        assert!(line.contains("claude-sonnet-4 • medium"), "{line}");
+    }
+
+    #[test]
+    fn thinking_level_is_dropped_when_the_model_does_not_support_it() {
+        let bar = StatusBar::new();
+        let data = StatusData::new("gpt-4o", "")
+            .with_model_supports_thinking(false)
+            .with_thinking_level(Some("medium".into()));
+        let line = bar.render(&data, 40);
+        assert!(!line.contains("thinking"), "{line}");
+        assert!(!line.contains("medium"), "{line}");
     }
 
     #[test]

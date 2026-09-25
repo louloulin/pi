@@ -1839,10 +1839,23 @@ impl App {
     /// user's own fold state is untouched — `app.header` still expands on a
     /// short terminal, where the list is simply truncated (LUM-1266).
     fn builtin_header_lines(&self, total_height: u16) -> Vec<StyledLine> {
-        if !self.config.startup_header || !self.header_expanded {
+        if !self.config.startup_header {
             return Vec::new();
         }
         let mut lines = self.header_title_lines();
+        if !self.header_expanded {
+            // Compact mode (user pressed `app.header` to collapse). TS pi-tui
+            // prints `logo + compactOnboarding` here; we mirror that with the
+            // title and the TS `compactOnboarding` row pointing at the chord
+            // that expands it (`interactive-mode.ts:948`).
+            let compact_rows = lines.len() as u16 + u16::from(self.header_folded_text().is_some());
+            if compact_rows.saturating_add(self.header_reserved_rows()) <= total_height {
+                if let Some(text) = self.header_folded_text() {
+                    lines.push(vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Dim))]);
+                }
+            }
+            return lines;
+        }
         let hints = self.header_hint_lines();
         if hints.is_empty() {
             return lines;
@@ -1853,11 +1866,10 @@ impl App {
             return lines;
         }
         // Short terminal: the title survives, the hints fold away, and the
-        // row that says so is dropped too if even that does not fit.
-        let kb = get_keybindings();
-        let folded = HeaderKey::Chord("app.header")
-            .label(|id| kb.get_keys(id))
-            .map(|keys| crate::locale::header_folded_line(self.config.locale, &keys));
+        // row that says so is dropped too if even that does not fit. The row
+        // itself is the TS `compactOnboarding` text — the same string the
+        // compact-mode branch above prints.
+        let folded = self.header_folded_text();
         let folded_rows = lines.len() as u16 + u16::from(folded.is_some());
         if folded_rows.saturating_add(self.header_reserved_rows()) <= total_height {
             if let Some(text) = folded {
@@ -1865,6 +1877,31 @@ impl App {
             }
         }
         lines
+    }
+
+    /// Resolve the `app.header` chord and render it through
+    /// [`crate::locale::header_folded_line`] so both compact-mode and
+    /// short-terminal-fold reuse the same string (`compactOnboarding`).
+    ///
+    /// `app.header` is a Rust-only binding — it has no upstream counterpart
+    /// and is *not* registered in the default keybinding table — so we fall
+    /// back to its hardcoded chord the same way `step_key` does (Alt+H).
+    fn header_folded_text(&self) -> Option<String> {
+        let kb = get_keybindings();
+        let keys = kb.get_keys("app.header");
+        let resolved = if keys.is_empty() {
+            vec![crate::locale::format_chord("alt+h")]
+        } else {
+            keys.into_iter()
+                .map(|chord| crate::locale::format_chord(&chord))
+                .collect()
+        };
+        let joined = resolved.join("/");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(crate::locale::header_folded_line(self.config.locale, &joined))
+        }
     }
 
     /// The header rows that survive a short terminal: the product line and,
@@ -2128,6 +2165,26 @@ impl App {
     /// cost part as ` (sub)` (`footer.ts:139-143`).
     pub fn set_status_subscription(&mut self, subscription: bool) {
         self.status_data.subscription = subscription;
+    }
+
+    /// Toggle the footer's `• xp` experimental-features indicator
+    /// (`footer.ts:162-164`).
+    ///
+    /// The driver wires this from `core/experimental.ts` (or any host that
+    /// tracks the same toggle). `false` (the default) keeps the indicator
+    /// out of the stats cluster entirely; `true` paints a dim `•` followed
+    /// by a bold warning-coloured `xp`. Either direction takes effect on the
+    /// next render — no extra rebudget, because the zone is already part of
+    /// [`StatusData`]'s [`NARROW_SACRIFICE_ORDER`].
+    ///
+    /// [`NARROW_SACRIFICE_ORDER`]: crate::components::status::NARROW_SACRIFICE_ORDER
+    pub fn set_experimental(&mut self, experimental: bool) {
+        self.status_data.set_experimental(experimental);
+    }
+
+    /// Whether the footer is currently drawing the `• xp` indicator.
+    pub fn experimental(&self) -> bool {
+        self.status_data.experimental()
     }
 
     /// Install the active model's per-token rates so the footer can
@@ -5332,6 +5389,11 @@ impl App {
         // Same beat, second animation: the busy spinner reuses this 50 ms
         // tick instead of owning a timer (see [`App::tick_busy_feedback`]).
         let _ = self.tick_busy_feedback(Instant::now());
+        // Phase 3 (G6): mirror the busy spinner frame onto the message view
+        // so the in-flight assistant header glyph stays in lock-step with
+        // the footer cursor. The setter is cheap; it lives here rather than
+        // inside `tick_busy_feedback` to keep that helper single-purpose.
+        self.messages.set_spinner_frame(self.spinner.frame());
         // Render the extension regions and budget the chrome before anything
         // else: the message viewport this frame paints is what the scroll,
         // selection and search paths must index.
@@ -5340,6 +5402,17 @@ impl App {
             .prompt
             .line_count(area.width, self.config.composer_max_rows)
             .max(1) as u16;
+        // Phase 2 (G3): when the built-in prompt is in use (`frame.editor` is
+        // None) and the composer is configured to wrap, reserve an extra
+        // chrome row for the `─` border painted above it (TS
+        // `interactive-mode.ts` editor border colour). A custom editor
+        // replaces the prompt entirely — there is no border to paint — so
+        // it must keep the row count it asks for.
+        let editor_min_rows = if self.config.composer_max_rows > 1 && frame.editor.is_none() {
+            editor_min_rows + 1
+        } else {
+            editor_min_rows
+        };
         let layout = plan_chrome(area.height, &frame, editor_min_rows);
         // Record the geometry first so the refresh below indexes the exact
         // viewport this frame is about to paint.
@@ -5912,6 +5985,11 @@ impl App {
             .prompt
             .line_count(width, self.config.composer_max_rows)
             .max(1) as u16;
+        let editor_min_rows = if self.config.composer_max_rows > 1 && frame.editor.is_none() {
+            editor_min_rows + 1
+        } else {
+            editor_min_rows
+        };
         let layout = plan_chrome(height, &frame, editor_min_rows);
         self.render_to_buffer_impl(area, &mut buf, false, false, &frame, &layout);
         let lines = buf

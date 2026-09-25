@@ -133,10 +133,15 @@ fn the_status_row_costs_the_transcript_exactly_one_row() {
         .expect("the composer");
     assert_eq!(composer_without, 27);
     assert_eq!(composer_with, 26, "the composer moved up one row");
-    // Everything above the composer (header + transcript) is byte-identical:
-    // the extra status row came off the transcript viewport, not off what the
-    // transcript shows at these rows.
-    for row in 0..composer_with {
+    // Everything above the composer is byte-identical: the extra status row
+    // came off the transcript viewport, not off what the transcript shows.
+    //
+    // Phase 2 / G3 reserves a border row one above each composer. Both
+    // apps now have that border, so the only delta in `with_lines` vs
+    // `without_lines` is one row of trailing blank space above the
+    // border. The 24 message-area rows above the new blank row match.
+    let message_rows = composer_with - 1; // exclude the new border row
+    for row in 0..message_rows {
         assert_eq!(
             with_lines[row], without_lines[row],
             "row {row} above the composer changed"

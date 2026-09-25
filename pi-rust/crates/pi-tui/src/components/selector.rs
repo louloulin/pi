@@ -938,7 +938,7 @@ impl Selector {
             for line in body {
                 lines.push(vec![StyledSpan::new(line.clone(), SpanStyle::default())]);
             }
-            self.append_footer(&mut lines);
+            self.append_footer(&mut lines, width);
             return lines;
         }
         if self.filtered.is_empty() {
@@ -953,7 +953,7 @@ impl Selector {
                 line,
                 SpanStyle::fg(ThemeColor::Muted),
             )]);
-            self.append_footer(&mut lines);
+            self.append_footer(&mut lines, width);
             return lines;
         }
         let (start, end) = self.visible_range();
@@ -974,12 +974,30 @@ impl Selector {
                 SpanStyle::fg(ThemeColor::Muted),
             )]);
         }
-        self.append_footer(&mut lines);
+        self.append_footer(&mut lines, width);
         lines
     }
 
     /// Append the muted key-hint lines, if any.
-    fn append_footer(&self, lines: &mut Vec<StyledLine>) {
+    ///
+    /// Upstream wraps the key-hint block between two `DynamicBorder` lines
+    /// (`extension-selector.ts:44,75`): the top `─` separates the list from
+    /// the hints, the bottom `─` closes the modal. The Rust port already
+    /// paints the top `─` between title and list (see
+    /// [`Selector::render_styled_lines`]); this helper adds the matching
+    /// line above the hints so the footer is bracketed the same way TS
+    /// brackets it.
+    fn append_footer(&self, lines: &mut Vec<StyledLine>, width: usize) {
+        if self.footer.is_empty() {
+            return;
+        }
+        // Mirror the title-list separator — the same `borderMuted` slot, the
+        // same width cap (40 cols) — so a key-hint footer reads as a closed
+        // block instead of looking glued to the last item.
+        lines.push(vec![StyledSpan::new(
+            "─".repeat(width.min(40)),
+            SpanStyle::fg(ThemeColor::BorderMuted),
+        )]);
         for hint in &self.footer {
             lines.push(vec![StyledSpan::new(
                 hint.clone(),

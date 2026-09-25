@@ -23,10 +23,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 const WIDTH: u16 = 40;
-/// Message viewport is this minus the status bar and the prompt row, i.e.
-/// 8 rows — the same canonical size the other App tests use.
+/// Message viewport is this minus the status bar, the prompt row, and
+/// the editor border row (Phase 2 / G3), i.e. 7 rows — the same canonical
+/// size the other App tests use.
 const HEIGHT: u16 = 10;
-const VIEWPORT: u16 = HEIGHT - 2;
+const VIEWPORT: u16 = HEIGHT - 3;
 /// Rightmost column of the viewport = the scrollbar's column.
 const BAR: u16 = WIDTH - 1;
 
@@ -159,13 +160,14 @@ fn geometry_is_hidden_before_the_first_render_and_without_overflow() {
 #[test]
 fn geometry_tracks_the_content_ratio_and_pins_the_thumb_to_the_bottom() {
     let mut app = app_with_lines(40);
-    // 40 lines at width 40, viewport 8: max scroll is 32 and the thumb keeps
-    // the 8/40 ratio, floored at the two-row minimum.
+    // 40 lines at width 40, viewport 7 (Phase 2 / G3 reserves a row for
+    // the editor border): max scroll is 33 and the thumb keeps the
+    // 7/40 ratio, floored at the two-row minimum.
     let tail = geometry(&app);
     assert_eq!(tail.column, BAR);
     assert_eq!(tail.track_top, 0);
     assert_eq!(tail.track_height, VIEWPORT);
-    assert_eq!(tail.max_scroll, 32);
+    assert_eq!(tail.max_scroll, 33);
     assert_eq!(tail.thumb_height, 2);
     assert_eq!(
         tail.thumb_top + tail.thumb_height,
@@ -181,8 +183,8 @@ fn geometry_tracks_the_content_ratio_and_pins_the_thumb_to_the_bottom() {
     assert!(app.scroll_viewport_down(16));
     let middle = geometry(&app);
     assert_eq!(
-        middle.thumb_top, 3,
-        "16/32 of six free rows rounds to three"
+        middle.thumb_top, 2,
+        "16/33 of five free rows rounds to two (Phase 2 / G3: max_scroll=33)"
     );
     assert_eq!(middle.thumb_height, 2);
 
@@ -305,9 +307,11 @@ fn a_modal_owns_the_bar_while_it_is_open() {
 #[test]
 fn pressing_the_track_jumps_to_the_pointer() {
     let mut app = app_with_lines(40);
-    assert_eq!(geometry(&app).thumb_top, 6, "starts at the tail");
+    // Phase 2 / G3: viewport shrunk from 8 to 7, so the tail-pinned thumb
+    // sits at row 5 (was 6).
+    assert_eq!(geometry(&app).thumb_top, 5, "starts at the tail");
 
-    // Row 4 is on the track (the thumb spans 6..8). The press centres the
+    // Row 4 is on the track (the thumb spans 5..7). The press centres the
     // thumb on the pointer, i.e. jumps to the matching ratio.
     assert_eq!(app.step(press(BAR, 4)), StepOutcome::Redraw);
     assert!(app.scrollbar_dragging());
@@ -321,12 +325,13 @@ fn pressing_the_track_jumps_to_the_pointer() {
 #[test]
 fn pressing_the_thumb_does_not_jump_and_a_drag_reaches_both_extremes() {
     let mut app = app_with_lines(40);
-    assert_eq!(geometry(&app).thumb_top, 6);
+    // Phase 2 / G3: tail-pinned thumb at row 5 (was 6).
+    assert_eq!(geometry(&app).thumb_top, 5);
 
     // A press on the thumb starts the drag without moving the viewport.
-    assert_eq!(app.step(press(BAR, 6)), StepOutcome::Idle);
+    assert_eq!(app.step(press(BAR, 5)), StepOutcome::Idle);
     assert!(app.scrollbar_dragging());
-    assert_eq!(geometry(&app).thumb_top, 6);
+    assert_eq!(geometry(&app).thumb_top, 5);
 
     // Dragging to the top row scrolls to the top of the log.
     assert_eq!(app.step(drag(BAR, 0)), StepOutcome::Redraw);

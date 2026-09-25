@@ -24,6 +24,7 @@ pub mod autocomplete;
 pub mod box_layout;
 pub mod cancellable_loader;
 pub mod dialog;
+pub mod dynamic_border;
 pub mod editor;
 pub mod extension_ui;
 pub mod h_stack;
@@ -62,6 +63,7 @@ pub use box_layout::BoxLayout;
 pub use box_layout::BoxLayout as Box;
 pub use cancellable_loader::CancellableLoader;
 pub use dialog::{Dialog, DialogAction, DialogKind};
+pub use dynamic_border::DynamicBorder;
 pub use editor::{
     is_bash_mode, parse_bash_command, BashCommand, Editor, EditorAction, HistoryEntry,
     HistorySearch, HistorySearchDirection, HistorySearchStatus, JumpDirection,

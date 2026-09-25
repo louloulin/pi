@@ -74,16 +74,22 @@ fn streaming_assistant_gets_caret_indicator() {
         .into_iter()
         .map(|l| strip_trailing(&l))
         .collect();
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("[gpt]hello"));
-    assert!(lines[0].ends_with('▍'));
-    // Finalizing removes the caret.
+    // The streaming header ("~ Working ") sits above the body to mirror
+    // upstream `assistant-message.ts`, so two lines are now expected
+    // instead of one. The caret indicator `▍` lands on the body row.
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("Working"));
+    assert!(lines[1].contains("[gpt]hello"));
+    assert!(lines[1].ends_with('▍'));
+    // Finalizing removes the caret and the streaming header.
     view.end_assistant_stream();
     let lines: Vec<String> = view
         .render_lines(40)
         .into_iter()
         .map(|l| strip_trailing(&l))
         .collect();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("[gpt]hello"));
     assert!(!lines[0].ends_with('▍'));
 }
 
@@ -170,4 +176,80 @@ fn info_message_uses_user_prefix() {
         .map(|l| strip_trailing(&l))
         .collect();
     assert_eq!(lines, vec!["> session ready"]);
+}
+
+#[test]
+fn update_available_notice_builds_a_bordered_block() {
+    let mut view = MessageView::new();
+    view.push_update_notice("1.2.3", None, "https://pi.dev/changelog", "pi", 60);
+    let lines: Vec<String> = view
+        .render_lines(60)
+        .into_iter()
+        .map(|l| strip_trailing(&l))
+        .collect();
+    // TS pi-tui's `showNewVersionNotification` — top border, bold header,
+    // instruction line with the action, changelog link, bottom border.
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    assert!(lines[0].chars().all(|c| c == '─') && !lines[0].is_empty());
+    assert!(lines[1].contains("Update Available"));
+    assert!(lines[2].contains("1.2.3") && lines[2].contains("pi update"));
+    assert!(lines[3].contains("Changelog") && lines[3].contains("https://pi.dev/changelog"));
+    assert_eq!(lines[4].chars().all(|c| c == '─') && !lines[4].is_empty(), true);
+}
+
+#[test]
+fn update_available_notice_with_note_renders_the_body_block() {
+    let mut view = MessageView::new();
+    view.push_update_notice(
+        "2.0.0",
+        Some("Highlights:\n- faster startup\n- new tui"),
+        "https://pi.dev/changelog",
+        "pi",
+        40,
+    );
+    let lines: Vec<String> = view
+        .render_lines(40)
+        .into_iter()
+        .map(|l| strip_trailing(&l))
+        .collect();
+    // divider, header, instruction, blank, body×3, blank, link, divider.
+    assert!(lines[0].chars().all(|c| c == '─'));
+    assert!(lines[1].contains("Update Available"));
+    assert!(lines.iter().any(|l| l.contains("Highlights")));
+    assert!(lines.iter().any(|l| l.contains("faster startup")));
+    assert!(lines.iter().any(|l| l.contains("new tui")));
+    // Borders bracket the block. `strip_trailing` keeps every divider row
+    // (─ is not trailing whitespace), so the exact count is the divider
+    // count from the builder.
+    let divider_count = lines
+        .iter()
+        .filter(|l| !l.is_empty() && l.chars().all(|c| c == '─'))
+        .count();
+    assert_eq!(divider_count, 2, "{lines:?}");
+}
+
+#[test]
+fn package_update_notice_lists_packages_with_dash_prefix() {
+    let mut view = MessageView::new();
+    view.push_package_update_notice(
+        &[
+            "@pi/foo".to_string(),
+            "@pi/bar".to_string(),
+        ],
+        "pi",
+        40,
+    );
+    let lines: Vec<String> = view
+        .render_lines(40)
+        .into_iter()
+        .map(|l| strip_trailing(&l))
+        .collect();
+    assert!(lines.iter().any(|l| l.contains("Package Updates Available")));
+    assert!(lines.iter().any(|l| l.contains("pi update --extensions")));
+    assert!(lines.iter().any(|l| l.starts_with("- @pi/foo")));
+    assert!(lines.iter().any(|l| l.starts_with("- @pi/bar")));
+    assert_eq!(
+        lines.iter().filter(|l| l.chars().all(|c| c == '─')).count(),
+        2
+    );
 }

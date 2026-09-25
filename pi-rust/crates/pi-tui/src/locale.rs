@@ -241,6 +241,19 @@ pub const HEADER_ONBOARDING_EN: &str =
 pub const HEADER_ONBOARDING_ZH: &str =
     "Pi 可以讲解自身功能并检索文档。直接问它「怎么用」或「怎么扩展」。";
 
+/// Upstream's `compactOnboarding` line (`interactive-mode.ts:948`).
+///
+/// TS pi-tui prints this single row when the user has folded it
+/// (`header_expanded = false`) so the surface still points at the chord that
+/// brings the full startup help back. The Rust port reuses the same string
+/// for both the user-collapsed case and the short-terminal fold — they are
+/// the same state from the user's perspective: "the expanded help is not on
+/// screen right now, here's how to get it".
+pub const HEADER_COMPACT_ONBOARDING_EN_TEMPLATE: &str =
+    "Press {keys} to show full startup help and loaded resources.";
+/// Chinese rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
+pub const HEADER_COMPACT_ONBOARDING_ZH_TEMPLATE: &str = "按 {keys} 显示完整启动帮助与已加载资源";
+
 /// Title of the `?` shortcut overlay (LUM-1464).
 ///
 /// The overlay lists the same chords the startup header advertises, so the
@@ -260,16 +273,19 @@ pub const SHORTCUT_OVERLAY_CLOSE_EN: &str = "? / Esc to close";
 /// Chinese rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
 pub const SHORTCUT_OVERLAY_CLOSE_ZH: &str = "? / Esc 关闭";
 
-/// Startup-header row shown when the terminal is too short for the full hint
-/// list and the header folded itself for this frame (LUM-1266).
+/// Startup-header row shown when the header is folded: either because the
+/// terminal is too short for the full hint list or because the user pressed
+/// `app.header` to collapse it. Upstream uses the same single line for both
+/// cases — its `compactOnboarding` row (`interactive-mode.ts:948`).
 ///
 /// `keys` is the resolved `app.header` chord — the action that expands the
 /// header again — so the row stays honest when the binding is overridden.
 pub fn header_folded_line(locale: Locale, keys: &str) -> String {
-    match locale {
-        Locale::En => format!("hints hidden on a short terminal — {keys} shows them"),
-        Locale::Zh => format!("终端太矮，键位提示已折叠 — {keys} 展开"),
-    }
+    let template = match locale {
+        Locale::En => HEADER_COMPACT_ONBOARDING_EN_TEMPLATE,
+        Locale::Zh => HEADER_COMPACT_ONBOARDING_ZH_TEMPLATE,
+    };
+    template.replace("{keys}", keys)
 }
 
 /// Startup-header copy for `--no-extensions`.

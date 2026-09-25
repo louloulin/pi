@@ -38,11 +38,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 const WIDTH: u16 = 40;
-/// Status bar + prompt row below the message viewport, i.e. 8 rows of log —
-/// the canonical size the other App tests use.
+/// Status bar + prompt row + border row below the message viewport
+/// (Phase 2 / G3), i.e. 7 rows of log — the canonical size the other App
+/// tests use.
 const HEIGHT: u16 = 10;
 /// Last row of the message viewport.
-const VIEWPORT_BOTTOM: u16 = HEIGHT - 2 - 1;
+const VIEWPORT_BOTTOM: u16 = HEIGHT - 3 - 1;
 
 fn faux_model() -> Model {
     Model {

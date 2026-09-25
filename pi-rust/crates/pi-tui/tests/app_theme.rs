@@ -108,7 +108,10 @@ fn app_buffer_cells_carry_the_theme_colours() {
     let mut app = app();
     app.messages_mut().push(MessageItem::user("hello"));
     app.messages_mut().push(MessageItem::assistant("hi"));
-    let buf = render(&mut app, 40, 4);
+    // Phase 2 / G3 reserves one extra chrome row for the editor border, so
+    // height 4 leaves exactly one message row visible. Use 5 to keep both
+    // messages in view.
+    let buf = render(&mut app, 40, 5);
 
     // Message rows: `> hello` (row 0) and `  hi` (row 1).
     assert_eq!(symbol_at(&buf, 0, 0), ">");
@@ -125,18 +128,20 @@ fn app_buffer_cells_carry_the_theme_colours() {
     // dim and left-aligned, the session id muted in the middle, and the model
     // accent at the right edge — upstream's `statsLeft + padding + rightSide`
     // with LUM-1467's field alignment (`footer.ts:205-240`).
-    assert_eq!(symbol_at(&buf, 0, 3), "?"); // "?/1.0k  ? for help" starts here
-    assert_eq!(style_at(&buf, 0, 3).fg, Some(DIM));
-    assert_eq!(symbol_at(&buf, 20, 3), "t"); // "  test  " starts at column 18
-    assert_eq!(style_at(&buf, 20, 3).fg, Some(MUTED));
-    assert_eq!(symbol_at(&buf, 36, 3), "F"); // "Faux" is flush right, at column 36
-    assert_eq!(style_at(&buf, 36, 3).fg, Some(ACCENT));
+    assert_eq!(symbol_at(&buf, 0, 4), "?"); // "?/1.0k  ? for help" starts here
+    assert_eq!(style_at(&buf, 0, 4).fg, Some(DIM));
+    assert_eq!(symbol_at(&buf, 20, 4), "t"); // "  test  " starts at column 18
+    assert_eq!(style_at(&buf, 20, 4).fg, Some(MUTED));
+    assert_eq!(symbol_at(&buf, 36, 4), "F"); // "Faux" is flush right, at column 36
+    assert_eq!(style_at(&buf, 36, 4).fg, Some(ACCENT));
 
-    // The editor region (y = height - 2) paints the prompt label in the
-    // current thinking level's border colour (upstream
-    // `updateEditorBorderColor`); the buffer itself stays plain.
-    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_MEDIUM));
-    assert!(is_unstyled(style_at(&buf, 2, 2)));
+    // The editor body sits at y = height - 2 (the prompt label colour is the
+    // current thinking level's border colour, see upstream
+    // `updateEditorBorderColor`). The row above (y = height - 3) is the new
+    // border row (Phase 2 / G3) — `─` glyphs in the same border colour.
+    assert_eq!(style_at(&buf, 0, 3).fg, Some(THINKING_MEDIUM));
+    assert_eq!(style_at(&buf, 2, 3).bg, Some(SELECTED_BG));
+    assert_eq!(symbol_at(&buf, 0, 2), "─");
 }
 
 #[test]
@@ -170,8 +175,10 @@ fn bash_mode_colours_the_prompt_label() {
     assert_eq!(symbol_at(&buf, 0, 2), ">");
     assert_eq!(style_at(&buf, 0, 2).fg, Some(BASH_MODE));
     assert_eq!(style_at(&buf, 1, 2).fg, Some(BASH_MODE));
-    // Only the label carries the colour; the buffer itself stays plain.
-    assert!(is_unstyled(style_at(&buf, 2, 2)));
+    // Only the label carries the bash-mode colour; the rest of the row
+    // carries the `selectedBg` slot the composer paints on every row.
+    assert_ne!(style_at(&buf, 2, 2).fg, Some(BASH_MODE));
+    assert_eq!(style_at(&buf, 2, 2).bg, Some(SELECTED_BG));
 
     // A normal buffer paints the label in the thinking level's border colour
     // instead (default level: medium).

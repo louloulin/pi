@@ -159,6 +159,15 @@ pub trait Marked {
 
 pub use crate::components::BoxLayout as Box;
 
+// ─── components/dynamic-border ──────────────────────────────────────
+//
+// Upstream `DynamicBorder` is the divider used by the "Update Available"
+// and "Package Updates Available" notices
+// (`packages/coding-agent/src/modes/interactive/components/dynamic-border.ts`).
+// It renders `─`.repeat(width)` with a configurable colour.
+
+pub use crate::components::DynamicBorder;
+
 // ─── components/cancellable-loader ──────────────────────────────────
 
 /// Upstream `CancellableLoader` — a `Component` that can be aborted.
@@ -222,6 +231,20 @@ pub trait Loader: Component {}
 /// indicator. Stub struct.
 #[derive(Debug, Clone, Default)]
 pub struct LoaderIndicatorOptions {}
+
+/// The Braille-pattern frame table that [`Spinner`] walks each tick
+/// (`packages/tui/src/components/loader.ts:38-41`). Re-exported under its
+/// TS name so plugin authors can inspect the animation without depending
+/// on the internal module path.
+pub use crate::components::loader::SPINNER_FRAMES as SpinnerFrames;
+
+/// Animation cadence for [`Spinner`] in milliseconds (`loader.ts:42`).
+pub use crate::components::loader::SPINNER_INTERVAL_MS as SpinnerIntervalMs;
+
+/// The cursor that walks [`SpinnerFrames`]. Mirrors the upstream
+/// `CancellableLoader` state machine enough that callers can drive a
+/// spinner from a render tick (`loader.ts:67-91`).
+pub use crate::components::loader::Spinner as Spinner;
 
 // ─── components/markdown ────────────────────────────────────────────
 

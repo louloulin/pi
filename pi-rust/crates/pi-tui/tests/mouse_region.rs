@@ -28,12 +28,13 @@ use pi_tui::settings::{SettingItem, SettingsList};
 use ratatui::layout::Rect;
 
 const WIDTH: u16 = 40;
-/// Snapshot height; the message viewport is this minus the status bar and the
-/// prompt row, i.e. 22 rows — tall enough that the settings overlay is not
-/// clipped, so its rectangle really ends inside the viewport.
+/// Snapshot height; the message viewport is this minus the status bar, the
+/// prompt row, and the editor border row (Phase 2 / G3), i.e. 21 rows —
+/// tall enough that the settings overlay is not clipped, so its rectangle
+/// really ends inside the viewport.
 const HEIGHT: u16 = 24;
 /// Rows the message viewport covers.
-const VIEWPORT_ROWS: u16 = HEIGHT - 2;
+const VIEWPORT_ROWS: u16 = HEIGHT - 3;
 
 fn faux_model() -> Model {
     Model {

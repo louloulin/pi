@@ -335,7 +335,7 @@ fn the_header_folds_on_a_terminal_that_cannot_hold_it() {
     // do not (they cost 19 of the 23 rows).
     assert!(text.contains("pi v"), "{text}");
     assert!(
-        text.contains("hints hidden on a short terminal — Alt+H shows them"),
+        text.contains("Press Alt+H to show full startup help"),
         "{text}"
     );
     assert!(!text.contains("to interrupt"), "folded:\n{text}");
