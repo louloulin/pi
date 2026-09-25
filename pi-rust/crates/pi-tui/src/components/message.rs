@@ -52,6 +52,19 @@ pub enum Role {
     /// and a closing border) and the role carries them in
     /// [`MessageItem::notice_lines`].
     Notice,
+    /// Branch summary produced by an automatic summarization pass
+    /// (`/branch`, `/tree-summary`). Wrapped in
+    /// `Box(paddingX, 1, bg("customMessageBg"))` with a `[branch]` label and
+    /// an expand/collapse affordance — mirrors TS
+    /// `packages/coding-agent/src/modes/interactive/components/custom-message.ts:48-58`.
+    BranchSummary,
+    /// Compaction summary produced by `/compact` or the auto-compaction
+    /// trigger. Same chrome as [`Role::BranchSummary`] but with a
+    /// `[compaction]` label and a token-count line.
+    CompactionSummary,
+    /// Skill invocation record — an extension called a registered skill
+    /// (`/skill foo`). Same chrome with a `[skill] <name>` label.
+    SkillInvocation,
 }
 
 /// Lifecycle of a tool execution; drives the background slot the
@@ -426,6 +439,117 @@ pub fn working_header_line(spinner_frame: char) -> Vec<StyledSpan> {
         format!("{spinner_frame} Working "),
         SpanStyle::fg(ThemeColor::Dim),
     )]
+}
+
+/// Phase 12 — render one CustomMessage item (branch summary, compaction
+/// summary, or skill invocation).
+///
+/// The shape mirrors upstream `custom-message.ts:48-58`:
+/// `<bold [kind]> <name>` on the first row, then a body. The body is the
+/// raw `text` field of [`MessageItem`]; the embedder passes either a
+/// multi-line markdown blob or a one-line token count.
+///
+/// The rows are wrapped to `text_width` columns, prefixed with the same
+/// empty string the other custom-message blocks use (the `Box(paddingX, 1, …)`
+/// wrapper is the chrome), and have the `CustomMessageText` colour slot
+/// applied through [`BoxLayout::with_bg`] at the call site. The label's
+/// `[kind]` token is bold so the reader can spot the family of the block
+/// in the transcript.
+pub(crate) fn custom_message_lines(
+    item: &MessageItem,
+    text_width: usize,
+) -> Vec<StyledLine> {
+    let (label, _name) = match item.role {
+        Role::BranchSummary => ("[branch]", ""),
+        Role::CompactionSummary => ("[compaction]", ""),
+        Role::SkillInvocation => ("[skill]", ""),
+        _ => return Vec::new(),
+    };
+    let mut lines: Vec<StyledLine> = Vec::new();
+    let mut header = StyledLine::new();
+    header.push(StyledSpan::new(
+        format!("{label} "),
+        SpanStyle::fg(ThemeColor::CustomMessageLabel).bold(),
+    ));
+    lines.push(header);
+    for raw in item.text.lines() {
+        let wrapped = wrap_text_columns(raw, text_width);
+        for (idx, segment) in wrapped.iter().enumerate() {
+            let mut row = StyledLine::new();
+            if idx == 0 && raw.is_empty() {
+                row.push(StyledSpan::new(String::new(), SpanStyle::PLAIN));
+            } else {
+                row.push(StyledSpan::new(
+                    segment.clone(),
+                    SpanStyle::fg(ThemeColor::CustomMessageText),
+                ));
+            }
+            lines.push(row);
+        }
+        if wrapped.is_empty() {
+            // Preserve a blank line for empty source lines so consecutive
+            // `\n`s stay as consecutive blank rows.
+            lines.push(StyledLine::new());
+        }
+    }
+    if lines.len() == 1 {
+        // Empty body — at least one content row so the bg slot has a row
+        // to paint, otherwise the slot disappears and the reader sees
+        // nothing.
+        lines.push(StyledLine::new());
+    }
+    lines
+}
+
+/// Greedy width-aware wrap that splits on whitespace boundaries when
+/// possible. Used by [`custom_message_lines`] so branch / compaction bodies
+/// fit the viewport exactly like upstream's `wordWrapLine`.
+fn wrap_text_columns(text: &str, max: usize) -> Vec<String> {
+    if max == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_cols = 0usize;
+    for word in text.split_whitespace() {
+        let word_cols = columns(word);
+        // Single word longer than the budget — hard-cut.
+        if word_cols > max {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+                current_cols = 0;
+            }
+            let mut remaining = word;
+            while columns(remaining) > max {
+                let (prefix, _) = crate::utils::width::prefix_columns(remaining, max);
+                out.push(prefix.to_string());
+                remaining = &remaining[prefix.len()..];
+            }
+            current.push_str(remaining);
+            current_cols = columns(remaining);
+            continue;
+        }
+        let sep = if current.is_empty() { 0 } else { 1 };
+        if current_cols + sep + word_cols > max {
+            out.push(std::mem::take(&mut current));
+            current.push_str(word);
+            current_cols = word_cols;
+        } else {
+            if sep > 0 {
+                current.push(' ');
+                current_cols += 1;
+            }
+            current.push_str(word);
+            current_cols += word_cols;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 /// Conversation log rendered by the TUI. Holds an ordered list of
@@ -1404,6 +1528,26 @@ impl MessageView {
         ranges
     }
 
+    /// `(item_index, start, end)` ranges for every tool block in the log,
+    /// in render order.
+    ///
+    /// Upstream wraps a folded tool block in a `MouseRegion` so a click on
+    /// the body toggles `tool_expanded` (`packages/tui/src/components/tool-execution.ts:115-126`).
+    /// The Rust port pairs [`MessageView::item_line_ranges`] with this
+    /// helper to lay out the matching click rectangles — the App's hit
+    /// test walks the ranges here before falling through to selection.
+    /// `end` is exclusive, matching `slice` ranges.
+    pub fn tool_block_ranges(&self, width: u16) -> Vec<(usize, usize, usize)> {
+        let ranges = self.item_line_ranges(width);
+        let mut out = Vec::new();
+        for (idx, (start, end)) in ranges.into_iter().enumerate() {
+            if matches!(self.items.get(idx).map(|i| &i.role), Some(Role::Tool)) && end > start {
+                out.push((idx, start, end));
+            }
+        }
+        out
+    }
+
     /// The styled lines one item contributes to the log.
     ///
     /// This is the single per-item layout implementation behind
@@ -1426,26 +1570,60 @@ impl MessageView {
         if item.role == Role::Notice {
             return item.notice_lines.clone().unwrap_or_default();
         }
+        // Phase 12 — three new `CustomMessage` variants share the same
+        // `customMessageBg` slot and the same `Box(paddingX, 1, …)` chrome as
+        // upstream, but each carries its own label line (Phase 12 phase
+        // matrix). Render them here so the rest of the pipeline (prefix,
+        // wrap, bg stamp) stays untouched.
+        if matches!(
+            item.role,
+            Role::BranchSummary | Role::CompactionSummary | Role::SkillInvocation
+        ) {
+            let lines = custom_message_lines(item, text_width);
+            let child: StdBox<dyn Component> = StdBox::new(TextComponent::from_lines(lines));
+            let boxed = BoxLayout::new(vec![child])
+                .with_padding_xy(0, 0)
+                .with_bg(ThemeBg::CustomMessageBg);
+            let width = u16::try_from(text_width).unwrap_or(u16::MAX);
+            return boxed.render(width);
+        }
         let (prefix, prefix_style, body_style) = match item.role {
+            // TS pi-tui paints the user message through
+            // `Box(outputPad, 1, bg("userMessageBg"))` + `Markdown` with
+            // no per-line prefix (`packages/coding-agent/src/modes/interactive/components/user-message.ts`).
+            // The Rust port previously emitted `> ` here, but that label
+            // is not present upstream and the user explicitly asked for
+            // a single input box instead of a chevron column, so the
+            // prefix is gone.
             Role::User => (
-                "> ",
+                "",
                 SpanStyle::fg(ThemeColor::Accent),
                 SpanStyle::fg(ThemeColor::UserMessageText),
             ),
             Role::Assistant => ("  ", SpanStyle::PLAIN, SpanStyle::fg(ThemeColor::Text)),
+            // Tool rows keep the `* ` marker — that is a Rust-side
+            // affordance the user finds useful when scanning the
+            // transcript and is not part of the upstream render.
             Role::Tool => (
                 "* ",
                 SpanStyle::fg(ThemeColor::Muted),
                 SpanStyle::fg(ThemeColor::ToolOutput),
             ),
+            // TS `custom-message.ts` does not prefix its body either —
+            // the box padding is the only chrome.
             Role::Info => (
-                "· ",
+                "",
                 SpanStyle::fg(ThemeColor::Muted),
                 SpanStyle::fg(ThemeColor::CustomMessageText),
             ),
             // Notice blocks returned verbatim above; this branch is
             // unreachable but the match has to cover every variant.
             Role::Notice => unreachable!("notice items short-circuit at the top of item_lines"),
+            // Phase 12 — the three CustomMessage variants are short-circuited
+            // above; this catch-all keeps the match exhaustive.
+            Role::BranchSummary
+            | Role::CompactionSummary
+            | Role::SkillInvocation => unreachable!("custom messages short-circuit above"),
         };
 
         let mut out: Vec<StyledLine> = Vec::new();
@@ -1530,6 +1708,11 @@ impl MessageView {
             Role::User => Some(ThemeBg::UserMessageBg),
             Role::Info => Some(ThemeBg::CustomMessageBg),
             Role::Tool => Some(item.tool_status.bg_slot()),
+            // Phase 12 — BranchSummary / CompactionSummary / SkillInvocation
+            // all share the `customMessageBg` slot.
+            Role::BranchSummary | Role::CompactionSummary | Role::SkillInvocation => {
+                Some(ThemeBg::CustomMessageBg)
+            }
             _ => None,
         };
         if let Some(slot) = bg_slot {
@@ -2287,7 +2470,8 @@ mod tests {
         view.push(MessageItem::user("hi"));
         view.push(MessageItem::assistant("hello"));
         let lines = view.render_lines(40);
-        assert!(lines[0].starts_with("> "));
+        // The user block no longer carries a `> ` prefix (TS parity).
+        assert!(lines[0].starts_with("hi"));
         assert!(lines[1].starts_with("  "));
     }
 
@@ -2369,8 +2553,9 @@ mod tests {
         view.push(MessageItem::user("x".repeat(50)));
         let lines = view.render_lines(10);
         // The first line fits at most 8 chars ("x" repeated), so the
-        // body is broken across multiple lines.
-        assert!(lines.iter().all(|l| l.starts_with("> ")));
+        // body is broken across multiple lines. With the prefix gone
+        // every line is just the body itself.
+        assert!(lines.iter().all(|l| l.starts_with("x")));
         assert!(lines.len() >= 5);
     }
 

@@ -293,6 +293,69 @@ impl App {
                 StepOutcome::Idle
             };
         }
+        // `tui.altScreen.halfPageUp` / `tui.altScreen.halfPageDown`. Bare
+        // chords are unbound by default — an installed override is the only
+        // path here. The composer-overflow guard matches the full-page
+        // bindings above: a draft taller than the composer window is content
+        // the user cannot reach any other way (LUM-1317 §5), so `PageUp` /
+        // `PageDown` page *it* then.
+        if kb.matches(&event, "tui.altScreen.halfPageUp") && !self.composer_overflows() {
+            return if self.scroll_viewport_half_page_up() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        if kb.matches(&event, "tui.altScreen.halfPageDown") && !self.composer_overflows() {
+            return if self.scroll_viewport_half_page_down() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        // `tui.altScreen.lineUp` / `tui.altScreen.lineDown`. Same
+        // composer-overflow caveat as above. The default registry leaves
+        // these chords empty (`packages/tui/src/keybindings.ts:218-219`), so
+        // a user override or extension hook is the only way to reach them;
+        // the bare `Up` / `Down` keys still reach the editor for cursor
+        // moves.
+        if kb.matches(&event, "tui.altScreen.lineUp") && !self.composer_overflows() {
+            return if self.scroll_viewport_line_up() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        if kb.matches(&event, "tui.altScreen.lineDown") && !self.composer_overflows() {
+            return if self.scroll_viewport_line_down() {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        // `tui.altScreen.previousPrompt` / `tui.altScreen.nextPrompt`. The
+        // transcript's `Ctrl+Up` / `Ctrl+Down` defaults
+        // (`packages/tui/src/keybindings.ts:212-215`) shadow the editor's
+        // own `Up` / `Down` here, so a keypress on a non-empty editor jumps
+        // between user prompts instead of moving the caret. Empty composers
+        // fall through to the caret handler; non-empty composers stay in
+        // step_composer until the user clears them.
+        if kb.matches(&event, "tui.altScreen.previousPrompt") {
+            let width = self.viewport().0;
+            return if self.jump_to_previous_prompt(width) {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
+        if kb.matches(&event, "tui.altScreen.nextPrompt") {
+            let width = self.viewport().0;
+            return if self.jump_to_next_prompt(width) {
+                StepOutcome::Redraw
+            } else {
+                StepOutcome::Idle
+            };
+        }
         // `tui.altScreen.top` / `tui.altScreen.bottom`.
         if kb.matches(&event, "tui.altScreen.top") {
             return if self.scroll_viewport_to_top() {

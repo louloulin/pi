@@ -575,6 +575,7 @@ fn value_to_color(value: Option<&ColorValue>, mode: ColorMode) -> Option<Color> 
         ColorValue::Hex(hex) => match mode {
             ColorMode::TrueColor => hex_to_rgb(hex).ok().map(|(r, g, b)| Color::Rgb(r, g, b)),
             ColorMode::Ansi256 => hex_to_256(hex).ok().map(Color::Indexed),
+            ColorMode::Auto => hex_to_256(hex).ok().map(Color::Indexed),
             ColorMode::None => None,
         },
         ColorValue::Var(_) => None,

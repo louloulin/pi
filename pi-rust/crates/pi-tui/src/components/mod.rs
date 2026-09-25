@@ -48,6 +48,7 @@ pub mod slash_menu;
 pub mod spacer;
 pub mod stack;
 pub mod status;
+pub mod status_indicator;
 pub mod text;
 pub mod truncated_text;
 pub mod undo_stack;
@@ -88,7 +89,7 @@ pub use message::{
 pub use mouse_region::{MouseRegion, MouseRegionPoint};
 pub use prompt::{Prompt, PromptAction};
 pub use scroll_view::{
-    ScrollView, ScrollViewOptions, ScrollViewScrollbar, ScrollViewScrollToOptions,
+    ScrollView, ScrollViewOptions, ScrollViewScrollbar, ScrollViewScrollToOptions, ScrollbarMode,
 };
 pub use search::{
     apply_query_key, find_matches, normalize_query, render_search_bar, search_bar_rect,
@@ -109,6 +110,11 @@ pub use stack::{
     StackLayoutEntry, StackLayoutViewport, StackOptions,
 };
 pub use status::{format_cost, format_tokens, BusyIndicator, StatusBar, StatusData, StatusPricing};
+pub use status_indicator::{
+    BranchSummaryStatusIndicator, CompactionReason, CompactionStatusIndicator, IdleStatus,
+    RetryStatusIndicator, StatusIndicator, StatusIndicatorKind, TimerHandle,
+    WorkingStatusIndicator,
+};
 pub use text::Text;
 pub use truncated_text::TruncatedText;
 pub use undo_stack::UndoStack;

@@ -792,14 +792,93 @@ pub fn get_scroll_views_at(frame: &LayoutFrame, x: u16, y: u16) -> Vec<Arc<dyn S
 
 // ── helpers ────────────────────────────────────────────────────────
 
+/// Strip every OSC 133 shell-integration marker from `line`.
+///
+/// The marker grammar is `ESC ] 133 ; <kind> [;exit=<code>] (BEL | ESC \\)`,
+/// where `<kind>` is one of:
+///
+/// * `A` — start of prompt (cursor in the editable prompt).
+/// * `B` — start of the user's command line input.
+/// * `C` — command finished, pre-exec.
+/// * `D` — command finished, post-exec; the trailing `;exit=<code>` carries
+///   the shell's last status.
+/// * `P+A` / `P+B` / `P+C` / `P+D` — same as above but for the *final* line
+///   of the prompt / output.
+///
+/// Terminals with iTerm2 / kitty / VSCode / WezTerm shell integration render
+/// the markers as zero-width jump targets in scrollback; the TUI cannot
+/// forward them downstream (it owns the alt screen and the markers have no
+/// visible glyph), so the only safe action is to delete them. We strip every
+/// variant so a prompt that injected a status code into `;D` still scrolls
+/// cleanly.
 fn strip_osc133(line: &mut String) {
     loop {
         let rest = line.as_str();
-        let Some(rest) = rest.strip_prefix("\x1b]133;A") else { break };
-        let rest = strip_osc133_terminator(rest);
-        *line = rest.to_string();
+        let Some(after_marker) = strip_one_osc133(rest) else {
+            break;
+        };
+        *line = after_marker.to_string();
     }
 }
+
+/// Try to peel one OSC 133 marker off the front of `s`. Returns the
+/// remainder (everything after the terminator) when the head matches the
+/// grammar; `None` otherwise.
+fn strip_one_osc133(s: &str) -> Option<&str> {
+    // ESC ] 133 ; <kind> ... where kind is one of A/B/C/D/P+A/P+B/P+C/P+D.
+    let after_prefix = s.strip_prefix("\x1b]133;")?;
+    // Multi-letter kinds (P+A/B/C/D) are matched first because the single
+    // letters are a prefix of them — try the longer match first so the
+    // single-letter match doesn't strip the `P` and leave `+A` behind.
+    let after_kind = if let Some(rest) = strip_one_osc133_kind(after_prefix, true) {
+        rest
+    } else {
+        strip_one_osc133_kind(after_prefix, false)?
+    };
+    // Optional `;exit=<digits>` payload before the terminator.
+    let after_payload = if let Some(rest) = after_kind.strip_prefix(";exit=") {
+        let digit_end: usize = rest
+            .as_bytes()
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digit_end == 0 {
+            // An empty exit code is malformed; refuse to consume the marker
+            // so the rest of the line survives unchanged.
+            return None;
+        }
+        &rest[digit_end..]
+    } else {
+        after_kind
+    };
+    Some(strip_osc133_terminator(after_payload))
+}
+
+/// Strip one of the eight valid `kind` tokens from the head of `s`.
+/// `multi = true` accepts the four two-letter kinds `P+A` / `P+B` /
+/// `P+C` / `P+D`; `multi = false` accepts the four single-letter kinds
+/// `A` / `B` / `C` / `D`.
+fn strip_one_osc133_kind(s: &str, multi: bool) -> Option<&str> {
+    for kind in OSC_133_KINDS {
+        let matched = if multi {
+            kind.0
+        } else {
+            kind.1
+        };
+        if let Some(rest) = s.strip_prefix(matched) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// `(multi_letter, single_letter)` pair for every supported OSC 133 kind.
+const OSC_133_KINDS: &[(&str, &str)] = &[
+    ("P+A", "A"),
+    ("P+B", "B"),
+    ("P+C", "C"),
+    ("P+D", "D"),
+];
 
 fn strip_osc133_terminator(s: &str) -> &str {
     if let Some(idx) = s.find('\x07') {
@@ -955,5 +1034,64 @@ mod tests {
         let mut line = "\x1b]133;A\x07hi".to_string();
         strip_osc133(&mut line);
         assert_eq!(line, "hi");
+    }
+
+    #[test]
+    fn strip_osc133_handles_every_zone_kind() {
+        for marker in [
+            "\x1b]133;A\x07",
+            "\x1b]133;B\x07",
+            "\x1b]133;C\x07",
+            "\x1b]133;D\x07",
+            "\x1b]133;P+A\x07",
+            "\x1b]133;P+B\x07",
+            "\x1b]133;P+C\x07",
+            "\x1b]133;P+D\x07",
+        ] {
+            let mut line = format!("{marker}payload");
+            strip_osc133(&mut line);
+            assert_eq!(line, "payload", "kind {marker:?} must be stripped");
+        }
+    }
+
+    #[test]
+    fn strip_osc133_strips_post_exec_with_exit_code() {
+        // `;D` and `;P+D` carry the exit code; the stripper must consume
+        // it as part of the marker.
+        let mut line = "\x1b]133;D;exit=127\x07[exit 127]".to_string();
+        strip_osc133(&mut line);
+        assert_eq!(line, "[exit 127]");
+        let mut line = "\x1b]133;P+D;exit=0\x07ok".to_string();
+        strip_osc133(&mut line);
+        assert_eq!(line, "ok");
+    }
+
+    #[test]
+    fn strip_osc133_accepts_the_st_terminator() {
+        // Some shells emit `ESC \` (ST) instead of BEL; the stripper must
+        // honour both.
+        let mut line = "\x1b]133;A\x1b\\visible".to_string();
+        strip_osc133(&mut line);
+        assert_eq!(line, "visible");
+    }
+
+    #[test]
+    fn strip_osc133_drops_multiple_consecutive_markers() {
+        // A prompt can carry a chained A→B→C→D burst; every one of them
+        // must vanish.
+        let mut line =
+            "\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D\x07text".to_string();
+        strip_osc133(&mut line);
+        assert_eq!(line, "text");
+    }
+
+    #[test]
+    fn strip_osc133_leaves_unknown_kinds_intact() {
+        // Unknown kinds (e.g. `;X`) are not part of the spec — refuse to
+        // touch them so a future OSC 133 extension doesn't get silently
+        // dropped.
+        let mut line = "\x1b]133;X\x07body".to_string();
+        strip_osc133(&mut line);
+        assert_eq!(line, "\x1b]133;X\x07body");
     }
 }

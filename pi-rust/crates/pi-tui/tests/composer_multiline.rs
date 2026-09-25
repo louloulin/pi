@@ -54,23 +54,25 @@ fn app_with_composer_max(max_rows: usize) -> App {
     )
 }
 
-/// A 20-char body at width 12 (label "> " = 2, body width 10) wraps into
-/// 2 rows; the prompt reports both.
+/// A 20-char body at width 12 wraps into 2 rows; the prompt reports
+/// both. With no chevron prefix, the label gutter is gone, so the
+/// first row takes the full 12 columns.
 #[test]
 fn prompt_grows_when_the_buffer_wraps() {
-    let mut prompt = Prompt::new("> ");
+    let mut prompt = Prompt::new("");
     prompt.editor_mut().insert_str("aaaaaaaaaa bbbbbb");
     assert_eq!(prompt.line_count(12, 8), 2);
     let lines = prompt.render_lines(12, 8, 0).0;
     assert_eq!(lines.len(), 8);
+    // First row owns the body — no prefix glyph since the label is empty.
     assert!(
-        lines[0].starts_with("> "),
-        "first row owns the label: {lines:?}"
+        lines[0].starts_with("aa"),
+        "first row owns the body: {lines:?}"
     );
     for row in &lines[1..] {
         assert!(
-            row.starts_with("  "),
-            "continuation rows are indented: {row:?}"
+            row.starts_with("b") || row.trim().is_empty() || row.starts_with("aa"),
+            "continuation rows are not indented any more: {row:?}"
         );
     }
 }
@@ -99,18 +101,30 @@ fn app_renders_multi_row_composer_into_the_editor_region() {
     let wide = app.render_snapshot(80, 24);
     let narrow = app.render_snapshot(20, 24);
 
-    // Narrow viewport: the composer wraps, the message view shrinks,
-    // and the editor region spans more than one row.
-    let narrow_editor_rows: Vec<_> = narrow
-        .lines
-        .iter()
-        .filter(|line| line.trim_start().starts_with("> ") || line.starts_with("  "))
-        .collect();
-    let wide_editor_rows: Vec<_> = wide
-        .lines
-        .iter()
-        .filter(|line| line.trim_start().starts_with("> ") || line.starts_with("  "))
-        .collect();
+    // Composer rows are the rows that carry the typed buffer — match a
+    // unique substring of the draft rather than a prefix glyph (the
+    // prefix was removed in Phase 9). The footer carries `?/` and the
+    // provider label, so we exclude that too.
+    fn composer_rows(snap: &pi_tui::app::RenderSnapshot) -> Vec<&str> {
+        snap.lines
+            .iter()
+            .map(String::as_str)
+            .filter(|line| {
+                !line.trim().is_empty()
+                    && !line.contains("?/")
+                    && !line.contains("Faux")
+                    && !line.starts_with("────")
+                    && (line.contains("fairly")
+                        || line.contains("wraps")
+                        || line.contains("draft")
+                        || line.contains("long composer")
+                        || line.starts_with("this "))
+            })
+            .collect()
+    }
+
+    let narrow_editor_rows = composer_rows(&narrow);
+    let wide_editor_rows = composer_rows(&wide);
     assert!(
         narrow_editor_rows.len() > wide_editor_rows.len(),
         "narrow viewport must produce more composer rows (wide={}, narrow={}):\nwide={:?}\nnarrow={:?}",
@@ -133,7 +147,12 @@ fn cap_protects_against_pathologically_long_buffers() {
     let editor_rows: Vec<_> = snapshot
         .lines
         .iter()
-        .filter(|line| line.trim_start().starts_with("> ") || line.starts_with("  "))
+        .filter(|line| {
+            !line.trim().is_empty()
+                && !line.contains("?/")
+                && !line.contains("Faux")
+                && line.chars().any(|c| c == 'x')
+        })
         .collect();
     assert!(
         editor_rows.len() <= 3,

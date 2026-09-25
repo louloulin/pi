@@ -90,12 +90,14 @@ fn user_block_paints_user_message_bg_through_box_layout() {
     let mut app = app();
     app.messages_mut().push(MessageItem::user("hi"));
 
-    // The user prefix is `> ` so the body text starts at column 2.
+    // The user block no longer carries a `> ` prefix (matches TS
+    // pi-tui — see `user-message.ts`), so the body text now starts at
+    // column 0. The first body cell must still carry the user bg,
+    // proving the bg travels through `BoxLayout::with_bg` rather than
+    // the per-span stamp.
     let buf = render(&mut app, WIDTH, HEIGHT);
 
-    // First body cell must carry the user bg, proving the bg travels
-    // through BoxLayout::with_bg rather than the per-span stamp.
-    assert_cell_bg(&buf, 2, 0, USER_BG, "user body[0,0]");
+    assert_cell_bg(&buf, 0, 0, USER_BG, "user body[0,0]");
 }
 
 #[test]
@@ -114,7 +116,8 @@ fn info_block_paints_custom_message_bg_through_box_layout() {
         notice_lines: None,
     });
 
-    // Info blocks have no `> ` prefix; the body starts at column 0.
+    // Info blocks have no `·` (TS parity — `custom-message.ts` adds
+    // none), so the body starts at column 0.
     let buf = render(&mut app, WIDTH, HEIGHT);
 
     assert_cell_bg(&buf, 0, 0, INFO_BG, "info body[0,0]");

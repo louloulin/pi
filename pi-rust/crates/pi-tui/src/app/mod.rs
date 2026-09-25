@@ -109,6 +109,13 @@
 //!   startup header's `Ctrl+C to clear` / `Ctrl+C twice to exit` promises.
 //! * `tui.altScreen.pageUp` / `pageDown` (`pageUp` / `pageDown`) and
 //!   `tui.altScreen.top` / `bottom` (`home` / `end`) — viewport scrolling.
+//! * `tui.altScreen.halfPageUp` / `halfPageDown` (`Ctrl+U` / `Ctrl+D` in
+//!   nanopi, unbound by upstream) — half-viewport scrolling; activated
+//!   through an installed override.
+//! * `tui.altScreen.lineUp` / `lineDown` — single-row scrolling; activated
+//!   through an installed override.
+//! * `tui.altScreen.previousPrompt` / `nextPrompt` (`Ctrl+Up` / `Ctrl+Down`)
+//!   — jump between user prompts.
 //! * `tui.altScreen.search` / `searchClose` / `searchNext` /
 //!   `searchPrevious` — the transcript search overlay (see below).
 //!
@@ -1138,6 +1145,15 @@ pub enum FollowUpOutcome {
     RefusedImages,
 }
 
+/// Direction for [`App::jump_to_previous_prompt`] / [`App::jump_to_next_prompt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptJumpDirection {
+    /// Walk towards the oldest line.
+    Previous,
+    /// Walk towards the latest line.
+    Next,
+}
+
 /// Snapshot of the rendered App for tests.
 #[derive(Debug, Clone)]
 pub struct RenderSnapshot {
@@ -1280,6 +1296,11 @@ pub struct App {
     /// until its release so only a click that starts and ends on the same
     /// cell moves the caret (upstream's `isClick` gate).
     prompt_mouse_press: Option<(u16, u16)>,
+    /// Item index of a left press that landed inside a tool block region,
+    /// kept until its release so only a press-and-release on the same block
+    /// toggles its `tool_expanded` (upstream's `isClick` gate). `None`
+    /// whenever no tool block owns the press.
+    tool_block_press: Option<usize>,
     /// Cell-based composer drag selection, in absolute buffer cell
     /// coordinates (LUM-1332). The selection stores the press anchor and
     /// the current drag focus; the rendered text and highlight are both
@@ -1443,7 +1464,7 @@ impl App {
         )
         .with_context_window(model.context_window);
         status_data.hint = Some("? for help".to_string());
-        let mut prompt = Prompt::new("> ");
+        let mut prompt = Prompt::default();
         prompt.set_placeholder(config.prompt_placeholder.clone());
         // Cross-session history is opt-in: the driver hands over a path, and
         // an App built without one never touches the filesystem.
@@ -1489,6 +1510,7 @@ impl App {
             search: None,
             modal_mouse_press: None,
             prompt_mouse_press: None,
+            tool_block_press: None,
             composer_drag_selection: None,
             composer_press_moved_caret: false,
             autocomplete_mouse_press: None,
@@ -3931,6 +3953,44 @@ impl App {
         regions
     }
 
+    /// On-screen rectangles of every tool block in the chat log, in render
+    /// order. Empty before the first render or when the transcript is empty.
+    ///
+    /// Upstream wraps a folded tool block in a `MouseRegion` so a click on
+    /// the body toggles `tool_expanded`
+    /// (`packages/tui/src/components/tool-execution.ts:115-126`); the Rust
+    /// port exposes the same rectangles here and routes the gesture in
+    /// [`App::step_tool_block_mouse_gesture`].
+    pub fn tool_block_regions(&self) -> Vec<(usize, MouseRegion)> {
+        let (width, height) = self.viewport();
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+        let (origin_x, origin_y) = self.viewport_origin();
+        let total = self.messages.line_count(width);
+        let scroll_top = total.saturating_sub(height as usize + self.resolved_scroll());
+        let mut out = Vec::new();
+        for (idx, start, end) in self.messages.tool_block_ranges(width) {
+            let visible_start = start.max(scroll_top);
+            let visible_end = end.min(scroll_top + height as usize);
+            if visible_end <= visible_start {
+                continue;
+            }
+            let row_offset = visible_start - scroll_top;
+            let rows = u16::try_from(visible_end - visible_start).unwrap_or(u16::MAX);
+            let y = origin_y + row_offset as u16;
+            if y >= origin_y + height {
+                continue;
+            }
+            let rows = rows.min(height - (y - origin_y));
+            if rows == 0 {
+                continue;
+            }
+            out.push((idx, MouseRegion::new(Rect::new(origin_x, y, width, rows))));
+        }
+        out
+    }
+
     /// Move the selection focus, returning whether the rendered highlight
     /// actually changed.
     ///
@@ -5345,6 +5405,134 @@ impl App {
         // `set_scroll_from_bottom(0)` also re-attaches to the tail.
         self.messages
             .set_scroll_from_bottom(current.saturating_sub(lines.max(1)));
+        true
+    }
+
+    /// Current scroll offset (lines from the bottom). `0` means
+    /// pinned.
+    pub fn scroll_offset_for_test(&self) -> usize {
+        self.resolved_scroll()
+    }
+
+    /// Scroll the chat log up by half a viewport (`tui.altScreen.halfPageUp`).
+    ///
+    /// A viewport of height `h` scrolls by `(h + 1) / 2` so the user crosses
+    /// the midpoint of an odd-height terminal on the first keystroke. The
+    /// bare chord is unbound by default
+    /// (`packages/tui/src/keybindings.ts:218-219`), so this path runs only
+    /// when an installed override binds the id; with nothing installed the
+    /// chord falls through and the bare `PageUp` / `PageDown` handler above
+    /// stays in charge.
+    pub fn scroll_viewport_half_page_up(&mut self) -> bool {
+        let page = self.message_page();
+        let half = page.div_ceil(2).max(1);
+        self.scroll_viewport_up(half)
+    }
+
+    /// Scroll the chat log down by half a viewport (`tui.altScreen.halfPageDown`).
+    ///
+    /// Mirror of [`scroll_viewport_half_page_up`](Self::scroll_viewport_half_page_up);
+    /// the count rounds up so the user crosses the midpoint of an odd-height
+    /// terminal on the first keystroke.
+    pub fn scroll_viewport_half_page_down(&mut self) -> bool {
+        let page = self.message_page();
+        let half = page.div_ceil(2).max(1);
+        self.scroll_viewport_down(half)
+    }
+
+    /// Scroll the chat log up by one line (`tui.altScreen.lineUp`).
+    ///
+    /// Upstream binds this id to no chord by default, so a custom overlay
+    /// or a user override is the only way to reach it; without one the
+    /// `PageUp` / `PageDown` handler above wins. The unit is one rendered
+    /// row, so a keypress on a tall transcript makes small, predictable
+    /// progress (LUM-1317 §5).
+    pub fn scroll_viewport_line_up(&mut self) -> bool {
+        self.scroll_viewport_up(1)
+    }
+
+    /// Scroll the chat log down by one line (`tui.altScreen.lineDown`).
+    ///
+    /// Mirror of [`scroll_viewport_line_up`](Self::scroll_viewport_line_up).
+    pub fn scroll_viewport_line_down(&mut self) -> bool {
+        self.scroll_viewport_down(1)
+    }
+
+    /// Jump the viewport to the start row of the previous user prompt
+    /// (`tui.altScreen.previousPrompt`).
+    ///
+    /// "Previous" means any [`Role::User`] item whose first rendered row
+    /// is above the viewport's current top edge. If the viewport is already
+    /// showing the oldest user prompt, the call is a no-op (returns
+    /// `false`). If no user prompts exist, the call is also a no-op.
+    /// Otherwise the viewport detaches from the tail and lands on the
+    /// prompt's first row.
+    pub fn jump_to_previous_prompt(&mut self, width: u16) -> bool {
+        self.jump_to_prompt_boundary(width, PromptJumpDirection::Previous)
+    }
+
+    /// Jump the viewport to the start row of the next user prompt
+    /// (`tui.altScreen.nextPrompt`).
+    ///
+    /// Mirror of [`jump_to_previous_prompt`](Self::jump_to_previous_prompt):
+    /// finds the first [`Role::User`] item whose first rendered row is
+    /// below the viewport's current top edge. If no such prompt exists
+    /// (or no user prompts exist at all) the call is a no-op.
+    pub fn jump_to_next_prompt(&mut self, width: u16) -> bool {
+        self.jump_to_prompt_boundary(width, PromptJumpDirection::Next)
+    }
+
+    fn jump_to_prompt_boundary(
+        &mut self,
+        width: u16,
+        direction: PromptJumpDirection,
+    ) -> bool {
+        let total = self.messages.line_count(width);
+        let viewport_top = total.saturating_sub(
+            self.viewport().1 as usize + self.resolved_scroll(),
+        );
+        let ranges = self.messages.item_line_ranges(width);
+        let boundary = match direction {
+            PromptJumpDirection::Previous => ranges
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, (start, _))| {
+                    if matches!(
+                        self.messages.items().get(idx).map(|i| i.role),
+                        Some(Role::User)
+                    ) {
+                        Some(start)
+                    } else {
+                        None
+                    }
+                })
+                .take_while(|&start| start < viewport_top)
+                .last(),
+            PromptJumpDirection::Next => ranges
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, (start, _))| {
+                    if matches!(
+                        self.messages.items().get(idx).map(|i| i.role),
+                        Some(Role::User)
+                    ) {
+                        Some(start)
+                    } else {
+                        None
+                    }
+                })
+                .find(|&start| start > viewport_top),
+        };
+        let Some(target_row) = boundary else {
+            return false;
+        };
+        let new_offset = total.saturating_sub(target_row).saturating_sub(
+            self.viewport().1 as usize,
+        );
+        if new_offset == self.resolved_scroll() {
+            return false;
+        }
+        self.messages.set_scroll_from_bottom(new_offset);
         true
     }
 

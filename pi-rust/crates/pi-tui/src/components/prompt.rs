@@ -48,8 +48,13 @@ pub struct Prompt {
 }
 
 impl Default for Prompt {
+    /// The default composer carries no prefix glyph, matching TS
+    /// `packages/tui/src/components/editor.ts` — the input box exists
+    /// on its own row and the caret is the only chrome. Use
+    /// [`Prompt::with_chevron`] to opt back into the historical `> `
+    /// prefix for layouts that still need it.
     fn default() -> Self {
-        Self::new("> ")
+        Self::new("")
     }
 }
 
@@ -61,6 +66,20 @@ impl Prompt {
             placeholder: String::new(),
             label: label.into(),
         }
+    }
+
+    /// Construct a prompt with the historical `> ` chevron prefix.
+    /// Mirrors the legacy Rust default and matches nanopi's inline layout;
+    /// useful when an embedder wants the legacy feel without writing
+    /// the literal by hand.
+    pub fn with_chevron() -> Self {
+        Self::new("> ")
+    }
+
+    /// Builder form for [`Prompt::with_chevron`].
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
     }
 
     /// Set the placeholder shown when the buffer is empty.

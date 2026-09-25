@@ -18,6 +18,13 @@
 //!
 //! Every assertion reads the **rendered frame** (cell grid), not internal
 //! state, so the invariants below are the ones the terminal actually sees.
+//!
+//! Phase 9 note: the composer no longer carries a `> ` chevron — see
+//! `crates/pi-tui/src/components/prompt.rs` and the TS
+//! `packages/coding-agent/src/modes/interactive/components/custom-editor.ts`
+//! reference. The body starts at column 0 and continuation rows are no longer
+//! indented, so the row-detection helper looks for the caret glyph and the
+//! placeholder text instead of the legacy `> ` / `  ` prefix.
 
 use std::sync::Arc;
 
@@ -33,16 +40,18 @@ use ratatui::layout::Rect;
 
 const WIDTH: u16 = 40;
 const HEIGHT: u16 = 14;
-/// The composer's label gutter (`Prompt::new("> ")`).
-const GUTTER: u16 = 2;
+/// Phase 9: the composer's label gutter is gone — body text starts at column 0.
+const GUTTER: u16 = 0;
 /// The caret glyph `Prompt` draws.
 const CARET: char = '▍';
+/// The placeholder the editor paints when the buffer is empty.
+const PLACEHOLDER: &str = "type a prompt";
 
 fn faux_model() -> Model {
     Model {
         provider: ProviderId::new("faux"),
-        id: "faux-model".into(),
         api: Api::Faux,
+        id: "faux-model".into(),
         label: Some("Faux".into()),
         context_window: 1024,
         max_output_tokens: 256,
@@ -105,20 +114,47 @@ fn row_width(buf: &Buffer, y: u16) -> usize {
     used
 }
 
-/// Every composer row (a row that starts with the label or with one of the
-/// continuation markers), top to bottom.
+/// Composer rows, top to bottom.
+///
+/// After Phase 9 there is no `> ` prefix or `  ` indent to key on, so we walk
+/// up from the caret row, collecting every consecutive row that is neither the
+/// footer nor the horizontal divider. This matches the on-screen region the
+/// user perceives as "the prompt area".
 fn composer_rows(buf: &Buffer) -> Vec<(u16, String)> {
-    (0..buf.area.height)
-        .filter_map(|y| {
-            let text = row_text(buf, y);
-            let starts_here = text.starts_with("> ")
-                || text.starts_with("  ")
-                || text.starts_with('↑')
-                || text.starts_with('↓')
-                || text.starts_with('↕');
-            (starts_here && text.trim_end().len() > 2).then_some((y, text))
-        })
-        .collect()
+    let mut caret_row: Option<u16> = None;
+    for y in 0..buf.area.height {
+        if row_text(buf, y).contains(CARET) {
+            caret_row = Some(y);
+        }
+    }
+    let Some(caret_row) = caret_row else {
+        // Empty composer — only the placeholder row counts.
+        return (0..buf.area.height)
+            .filter_map(|y| {
+                let text = row_text(buf, y);
+                text.contains(PLACEHOLDER).then_some((y, text))
+            })
+            .collect();
+    };
+    let mut rows: Vec<(u16, String)> = Vec::new();
+    let mut y = caret_row;
+    loop {
+        let text = row_text(buf, y);
+        if text.contains("?/")
+            || text.contains("────")
+            || text.contains("Faux")
+            || text.trim().is_empty()
+        {
+            break;
+        }
+        rows.push((y, text));
+        if y == 0 {
+            break;
+        }
+        y -= 1;
+    }
+    rows.reverse();
+    rows
 }
 
 /// Cell column of the caret marker in a frame, if it is on screen.
@@ -171,24 +207,25 @@ fn assert_no_cell_under_a_wide_glyph(buf: &Buffer) {
 #[test]
 fn a_cjk_draft_wraps_at_the_composer_width_in_columns() {
     let mut app = app();
-    // 38 body columns (40 minus the 2-cell label) hold 19 wide glyphs.
+    // 30 wide glyphs = 60 columns; with no gutter the body has 40 columns,
+    // so 30 glyphs must wrap to 2 rows (20 + 10).
     type_text(&mut app, &"你".repeat(30));
     let buf = frame(&mut app);
     let rows: Vec<String> = composer_rows(&buf).into_iter().map(|(_, t)| t).collect();
     assert_eq!(
         rows.len(),
         2,
-        "30 wide glyphs are 60 columns and cannot fit one 38-column row: {rows:#?}"
+        "30 wide glyphs are 60 columns and cannot fit one 40-column row: {rows:#?}"
     );
     assert_eq!(
         rows[0].trim_end(),
-        format!("> {}", "你".repeat(19)),
-        "the first row takes 19 glyphs = 38 columns"
+        "你".repeat(20),
+        "the first row takes 20 glyphs = 40 columns"
     );
     assert_eq!(
         rows[1].trim_end(),
-        format!("  {}▍", "你".repeat(11)),
-        "the remaining 11 glyphs continue on an indented row, caret after them"
+        format!("{}▍", "你".repeat(10)),
+        "the remaining 10 glyphs continue on row 2, caret after them"
     );
     for (y, _) in composer_rows(&buf) {
         assert!(
@@ -202,13 +239,14 @@ fn a_cjk_draft_wraps_at_the_composer_width_in_columns() {
 #[test]
 fn a_mixed_width_draft_wraps_by_columns() {
     let mut app = app();
-    // "ab" (2) + 18 wide glyphs (36) = 38 columns exactly, then "cd" wraps.
+    // "ab" (2) + 18 wide glyphs (36) = 38 columns, then "cd" wraps.
+    // Body has 40 columns → row 1 holds "ab" + 18 wide + "cd" (40 cols).
     let draft = format!("ab{}cd", "中".repeat(18));
     type_text(&mut app, &draft);
     let buf = frame(&mut app);
     let rows: Vec<String> = composer_rows(&buf).into_iter().map(|(_, t)| t).collect();
-    assert_eq!(rows[0].trim_end(), format!("> ab{}", "中".repeat(18)));
-    assert_eq!(rows[1].trim_end(), "  cd▍");
+    assert_eq!(rows.len(), 1, "the whole draft fits one 40-column row");
+    assert_eq!(rows[0].trim_end(), draft);
     assert_no_cell_under_a_wide_glyph(&buf);
 }
 
@@ -223,13 +261,13 @@ fn a_burst_of_wide_glyphs_leaves_no_placeholder_cells_behind() {
     // completely, including the cells a wide glyph covers.
     let before = frame(&mut app);
     assert!(
-        row_text(&before, HEIGHT - 2).contains("type a prompt"),
+        row_text(&before, HEIGHT - 2).contains(PLACEHOLDER),
         "the empty composer shows the placeholder"
     );
     type_text(&mut app, "世界你好");
     let buf = frame(&mut app);
     let row = row_text(&buf, HEIGHT - 2);
-    assert_eq!(row.trim_end(), "> 世界你好▍");
+    assert_eq!(row.trim_end(), "世界你好▍");
     for ghost in ["p", "e", "t", "y", "a", "r", "o", "m"] {
         assert!(
             !row.contains(ghost),
@@ -249,7 +287,7 @@ fn the_caret_sits_at_the_column_of_the_cursor_after_wide_glyphs() {
     type_text(&mut app, "世界你好");
     let buf = frame(&mut app);
     let (x, y) = caret_cell(&buf).expect("the caret is on screen");
-    // Cursor is after four wide glyphs: 2 columns of gutter + 8 columns.
+    // Cursor is after four wide glyphs: 0 (gutter) + 8 (四×二) columns.
     assert_eq!(x, GUTTER + 8, "caret cell on row {y}");
     assert_no_cell_under_a_wide_glyph(&buf);
 }
@@ -260,7 +298,7 @@ fn the_caret_sits_at_the_column_of_the_cursor_in_a_mixed_row() {
     type_text(&mut app, "ab你好cd");
     let buf = frame(&mut app);
     let (x, _) = caret_cell(&buf).expect("the caret is on screen");
-    // 2 (gutter) + 2 (ab) + 4 (你好) + 2 (cd) = 10.
+    // 0 (gutter) + 2 (ab) + 4 (你好) + 2 (cd) = 8.
     assert_eq!(x, GUTTER + 8);
 }
 
@@ -271,10 +309,10 @@ fn the_caret_stays_inside_the_composer_on_a_wrapped_cjk_draft() {
     let buf = frame(&mut app);
     let (x, y) = caret_cell(&buf).expect("the caret is on screen");
     assert!(x < WIDTH, "the caret is inside the composer: {x}");
-    // 30 glyphs at 19 per row: the caret is at the end of the second row.
+    // 30 glyphs at 20 per row: the caret is at the end of the second row.
     let rows = composer_rows(&buf);
     assert_eq!(y, rows[1].0, "the caret is on the row being typed into");
-    assert_eq!(x, GUTTER + 22, "11 glyphs = 22 columns into that row");
+    assert_eq!(x, GUTTER + 20, "10 glyphs = 20 columns into that row");
 }
 
 // ---------------------------------------------------------------------------
@@ -287,8 +325,9 @@ fn a_pasted_cjk_block_wraps_by_columns_too() {
     app.step_paste(&"好".repeat(20));
     let buf = frame(&mut app);
     let rows: Vec<String> = composer_rows(&buf).into_iter().map(|(_, t)| t).collect();
-    assert_eq!(rows[0].trim_end(), format!("> {}", "好".repeat(19)));
-    assert_eq!(rows[1].trim_end(), "  好▍");
+    assert_eq!(rows.len(), 2, "20 wide glyphs = 40 columns → 1 row");
+    assert_eq!(rows[0].trim_end(), "好".repeat(20));
+    assert_eq!(rows[1].trim_end(), "好▍");
     assert_no_cell_under_a_wide_glyph(&buf);
 }
 
@@ -301,10 +340,10 @@ fn a_click_on_the_second_cell_of_a_wide_glyph_caret_before_that_glyph() {
     let mut app = app();
     type_text(&mut app, "你好世界");
     let _ = frame(&mut app);
-    // 你 = columns 2-3, 好 = 4-5, 世 = 6-7, 界 = 8-9. Click the second cell
-    // of 世 (column 7): the caret goes before 世, i.e. after 你好.
+    // 你 = columns 0-1, 好 = 2-3, 世 = 4-5, 界 = 6-7. Click the second cell
+    // of 世 (column 5): the caret goes before 世, i.e. after 你好.
     // A click is a press and its release on the same cell.
-    let click = |kind| InputEvent::gesture(MouseGesture::new(kind, GUTTER + 5, HEIGHT - 2, false));
+    let click = |kind| InputEvent::gesture(MouseGesture::new(kind, GUTTER + 3, HEIGHT - 2, false));
     app.step(click(MouseGestureKind::Press(MouseButton::Left)));
     app.step(click(MouseGestureKind::Release(MouseButton::Left)));
     let buf = frame(&mut app);

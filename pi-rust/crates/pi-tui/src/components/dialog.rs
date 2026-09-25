@@ -82,13 +82,13 @@ impl Dialog {
     pub fn new(request: UiRequest, reply: oneshot::Sender<Option<UiResponse>>) -> Self {
         let input = match &request {
             UiRequest::Input { placeholder, .. } => {
-                let mut prompt = Prompt::new("> ");
+                let mut prompt = Prompt::default();
                 if let Some(placeholder) = placeholder {
                     prompt.set_placeholder(placeholder.clone());
                 }
                 prompt
             }
-            _ => Prompt::new("> "),
+            _ => Prompt::default(),
         };
         let selector = match &request {
             UiRequest::Select { title, options } => Selector::new(

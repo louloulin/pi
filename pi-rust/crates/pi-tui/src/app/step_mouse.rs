@@ -54,6 +54,14 @@ impl App {
             self.scrollbar_drag = None;
             return outcome;
         }
+        // A folded tool block owns clicks on its body so the user can expand
+        // and collapse results without a chord. Mirrors upstream's per-tool
+        // `MouseRegion` (`tool-execution.ts:115-126`).
+        if let Some(outcome) = self.step_tool_block_mouse_gesture(gesture) {
+            self.scrollbar_hover = false;
+            self.scrollbar_drag = None;
+            return outcome;
+        }
         // The pill is the first thing on the transcript to get the pointer
         // (upstream `handleScrollToEndIndicatorMouseEvent`, tested before the
         // scrollbar and the selection, `packages/tui/src/tui-alt-screen.ts:1017-1024`):
@@ -223,6 +231,58 @@ impl App {
             // Drags inside a modal, bare moves and the other buttons are
             // consumed without changing anything.
             _ => StepOutcome::Idle,
+        }
+    }
+
+    /// Route a gesture to a tool block region.
+    ///
+    /// Mirrors upstream's per-tool `MouseRegion`
+    /// (`packages/tui/src/components/tool-execution.ts:115-126`): a left
+    /// press on a folded block toggles `tool_expanded` so the user can
+    /// collapse or expand tool output without a chord. Other gestures pass
+    /// through to the chat-log selection.
+    pub(super) fn step_tool_block_mouse_gesture(
+        &mut self,
+        gesture: MouseGesture,
+    ) -> Option<StepOutcome> {
+        // Non-press moves never activate a tool block; only the press +
+        // release pair counts as a click so a drag that started outside the
+        // block cannot collapse it.
+        if !matches!(
+            gesture.kind,
+            MouseGestureKind::Press(MouseButton::Left) | MouseGestureKind::Release(MouseButton::Left)
+        ) {
+            return None;
+        }
+        let hit = self
+            .tool_block_regions()
+            .into_iter()
+            .find_map(|(idx, region)| region.capture(gesture).map(|p| (idx, p)))?;
+        let (idx, _point) = hit;
+        match gesture.kind {
+            MouseGestureKind::Press(MouseButton::Left) => {
+                self.tool_block_press = Some(idx);
+                // Don't let the press also start a text selection that
+                // covers the block — clear any in-flight selection.
+                if self.selection.is_some() {
+                    self.selection = None;
+                    Some(StepOutcome::Redraw)
+                } else {
+                    Some(StepOutcome::Idle)
+                }
+            }
+            MouseGestureKind::Release(MouseButton::Left) => {
+                if self.tool_block_press.take() == Some(idx) {
+                    if self.messages.toggle_tool_at(idx).is_some() {
+                        Some(StepOutcome::Redraw)
+                    } else {
+                        Some(StepOutcome::Idle)
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }

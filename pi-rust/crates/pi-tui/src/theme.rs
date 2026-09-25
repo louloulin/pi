@@ -613,6 +613,13 @@ pub enum ColorMode {
     /// It is what makes the component-style regression test
     /// "`ColorMode::None` emits no `\x1b[`" expressible.
     None,
+    /// Resolve at render time against the terminal's detected
+    /// capabilities — `TrueColor` when the running terminal advertises
+    /// 24-bit support, otherwise `Ansi256`. Use this in user-facing entry
+    /// points that cannot know the depth up front (the live TUI driver
+    /// feeds it the cached record from
+    /// [`crate::terminal::capabilities::true_color_supported`]).
+    Auto,
 }
 
 impl ColorMode {
@@ -624,6 +631,29 @@ impl ColorMode {
         } else {
             Self::Ansi256
         }
+    }
+
+    /// Resolve [`ColorMode::Auto`] against a runtime capability flag.
+    ///
+    /// `TrueColor`, `Ansi256`, and `None` pass through unchanged; `Auto`
+    /// becomes whichever concrete mode the `true_color` flag selects. This
+    /// indirection lets callers carry an `Auto` through their API and pin
+    /// it only when the terminal record is known, without forcing the
+    /// `theme` module to import `terminal::capabilities` (which would
+    /// produce a `theme` ↔ `terminal` cycle in the dependency graph).
+    pub fn resolve(&self, true_color: bool) -> ColorMode {
+        match self {
+            ColorMode::Auto => Self::from_true_color(true_color),
+            other => *other,
+        }
+    }
+
+    /// Whether the resolved mode emits any ANSI at all. `Auto` is
+    /// treated as "yes, it picks either TrueColor or Ansi256" — the
+    /// same answer callers get when they ask whether a theme can render
+    /// colour before they've pinned the capability.
+    pub fn emits_ansi(&self) -> bool {
+        !matches!(self, ColorMode::None)
     }
 }
 
@@ -748,6 +778,12 @@ pub fn fg_ansi(color: &ColorValue, mode: ColorMode) -> Result<String, ThemeError
                 Ok(format!("\x1b[38;2;{r};{g};{b}m"))
             }
             ColorMode::Ansi256 => Ok(format!("\x1b[38;5;{}m", hex_to_256(hex)?)),
+            // `Auto` is supposed to be resolved by the driver before a
+            // Theme is built; this is a defensive fallback for callers that
+            // skip the resolve step (mostly tests). Ansi256 is the safe
+            // concrete mode — every modern terminal that does not support
+            // true color still supports 256.
+            ColorMode::Auto => Ok(format!("\x1b[38;5;{}m", hex_to_256(hex)?)),
             ColorMode::None => Ok(String::new()),
         },
         ColorValue::Var(name) => Err(ThemeError::InvalidColorValue(name.clone())),
@@ -771,6 +807,7 @@ pub fn bg_ansi(color: &ColorValue, mode: ColorMode) -> Result<String, ThemeError
                 Ok(format!("\x1b[48;2;{r};{g};{b}m"))
             }
             ColorMode::Ansi256 => Ok(format!("\x1b[48;5;{}m", hex_to_256(hex)?)),
+            ColorMode::Auto => Ok(format!("\x1b[48;5;{}m", hex_to_256(hex)?)),
             ColorMode::None => Ok(String::new()),
         },
         ColorValue::Var(name) => Err(ThemeError::InvalidColorValue(name.clone())),
@@ -1832,5 +1869,26 @@ mod tests {
         let css = builtin_theme_json("light").unwrap().css_colors().unwrap();
         assert_eq!(css.get("accent").map(String::as_str), Some("#5a8080"));
         assert_eq!(css.get("selectedBg").map(String::as_str), Some("#d0d0e0"));
+    }
+
+    #[test]
+    fn auto_resolves_to_true_color_when_supported() {
+        assert_eq!(ColorMode::Auto.resolve(true), ColorMode::TrueColor);
+        assert_eq!(ColorMode::Auto.resolve(false), ColorMode::Ansi256);
+    }
+
+    #[test]
+    fn resolve_passes_through_concrete_modes() {
+        assert_eq!(ColorMode::TrueColor.resolve(false), ColorMode::TrueColor);
+        assert_eq!(ColorMode::Ansi256.resolve(true), ColorMode::Ansi256);
+        assert_eq!(ColorMode::None.resolve(true), ColorMode::None);
+    }
+
+    #[test]
+    fn emits_ansi_only_for_non_none_modes() {
+        assert!(ColorMode::Auto.emits_ansi());
+        assert!(ColorMode::TrueColor.emits_ansi());
+        assert!(ColorMode::Ansi256.emits_ansi());
+        assert!(!ColorMode::None.emits_ansi());
     }
 }
