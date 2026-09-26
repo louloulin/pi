@@ -5,12 +5,15 @@
 //! host from [`pi_extensions`]. Both paths coexist; the file extension
 //! on disk decides which one runs.
 
+pub mod api_surface;
 pub mod autocomplete;
+pub mod event_bus;
 pub mod events;
 pub mod extension_shortcuts;
 pub mod hook;
 pub mod js_loader;
 pub mod lifecycle;
 pub mod pi_ai_runner;
+pub mod required_api;
 pub mod ui_bridge;
 pub mod wiring;

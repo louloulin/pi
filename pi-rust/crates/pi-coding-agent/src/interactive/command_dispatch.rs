@@ -99,7 +99,20 @@ pub(super) async fn run_slash_command(
             open_scoped_models_selector(app, options);
         }
         SlashCommand::Hotkeys => {
-            app.info_block(crate::commands::slash::hotkeys_text());
+            // Snapshot the live extension-shortcut registry so any
+            // chord a JS extension installed via `registerShortcut`
+            // shows up in the Extensions table (TS parity:
+            // `handleHotkeysCommand` calls `extensionRunner.getShortcuts`
+            // before rendering).
+            let extension_shortcuts = options
+                .extension_shortcut_registry
+                .as_deref()
+                .map(|registry| registry.snapshot());
+            let extension_ref = extension_shortcuts.as_deref();
+            app.info_block(crate::commands::slash::hotkeys_text_with(
+                &pi_tui::keybindings::get_keybindings(),
+                extension_ref,
+            ));
         }
         SlashCommand::Extensions => {
             let home = crate::paths::home_dir();

@@ -195,7 +195,13 @@ pub(super) async fn run_loop(
     // agent's fan-out (the first belongs to the App) drives every mapped
     // event into the host on its own task, so a slow plugin cannot stall
     // rendering. Skipped entirely when no loaded extension subscribed.
-    let extension_pump = start_extension_event_pump(&agent, options.extensions.as_ref()).await;
+    let extension_event_bus = std::sync::Arc::new(crate::extensions::event_bus::EventBus::new());
+    let extension_pump = start_extension_event_pump(
+        &agent,
+        options.extensions.as_ref(),
+        std::sync::Arc::clone(&extension_event_bus),
+    )
+    .await;
     // The events that fire *inside* a run (`context`, `before_agent_start`, …)
     // need an async answer, so they ride [`LifecycleHooks`] instead of the
     // synchronous fan-out above. Installed before the first prompt, and only

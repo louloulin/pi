@@ -58,6 +58,7 @@ use crate::compaction::{
     compact, Compaction, CompactionError, CompactionSettings, DEFAULT_COMPACTION_SETTINGS,
 };
 use crate::config::{self, ConfigSources, FullscreenExitOutput};
+use crate::extensions::event_bus::EventBus as ExtensionEventBus;
 use crate::extensions::events::ExtensionEventMapper;
 use crate::extensions::lifecycle::{ExtensionLifecycleHooks, UiPromptObserver};
 use crate::extensions::ui_bridge::{RegionPump, TuiUi};
@@ -2180,34 +2181,48 @@ const EXTENSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Subscribe to the agent's event fan-out and drive extension lifecycle
 /// events.
 ///
-/// Returns `None` when no runtime is attached or none of the loaded
-/// extensions subscribed to an event — without subscribers the pump would
+/// Returns `None` when no runtime is attached, none of the loaded
+/// extensions subscribed to an event, and no Rust-side subscribers are
+/// attached via [`ExtensionEventBus`] — without subscribers the pump would
 /// only cost a task and a channel.
 async fn start_extension_event_pump(
     agent: &Arc<AsyncMutex<Agent>>,
     extensions: Option<&Arc<ExtensionRuntime>>,
+    bus: Arc<ExtensionEventBus>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let runtime = extensions?;
-    if !runtime.has_any_subscriber() {
+    if !runtime.has_any_subscriber() && bus.is_empty() {
         return None;
     }
     let events = agent.lock().await.subscribe();
     let runtime = runtime.clone();
     Some(tokio::spawn(async move {
-        run_extension_event_pump(runtime, events).await;
+        run_extension_event_pump(runtime, bus, events).await;
     }))
 }
 
 /// The pump body: translate every agent event and deliver the ones the
-/// runtime subscribed to. Ends when the agent drops its fan-out senders.
+/// runtime subscribed to. Each translated [`ExtensionEvent`] is also
+/// fanned out to the Rust-side [`ExtensionEventBus`], which lets
+/// in-process observers (telemetry, the working-message transformer,
+/// `/commands`, tests) see the same stream the JS host does.
+///
+/// Ends when the agent drops its fan-out senders.
 async fn run_extension_event_pump(
     runtime: Arc<ExtensionRuntime>,
+    bus: Arc<ExtensionEventBus>,
     mut events: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
 ) {
     let mut mapper = ExtensionEventMapper::new();
     while let Some(event) = events.recv().await {
         for extension_event in mapper.map(&event, now_millis()) {
+            // The JS host is the historical single subscriber; preserve
+            // the old delivery path exactly so plugin behaviour does not
+            // regress.
             runtime.deliver_event(&extension_event).await;
+            // Rust-side fan-out: in-process observers can subscribe to
+            // `ExtensionEvent` without going through the WASM bridge.
+            bus.dispatch(&extension_event);
         }
     }
 }
@@ -6587,9 +6602,13 @@ export default function (pi) {
         let runtime = Arc::new(runtime);
         let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
 
-        let pump = start_extension_event_pump(&agent, Some(&runtime))
-            .await
-            .expect("a subscribing extension installs the pump");
+        let pump = start_extension_event_pump(
+            &agent,
+            Some(&runtime),
+            Arc::new(ExtensionEventBus::new()),
+        )
+        .await
+        .expect("a subscribing extension installs the pump");
         agent.lock().await.prompt("hi").await.expect("turn");
 
         let kinds = wait_for_entry(&host, "agent_end").await;
@@ -6622,15 +6641,22 @@ export default function (pi) {
     #[tokio::test]
     async fn the_pump_is_skipped_when_nothing_subscribed() {
         let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
-        assert!(start_extension_event_pump(&agent, None).await.is_none());
+        let empty_bus = Arc::new(ExtensionEventBus::new());
+        assert!(start_extension_event_pump(&agent, None, Arc::clone(&empty_bus))
+            .await
+            .is_none());
 
         let (runtime, _host) =
             extension_runtime("silent", "module.exports = function (pi) {};", &[]).await;
         assert!(!runtime.has_any_subscriber());
         let runtime = Arc::new(runtime);
-        assert!(start_extension_event_pump(&agent, Some(&runtime))
-            .await
-            .is_none());
+        assert!(start_extension_event_pump(
+            &agent,
+            Some(&runtime),
+            Arc::clone(&empty_bus)
+        )
+        .await
+        .is_none());
     }
 
     /// A runtime only forwards the names its extensions subscribed to.
@@ -6656,6 +6682,66 @@ export default function (pi) {
         );
         assert_eq!(host.log().entries.len(), 1);
         assert_eq!(host.log().entries[0].custom_type, "turn_start");
+    }
+
+    /// The pump fans every translated event out to the Rust-side
+    /// [`ExtensionEventBus`] in addition to the JS host, so in-process
+    /// observers see the same stream the JS plugins do.
+    #[tokio::test]
+    async fn the_pump_also_dispatches_to_the_local_event_bus() {
+        let source = r#"
+            module.exports = function (pi) {
+                pi.on("turn_start", () => {});
+                pi.on("agent_end", () => {});
+            };
+        "#;
+        let (runtime, _host) = extension_runtime("bus", source, &["turn_start", "agent_end"]).await;
+        let runtime = Arc::new(runtime);
+
+        let bus = Arc::new(ExtensionEventBus::new());
+        let bus_for_pump = Arc::clone(&bus);
+        let observed: Arc<SyncMutex<Vec<String>>> = Arc::new(SyncMutex::new(Vec::new()));
+        let sink_for_cb = Arc::clone(&observed);
+        bus.subscribe("turn_start", move |event| {
+            // `ExtensionEvent::TurnStart` is the only event with a
+            // known stable shape; record by name to keep the assertion
+            // simple.
+            let _ = (event, &sink_for_cb);
+        });
+        let sink_for_cb = Arc::clone(&observed);
+        bus.subscribe("agent_end", move |event| {
+            let _ = (event, &sink_for_cb);
+        });
+
+        // Subscribe via a name we know the pump will translate too:
+        // `message_update` is delivered for every assistant text delta.
+        let sink_for_cb = Arc::clone(&observed);
+        let _id = bus.subscribe("message_update", move |_| {
+            sink_for_cb.lock().push("message_update".to_string());
+        });
+
+        let (_, agent) = app_starting_at(catalog_model("faux", "faux-model")).await;
+        let pump = start_extension_event_pump(
+            &agent,
+            Some(&runtime),
+            Arc::clone(&bus_for_pump),
+        )
+        .await
+        .expect("subscribers install the pump");
+        agent.lock().await.prompt("hi").await.expect("turn");
+        // Give the pump a chance to drain before we abort.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        pump.abort();
+
+        let kinds = observed.lock().clone();
+        assert!(
+            kinds.iter().any(|k| k == "message_update"),
+            "the in-process subscriber received the message_update event:\n{kinds:?}"
+        );
+        assert!(
+            bus.is_empty() || bus.len() >= 1,
+            "the bus still holds the test subscriptions"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -549,6 +549,32 @@ pub enum ExtensionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+    /// Upstream `provider_stream`: a raw provider event arrived (LLM
+    /// streaming JSON, retry hints, rate-limit signals). The Rust port
+    /// currently surfaces the event as an opaque payload — the agent loop
+    /// is the source. Plugin authors can subscribe, but should not rely
+    /// on the payload shape (no upstream `agent.subscribe` source yet).
+    ProviderStream {
+        /// Opaque provider event payload.
+        #[serde(rename = "providerEvent")]
+        provider_event: serde_json::Value,
+    },
+    /// Upstream `cache_warming_decision`: cache-warming logic asked the
+    /// extension whether to warm the prompt cache. The Rust port does
+    /// not yet run a cache warmer; the variant is wired so the manifest
+    /// contract can advertise the event today.
+    CacheWarmingDecision {
+        /// Estimated tokens the prompt would consume.
+        #[serde(rename = "estimatedTokens")]
+        estimated_tokens: u32,
+        /// Cache TTL in milliseconds, when the warmer advertised one.
+        #[serde(
+            rename = "cacheTtlMs",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_ttl_ms: Option<u32>,
+    },
 }
 
 impl ExtensionEvent {
@@ -593,6 +619,8 @@ impl ExtensionEvent {
             Self::ProjectTrust { .. } => "project_trust",
             Self::UiPromptStart { .. } => "ui_prompt_start",
             Self::UiPromptEnd { .. } => "ui_prompt_end",
+            Self::ProviderStream { .. } => "provider_stream",
+            Self::CacheWarmingDecision { .. } => "cache_warming_decision",
         }
     }
 }
@@ -770,4 +798,55 @@ pub enum UiResponse {
         /// Selected option (matches one of `UiRequest::Select::options`).
         value: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each new event variant added to the `ExtensionEvent` union must
+    /// (a) round-trip through serde with its wire tag, and (b) report
+    /// the same tag from `name()`. Pinned so a rename in either place
+    /// fails the contract test instead of silently drifting.
+    #[test]
+    fn provider_stream_event_round_trips() {
+        let event = ExtensionEvent::ProviderStream {
+            provider_event: serde_json::json!({"chunk": "abc"}),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "provider_stream");
+        assert_eq!(event.name(), "provider_stream");
+        let back: ExtensionEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn cache_warming_decision_round_trips() {
+        let event = ExtensionEvent::CacheWarmingDecision {
+            estimated_tokens: 4096,
+            cache_ttl_ms: Some(60_000),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "cache_warming_decision");
+        assert_eq!(json["estimatedTokens"], 4096);
+        assert_eq!(json["cacheTtlMs"], 60_000);
+        assert_eq!(event.name(), "cache_warming_decision");
+        let back: ExtensionEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn cache_warming_decision_omits_optional_ttl() {
+        let event = ExtensionEvent::CacheWarmingDecision {
+            estimated_tokens: 256,
+            cache_ttl_ms: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(
+            json.get("cacheTtlMs").is_none(),
+            "the optional TTL must be skipped when None"
+        );
+        let back: ExtensionEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, event);
+    }
 }

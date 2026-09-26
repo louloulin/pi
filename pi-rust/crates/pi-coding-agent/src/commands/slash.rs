@@ -612,13 +612,27 @@ pub fn display_path(
 /// (`crate::keybindings::install_keybindings_from`), so this resolves the
 /// same chords the components do — including any `keybindings.json`
 /// override.
+///
+/// Output is a markdown document (`ts` parity: `handleHotkeysCommand` at
+/// `interactive-mode.ts:6315-6429` renders the same content through a
+/// `Markdown` widget). Plain-text consumers (the `info_block` rendering
+/// used by command dispatch) keep the same layout because the markdown
+/// table is rendered as-is by the chat log.
 pub fn hotkeys_text() -> String {
-    hotkeys_text_with(&pi_tui::keybindings::get_keybindings())
+    hotkeys_text_with(&pi_tui::keybindings::get_keybindings(), None)
 }
 
 /// [`hotkeys_text`] against an explicit table (the injectable form used by
 /// tests).
-pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) -> String {
+///
+/// `extension_shortcuts` carries the rows the JS extensions registered
+/// via `registerShortcut`; pass `None` to render the chord list without
+/// the Extensions section (matches the TS path when no extension has
+/// registered a shortcut yet).
+pub fn hotkeys_text_with(
+    keybindings: &pi_tui::keybindings::KeybindingsManager,
+    extension_shortcuts: Option<&[crate::extensions::extension_shortcuts::ExtensionShortcut]>,
+) -> String {
     // Upstream groups the same way: navigation, editing, the transcript
     // viewport, the app actions and the selection lists
     // (`interactive-mode.ts:6315-6419`). A row whose id has no chord is
@@ -729,43 +743,96 @@ pub fn hotkeys_text_with(keybindings: &pi_tui::keybindings::KeybindingsManager) 
         ("tui.input.tab", "path completion / accept autocomplete"),
     ];
 
-    let mut out = String::from("keyboard shortcuts:\n");
+    let mut out = String::from("# Keyboard Shortcuts\n");
     for (heading, rows) in [
-        ("navigation", NAVIGATION),
-        ("editing", EDITING),
-        ("chat log", TRANSCRIPT),
-        ("app", APP),
-        ("selectors and completion", SELECTORS),
+        ("Navigation", NAVIGATION),
+        ("Editing", EDITING),
+        ("Chat log", TRANSCRIPT),
+        ("Other", APP),
+        ("Selectors and completion", SELECTORS),
     ] {
-        let mut section = String::new();
-        for (id, label) in rows {
-            let chords = keybindings
-                .get_keys(id)
-                .iter()
-                .map(|chord| format_chord(chord))
-                .collect::<Vec<_>>();
-            if chords.is_empty() {
-                continue;
-            }
-            // Bound is not the same as implemented. An `app.*` id no consumer
-            // answers is not a shortcut, so it is not advertised (LUM-1240 /
-            // LUM-1245). `tui.*` ids are consumed by the components, so the
-            // filter is a no-op for them.
-            if !pi_tui::keybindings::app_action_is_consumed(id) {
-                continue;
-            }
-            section.push_str(&format!("  {:<16} {}\n", chords.join(" / "), label));
-        }
+        let section = render_hotkeys_section_md(keybindings, heading, rows);
         if !section.is_empty() {
-            out.push_str(&format!("\n{heading}:\n{section}"));
+            out.push('\n');
+            out.push_str(&section);
         }
     }
-    out.push_str("\ncommands:\n");
-    out.push_str("  /               slash commands (/help, /model, /hotkeys, …)\n");
-    // The cancel chord, not a literal `Esc`: this row is the tail of the same
-    // legend the groups above read from the table.
+    if let Some(shortcuts) = extension_shortcuts {
+        let section = render_extension_shortcuts_md(shortcuts);
+        if !section.is_empty() {
+            out.push('\n');
+            out.push_str(&section);
+        }
+    }
+    out.push('\n');
+    out.push_str(&render_commands_section(keybindings));
+    out
+}
+
+fn render_hotkeys_section_md(
+    keybindings: &pi_tui::keybindings::KeybindingsManager,
+    heading: &str,
+    rows: &[(&str, &str)],
+) -> String {
+    // Bound is not the same as implemented. An `app.*` id without a
+    // consumer is filtered — `tui.*` ids are always consumed by their
+    // component, so the filter is a no-op for them.
+    let resolved: Vec<(String, &str)> = rows
+        .iter()
+        .filter_map(|(id, label)| {
+            let chords = keybindings.get_keys(id);
+            if chords.is_empty() {
+                return None;
+            }
+            if id.starts_with("app.") && !pi_tui::keybindings::app_action_is_consumed(id) {
+                return None;
+            }
+            let display = chords
+                .iter()
+                .map(|chord| format_chord(chord))
+                .collect::<Vec<_>>()
+                .join(" / ");
+            Some((display, *label))
+        })
+        .collect();
+    if resolved.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("**{heading}**\n\n| Key | Action |\n|-----|--------|\n");
+    for (key, label) in resolved {
+        out.push_str(&format!("| `{}` | {} |\n", key, label));
+    }
+    out
+}
+
+fn render_extension_shortcuts_md(
+    shortcuts: &[crate::extensions::extension_shortcuts::ExtensionShortcut],
+) -> String {
+    if shortcuts.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("**Extensions**\n\n| Key | Action |\n|-----|--------|\n");
+    for sc in shortcuts {
+        let description = sc
+            .description
+            .as_deref()
+            .or(sc.extension_path.as_deref())
+            .unwrap_or("");
+        out.push_str(&format!(
+            "| `{}` | {} |\n",
+            format_chord(&sc.chord),
+            description
+        ));
+    }
+    out
+}
+
+fn render_commands_section(keybindings: &pi_tui::keybindings::KeybindingsManager) -> String {
+    let slash = format_keys(keybindings, "tui.input.tab", "/");
+    let mut out = String::from("**Commands**\n\n| Key | Action |\n|-----|--------|\n");
+    out.push_str(&format!("| `{slash}` | Slash commands (`/help`, `/model`, `/hotkeys`, …) |\n"));
     out.push_str(&format!(
-        "  {:<15} close the selector / overlay first\n",
+        "| `{}` | Close selector / overlay first |\n",
         format_keys(keybindings, "tui.select.cancel", "escape")
     ));
     out
@@ -1007,7 +1074,7 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(text.contains("search the prompt history"), "{text}");
         assert!(text.contains("prompt history search match"), "{text}");
         assert!(text.contains("Ctrl+R"), "{text}");
@@ -1032,7 +1099,7 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         // The remaining session-branch shortcuts are still advertised.
         for label in ["open the session tree", "resume a session"] {
             assert!(text.contains(label), "{label} missing from:\n{text}");
@@ -1051,25 +1118,28 @@ mod tests {
             "fork is unbound, so /hotkeys must drop it (renderer's empty-chord rule):\n{text}"
         );
         // Alt+F now belongs to the editor's forward-word chord (the fix's
-        // positive half): it must appear in `navigation:` as part of the
+        // positive half): it must appear in `**Navigation**` as part of the
         // `move by word (right)` cell, and it must NOT appear as a shortcut
-        // cell in the `app:` group (which would mean an `app.*` default is
-        // shadowing it again).
+        // cell in the `**Other**` group (which would mean an `app.*`
+        // default is shadowing it again).
         assert!(
-            text.contains("Alt+Right / Ctrl+Right / Alt+F move by word (right)"),
+            text.contains("`Alt+Right / Ctrl+Right / Alt+F` | move by word (right)"),
             "Alt+F must be back in navigation as the forward-word chord:\n{text}"
         );
-        let app_section = text.split("\napp:\n").nth(1).unwrap_or("");
-        // The app group runs until the next blank line or section header.
-        let app_section = app_section
+        let other_section = text.split("**Other**\n").nth(1).unwrap_or("");
+        // The "Other" markdown table ends at the next blank line / section
+        // heading.
+        let other_table = other_section
             .split("\n\n")
             .next()
             .unwrap_or("")
             .trim_end_matches('\n');
-        let app_has_alt_f_cell = app_section.lines().any(|line| line.starts_with("  Alt+F"));
+        let other_has_alt_f_cell = other_table.lines().any(|line| {
+            line.starts_with("| `Alt+F`") || line.starts_with("| `Ctrl+Alt+F`")
+        });
         assert!(
-            !app_has_alt_f_cell,
-            "Alt+F must not appear as an app-group shortcut cell:\n{text}"
+            !other_has_alt_f_cell,
+            "Alt+F must not appear as an Other-group shortcut cell:\n{text}"
         );
     }
 
@@ -1084,7 +1154,7 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(text.contains("start a new session"), "{text}");
         assert!(text.contains("Alt+N"), "{text}");
     }
@@ -1101,7 +1171,7 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(text.contains("Ctrl+O"), "{text}");
         assert!(text.contains("expand or collapse tool output"), "{text}");
     }
@@ -1117,7 +1187,7 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(text.contains("Alt+H"), "{text}");
         assert!(
             text.contains("expand or collapse the startup header"),
@@ -1287,12 +1357,12 @@ mod tests {
             ),
             pi_tui::keybindings::KeybindingsConfig::default(),
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(text.contains("Ctrl+P"), "{text}");
         assert!(text.contains("Ctrl+X"), "{text}");
         assert!(text.contains("Ctrl+T"), "{text}");
-        assert!(text.contains("navigation:"), "{text}");
-        assert!(text.contains("chat log:"), "{text}");
+        assert!(text.contains("**Navigation**"), "{text}");
+        assert!(text.contains("**Chat log**"), "{text}");
         assert!(text.contains("copy the last assistant message"), "{text}");
         assert!(text.contains("show or hide thinking blocks"), "{text}");
     }
@@ -1315,7 +1385,7 @@ mod tests {
             ["ctrl+z"],
             "app.suspend stays bound"
         );
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(
             text.contains("suspend to the background"),
             "app.suspend has a consumer but is not advertised:\n{text}"
@@ -1338,8 +1408,8 @@ mod tests {
         // lookup can answer "is this row printed" — LUM-1242).
         let cell_is_advertised = |chords: &[&str]| {
             let rendered: Vec<String> = chords.iter().map(|c| format_chord(c)).collect();
-            let prefix = format!("  {:<16} ", rendered.join(" / "));
-            text.lines().any(|line| line.starts_with(&prefix))
+            let cell = format!("`{}`", rendered.join(" / "));
+            text.lines().any(|line| line.contains(&cell))
         };
         assert!(cell_is_advertised(&["ctrl+z"]), "{text}");
         assert!(cell_is_advertised(&["ctrl+g"]), "{text}");
@@ -1351,7 +1421,7 @@ mod tests {
         // The plain `pi-tui` table leaves `app.*` unbound: those rows must
         // not be advertised.
         let manager = pi_tui::keybindings::KeybindingsManager::tui_defaults();
-        let text = hotkeys_text_with(&manager);
+        let text = hotkeys_text_with(&manager, None);
         assert!(!text.contains("cycle to the next model"), "{text}");
         assert!(text.contains("send message"), "{text}");
     }

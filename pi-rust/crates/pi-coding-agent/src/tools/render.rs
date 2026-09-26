@@ -190,11 +190,28 @@ pub trait ToolRenderer: Send {
         options: &ToolRenderOptions,
         ctx: &ToolRenderContext,
     ) -> Vec<StyledLine>;
+
+    /// Clone the renderer into a fresh `Box`. Required by
+    /// [`ToolRendererRegistry`] so each `ToolRenderSession::call` keeps
+    /// its own state (e.g. remembered `path`) without sharing with the
+    /// registry's stored instance. Implementations get the boilerplate
+    /// for free via the `clone_renderer` derive macro below.
+    fn clone_box(&self) -> Box<dyn ToolRenderer>;
 }
 
 /// Renderer for a built-in tool name, or `None` when the tool has no
 /// presentation layer.
+///
+/// `renderer_for` first consults the extension [`ToolRendererRegistry`]
+/// (`register_tool_renderer`); an extension-supplied renderer always wins
+/// over the built-in default. Extensions that want to *augment* the
+/// built-in renderer can call `with_extension_renderer(name, |builtin|)`
+/// (see [`ToolRendererRegistry::wrap`]) so they get the built-in as a
+/// fallback and only override `render_call` / `render_result` selectively.
 pub fn renderer_for(name: &str) -> Option<Box<dyn ToolRenderer>> {
+    if let Some(extension) = ToolRendererRegistry::global().lookup(name) {
+        return Some(extension);
+    }
     match name {
         "read" => Some(Box::new(ReadRenderer::default())),
         "write" => Some(Box::new(WriteRenderer::default())),
@@ -207,6 +224,121 @@ pub fn renderer_for(name: &str) -> Option<Box<dyn ToolRenderer>> {
     }
 }
 
+/// Process-wide registry of extension-supplied tool renderers.
+///
+/// Mirrors the upstream TS `extensions/runner.ts` lookup table: each
+/// extension that ships its own `renderCall` / `renderResult` pair
+/// registers a renderer here keyed by the *tool name*, and the renderer
+/// shadows the built-in default. The registry is process-wide because
+/// tools are global, not per-session — extensions register at startup
+/// and the renderer outlives every session.
+#[derive(Default)]
+pub struct ToolRendererRegistry {
+    renderers: std::sync::Mutex<HashMap<String, Box<dyn ToolRenderer>>>,
+}
+
+impl ToolRendererRegistry {
+    /// Construct an empty registry. Most callers use
+    /// [`ToolRendererRegistry::global`] instead.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a renderer for `name`, shadowing the built-in default.
+    /// `factory` is invoked once at registration time so the renderer
+    /// state (e.g. `ReadRenderer::path`) starts fresh.
+    pub fn register(
+        &self,
+        name: impl Into<String>,
+        factory: impl FnOnce() -> Box<dyn ToolRenderer> + Send + 'static,
+    ) {
+        let name = name.into();
+        let renderer = factory();
+        let mut guard = self
+            .renderers
+            .lock()
+            .expect("tool renderer registry poisoned");
+        guard.insert(name, renderer);
+    }
+
+    /// Remove a renderer by tool name. Returns `true` when one was
+    /// removed (mirrors [`ExtensionShortcutRegistry::unregister`]).
+    pub fn unregister(&self, name: &str) -> bool {
+        let mut guard = self
+            .renderers
+            .lock()
+            .expect("tool renderer registry poisoned");
+        guard.remove(name).is_some()
+    }
+
+    /// Snapshot the registered tool names. Useful for tests and tooling.
+    pub fn names(&self) -> Vec<String> {
+        let guard = self
+            .renderers
+            .lock()
+            .expect("tool renderer registry poisoned");
+        let mut out: Vec<String> = guard.keys().cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// Look up a renderer for `name`. Returns a fresh instance per call
+    /// so callers can keep it alive alongside the call without sharing
+    /// state across turns.
+    pub fn lookup(&self, name: &str) -> Option<Box<dyn ToolRenderer>> {
+        let guard = self
+            .renderers
+            .lock()
+            .expect("tool renderer registry poisoned");
+        guard.get(name).map(|renderer| clone_renderer(renderer.as_ref()))
+    }
+
+    /// Process-wide singleton used by [`renderer_for`]. The Mutex inside
+    /// keeps the registry thread-safe; the wrapper is a `static` so the
+    /// API stays as ergonomic as the `set_stdin_tty_override` /
+    /// `set_experimental_override` test seams in this crate.
+    pub fn global() -> &'static Self {
+        GLOBAL_RENDERER_REGISTRY.get_or_init(ToolRendererRegistry::new)
+    }
+
+    /// Reset the registry to empty. Tests use this to keep cases
+    /// isolated; production code never calls it.
+    pub fn clear(&self) {
+        let mut guard = self
+            .renderers
+            .lock()
+            .expect("tool renderer registry poisoned");
+        guard.clear();
+    }
+}
+
+static GLOBAL_RENDERER_REGISTRY: std::sync::OnceLock<ToolRendererRegistry> =
+    std::sync::OnceLock::new();
+
+fn clone_renderer(renderer: &dyn ToolRenderer) -> Box<dyn ToolRenderer> {
+    renderer.clone_box()
+}
+
+/// Convenience: install `factory` as the extension renderer for `name`.
+/// Equivalent to [`ToolRendererRegistry::register`] on the global registry.
+pub fn register_tool_renderer(
+    name: impl Into<String>,
+    factory: impl FnOnce() -> Box<dyn ToolRenderer> + Send + 'static,
+) {
+    ToolRendererRegistry::global().register(name, factory);
+}
+
+/// Convenience: drop the extension renderer for `name` (no-op when no
+/// renderer is registered).
+pub fn unregister_tool_renderer(name: &str) -> bool {
+    ToolRendererRegistry::global().unregister(name)
+}
+
+/// Reset every extension renderer. Tests use this between cases.
+pub fn clear_tool_renderers() {
+    ToolRendererRegistry::global().clear();
+}
+
 // ---------------------------------------------------------------------------
 // read
 // ---------------------------------------------------------------------------
@@ -216,7 +348,7 @@ pub fn renderer_for(name: &str) -> Option<Box<dyn ToolRenderer>> {
 /// Remembers the path (and offset/limit) from [`ToolRenderer::render_call`] so
 /// [`ToolRenderer::render_result`] can pick the highlighting language without
 /// re-parsing the call.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ReadRenderer {
     path: Option<String>,
     offset: Option<i64>,
@@ -238,6 +370,10 @@ impl ReadRenderer {
 impl ToolRenderer for ReadRenderer {
     fn name(&self) -> &str {
         "read"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -359,7 +495,7 @@ fn truncation_notice(details: Option<&serde_json::Value>) -> Option<String> {
 /// the [`WriteHighlightCache`] across repeated calls so a re-render of a
 /// growing payload only re-highlights the delta. `render_result` renders the
 /// error body — upstream shows nothing for a successful write.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct WriteRenderer {
     path: Option<String>,
     cache: Option<WriteHighlightCache>,
@@ -381,6 +517,10 @@ impl WriteRenderer {
 impl ToolRenderer for WriteRenderer {
     fn name(&self) -> &str {
         "write"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -507,11 +647,34 @@ pub struct WriteHighlightCache {
     stats: WriteHighlightStats,
 }
 
+impl Clone for WriteHighlightCache {
+    fn clone(&self) -> Self {
+        self.clone_cache()
+    }
+}
+
 impl WriteHighlightCache {
     /// Build a cache for `raw_path` / `content`, or `None` when the path does
     /// not map to a language the highlighter supports.
     pub fn new(raw_path: &str, content: &str) -> Option<Self> {
         Self::with_highlighter(raw_path, content, default_highlight_fn())
+    }
+
+    /// Clone the cache. The `Arc<HighlightFn>` is shared so the clone
+    /// keeps referring to the same highlighter closure; the streaming
+    /// buffers are duplicated so the clone can be mutated independently
+    /// by a parallel render (rare — the renderer is usually per-session).
+    /// Required by [`ToolRenderer::clone_box`].
+    fn clone_cache(&self) -> Self {
+        Self {
+            raw_path: self.raw_path.clone(),
+            lang: self.lang,
+            raw_content: self.raw_content.clone(),
+            normalized_lines: self.normalized_lines.clone(),
+            highlighted_lines: self.highlighted_lines.clone(),
+            highlight: self.highlight.clone(),
+            stats: self.stats,
+        }
     }
 
     /// Build a cache with an injected highlighter. Used by tests to observe
@@ -688,12 +851,16 @@ pub const BASH_PREVIEW_LINES: usize = 5;
 /// updated by a 1s interval while the call is partial). The Rust port renders a
 /// finished result only and takes the duration from the tool's own
 /// `details.elapsed_ms`, so it needs neither a timer nor an invalidation hook.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BashRenderer;
 
 impl ToolRenderer for BashRenderer {
     fn name(&self) -> &str {
         "bash"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -826,12 +993,16 @@ impl ToolRenderer for BashRenderer {
 pub const FIND_FOLD_LINES: usize = 20;
 
 /// Presentation for the `find` tool.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FindRenderer;
 
 impl ToolRenderer for FindRenderer {
     fn name(&self) -> &str {
         "find"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -905,12 +1076,16 @@ impl ToolRenderer for FindRenderer {
 pub const GREP_FOLD_LINES: usize = 15;
 
 /// Presentation for the `grep` tool.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GrepRenderer;
 
 impl ToolRenderer for GrepRenderer {
     fn name(&self) -> &str {
         "grep"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -1005,12 +1180,16 @@ impl ToolRenderer for GrepRenderer {
 pub const LS_FOLD_LINES: usize = 20;
 
 /// Presentation for the `ls` tool.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LsRenderer;
 
 impl ToolRenderer for LsRenderer {
     fn name(&self) -> &str {
         "ls"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -1079,7 +1258,7 @@ impl ToolRenderer for LsRenderer {
 /// result diff when it equals that preview (and suppresses an error that the
 /// preview already showed); the Rust port renders a finished result only, so
 /// it always shows the `details.diff` / error body.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EditRenderer {
     path: Option<String>,
 }
@@ -1099,6 +1278,10 @@ impl EditRenderer {
 impl ToolRenderer for EditRenderer {
     fn name(&self) -> &str {
         "edit"
+    }
+
+    fn clone_box(&self) -> Box<dyn ToolRenderer> {
+        Box::new(self.clone())
     }
 
     fn render_call(
@@ -1442,6 +1625,7 @@ pub struct ToolRenderSession {
     show_images: bool,
     width: u16,
     renderers: HashMap<String, Box<dyn ToolRenderer>>,
+    renderer_registry: Option<Arc<ToolRendererRegistry>>,
 }
 
 impl ToolRenderSession {
@@ -1453,6 +1637,7 @@ impl ToolRenderSession {
             show_images: false,
             width: DEFAULT_IMAGE_WIDTH,
             renderers: HashMap::new(),
+            renderer_registry: None,
         }
     }
 
@@ -1489,10 +1674,24 @@ impl ToolRenderSession {
         self.show_images = show_images;
     }
 
+    /// Attach a local renderer registry. When `Some`, every `call` and
+    /// `result` consults `registry.lookup(name)` before falling back to
+    /// the built-in `renderer_for`; this lets tests (and the extension
+    /// host) override per-tool rendering without polluting the global
+    /// [`ToolRendererRegistry`]. Pass `None` to revert to the global
+    /// lookup (the default).
+    pub fn with_renderer_registry(
+        mut self,
+        registry: Option<Arc<ToolRendererRegistry>>,
+    ) -> Self {
+        self.renderer_registry = registry;
+        self
+    }
+
     /// Render a tool call started by the agent. Returns an empty vector when
     /// the tool has no renderer.
     pub fn call(&mut self, call: &ToolCall, is_error: bool) -> Vec<StyledLine> {
-        let Some(mut renderer) = renderer_for(&call.name) else {
+        let Some(mut renderer) = self.lookup_renderer(&call.name) else {
             return Vec::new();
         };
         let ctx = self.context(is_error);
@@ -1537,6 +1736,19 @@ impl ToolRenderSession {
             show_images: self.show_images,
             width: self.width,
         }
+    }
+
+    /// Pick the renderer for `name`. The local registry (when set via
+    /// [`Self::with_renderer_registry`]) takes precedence; otherwise
+    /// fall back to [`renderer_for`], which itself consults the global
+    /// [`ToolRendererRegistry`] and the built-in defaults.
+    fn lookup_renderer(&self, name: &str) -> Option<Box<dyn ToolRenderer>> {
+        if let Some(registry) = self.renderer_registry.as_ref() {
+            if let Some(renderer) = registry.lookup(name) {
+                return Some(renderer);
+            }
+        }
+        renderer_for(name)
     }
 }
 

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::file_mutation_queue::with_file_mutation_queue;
 use super::{AbortLike, AgentTool, ToolError, ToolOutput};
 
 /// `write` tool — create or overwrite a file.
@@ -68,25 +69,32 @@ impl AgentTool for WriteTool {
         let parsed: WriteArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        if let Some(parent) = std::path::Path::new(&parsed.path).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    ToolError::Execution(format!(
-                        "failed to create parent directories for '{}': {}",
-                        parsed.path, e
-                    ))
-                })?;
+        // Hold the per-path mutation lock while we touch the file so a
+        // parallel `edit` on the same path cannot read the file between our
+        // write and our follow-up operations (TS
+        // `createWriteTool` wraps its write in `withFileMutationQueue`).
+        with_file_mutation_queue(&parsed.path, async {
+            if let Some(parent) = std::path::Path::new(&parsed.path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        ToolError::Execution(format!(
+                            "failed to create parent directories for '{}': {}",
+                            parsed.path, e
+                        ))
+                    })?;
+                }
             }
-        }
 
-        std::fs::write(&parsed.path, &parsed.content).map_err(|e| {
-            ToolError::Execution(format!("failed to write '{}': {}", parsed.path, e))
-        })?;
+            std::fs::write(&parsed.path, &parsed.content).map_err(|e| {
+                ToolError::Execution(format!("failed to write '{}': {}", parsed.path, e))
+            })?;
 
-        Ok(ToolOutput::text(format!(
-            "Successfully wrote {} bytes to {}",
-            parsed.content.len(),
-            parsed.path
-        )))
+            Ok(ToolOutput::text(format!(
+                "Successfully wrote {} bytes to {}",
+                parsed.content.len(),
+                parsed.path
+            )))
+        })
+        .await
     }
 }

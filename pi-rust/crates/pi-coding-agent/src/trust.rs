@@ -67,6 +67,25 @@ pub struct ProjectTrustUpdate {
     pub decision: ProjectTrustDecision,
 }
 
+/// User-facing trust prompt choice.
+///
+/// Mirrors upstream `ProjectTrustOption` from
+/// `core/trust-manager.ts`. The interactive prompt lists one row per
+/// option; selecting one either persists a [`ProjectTrustUpdate`]
+/// (`updates` non-empty) or holds the decision in memory for the current
+/// session (`updates` empty + `session_only`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectTrustOption {
+    /// Label shown to the user.
+    pub label: String,
+    /// Resulting trust state when the user picks this row.
+    pub trusted: bool,
+    /// Writes the trust store will receive on accept.
+    pub updates: Vec<ProjectTrustUpdate>,
+    /// Decision applies to the current session only (no writes).
+    pub session_only: bool,
+}
+
 /// What to do when a project needs a trust decision but none is saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DefaultProjectTrust {
@@ -150,6 +169,77 @@ pub fn get_project_trust_parent_path(cwd: &Path) -> Option<PathBuf> {
         .parent()
         .filter(|parent| *parent != trust_path)
         .map(Path::to_path_buf)
+}
+
+/// Build the options shown to the user when a project needs a trust
+/// decision.
+///
+/// Mirrors `getProjectTrustOptions` from `core/trust-manager.ts`. The
+/// caller picks the option whose `label` matches the user's selection and
+/// then either applies its `updates` to the trust store (a persisted
+/// decision) or holds the `trusted` boolean in memory (`session_only`).
+/// Passing `include_session_only = true` interleaves the two
+/// session-scoped rows (no writes) so the user can opt out without
+/// touching the store.
+pub fn get_project_trust_options(
+    cwd: &Path,
+    include_session_only: bool,
+) -> Vec<ProjectTrustOption> {
+    let trust_path = normalize_cwd(cwd);
+    let mut options = Vec::with_capacity(5);
+    options.push(ProjectTrustOption {
+        label: "Trust".to_string(),
+        trusted: true,
+        updates: vec![ProjectTrustUpdate {
+            path: trust_path.clone(),
+            decision: Some(true),
+        }],
+        session_only: false,
+    });
+    if let Some(parent_path) = get_project_trust_parent_path(cwd) {
+        let parent_display = parent_path.to_string_lossy().into_owned();
+        options.push(ProjectTrustOption {
+            label: format!("Trust parent folder ({parent_display})"),
+            trusted: true,
+            updates: vec![
+                ProjectTrustUpdate {
+                    path: parent_path,
+                    decision: Some(true),
+                },
+                ProjectTrustUpdate {
+                    path: trust_path,
+                    decision: None,
+                },
+            ],
+            session_only: false,
+        });
+    }
+    if include_session_only {
+        options.push(ProjectTrustOption {
+            label: "Trust (this session only)".to_string(),
+            trusted: true,
+            updates: Vec::new(),
+            session_only: true,
+        });
+    }
+    options.push(ProjectTrustOption {
+        label: "Do not trust".to_string(),
+        trusted: false,
+        updates: vec![ProjectTrustUpdate {
+            path: normalize_cwd(cwd),
+            decision: Some(false),
+        }],
+        session_only: false,
+    });
+    if include_session_only {
+        options.push(ProjectTrustOption {
+            label: "Do not trust (this session only)".to_string(),
+            trusted: false,
+            updates: Vec::new(),
+            session_only: true,
+        });
+    }
+    options
 }
 
 /// Whether `cwd` has project resources that must be gated by trust:
@@ -550,5 +640,97 @@ mod tests {
             None,
             DefaultProjectTrust::Ask
         ));
+    }
+
+    #[test]
+    fn trust_options_list_trust_parent_trust_session_and_deny() {
+        let temp = tempfile::TempDir::with_prefix("pi-trust-options-").expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("mkdir");
+
+        let persisted = get_project_trust_options(&project, false);
+        assert_eq!(persisted.len(), 3, "without session-only, three rows");
+        assert_eq!(persisted[0].label, "Trust");
+        assert!(persisted[0].trusted);
+        assert!(!persisted[0].session_only);
+        assert_eq!(persisted[0].updates.len(), 1);
+        assert_eq!(persisted[0].updates[0].decision, Some(true));
+        // "Trust parent folder (...)" carries two writes: parent=true, project cleared.
+        assert!(persisted[1].label.starts_with("Trust parent folder ("));
+        assert!(persisted[1].trusted);
+        assert_eq!(persisted[1].updates.len(), 2);
+        assert_eq!(persisted[1].updates[1].decision, None);
+        assert_eq!(persisted[2].label, "Do not trust");
+        assert!(!persisted[2].trusted);
+        assert_eq!(persisted[2].updates[0].decision, Some(false));
+
+        let with_session = get_project_trust_options(&project, true);
+        assert_eq!(with_session.len(), 5, "session-only adds two rows");
+        // Session-only rows have empty updates and never persist.
+        assert_eq!(with_session[2].label, "Trust (this session only)");
+        assert!(with_session[2].trusted);
+        assert!(with_session[2].session_only);
+        assert!(with_session[2].updates.is_empty());
+        assert_eq!(with_session[4].label, "Do not trust (this session only)");
+        assert!(!with_session[4].trusted);
+        assert!(with_session[4].session_only);
+        assert!(with_session[4].updates.is_empty());
+    }
+
+    #[test]
+    fn trust_options_skip_parent_folder_at_filesystem_root() {
+        // `/` is its own parent, so the "Trust parent folder" row must be
+        // absent; the rest of the list is unchanged.
+        let persisted = get_project_trust_options(Path::new("/"), false);
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0].label, "Trust");
+        assert_eq!(persisted[1].label, "Do not trust");
+    }
+
+    #[test]
+    fn trust_options_apply_to_a_project_with_an_ancestor_decision() {
+        // When the parent already has a saved "trusted" decision the
+        // "Trust parent folder" option's update list still names the
+        // canonical parent path; both the parent's `Some(true)` and the
+        // project's `None` are present so a /trust prompt that lands on
+        // this row "promotes" the project while keeping the parent entry
+        // intact.
+        let temp = tempfile::TempDir::with_prefix("pi-trust-options-parent-").expect("tempdir");
+        let parent = temp.path().join("trusted-parent");
+        let project = parent.join("project");
+        fs::create_dir_all(&project).expect("mkdir");
+
+        let options = get_project_trust_options(&project, false);
+        let parent_row = options
+            .iter()
+            .find(|opt| opt.label.starts_with("Trust parent folder ("))
+            .expect("parent row exists");
+        assert_eq!(parent_row.updates.len(), 2);
+        assert_eq!(parent_row.updates[0].path, parent.canonicalize().unwrap());
+        assert_eq!(parent_row.updates[0].decision, Some(true));
+        assert_eq!(parent_row.updates[1].decision, None);
+    }
+
+    #[test]
+    fn project_trust_option_session_only_does_not_mutate_the_store() {
+        // A `session_only` row carries no updates; selecting it must leave
+        // the trust store untouched.
+        let temp = tempfile::TempDir::with_prefix("pi-trust-session-only-").expect("tempdir");
+        let agent_dir = temp.path().join("agent");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("mkdir");
+        let store = ProjectTrustStore::new(&agent_dir);
+
+        let options = get_project_trust_options(&project, true);
+        let session_only: Vec<_> = options
+            .iter()
+            .filter(|opt| opt.session_only)
+            .collect();
+        assert_eq!(session_only.len(), 2);
+        for option in session_only {
+            assert!(option.updates.is_empty());
+        }
+        // Selecting either session-only row does not change the store.
+        assert_eq!(store.get(&project).expect("read"), None);
     }
 }

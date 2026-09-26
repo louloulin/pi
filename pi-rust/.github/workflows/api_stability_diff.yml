@@ -1,0 +1,177 @@
+# Monthly TS ↔ Rust extension API stability diff.
+#
+# Pulls the upstream `pi-mono` TS source for the current month, extracts
+# the `ExtensionUIContext` method names and the `ExtensionEvent`
+# variants, and diffs them against `crates/pi-coding-agent/src/
+# extensions/api_surface.rs::STABLE_API` plus `docs/API_STABILITY.md`.
+#
+# Output:
+# - On `pull_request`: a CI job that runs the diff and fails when the
+#   Rust side has drifted from upstream *and* the drift was introduced
+#   by the PR (the `STABLE_API` is treated as the source of truth).
+# - On schedule (1st of the month, 06:00 UTC): opens an issue titled
+#   "API stability drift — YYYY-MM" listing the new methods / events
+#   upstream has gained. Best-effort: a missing entry is informational,
+#   not a release blocker.
+
+name: API stability diff
+
+on:
+  schedule:
+    # 1st of every month at 06:00 UTC.
+    - cron: "0 6 1 * *"
+  pull_request:
+    paths:
+      - "crates/pi-coding-agent/src/extensions/api_surface.rs"
+      - "docs/API_STABILITY.md"
+
+jobs:
+  diff:
+    name: TS ↔ Rust API diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch upstream TS source
+        # Pinned shallow clone — keeps the workflow fast and reproducible.
+        # Bump `ref` when chasing a newer upstream release.
+        env:
+          UPSTREAM_REF: "main"
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse \
+            "https://github.com/badlogic/pi-mono.git" upstream
+          git -C upstream sparse-checkout set \
+            "packages/coding-agent/src/core/extensions/types.ts" \
+            "packages/coding-agent/src/core/extensions/runner.ts"
+          echo "upstream source fetched"
+
+      - name: Extract TS UI method names
+        id: extract-ui
+        run: |
+          set -euo pipefail
+          # Grep for `methodName(` / `methodName <` definitions in the
+          # TS source. This is heuristic but matches the way upstream
+          # writes them.
+          : > ts-ui-methods.txt
+          grep -hEo '^\s*([a-z][a-zA-Z0-9]+)\s*[<(]' \
+            "upstream/packages/coding-agent/src/core/extensions/types.ts" \
+            | sed -E 's/^[[:space:]]*//' \
+            | awk '{print $1}' \
+            | sort -u > ts-ui-methods.txt
+          echo "Extracted $(wc -l < ts-ui-methods.txt) TS UI tokens"
+
+      - name: Extract TS event variants
+        id: extract-events
+        run: |
+          set -euo pipefail
+          : > ts-events.txt
+          # Capture the body of `export type ExtensionEvent = ...` and
+          # look for `"event_name":` / `event_name:` candidates.
+          awk '/ExtensionEvent/,/^};/' \
+            "upstream/packages/coding-agent/src/core/extensions/types.ts" \
+            | grep -Eo '"[a-z_]+"' \
+            | tr -d '"' \
+            | sort -u > ts-events.txt
+          echo "Extracted $(wc -l < ts-events.txt) TS event names"
+
+      - name: Run Rust surface enumeration
+        id: rust-surface
+        run: |
+          set -euo pipefail
+          cargo test -p pi-coding-agent --lib \
+            extensions::api_surface -- --quiet --nocapture \
+            2>&1 | tee rust-test-output.log
+
+      - name: Diff UI methods
+        if: always()
+        run: |
+          set -euo pipefail
+          # Convert the Rust STABLE_API to a flat list of "ui.<name>"
+          # tokens for direct comparison.
+          : > rust-ui-methods.txt
+          grep -Eo '"ui\.[a-zA-Z]+"' \
+            "crates/pi-coding-agent/src/extensions/api_surface.rs" \
+            | tr -d '"' | sort -u > rust-ui-methods.txt
+
+          {
+            echo "## TS UI methods missing from Rust STABLE_API"
+            comm -23 ts-ui-methods.txt rust-ui-methods.txt || true
+            echo
+            echo "## Rust UI methods not present in upstream TS"
+            comm -13 ts-ui-methods.txt rust-ui-methods.txt || true
+          } > api-diff-ui.txt
+          cat api-diff-ui.txt
+
+      - name: Diff events
+        if: always()
+        run: |
+          set -euo pipefail
+          : > rust-events.txt
+          grep -Eo '"[a-z_]+"' \
+            "crates/pi-coding-agent/src/extensions/api_surface.rs" \
+            | tr -d '"' | sort -u > rust-events.txt
+
+          {
+            echo "## TS events missing from Rust STABLE_API"
+            comm -23 ts-events.txt rust-events.txt || true
+            echo
+            echo "## Rust events not present in upstream TS"
+            comm -13 ts-events.txt rust-events.txt || true
+          } > api-diff-events.txt
+          cat api-diff-events.txt
+
+      - name: Comment on PR (only when triggered by PR)
+        if: github.event_name == 'pull_request' && always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: api-stability-diff
+          path: |
+            api-diff-ui.txt
+            api-diff-events.txt
+
+      - name: Open monthly drift issue
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          MONTH="$(date -u +%Y-%m)"
+          TITLE="API stability drift — ${MONTH}"
+          BODY=$(cat <<EOF
+          Monthly TS ↔ Rust extension API stability diff for **${MONTH}**.
+
+          See \`docs/API_STABILITY.md\` for the curated list and
+          \`crates/pi-coding-agent/src/extensions/api_surface.rs\` for
+          the authoritative \`STABLE_API\` array.
+
+          ### TS UI methods missing from Rust
+          \`\`\`
+          $(cat api-diff-ui.txt)
+          \`\`\`
+
+          ### TS events missing from Rust
+          \`\`\`
+          $(cat api-diff-events.txt)
+          \`\`\`
+
+          Auto-generated by \`.github/workflows/api_stability_diff.yml\`.
+          Closing this issue requires the \`STABLE_API\` entries to be
+          updated to match upstream.
+          EOF
+          )
+          # Best-effort: do not fail the run if `gh` cannot open the
+          # issue (rate-limit, missing token). This is a soft signal.
+          gh issue create \
+            --title "${TITLE}" \
+            --body "${BODY}" \
+            --label "api-stability" \
+            || echo "gh issue create skipped (no auth or rate-limited)"

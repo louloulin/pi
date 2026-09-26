@@ -28,6 +28,7 @@ use super::edit_diff::{
     apply_edits_to_normalized_content, detect_line_ending, generate_diff_string,
     generate_unified_patch, normalize_to_lf, restore_line_endings, split_bom, Edit,
 };
+use super::file_mutation_queue::with_file_mutation_queue;
 use super::{AbortLike, AgentTool, ToolError, ToolOutput};
 
 /// `edit` tool — exact-text replacement of one or more disjoint regions.
@@ -249,36 +250,47 @@ impl AgentTool for EditTool {
         let parsed: EditArgs = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
 
-        let absolute = crate::paths::absolute(Path::new(&parsed.path));
+        // Hold the per-path mutation lock for the whole read → match → write
+        // pipeline so a parallel `write` on the same path cannot race our
+        // edit and silently overwrite the result (TS `createEditTool` wraps
+        // the whole pipeline in `withFileMutationQueue`).
+        with_file_mutation_queue(&parsed.path, async {
+            let absolute = crate::paths::absolute(Path::new(&parsed.path));
 
-        if parsed.replace_all.unwrap_or(false) && parsed.edits.is_none() {
-            return execute_replace_all(&parsed, &absolute);
-        }
+            if parsed.replace_all.unwrap_or(false) && parsed.edits.is_none() {
+                return execute_replace_all(&parsed, &absolute);
+            }
 
-        let edits = prepare_edits(&parsed)?;
+            let edits = prepare_edits(&parsed)?;
 
-        let raw_content = std::fs::read_to_string(&absolute)
-            .map_err(|error| could_not_edit(&parsed.path, &error))?;
-        let (bom, content) = split_bom(&raw_content);
-        let ending = detect_line_ending(content);
-        let normalized_content = normalize_to_lf(content);
+            let raw_content = std::fs::read_to_string(&absolute)
+                .map_err(|error| could_not_edit(&parsed.path, &error))?;
+            let (bom, content) = split_bom(&raw_content);
+            let ending = detect_line_ending(content);
+            let normalized_content = normalize_to_lf(content);
 
-        let applied = apply_edits_to_normalized_content(&normalized_content, &edits, &parsed.path)
-            .map_err(ToolError::Execution)?;
+            let applied =
+                apply_edits_to_normalized_content(&normalized_content, &edits, &parsed.path)
+                    .map_err(ToolError::Execution)?;
 
-        let final_content = format!(
-            "{bom}{}",
-            restore_line_endings(&applied.new_content, ending)
-        );
-        std::fs::write(&absolute, &final_content)
-            .map_err(|error| could_not_edit(&parsed.path, &error))?;
+            let final_content = format!(
+                "{bom}{}",
+                restore_line_endings(&applied.new_content, ending)
+            );
+            std::fs::write(&absolute, &final_content)
+                .map_err(|error| could_not_edit(&parsed.path, &error))?;
 
-        let details = details_from(&applied.base_content, &applied.new_content, &parsed.path);
-        Ok(ToolOutput::text(format!(
-            "Successfully replaced {} block(s) in {}.",
-            edits.len(),
-            parsed.path
-        ))
-        .with_details(serde_json::to_value(details).expect("EditToolDetails is JSON-serializable")))
+            let details =
+                details_from(&applied.base_content, &applied.new_content, &parsed.path);
+            Ok(ToolOutput::text(format!(
+                "Successfully replaced {} block(s) in {}.",
+                edits.len(),
+                parsed.path
+            ))
+            .with_details(
+                serde_json::to_value(details).expect("EditToolDetails is JSON-serializable"),
+            ))
+        })
+        .await
     }
 }

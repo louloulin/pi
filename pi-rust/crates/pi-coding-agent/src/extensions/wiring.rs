@@ -753,9 +753,9 @@ pub fn load(
         if !options.project_trusted
             && crate::trust::has_trust_requiring_project_resources(&options.cwd)
         {
-            if let Some(trusted) =
-                ask_project_trust(&host, &options.cwd, &options.mode, has_ui).await
-            {
+            let extension_decision =
+                ask_project_trust(&host, &options.cwd, &options.mode, has_ui).await;
+            if let Some(trusted) = extension_decision {
                 if trusted {
                     // Second pass: the project root the first pass deliberately
                     // left out. Same host, so handlers registered by global /
@@ -778,6 +778,49 @@ pub fn load(
                     .await;
                     outcome.entries.extend(project.entries);
                     outcome.errors.extend(project.errors);
+                }
+            } else if has_ui {
+                // No extension answered (every handler returned `undecided`,
+                // or nobody subscribed). Fall back to the user-facing prompt
+                // built from `getProjectTrustOptions`; a non-interactive
+                // entry point stays untrusted, matching the upstream
+                // `hasUI === false` short-circuit in `project-trust.ts`.
+                if let Some(ui) = options.ui.as_ref() {
+                    if let Some(option) = prompt_user_for_project_trust(
+                        ui.handler(),
+                        &options.cwd,
+                    )
+                    .await
+                    {
+                        if option.trusted {
+                            let project_request = ExtensionLoadRequest {
+                                search: ExtensionSearchPaths {
+                                    global: None,
+                                    project: Some(options.cwd.join(".pi").join("extensions")),
+                                },
+                                explicit: Vec::new(),
+                            };
+                            let project = js_loader::load_configured_extensions(
+                                host.clone(),
+                                &project_request,
+                                &options.mode,
+                                has_ui,
+                                &cwd,
+                            )
+                            .await;
+                            outcome.entries.extend(project.entries);
+                            outcome.errors.extend(project.errors);
+                        }
+                        // Persist the chosen option's writes (session-only
+                        // rows carry no updates and are intentionally
+                        // dropped here).
+                        if !option.updates.is_empty() {
+                            let store = crate::trust::ProjectTrustStore::new(
+                                &crate::paths::agent_dir_or_default(),
+                            );
+                            let _ = store.set_many(&option.updates);
+                        }
+                    }
                 }
             }
         }
@@ -925,6 +968,28 @@ async fn ask_project_trust(
         }
     }
     decision
+}
+
+/// Fall back to the user-facing prompt when extensions did not answer.
+///
+/// Mirrors `selectProjectTrustOption` + `saveProjectTrustPromptResult`
+/// from `core/project-trust.ts`: the dialog shows the rows produced by
+/// [`crate::trust::get_project_trust_options`], the caller picks one by
+/// label, and we return the matching [`ProjectTrustOption`] so the caller
+/// can apply its writes (or honour its `session_only` flag by leaving the
+/// store alone).
+async fn prompt_user_for_project_trust(
+    ui_handler: Arc<dyn UiHandler>,
+    cwd: &std::path::Path,
+) -> Option<crate::trust::ProjectTrustOption> {
+    let options = crate::trust::get_project_trust_options(cwd, true);
+    let labels: Vec<String> = options.iter().map(|opt| opt.label.clone()).collect();
+    let prompt = format!(
+        "Trust project folder?\n{}\n\nThis allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.",
+        cwd.display()
+    );
+    let selected = ui_handler.select(&prompt, &labels).await?;
+    options.into_iter().find(|opt| opt.label == selected)
 }
 
 /// Resolve the paths named on the command line.

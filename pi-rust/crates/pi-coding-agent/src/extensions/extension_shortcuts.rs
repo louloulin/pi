@@ -48,6 +48,14 @@ pub const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS: &[&str] = &[
 ];
 
 /// One installed extension shortcut.
+///
+/// `description` and `extension_path` mirror the TS
+/// `{ id, description, extensionPath }` shape exposed by
+/// `runner.ts:126-153`; both default to `None` for callers that do not
+/// have an extension context (the `register` constructor keeps the
+/// original 2-argument signature for backwards compatibility, and the
+/// `register_with_meta` constructor fills both fields so `/hotkeys` can
+/// surface a meaningful label).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionShortcut {
     /// Handle returned to the extension; used by `unregister`.
@@ -58,6 +66,12 @@ pub struct ExtensionShortcut {
     /// Opaque callback payload. The TUI host stores it verbatim — only
     /// the JS shim knows how to decode it back into a handler call.
     pub callback: String,
+    /// Optional human-readable description surfaced in `/hotkeys`. When
+    /// `None` the formatter falls back to `extension_path`.
+    pub description: Option<String>,
+    /// Path of the extension that registered the chord. Used as the
+    /// fallback label for `/hotkeys` and as a debugging breadcrumb.
+    pub extension_path: Option<String>,
 }
 
 /// Failure modes for [`ExtensionShortcutRegistry::register`].
@@ -130,6 +144,20 @@ impl ExtensionShortcutRegistry {
         callback: String,
         keybindings: &KeybindingsManager,
     ) -> Result<u64, ShortcutConflict> {
+        self.register_with_meta(chord, callback, None, None, keybindings)
+    }
+
+    /// Like [`Self::register`] but records an optional human-readable
+    /// `description` and the `extension_path` so `/hotkeys` can render
+    /// a meaningful row instead of a bare chord.
+    pub fn register_with_meta(
+        &self,
+        chord: &str,
+        callback: String,
+        description: Option<String>,
+        extension_path: Option<String>,
+        keybindings: &KeybindingsManager,
+    ) -> Result<u64, ShortcutConflict> {
         // Reject before we touch state — `parse_key_id` is pure, so an
         // unknown chord never depends on user bindings.
         let parsed = pi_tui::keybindings::parse_key_id(chord)
@@ -172,6 +200,8 @@ impl ExtensionShortcutRegistry {
             id,
             chord: chord.to_string(),
             callback,
+            description,
+            extension_path,
         };
         let mut guard = self.inner.lock().expect("extension shortcut mutex poisoned");
         guard.insert(id, shortcut);
@@ -247,5 +277,21 @@ pub fn register_on(
 ) -> Result<u64, String> {
     registry
         .register(&chord, callback, keybindings)
+        .map_err(|err| err.to_string())
+}
+
+/// Like [`register_on`] but propagates the optional `description` /
+/// `extension_path` so the registry snapshot can be rendered
+/// meaningfully by `/hotkeys`.
+pub fn register_with_meta_on(
+    registry: &ExtensionShortcutRegistry,
+    keybindings: &KeybindingsManager,
+    chord: String,
+    callback: String,
+    description: Option<String>,
+    extension_path: Option<String>,
+) -> Result<u64, String> {
+    registry
+        .register_with_meta(&chord, callback, description, extension_path, keybindings)
         .map_err(|err| err.to_string())
 }

@@ -20,6 +20,8 @@ use pi_extensions::{
 use pi_protocol::ExtensionEvent;
 use thiserror::Error;
 
+use crate::extensions::required_api::{validate_required_api, RequiredApiReport};
+
 /// Failure mode surfaced by the JS loader.
 #[derive(Debug, Error)]
 pub enum JsLoaderError {
@@ -38,6 +40,20 @@ pub enum JsLoaderError {
     /// The host runtime itself failed.
     #[error("host error: {0}")]
     Host(#[from] pi_extensions::ExtensionError),
+    /// The extension's `required_api` declared an entry this build
+    /// does not implement. The loader refuses to register the
+    /// extension so the author sees the gap at startup.
+    #[error("extension {path} {report}")]
+    RequiredApi {
+        path: PathBuf,
+        report: RequiredApiReport,
+    },
+    /// The `required_api` header comment was present but not parseable.
+    #[error("extension {path} has malformed @required_api header: {detail}")]
+    RequiredApiParse {
+        path: PathBuf,
+        detail: String,
+    },
 }
 
 /// Aggregated view of a single load operation: which extensions
@@ -162,6 +178,37 @@ async fn load_candidates(
                 continue;
             }
         };
+        // Enforce the `required_api` manifest contract before doing
+        // any work. An extension that declares a dependency on an API
+        // this build does not implement is refused at load time so the
+        // gap is visible immediately, instead of crashing on the first
+        // call to a missing method.
+        match parse_required_api_header(&source) {
+            Ok(Some(declared)) => {
+                let report = validate_required_api(&declared);
+                if !report.is_satisfied() {
+                    errors.push((
+                        path.clone(),
+                        JsLoaderError::RequiredApi {
+                            path: path.clone(),
+                            report,
+                        },
+                    ));
+                    continue;
+                }
+            }
+            Ok(None) => { /* no header → no constraint */ }
+            Err(detail) => {
+                errors.push((
+                    path.clone(),
+                    JsLoaderError::RequiredApiParse {
+                        path: path.clone(),
+                        detail,
+                    },
+                ));
+                continue;
+            }
+        }
         // Compile the source to ESM JavaScript before handing it to
         // the QuickJS host. TS / TSX goes through SWC's `strip` pass
         // (`pi_extensions::transpile`); CJS-flavored sources get a
@@ -284,6 +331,64 @@ fn id_for_path(path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("extension")
         .to_string()
+}
+
+/// Parse the `@required_api` header from a JS / TS extension source.
+///
+/// Recognised forms:
+///
+/// ```text
+/// // @required_api ["turn_start", "ui.setWidget"]
+/// //  @required_api  [ 'turn_start', 'ui.setWidget' ]
+/// ```
+///
+/// The header is recognised only in the first 32 lines (above any
+/// `import` / `module.exports` statements that are likely to appear in a
+/// real extension) so a comment containing the substring `@required_api`
+/// in a doc block does not get picked up.
+///
+/// Returns:
+///
+/// * `Ok(Some(vec))` — header present and parseable.
+/// * `Ok(None)` — header absent, no constraint to enforce.
+/// * `Err(detail)` — header present but malformed; the loader surfaces
+///   the detail so the author can fix the manifest.
+pub fn parse_required_api_header(source: &str) -> Result<Option<Vec<String>>, String> {
+    for line in source.lines().take(32) {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("//") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix("@required_api") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        // Expect `[ ... ]` (square brackets required so a stray
+        // comment like "// @required_api note: …" cannot sneak in).
+        let Some(rest) = rest.strip_prefix('[') else {
+            return Err("expected `[` after @required_api".to_string());
+        };
+        let Some(rest) = rest.strip_suffix(']') else {
+            return Err("expected closing `]` for @required_api list".to_string());
+        };
+        let mut entries: Vec<String> = Vec::new();
+        for raw in rest.split(',') {
+            let token = raw
+                .trim()
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .trim();
+            if token.is_empty() {
+                continue;
+            }
+            entries.push(token.to_string());
+        }
+        return Ok(Some(entries));
+    }
+    Ok(None)
 }
 
 /// Resolve the on-disk cache directory for transpiled module sources.

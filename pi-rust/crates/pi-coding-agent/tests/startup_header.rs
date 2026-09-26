@@ -235,7 +235,7 @@ fn the_shipped_header_advertises_the_recovered_chords_and_keeps_the_live_ones() 
 #[test]
 fn the_shipped_hotkeys_group_lists_only_consumed_actions() {
     let _guard = lock_registry();
-    let text = hotkeys_text_with(&manager());
+    let text = hotkeys_text_with(&manager(), None);
     let app = app_group(&text);
 
     // Both recovered chords are in the group that lists `app.*` actions.

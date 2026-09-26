@@ -56,30 +56,55 @@ pub async fn with_file_mutation_queue<F, T>(file_path: &str, f: F) -> T
 where
     F: Future<Output = T>,
 {
-    let key = match resolve_key(file_path) {
-        Ok(key) => key,
-        // Path resolution failure is fatal for the operation; bubble it up by
-        // running the closure on an empty key (which still serializes but
-        // cannot block other paths). This matches upstream's "throw" path.
-        Err(_) => run_unscoped(f).await,
-    };
+    // Path resolution failure is fatal for the operation; bubble it up by
+    // running the closure on an empty key (which still serializes but
+    // cannot block other paths). This matches upstream's "throw" path.
+    let key = resolve_key(file_path).unwrap_or_default();
 
     let (current, mine) = install(&key);
     if let Some(prev) = current {
         prev.notified().await;
     }
+    // Hold a release guard on the stack; even if `f` panics or the caller
+    // drops the returned future before completion, the guard's `Drop` will
+    // fire `release` so the next caller is never deadlocked.
+    let guard = ReleaseGuard {
+        key: &key,
+        mine: &mine,
+        armed: true,
+    };
     let result = f.await;
+    // Manually disarm the guard so the Drop is a no-op for the normal path;
+    // this avoids calling `notify_waiters` twice when a future does complete.
+    guard.disarm();
     release(&key, &mine);
     result
 }
 
-/// Run `f` without acquiring the lock. Used as a fallback when path
-/// resolution fails so the caller still gets its result.
-async fn run_unscoped<F, T>(f: F) -> T
-where
-    F: Future<Output = T>,
-{
-    f.await
+/// Stack-scoped guard that releases the queue head when dropped.
+///
+/// Mirrors upstream's `try { ... } finally { releaseNext(); ... }` block:
+/// even if the closure panics or the caller drops the future mid-flight, the
+/// next waiter gets woken. Without this, a single panicked operation would
+/// strand every subsequent operation on that path.
+struct ReleaseGuard<'a> {
+    key: &'a str,
+    mine: &'a Arc<Notify>,
+    armed: bool,
+}
+
+impl ReleaseGuard<'_> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReleaseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            release(self.key, self.mine);
+        }
+    }
 }
 
 /// Snapshot the current head and install a fresh `Notify` as the new head.

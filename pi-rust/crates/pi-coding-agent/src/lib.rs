@@ -52,6 +52,7 @@ pub mod commands;
 pub mod compaction;
 pub mod config;
 pub mod context_files;
+pub mod experimental;
 pub mod export;
 pub mod extensions;
 pub mod external_editor;
@@ -127,7 +128,7 @@ pub use tool_executor::{
     default_executor, BuiltinToolBridge, BuiltinToolExecutor, ExtensionToolExecutor,
 };
 pub use trust::{
-    has_trust_requiring_project_resources, resolve_project_trusted, DefaultProjectTrust,
-    ProjectTrustDecision, ProjectTrustStore, ProjectTrustStoreEntry, ProjectTrustUpdate,
-    TrustError,
+    get_project_trust_options, get_project_trust_parent_path, resolve_project_trusted,
+    DefaultProjectTrust, ProjectTrustDecision, ProjectTrustOption, ProjectTrustStore,
+    ProjectTrustStoreEntry, ProjectTrustUpdate, TrustError,
 };
