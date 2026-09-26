@@ -24,8 +24,32 @@ use pi_coding_agent::resource_loader::{
     resolve_cli_project_trust,
 };
 use pi_coding_agent::session_log::SessionLog;
+use pi_coding_agent::startup_log;
 use pi_extensions::DiscoveredResources;
 use pi_protocol::{Api, Model, ProviderId};
+
+fn detect_mode_target(cli: &Cli) -> ModeTarget {
+    match cli.command.as_ref() {
+        Some(Command::Print { .. }) => ModeTarget::Print,
+        Some(Command::Rpc) => ModeTarget::Rpc,
+        Some(Command::Session { .. }) => ModeTarget::Session,
+        Some(Command::Version { .. })
+        | Some(Command::Install { .. })
+        | Some(Command::Remove { .. })
+        | Some(Command::List { .. })
+        | Some(Command::UpdateModels)
+        | Some(Command::ListModels { .. }) => ModeTarget::Packages,
+        _ => {
+            if cli.print.is_some() {
+                ModeTarget::Print
+            } else if cli.rpc {
+                ModeTarget::Rpc
+            } else {
+                ModeTarget::Interactive
+            }
+        }
+    }
+}
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -66,6 +90,14 @@ fn main() -> ExitCode {
         return clear_prompt_history_cli();
     }
 
+    // Decide the run target *before* any startup-notice-emitting code
+    // runs. The interactive target silences stderr for the
+    // startup_log::log_message channel so extension-load noise does not
+    // race the TUI's first alt-screen frame; non-interactive targets
+    // keep the historical behaviour of mirroring each notice to stderr.
+    let target_mode = detect_mode_target(&cli);
+    startup_log::set_mirror_to_stderr(target_mode != ModeTarget::Interactive);
+
     let mut models = build_default_models();
     let model_override = cli
         .model
@@ -93,27 +125,6 @@ fn main() -> ExitCode {
 
     let session_dir = cli.session_dir.clone().unwrap_or_else(default_session_dir);
     let session_id = cli.resume.clone().unwrap_or_else(new_session_id);
-
-    let target_mode = match cli.command.as_ref() {
-        Some(Command::Print { .. }) => ModeTarget::Print,
-        Some(Command::Rpc) => ModeTarget::Rpc,
-        Some(Command::Session { .. }) => ModeTarget::Session,
-        Some(Command::Version { .. })
-        | Some(Command::Install { .. })
-        | Some(Command::Remove { .. })
-        | Some(Command::List { .. })
-        | Some(Command::UpdateModels)
-        | Some(Command::ListModels { .. }) => ModeTarget::Packages,
-        _ => {
-            if cli.print.is_some() {
-                ModeTarget::Print
-            } else if cli.rpc {
-                ModeTarget::Rpc
-            } else {
-                ModeTarget::Interactive
-            }
-        }
-    };
 
     // Prompt templates are expanded at submission time, not baked into
     // the system prompt. They are loaded per mode *after* the extension
@@ -590,13 +601,18 @@ fn load_extensions(
     };
     let outcome = wiring::load(runtime, &options);
     for (path, reason) in &outcome.errors {
-        eprintln!("pi: extension load failed for {}: {reason}", path.display());
+        startup_log::log_message(&format!(
+            "pi: extension load failed for {}: {reason}",
+            path.display()
+        ));
     }
     for name in &outcome.shadowed {
-        eprintln!("pi: extension tool `{name}` ignored: a built-in tool already uses that name");
+        startup_log::log_message(&format!(
+            "pi: extension tool `{name}` ignored: a built-in tool already uses that name"
+        ));
     }
     if !outcome.loaded.is_empty() {
-        eprintln!(
+        startup_log::log_message(&format!(
             "pi: loaded {} extension(s) [{}]",
             outcome.loaded.len(),
             outcome
@@ -605,10 +621,10 @@ fn load_extensions(
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
     }
     if !outcome.runtime.commands().is_empty() {
-        eprintln!(
+        startup_log::log_message(&format!(
             "pi: extension commands: {}",
             outcome
                 .runtime
@@ -617,7 +633,7 @@ fn load_extensions(
                 .map(|c| format!("/{}", c.name))
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
     }
     outcome
 }
@@ -651,7 +667,7 @@ fn build_default_models() -> Models {
             Ok(overrides) => return overrides,
             Err(pi_ai::LoadModelsError::Io { .. }) => {}
             Err(err) => {
-                eprintln!("pi: {err}");
+                startup_log::log_message(&format!("pi: {err}"));
             }
         }
     }

@@ -72,6 +72,7 @@ pub mod rpc;
 pub mod scoped_models;
 pub mod session_log;
 pub mod skills;
+pub mod startup_log;
 pub mod system_prompt;
 pub mod text_fallback;
 pub mod thinking;

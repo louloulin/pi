@@ -49,6 +49,28 @@ use super::bash_runner::BashRunner;
 use crate::config;
 use crate::extensions::ui_bridge::RegionPump;
 
+/// Decide whether a `set_theme_by_name` failure leaves the user with a
+/// usable fallback palette or whether they genuinely need a status-bar
+/// flash.
+///
+/// The App is constructed with `dark` as its initial palette, so a
+/// failure to load the user-requested theme simply keeps that
+/// default in place. The only failures worth surfacing in the status
+/// bar are the ones that mean even the default cannot be relied on —
+/// missing colour tokens, unparseable hex, broken `vars`, …
+///
+/// "Theme not found" / "invalid theme name" land here in practice:
+/// users frequently port a `theme` field from a TS pi config (e.g.
+/// `"upup-dark"`) into a Rust pi `settings.json` and the request fails
+/// to resolve because the port does not ship that palette. Showing a
+/// panic-y "Theme not applied: …" banner for what is effectively a
+/// cosmetic mismatch crowded the first TUI frame; routing the
+/// notice to the persistent startup log keeps the audit trail
+/// without polluting the screen.
+fn is_fallback_sufficient_theme_error(err: &str) -> bool {
+    err.starts_with("Theme not found:") || err.starts_with("Invalid theme name:")
+}
+
 /// What one interactive run hands back to [`run_interactive`].
 pub(super) struct RunOutcome {
     /// Why the loop stopped.
@@ -177,13 +199,24 @@ pub(super) async fn run_loop(
         // `session.scopedModels` before the loop starts (`main.ts:448`).
         seed_model_scope(&mut options, &settings_sources());
         if let Some(err) = &startup_ui.theme_error {
-            // Use the transient status line, not a permanent info block —
-            // the previous behaviour pushed a sticky banner that survived
-            // every subsequent scroll, which made it look like a fatal
-            // error and crowded the chat whenever a user had a stale
-            // `theme` field in `settings.json`. The flash fades after the
-            // configured duration (see `App::flash_status`).
-            app.flash_status(format!("Theme not applied: {err}"));
+            // `set_theme_by_name` leaves the App's *previous* palette in
+            // place on failure. The App is built with `dark` as its
+            // initial palette (`App::new` in `pi-tui/app/mod.rs`), so a
+            // simple "theme not found" — the case that hits users who
+            // copied a TS pi `theme: "upup-dark"` into `settings.json`
+            // — already has a usable fallback painted; flashing a
+            // status bar warning only crowds the first frame.
+            //
+            // Anything else (missing colour tokens, invalid hex,
+            // unresolvable variable, …) means even the fallback path is
+            // unhappy, and the user genuinely needs to know.
+            if is_fallback_sufficient_theme_error(err) {
+                crate::startup_log::log_message(&format!(
+                    "pi: theme fallback: {err} (kept built-in palette)"
+                ));
+            } else {
+                app.flash_status(format!("Theme not applied: {err}"));
+            }
         }
     }
 
@@ -499,4 +532,38 @@ pub(super) async fn run_loop(
         exit: InteractiveExit::UserExit,
         exit_output,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_fallback_sufficient_theme_error;
+
+    #[test]
+    fn theme_not_found_is_silent() {
+        assert!(is_fallback_sufficient_theme_error(
+            "Theme not found: upup-dark"
+        ));
+    }
+
+    #[test]
+    fn invalid_theme_name_is_silent() {
+        assert!(is_fallback_sufficient_theme_error(
+            "Invalid theme name: \"/etc/passwd\""
+        ));
+    }
+
+    #[test]
+    fn structural_theme_errors_still_flash() {
+        // Missing colour tokens mean even the fallback palette is at risk;
+        // the user genuinely needs to know.
+        assert!(!is_fallback_sufficient_theme_error(
+            "Invalid theme \"dark\": missing color token \"toolPendingBg\""
+        ));
+        assert!(!is_fallback_sufficient_theme_error(
+            "Invalid hex color: #xyz"
+        ));
+        assert!(!is_fallback_sufficient_theme_error(
+            "Variable reference not found: undefined-token"
+        ));
+    }
 }

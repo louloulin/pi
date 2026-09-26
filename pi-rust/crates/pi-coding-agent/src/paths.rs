@@ -45,6 +45,25 @@ pub fn history_file_path() -> PathBuf {
     agent_dir_or_default().join("history.jsonl")
 }
 
+/// The directory under `~/.pi/agent/` that captures transient
+/// startup-time notices (extension load failures, schema warnings, the
+/// list of loaded extensions). Kept separate from `history.jsonl` and
+/// the session database so a long-running TUI cannot accidentally
+/// truncate either when reopening the log.
+pub fn logs_dir() -> Option<PathBuf> {
+    agent_dir().map(|dir| dir.join("logs"))
+}
+
+/// The startup notice log (`~/.pi/agent/logs/pi.log`).
+///
+/// Append-only; each line is prefixed with a Unix-second timestamp so
+/// the file stays greppable across launches. The interactive driver
+/// never writes here — only the CLI startup sequence does, when stderr
+/// would otherwise clobber the TUI's first frame.
+pub fn startup_log_path() -> Option<PathBuf> {
+    logs_dir().map(|dir| dir.join("pi.log"))
+}
+
 /// Collapse `.` / `..` components without touching the filesystem.
 pub fn normalize_lexically(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
