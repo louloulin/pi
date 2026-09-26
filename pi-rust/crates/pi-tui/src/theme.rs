@@ -42,6 +42,9 @@ use std::path::{Path, PathBuf};
 
 use pi_agent_core::ThinkingLevel;
 use serde::de::{self, Visitor};
+
+pub mod morandi;
+pub use morandi::{context_color, Morandi, MorandiAccent};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -293,6 +296,16 @@ pub enum ThemeColor {
     ToolOutput,
     /// Markdown heading.
     MdHeading,
+    /// Markdown H1 colour (optional; falls back to [`ThemeColor::MdHeading`]).
+    /// nanopi borrows: each heading level gets its own warm hue so the
+    /// hierarchy is visible before the eye reaches the `#` prefix. The
+    /// TS pi-tui uses one colour for every level, so this is a deliberate
+    /// deviation in the spirit of "borrow when TS doesn't cover".
+    MdHeading1,
+    /// Markdown H2 colour (optional; falls back to [`ThemeColor::MdHeading`]).
+    MdHeading2,
+    /// Markdown H3 colour (optional; falls back to [`ThemeColor::MdHeading`]).
+    MdHeading3,
     /// Markdown link text.
     MdLink,
     /// Markdown link URL.
@@ -363,7 +376,7 @@ pub enum ThemeColor {
 
 impl ThemeColor {
     /// Every foreground slot, in upstream declaration order.
-    pub const ALL: [ThemeColor; 53] = [
+    pub const ALL: [ThemeColor; 56] = [
         ThemeColor::Accent,
         ThemeColor::Border,
         ThemeColor::BorderAccent,
@@ -384,6 +397,9 @@ impl ThemeColor {
         ThemeColor::ToolTitle,
         ThemeColor::ToolOutput,
         ThemeColor::MdHeading,
+        ThemeColor::MdHeading1,
+        ThemeColor::MdHeading2,
+        ThemeColor::MdHeading3,
         ThemeColor::MdLink,
         ThemeColor::MdLinkUrl,
         ThemeColor::MdCode,
@@ -442,6 +458,9 @@ impl ThemeColor {
             ThemeColor::ToolTitle => "toolTitle",
             ThemeColor::ToolOutput => "toolOutput",
             ThemeColor::MdHeading => "mdHeading",
+            ThemeColor::MdHeading1 => "mdHeading1",
+            ThemeColor::MdHeading2 => "mdHeading2",
+            ThemeColor::MdHeading3 => "mdHeading3",
             ThemeColor::MdLink => "mdLink",
             ThemeColor::MdLinkUrl => "mdLinkUrl",
             ThemeColor::MdCode => "mdCode",
@@ -489,6 +508,14 @@ impl ThemeColor {
             ThemeColor::Hint => Some(ThemeColor::Muted),
             ThemeColor::FgSecondary => Some(ThemeColor::Dim),
             ThemeColor::Caption => Some(ThemeColor::Muted),
+            // Per-level heading colours fall back to the unified
+            // `MdHeading` slot so themes that don't want a hierarchy can
+            // keep using a single colour. nanopi borrows: each level
+            // gets a distinct warm hue (`Indexed(214)` / `220` / `228`)
+            // when the theme opts in via `mdHeading1/2/3`.
+            ThemeColor::MdHeading1 => Some(ThemeColor::MdHeading),
+            ThemeColor::MdHeading2 => Some(ThemeColor::MdHeading),
+            ThemeColor::MdHeading3 => Some(ThemeColor::MdHeading),
             _ => None,
         }
     }
@@ -529,11 +556,18 @@ pub enum ThemeBg {
     ToolErrorBg,
     /// Panel/popup background (falls back to SelectedBg).
     Panel,
+    /// Background of inline `` `code` `` (falls back to `ToolPendingBg`).
+    /// Borrowed from nanopi's `Indexed(236)` fill — without a fill, an
+    /// inline `code` span is just coloured text and reads as ordinary
+    /// prose; the bg fill makes the run visually "boxed" so the eye
+    /// catches it as a syntactic token. Falls back to a dark grey-blue
+    /// so themes without an explicit value still get a visible fill.
+    MdCodeBg,
 }
 
 impl ThemeBg {
     /// Every background slot, in upstream declaration order.
-    pub const ALL: [ThemeBg; 8] = [
+    pub const ALL: [ThemeBg; 9] = [
         ThemeBg::SelectedBg,
         ThemeBg::SearchMatchBg,
         ThemeBg::UserMessageBg,
@@ -542,6 +576,7 @@ impl ThemeBg {
         ThemeBg::ToolSuccessBg,
         ThemeBg::ToolErrorBg,
         ThemeBg::Panel,
+        ThemeBg::MdCodeBg,
     ];
 
     /// The JSON key used for this slot.
@@ -555,6 +590,7 @@ impl ThemeBg {
             ThemeBg::ToolSuccessBg => "toolSuccessBg",
             ThemeBg::ToolErrorBg => "toolErrorBg",
             ThemeBg::Panel => "panel",
+            ThemeBg::MdCodeBg => "mdCodeBg",
         }
     }
 
@@ -563,6 +599,11 @@ impl ThemeBg {
         match self {
             ThemeBg::SearchMatchBg => Some(ThemeBg::SelectedBg),
             ThemeBg::Panel => Some(ThemeBg::SelectedBg),
+            // Inline code gets a subtle dark fill by default — closer to
+            // nanopi's `Indexed(236)` than to the page background. Themes
+            // that want a transparent inline-code look can still override
+            // it via the JSON key `mdCodeBg`.
+            ThemeBg::MdCodeBg => Some(ThemeBg::ToolPendingBg),
             _ => None,
         }
     }

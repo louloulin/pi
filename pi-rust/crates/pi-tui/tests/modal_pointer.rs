@@ -350,7 +350,7 @@ fn a_select_dialog_takes_the_wheel_and_the_click() {
     let first = row_of(&lines, "alpha");
     let gamma = row_of(&lines, "gamma");
     assert!(
-        lines[first as usize].starts_with('❯'),
+        lines[first as usize].starts_with('→'),
         "{:?}",
         lines[first as usize]
     );

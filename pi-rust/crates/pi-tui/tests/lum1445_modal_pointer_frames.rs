@@ -6,7 +6,7 @@
 //! paints it. Two panels, both 76×18:
 //!
 //! 1. the picker open over the transcript, highlight on the first row
-//!    (`❯ faux-a`) — the reference frame;
+//!    (`→ faux-a`) — the reference frame;
 //! 2. after a **left click on the `faux-c` row**: the press moved the
 //!    highlight onto it, the release activated it (the App hands the value
 //!    to the driver, which closes the picker), and the transcript rows the
@@ -143,10 +143,10 @@ fn gesture(kind: MouseGestureKind, x: u16, y: u16) -> InputEvent {
 fn frame_dump_before_the_click() {
     let mut app = app();
     let buf = frame(&mut app);
-    assert!(row_text(&buf, row_with(&buf, "❯ faux-a")).contains("❯ faux-a"));
+    assert!(row_text(&buf, row_with(&buf, "→ faux-a")).contains("→ faux-a"));
     dump(
         &mut app,
-        "before the click: `❯ faux-a` highlighted, picker owns the pointer",
+        "before the click: `→ faux-a` highlighted, picker owns the pointer",
     );
 }
 
@@ -171,11 +171,11 @@ fn frame_dump_after_the_click() {
     ));
     let after = frame(&mut app);
     assert!(
-        row_text(&after, row_with(&after, "❯ faux-c")).contains("❯ faux-c"),
+        row_text(&after, row_with(&after, "→ faux-c")).contains("→ faux-c"),
         "the click should have left the highlight on `faux-c`"
     );
     assert!(
-        !row_text(&after, row_with(&after, "faux-a")).contains('❯'),
+        !row_text(&after, row_with(&after, "faux-a")).contains('→'),
         "`faux-a` is no longer the highlighted row"
     );
     assert_eq!(

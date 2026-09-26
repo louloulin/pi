@@ -33,7 +33,9 @@ fn h1_is_heading_bold_underline() {
     let lines = render_markdown("# Title", 40);
     assert_eq!(texts(&lines), vec!["Title"]);
     let span = find(&lines[0], "Title");
-    assert_eq!(span.style.fg, Some(ThemeColor::MdHeading));
+    // P20 nanopi borrow: H1 now uses its own `MdHeading1` slot (falls
+    // back to `MdHeading` for themes that don't override it).
+    assert_eq!(span.style.fg, Some(ThemeColor::MdHeading1));
     assert!(span.style.bold);
     assert!(span.style.underline);
 }
@@ -42,14 +44,14 @@ fn h1_is_heading_bold_underline() {
 fn h2_is_heading_bold_only_and_h3_keeps_its_prefix() {
     let lines = render_markdown("## Sub", 40);
     let span = find(&lines[0], "Sub");
-    assert_eq!(span.style.fg, Some(ThemeColor::MdHeading));
+    assert_eq!(span.style.fg, Some(ThemeColor::MdHeading2));
     assert!(span.style.bold);
     assert!(!span.style.underline);
 
     let lines = render_markdown("### Third", 40);
     assert_eq!(texts(&lines), vec!["### Third"]);
     let span = find(&lines[0], "### Third");
-    assert_eq!(span.style.fg, Some(ThemeColor::MdHeading));
+    assert_eq!(span.style.fg, Some(ThemeColor::MdHeading3));
     assert!(span.style.bold);
 }
 
@@ -57,13 +59,15 @@ fn h2_is_heading_bold_only_and_h3_keeps_its_prefix() {
 fn headings_up_to_level_six_and_closing_hashes() {
     let lines = render_markdown("###### Six\n\n## Closed ##", 40);
     assert_eq!(texts(&lines), vec!["###### Six", "", "Closed"]);
+    // Levels 4–6 fall through to the unified `MdHeading` slot because
+    // nanopi only specialises the top three (`nanopi/src/render/markdown.rs:57-79`).
     assert_eq!(
         find(&lines[0], "###### Six").style.fg,
         Some(ThemeColor::MdHeading)
     );
     assert_eq!(
         find(&lines[2], "Closed").style.fg,
-        Some(ThemeColor::MdHeading)
+        Some(ThemeColor::MdHeading2)
     );
 }
 
@@ -149,15 +153,18 @@ fn list_item_wraps_under_a_continuation_indent() {
 #[test]
 fn blockquote_uses_quote_slots_and_border() {
     let lines = render_markdown("> quoted **bold**", 40);
-    assert_eq!(texts(&lines), vec!["│ quoted bold"]);
-    assert_eq!(lines[0][0].text, "│ ");
+    assert_eq!(texts(&lines), vec!["▏ quoted bold"]);
+    assert_eq!(lines[0][0].text, "▏ ");
     assert_eq!(lines[0][0].style.fg, Some(ThemeColor::MdQuoteBorder));
     let quoted = find(&lines[0], "quoted ");
     assert_eq!(quoted.style.fg, Some(ThemeColor::MdQuote));
-    assert!(quoted.style.italic);
+    // nanopi borrows: the body is non-italic so it cannot collide with the
+    // thinking stream (which uses the same `gray` slot + italic). The
+    // gutter carries the "this is a quote" signal instead.
+    assert!(!quoted.style.italic);
     let bold = find(&lines[0], "bold");
     assert_eq!(bold.style.fg, Some(ThemeColor::MdQuote));
-    assert!(bold.style.italic);
+    assert!(!bold.style.italic);
     assert!(bold.style.bold);
 }
 
@@ -185,6 +192,9 @@ fn inline_emphasis_code_and_strikethrough() {
     assert!(find(&lines[0], "it2").style.italic);
     let code = find(&lines[0], "code");
     assert_eq!(code.style.fg, Some(ThemeColor::MdCode));
+    // P19 borrow from nanopi: inline `code` carries a `mdCodeBg` fill so
+    // the span reads as a boxed token, not coloured prose.
+    assert_eq!(code.style.bg, Some(pi_tui::theme::ThemeBg::MdCodeBg));
     assert!(!code.style.bold);
     assert!(find(&lines[0], "del").style.strikethrough);
 }
@@ -471,7 +481,9 @@ fn md_heading_resolves_through_the_theme_to_a_ratatui_style() {
     let theme = builtin_theme("dark", ColorMode::TrueColor).expect("dark theme");
     let lines = render_markdown("# Title", 40);
     let style = find(&lines[0], "Title").style.to_style(&theme);
-    assert_eq!(style.fg, Some(ratatui::style::Color::Rgb(240, 198, 116)));
+    // P20: H1 uses `mdHeading1` (`#ff875f` in dark.json), not the legacy
+    // `mdHeading` (`#f0c674`).
+    assert_eq!(style.fg, Some(ratatui::style::Color::Rgb(255, 135, 95)));
     assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
     assert!(style
         .add_modifier
@@ -514,7 +526,8 @@ fn message_view_markdown_opt_in_themes_assistant_bodies() {
     let lines = view.render_styled_lines(40);
     assert_eq!(texts(&lines), vec!["  Head"]);
     let heading = find(&lines[0], "Head");
-    assert_eq!(heading.style.fg, Some(ThemeColor::MdHeading));
+    // P20: H1 now resolves to its own `MdHeading1` slot.
+    assert_eq!(heading.style.fg, Some(ThemeColor::MdHeading1));
     assert!(heading.style.bold);
 }
 
@@ -546,6 +559,8 @@ fn streaming_caret_sits_on_the_last_markdown_line() {
         tool_expanded: None,
         tool_status: Default::default(),
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
     let lines = view.render_styled_lines(40);
     assert_eq!(lines.len(), 2);
@@ -775,11 +790,11 @@ fn table_inside_a_quote_keeps_the_quote_style() {
     assert_eq!(
         texts(&lines),
         vec![
-            "│ ┌───┬───┐",
-            "│ │ a │ b │",
-            "│ ├───┼───┤",
-            "│ │ 1 │ 2 │",
-            "│ └───┴───┘",
+            "▏ ┌───┬───┐",
+            "▏ │ a │ b │",
+            "▏ ├───┼───┤",
+            "▏ │ 1 │ 2 │",
+            "▏ └───┴───┘",
         ]
     );
     for line in &lines {
@@ -790,7 +805,8 @@ fn table_inside_a_quote_keeps_the_quote_style() {
     }
     let cell = find(&lines[1], "a");
     assert_eq!(cell.style.fg, Some(ThemeColor::MdQuote));
-    assert!(cell.style.italic);
+    // nanopi borrow: cells inside a quote are also non-italic.
+    assert!(!cell.style.italic);
     assert!(cell.style.bold);
 }
 
@@ -812,6 +828,9 @@ fn table_cells_keep_escaped_pipes_and_inline_slots() {
     // The header is bold, but the code cell keeps its `mdCode` slot.
     let code = find(&lines[1], "c");
     assert_eq!(code.style.fg, Some(ThemeColor::MdCode));
+    // P19 borrow: even inside a table cell, inline `code` still carries
+    // the `mdCodeBg` fill.
+    assert_eq!(code.style.bg, Some(pi_tui::theme::ThemeBg::MdCodeBg));
     assert!(code.style.bold);
 
     // A link renders its label and its URL, and the width accounts for both.

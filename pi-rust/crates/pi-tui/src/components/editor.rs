@@ -2403,7 +2403,7 @@ pub fn accept_history_search(&mut self) -> EditorAction {
 
     /// Render the dropdown rows for a widget `width`, one entry per
     /// candidate (already windowed to the configured height). The
-    /// highlighted row is marked with `❯`.
+    /// highlighted row is marked with `→`.
     ///
     /// The layout is the shared `SelectList` one
     /// ([`select_list_row_spans`], upstream `SelectList::renderItem`) — the

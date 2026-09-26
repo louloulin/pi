@@ -19,8 +19,10 @@
 //! | [`frame_pacer`] | Per-frame paint scheduling |
 
 pub mod capabilities;
+pub mod color_mode;
 pub mod colors;
 pub mod frame_pacer;
+pub mod high_dpi;
 pub mod image;
 pub mod process;
 pub mod raw_tty;
@@ -31,8 +33,16 @@ pub use crate::terminal::capabilities::{
     current, hyperlinks_supported, image_protocol_supported, reset, set_overrides,
     true_color_supported,
 };
+pub use crate::terminal::color_mode::{
+    detect as detect_color_mode, detect_with, has_256color_hint, is_truthy, ColorModeInputs,
+};
 pub use crate::terminal::colors::{parse_osc11_background_color, parse_terminal_color_scheme_report, TerminalColorSchemeReport as TerminalColorScheme};
 pub use crate::terminal::frame_pacer::FramePacer;
+pub use crate::terminal::high_dpi::{
+    detect_device_pixel_ratio_from_env, detect_device_pixel_ratio_with,
+    device_pixel_ratio, refresh_device_pixel_ratio, set_device_pixel_ratio,
+    DevicePixelRatio, DEFAULT_DPI_RATIO, HIGH_DPI_RATIO,
+};
 pub use crate::terminal::image::{
     allocate_image_id, apply_env_overrides, calculate_image_cell_size, calculate_image_rows,
     capability_inputs_from_env, crop_kitty_image_line, decoded_base64_len,

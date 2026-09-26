@@ -103,6 +103,13 @@ fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
         .collect()
 }
 
+/// One rendered row as a quoted `String`, for inclusion in assertion
+/// failure messages.
+fn rows_text(buf: &Buffer, y: u16) -> String {
+    let width = buf.area().width;
+    row_text(buf, y, width)
+}
+
 #[test]
 fn app_buffer_cells_carry_the_theme_colours() {
     let mut app = app();
@@ -113,14 +120,17 @@ fn app_buffer_cells_carry_the_theme_colours() {
     // messages in view.
     let buf = render(&mut app, 40, 5);
 
-    // Message rows: `> hello` (row 0) and `  hi` (row 1).
-    assert_eq!(symbol_at(&buf, 0, 0), ">");
-    assert_eq!(style_at(&buf, 0, 0).fg, Some(ACCENT));
-    // The user body takes `userMessageText`. The assistant body renders as
-    // markdown by default (`AppConfig::markdown`), and a markdown paragraph
-    // carries no theme slot — upstream's `Markdown` inherits the terminal's
-    // default text style — so those cells stay unstyled.
-    assert_eq!(style_at(&buf, 2, 0).fg, Some(TEXT));
+    // Message rows: `hello` (row 0) and `  hi` (row 1). P9 removed the
+    // `> ` prefix from user messages — `userMessageText` now owns the
+    // first column, and the body takes the `text` colour from the theme.
+    assert_eq!(symbol_at(&buf, 0, 0), "h");
+    assert_eq!(style_at(&buf, 0, 0).fg, Some(TEXT));
+    // The assistant body renders as markdown by default (`AppConfig::markdown`),
+    // and a markdown paragraph carries no theme slot — upstream's `Markdown`
+    // inherits the terminal's default text style — so those cells stay
+    // unstyled. The assistant still keeps its two-cell indent.
+    assert_eq!(symbol_at(&buf, 0, 1), " ");
+    assert_eq!(symbol_at(&buf, 2, 1), "h");
     assert!(is_unstyled(style_at(&buf, 2, 1)));
 
     // Status row (y = height - 1, the last row: the status bar sits below
@@ -139,9 +149,11 @@ fn app_buffer_cells_carry_the_theme_colours() {
     // current thinking level's border colour, see upstream
     // `updateEditorBorderColor`). The row above (y = height - 3) is the new
     // border row (Phase 2 / G3) — `─` glyphs in the same border colour.
-    assert_eq!(style_at(&buf, 0, 3).fg, Some(THINKING_MEDIUM));
-    assert_eq!(style_at(&buf, 2, 3).bg, Some(SELECTED_BG));
+    // The border only paints when the composer is multi-row; at the default
+    // height of 5 with two short messages, the composer has the room to
+    // wrap, so the border row is visible.
     assert_eq!(symbol_at(&buf, 0, 2), "─");
+    assert_eq!(style_at(&buf, 2, 3).bg, Some(SELECTED_BG));
 }
 
 #[test]
@@ -150,19 +162,19 @@ fn set_theme_hot_swaps_the_next_render() {
     app.messages_mut().push(MessageItem::user("hello"));
 
     let dark = render(&mut app, 40, 4);
-    assert_eq!(style_at(&dark, 0, 0).fg, Some(ACCENT));
+    assert_eq!(style_at(&dark, 0, 0).fg, Some(TEXT));
 
     app.set_theme(builtin_theme("light", ColorMode::TrueColor).expect("light theme"));
     let light = render(&mut app, 40, 4);
-    assert_eq!(style_at(&light, 0, 0).fg, Some(LIGHT_ACCENT));
+    assert_eq!(style_at(&light, 0, 0).fg, Some(Color::Rgb(31, 35, 40)));
     // The visible text is unchanged by the palette.
-    assert_eq!(symbol_at(&light, 0, 0), ">");
-    assert_eq!(symbol_at(&light, 2, 0), "h");
+    assert_eq!(symbol_at(&light, 0, 0), "h");
+    assert_eq!(symbol_at(&light, 1, 0), "e");
 
-    // Switching back restores the dark accent on the same App instance.
+    // Switching back restores the dark text colour on the same App instance.
     app.set_theme_by_name("dark").expect("built-in dark");
     let back = render(&mut app, 40, 4);
-    assert_eq!(style_at(&back, 0, 0).fg, Some(ACCENT));
+    assert_eq!(style_at(&back, 0, 0).fg, Some(TEXT));
 }
 
 #[test]
@@ -172,37 +184,52 @@ fn bash_mode_colours_the_prompt_label() {
     // prompt label occupies its first two cells.
     app.set_editor_text("!ls");
     let buf = render(&mut app, 40, 4);
-    assert_eq!(symbol_at(&buf, 0, 2), ">");
+    // P9 removed the `> ` chevron prefix; the bash-mode signal now lives
+    // on the leading `!`/`!!` indicator. The composer paints that indicator
+    // in `BashMode` so the user can still tell the buffer is a shell
+    // submission rather than a model prompt.
+    assert_eq!(symbol_at(&buf, 0, 2), "!");
     assert_eq!(style_at(&buf, 0, 2).fg, Some(BASH_MODE));
-    assert_eq!(style_at(&buf, 1, 2).fg, Some(BASH_MODE));
-    // Only the label carries the bash-mode colour; the rest of the row
-    // carries the `selectedBg` slot the composer paints on every row.
-    assert_ne!(style_at(&buf, 2, 2).fg, Some(BASH_MODE));
+    // Only the indicator carries bash-mode colour; the rest of the row
+    // keeps its default body colour and the `selectedBg` slot the composer
+    // paints on every row.
+    assert_eq!(symbol_at(&buf, 1, 2), "l");
+    assert_ne!(style_at(&buf, 1, 2).fg, Some(BASH_MODE));
     assert_eq!(style_at(&buf, 2, 2).bg, Some(SELECTED_BG));
 
-    // A normal buffer paints the label in the thinking level's border colour
-    // instead (default level: medium).
+    // A normal buffer paints nothing in the bash-mode colour — the body
+    // just inherits the default body colour.
     app.set_editor_text("ls");
     let buf = render(&mut app, 40, 4);
-    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_MEDIUM));
+    assert_ne!(style_at(&buf, 0, 2).fg, Some(BASH_MODE));
 }
 
 #[test]
 fn the_prompt_label_follows_the_thinking_level() {
+    // P9 removed the `> ` chevron label that used to take the thinking-level
+    // border colour on the composer's first row. The thinking level still
+    // drives the border row painted above a multi-row composer (the
+    // `─` separator from Phase 2 / G3), so we exercise that path here by
+    // filling the buffer with enough newlines to force `max_rows > 1`.
     let mut app = app();
 
     app.set_thinking_level(ThinkingLevel::High);
-    let buf = render(&mut app, 40, 4);
-    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_HIGH));
+    app.set_editor_text("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta");
+    let buf = render(&mut app, 40, 6);
+    // Border row sits immediately above the composer's rectangle. With
+    // height=6 the layout reserves row 5 for the status bar and one
+    // message row at the top, leaving 4 rows for the editor — one
+    // border row plus three composer rows, anchored at y = 1.
+    assert_eq!(style_at(&buf, 0, 1).fg, Some(THINKING_HIGH));
 
     app.set_thinking_level(ThinkingLevel::Max);
-    let buf = render(&mut app, 40, 4);
-    assert_eq!(style_at(&buf, 0, 2).fg, Some(THINKING_MAX));
+    let buf = render(&mut app, 40, 6);
+    assert_eq!(style_at(&buf, 0, 1).fg, Some(THINKING_MAX));
 
-    // Bash mode still wins over the thinking colour.
-    app.set_editor_text("!ls");
-    let buf = render(&mut app, 40, 4);
-    assert_eq!(style_at(&buf, 0, 2).fg, Some(BASH_MODE));
+    // Bash mode still wins over the thinking colour on the border row.
+    app.set_editor_text("!ls\nalpha\nbeta\ngamma\ndelta\nepsilon");
+    let buf = render(&mut app, 40, 6);
+    assert_eq!(style_at(&buf, 0, 1).fg, Some(BASH_MODE));
 }
 
 #[test]
@@ -235,9 +262,11 @@ fn a_plain_theme_renders_unstyled_cells() {
     app.set_theme(builtin_theme("dark", ColorMode::None).expect("plain theme"));
     let buf = render(&mut app, 40, 4);
 
-    assert_eq!(symbol_at(&buf, 0, 0), ">");
+    // P9 removed the `> ` prefix from user messages — the user body now
+    // starts at column 0 and inherits the default text colour.
+    assert_eq!(symbol_at(&buf, 0, 0), "h");
     assert!(is_unstyled(style_at(&buf, 0, 0)));
-    assert!(is_unstyled(style_at(&buf, 2, 0)));
+    assert!(is_unstyled(style_at(&buf, 1, 0)));
     assert!(is_unstyled(style_at(&buf, 0, 2)));
 }
 
@@ -262,14 +291,16 @@ fn selector_overlay_uses_the_title_border_and_selected_row_slots() {
 
     // Row 3 is the selected first item: accent fg over the selectedBg.
     let selected = style_at(&buf, 0, 3);
-    assert_eq!(symbol_at(&buf, 0, 3), "❯");
+    assert_eq!(symbol_at(&buf, 0, 3), "→");
     assert_eq!(selected.fg, Some(ACCENT));
     assert_eq!(selected.bg, Some(SELECTED_BG));
 
-    // The non-selected item's description column is muted.
+    // The non-selected item's description column is muted. N7
+    // right-aligns descriptions to the row's right edge (column 59 for
+    // width=60), so the description "two" sits flush at columns 57–59.
     assert!(is_unstyled(style_at(&buf, 2, 4)));
-    assert_eq!(style_at(&buf, 34, 4).fg, Some(MUTED));
-    assert_eq!(symbol_at(&buf, 34, 4), "t"); // "two" starts at column 34
+    assert_eq!(style_at(&buf, 57, 4).fg, Some(MUTED));
+    assert_eq!(symbol_at(&buf, 57, 4), "t"); // "two" ends at column 59
 }
 
 #[test]
@@ -293,31 +324,45 @@ fn the_composer_dropdown_paints_the_select_list_theme_roles() {
     app.step_key(Key::char('/'));
     let buf = render(&mut app, 80, 12);
 
-    let selected_row = row_containing(&buf, 80, 12, "❯ help");
+    let selected_row = row_containing(&buf, 80, 12, "→ help");
     let plain_row = row_containing(&buf, 80, 12, "  clear");
     assert_eq!(plain_row, selected_row + 1, "the list is one row per item");
 
-    // Slash menu layout: a 12-column primary column, so the descriptions
-    // start at 2 (marker) + 12 = 14 on both rows.
-    assert_eq!(symbol_at(&buf, 14, selected_row), "s");
-    assert_eq!(symbol_at(&buf, 14, plain_row), "w");
+    // N7 right-aligns the description column. With width=80:
+    //  - "show this help text" (19 cols) is right-aligned → columns 61–79
+    //  - "wipe the message view" (21 cols) is right-aligned → columns 59–79
+    let selected_desc_start: u16 = (80 - "show this help text".chars().count()) as u16;
+    let plain_desc_start: u16 = (80 - "wipe the message view".chars().count()) as u16;
+    assert_eq!(
+        symbol_at(&buf, selected_desc_start, selected_row),
+        "s",
+        "selected row {selected_row} col {selected_desc_start}: row was {:?}",
+        rows_text(&buf, selected_row)
+    );
+    assert_eq!(
+        symbol_at(&buf, plain_desc_start, plain_row),
+        "w",
+        "plain row {plain_row} col {plain_desc_start}: row was {:?}",
+        rows_text(&buf, plain_row)
+    );
 
     // The selected row is wrapped whole: accent fg over selectedBg, label and
     // description alike.
     let selected_label = style_at(&buf, 2, selected_row);
     assert_eq!(selected_label.fg, Some(ACCENT));
     assert_eq!(selected_label.bg, Some(SELECTED_BG));
-    let selected_description = style_at(&buf, 14, selected_row);
+    let selected_description = style_at(&buf, selected_desc_start, selected_row);
     assert_eq!(selected_description.fg, Some(ACCENT));
     assert_eq!(selected_description.bg, Some(SELECTED_BG));
 
     // A plain row keeps its label at the terminal default and only the
     // description column takes `muted`.
     assert!(is_unstyled(style_at(&buf, 2, plain_row)));
-    assert_eq!(style_at(&buf, 14, plain_row).fg, Some(MUTED));
-    // …and the row it borrowed from the transcript is blanked to the right of
-    // the candidate, not left showing the output underneath.
-    assert_eq!(symbol_at(&buf, 79, plain_row), " ");
+    assert_eq!(style_at(&buf, plain_desc_start, plain_row).fg, Some(MUTED));
+    // The right-aligned description ends flush with the row's right edge:
+    // "wipe the message view" (21 cols) is right-aligned into columns
+    // 59..=79, so the trailing "w" lives in the last column.
+    assert_eq!(symbol_at(&buf, 79, plain_row), "w");
 }
 
 /// The `y` of the first row whose text contains `needle`.

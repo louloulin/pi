@@ -3,10 +3,49 @@
 //! component, and the `custom` overlay.
 //!
 //! [`App`](crate::App) owns one [`ExtensionUi`] and exposes it through
-//! `set_header` / `set_footer` / `set_widget` / `set_editor_component` /
-//! `open_custom`. The module also owns the host-side layout: it renders the
-//! attached [`Component`]s to [`StyledLine`]s and plans how many rows each
-//! region may occupy (`plan_chrome`).
+//! `set_header` / `set_footer` / `prepend_header` / `append_footer` /
+//! `set_widget` / `set_editor_component` / `open_custom`. The module also
+//! owns the host-side layout: it renders the attached [`Component`]s to
+//! [`StyledLine`]s and plans how many rows each region may occupy
+//! (`plan_chrome`).
+//!
+//! # Layout contract
+//!
+//! Regions are laid out top to bottom in this order:
+//!
+//! ```text
+//! prepended headers (insertion order)
+//! header (single replacement slot)
+//! message view
+//! Above widgets (in insertion order)
+//! editor region (custom non-overlay component → editor component → prompt)
+//! Below widgets (in insertion order)
+//! status bar
+//! footer (single replacement slot)
+//! appended footers (insertion order)
+//! ```
+//!
+//! and the `custom` overlay (`CustomOptions::overlay`) is painted on top of
+//! all of it. The same order is restated in `app.rs`, which owns the paint
+//! calls.
+//!
+//! ## Extension hooks
+//!
+//! Extensions have four distinct footer / header surfaces:
+//!
+//! | Hook                  | Behaviour |
+//! |-----------------------|-----------|
+//! | `set_header`          | Replaces the built-in header entirely (extension is the only thing the user sees). |
+//! | `prepend_header`      | Adds a row *above* the built-in header, leaving the built-in intact. |
+//! | `set_footer`          | Replaces the built-in footer entirely. |
+//! | `append_footer`       | Adds a row *below* the built-in footer (or the extension footer), in insertion order. |
+//!
+//! The `prepend_header` / `append_footer` pair mirrors upstream's
+//! `ctx.ui.prependHeader` / `ctx.ui.appendFooter` (`packages/coding-agent/src/modes/interactive/extensions/ui.ts:30-94`),
+//! which extensions use to surface a status indicator, a counter, or a
+//! key reminder **without** losing the built-in UI. Each append/prepend
+//! is keyed so re-registering under the same key replaces the previous
+//! component and disposes it.
 //!
 //! # Layout contract
 //!
@@ -101,6 +140,13 @@ struct WidgetEntry {
     component: Box<dyn Component>,
 }
 
+/// A keyed extension region (prepended header / appended footer), kept in
+/// insertion order so multiple extensions can stack without colliding.
+struct KeyedRegion {
+    key: String,
+    component: Box<dyn Component>,
+}
+
 /// The single open `custom` session.
 struct CustomOverlay {
     component: Option<Box<dyn Component>>,
@@ -122,6 +168,12 @@ pub struct ExtensionUi {
     footer: Option<Box<dyn Component>>,
     editor_component: Option<Box<dyn Component>>,
     widgets: Vec<WidgetEntry>,
+    /// Keyed regions rendered *above* the built-in header, in insertion
+    /// order. Mirrors upstream's `ctx.ui.prependHeader`.
+    prepended_headers: Vec<KeyedRegion>,
+    /// Keyed regions rendered *below* the built-in footer, in insertion
+    /// order. Mirrors upstream's `ctx.ui.appendFooter`.
+    appended_footers: Vec<KeyedRegion>,
     custom: Option<CustomOverlay>,
     next_custom_id: u64,
 }
@@ -272,12 +324,90 @@ impl ExtensionUi {
     /// Whether a `custom` session is open.
     pub fn custom_open(&self) -> bool {
         self.custom.is_some()
-    }
-
-    /// Whether the open `custom` component is currently visible (it may be
+    }    /// Whether the open `custom` component is currently visible (it may be
     /// temporarily hidden through [`CustomHandle::set_visible`]).
     pub fn custom_visible(&self) -> bool {
         self.custom.as_ref().is_some_and(CustomOverlay::is_visible)
+    }
+
+    /// Append a keyed component *below* the built-in footer, in insertion
+    /// order. Passing `None` clears the component registered under `key`,
+    /// disposing it. Re-registering an existing `key` replaces the previous
+    /// component (disposing it) and moves it to the end of the sequence —
+    /// the same rule upstream applies to widget keys.
+    pub(crate) fn append_footer(
+        &mut self,
+        key: String,
+        component: Option<Box<dyn Component>>,
+    ) {
+        let mut regions = std::mem::take(&mut self.appended_footers);
+        regions = take_keyed(regions, &key);
+        if let Some(component) = component {
+            regions.push(KeyedRegion { key, component });
+        }
+        self.appended_footers = regions;
+    }
+
+    /// Drop the appended footer under `key`, disposing it. Returns whether
+    /// a region was removed.
+    pub(crate) fn remove_appended_footer(&mut self, key: &str) -> bool {
+        let mut regions = std::mem::take(&mut self.appended_footers);
+        let removed;
+        (regions, removed) = take_keyed_returning(regions, key);
+        self.appended_footers = regions;
+        removed
+    }
+
+    /// Drop every appended footer, disposing each.
+    pub(crate) fn clear_appended_footers(&mut self) {
+        for mut region in self.appended_footers.drain(..) {
+            region.component.dispose();
+        }
+    }
+
+    /// The registered appended-footer keys, in insertion order.
+    pub fn appended_footer_keys(&self) -> Vec<String> {
+        self.appended_footers.iter().map(|r| r.key.clone()).collect()
+    }
+
+    /// Prepend a keyed component *above* the built-in header, in insertion
+    /// order. Same semantics as [`append_footer`] for the top of the frame.
+    pub(crate) fn prepend_header(
+        &mut self,
+        key: String,
+        component: Option<Box<dyn Component>>,
+    ) {
+        let mut regions = std::mem::take(&mut self.prepended_headers);
+        regions = take_keyed(regions, &key);
+        if let Some(component) = component {
+            regions.push(KeyedRegion { key, component });
+        }
+        self.prepended_headers = regions;
+    }
+
+    /// Drop the prepended header under `key`, disposing it. Returns whether
+    /// a region was removed.
+    pub(crate) fn remove_prepended_header(&mut self, key: &str) -> bool {
+        let mut regions = std::mem::take(&mut self.prepended_headers);
+        let removed;
+        (regions, removed) = take_keyed_returning(regions, key);
+        self.prepended_headers = regions;
+        removed
+    }
+
+    /// Drop every prepended header, disposing each.
+    pub(crate) fn clear_prepended_headers(&mut self) {
+        for mut region in self.prepended_headers.drain(..) {
+            region.component.dispose();
+        }
+    }
+
+    /// The registered prepended-header keys, in insertion order.
+    pub fn prepended_header_keys(&self) -> Vec<String> {
+        self.prepended_headers
+            .iter()
+            .map(|r| r.key.clone())
+            .collect()
     }
 
     /// Route a key to the `custom` overlay, if one is open, visible and in
@@ -315,13 +445,16 @@ impl ExtensionUi {
     /// Render every attached component into its region's lines.
     pub(crate) fn frame(&self, width: u16) -> ExtensionFrame {
         ExtensionFrame {
+            prepended_headers: self.keyed_lines(&self.prepended_headers, width),
             header: render_optional(self.header.as_deref(), width),
             above: self.placement_lines(WidgetPlacement::Above, width),
             below: self.placement_lines(WidgetPlacement::Below, width),
             footer: render_optional(self.footer.as_deref(), width),
+            appended_footers: self.keyed_lines(&self.appended_footers, width),
             editor: self.editor_lines(width),
             overlay: self.overlay_layer(width),
             status: 1,
+            tool_strip: 0,
             pending: 0,
         }
     }
@@ -334,6 +467,14 @@ impl ExtensionUi {
             .filter(|widget| widget.placement == placement)
         {
             lines.extend(widget.component.render(width));
+        }
+        lines
+    }
+
+    fn keyed_lines(&self, regions: &[KeyedRegion], width: u16) -> Vec<StyledLine> {
+        let mut lines = Vec::new();
+        for region in regions {
+            lines.extend(region.component.render(width));
         }
         lines
     }
@@ -372,6 +513,8 @@ impl Drop for ExtensionUi {
         dispose_option(&mut self.footer);
         dispose_option(&mut self.editor_component);
         self.clear_widgets();
+        self.clear_prepended_headers();
+        self.clear_appended_footers();
         if let Some(mut custom) = self.custom.take() {
             if let Some(mut component) = custom.component.take() {
                 component.dispose();
@@ -393,8 +536,38 @@ fn render_optional(component: Option<&dyn Component>, width: u16) -> Vec<StyledL
         .unwrap_or_default()
 }
 
+/// Remove the region under `key` from `regions`, disposing its component,
+/// and return the remaining regions. The free-function form avoids the
+/// `&mut self` + `&mut self.field` borrow-conflict that the equivalent
+/// method runs into.
+fn take_keyed(mut regions: Vec<KeyedRegion>, key: &str) -> Vec<KeyedRegion> {
+    let Some(index) = regions.iter().position(|r| r.key == key) else {
+        return regions;
+    };
+    let mut removed = regions.remove(index);
+    removed.component.dispose();
+    regions
+}
+
+/// Same as [`take_keyed`] but also reports whether a region was removed —
+/// used by the `remove_*` accessors that return `bool`.
+fn take_keyed_returning(
+    regions: Vec<KeyedRegion>,
+    key: &str,
+) -> (Vec<KeyedRegion>, bool) {
+    let Some(index) = regions.iter().position(|r| r.key == key) else {
+        return (regions, false);
+    };
+    let mut regions = regions;
+    let mut removed = regions.remove(index);
+    removed.component.dispose();
+    (regions, true)
+}
+
 /// The rendered lines of every extension region for one frame.
 pub(crate) struct ExtensionFrame {
+    /// Prepended-header lines, above the built-in header (insertion order).
+    pub(crate) prepended_headers: Vec<StyledLine>,
     /// Header lines, above the message view.
     pub(crate) header: Vec<StyledLine>,
     /// `Above` widget lines, below the message view.
@@ -403,6 +576,8 @@ pub(crate) struct ExtensionFrame {
     pub(crate) below: Vec<StyledLine>,
     /// Footer lines, below the status bar.
     pub(crate) footer: Vec<StyledLine>,
+    /// Appended-footer lines, below the built-in footer (insertion order).
+    pub(crate) appended_footers: Vec<StyledLine>,
     /// Editor-region lines that replace the prompt, if any.
     pub(crate) editor: Option<Vec<StyledLine>>,
     /// The topmost `custom` overlay, if one is visible.
@@ -413,6 +588,11 @@ pub(crate) struct ExtensionFrame {
     /// exactly this many rows so a host that never supplies a working
     /// directory keeps the single-row geometry.
     pub(crate) status: u16,
+    /// Rows the docked tool strip asked for (`0` while idle, `1` while a
+    /// tool is running or the model is thinking). The App sets this from
+    /// [`crate::App::tool_strip_state`] (`N2` in
+    /// `docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`).
+    pub(crate) tool_strip: u16,
     /// Rows the queued-messages block asked for (`0` when no prompt is
     /// queued). The App sets this from
     /// [`crate::components::message::MessageView::pending_block_rows`]; it is data driven
@@ -431,6 +611,8 @@ pub(crate) struct OverlayLayer {
 
 /// Rows each region of the frame may occupy.
 pub(crate) struct ChromeLayout {
+    /// Prepended-header rows (above the built-in header).
+    pub(crate) prepended_headers: u16,
     /// Header rows.
     pub(crate) header: u16,
     /// `Above` widget rows.
@@ -441,10 +623,17 @@ pub(crate) struct ChromeLayout {
     pub(crate) below: u16,
     /// Message-view rows (at least one whenever the terminal has two rows).
     pub(crate) message: u16,
+    /// Rows reserved for the docked tool strip — `1` while a tool is
+    /// running or the model is thinking, `0` otherwise (nanopi's
+    /// `tui.rs:5305-5322` row that lights up the whole bottom bar;
+    /// `N2` in `docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`).
+    pub(crate) tool_strip: u16,
     /// Status-bar rows.
     pub(crate) status: u16,
     /// Footer rows.
     pub(crate) footer: u16,
+    /// Appended-footer rows (below the built-in footer).
+    pub(crate) appended_footers: u16,
     /// Queued-messages rows, directly above the editor region (upstream keeps
     /// its `pendingMessagesContainer` in the prompt area,
     /// `interactive-mode.ts:878-892`).
@@ -503,19 +692,41 @@ pub(crate) fn plan_chrome(
     // turn is running (it is where their typed-ahead prompt shows up), and the
     // foldable header is what gives way when both cannot fit.
     let pending = take(frame.pending);
+    // The docked tool strip (N2) sits between the editor block and the
+    // status bar — it is `0` while idle so an idle session keeps the
+    // pre-N2 geometry, and `1` while a turn is in flight so the busy
+    // indicator gets a dedicated row.
+    let tool_strip = take(frame.tool_strip);
+    // Prepended headers sit above the built-in header. They are the most
+    // expendable region (extension-decorated chrome the user can hide by
+    // uninstalling the extension), so they truncate first when the frame
+    // is squeezed.
+    let prepended_headers = take(lines_height(&frame.prepended_headers));
     let header = take(lines_height(&frame.header));
     let above = take(lines_height(&frame.above));
     let below = take(lines_height(&frame.below));
     let footer = take(lines_height(&frame.footer));
-    let used = header + above + editor + below + footer + pending;
+    let appended_footers = take(lines_height(&frame.appended_footers));
+    let used = prepended_headers
+        + header
+        + above
+        + editor
+        + below
+        + tool_strip
+        + footer
+        + appended_footers
+        + pending;
     ChromeLayout {
+        prepended_headers,
         header,
         above,
         editor,
         below,
         message: total.saturating_sub(status + used),
         status,
+        tool_strip,
         footer,
+        appended_footers,
         pending,
     }
 }
@@ -781,13 +992,16 @@ mod tests {
     ) -> ExtensionFrame {
         let lines = |count: usize| vec![TextComponent::new(["x"]).render(1)[0].clone(); count];
         ExtensionFrame {
+            prepended_headers: Vec::new(),
             header: lines(header),
             above: lines(above),
             below: lines(below),
             footer: lines(footer),
+            appended_footers: Vec::new(),
             editor: editor.map(lines),
             overlay: None,
             status: 1,
+            tool_strip: 0,
             pending: 0,
         }
     }
@@ -961,4 +1175,153 @@ mod tests {
         assert_eq!(editor_disposed.load(Ordering::Relaxed), 1);
         assert_eq!(widget_disposed.load(Ordering::Relaxed), 1);
     }
+
+    /// E5 — `append_footer` registers a keyed component below the built-in
+    /// footer. Insertion order is preserved across multiple registrations.
+    #[test]
+    fn appended_footers_render_in_insertion_order_below_the_built_in_footer() {
+        let mut ui = ExtensionUi::new();
+        ui.set_footer(Some(Box::new(TextComponent::new(["built-in"]))));
+        ui.append_footer(
+            "ext-a".into(),
+            Some(Box::new(TextComponent::new(["a"]))),
+        );
+        ui.append_footer(
+            "ext-b".into(),
+            Some(Box::new(TextComponent::new(["b"]))),
+        );
+        let frame = ui.frame(20);
+        assert_eq!(line_texts(&frame.footer), vec!["built-in"]);
+        assert_eq!(line_texts(&frame.appended_footers), vec!["a", "b"]);
+        assert_eq!(ui.appended_footer_keys(), vec!["ext-a", "ext-b"]);
+    }
+
+    /// E5 — `prepend_header` registers a keyed component above the built-in
+    /// header. Same insertion-order + key-replace rules as `append_footer`.
+    #[test]
+    fn prepended_headers_render_in_insertion_order_above_the_built_in_header() {
+        let mut ui = ExtensionUi::new();
+        ui.set_header(Some(Box::new(TextComponent::new(["built-in"]))));
+        ui.prepend_header(
+            "ext-x".into(),
+            Some(Box::new(TextComponent::new(["x"]))),
+        );
+        ui.prepend_header(
+            "ext-y".into(),
+            Some(Box::new(TextComponent::new(["y"]))),
+        );
+        let frame = ui.frame(20);
+        assert_eq!(line_texts(&frame.prepended_headers), vec!["x", "y"]);
+        assert_eq!(line_texts(&frame.header), vec!["built-in"]);
+        assert_eq!(ui.prepended_header_keys(), vec!["ext-x", "ext-y"]);
+    }
+
+    /// E5 — re-registering under an existing key disposes the previous
+    /// component and moves the new one to the end of the sequence.
+    #[test]
+    fn append_footer_replace_disposes_the_previous_component() {
+        let mut ui = ExtensionUi::new();
+        let (first, disposed, _) = Probe::new("first", false);
+        ui.append_footer("k".into(), Some(Box::new(first)));
+        assert_eq!(disposed.load(Ordering::Relaxed), 0);
+
+        // Re-setting under the same key replaces the component.
+        ui.append_footer(
+            "k".into(),
+            Some(Box::new(TextComponent::new(["second"]))),
+        );
+        assert_eq!(disposed.load(Ordering::Relaxed), 1);
+        let frame = ui.frame(20);
+        assert_eq!(line_texts(&frame.appended_footers), vec!["second"]);
+
+        // Passing `None` clears the component and disposes it.
+        let (last, last_disposed, _) = Probe::new("last", false);
+        ui.append_footer("k".into(), Some(Box::new(last)));
+        ui.append_footer("k".into(), None);
+        assert_eq!(last_disposed.load(Ordering::Relaxed), 1);
+        assert!(
+            ui.frame(20).appended_footers.is_empty(),
+            "appending None clears the keyed region"
+        );
+        // The previous "second" component was already disposed when
+        // "last" replaced it; passing None disposes "last" and leaves the
+        // slot empty.
+    }
+
+    /// E5 — `remove_*` / `clear_*` dispose every registered component and
+    /// leave the frame empty.
+    #[test]
+    fn remove_and_clear_dispose_keyed_components() {
+        let mut ui = ExtensionUi::new();
+        let (p1, p1d, _) = Probe::new("p1", false);
+        let (p2, p2d, _) = Probe::new("p2", false);
+        ui.prepend_header("p1".into(), Some(Box::new(p1)));
+        ui.append_footer("a1".into(), Some(Box::new(p2)));
+        assert!(ui.remove_prepended_header("p1"));
+        assert!(ui.remove_appended_footer("a1"));
+        assert_eq!(p1d.load(Ordering::Relaxed), 1);
+        assert_eq!(p2d.load(Ordering::Relaxed), 1);
+        assert!(!ui.remove_prepended_header("p1"));
+        assert!(!ui.remove_appended_footer("a1"));
+
+        // clear_* disposes every remaining component.
+        let (q1, q1d, _) = Probe::new("q1", false);
+        let (q2, q2d, _) = Probe::new("q2", false);
+        ui.prepend_header("q1".into(), Some(Box::new(q1)));
+        ui.append_footer("q2".into(), Some(Box::new(q2)));
+        ui.clear_prepended_headers();
+        ui.clear_appended_footers();
+        assert_eq!(q1d.load(Ordering::Relaxed), 1);
+        assert_eq!(q2d.load(Ordering::Relaxed), 1);
+    }
+
+    /// E5 — Drop disposes every keyed region so an uninstalling extension
+    /// does not leak its component.
+    #[test]
+    fn drop_disposes_prepended_and_appended_regions() {
+        let (ph, ph_disposed) = counter("ph");
+        let (af, af_disposed) = counter("af");
+        {
+            let mut ui = ExtensionUi::new();
+            ui.prepend_header("p".into(), Some(Box::new(ph)));
+            ui.append_footer("a".into(), Some(Box::new(af)));
+        }
+        assert_eq!(ph_disposed.load(Ordering::Relaxed), 1);
+        assert_eq!(af_disposed.load(Ordering::Relaxed), 1);
+    }
+
+    /// E5 — `plan_chrome` budgets the prepended / appended rows; on a
+    /// squeezed frame the prepended regions truncate first, then the
+    /// appended regions, then the foldable header.
+    #[test]
+    fn plan_chrome_budgets_prepended_and_appended_rows() {
+        // 10 rows: 1 status + 1 composer + 3 pending leave 5 for chrome.
+        // Prepended (3) + header (2) + footer (1) + appended (4) = 10 rows.
+        let frame = ExtensionFrame {
+            prepended_headers: lines(3),
+            appended_footers: lines(4),
+            ..frame_with(2, 0, None, 0, 1)
+        };
+        let layout = plan_chrome(10, &frame, 1);
+        assert_eq!(layout.status, 1);
+        assert_eq!(layout.editor, 1);
+        assert_eq!(
+            (
+                layout.prepended_headers,
+                layout.header,
+                layout.footer,
+                layout.appended_footers,
+            ),
+            (3, 2, 1, 1),
+            "appended footers truncate first when the frame overflows"
+        );
+    }
+}
+
+/// Build `n` single-line `StyledLine`s for plan_chrome tests.
+fn lines(count: usize) -> Vec<StyledLine> {
+    use crate::utils::styled::StyledSpan;
+    (0..count)
+        .map(|_| vec![StyledSpan::new("x".to_string(), Default::default())])
+        .collect()
 }

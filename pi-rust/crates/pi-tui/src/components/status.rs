@@ -122,6 +122,16 @@ pub struct StatusData {
     /// Auto-compaction switch — upstream's `(auto)` suffix on the context
     /// gauge (`footer.ts:150`). `false` keeps the pre-LUM-1467 frame.
     pub auto_compact: bool,
+    /// Tokens remaining before auto-compaction would fire, when known.
+    ///
+    /// The host sets this from its configured compact threshold
+    /// (`interactive-mode.ts:4133-4139`); the bar turns it into the
+    /// upstream `?%/12k ⚠` indicator next to the context gauge when the
+    /// remaining headroom drops below the model's prompt budget
+    /// (`C4.13` in `docs/PHASE_9_PLUS_UI_GAP_ANALYSIS.md`). `None` keeps
+    /// the segment off entirely — pre-existing frames stay byte
+    /// identical.
+    pub auto_compact_remaining: Option<u32>,
     /// How many providers the host can route to. Upstream prepends
     /// `(provider) ` to the model only when this is `> 1`
     /// (`footer.ts:191-197`). `0`/`1` hide it.
@@ -199,6 +209,7 @@ impl StatusData {
             cost_micros: None,
             latest_cache_hit_rate: None,
             auto_compact: false,
+            auto_compact_remaining: None,
             provider_count: 0,
             provider_label: None,
             subscription: false,
@@ -363,6 +374,20 @@ impl StatusData {
     pub fn with_auto_compact(mut self, enabled: bool) -> Self {
         self.auto_compact = enabled;
         self
+    }
+
+    /// Tell the footer how many tokens remain before auto-compaction
+    /// would fire, so the upstream `?%/12k ⚠` segment can render.
+    /// `None` hides the segment; the gauge's `(auto)` suffix is
+    /// unchanged either way.
+    pub fn with_auto_compact_remaining(mut self, remaining: Option<u32>) -> Self {
+        self.auto_compact_remaining = remaining;
+        self
+    }
+
+    /// Mutable setter for [`StatusData::with_auto_compact_remaining`].
+    pub fn set_auto_compact_remaining(&mut self, remaining: Option<u32>) {
+        self.auto_compact_remaining = remaining;
     }
 
     /// Tell the bar how many providers are routable and which one is active,
@@ -668,6 +693,11 @@ enum Zone {
     /// `• xp` — the experimental-features indicator (dim bullet + warning
     /// `xp`); drawn only while [`StatusData::experimental`] is `true`.
     Xp,
+    /// `?%/12k ⚠` — the auto-compact headroom indicator. Upstream reads the
+    /// host's remaining threshold and tints the segment warning when the
+    /// configured threshold would fire inside the model's prompt budget
+    /// (`C4.13` in `docs/PHASE_9_PLUS_UI_GAP_ANALYSIS.md`).
+    AutoCompact,
 }
 
 /// The order the narrow layout gives parts up in — least valuable first.
@@ -697,9 +727,10 @@ enum Zone {
 /// * `Xp` is treated like a hint: it is a transient affordance the reader
 ///   can re-enable through `/xp`, so it is the first thing to drop alongside
 ///   the regular hint.
-const NARROW_SACRIFICE_ORDER: [Zone; 9] = [
+const NARROW_SACRIFICE_ORDER: [Zone; 10] = [
     Zone::Hint,
     Zone::Xp,
+    Zone::AutoCompact,
     Zone::CacheHit,
     Zone::Cache,
     Zone::Session,
@@ -716,10 +747,11 @@ const NARROW_SACRIFICE_ORDER: [Zone; 9] = [
 /// [`StatusData::hint_pinned`] hint is the opposite: it is the query the user
 /// is typing into, so it outlives every counter (only the model name, which
 /// says what an answer will come from, is kept past it).
-fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 9] {
+fn narrow_sacrifice_order(data: &StatusData) -> [Zone; 10] {
     if data.hint_pinned {
         [
             Zone::Xp,
+            Zone::AutoCompact,
             Zone::CacheHit,
             Zone::Cache,
             Zone::Session,
@@ -759,6 +791,10 @@ fn zone_lead(zone: Zone) -> &'static str {
         // `xp` to the previous part with a single space and the bullet is
         // part of the same fragment, so the lead is empty.
         Zone::Xp => "",
+        // The auto-compact headroom segment is a single space — the gauge
+        // already owns its trailing space and the segment reads as a
+        // suffix on the gauge's parent cluster.
+        Zone::AutoCompact => "",
     }
 }
 
@@ -775,6 +811,7 @@ fn left_cluster(data: &StatusData) -> StyledLine {
         Zone::CacheHit,
         Zone::Cost,
         Zone::Gauge,
+        Zone::AutoCompact,
         Zone::Hint,
         Zone::Xp,
     ] {
@@ -829,6 +866,7 @@ fn narrow_zones(data: &StatusData) -> Vec<Zone> {
         Zone::CacheHit,
         Zone::Cost,
         Zone::Gauge,
+        Zone::AutoCompact,
         Zone::Hint,
         Zone::Xp,
     ] {
@@ -970,6 +1008,19 @@ fn zone_body(data: &StatusData, zone: Zone) -> StyledLine {
                 StyledLine::new()
             }
         }
+        // `?%/12k ⚠` — the auto-compact headroom indicator. Upstream reads
+        // the host's remaining threshold and tints the segment warning when
+        // the configured threshold would fire inside the model's prompt
+        // budget (`C4.13` in `docs/PHASE_9_PLUS_UI_GAP_ANALYSIS.md`). The
+        // figure is the remaining tokens formatted with the crate's
+        // `format_tokens` helper so it lines up with the cumulative arrows.
+        Zone::AutoCompact => match data.auto_compact_remaining {
+            Some(remaining) => vec![StyledSpan::new(
+                format!(" ?%/{}{} ⚠", format_tokens(remaining), "%"),
+                SpanStyle::fg(ThemeColor::Warning).bold(),
+            )],
+            None => StyledLine::new(),
+        },
     }
 }
 

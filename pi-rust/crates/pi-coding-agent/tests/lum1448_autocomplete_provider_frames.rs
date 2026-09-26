@@ -206,7 +206,7 @@ fn frame_dump_hash_candidates_from_the_real_extension() {
         assert_eq!(app.prompt().editor().autocomplete_items().len(), 1);
 
         let buf = frame(&mut app);
-        let candidate = row(&buf, row_with(&buf, "❯ #2983"));
+        let candidate = row(&buf, row_with(&buf, "→ #2983"));
         assert!(
             candidate.contains("[open] Extension API for autocomplete"),
             "{candidate:?}"

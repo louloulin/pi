@@ -34,6 +34,8 @@
 
 pub mod credential_store;
 pub mod helpers;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod oauth;
 pub mod provider_registry;
 pub mod resolve;
 pub mod types;
@@ -44,6 +46,8 @@ use crate::types::AbortSignal;
 
 pub use credential_store::InMemoryCredentialStore;
 pub use helpers::{env_api_key_auth, lazy_oauth, LazyOAuthConfig};
+#[cfg(not(target_arch = "wasm32"))]
+pub use oauth::{github_copilot_oauth, kimi_coding_oauth, openai_codex_oauth};
 pub use provider_registry::{provider_auth_for, resolve_api_key_for_provider};
 pub use resolve::{
     resolve_provider_auth, AuthResolutionOverrides, ModelsError, ModelsErrorCode,

@@ -65,6 +65,8 @@ fn assistant_with_link() -> MessageView {
         tool_expanded: None,
         tool_status: Default::default(),
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
     view
 }
@@ -156,6 +158,8 @@ fn selection_never_includes_osc8_sequences() {
         tool_expanded: None,
         tool_status: Default::default(),
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
     let area = Rect::new(0, 0, WIDTH, HEIGHT);
     let mut buf = Buffer::empty(area);
@@ -195,6 +199,8 @@ fn snapshot_export_stays_plain_text_when_hyperlinks_are_on() {
         tool_expanded: None,
         tool_status: Default::default(),
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
     let snapshot = app.render_snapshot(WIDTH, HEIGHT);
     assert!(!snapshot.lines.iter().any(|line| line.contains('\u{1b}')));

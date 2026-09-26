@@ -37,6 +37,14 @@ anyhow.workspace = true
 # sharing it here does not add a new transitive dependency.
 regex.workspace = true
 
+# OAuth login flows (P33): PKCE needs SHA-256 + base64url; `reqwest`
+# already provides form-urlencoded bodies and JSON parsing.
+sha2.workspace = true
+base64.workspace = true
+# `getrandom` powers PKCE verifier bytes — `getrandom` is already in the
+# dep graph via `pi-extensions`, so adding it here is free.
+getrandom.workspace = true
+
 # Tokio's feature set is target-conditional: the workspace dep pulls `full`
 # (which transitively depends on `mio`), and `mio` does not compile on
 # `wasm32-unknown-unknown`. We therefore declare tokio *only* in the

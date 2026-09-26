@@ -298,12 +298,33 @@ fn typing_slash_paints_the_command_dropdown_above_the_prompt() {
         .map(|y| row_text(&buf, y))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(tail.contains("❯ help"), "the dropdown is painted:\n{tail}");
-    // At this canonical 40-column size the `SelectList` layout drops the
-    // description column (upstream: descriptions only past 40 columns,
-    // LUM-1305 took the dropdown onto that same layout — see
-    // `crates/pi-tui/tests/autocomplete.rs` for the wide-row cases).
-    assert!(!tail.contains("show this help text"), "{tail}");
+    assert!(tail.contains("→ help"), "the dropdown is painted:\n{tail}");
+    // N7 right-aligns the description column. With width=40 the budget for
+    // the description is `40 - 2 - 2 - 1 = 35` columns, so the full
+    // "show this help text" (19 cols) fits and lands flush at the right
+    // edge — columns 21..=39 within the dropdown row. The previous
+    // fixed-32-column layout dropped descriptions at 40 cols; the
+    // right-aligned version shows them whenever they fit, so the
+    // assertion now checks the *position* of the right-aligned
+    // description instead of its absence.
+    let row_with_help: String = (0..HEIGHT)
+        .map(|y| row_text(&buf, y))
+        .find(|row| row.contains("→ help"))
+        .expect("a row paints the `help` candidate");
+    // The row starts with a `→` arrow (3 UTF-8 bytes / 1 cell), so
+    // `find` returns a byte offset rather than the cell index. Walk
+    // the row by chars until the description string starts.
+    let needle = "show this help text";
+    let char_pos = row_with_help
+        .as_str()
+        .find(needle)
+        .map(|byte_pos| row_with_help[..byte_pos].chars().count())
+        .expect("description is shown at width 40");
+    assert_eq!(
+        char_pos,
+        (WIDTH as usize) - needle.chars().count(),
+        "description is right-aligned to the row's right edge"
+    );
     assert!(
         tail.contains("  hotkeys"),
         "every candidate is listed:\n{tail}"
@@ -334,7 +355,7 @@ fn a_closed_dropdown_paints_nothing() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        !tail.contains("❯"),
+        !tail.contains("→"),
         "no candidates before a trigger:\n{tail}"
     );
 }

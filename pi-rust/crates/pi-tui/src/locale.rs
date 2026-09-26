@@ -21,6 +21,16 @@ pub enum Locale {
     En,
     /// Simplified Chinese.
     Zh,
+    /// Japanese.
+    Ja,
+    /// Korean.
+    Ko,
+    /// Spanish.
+    Es,
+    /// French.
+    Fr,
+    /// German.
+    De,
 }
 
 impl Locale {
@@ -37,6 +47,11 @@ impl Locale {
         match base.as_str() {
             "en" => Some(Locale::En),
             "zh" => Some(Locale::Zh),
+            "ja" | "jp" => Some(Locale::Ja),
+            "ko" | "kr" => Some(Locale::Ko),
+            "es" => Some(Locale::Es),
+            "fr" => Some(Locale::Fr),
+            "de" => Some(Locale::De),
             _ => None,
         }
     }
@@ -46,14 +61,55 @@ impl Locale {
         match self {
             Locale::En => "en",
             Locale::Zh => "zh",
+            Locale::Ja => "ja",
+            Locale::Ko => "ko",
+            Locale::Es => "es",
+            Locale::Fr => "fr",
+            Locale::De => "de",
         }
     }
 
     /// Pick the copy for this locale (Martty's `tr(en, zh)`).
+    ///
+    /// Locales that haven't been translated yet fall back to the English
+    /// column so adding a locale never produces a blank header — the row
+    /// stays informative in the reader's own language or English, never
+    /// empty.
     pub fn tr<'a>(self, en: &'a str, zh: &'a str) -> &'a str {
         match self {
             Locale::En => en,
             Locale::Zh => zh,
+            // Fallback chain for the new locales. Rows that have a real
+            // translation can call [`Locale::tr7`] with all seven columns
+            // instead.
+            Locale::Ja | Locale::Ko | Locale::Es | Locale::Fr | Locale::De => en,
+        }
+    }
+
+    /// Pick the copy from a full seven-column row.
+    ///
+    /// `en` is the universal fallback: a locale that hasn't been
+    /// translated yet reads the English copy. The 7-arg signature matches
+    /// the 7 supported locales so a translation review can scan each row
+    /// left-to-right in language order.
+    pub fn tr7<'a>(
+        self,
+        en: &'a str,
+        zh: &'a str,
+        ja: &'a str,
+        ko: &'a str,
+        es: &'a str,
+        fr: &'a str,
+        de: &'a str,
+    ) -> &'a str {
+        match self {
+            Locale::En => en,
+            Locale::Zh => zh,
+            Locale::Ja => ja,
+            Locale::Ko => ko,
+            Locale::Es => es,
+            Locale::Fr => fr,
+            Locale::De => de,
         }
     }
 }
@@ -240,6 +296,34 @@ pub const HEADER_ONBOARDING_EN: &str =
 /// Chinese rendering of [`HEADER_ONBOARDING_EN`].
 pub const HEADER_ONBOARDING_ZH: &str =
     "Pi 可以讲解自身功能并检索文档。直接问它「怎么用」或「怎么扩展」。";
+/// Japanese rendering of [`HEADER_ONBOARDING_EN`].
+pub const HEADER_ONBOARDING_JA: &str =
+    "Pi は自身の機能を説明し、ドキュメントを参照できます。利用方法または拡張方法を尋ねてください。";
+/// Korean rendering of [`HEADER_ONBOARDING_EN`].
+pub const HEADER_ONBOARDING_KO: &str =
+    "Pi는 자체 기능을 설명하고 문서를 검색할 수 있습니다. 사용법이나 확장 방법을 물어보세요.";
+/// Spanish rendering of [`HEADER_ONBOARDING_EN`].
+pub const HEADER_ONBOARDING_ES: &str =
+    "Pi puede explicar sus propias funciones y consultar su documentación. Pregúntale cómo usarlo o extenderlo.";
+/// French rendering of [`HEADER_ONBOARDING_EN`].
+pub const HEADER_ONBOARDING_FR: &str =
+    "Pi peut expliquer ses propres fonctionnalités et consulter sa documentation. Demandez-lui comment l'utiliser ou l'étendre.";
+/// German rendering of [`HEADER_ONBOARDING_EN`].
+pub const HEADER_ONBOARDING_DE: &str =
+    "Pi kann seine eigenen Funktionen erklären und seine Dokumentation nachschlagen. Frag es, wie du es nutzen oder erweitern kannst.";
+
+/// Pick the onboarding line for `locale`.
+pub fn header_onboarding_line(locale: Locale) -> &'static str {
+    locale.tr7(
+        HEADER_ONBOARDING_EN,
+        HEADER_ONBOARDING_ZH,
+        HEADER_ONBOARDING_JA,
+        HEADER_ONBOARDING_KO,
+        HEADER_ONBOARDING_ES,
+        HEADER_ONBOARDING_FR,
+        HEADER_ONBOARDING_DE,
+    )
+}
 
 /// Upstream's `compactOnboarding` line (`interactive-mode.ts:948`).
 ///
@@ -253,6 +337,21 @@ pub const HEADER_COMPACT_ONBOARDING_EN_TEMPLATE: &str =
     "Press {keys} to show full startup help and loaded resources.";
 /// Chinese rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
 pub const HEADER_COMPACT_ONBOARDING_ZH_TEMPLATE: &str = "按 {keys} 显示完整启动帮助与已加载资源";
+/// Japanese rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
+pub const HEADER_COMPACT_ONBOARDING_JA_TEMPLATE: &str =
+    "{keys} を押すと完全な起動ヘルプと読み込まれたリソースを表示します";
+/// Korean rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
+pub const HEADER_COMPACT_ONBOARDING_KO_TEMPLATE: &str =
+    "{keys} 를 눌러 전체 시작 도움말과 로드된 리소스를 표시하세요";
+/// Spanish rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
+pub const HEADER_COMPACT_ONBOARDING_ES_TEMPLATE: &str =
+    "Pulsa {keys} para mostrar la ayuda de inicio completa y los recursos cargados";
+/// French rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
+pub const HEADER_COMPACT_ONBOARDING_FR_TEMPLATE: &str =
+    "Appuyez sur {keys} pour afficher l'aide complète au démarrage et les ressources chargées";
+/// German rendering of [`HEADER_COMPACT_ONBOARDING_EN_TEMPLATE`].
+pub const HEADER_COMPACT_ONBOARDING_DE_TEMPLATE: &str =
+    "Drücke {keys}, um die vollständige Starthilfe und geladene Ressourcen anzuzeigen";
 
 /// Title of the `?` shortcut overlay (LUM-1464).
 ///
@@ -263,6 +362,29 @@ pub const HEADER_COMPACT_ONBOARDING_ZH_TEMPLATE: &str = "按 {keys} 显示完整
 pub const SHORTCUT_OVERLAY_TITLE_EN: &str = "Keyboard shortcuts";
 /// Chinese rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
 pub const SHORTCUT_OVERLAY_TITLE_ZH: &str = "键盘快捷键";
+/// Japanese rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
+pub const SHORTCUT_OVERLAY_TITLE_JA: &str = "キーボードショートカット";
+/// Korean rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
+pub const SHORTCUT_OVERLAY_TITLE_KO: &str = "키보드 단축키";
+/// Spanish rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
+pub const SHORTCUT_OVERLAY_TITLE_ES: &str = "Atajos de teclado";
+/// French rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
+pub const SHORTCUT_OVERLAY_TITLE_FR: &str = "Raccourcis clavier";
+/// German rendering of [`SHORTCUT_OVERLAY_TITLE_EN`].
+pub const SHORTCUT_OVERLAY_TITLE_DE: &str = "Tastenkürzel";
+
+/// Pick the shortcut-overlay title for `locale`.
+pub fn shortcut_overlay_title(locale: Locale) -> &'static str {
+    locale.tr7(
+        SHORTCUT_OVERLAY_TITLE_EN,
+        SHORTCUT_OVERLAY_TITLE_ZH,
+        SHORTCUT_OVERLAY_TITLE_JA,
+        SHORTCUT_OVERLAY_TITLE_KO,
+        SHORTCUT_OVERLAY_TITLE_ES,
+        SHORTCUT_OVERLAY_TITLE_FR,
+        SHORTCUT_OVERLAY_TITLE_DE,
+    )
+}
 
 /// How the `?` overlay is dismissed, printed on its title row.
 ///
@@ -272,6 +394,29 @@ pub const SHORTCUT_OVERLAY_TITLE_ZH: &str = "键盘快捷键";
 pub const SHORTCUT_OVERLAY_CLOSE_EN: &str = "? / Esc to close";
 /// Chinese rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
 pub const SHORTCUT_OVERLAY_CLOSE_ZH: &str = "? / Esc 关闭";
+/// Japanese rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
+pub const SHORTCUT_OVERLAY_CLOSE_JA: &str = "? / Esc で閉じる";
+/// Korean rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
+pub const SHORTCUT_OVERLAY_CLOSE_KO: &str = "? / Esc 로 닫기";
+/// Spanish rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
+pub const SHORTCUT_OVERLAY_CLOSE_ES: &str = "? / Esc para cerrar";
+/// French rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
+pub const SHORTCUT_OVERLAY_CLOSE_FR: &str = "? / Échap pour fermer";
+/// German rendering of [`SHORTCUT_OVERLAY_CLOSE_EN`].
+pub const SHORTCUT_OVERLAY_CLOSE_DE: &str = "? / Esc zum Schließen";
+
+/// Pick the shortcut-overlay close hint for `locale`.
+pub fn shortcut_overlay_close(locale: Locale) -> &'static str {
+    locale.tr7(
+        SHORTCUT_OVERLAY_CLOSE_EN,
+        SHORTCUT_OVERLAY_CLOSE_ZH,
+        SHORTCUT_OVERLAY_CLOSE_JA,
+        SHORTCUT_OVERLAY_CLOSE_KO,
+        SHORTCUT_OVERLAY_CLOSE_ES,
+        SHORTCUT_OVERLAY_CLOSE_FR,
+        SHORTCUT_OVERLAY_CLOSE_DE,
+    )
+}
 
 /// Startup-header row shown when the header is folded: either because the
 /// terminal is too short for the full hint list or because the user pressed
@@ -281,10 +426,15 @@ pub const SHORTCUT_OVERLAY_CLOSE_ZH: &str = "? / Esc 关闭";
 /// `keys` is the resolved `app.header` chord — the action that expands the
 /// header again — so the row stays honest when the binding is overridden.
 pub fn header_folded_line(locale: Locale, keys: &str) -> String {
-    let template = match locale {
-        Locale::En => HEADER_COMPACT_ONBOARDING_EN_TEMPLATE,
-        Locale::Zh => HEADER_COMPACT_ONBOARDING_ZH_TEMPLATE,
-    };
+    let template = locale.tr7(
+        HEADER_COMPACT_ONBOARDING_EN_TEMPLATE,
+        HEADER_COMPACT_ONBOARDING_ZH_TEMPLATE,
+        HEADER_COMPACT_ONBOARDING_JA_TEMPLATE,
+        HEADER_COMPACT_ONBOARDING_KO_TEMPLATE,
+        HEADER_COMPACT_ONBOARDING_ES_TEMPLATE,
+        HEADER_COMPACT_ONBOARDING_FR_TEMPLATE,
+        HEADER_COMPACT_ONBOARDING_DE_TEMPLATE,
+    );
     template.replace("{keys}", keys)
 }
 
@@ -296,6 +446,29 @@ pub fn header_folded_line(locale: Locale, keys: &str) -> String {
 pub const EXTENSIONS_DISABLED_EN: &str = "extensions: none (--no-extensions)";
 /// Chinese rendering of [`EXTENSIONS_DISABLED_EN`].
 pub const EXTENSIONS_DISABLED_ZH: &str = "扩展: 无（--no-extensions）";
+/// Japanese rendering of [`EXTENSIONS_DISABLED_EN`].
+pub const EXTENSIONS_DISABLED_JA: &str = "拡張: なし（--no-extensions）";
+/// Korean rendering of [`EXTENSIONS_DISABLED_EN`].
+pub const EXTENSIONS_DISABLED_KO: &str = "확장: 없음（--no-extensions）";
+/// Spanish rendering of [`EXTENSIONS_DISABLED_EN`].
+pub const EXTENSIONS_DISABLED_ES: &str = "extensiones: ninguna (--no-extensions)";
+/// French rendering of [`EXTENSIONS_DISABLED_EN`].
+pub const EXTENSIONS_DISABLED_FR: &str = "extensions : aucune (--no-extensions)";
+/// German rendering of [`EXTENSIONS_DISABLED_EN`].
+pub const EXTENSIONS_DISABLED_DE: &str = "Erweiterungen: keine (--no-extensions)";
+
+/// Pick the `--no-extensions` line for `locale`.
+pub fn extensions_disabled_line(locale: Locale) -> &'static str {
+    locale.tr7(
+        EXTENSIONS_DISABLED_EN,
+        EXTENSIONS_DISABLED_ZH,
+        EXTENSIONS_DISABLED_JA,
+        EXTENSIONS_DISABLED_KO,
+        EXTENSIONS_DISABLED_ES,
+        EXTENSIONS_DISABLED_FR,
+        EXTENSIONS_DISABLED_DE,
+    )
+}
 
 /// The startup header's extension summary: `N extension(s): a.mjs, b.mjs`.
 ///
@@ -303,10 +476,18 @@ pub const EXTENSIONS_DISABLED_ZH: &str = "扩展: 无（--no-extensions）";
 /// so the row never renders a count with nothing behind it.
 pub fn extensions_summary_line(locale: Locale, count: usize, names: &[String]) -> String {
     let list = names.join(", ");
-    match locale {
-        Locale::En => format!("{count} extension(s): {list}"),
-        Locale::Zh => format!("{count} 个扩展: {list}"),
-    }
+    let template = locale.tr7(
+        "{count} extension(s): {list}",
+        "{count} 个扩展: {list}",
+        "拡張 {count} 個: {list}",
+        "확장 {count} 개: {list}",
+        "{count} extensión(es): {list}",
+        "{count} extension(s) : {list}",
+        "{count} Erweiterung(en): {list}",
+    );
+    template
+        .replace("{count}", &count.to_string())
+        .replace("{list}", &list)
 }
 
 /// Render a key id as the reader sees it: `ctrl+o` → `Ctrl+O`, `alt+enter` →
@@ -428,8 +609,38 @@ mod tests {
         assert_eq!(Locale::parse("en-US"), Some(Locale::En));
         assert_eq!(Locale::parse("zh_CN"), Some(Locale::Zh));
         assert_eq!(Locale::parse("ZH"), Some(Locale::Zh));
-        assert_eq!(Locale::parse("fr"), None);
+        // The five new locales accept both the canonical two-letter code
+        // and the older three-letter where one exists (Japanese `jp`,
+        // Korean `kr` — common aliases in JVM locales).
+        assert_eq!(Locale::parse("fr"), Some(Locale::Fr));
+        assert_eq!(Locale::parse("de"), Some(Locale::De));
+        assert_eq!(Locale::parse("es"), Some(Locale::Es));
+        assert_eq!(Locale::parse("ja"), Some(Locale::Ja));
+        assert_eq!(Locale::parse("ja-JP"), Some(Locale::Ja));
+        assert_eq!(Locale::parse("jp"), Some(Locale::Ja));
+        assert_eq!(Locale::parse("ko"), Some(Locale::Ko));
+        assert_eq!(Locale::parse("kr"), Some(Locale::Ko));
         assert_eq!(Locale::parse(""), None);
+        // Truly unsupported languages still return None.
+        assert_eq!(Locale::parse("ru"), None);
+        assert_eq!(Locale::parse("ar"), None);
+    }
+
+    #[test]
+    fn code_returns_the_bcp47_subtag_for_every_locale() {
+        // Round-trip every variant through `code()` and confirm `parse`
+        // can read it back.
+        for locale in [
+            Locale::En,
+            Locale::Zh,
+            Locale::Ja,
+            Locale::Ko,
+            Locale::Es,
+            Locale::Fr,
+            Locale::De,
+        ] {
+            assert_eq!(Locale::parse(locale.code()), Some(locale));
+        }
     }
 
     #[test]
@@ -438,6 +649,156 @@ mod tests {
         assert_eq!(Locale::Zh.tr("en", "zh"), "zh");
         assert_eq!(Locale::default(), Locale::En);
         assert_eq!(Locale::Zh.code(), "zh");
+        // New locales fall back to English through the 2-arg `tr` (so
+        // existing callers don't have to change) — the 7-arg `tr7`
+        // returns the per-locale column instead.
+        assert_eq!(Locale::Ja.tr("en", "zh"), "en");
+        assert_eq!(Locale::Ko.tr("en", "zh"), "en");
+        assert_eq!(Locale::Es.tr("en", "zh"), "en");
+        assert_eq!(Locale::Fr.tr("en", "zh"), "en");
+        assert_eq!(Locale::De.tr("en", "zh"), "en");
+    }
+
+    #[test]
+    fn tr7_picks_every_locale_column() {
+        // Every column gets its own copy; the 7-arg signature is the
+        // explicit one a translation review reads top-to-bottom.
+        let row = Locale::En.tr7("E", "Z", "J", "K", "S", "F", "G");
+        assert_eq!(row, "E");
+        assert_eq!(Locale::Zh.tr7("E", "Z", "J", "K", "S", "F", "G"), "Z");
+        assert_eq!(Locale::Ja.tr7("E", "Z", "J", "K", "S", "F", "G"), "J");
+        assert_eq!(Locale::Ko.tr7("E", "Z", "J", "K", "S", "F", "G"), "K");
+        assert_eq!(Locale::Es.tr7("E", "Z", "J", "K", "S", "F", "G"), "S");
+        assert_eq!(Locale::Fr.tr7("E", "Z", "J", "K", "S", "F", "G"), "F");
+        assert_eq!(Locale::De.tr7("E", "Z", "J", "K", "S", "F", "G"), "G");
+    }
+
+    #[test]
+    fn header_onboarding_line_localises_for_every_locale() {
+        // Every locale must have a non-empty onboarding string. The audit
+        // pins "Pi can explain" as the English substring; we check that
+        // the other locales don't accidentally come back as the same
+        // English text (that would mean a translation got overwritten by
+        // the fallback chain).
+        assert!(header_onboarding_line(Locale::En).contains("Pi can explain"));
+        assert!(header_onboarding_line(Locale::Zh).contains("Pi 可以"));
+        assert!(header_onboarding_line(Locale::Ja).contains("Pi は"));
+        assert!(header_onboarding_line(Locale::Ko).contains("Pi는"));
+        assert!(header_onboarding_line(Locale::Es).contains("Pi puede"));
+        assert!(header_onboarding_line(Locale::Fr).contains("Pi peut"));
+        assert!(header_onboarding_line(Locale::De).contains("Pi kann"));
+    }
+
+    #[test]
+    fn header_folded_line_substitutes_keys_in_every_locale() {
+        // The chord placeholder is a single `{keys}` token in every
+        // template — a translator who adds extra braces (or strips the
+        // placeholder entirely) surfaces here.
+        for locale in [
+            Locale::En,
+            Locale::Zh,
+            Locale::Ja,
+            Locale::Ko,
+            Locale::Es,
+            Locale::Fr,
+            Locale::De,
+        ] {
+            let line = header_folded_line(locale, "Ctrl+O");
+            assert!(line.contains("Ctrl+O"), "{locale:?} missing substitution: {line:?}");
+            assert!(!line.contains("{keys}"), "{locale:?} still has placeholder: {line:?}");
+        }
+    }
+
+    #[test]
+    fn shortcut_overlay_localises_title_and_close_in_every_locale() {
+        // Title and close hint both differ across locales — passing the
+        // same string in two languages means the table is missing one
+        // row.
+        for locale in [
+            Locale::En,
+            Locale::Zh,
+            Locale::Ja,
+            Locale::Ko,
+            Locale::Es,
+            Locale::Fr,
+            Locale::De,
+        ] {
+            assert!(!shortcut_overlay_title(locale).is_empty());
+            assert!(!shortcut_overlay_close(locale).is_empty());
+        }
+        assert_ne!(
+            shortcut_overlay_title(Locale::En),
+            shortcut_overlay_title(Locale::Zh),
+        );
+        assert_ne!(
+            shortcut_overlay_title(Locale::En),
+            shortcut_overlay_title(Locale::De),
+        );
+        assert_ne!(
+            shortcut_overlay_close(Locale::En),
+            shortcut_overlay_close(Locale::Ja),
+        );
+    }
+
+    #[test]
+    fn extensions_disabled_carries_the_flag_in_every_locale() {
+        // The audit pins that `extensions: none (--no-extensions)` carries
+        // both facts. Every locale has to surface the flag somewhere in
+        // its line so the user understands what they did.
+        for locale in [
+            Locale::En,
+            Locale::Zh,
+            Locale::Ja,
+            Locale::Ko,
+            Locale::Es,
+            Locale::Fr,
+            Locale::De,
+        ] {
+            let line = extensions_disabled_line(locale);
+            assert!(line.contains("--no-extensions"), "{locale:?} missing flag: {line:?}");
+        }
+    }
+
+    #[test]
+    fn extensions_summary_line_substitutes_count_and_list_for_every_locale() {
+        // Same placeholder convention as `header_folded_line`: `{count}`
+        // and `{list}` both have to land, and nothing should remain.
+        let names = vec!["a.mjs".to_string(), "b.mjs".to_string()];
+        for locale in [
+            Locale::En,
+            Locale::Zh,
+            Locale::Ja,
+            Locale::Ko,
+            Locale::Es,
+            Locale::Fr,
+            Locale::De,
+        ] {
+            let line = extensions_summary_line(locale, 2, &names);
+            assert!(line.contains("2"), "{locale:?} missing count: {line:?}");
+            assert!(line.contains("a.mjs"), "{locale:?} missing list: {line:?}");
+            assert!(line.contains("b.mjs"), "{locale:?} missing list: {line:?}");
+            assert!(!line.contains("{count}"), "{locale:?} still has placeholder: {line:?}");
+            assert!(!line.contains("{list}"), "{locale:?} still has placeholder: {line:?}");
+        }
+    }
+
+    #[test]
+    fn header_hint_description_falls_back_to_english_for_untranslated_locales() {
+        // `HeaderHint` carries only the English and Chinese columns; the
+        // five new locales see the English copy rather than an empty
+        // string, so the header never disappears for a non-Zh reader.
+        let hint = HeaderHint {
+            key: HeaderKey::Literal("/"),
+            en: "for commands",
+            zh: "斜杠命令",
+        };
+        assert_eq!(hint.description(Locale::En), "for commands");
+        assert_eq!(hint.description(Locale::Zh), "斜杠命令");
+        assert_eq!(hint.description(Locale::Ja), "for commands");
+        assert_eq!(hint.description(Locale::Ko), "for commands");
+        assert_eq!(hint.description(Locale::Es), "for commands");
+        assert_eq!(hint.description(Locale::Fr), "for commands");
+        assert_eq!(hint.description(Locale::De), "for commands");
     }
 
     #[test]

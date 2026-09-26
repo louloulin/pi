@@ -119,6 +119,41 @@ impl Prompt {
         self.editor.display_cursor()
     }
 
+    /// Cursor cell coordinates inside the composer's rectangle, given the
+    /// rectangle's `width` and the caller-chosen `max_rows` and `scroll`.
+    ///
+    /// Returns `(row, col)` where `row` is the row within the composer's
+    /// currently-shown window (so `0` is the first row the user sees, not
+    /// the first row of the underlying draft when it scrolled) and `col`
+    /// is the cell column, measured from the **start of the cell** the
+    /// caret sits on (i.e. the column of the `▍` cursor marker, not the
+    /// column the next typed character would land on).
+    ///
+    /// `scroll` is the same value [`Prompt::render_lines`] would receive
+    /// — the App usually has it cached in
+    /// `viewport.composer_scroll`. An empty buffer pins the caret to
+    /// `(0, 0)` so the IME candidate window still anchors.
+    pub fn cursor_position(&self, width: u16, max_rows: usize, scroll: usize) -> (u16, u16) {
+        let width = width as usize;
+        if width == 0 {
+            return (0, 0);
+        }
+        let label_width = columns(&self.label);
+        let text = self.editor.display_text();
+        if text.is_empty() {
+            return (0, label_width.min(width.saturating_sub(1)) as u16);
+        }
+        let available = self.body_width(width as u16);
+        let layout = VisualLayout::new(&text, available);
+        let (cursor_row, cursor_col) = layout.caret(self.editor.display_cursor());
+        let total_rows = layout.len();
+        let show_rows = total_rows.min(max_rows.max(1));
+        let skip = follow_cursor(scroll, cursor_row, total_rows, show_rows);
+        let window_row = cursor_row.saturating_sub(skip) as u16;
+        let cell_col = (label_width + cursor_col).min(width.saturating_sub(1)) as u16;
+        (window_row, cell_col)
+    }
+
     /// The pasted image chips attached to the draft, in buffer order.
     pub fn images(&self) -> &[pi_protocol::ImageContent] {
         self.editor.image_attachments()
@@ -307,6 +342,31 @@ impl Prompt {
         }
         let rows = VisualLayout::new(&text, self.body_width(width as u16)).len();
         rows.clamp(1, max_rows.max(1))
+    }
+
+    /// Phase N4 — `(line n/N)` overflow hint, italic DarkGray.
+    ///
+    /// nanopi appends a hint to the top visible row when the draft does
+    /// not fit the composer's visible rows so the reader can tell where
+    /// the caret sits in a long draft (`docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`,
+    /// §N4). The Rust port returns the formatted string from this
+    /// method and the [`crate::utils::render_helpers::paint_prompt`]
+    /// painter lays it at the right edge of the first composer row in
+    /// `Color::DarkGray + ITALIC`. `None` keeps the historical "no hint"
+    /// behaviour when the draft fits.
+    pub fn overflow_hint(&self, width: u16, max_rows: usize) -> Option<String> {
+        let available = self.body_width(width);
+        let text = self.editor.display_text();
+        if text.is_empty() {
+            return None;
+        }
+        let layout = VisualLayout::new(&text, available);
+        let total_rows = layout.len();
+        if total_rows <= max_rows.max(1) {
+            return None;
+        }
+        let (cursor_row, _) = layout.caret(self.editor.display_cursor());
+        Some(format!("(line {}/{})", cursor_row + 1, total_rows))
     }
 
     /// Render the prompt into 1..=`max_rows` lines at the given width,

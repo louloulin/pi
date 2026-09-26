@@ -120,6 +120,9 @@ unicode-normalization = "=0.1.25"
 # dependency graph (pulled in by `pi-chord` for content-addressed
 # keys), so adding the direct dep is essentially free.
 sha2 = "0.10"
+# Base64 (standard + URL-safe alphabets) — required by the OAuth login
+# flows in `pi-ai::auth::oauth` (PKCE challenges, JWT decoding).
+base64 = "0.22"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.3", features = ["serde"] }

@@ -629,7 +629,13 @@ async fn run_loop(
         // `session.scopedModels` before the loop starts (`main.ts:448`).
         seed_model_scope(&mut options, &settings_sources());
         if let Some(err) = &startup_ui.theme_error {
-            app.info(format!("theme → not applied: {err}"));
+            // Use the transient status line, not a permanent info block —
+            // the previous behaviour pushed a sticky banner that survived
+            // every subsequent scroll, which made it look like a fatal
+            // error and crowded the chat whenever a user had a stale
+            // `theme` field in `settings.json`. The flash fades after the
+            // configured duration (see `App::flash_status`).
+            app.flash_status(format!("Theme not applied: {err}"));
         }
     }
 
@@ -712,6 +718,15 @@ async fn run_loop(
         // Drain pending agent events before drawing so the TUI sees
         // fresh state on every tick.
         app.drain_agent_events();
+        // Surface a provider / agent error that the App captured during the
+        // last drain — without this the user sees nothing when the model
+        // call fails, which looks like the prompt was never sent. A flash
+        // (not a permanent info block) so the message disappears once the
+        // reader has had a chance to see it, matching the rest of the
+        // transient-status policy (`App::flash_status`).
+        if let Some(err) = app.take_error() {
+            app.flash_status(format!("Agent error: {err}"));
+        }
         // A local `!` command may have finished since the last tick; fold it
         // into the transcript (the task owns the process, the loop owns the
         // App). A no-op when no command is running.
@@ -1090,185 +1105,10 @@ enum InternalAction {
     /// `app.suspend` (`Ctrl+Z`): restore the terminal, stop this process
     /// group, repaint when it is continued.
     Suspend,
-}
 
-// ---------------------------------------------------------------------------
-// Local `!` / `!!` bash commands (LUM-1223, upstream `handleBashCommand`)
-// ---------------------------------------------------------------------------
-
-/// Monotonic id for a synthetic local-bash tool block, so two commands in one
-/// transcript never collide in the App's streamed-tool map.
-fn next_bash_call_id() -> String {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    format!("local-bash-{}", SEQ.fetch_add(1, Ordering::Relaxed))
-}
-
-/// State for the local `!` / `!!` command that is currently running.
-///
-/// The command runs on a background task (the `bash` tool's process wait is
-/// already bridged onto `spawn_blocking`) so the render loop keeps reading
-/// keys while it runs; `Esc` sets the shared abort flag and the tool kills the
-/// child. One command at a time, mirroring upstream's `session.isBashRunning`.
-#[derive(Default)]
-struct BashRunner {
-    run: Option<BashRun>,
-}
-
-struct BashRun {
-    /// Set to `true` by `Esc`; the tool polls it and kills the child.
-    abort: Arc<AtomicBool>,
-    /// Delivers the finished command's outcome back to the render loop.
-    rx: tokio::sync::mpsc::UnboundedReceiver<BashOutcome>,
-    /// The command text, echoed in the transcript header.
-    command: String,
-    /// `!!` — the result is kept out of the agent message log.
-    excluded: bool,
-}
-
-struct BashOutcome {
-    result: Result<crate::tools::ToolOutput, crate::tools::ToolError>,
-    elapsed_ms: u64,
-}
-
-impl BashRunner {
-    /// Whether a command is still in flight (finished-but-unpolled counts as
-    /// running, so a second submission is refused until the block is shown).
-    fn is_running(&self) -> bool {
-        self.run.is_some()
-    }
-
-    /// Start `command` on a background task. Returns immediately; the outcome
-    /// arrives on [`BashRunner::poll`] / [`BashRunner::wait`].
-    fn start(&mut self, command: String, excluded: bool) {
-        let abort = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let abort_for_task = abort.clone();
-        let command_for_task = command.clone();
-        tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            let args = serde_json::json!({ "command": command_for_task });
-            let result = crate::tools::BashTool
-                .execute(args, crate::tools::AbortLike::from_flag(abort_for_task))
-                .await;
-            let _ = tx.send(BashOutcome {
-                result,
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            });
-        });
-        self.run = Some(BashRun {
-            abort,
-            rx,
-            command,
-            excluded,
-        });
-    }
-
-    /// Request cancellation of the running command (upstream
-    /// `session.abortBash()`, `interactive-mode.ts:2858`).
-    fn cancel(&mut self) {
-        if let Some(run) = &self.run {
-            run.abort.store(true, Ordering::SeqCst);
-        }
-    }
-
-    /// Fold a finished command into the transcript. Returns `true` once the run
-    /// was consumed, so the render loop knows there is nothing left to poll.
-    fn poll(&mut self, app: &mut App, width: u16) -> bool {
-        let Some(run) = self.run.as_mut() else {
-            return true;
-        };
-        match run.rx.try_recv() {
-            Ok(outcome) => {
-                let run = self.run.take().expect("checked above");
-                push_bash_block(app, &run.command, run.excluded, &outcome, width);
-                true
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => false,
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                self.run = None;
-                true
-            }
-        }
-    }
-
-    /// Await the running command and fold it into the transcript. Used by
-    /// tests and any one-shot caller that has nothing else to poll.
-    #[cfg(test)]
-    async fn wait(&mut self, app: &mut App, width: u16) {
-        let Some(run) = self.run.as_mut() else {
-            return;
-        };
-        let outcome = run.rx.recv().await;
-        let Some(run) = self.run.take() else {
-            return;
-        };
-        if let Some(outcome) = outcome {
-            push_bash_block(app, &run.command, run.excluded, &outcome, width);
-        }
-    }
-}
-
-/// Render a finished `!` / `!!` command into the transcript.
-///
-/// The block goes through the same rich renderer the model's tool calls use
-/// ([`crate::tools::InteractiveToolRenderer`]) and the same App-side
-/// finalizer (`MessageView::finish_tool_execution_with_lines`), so the
-/// collapsed preview, `Ctrl+O` and click-to-expand all apply for free.
-///
-/// Nothing is written to the agent's message log: the command is local, and
-/// `!!` must never reach the model. `excluded` is recorded on the block's
-/// details so the two forms stay distinguishable without changing the
-/// transcript text.
-fn push_bash_block(
-    app: &mut App,
-    command: &str,
-    excluded: bool,
-    outcome: &BashOutcome,
-    width: u16,
-) {
-    let (text, is_error, details) = match &outcome.result {
-        Ok(output) => (
-            crate::tools::get_text_output(output, false),
-            false,
-            output.details.clone(),
-        ),
-        Err(crate::tools::ToolError::Aborted) => ("command cancelled".to_string(), true, None),
-        Err(err) => (err.to_string(), true, None),
-    };
-
-    let exclude_flag = serde_json::json!(excluded);
-    let details = Some(match details {
-        Some(mut details) => {
-            if let Some(map) = details.as_object_mut() {
-                map.insert("exclude_from_context".into(), exclude_flag);
-            }
-            details
-        }
-        None => serde_json::json!({ "exclude_from_context": exclude_flag }),
-    });
-
-    let call = ToolCall {
-        id: next_bash_call_id(),
-        name: "bash".to_string(),
-        arguments: serde_json::json!({ "command": command }),
-    };
-    let result = ToolResult {
-        tool_call_id: call.id.clone(),
-        content: Box::new(Content::text(text.clone())),
-        is_error,
-        details,
-        added_tool_names: None,
-    };
-
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut renderer = crate::tools::InteractiveToolRenderer::new(cwd);
-    renderer.begin_tool(&call);
-    let block = renderer.finish_tool(&result, width);
-
-    let messages = app.messages_mut();
-    messages.start_tool_execution(&call.id, "bash", command);
-    messages.finish_tool_execution_with_lines(&call.id, outcome.elapsed_ms, &text, is_error, block);
-}
+// Sub-modules (added by M1 PR1 on 2026-09-26; see scripts/architecture_no_regression.sh)
+pub mod bash_runner;
+pub(super) use bash_runner::BashRunner;
 
 /// Translate a single [`InputEvent`] into App mutations. Returns
 /// `Some(InternalAction::Exit)` when the App has exited and the
@@ -1978,8 +1818,13 @@ fn open_thinking_selector(app: &mut App, supports: bool) {
 /// (`packages/coding-agent/src/core/keybindings.ts:116`, "Open model
 /// selector"), so both entry points must land on one implementation rather
 /// than a second copy (LUM-1245).
+///
+/// Only providers with a configured credential appear — Ling in the
+/// screenshot the user filed is hidden until `ANT_LING_API_KEY` is set
+/// (`/login ant-ling` prompts for it). This matches upstream
+/// `Models.getAvailable()`.
 fn open_model_selector(app: &mut App, options: &InteractiveOptions) {
-    let items = sorted_models(&options.models)
+    let items = sorted_models_available(&options.models)
         .into_iter()
         .map(|(provider, model)| {
             let label = model.label.clone().unwrap_or_else(|| model.id.clone());
@@ -1988,7 +1833,9 @@ fn open_model_selector(app: &mut App, options: &InteractiveOptions) {
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
-        app.info("no models available".to_string());
+        app.info(
+            "no models available — set an API key (e.g. /login <provider>) or pass --provider".to_string(),
+        );
         return;
     }
     // Upstream `/model` is searchable and windows at 10 rows
@@ -2119,6 +1966,35 @@ fn sorted_models(models: &Models) -> Vec<(ProviderId, Model)> {
         .collect::<Vec<_>>();
     catalog.sort_by(|a, b| (a.0.to_string(), &a.1.id).cmp(&(b.0.to_string(), &b.1.id)));
     catalog
+}
+
+/// Same ordering as [`sorted_models`] but drops OAuth-first providers whose
+/// OAuth flow is not wired yet (upstream `Models.getAvailable()` mirror).
+///
+/// Extension-registered providers and test fixtures are kept — they own
+/// their own auth and do not need `api_key_env` to be configured. The actual
+/// "unconfigured" surface is the request layer: an unconfigured credential
+/// returns the env-var hint the same way it did before the filter landed.
+fn sorted_models_available(models: &Models) -> Vec<(ProviderId, Model)> {
+    sorted_models(models)
+        .into_iter()
+        .filter(|(provider, _)| {
+            match pi_ai::providers::registry::find_provider(&provider.0) {
+                // OAuth-first provider with no flow wired yet: hide.
+                Some(spec) if spec.oauth.is_some() => false,
+                // Built-in with API-key env: hide when no env var is set
+                // (Ling in the screenshot the user filed is hidden until
+                // `ANT_LING_API_KEY` is set — matches upstream
+                // `Models.getAvailable()`).
+                Some(spec) if !spec.api_key_env.is_empty() => {
+                    pi_ai::env_api_keys::find_env_keys(&provider.0, None).is_some()
+                }
+                // Extension / catalog-only provider: always available; the
+                // provider owns its auth.
+                _ => true,
+            }
+        })
+        .collect()
 }
 
 /// The models `app.model.cycleForward` / `cycleBackward` walk.
@@ -3868,16 +3744,76 @@ async fn run_slash_command(
             app.info("/changelog: not yet implemented in Rust port".to_string());
         }
         SlashCommand::Login { provider } => {
-            // Configure provider authentication.
+            // Configure provider authentication. The Rust port surfaces the
+            // same hint as upstream's `Models.getApiKeyForProvider`: the
+            // env vars the provider reads, in priority order. Setting any one
+            // makes the provider's models appear in `/model` (the model
+            // selector filters by configured credential — `Models.getAvailable()`
+            // mirror). OAuth-first providers stay hidden until P33 ships.
             match provider {
-                Some(p) => app.info(format!("/login: login for {p} not yet implemented in Rust port")),
-                None => app.info("/login: provider required (usage: /login <provider>)".to_string()),
+                Some(p) => {
+                    let env_vars = pi_ai::providers::registry::api_key_env_vars(&p);
+                    if env_vars.is_empty() {
+                        let oauth_label = pi_ai::providers::registry::find_provider(&p)
+                            .and_then(|spec| spec.oauth)
+                            .map(|oauth| oauth.login_label);
+                        match oauth_label {
+                            Some(label) => app.info(format!(
+                                "/login {p}: OAuth flow not yet implemented in Rust port (would show \"{label}\" once P33 lands)"
+                            )),
+                            None => app.info(format!(
+                                "/login {p}: unknown provider (no api_key_env registered)"
+                            )),
+                        }
+                    } else {
+                        app.info(format!(
+                            "/login {p}: set {} to authenticate; the provider's models will appear in /model once set",
+                            env_vars
+                                .iter()
+                                .map(|name| format!("`{name}`"))
+                                .collect::<Vec<_>>()
+                                .join(" or ")
+                        ));
+                    }
+                }
+                None => {
+                    let oauth_only: Vec<&str> = pi_ai::providers::registry::BUILTIN_PROVIDERS
+                        .iter()
+                        .filter(|s| !s.api_key_env.is_empty())
+                        .map(|s| s.id)
+                        .collect();
+                    app.info(format!(
+                        "/login: usage: /login <provider> — known providers: {}",
+                        oauth_only.join(", ")
+                    ));
+                }
             }
         }
         SlashCommand::Logout { provider } => {
-            // Remove provider authentication.
+            // The Rust port does not own a credentials panel yet (TS upstream
+            // has one); until then, `/logout` explains how to clear the
+            // credential the user controls. The model selector filters by
+            // the same env vars, so once cleared, the provider's models
+            // disappear from `/model`. OAuth-first providers stay in the
+            // "not yet wired" state until P33 lands.
             match provider {
-                Some(p) => app.info(format!("/logout: logout for {p} not yet implemented in Rust port")),
+                Some(p) => {
+                    let env_vars = pi_ai::providers::registry::api_key_env_vars(&p);
+                    if env_vars.is_empty() {
+                        app.info(format!(
+                            "/logout {p}: OAuth-based providers not yet wired in Rust port"
+                        ));
+                    } else {
+                        app.info(format!(
+                            "/logout {p}: unset {} in your shell and restart the session (no credentials panel yet)",
+                            env_vars
+                                .iter()
+                                .map(|name| format!("`{name}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
                 None => app.info("/logout: provider required (usage: /logout <provider>)".to_string()),
             }
         }
@@ -5213,7 +5149,17 @@ mod tests {
     fn the_locale_comes_from_the_environment_and_defaults_to_english() {
         assert_eq!(locale_from_env(Some("en")), pi_tui::Locale::En);
         assert_eq!(locale_from_env(Some("zh-CN")), pi_tui::Locale::Zh);
-        assert_eq!(locale_from_env(Some("fr")), pi_tui::Locale::En);
+        // The five new locales (P17) flow through verbatim.
+        assert_eq!(locale_from_env(Some("fr")), pi_tui::Locale::Fr);
+        assert_eq!(locale_from_env(Some("de")), pi_tui::Locale::De);
+        assert_eq!(locale_from_env(Some("ja")), pi_tui::Locale::Ja);
+        assert_eq!(locale_from_env(Some("ko")), pi_tui::Locale::Ko);
+        assert_eq!(locale_from_env(Some("es")), pi_tui::Locale::Es);
+        // Truly unsupported languages still fall back to English — the
+        // caller's job is to keep the user's previous locale, not to
+        // invent a guess for every input.
+        assert_eq!(locale_from_env(Some("ru")), pi_tui::Locale::En);
+        assert_eq!(locale_from_env(Some("")), pi_tui::Locale::En);
         assert_eq!(locale_from_env(None), pi_tui::Locale::En);
     }
 
@@ -6532,6 +6478,8 @@ mod tests {
             tool_expanded: None,
             tool_status: Default::default(),
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         });
         app.messages_mut().push(pi_tui::message::MessageItem {
             role: pi_tui::message::Role::Assistant,
@@ -6543,6 +6491,8 @@ mod tests {
             tool_expanded: None,
             tool_status: Default::default(),
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         });
 
         copy_last_assistant_message(&mut app);
@@ -7648,7 +7598,7 @@ mod tests {
         let selected = snapshot
             .lines
             .iter()
-            .find(|line| line.contains('❯'))
+            .find(|line| line.contains('→'))
             .unwrap_or_else(|| panic!("no dropdown row in:\n{rendered}"));
         // Whatever the fuzzy ranker puts first, the dropdown is live and
         // the `/com` prefix keeps its own matching candidates on screen.
@@ -7682,11 +7632,11 @@ mod tests {
             .render_snapshot(72, 14)
             .lines
             .iter()
-            .any(|l| l.contains('❯')));
+            .any(|l| l.contains('→')));
 
         app.step(key(KeyCode::Esc));
         let rendered = app.render_snapshot(72, 14).lines.join("\n");
-        assert!(!rendered.contains('❯'), "{rendered}");
+        assert!(!rendered.contains('→'), "{rendered}");
         assert!(rendered.contains("existing output"), "{rendered}");
         // `Esc` closed the dropdown without rewriting the input.
         assert!(rendered.contains("/m"), "{rendered}");

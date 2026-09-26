@@ -16,7 +16,7 @@ use crate::core::input_parse::{Key, KeyCode, KeyModifiers, MouseButton, MouseGes
 use crate::components::keybindings::get_keybindings;
 use crate::locale::format_chord;
 use crate::components::search::{apply_query_key, search_bar_rect, SearchSelectionMode};
-use crate::utils::styled::SpanStyle;
+use crate::utils::styled::{write_styled_line_ellipsized, SpanStyle, StyledLine};
 use crate::utils::styled::StyledSpan;
 use crate::theme::{ThemeBg, ThemeColor};
 
@@ -182,6 +182,64 @@ impl App {
             style: SpanStyle::fg_bg(ThemeColor::Text, ThemeBg::SelectedBg),
             link: None,
         }
+    }
+
+    /// Composite a one-line welcome hint in the middle of the message area
+    /// when the transcript is empty, no turn is running, and the editor has
+    /// no draft — without it, an empty viewport is a wall of blank rows that
+    /// reads as "the app is broken" instead of "type something".
+    ///
+    /// The hint stays out of the way the moment any of those three preconditions
+    /// flips: as soon as a turn is running the user is watching the spinner,
+    /// as soon as the transcript holds even one item the message renderer
+    /// already fills the area, and as soon as the editor has text the
+    /// composer grows to claim the rows the hint would have used.
+    pub(super) fn paint_empty_hint(
+        &self,
+        message_area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+    ) {
+        use std::sync::atomic::Ordering;
+        if message_area.width == 0 || message_area.height < 3 {
+            // A two-line editor on a 24-row terminal leaves only ~5 rows for
+            // messages; below that height the hint would crowd the composer
+            // and the user would never see it anyway.
+            return;
+        }
+        if self.turn_busy.load(Ordering::SeqCst) {
+            return;
+        }
+        if !self.messages.is_empty() {
+            return;
+        }
+        if !self.prompt.is_empty() {
+            return;
+        }
+        let label = StyledSpan {
+            text: "Type a message and press Enter to chat — /help for commands".to_string(),
+            style: SpanStyle::fg(ThemeColor::Muted),
+            link: None,
+        };
+        let line: StyledLine = vec![label];
+        let visible = crate::utils::hyperlink::visible_width(&line[0].text) as u16;
+        if visible == 0 {
+            return;
+        }
+        let width = visible.min(message_area.width);
+        // Vertical anchor: middle of the viewport, biased slightly upward so
+        // the hint sits at eye level on a tall window without crowding the
+        // composer on a short one.
+        let row = message_area.y + (message_area.height.saturating_sub(2) / 2);
+        let column = message_area.x + (message_area.width.saturating_sub(width) / 2);
+        // Blank the cells the hint covers so any leftover transcript glyphs
+        // from a previous frame do not bleed through (ratatui only emits the
+        // cells this buffer changed).
+        for offset in 0..width {
+            if let Some(cell) = buf.cell_mut((column + offset, row)) {
+                cell.reset();
+            }
+        }
+        write_styled_line_ellipsized(buf, column, row, width, &line, &self.theme);
     }
 
     /// Composite the pill onto the bottom row of the message viewport when
@@ -358,6 +416,60 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         app.paint_truncated_above(area, &mut buf);
+    }
+
+    #[test]
+    fn paint_empty_hint_paints_centre_row_when_idle_and_empty() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = make_app();
+        // Preconditions: not busy, no messages, no draft.
+        assert!(!app.turn_busy.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(app.messages.is_empty());
+        assert!(app.prompt.is_empty());
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.paint_empty_hint(area, &mut buf);
+
+        // The middle row (row 11 on a 24-row viewport) must have at least
+        // one non-reset cell — the hint label.
+        let row = area.y + (area.height.saturating_sub(2) / 2);
+        let mut found = false;
+        for x in area.x..(area.x + area.width) {
+            if let Some(cell) = buf.cell((x, row)) {
+                if cell.symbol() != " " || cell.style() != ratatui::style::Style::default() {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "paint_empty_hint must paint at least one cell on the centre row");
+    }
+
+    #[test]
+    fn paint_empty_hint_is_quiet_when_composer_has_draft() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut app = make_app();
+        app.prompt.editor_mut().set_text("hello world");
+        assert!(!app.prompt.is_empty());
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        app.paint_empty_hint(area, &mut buf);
+
+        // No cell on the centre row should differ from a blank space.
+        let row = area.y + (area.height.saturating_sub(2) / 2);
+        for x in area.x..(area.x + area.width) {
+            if let Some(cell) = buf.cell((x, row)) {
+                assert_eq!(
+                    cell.symbol().trim(),
+                    "",
+                    "paint_empty_hint must not paint when the composer has a draft"
+                );
+            }
+        }
     }
 
     #[test]

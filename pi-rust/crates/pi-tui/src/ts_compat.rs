@@ -107,6 +107,33 @@ pub use crate::terminal::image::{
     set_cell_dimensions, TerminalCapabilities,
 };
 
+// ─── DevicePixelRatio ────────────────────────────────────────────
+//
+// Upstream has no high-level helper for device-pixel-ratio; the cell
+// detection lives inside `terminal-image.ts`. The Rust port lifts the
+// rule into its own module so plugin authors can read the value the
+// renderer is using. The naming follows the Rust surface; no TS
+// counterpart at this level.
+
+pub use crate::terminal::high_dpi::{
+    detect_device_pixel_ratio_from_env, detect_device_pixel_ratio_with, device_pixel_ratio,
+    refresh_device_pixel_ratio, set_device_pixel_ratio, DevicePixelRatio, DEFAULT_DPI_RATIO,
+    HIGH_DPI_RATIO,
+};
+
+// ─── NarrowOptions ───────────────────────────────────────────────
+//
+// The narrow-terminal helper decides which chrome to render at a given
+// width. Upstream folds the same way inside the `Container` component;
+// the Rust port lifts it into a single struct so plugin authors can ask
+// the question once.
+
+pub use crate::narrow_terminal::{
+    is_extreme_narrow as is_extreme_narrow_terminal, is_narrow as is_narrow_terminal,
+    narrow_options, NarrowOptions, EXTREME_NARROW_WIDTH, HEADER_HINT_COLLAPSE_THRESHOLD,
+    NARROW_TERMINAL_WIDTH,
+};
+
 // ─── JumpDirection ─────────────────────────────────────────────────
 //
 // Upstream exports `JumpDirection` as a type-only export from

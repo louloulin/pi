@@ -449,9 +449,16 @@ mod tests {
         let list = SelectList::new(items(), 5, SelectListTheme::default());
         let lines = list.render(20);
         let beta_line = plain_text(&lines[1]);
-        assert!(beta_line.contains("Beta"));
-        // No description column when width can't fit it.
-        assert!(!beta_line.contains("Second letter"));
+        // N7 ellipsizes whichever column needs it: at width=20 the
+        // label "Beta" shrinks to "Be…" and the description "Second
+        // letter" still fits (13 cols + 2 + 3 + 2 = 20), so the row is
+        // "  Be…  Second letter" (unselected — the cursor sits on
+        // Gamma, the only item still in range when selected_index=5
+        // clamps to filtered len).
+        assert!(beta_line.starts_with("  Be…"), "{:?}", beta_line);
+        assert!(beta_line.contains("Second letter"), "{:?}", beta_line);
+        assert!(!beta_line.contains("Beta"), "{:?}", beta_line);
+        assert_eq!(beta_line.chars().count(), 20);
     }
 
     #[test]

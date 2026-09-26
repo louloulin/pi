@@ -534,8 +534,15 @@ fn the_composer_click_still_works_with_the_dropdown_open() {
     let buf = frame(&mut app);
     assert!(showing(&app), "`/hot` has candidates");
     // The composer row (the last row above the status bar) is below the list.
+    // P9 removed the `> ` prefix; the visible composer is `/hot` (or `/hot▍`
+    // for the IME-anchored caret). Match by content rather than a fixed
+    // prefix.
     let composer_y = HEIGHT - 2;
-    assert!(row_text(&buf, composer_y).starts_with("> /hot"));
+    let composer_row = row_text(&buf, composer_y);
+    assert!(
+        composer_row.contains("/hot"),
+        "composer row {composer_row:?} must contain `/hot`"
+    );
 
     // A click inside the draft puts the caret there — the LUM-1327 rule —
     // while the dropdown is open; the caret lands between `/h` and `ot`.
@@ -561,11 +568,13 @@ fn placing_the_caret_outside_the_token_closes_the_dropdown() {
     let composer_y = HEIGHT - 2;
     assert!(showing(&app));
 
-    // The gutter cell belongs to the draft's first column, which is outside
-    // the `/hot` token: the click places the caret and the dropdown refreshes
-    // for the new position, where there is nothing to complete (upstream's
-    // click branch ends in `updateAutocomplete()`).
-    assert_eq!(press(&mut app, 1, composer_y), StepOutcome::Redraw);
+    // P9 removed the `> ` composer prefix, so column 0 of the composer row
+    // is the `/` of the draft. A click one column before the draft lands
+    // in the gutter cell, but there is no gutter any more — the only
+    // cursor position outside the `/hot` token is *before* it, i.e. column
+    // 0 (which still places the caret at byte offset 0 because the draft
+    // starts there).
+    assert_eq!(press(&mut app, 0, composer_y), StepOutcome::Redraw);
     assert_eq!(app.prompt().editor().cursor(), 0);
     assert!(!showing(&app));
     assert_eq!(app.editor_text(), "/hot", "the draft is untouched");
@@ -590,7 +599,7 @@ fn reverse_search_takes_the_pointer_from_the_dropdown() {
     assert!(app.prompt().editor().history_search_active());
     assert!(!showing(&app), "the search owns the composer's pointer");
     let buf = frame(&mut app);
-    assert!(!frame_has(&buf, "❯"), "nothing is painted to click");
+    assert!(!frame_has(&buf, "→"), "nothing is painted to click");
 
     // A press where the list used to be now belongs to the transcript, and
     // completes nothing.

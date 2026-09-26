@@ -123,7 +123,7 @@ fn rendered_rows_follow_the_ranked_order() {
     sel.set_filter("gmp");
     let lines = sel.render_lines(60);
     let joined = lines.join("\n");
-    assert!(joined.contains("❯ Gemini 2.5 Pro"), "rows were {joined:?}");
+    assert!(joined.contains("→ Gemini 2.5 Pro"), "rows were {joined:?}");
     // The other rows are filtered out entirely.
     assert_eq!(sel.filtered_len(), 1);
     assert!(sel.render_lines(60).len() < 5);

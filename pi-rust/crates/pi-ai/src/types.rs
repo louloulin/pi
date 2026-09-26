@@ -96,6 +96,16 @@ impl AbortSignal {
             None => std::future::pending().await,
         }
     }
+
+    /// Trigger cancellation. Native signals backed by a `CancellationToken`
+    /// flip their token; WASM signals are toggled by the host. A never-set
+    /// signal (`AbortSignal::new()`) is a no-op.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn cancel(&self) {
+        if let Some(AbortSignalInner::Native(token)) = &self.inner {
+            token.cancel();
+        }
+    }
 }
 
 impl std::fmt::Debug for AbortSignal {

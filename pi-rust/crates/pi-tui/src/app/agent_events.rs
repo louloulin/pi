@@ -9,11 +9,22 @@
 //! per-frame rendering surface; the message view + tool-block renderer
 //! already do most of the heavy lifting, so the body is mostly a long
 //! `match` over `AgentEvent`.
+//!
+//! # Extension subscription surface
+//!
+//! [`AgentEventHandler`] is the public trait extensions and overlays
+//! implement to receive typed callbacks for each stage of a turn.
+//! [`AgentEventRouter`] owns the fan-out list and dispatches events to
+//! every subscriber; [`default_router`] returns an empty router that
+//! callers can `.push(...)` handlers onto. These three types are
+//! additive — the existing [`App::apply_event`] pipeline still owns the
+//! message view + status bar; the router only forwards to extra
+//! subscribers.
 
 use std::sync::atomic::Ordering;
 
 use pi_agent_core::{AgentEvent, AssistantMessageUpdate};
-use pi_protocol::Content;
+use pi_protocol::{Content, Message, StopReason, ToolCall, ToolResult, Usage};
 use tokio::sync::mpsc;
 
 use super::{App, TurnUsage};
@@ -184,5 +195,344 @@ impl App {
                 self.pending_error = Some(message);
             }
         }
+    }
+}
+
+// =====================================================================
+// Public extension subscription surface (additive — does not touch the
+// existing App::apply_event pipeline). See module-level docs above.
+// =====================================================================
+
+/// Typed subscription hooks for [`AgentEvent`] callbacks.
+///
+/// Extensions and overlays implement this trait to receive callbacks for
+/// each stage of a turn without holding an `&mut App`. Every method has
+/// a no-op default so consumers override only what they need.
+///
+/// The trait is **object-safe** — handlers are stored as
+/// `Box<dyn AgentEventHandler>` inside [`AgentEventRouter`].
+pub trait AgentEventHandler: Send {
+    /// A user message was enqueued at the start of a turn.
+    fn on_user_message(&mut self, _msg: &Message) {}
+    /// A new assistant message started streaming. `model` is the
+    /// provider-issued identifier.
+    fn on_assistant_start(&mut self, _model: &str) {}
+    /// Incremental assistant text delta.
+    fn on_assistant_delta(&mut self, _delta: &str) {}
+    /// Incremental assistant thinking delta.
+    fn on_thinking_delta(&mut self, _delta: &str) {}
+    /// A tool call started executing.
+    fn on_tool_call(&mut self, _call: &ToolCall) {}
+    /// Incremental tool execution update (partial stdout/stderr).
+    fn on_tool_update(&mut self, _tool_call_id: &str, _delta: &str) {}
+    /// A tool call finished. `duration_ms` is the wall-clock duration.
+    fn on_tool_result(&mut self, _result: &ToolResult, _duration_ms: u64) {}
+    /// The assistant message finished streaming.
+    fn on_assistant_end(&mut self, _usage: &Usage) {}
+    /// A turn finished. `tool_results` is the list of tool-result
+    /// messages produced during the turn.
+    fn on_turn_end(
+        &mut self,
+        _usage: &Usage,
+        _stop_reason: &StopReason,
+        _tool_results: &[Message],
+    ) {
+    }
+    /// A new turn began.
+    fn on_turn_start(&mut self) {}
+    /// An agent run started (one per `Agent::prompt` call).
+    fn on_agent_start(&mut self) {}
+    /// An agent run finished.
+    fn on_agent_end(&mut self, _messages: &[Message]) {}
+    /// The session was compacted. Carries nothing extra today; this
+    /// hook is a placeholder so extensions can subscribe before the
+    /// richer `SessionCompact` payload lands.
+    fn on_session_compacted(&mut self) {}
+    /// Agent surface error.
+    fn on_error(&mut self, _message: &str) {}
+}
+
+/// Fans [`AgentEvent`]s out to a list of [`AgentEventHandler`]
+/// subscribers.
+///
+/// The router owns no state of its own — every `dispatch` call iterates
+/// the handler list and forwards the relevant sub-event. The existing
+/// [`App::apply_event`] pipeline is untouched; consumers who want the
+/// router's events call `router.dispatch(&event)` alongside the drain.
+pub struct AgentEventRouter {
+    handlers: Vec<Box<dyn AgentEventHandler>>,
+}
+
+impl Default for AgentEventRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AgentEventRouter {
+    /// Construct an empty router.
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+        }
+    }
+
+    /// Append a handler to the fan-out list.
+    pub fn push(&mut self, handler: Box<dyn AgentEventHandler>) {
+        self.handlers.push(handler);
+    }
+
+    /// Number of registered handlers.
+    pub fn len(&self) -> usize {
+        self.handlers.len()
+    }
+
+    /// True when no handlers are registered.
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+
+    /// Forward one [`AgentEvent`] to every registered handler.
+    ///
+    /// Handlers run sequentially in registration order. A handler panics
+    /// propagate (we do not swallow them) — extension authors should
+    /// keep callbacks total.
+    pub fn dispatch(&mut self, event: &AgentEvent) {
+        for handler in &mut self.handlers {
+            Self::forward(event, handler.as_mut());
+        }
+    }
+
+    fn forward(event: &AgentEvent, h: &mut dyn AgentEventHandler) {
+        match event {
+            AgentEvent::UserMessage(msg) => h.on_user_message(msg),
+            AgentEvent::MessageStart { model } => h.on_assistant_start(model),
+            AgentEvent::MessageUpdate(AssistantMessageUpdate::TextDelta { delta }) => {
+                h.on_assistant_delta(delta)
+            }
+            AgentEvent::MessageUpdate(AssistantMessageUpdate::ThinkingDelta { delta }) => {
+                h.on_thinking_delta(delta)
+            }
+            AgentEvent::MessageUpdate(AssistantMessageUpdate::ToolCallDelta { .. }) => {
+                // Tool-call deltas carry argument fragments; the router
+                // does not forward them — extensions receive the
+                // structured ToolCall via `on_tool_call` instead.
+            }
+            AgentEvent::MessageEnd { message } => h.on_assistant_end(&message.usage),
+            AgentEvent::ToolExecutionStart { call } => h.on_tool_call(call),
+            AgentEvent::ToolExecutionUpdate { tool_call_id, delta } => {
+                h.on_tool_update(tool_call_id, delta)
+            }
+            AgentEvent::ToolExecutionEnd {
+                result,
+                duration_ms,
+            } => h.on_tool_result(result, *duration_ms),
+            AgentEvent::TurnStart => h.on_turn_start(),
+            AgentEvent::TurnEnd {
+                message,
+                tool_results,
+            } => h.on_turn_end(&message.usage, &message.stop_reason, tool_results),
+            AgentEvent::AgentStart => h.on_agent_start(),
+            AgentEvent::AgentEnd { messages } => h.on_agent_end(messages),
+            AgentEvent::Error(msg) => h.on_error(msg),
+        }
+    }
+}
+
+/// Factory helper — returns an empty router.
+///
+/// Equivalent to `AgentEventRouter::new()` but kept as a named
+/// constructor so future presets (e.g. a "logger" handler preinstalled)
+/// can be added without breaking callers.
+pub fn default_router() -> AgentEventRouter {
+    AgentEventRouter::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Records every callback it sees for later assertion.
+    struct Recorder {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl Recorder {
+        fn new(log: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { log }
+        }
+        fn push(&self, line: String) {
+            self.log.lock().unwrap().push(line);
+        }
+    }
+    impl AgentEventHandler for Recorder {
+        fn on_assistant_start(&mut self, model: &str) {
+            self.push(format!("assistant_start:{model}"));
+        }
+        fn on_assistant_delta(&mut self, delta: &str) {
+            self.push(format!("assistant_delta:{delta}"));
+        }
+        fn on_thinking_delta(&mut self, delta: &str) {
+            self.push(format!("thinking_delta:{delta}"));
+        }
+        fn on_tool_call(&mut self, call: &ToolCall) {
+            self.push(format!("tool_call:{}", call.name));
+        }
+        fn on_tool_result(&mut self, result: &ToolResult, duration_ms: u64) {
+            self.push(format!("tool_result:{}:{duration_ms}", result.tool_call_id));
+        }
+        fn on_assistant_end(&mut self, usage: &Usage) {
+            self.push(format!("assistant_end:{}", usage.input + usage.output));
+        }
+        fn on_turn_end(
+            &mut self,
+            usage: &Usage,
+            stop_reason: &StopReason,
+            _tool_results: &[Message],
+        ) {
+            self.push(format!(
+                "turn_end:{}:{:?}",
+                usage.input + usage.output,
+                stop_reason
+            ));
+        }
+        fn on_agent_start(&mut self) {
+            self.push("agent_start".into());
+        }
+        fn on_agent_end(&mut self, _messages: &[Message]) {
+            self.push("agent_end".into());
+        }
+        fn on_error(&mut self, msg: &str) {
+            self.push(format!("error:{msg}"));
+        }
+    }
+
+    fn text_delta(delta: &str) -> AssistantMessageUpdate {
+        AssistantMessageUpdate::TextDelta {
+            delta: delta.into(),
+        }
+    }
+
+    fn thinking_delta(delta: &str) -> AssistantMessageUpdate {
+        AssistantMessageUpdate::ThinkingDelta {
+            delta: delta.into(),
+        }
+    }
+
+    #[test]
+    fn empty_router_drops_silently() {
+        let mut router = default_router();
+        assert!(router.is_empty());
+        router.dispatch(&AgentEvent::TurnStart);
+        router.dispatch(&AgentEvent::Error("boom".into()));
+        assert_eq!(router.len(), 0);
+    }
+
+    #[test]
+    fn single_handler_records_each_event() {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut router = default_router();
+        router.push(Box::new(Recorder::new(log.clone())));
+
+        router.dispatch(&AgentEvent::AgentStart);
+        router.dispatch(&AgentEvent::MessageStart {
+            model: "test-model".into(),
+        });
+        router.dispatch(&AgentEvent::MessageUpdate(text_delta("hi")));
+        router.dispatch(&AgentEvent::MessageUpdate(thinking_delta("plan?")));
+        router.dispatch(&AgentEvent::ToolExecutionEnd {
+            result: ToolResult {
+                tool_call_id: "c1".into(),
+                content: Box::new(Content::text("done")),
+                is_error: false,
+                details: None,
+                added_tool_names: None,
+            },
+            duration_ms: 42,
+        });
+        router.dispatch(&AgentEvent::Error("oops".into()));
+
+        let captured = log.lock().unwrap().clone();
+        assert_eq!(
+            captured,
+            vec![
+                "agent_start".to_string(),
+                "assistant_start:test-model".to_string(),
+                "assistant_delta:hi".to_string(),
+                "thinking_delta:plan?".to_string(),
+                "tool_result:c1:42".to_string(),
+                "error:oops".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn multiple_handlers_each_receive_event() {
+        let log_a = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log_b = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut router = default_router();
+        router.push(Box::new(Recorder::new(log_a.clone())));
+        router.push(Box::new(Recorder::new(log_b.clone())));
+
+        router.dispatch(&AgentEvent::MessageStart {
+            model: "shared".into(),
+        });
+
+        assert_eq!(
+            log_a.lock().unwrap().clone(),
+            vec!["assistant_start:shared".to_string()]
+        );
+        assert_eq!(
+            log_b.lock().unwrap().clone(),
+            vec!["assistant_start:shared".to_string()]
+        );
+        assert_eq!(router.len(), 2);
+    }
+
+    #[test]
+    fn tool_call_dispatch_forwards_structured_call() {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut router = default_router();
+        router.push(Box::new(Recorder::new(log.clone())));
+
+        router.dispatch(&AgentEvent::ToolExecutionStart {
+            call: ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"cmd": "ls"}),
+            },
+        });
+
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec!["tool_call:bash".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_noop_handlers_are_zero_cost_to_skip() {
+        // A handler that only overrides on_error must not receive any
+        // other callback.
+        struct OnlyError {
+            log: Arc<Mutex<Vec<String>>>,
+        }
+        impl AgentEventHandler for OnlyError {
+            fn on_error(&mut self, msg: &str) {
+                self.log.lock().unwrap().push(format!("error:{msg}"));
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut router = default_router();
+        router.push(Box::new(OnlyError { log: log.clone() }));
+
+        router.dispatch(&AgentEvent::TurnStart);
+        router.dispatch(&AgentEvent::MessageUpdate(text_delta("ignored")));
+        router.dispatch(&AgentEvent::Error("captured".into()));
+
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec!["error:captured".to_string()]
+        );
     }
 }

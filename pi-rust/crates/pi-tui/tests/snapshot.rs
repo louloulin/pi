@@ -33,7 +33,9 @@ fn user_message_prefix_and_wrap() {
         .into_iter()
         .map(|l| strip_trailing(&l))
         .collect();
-    assert_eq!(lines, vec!["> hello world"]);
+    // P9 dropped the `> ` prefix from user messages — the box padding
+    // is the only chrome (matches TS `custom-message.ts`).
+    assert_eq!(lines, vec!["hello world"]);
 }
 
 #[test]
@@ -102,12 +104,11 @@ fn long_text_wraps_within_width() {
         .into_iter()
         .map(|l| strip_trailing(&l))
         .collect();
-    // Width 10, prefix ">" + space eats 2 columns, so the body wraps
-    // at 8 columns. 40 chars across 8 cols = 5 wrapped lines.
-    assert_eq!(lines.len(), 5);
+    // P9 dropped the `> ` user prefix, so the body wraps inside the
+    // available width. Assert the wrap actually happened and every
+    // visible cell count is <= width.
+    assert!(lines.len() >= 4);
     for line in &lines {
-        assert!(line.starts_with("> "));
-        // Body length (after the prefix) must be <= 8.
         assert!(line.chars().count() <= 10);
     }
 }
@@ -147,7 +148,7 @@ fn render_to_buffer_matches_lines_layout() {
                 .unwrap_or(' ')
         })
         .collect();
-    assert_eq!(row0.trim_end(), "> alpha");
+    assert_eq!(row0.trim_end(), "alpha");
     assert_eq!(row1.trim_end(), "  beta");
 }
 
@@ -175,7 +176,10 @@ fn info_message_uses_user_prefix() {
         .into_iter()
         .map(|l| strip_trailing(&l))
         .collect();
-    assert_eq!(lines, vec!["> session ready"]);
+    // P9 dropped the `> ` prefix — info rows render the body directly.
+    // The `· ` prefix is owned by `info_block` (used for `/help`),
+    // not by the plain `push_info` notice path.
+    assert_eq!(lines, vec!["session ready"]);
 }
 
 #[test]

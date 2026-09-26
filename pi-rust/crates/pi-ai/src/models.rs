@@ -44,6 +44,46 @@ impl Models {
             .flat_map(|(p, ms)| ms.iter().map(move |m| (p, m)))
     }
 
+    /// Whether `provider` is configured for use — at least one
+    /// `api_key_env` variable is set, or the provider has an OAuth
+    /// credential stored (upstream `Models.getAvailable()` mirror).
+    ///
+    /// `env` is the same scoped env the auth resolver sees (`pi-coding-agent`
+    /// passes its injectable `get_env`). Providers whose `api_key_env` is
+    /// empty (faux and the OAuth-first `github-copilot` / `openai-codex` /
+    /// `kimi-coding`) are reported as available only when OAuth credentials
+    /// are stored — today that is always false until OAuth flow lands; the
+    /// shape leaves room for it without touching this module.
+    pub fn is_provider_available(
+        &self,
+        provider: &ProviderId,
+        env: Option<&crate::auth::types::ProviderEnv>,
+    ) -> bool {
+        if self.by_provider.contains_key(provider) {
+            crate::env_api_keys::find_env_keys(&provider.0, env).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Iterator over models whose provider is configured (`Models.getAvailable()`).
+    ///
+    /// Used by the model selector so unconfigured providers (Ling in the
+    /// screenshot the user filed) do not appear as a choice — the user
+    /// must `/login <provider>` first.
+    pub fn iter_available(
+        &self,
+        env: Option<&crate::auth::types::ProviderEnv>,
+    ) -> impl Iterator<Item = (&ProviderId, &Model)> {
+        let env = env.cloned();
+        self.by_provider
+            .iter()
+            .filter(move |(p, _)| {
+                crate::env_api_keys::find_env_keys(&p.0, env.as_ref()).is_some()
+            })
+            .flat_map(|(p, ms)| ms.iter().map(move |m| (p, m)))
+    }
+
     /// Register a provider's models from a JSON envelope.
     ///
     /// `provider` is the [`ProviderId`] the entries will be registered

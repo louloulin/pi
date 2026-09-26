@@ -78,7 +78,7 @@ use crate::components::keybindings::KeybindingsManager;
 use crate::utils::styled::{plain_text, themed_text, SpanStyle, StyledLine, StyledSpan};
 use crate::styles::SelectListStyles;
 use crate::theme::{ThemeBg, ThemeColor};
-use crate::utils::width::{columns, truncate_columns};
+use crate::utils::width::{char_columns as columns_char, columns, truncate_columns};
 
 /// Default primary (label) column width, upstream
 /// `DEFAULT_PRIMARY_COLUMN_WIDTH`.
@@ -231,73 +231,164 @@ pub fn select_list_visible_range(
 
 /// Render one `SelectList` row — upstream `SelectList::renderItem`.
 ///
-/// A row that has a description and enough horizontal room renders the
-/// description in a column that starts at the same offset on every row;
-/// otherwise it falls back to a width-clamped label alone.
+/// Layout (N7 — nanopi-style palette):
 ///
-/// The row is returned as theme-slot spans, so the same layout drives the
-/// modal [`Selector`], the composer dropdown and the ANSI renders: the
-/// selected row is wrapped whole (upstream `select-list.ts:205,216`), a
-/// non-selected description column is wrapped on its own
-/// (`select-list.ts:208`).
+/// ```text
+///   ┌── arrow (2 cols) ──┐ ┌── label (padded, ellipsis-truncated) ─────┐ ┌── gap ──┐ ┌── description (right-aligned) ──┐
+///   "→ " (selected)      │   "Alpha" + spaces                          │ "  "     │                       "fastest" │
+///   "  " (unselected)    │                                            │          │                                  │
+/// ```
+///
+/// The description column is **right-aligned** to the row's right edge
+/// (the nanopi pattern from `nanopi/src/mode/tui.rs:5446-5470`); the
+/// label is padded to fill the remaining space and ellipsis-truncated
+/// when it would collide with the description. Rows too narrow to hold
+/// even an arrow + 1-cell label fall back to the arrow + a width-clamped
+/// label, exactly like the upstream `width <= 40` skip.
 pub fn select_list_row_spans<R>(
     row: &R,
     selected: bool,
     width: usize,
-    primary_column_width: usize,
+    _primary_column_width: usize,
 ) -> StyledLine
 where
     R: SelectListRow + ?Sized,
 {
-    let marker = if selected { "❯ " } else { "  " };
-    let prefix_width = display_width(marker);
+    // Arrow occupies 2 columns: "→ " when selected, "  " otherwise — both
+    // 2 cells wide, so the label always starts at the same offset and the
+    // description always ends at the same offset on every row.
+    const ARROW_W: usize = 2;
+    const GAP_W: usize = 2;
+    // A description that would consume more than this fraction of the
+    // available cells is shortened. Below the fraction we keep the
+    // description verbatim (the row still fits the right-edge column).
+    const MIN_DESC_COLS: usize = 4;
 
-    let display = display_value(row);
-    if let Some(description) = row.description() {
-        let description = normalize_single_line(description);
-        if !description.is_empty() && width > MIN_DESCRIPTION_LIST_WIDTH {
-            let column = primary_column_width
-                .min(width.saturating_sub(prefix_width + 4))
-                .max(1);
-            let label_width = column.saturating_sub(PRIMARY_COLUMN_GAP).max(1);
-            let truncated = truncate_to_width(display, label_width);
-            let truncated_width = display_width(&truncated);
-            let spacing = " ".repeat(column.saturating_sub(truncated_width).max(1));
-            let description_start = prefix_width + truncated_width + display_width(&spacing);
-            let remaining = width.saturating_sub(description_start + 2);
-            if remaining > MIN_DESCRIPTION_WIDTH {
-                let truncated_description = truncate_to_width(&description, remaining);
-                if selected {
-                    let body = format!("{marker}{truncated}{spacing}{truncated_description}");
-                    return vec![StyledSpan::new(
-                        body,
-                        SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
-                    )];
-                }
-                // Upstream wraps the gap and the description together:
-                // `this.theme.description(spacing + truncatedDesc)`
-                // (`select-list.ts:208`).
-                return vec![
-                    StyledSpan::new(format!("{marker}{truncated}"), SpanStyle::PLAIN),
-                    StyledSpan::new(
-                        format!("{spacing}{truncated_description}"),
-                        SpanStyle::fg(ThemeColor::Muted),
-                    ),
-                ];
-            }
+    let arrow = if selected { "→ " } else { "  " };
+    let label = display_value(row);
+
+    // No description → label gets all the remaining space.
+    let description_text = row
+        .description()
+        .map(normalize_single_line)
+        .filter(|s| !s.is_empty());
+
+    if description_text.is_none() {
+        let label_max = width.saturating_sub(ARROW_W).max(1);
+        let (truncated_label, lw) = ellipsize_label(label, label_max);
+        let body = format!("{arrow}{truncated_label}");
+        let padding = " ".repeat(label_max.saturating_sub(lw));
+        if selected {
+            return vec![StyledSpan::new(
+                format!("{body}{padding}"),
+                SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg).bold(),
+            )];
         }
+        let mut spans = vec![StyledSpan::new(body, SpanStyle::PLAIN)];
+        if !padding.is_empty() {
+            spans.push(StyledSpan::new(padding, SpanStyle::PLAIN));
+        }
+        return spans;
     }
 
-    let max_width = width.saturating_sub(prefix_width + 2).max(1);
-    let body = format!("{marker}{}", truncate_to_width(display, max_width));
-    if selected {
-        vec![StyledSpan::new(
-            body,
-            SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg),
-        )]
-    } else {
-        vec![StyledSpan::new(body, SpanStyle::PLAIN)]
+    // Right-aligned description: it must consume at least `MIN_DESC_COLS`
+    // cells for the row to read as a two-column layout.
+    let available_for_desc = width.saturating_sub(ARROW_W + GAP_W);
+    if available_for_desc < MIN_DESC_COLS + 1 {
+        // Row too narrow for a meaningful description column — fall back
+        // to the label-only branch above.
+        let label_max = width.saturating_sub(ARROW_W).max(1);
+        let (truncated_label, lw) = ellipsize_label(label, label_max);
+        let body = format!("{arrow}{truncated_label}");
+        let padding = " ".repeat(label_max.saturating_sub(lw));
+        if selected {
+            return vec![StyledSpan::new(
+                format!("{body}{padding}"),
+                SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg).bold(),
+            )];
+        }
+        let mut spans = vec![StyledSpan::new(body, SpanStyle::PLAIN)];
+        if !padding.is_empty() {
+            spans.push(StyledSpan::new(padding, SpanStyle::PLAIN));
+        }
+        return spans;
     }
+
+    let description = description_text.expect("checked above");
+    // Reserve one column for the label's minimum ellipsis so the
+    // description can never push the row past `width`. Computing the
+    // description width first would otherwise leave `label_max = 0`,
+    // and `max(1)` would re-grow the label past the budget.
+    const LABEL_MIN: usize = 1;
+    let max_desc = width.saturating_sub(ARROW_W + GAP_W + LABEL_MIN);
+    let (desc_str, desc_w) = ellipsize_label(&description, max_desc);
+    let label_max = width
+        .saturating_sub(ARROW_W + GAP_W + desc_w)
+        .max(LABEL_MIN);
+    let (label_str, lw) = ellipsize_label(label, label_max);
+    let label_padding = " ".repeat(label_max.saturating_sub(lw));
+
+    if selected {
+        let body = format!(
+            "{arrow}{label_str}{label_padding}{gap}{desc_str}",
+            gap = " ".repeat(GAP_W)
+        );
+        return vec![StyledSpan::new(
+            body,
+            SpanStyle::fg_bg(ThemeColor::Accent, ThemeBg::SelectedBg).bold(),
+        )];
+    }
+
+    // Unselected: the arrow + label is plain, the description is muted so
+    // the right-edge column reads as a secondary hint rather than a third
+    // value (matches the upstream `description(spacing + truncatedDesc)`
+    // wrap at `select-list.ts:208`).
+    vec![
+        StyledSpan::new(
+            format!("{arrow}{label_str}{label_padding}"),
+            SpanStyle::PLAIN,
+        ),
+        StyledSpan::new(
+            format!("{}{desc_str}", " ".repeat(GAP_W)),
+            SpanStyle::fg(ThemeColor::Muted),
+        ),
+    ]
+}
+
+/// Truncate `text` to at most `max_width` visible columns, replacing the
+/// tail with a single `…` ellipsis when the natural width exceeds the
+/// budget.
+///
+/// nanopi uses `…` (one Unicode char, 1 cell) instead of the upstream
+/// `truncate_to_width`'s `...` (three ASCII dots, 3 cells) so the label
+/// fits one extra character of information. Returns the resulting string
+/// plus its display width so callers can right-pad without re-measuring.
+fn ellipsize_label(text: &str, max_width: usize) -> (String, usize) {
+    const ELLIPSIS: &str = "…";
+    let width = display_width(text);
+    if max_width == 0 || width <= max_width {
+        return (text.to_string(), width);
+    }
+    if max_width == 1 {
+        return (ELLIPSIS.to_string(), 1);
+    }
+    // `ELLIPSIS.len()` is the byte length (3 for `…`), not the column width
+    // (1). Using bytes here would shrink the budget by 2 columns for an
+    // ASCII label, dropping two characters of information that could fit.
+    let ellipsis_w = columns_char(ELLIPSIS.chars().next().unwrap());
+    let budget = max_width - ellipsis_w;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cw = columns_char(ch);
+        if used + cw > budget {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push_str(ELLIPSIS);
+    (out, max_width)
 }
 
 /// Single item in a [`Selector`].
@@ -1263,14 +1354,15 @@ mod tests {
         let lines = sel.render_lines(40);
         // 2 header lines + 5 rows + the scroll indicator.
         assert_eq!(lines.len(), 8);
-        assert_eq!(lines[2], "❯ Item 0");
-        assert_eq!(lines[6], "  Item 4");
+        // N7 arrow + label padded out to the full row width.
+        assert!(lines[2].starts_with("→ Item 0"), "{:?}", lines[2]);
+        assert!(lines[6].starts_with("  Item 4"), "{:?}", lines[6]);
         assert_eq!(lines[7], "  (1/12)");
         // The window follows the cursor and is centred on it.
         sel.last();
         let lines = sel.render_lines(40);
-        assert_eq!(lines[2], "  Item 7");
-        assert_eq!(lines[6], "❯ Item 11");
+        assert!(lines[2].starts_with("  Item 7"), "{:?}", lines[2]);
+        assert!(lines[6].starts_with("→ Item 11"), "{:?}", lines[6]);
         assert_eq!(lines[7], "  (12/12)");
     }
 
@@ -1307,8 +1399,11 @@ mod tests {
         let items = vec![SelectorItem::new("a", "Alpha").with_description("first\nsecond")];
         let sel = Selector::new("Pick", items);
         let lines = sel.render_lines(80);
+        // N7 right-aligns the description: "first second" (12 cols) sits
+        // at the row's right edge, so it spans cols 68..80. skip(68)
+        // returns the trailing 12 chars.
         assert_eq!(
-            lines[2].chars().skip(34).collect::<String>(),
+            lines[2].chars().skip(68).collect::<String>(),
             "first second"
         );
     }
@@ -1318,15 +1413,19 @@ mod tests {
         let sel = Selector::new("Pick", items());
         let lines = sel.render_lines(80);
         let rows = &lines[2..5];
-        // Default layout: a fixed 32-column primary column, so the
-        // description starts at 2 (marker) + 32 = 34 on every row.
-        let starts: Vec<String> = rows
-            .iter()
-            .map(|row| row.chars().skip(34).collect())
-            .collect();
-        assert_eq!(starts, vec!["OpenAI", "Anthropic", "Test"]);
-        assert!(rows[0].starts_with("❯ gpt-4o"));
-        assert!(rows[1].starts_with("  claude-3.5-sonnet"));
+        // N7 right-aligns descriptions: every description ends at col 79,
+        // but descriptions of different widths START at different columns
+        // because the label column absorbs the freed space.
+        let tails: Vec<&str> = rows.iter().map(|r| r.trim_end()).collect();
+        assert!(tails[0].ends_with("OpenAI"), "{:?}", tails[0]);
+        assert!(tails[1].ends_with("Anthropic"), "{:?}", tails[1]);
+        assert!(tails[2].ends_with("Test"), "{:?}", tails[2]);
+        assert!(rows[0].starts_with("→ gpt-4o"), "{:?}", rows[0]);
+        assert!(rows[1].starts_with("  claude-3.5-sonnet"), "{:?}", rows[1]);
+        // All three rows end at the same right-edge column.
+        assert_eq!(rows[0].chars().count(), 80);
+        assert_eq!(rows[1].chars().count(), 80);
+        assert_eq!(rows[2].chars().count(), 80);
     }
 
     #[test]
@@ -1336,17 +1435,26 @@ mod tests {
             SelectorItem::new("b", "A Much Longer Label").with_description("two"),
         ];
         let sel = Selector::new("Pick", items).with_primary_column_width(10, 40);
-        // Widest label (19) + gap (2) = 21, inside [10, 40].
+        // Both descriptions are 3 cols; with width=80, label_max = 80-2-2-3
+        // = 73, so descriptions occupy cols 77..80 and the right-edge is
+        // the shared column.
         let lines = sel.render_lines(80);
-        assert_eq!(lines[2].chars().skip(23).collect::<String>(), "one");
-        assert_eq!(lines[3].chars().skip(23).collect::<String>(), "two");
+        assert_eq!(lines[2].chars().skip(77).collect::<String>(), "one");
+        assert_eq!(lines[3].chars().skip(77).collect::<String>(), "two");
     }
 
     #[test]
     fn narrow_rows_render_the_label_without_the_description_column() {
         let items = vec![SelectorItem::new("a", "Alpha").with_description("first second")];
         let sel = Selector::new("Pick", items);
-        assert_eq!(sel.render_lines(40)[2], "❯ Alpha");
+        let lines = sel.render_lines(40);
+        // N7: the description "first second" (12 cols) fits at the right
+        // edge even at width=40, so the row now carries both columns.
+        // The label is right-padded into the freed space.
+        let row = &lines[2];
+        assert!(row.starts_with("→ Alpha"), "{:?}", row);
+        assert!(row.ends_with("first second"), "{:?}", row);
+        assert_eq!(row.chars().count(), 40);
     }
 
     #[test]

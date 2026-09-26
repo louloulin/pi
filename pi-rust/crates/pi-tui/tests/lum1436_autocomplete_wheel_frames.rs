@@ -6,9 +6,9 @@
 //! paints it. Two panels, both 76×16:
 //!
 //! 1. the dropdown open over the transcript, highlight on the first candidate
-//!    (`❯ help`) — the reference frame;
+//!    (`→ help`) — the reference frame;
 //! 2. after a **wheel notch down** at the list's own row: the highlight moved
-//!    to `❯ model`, the draft is still `/` and the transcript row the list
+//!    to `→ model`, the draft is still `/` and the transcript row the list
 //!    covers is unchanged, i.e. the notch never reached the chat log.
 //!
 //! Why not `scripts/pty_capture.py`: this Windows runner has no PTY (see
@@ -141,10 +141,10 @@ fn frame_dump_before_the_wheel_notch() {
     let mut app = app();
     app.step(InputEvent::Key(Key::char('/')));
     let buf = frame(&mut app);
-    assert!(row_text(&buf, row_with(&buf, "❯ help")).contains("❯ help"));
+    assert!(row_text(&buf, row_with(&buf, "→ help")).contains("→ help"));
     dump(
         &mut app,
-        "before the notch: `❯ help` highlighted, draft `/`",
+        "before the notch: `→ help` highlighted, draft `/`",
     );
 }
 
@@ -153,7 +153,7 @@ fn frame_dump_after_the_wheel_notch() {
     let mut app = app();
     app.step(InputEvent::Key(Key::char('/')));
     let buf = frame(&mut app);
-    let list_row = row_with(&buf, "❯ help");
+    let list_row = row_with(&buf, "→ help");
     // The rows the list borrows, captured before the notch so the frame can
     // show they did not move.
     let covered_before: Vec<String> = ((list_row.saturating_sub(3))..list_row)
@@ -163,11 +163,11 @@ fn frame_dump_after_the_wheel_notch() {
     app.step(InputEvent::wheel(false, false, 2, list_row));
     let after = frame(&mut app);
     assert!(
-        row_text(&after, row_with(&after, "❯ model")).contains("❯ model"),
+        row_text(&after, row_with(&after, "→ model")).contains("→ model"),
         "the notch should have moved the highlight onto `model`"
     );
     assert!(
-        !row_text(&after, list_row).contains('❯'),
+        !row_text(&after, list_row).contains('→'),
         "`help` is no longer the highlighted row"
     );
     assert_eq!(app.editor_text(), "/");
@@ -181,6 +181,6 @@ fn frame_dump_after_the_wheel_notch() {
     );
     dump(
         &mut app,
-        "after one notch down on the list: `❯ model`, draft `/`, transcript untouched",
+        "after one notch down on the list: `→ model`, draft `/`, transcript untouched",
     );
 }

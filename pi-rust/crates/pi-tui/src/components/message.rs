@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
-use pi_protocol::{ToolCall, ToolResult};
+use pi_protocol::{StopReason, ToolCall, ToolResult};
 
 use std::boxed::Box as StdBox;
 
@@ -253,6 +253,26 @@ pub struct MessageItem {
     /// verbatim — no prefix, no wrap — so the caller is responsible for
     /// whatever margins, borders and colour slots the notice needs.
     pub notice_lines: Option<Vec<StyledLine>>,
+    /// Stop reason a finalized assistant message ended with.
+    ///
+    /// Mirrors upstream's `stop_reason` field on the assistant message
+    /// (`packages/coding-agent/src/modes/interactive/components/assistant-message.ts`,
+    /// the trailing glyph / label rendered under the body when the model
+    /// finished abnormally). When `Some`, the renderer appends a one-line
+    /// tail after the body so the reader can tell at a glance whether the
+    /// turn ended cleanly (`Stop` / `ToolUse`) or hit a guard rail
+    /// (`MaxTokens` / `Aborted` / `Error` / `Empty`); `None` keeps the
+    /// historical "no tail" behaviour for backwards compatibility.
+    pub stop_reason: Option<StopReason>,
+    /// Wall-clock duration of a finished tool call, in milliseconds.
+    ///
+    /// nanopi-style tool panels end with a `Took Xs` row (`docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`,
+    /// §2.4 / N3) so the reader can see how long the call ran at a glance
+    /// without parsing the body. The Rust port mirrors that — when `Some`
+    /// and the block has finished (status != Pending) the renderer appends
+    /// one trailing line; `None` keeps the historical "no footer"
+    /// behaviour for callers that never observed the call's start.
+    pub elapsed_ms: Option<u64>,
 }
 
 impl MessageItem {
@@ -268,6 +288,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 
@@ -283,6 +305,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 
@@ -299,6 +323,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 
@@ -314,6 +340,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 
@@ -330,6 +358,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 
@@ -345,6 +375,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 
@@ -357,6 +389,37 @@ impl MessageItem {
     /// Set the tool lifecycle status in place.
     pub fn set_tool_status(&mut self, status: ToolStatus) {
         self.tool_status = status;
+    }
+
+    /// Set the stop reason a finalized assistant message ended with
+    /// (builder form).
+    pub fn with_stop_reason(mut self, reason: StopReason) -> Self {
+        self.stop_reason = Some(reason);
+        self
+    }
+
+    /// Set the stop reason in place.
+    pub fn set_stop_reason(&mut self, reason: StopReason) {
+        self.stop_reason = Some(reason);
+    }
+
+    /// Record the wall-clock duration of a finished tool call
+    /// (builder form).
+    ///
+    /// nanopi-style tool panels end with a `Took Xs` row — when the driver
+    /// saw both `ToolExecutionStart` and `ToolExecutionEnd` for this call
+    /// it passes the measured `Duration` in here and the renderer paints
+    /// the footer. `None` keeps the historical "no footer" rendering for
+    /// callers that never saw the start (driver skip, re-attached stream).
+    pub fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = Some(elapsed_ms);
+        self
+    }
+
+    /// Record the wall-clock duration in place. See
+    /// [`Self::with_elapsed_ms`] for the rationale.
+    pub fn set_elapsed_ms(&mut self, elapsed_ms: u64) {
+        self.elapsed_ms = Some(elapsed_ms);
     }
 
     /// Build a notice block from already-styled lines.
@@ -376,6 +439,8 @@ impl MessageItem {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: Some(lines),
+            stop_reason: None,
+            elapsed_ms: None,
         }
     }
 }
@@ -439,6 +504,128 @@ pub fn working_header_line(spinner_frame: char) -> Vec<StyledSpan> {
         format!("{spinner_frame} Working "),
         SpanStyle::fg(ThemeColor::Dim),
     )]
+}
+
+/// Phase 21 (C3.6) — tail line appended under a finalized assistant
+/// block when the provider reported an abnormal `StopReason`.
+///
+/// Upstream paints a small status row directly under the body so the
+/// reader can tell at a glance whether the turn ended cleanly or hit a
+/// guard rail. The Rust port mirrors the same six arms:
+///   - [`StopReason::Stop`] and [`StopReason::ToolUse`] are the "happy"
+///     arms: the model ended its turn normally (text or a tool call),
+///     so no tail is painted — this is what callers observe for >99% of
+///     turns today.
+///   - [`StopReason::MaxTokens`] is a red `⚠ max_tokens` warning so the
+///     reader can immediately see why the response cut off.
+///   - [`StopReason::Aborted`] is a dim `⏹ aborted` so the cancellation
+///     is visible without looking like an error.
+///   - [`StopReason::Error`] is a red `✗ error` — the provider reported
+///     a generation failure.
+///   - [`StopReason::Empty`] is a dim `(empty response)` — the model
+///     finished its turn with no content, which usually means a routing
+///     or configuration issue.
+///
+/// The glyph + label combination is fixed (no theme lookup) so the tail
+/// is cheap to render and recognisable across themes. The colours follow
+/// the upstream convention: red = bad, dim = informational.
+pub fn stop_reason_tail_line(reason: StopReason) -> Vec<StyledSpan> {
+    match reason {
+        StopReason::Stop | StopReason::ToolUse => Vec::new(),
+        StopReason::MaxTokens => vec![StyledSpan::new(
+            "⚠ max_tokens",
+            SpanStyle::fg(ThemeColor::Error).bold(),
+        )],
+        StopReason::Aborted => vec![StyledSpan::new(
+            "⏹ aborted",
+            SpanStyle::fg(ThemeColor::Dim),
+        )],
+        StopReason::Error => vec![StyledSpan::new(
+            "✗ error",
+            SpanStyle::fg(ThemeColor::Error),
+        )],
+        StopReason::Empty => vec![StyledSpan::new(
+            "(empty response)",
+            SpanStyle::fg(ThemeColor::Dim),
+        )],
+    }
+}
+
+/// Phase N3 — [`MessageItem::elapsed_ms`] footer line.
+///
+/// nanopi paints a `Took Xs` row at the end of every finished tool block
+/// (`docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`, §2.4 / N3). The Rust port
+/// mirrors that: when the driver measures a `Duration` and stamps it via
+/// [`MessageItem::with_elapsed_ms`], the renderer appends one trailing
+/// row so the reader can tell at a glance how long the call ran.
+///
+/// Formatting:
+///   * `<1s`     → `Took 532ms` (millisecond precision; bash `ls` usually lands here).
+///   * `<60s`    → `Took 12.4s`  (one decimal; the threshold the upstream panels use).
+///   * `<60min`  → `Took 4m 32s` (minute + second, no decimal — readable on one row).
+///   * otherwise → `Took 1h 12m`.
+pub fn took_footer_line(elapsed_ms: u64) -> Vec<StyledSpan> {
+    let text = if elapsed_ms < 1_000 {
+        format!("Took {elapsed_ms}ms")
+    } else if elapsed_ms < 60_000 {
+        let tenths = elapsed_ms / 100;
+        let whole = tenths / 10;
+        let frac = tenths % 10;
+        format!("Took {whole}.{frac}s")
+    } else if elapsed_ms < 3_600_000 {
+        let total_s = elapsed_ms / 1_000;
+        let mins = total_s / 60;
+        let secs = total_s % 60;
+        format!("Took {mins}m {secs:02}s")
+    } else {
+        let total_s = elapsed_ms / 1_000;
+        let hours = total_s / 3600;
+        let mins = (total_s % 3600) / 60;
+        format!("Took {hours}h {mins:02}m")
+    };
+    vec![StyledSpan::new(text, SpanStyle::fg(ThemeColor::Dim).italic())]
+}
+
+/// Phase 21 (C3.6) — [`MessageView::item_lines`] call site for the
+/// stop-reason tail.
+///
+/// Appends at most one [`StyledLine`] to `out`: a single row that
+/// combines the assistant-message prefix (`"  "`, the same column the
+/// body uses so the tail aligns with the bullet) with the spans
+/// returned by [`stop_reason_tail_line`]. Skips silently when:
+///   - the role is not Assistant (only assistant blocks carry a stop
+///     reason — tool / user / notice blocks have their own status row);
+///   - the item is still streaming (the `working_header_line` already
+///     tells the reader the turn is in flight, and a stop reason is not
+///     yet known);
+///   - the stop reason resolves to an empty tail ([`StopReason::Stop`]
+///     / [`StopReason::ToolUse`] — the two "happy" arms).
+///
+/// Keeping this in a dedicated helper means the markdown path and the
+/// plain-text path share the exact same tail semantics, and a future
+/// change (e.g. an icon glyph swap) lands in one place.
+fn append_stop_reason_tail(
+    out: &mut Vec<StyledLine>,
+    item: &MessageItem,
+    prefix: &str,
+    prefix_style: SpanStyle,
+) {
+    if item.role != Role::Assistant || item.streaming {
+        return;
+    }
+    let Some(reason) = item.stop_reason else {
+        return;
+    };
+    let tail_spans = stop_reason_tail_line(reason);
+    if tail_spans.is_empty() {
+        return;
+    }
+    let mut line: StyledLine = Vec::new();
+    if !prefix.is_empty() {
+        line.push(StyledSpan::new(prefix.to_string(), prefix_style));
+    }
+    line.extend(tail_spans);
+    out.push(line);
 }
 
 /// Phase 12 — render one CustomMessage item (branch summary, compaction
@@ -1267,6 +1454,7 @@ impl MessageView {
                 self.items[index].tool_header = header;
                 self.items[index].tool_lines = body;
                 self.items[index].tool_expanded = None;
+                self.items[index].elapsed_ms = Some(duration_ms);
                 self.repin_if_following();
             }
             // No start event for this id (synthetic / replayed turn): keep
@@ -1275,6 +1463,7 @@ impl MessageView {
                 let mut item = MessageItem::tool(format_tool("", "", result, is_error));
                 item.tool_header = header;
                 item.tool_lines = body;
+                item.elapsed_ms = Some(duration_ms);
                 self.push(item);
             }
         }
@@ -1298,6 +1487,8 @@ impl MessageView {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         });
     }
 
@@ -1318,6 +1509,8 @@ impl MessageView {
             tool_lines: None,
             tool_expanded: None,
             notice_lines: None,
+            stop_reason: None,
+            elapsed_ms: None,
         });
     }
 
@@ -1646,6 +1839,11 @@ impl MessageView {
                 item.streaming,
                 hyperlinks,
             ));
+            // Phase 21 (C3.6) — append the stop-reason tail for finalized
+            // assistant blocks so the reader sees at a glance whether the
+            // turn ended cleanly (no tail for Stop/ToolUse) or hit a guard
+            // rail (warning row for MaxTokens/Aborted/Error/Empty).
+            append_stop_reason_tail(&mut out, item, prefix, prefix_style);
             return out;
         }
 
@@ -1724,6 +1922,13 @@ impl MessageView {
             out.extend(boxed.render(width));
         } else {
             out.extend(lines);
+            // Phase 21 (C3.6) — finalize assistant blocks: append the
+            // stop-reason tail after the body so a finished `MaxTokens`
+            // / `Aborted` / `Error` / `Empty` turn ends with a one-line
+            // status row. Streaming assistant blocks are skipped (the
+            // `working_header_line` above already conveys "in flight");
+            // `Stop` / `ToolUse` produce no tail by design.
+            append_stop_reason_tail(&mut out, item, prefix, prefix_style);
         }
         out
     }
@@ -1768,15 +1973,31 @@ impl MessageView {
         let expanded = item.tool_expanded.unwrap_or(self.tools_expanded);
         if expanded || full.len() <= self.tool_preview_lines {
             out.extend(full);
-            return out;
+        } else {
+            let hidden = full.len() - self.tool_preview_lines;
+            out.reserve(self.tool_preview_lines + 1);
+            out.push(vec![
+                StyledSpan::new(prefix, prefix_style),
+                StyledSpan::new(tool_fold_hint(hidden), SpanStyle::fg(ThemeColor::Muted)),
+            ]);
+            out.extend(full.into_iter().skip(hidden));
         }
-        let hidden = full.len() - self.tool_preview_lines;
-        out.reserve(self.tool_preview_lines + 1);
-        out.push(vec![
-            StyledSpan::new(prefix, prefix_style),
-            StyledSpan::new(tool_fold_hint(hidden), SpanStyle::fg(ThemeColor::Muted)),
-        ]);
-        out.extend(full.into_iter().skip(hidden));
+        // Phase N3 — `Took Xs` footer. Appended *after* the fold hint so
+        // the row sits at the bottom of the block in both expanded and
+        // collapsed states — matching nanopi's `tui.rs` tool panel layout.
+        // Skipped while the call is still pending (no measured duration
+        // yet — and a footer that overlaps the pending-bg slot would be
+        // visually inconsistent).
+        if let Some(ms) = item.elapsed_ms {
+            if item.tool_status != ToolStatus::Pending {
+                let mut line: StyledLine = Vec::new();
+                if !prefix.is_empty() {
+                    line.push(StyledSpan::new(prefix.to_string(), prefix_style));
+                }
+                line.extend(took_footer_line(ms));
+                out.push(line);
+            }
+        }
         out
     }
 
@@ -2641,13 +2862,13 @@ mod tests {
     fn collapsed_tool_block_keeps_the_header_tail_and_a_hint() {
         let view = view_with_tool_body(10);
         let lines = view.render_lines(40);
-        // Header + hint + the 4-line preview.
-        assert_eq!(lines.len(), 2 + TOOL_PREVIEW_LINES);
+        // Header + hint + the 4-line preview + the N3 `Took Xs` footer.
+        assert_eq!(lines.len(), 3 + TOOL_PREVIEW_LINES);
         assert_eq!(lines[0], "* bash echo hi");
         assert_eq!(lines[1], "* … (+6 lines, Ctrl+O to expand)");
         // The preview is the *tail*: body-6 … body-9.
         assert_eq!(
-            &lines[2..],
+            &lines[2..2 + TOOL_PREVIEW_LINES],
             &["* body-6", "* body-7", "* body-8", "* body-9"]
         );
         // Rich styling survives the fold, on both the header and the body.
@@ -2666,8 +2887,9 @@ mod tests {
         view.set_tool_preview_lines(10);
         assert_eq!(view.tool_preview_lines(), 10);
         let lines = view.render_lines(40);
-        // Header + 3 body lines, no hint: it fits the preview.
-        assert_eq!(lines.len(), 4);
+        // Header + 3 body lines + the N3 `Took Xs` footer, no fold hint:
+        // the block fits the preview.
+        assert_eq!(lines.len(), 5);
         assert!(!lines.iter().any(|line| line.contains("Ctrl+O")));
     }
 
@@ -2677,16 +2899,16 @@ mod tests {
         assert!(!view.tools_expanded());
         // A per-block click expands just this block …
         assert_eq!(view.toggle_tool_at(0), Some(true));
-        // Header + every body line.
-        assert_eq!(view.render_lines(40).len(), 11);
+        // Header + every body line + the N3 `Took Xs` footer.
+        assert_eq!(view.render_lines(40).len(), 12);
         // … the chord then toggles every block: global collapse wins, and the
         // overrides are cleared so the next chord really is global.
         assert!(view.toggle_tools_expanded());
-        assert_eq!(view.render_lines(40).len(), 11);
+        assert_eq!(view.render_lines(40).len(), 12);
         assert!(!view.toggle_tools_expanded());
-        assert_eq!(view.render_lines(40).len(), 2 + TOOL_PREVIEW_LINES);
+        assert_eq!(view.render_lines(40).len(), 3 + TOOL_PREVIEW_LINES);
         assert!(view.toggle_tools_expanded());
-        assert_eq!(view.render_lines(40).len(), 11);
+        assert_eq!(view.render_lines(40).len(), 12);
     }
 
     #[test]

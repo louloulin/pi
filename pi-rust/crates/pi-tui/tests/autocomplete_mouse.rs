@@ -156,7 +156,7 @@ fn click(app: &mut App, x: u16, y: u16) {
     let _ = app.step(release(x, y));
 }
 
-/// Column the candidate label starts at (the two-cell `❯ ` / `  ` gutter).
+/// Column the candidate label starts at (the two-cell `→ ` / `  ` gutter).
 const LABEL_COLUMN: u16 = 1;
 
 #[test]
@@ -166,7 +166,7 @@ fn a_press_on_a_candidate_highlights_it_without_applying_it() {
     let buf = frame(&mut app);
     let model_row = row_with(&buf, "model");
     assert!(
-        !row_text(&buf, model_row).starts_with('❯'),
+        !row_text(&buf, model_row).starts_with('→'),
         "the best match starts selected, not `model`"
     );
 
@@ -175,7 +175,7 @@ fn a_press_on_a_candidate_highlights_it_without_applying_it() {
     // The press moved the highlight to the pressed row …
     let buf = frame(&mut app);
     assert!(
-        row_text(&buf, model_row).starts_with("❯ model"),
+        row_text(&buf, model_row).starts_with("→ model"),
         "pressing a row should highlight it: {:?}",
         row_text(&buf, model_row)
     );

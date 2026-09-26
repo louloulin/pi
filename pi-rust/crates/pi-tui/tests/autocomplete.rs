@@ -416,7 +416,7 @@ fn dropdown_rendering_marks_the_selection_and_windows_long_lists() {
     type_text(&mut editor, "/");
     let rows = editor.autocomplete_render_lines(40);
     assert_eq!(rows.len(), 3);
-    assert!(rows[0].starts_with("❯ "), "{rows:?}");
+    assert!(rows[0].starts_with("→ "), "{rows:?}");
     assert!(rows[0].contains("help"));
     assert!(rows[1].starts_with("  "), "{rows:?}");
 
@@ -443,9 +443,10 @@ fn dropdown_rendering_marks_the_selection_and_windows_long_lists() {
     assert_eq!(editor.autocomplete_max_visible(), 3);
 }
 
-/// The dropdown borrows the `SelectList` row layout, so its description
-/// column starts at the same offset on every row — `label  description` with
-/// two blanks is exactly what this replaced (LUM-1305).
+/// The dropdown borrows the `SelectList` row layout. N7 right-aligns the
+/// description column to the row's right edge (nanopi pattern); the label
+/// sits flush with the `→ ` marker and is padded so the description lands
+/// at the same column on every row.
 #[test]
 fn slash_dropdown_aligns_descriptions_into_the_select_list_column() {
     let mut editor = editor_with(command_provider());
@@ -453,35 +454,21 @@ fn slash_dropdown_aligns_descriptions_into_the_select_list_column() {
     let rows = editor.autocomplete_render_lines(80);
     assert_eq!(rows.len(), 3);
 
-    // Slash menu: `SLASH_COMMAND_SELECT_LIST_LAYOUT` (12..32). The widest
-    // label here is "render" (6) + the 2-column gap = 8, under the floor, so
-    // the primary column is 12 and every description starts at
-    // 2 (marker) + 12 = 14.
-    let column = 2 + 12;
-    let descriptions: Vec<String> = rows
-        .iter()
-        .map(|row| row.chars().skip(column).collect())
-        .collect();
-    assert_eq!(
-        descriptions,
-        vec![
-            "show this help text",
-            "wipe the message view",
-            "redraw the view"
-        ],
-        "{rows:?}"
-    );
-    assert!(rows[0].starts_with("❯ help"));
+    // Every row is 80 columns wide and ends with its description.
+    let suffixes = ["show this help text", "wipe the message view", "redraw the view"];
+    let markers = ["→", "  ", "  "];
+    for ((row, suffix), marker) in rows.iter().zip(suffixes.iter()).zip(markers.iter()) {
+        assert!(row.starts_with(*marker), "row is {row:?}");
+        assert!(row.ends_with(suffix), "row is {row:?}");
+        assert_eq!(row.chars().count(), 80, "row is {row:?}");
+    }
+    assert!(rows[0].starts_with("→ help"));
     assert!(rows[1].starts_with("  clear"));
-    // The labels themselves are padded out to the column, not separated by
-    // the old two-blank shortcut: `help` is followed by 6 blanks.
-    let padded: String = rows[0].chars().skip(2).take(10).collect();
-    assert_eq!(padded, "help      ", "{rows:?}");
 }
 
-/// The primary column tracks the widest command name inside `[12, 32]`
-/// (upstream `getPrimaryColumnWidth`), so a long command pushes the
-/// description right instead of running into it.
+/// N7 ellipsizes the label column to keep the description flush with the
+/// right edge regardless of the label's natural width — a wide label
+/// shortens, a short one pads, and both rows end on the same column.
 #[test]
 fn slash_dropdown_primary_column_tracks_the_widest_label() {
     let provider = CombinedAutocompleteProvider::new(
@@ -495,18 +482,23 @@ fn slash_dropdown_primary_column_tracks_the_widest_label() {
     type_text(&mut editor, "/");
     let rows = editor.autocomplete_render_lines(80);
 
-    // Widest label 24 + gap 2 = 26, inside [12, 32], so the column is 26 and
-    // the descriptions start at 2 + 26 = 28 on both rows.
-    let column = 2 + 26;
-    for (row, description) in rows.iter().zip(["first", "second"]) {
-        assert_eq!(row.chars().skip(column).collect::<String>(), description);
+    let markers = ["→", "  "];
+    for ((row, description), marker) in rows
+        .iter()
+        .zip(["first", "second"])
+        .zip(markers.iter())
+    {
+        assert!(row.starts_with(*marker), "row is {row:?}");
+        assert!(row.ends_with(description), "row is {row:?}");
+        assert_eq!(row.chars().count(), 80, "row is {row:?}");
     }
-    // A short label is padded out to the tracked column.
-    assert_eq!(&rows[1][..8], "  ok    ", "{rows:?}");
+    // Short label `ok` is padded to the column.
+    assert!(rows[1].starts_with("  ok"), "row is {:?}", rows[1]);
 }
 
-/// A label wider than the primary column is clamped to it, so the description
-/// column still starts at the same offset (upstream `truncatePrimary`).
+/// N7 right-aligns the description column to the row's right edge. The
+/// label is only ellipsized when its natural width would collide with the
+/// description; otherwise it sits un-truncated.
 #[test]
 fn slash_dropdown_clamps_a_label_wider_than_the_primary_column() {
     let provider = CombinedAutocompleteProvider::new(
@@ -520,15 +512,42 @@ fn slash_dropdown_clamps_a_label_wider_than_the_primary_column() {
     type_text(&mut editor, "/");
     let rows = editor.autocomplete_render_lines(80);
 
-    // The column is clamped at 32, so the label is truncated to 30 columns
-    // and the description still starts at 2 + 32 = 34.
-    assert_eq!(rows[0].chars().count(), 34 + "kept".len());
-    assert_eq!(rows[0].chars().skip(34).collect::<String>(), "kept");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.chars().count(), 80, "row is {row:?}");
+    assert!(row.ends_with("kept"), "row is {row:?}");
+    // At width=80 the 54-cell label leaves 24 cells for gap+padding+desc,
+    // so no ellipsis is needed.
     assert!(
-        rows[0].starts_with("❯ a-command-name-that-is-far-too"),
-        "{rows:?}"
+        row.starts_with("→ a-command-name-that-is-far-too-long-for-the-column"),
+        "row is {row:?}"
     );
-    assert!(!rows[0].contains("long"), "{rows:?}");
+}
+
+/// Verify the ellipsization kicks in when the label would actually
+/// overflow — at width=57 the 50-cell label leaves no slack for gap +
+/// description, so N7 truncates the label.
+#[test]
+fn slash_dropdown_ellipsizes_label_when_it_collides_with_description() {
+    let provider = CombinedAutocompleteProvider::new(
+        vec![
+            SlashCommand::new("a-command-name-that-is-far-too-long-for-the-column")
+                .with_description("kept"),
+        ],
+        ".",
+    );
+    let mut editor = editor_with(provider);
+    type_text(&mut editor, "/");
+    let rows = editor.autocomplete_render_lines(57);
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.chars().count(), 57, "row is {row:?}");
+    assert!(row.ends_with("kept"), "row is {row:?}");
+    // The label must be ellipsized (trailing `…`) and never contain
+    // the un-truncated tail of the source label.
+    assert!(row.contains('…'), "row is {row:?}");
+    assert!(!row.contains("long-for-the-column"), "row is {row:?}");
 }
 
 /// Non-slash completions (the `@` file menu) use the `SelectList` default —
@@ -544,32 +563,62 @@ fn file_dropdown_uses_the_fixed_primary_column() {
     let rows = editor.autocomplete_render_lines(80);
     assert_eq!(rows.len(), 1, "{rows:?}");
 
-    // Default layout: a fixed 32-column primary column, so the path
-    // description starts at 2 (marker) + 32 = 34.
-    assert!(rows[0].starts_with("❯ readme.md"), "{rows:?}");
-    assert_eq!(rows[0].chars().skip(34).collect::<String>(), "readme.md");
+    // N7 right-aligns the description column to the row's right edge. The
+    // label "readme.md" (9 cols) sits flush with the `→ ` marker at column
+    // 0 and "readme.md" (the description) is right-aligned at column 79.
+    assert!(rows[0].starts_with("→ readme.md"), "{rows:?}");
+    assert!(
+        rows[0].ends_with("readme.md"),
+        "description must be right-aligned, got {rows:?}"
+    );
+    assert_eq!(rows[0].chars().count(), 80, "row is {rows:?}");
     // And that is exactly where a modal `Selector` with the same row puts it.
     let selector = Selector::new(
         "Pick",
         vec![SelectorItem::new("x", "readme.md").with_description("readme.md")],
     );
     let modal = selector.render_lines(80);
-    assert_eq!(modal[2].chars().skip(34).collect::<String>(), "readme.md");
+    assert!(
+        modal[2].ends_with("readme.md"),
+        "modal selector must right-align, got {:?}",
+        modal
+    );
 }
 
-/// Rows narrower than the upstream threshold (40 columns) fall back to the
-/// label alone — the description column is not squeezed, it is dropped.
+/// Rows narrower than the description-minimum (5 cells of slack — arrow +
+/// gap + at least one label + at least one description cell) drop the
+/// description column entirely. N7 ellipsizes the label to fit a wide
+/// description at the right edge of `width`, so descriptions stay on rows
+/// down to that threshold.
 #[test]
 fn narrow_dropdown_drops_the_description_column() {
     let mut editor = editor_with(command_provider());
     type_text(&mut editor, "/");
+    // Widths that allow a 4+1 description column keep descriptions. The
+    // selected row preserves the label verbatim; the unselected rows
+    // ellipsize the label to leave room for the description.
     for width in [40, 30, 20] {
+        let rows = editor.autocomplete_render_lines(width);
+        assert!(rows[0].starts_with("→"), "{rows:?}");
+        // Every row is right-aligned to `width` (or shorter).
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width),
+            "{rows:?}"
+        );
+        // The description survives in some form on every row.
+        assert!(
+            rows.iter().any(|row| row.contains("help")),
+            "{rows:?}"
+        );
+    }
+    // Widths that collapse below the description floor drop the column.
+    for width in [8, 7, 6] {
         let rows = editor.autocomplete_render_lines(width);
         assert!(
             !rows.iter().any(|row| row.contains("help text")),
             "{rows:?}"
         );
-        assert!(rows[0].starts_with("❯ help"), "{rows:?}");
+        assert!(rows[0].starts_with("→"), "{rows:?}");
         assert!(
             rows.iter().all(|row| row.chars().count() <= width),
             "{rows:?}"
@@ -763,37 +812,49 @@ fn the_app_paints_the_dropdown_directly_above_the_prompt() {
 
     // Nothing is painted until the trigger is typed.
     let before = app.render_snapshot(48, 12).lines.join("\n");
-    assert!(!before.contains('❯'), "{before}");
+    assert!(!before.contains('→'), "{before}");
 
     type_into(&mut app, "/h");
     let snapshot = app.render_snapshot(48, 12);
     let selected: Vec<&String> = snapshot
         .lines
         .iter()
-        .filter(|line| line.contains('❯'))
+        .filter(|line| line.contains('→'))
         .collect();
     assert_eq!(selected.len(), 1, "{:?}", snapshot.lines);
 
     let selected_at = snapshot
         .lines
         .iter()
-        .position(|line| line.contains('❯'))
+        .position(|line| line.contains('→'))
         .expect("selected row");
     let prompt_at = snapshot
         .lines
         .iter()
-        .position(|line| line.contains("> /h"))
+        .position(|line| line.contains("/h▍"))
         .expect("prompt row");
     // The list is bottom-anchored: its last row is the one directly above
     // the prompt, and it grows from there towards older output.
     assert!(selected_at < prompt_at, "{:?}", snapshot.lines);
     // Phase 2 (G3) paints the `─` editor border directly above the prompt,
     // so the dropdown's bottom row is two cells up instead of one.
+    //
+    // N7 right-aligns the description column to the row's right edge. With
+    // width=48 the unselected row is `  hotkeys` followed by enough
+    // padding to push "list shortcuts" flush against column 48.
+    let last = &snapshot.lines[prompt_at - 2];
+    assert!(
+        last.starts_with("  hotkeys"),
+        "row is {last:?}, expected to start with `  hotkeys`"
+    );
+    assert!(
+        last.ends_with("list shortcuts"),
+        "row is {last:?}, expected description right-aligned at row end"
+    );
     assert_eq!(
-        snapshot.lines[prompt_at - 2].trim_end(),
-        "  hotkeys     list shortcuts",
-        "{:?}",
-        snapshot.lines
+        last.chars().count(),
+        48,
+        "row is {last:?}, expected 48 columns wide"
     );
     assert_eq!(
         snapshot.lines[prompt_at - 1].trim_end(),
@@ -813,13 +874,16 @@ fn closing_the_dropdown_gives_the_rows_back_to_the_transcript() {
         .push(pi_tui::message::MessageItem::assistant("transcript body"));
 
     type_into(&mut app, "/h");
-    assert!(app.render_snapshot(48, 12).lines.join("\n").contains('❯'));
+    assert!(app.render_snapshot(48, 12).lines.join("\n").contains('→'));
 
     app.step(pi_tui::InputEvent::Key(key(KeyCode::Esc)));
     let after = app.render_snapshot(48, 12).lines.join("\n");
-    assert!(!after.contains('❯'), "{after}");
-    // `Esc` closed the list without rewriting the input.
-    assert!(after.contains("> /h"), "{after}");
+    // No dropdown marker is left in the buffer after Esc.
+    assert!(!after.contains('→'), "{after}");
+    // `Esc` closed the list without rewriting the input. The composer
+    // uses an REVERSED-block caret (`▍`) and no `> ` prefix (P9), so
+    // the visible cell is the digit `/h▍`.
+    assert!(after.contains("/h▍"), "{after}");
 }
 
 #[test]
@@ -845,7 +909,7 @@ fn dropdown_rows_are_opaque_over_the_transcript() {
     let row = snapshot
         .lines
         .iter()
-        .find(|line| line.contains('❯'))
+        .find(|line| line.contains('→'))
         .expect("dropdown row");
     assert!(!row.contains('X'), "transcript bled through: {row:?}");
     assert!(row.contains("help"), "{row:?}");

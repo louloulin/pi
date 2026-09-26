@@ -118,7 +118,7 @@ fn selected(app: &App) -> usize {
 fn wheel_over_the_dropdown_moves_the_highlight_and_not_the_transcript() {
     let mut app = app_with_lines(30);
     open_dropdown(&mut app);
-    let list_row = row_with(&mut app, "❯ help");
+    let list_row = row_with(&mut app, "→ help");
     assert_eq!(selected(&app), 0);
     assert_eq!(app.messages().scroll_offset(), 0);
 
@@ -152,7 +152,7 @@ fn wheel_over_the_dropdown_moves_the_highlight_and_not_the_transcript() {
 fn wheel_over_the_dropdown_clamps_at_both_ends() {
     let mut app = app_with_lines(30);
     open_dropdown(&mut app);
-    let list_row = row_with(&mut app, "❯ help");
+    let list_row = row_with(&mut app, "→ help");
 
     // Already on the first candidate: a notch up is still the list's, so it
     // reports Idle *and* leaves the transcript where it is.
@@ -186,7 +186,7 @@ fn alt_wheel_over_the_dropdown_still_steps_one_candidate() {
     // sign of the notch only.
     let mut app = app_with_lines(30);
     open_dropdown(&mut app);
-    let list_row = row_with(&mut app, "❯ help");
+    let list_row = row_with(&mut app, "→ help");
 
     assert_eq!(
         app.step(InputEvent::wheel(false, true, 2, list_row)),
@@ -218,7 +218,7 @@ fn wheel_on_the_counter_row_still_steers_the_list() {
 fn wheel_outside_the_dropdown_still_scrolls_the_transcript() {
     let mut app = app_with_lines(30);
     open_dropdown(&mut app);
-    let list_row = row_with(&mut app, "❯ help");
+    let list_row = row_with(&mut app, "→ help");
     assert!(list_row > 0, "the list borrows rows below the top");
 
     // A row above the list is transcript, so the notch is unclaimed and
@@ -236,7 +236,7 @@ fn wheel_outside_the_dropdown_still_scrolls_the_transcript() {
 fn the_wheel_returns_to_the_transcript_once_the_dropdown_closes() {
     let mut app = app_with_lines(30);
     open_dropdown(&mut app);
-    let list_row = row_with(&mut app, "❯ help");
+    let list_row = row_with(&mut app, "→ help");
 
     // A space ends the command context, so the provider yields nothing and
     // the list closes — the row it borrowed is transcript again.

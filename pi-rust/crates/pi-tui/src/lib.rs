@@ -29,6 +29,7 @@ pub mod component;
 pub mod components;
 pub mod core;
 pub mod locale;
+pub mod narrow_terminal;
 pub mod styles;
 pub mod terminal;
 pub mod theme;
@@ -136,6 +137,9 @@ pub mod keys {
 pub mod frame_pacer {
     pub use crate::terminal::frame_pacer::*;
 }
+pub mod high_dpi {
+    pub use crate::terminal::high_dpi::*;
+}
 pub mod stdin_buffer {
     pub use crate::terminal::stdin_buffer::*;
 }
@@ -145,6 +149,7 @@ pub mod layout {
 pub mod layout_node {
     pub use crate::app::layout_node::*;
 }
+
 
 // -----------------------------------------------------------------------------
 // Legacy flat re-exports
@@ -194,12 +199,17 @@ pub use crate::components::loader::{
     format_elapsed, indicator_line, Spinner, SPINNER_FRAMES, SPINNER_INTERVAL_MS,
 };
 pub use crate::locale::{Locale, STARTUP_HINTS};
+pub use crate::narrow_terminal::{
+    is_extreme_narrow, is_narrow, narrow_options, NarrowOptions, EXTREME_NARROW_WIDTH,
+    HEADER_HINT_COLLAPSE_THRESHOLD, NARROW_TERMINAL_WIDTH,
+};
 pub use crate::components::markdown::{
     render_markdown, render_markdown_with_links, render_markdown_with_theme,
+    render_markdown_with_transform, MarkdownTransform, TransformError,
 };
 pub use crate::components::message::{
-    tool_fold_hint, MessageItem, MessageView, PendingMessageKind, Role, ToolBlock,
-    ToolBlockRenderer, TOOL_PREVIEW_LINES,
+    stop_reason_tail_line, tool_fold_hint, MessageItem, MessageView, PendingMessageKind, Role,
+    ToolBlock, ToolBlockRenderer, TOOL_PREVIEW_LINES,
 };
 pub use crate::components::mouse_region::{MouseRegion, MouseRegionPoint};
 pub use crate::components::prompt::{Prompt, PromptAction};
@@ -227,6 +237,11 @@ pub use crate::terminal::image::{
     ImageProtocol, ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions, KittyImageMetadata,
     KittyImagePlacement, Override, RenderImageResult, TerminalCapabilities, ITERM2_PREFIX,
     KITTY_CHUNK_SIZE, KITTY_PREFIX,
+};
+pub use crate::terminal::high_dpi::{
+    detect_device_pixel_ratio_from_env, detect_device_pixel_ratio_with, device_pixel_ratio,
+    refresh_device_pixel_ratio, set_device_pixel_ratio, DevicePixelRatio, DEFAULT_DPI_RATIO,
+    HIGH_DPI_RATIO,
 };
 pub use crate::terminal::title::{
     auto_title, path_basename, sanitize_title, title_sequence, TITLE_CLOSE, TITLE_OPEN,

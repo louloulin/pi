@@ -407,10 +407,15 @@ impl ProviderRouter {
         let mut adapters: HashMap<String, SharedStreamFn> = HashMap::new();
 
         for spec in BUILTIN_PROVIDERS {
-            let base_url = env_value(&get_env, spec.base_url_env)
-                .unwrap_or_else(|| spec.default_base_url.to_string());
-            let api_key = if spec.requires_api_key() {
-                match resolve_provider_key(
+            // OAuth-first providers (`github-copilot`, `openai-codex`,
+            // `kimi-coding`) declare no `api_key_env` and no ambient path,
+            // and the OAuth flow that would authenticate them is not wired
+            // in the Rust port yet. Skip them so the router reports
+            // "unconfigured" until P33 lands.
+            if spec.requires_api_key() {
+                let base_url = env_value(&get_env, spec.base_url_env)
+                    .unwrap_or_else(|| spec.default_base_url.to_string());
+                let api_key = match resolve_provider_key(
                     spec,
                     &get_env,
                     credentials.as_ref(),
@@ -429,14 +434,20 @@ impl ProviderRouter {
                         );
                         continue;
                     }
+                };
+                if let Some(adapter) = build_adapter(spec.api, api_key, base_url) {
+                    adapters.insert(spec.id.to_string(), adapt_retry(adapter, retry_policy));
                 }
-            } else {
-                // Keyless providers (faux) are always registered.
-                String::new()
-            };
-            if let Some(adapter) = build_adapter(spec.api, api_key, base_url) {
-                adapters.insert(spec.id.to_string(), adapt_retry(adapter, retry_policy));
+            } else if spec.oauth.is_none() && !spec.models.is_empty() {
+                // Keyless provider with a built-in catalog (faux): always
+                // register so tests and the offline binary can speak it.
+                let base_url = env_value(&get_env, spec.base_url_env)
+                    .unwrap_or_else(|| spec.default_base_url.to_string());
+                if let Some(adapter) = build_adapter(spec.api, String::new(), base_url) {
+                    adapters.insert(spec.id.to_string(), adapt_retry(adapter, retry_policy));
+                }
             }
+            // OAuth-first provider with no catalog: skip — see comment above.
         }
 
         Self {

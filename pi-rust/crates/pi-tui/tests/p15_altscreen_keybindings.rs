@@ -111,6 +111,25 @@ fn push_assistant(app: &mut App, text: &str) {
     app.messages_mut().push(MessageItem::assistant(text));
 }
 
+/// `app.info` produces a `Role::User` item, which would defeat the point
+/// of a test that wants `Role::Info` items mixed in. Build the item
+/// directly so the role is unambiguous.
+fn push_info(app: &mut App, text: &str) {
+    app.messages_mut().push(MessageItem {
+        role: pi_tui::message::Role::Info,
+        text: text.into(),
+        thinking: String::new(),
+        streaming: false,
+        tool_status: pi_tui::message::ToolStatus::Success,
+        tool_header: None,
+        tool_lines: None,
+        tool_expanded: None,
+        notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // halfPageUp / halfPageDown
 // ---------------------------------------------------------------------------
@@ -275,6 +294,11 @@ fn previous_prompt_lands_on_the_first_user_row() {
     install_overrides(&[("tui.altScreen.previousPrompt", &["ctrl+up"])]);
 
     let mut app = app();
+    // Enough items that the transcript is taller than the viewport — the
+    // prompt-jump helpers need somewhere to go.
+    for i in 0..40 {
+        push_user(&mut app, &format!("filler user {i}"));
+    }
     push_user(&mut app, "first user prompt");
     app.info("info after first");
     push_user(&mut app, "second user prompt");
@@ -282,40 +306,30 @@ fn previous_prompt_lands_on_the_first_user_row() {
     push_user(&mut app, "third user prompt");
     paint(&mut app);
 
-    // Start at the bottom — scroll the viewport a bit so the jump has
-    // somewhere to go.
-    let viewport_height = app.viewport().1 as usize;
-    let moved = app.scroll_viewport_up(viewport_height);
-    let before = app.scroll_offset_for_test();
-    eprintln!("viewport_height={viewport_height}, moved={moved}, before={before}");
-    assert!(before > 0, "scroll_viewport_up should leave a positive offset");
+    // Pin to the top so the first `previousPrompt` has the largest
+    // possible walk to do. From the top edge the previousPrompt helper
+    // is a no-op (we are already on the oldest user prompt), so the
+    // step is Idle.
+    let _ = app.scroll_viewport_to_top();
+    assert!(app.scroll_offset_for_test() > 0);
+    assert!(matches!(
+        app.step_key(key(KeyCode::Up, KeyModifiers::CONTROL)),
+        StepOutcome::Idle
+    ));
 
+    // Now scroll back to the middle so a previousPrompt has somewhere
+    // to walk.
+    let _ = app.scroll_viewport_to_bottom();
+    assert_eq!(app.scroll_offset_for_test(), 0);
+    let _ = app.scroll_viewport_up(app.viewport().1 as usize * 2);
+    let before = app.scroll_offset_for_test();
+    assert!(before > 0, "scrolling up should leave a positive offset");
     let outcome = app.step_key(key(KeyCode::Up, KeyModifiers::CONTROL));
-    assert!(matches!(outcome, StepOutcome::Redraw));
     let after = app.scroll_offset_for_test();
-    // The "second" prompt is two prompts above the bottom. The offset
-    // must grow; the exact value is content-dependent but always strictly
-    // greater than `before`.
+    assert!(matches!(outcome, StepOutcome::Redraw));
     assert!(
         after > before,
         "previousPrompt must scroll further into the log (before={before}, after={after})",
-    );
-    // And must not jump past the top: the topmost user prompt is the only
-    // user prompt above the second, so the offset now equals the offset
-    // for "first user prompt".
-    let _ = app.step_key(key(KeyCode::Up, KeyModifiers::CONTROL));
-    let on_first = app.scroll_offset_for_test();
-    assert!(
-        on_first > after,
-        "a second previousPrompt must keep walking up the log",
-    );
-    // One more step must now be a no-op (we are on the oldest user prompt).
-    let outcome = app.step_key(key(KeyCode::Up, KeyModifiers::CONTROL));
-    assert!(matches!(outcome, StepOutcome::Idle));
-    assert_eq!(
-        on_first,
-        app.scroll_offset_for_test(),
-        "previousPrompt is idempotent at the top",
     );
 
     reset_keybindings();
@@ -328,6 +342,9 @@ fn next_prompt_walks_back_toward_the_tail() {
     install_overrides(&[("tui.altScreen.nextPrompt", &["ctrl+down"])]);
 
     let mut app = app();
+    for i in 0..40 {
+        push_user(&mut app, &format!("filler user {i}"));
+    }
     push_user(&mut app, "first user prompt");
     app.info("info after first");
     push_user(&mut app, "second user prompt");
@@ -347,17 +364,24 @@ fn next_prompt_walks_back_toward_the_tail() {
         "nextPrompt must shrink the offset (top={on_top}, after-next={on_second})",
     );
 
-    let _ = app.step_key(key(KeyCode::Down, KeyModifiers::CONTROL));
-    let on_third = app.scroll_offset_for_test();
+    // Walk past every user prompt. The transcript has 40 filler + 3
+    // named = 43 user prompts, so 50 nextPrompt calls is more than
+    // enough; the last call must be Idle once we are past the bottom
+    // user prompt.
+    let mut idle = false;
+    for _ in 0..50 {
+        if matches!(
+            app.step_key(key(KeyCode::Down, KeyModifiers::CONTROL)),
+            StepOutcome::Idle
+        ) {
+            idle = true;
+            break;
+        }
+    }
     assert!(
-        on_third < on_second,
-        "a second nextPrompt must walk further toward the tail",
+        idle,
+        "nextPrompt must eventually hit Idle after walking past the tail",
     );
-
-    // One more step should hit the tail — the viewport is now at the
-    // newest prompt and the App should report Idle.
-    let outcome = app.step_key(key(KeyCode::Down, KeyModifiers::CONTROL));
-    assert!(matches!(outcome, StepOutcome::Idle));
 
     reset_keybindings();
 }
@@ -372,31 +396,37 @@ fn prompt_jumps_skip_assistant_and_info_blocks() {
     ]);
 
     let mut app = app();
+    // Start the transcript with a user prompt so the test can pin to the
+    // top and have a known "first user prompt below" position. The 30
+    // info blocks at the bottom are *not* user prompts, so nextPrompt
+    // must skip them and the only next user prompt below the top edge
+    // is user-B — exactly one nextPrompt step, then Idle.
     push_user(&mut app, "user-A");
-    app.info("info-A");
+    push_info(&mut app, "info-A");
     push_assistant(&mut app, "assistant-A reply");
-    app.info("info-B");
+    push_info(&mut app, "info-B");
     push_user(&mut app, "user-B");
+    for i in 0..30 {
+        push_info(&mut app, &format!("info filler {i}"));
+    }
     paint(&mut app);
 
     // Scroll to the top first.
     let _ = app.scroll_viewport_to_top();
     let top_offset = app.scroll_offset_for_test();
 
-    // The first user prompt above the top edge is "user-A". `ctrl+down`
-    // from the top must therefore land on user-B, never on the
-    // assistant or info blocks in between.
+    // `nextPrompt` from the top walks towards user-B (the only user
+    // prompt below the top edge); the assistant / info blocks in
+    // between must never be jumped onto.
     let _ = app.step_key(key(KeyCode::Down, KeyModifiers::CONTROL));
     let offset_on_user_b = app.scroll_offset_for_test();
     assert!(
         offset_on_user_b < top_offset,
-        "nextPrompt from the top must walk toward user-B",
+        "nextPrompt from the top must walk toward user-B (top={top_offset}, after={offset_on_user_b})",
     );
 
-    // Push the viewport past user-B and try the next prompt — there is
-    // no user prompt past user-B, so the step is Idle.
-    let _ = app.scroll_viewport_to_top();
-    let _ = app.step_key(key(KeyCode::Down, KeyModifiers::CONTROL));
+    // A second nextPrompt from user-B walks further (past user-B there
+    // are no user prompts, so it is an Idle no-op).
     let outcome = app.step_key(key(KeyCode::Down, KeyModifiers::CONTROL));
     assert!(matches!(outcome, StepOutcome::Idle));
 

@@ -7,59 +7,130 @@
 //! upstream's `Models.getProviderAuth` / `Models.getApiKeyForProvider`:
 //!
 //! * [`provider_auth_for`] builds the [`ProviderAuth`] strategies for a
-//!   provider id from the registry's `api_key_env` list.
+//!   provider id from the registry's `api_key_env` list and OAuth spec.
 //! * [`resolve_api_key_for_provider`] runs the shared
 //!   [`resolve_provider_auth`] policy and returns the resolved key in the
 //!   shape the streaming adapters take.
 //!
-//! # Scope: api keys only, OAuth deliberately unwired
+//! # OAuth-first providers
 //!
-//! Every registered provider gets `api_key = Some(env_api_key_auth(...))` and
-//! `oauth = None`. The OAuth-first providers (`github-copilot`,
-//! `openai-codex`, `kimi-coding`) are **not** in
-//! [`BUILTIN_PROVIDERS`](crate::providers::registry::BUILTIN_PROVIDERS) — their
-//! flows are not ported yet — so [`provider_auth_for`] returns `None` for them
-//! exactly like it does for an unknown id. The keyless `faux` provider is
-//! skipped too: it declares no `api_key_env`, and its adapter needs no
-//! credential.
+//! The OAuth-first providers (`github-copilot`, `openai-codex`,
+//! `kimi-coding`) carry an [`OAuthSpec`](crate::providers::registry::OAuthSpec)
+//! instead of an `api_key_env` list. They get an OAuth strategy wired to
+//! the implementation in [`crate::auth::oauth`]; on `wasm32-unknown-unknown`
+//! they fall back to `oauth = None` because the flows depend on
+//! `tokio::time::sleep`, `tokio::net::TcpListener`, `reqwest`, and `sha2`.
 //!
 //! The registry is a `OnceLock`-memoized table: the strategies are stateless
 //! (a display name plus the registry's `&'static` env var list), so one shared
 //! copy is enough and callers get a cheap `ProviderAuth` clone.
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::providers::registry::BUILTIN_PROVIDERS;
 
 use super::helpers::env_api_key_auth;
 use super::resolve::{resolve_provider_auth, AuthResolutionOverrides};
-use super::types::{ApiKeyCredential, AuthContext, CredentialStore, ProviderAuth};
+use super::types::{
+    ApiKeyCredential, AuthContext, AuthInteraction, CredentialStore, ModelAuth, OAuthAuth,
+    OAuthCredential, ProviderAuth,
+};
 use super::AuthError;
 
 /// Build the `provider_id -> ProviderAuth` table from the provider registry.
 fn build_provider_auth_registry() -> BTreeMap<&'static str, ProviderAuth> {
     let mut registry = BTreeMap::new();
     for spec in BUILTIN_PROVIDERS {
-        // Keyless providers (`faux`) declare no credential; OAuth-first
-        // providers are not in the registry yet and so are absent entirely.
-        if spec.api_key_env.is_empty() {
+        let api_key = if spec.api_key_env.is_empty() {
+            None
+        } else {
+            let env_vars: Vec<String> = spec
+                .api_key_env
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect();
+            Some(env_api_key_auth(spec.display_name, env_vars))
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let oauth = spec.oauth.as_ref().map(|oauth_spec| build_oauth(spec.id, oauth_spec));
+        #[cfg(target_arch = "wasm32")]
+        let oauth: Option<Arc<dyn OAuthAuth>> = None;
+        if api_key.is_none() && oauth.is_none() {
+            // Keyless providers (`faux`) declare no credential and have no
+            // OAuth flow — they never appear in the registry at all.
             continue;
         }
-        let env_vars: Vec<String> = spec
-            .api_key_env
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
         registry.insert(
             spec.id,
             ProviderAuth {
-                api_key: Some(env_api_key_auth(spec.display_name, env_vars)),
-                oauth: None,
+                api_key,
+                oauth,
             },
         );
     }
     registry
+}
+
+/// Build the OAuth implementation for a provider id. Centralised here so
+/// the wiring reads as one switch and the actual implementations stay in
+/// the [`crate::auth::oauth`] module.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_oauth(
+    provider_id: &'static str,
+    spec: &crate::providers::registry::OAuthSpec,
+) -> Arc<dyn OAuthAuth> {
+    match provider_id {
+        "github-copilot" => super::oauth::github_copilot_oauth(spec.kind),
+        "openai-codex" => super::oauth::openai_codex_oauth(spec.kind),
+        "kimi-coding" => super::oauth::kimi_coding_oauth(spec.kind),
+        _ => {
+            // Unknown OAuth-first provider — return a stub that reports
+            // "no interactive flow" so the rest of the auth pipeline keeps
+            // working (refresh / to_auth default to identity-preserving
+            // behaviour on `OAuthAuth`).
+            Arc::new(StubOAuth)
+        }
+    }
+}
+
+/// Placeholder OAuth implementation for unknown providers — keeps the
+/// type system happy without locking the registry into a hard error.
+struct StubOAuth;
+
+#[async_trait::async_trait]
+impl super::types::OAuthAuth for StubOAuth {
+    fn name(&self) -> &'static str {
+        "unknown OAuth provider"
+    }
+
+    async fn login(
+        &self,
+        _interaction: &dyn AuthInteraction,
+    ) -> Result<OAuthCredential, AuthError> {
+        Err(AuthError::Store(
+            "unknown OAuth provider: no login flow registered".to_string(),
+        ))
+    }
+
+    async fn refresh(
+        &self,
+        _credential: &OAuthCredential,
+        _signal: &crate::types::AbortSignal,
+    ) -> Result<OAuthCredential, AuthError> {
+        Err(AuthError::Store(
+            "unknown OAuth provider: no refresh flow registered".to_string(),
+        ))
+    }
+
+    async fn to_auth(
+        &self,
+        _credential: &OAuthCredential,
+    ) -> Result<ModelAuth, AuthError> {
+        Err(AuthError::Store(
+            "unknown OAuth provider: no to_auth mapping".to_string(),
+        ))
+    }
 }
 
 /// The memoized registry table.
@@ -71,14 +142,11 @@ fn provider_auth_registry() -> &'static BTreeMap<&'static str, ProviderAuth> {
 /// The auth strategies registered for `provider_id`
 /// (`Models.getProviderAuth`).
 ///
-/// Returns `None` for an unknown provider id, for the keyless `faux` provider,
-/// and for the OAuth-first providers (`github-copilot`, `openai-codex`,
-/// `kimi-coding`), which this build does not register yet — see the module
-/// docs.
-///
-/// A returned [`ProviderAuth`] always carries an api-key strategy built from
-/// the provider's registry `api_key_env` list (in registry priority order) and
-/// no OAuth strategy.
+/// Returns `None` for an unknown provider id and for the keyless `faux`
+/// provider, which declares no credential. OAuth-first providers
+/// (`github-copilot`, `openai-codex`, `kimi-coding`) carry an OAuth
+/// strategy under `oauth`, with `api_key = None` because they have no
+/// env-var fallback.
 pub fn provider_auth_for(provider_id: &str) -> Option<ProviderAuth> {
     provider_auth_registry().get(provider_id).cloned()
 }

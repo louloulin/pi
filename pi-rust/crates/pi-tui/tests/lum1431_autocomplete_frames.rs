@@ -6,7 +6,7 @@
 //! paints it. Three panels, all 76×16:
 //!
 //! 1. the dropdown open over the transcript after a **press on `model`** — the
-//!    highlight moved to the pressed row (`❯ model`) and the draft is still
+//!    highlight moved to the pressed row (`→ model`) and the draft is still
 //!    `/`, which is what a click must not skip;
 //! 2. a six-command list in a three-row window — the trailing `(1/6)` counter
 //!    is painted but is not a candidate;
@@ -134,7 +134,7 @@ fn frame(app: &mut App) -> Buffer {
 }
 
 /// One buffer row as plain text (the dropdown's selected row is marked by
-/// `❯`, and the theme's background is not carried by a text dump).
+/// `→`, and the theme's background is not carried by a text dump).
 fn row(buf: &Buffer, y: u16) -> String {
     let mut text = String::new();
     let mut skip = 0usize;
@@ -176,7 +176,7 @@ fn frame_dump_for_the_dropdown_press_screenshot() {
     let model_row = row_with(&buf, "model");
     press(&mut app, 1, model_row);
     assert!(
-        row(&frame(&mut app), model_row).starts_with("❯ model"),
+        row(&frame(&mut app), model_row).starts_with("→ model"),
         "the press should have moved the highlight onto `model`"
     );
     assert_eq!(

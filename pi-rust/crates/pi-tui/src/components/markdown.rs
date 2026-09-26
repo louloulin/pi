@@ -88,7 +88,7 @@
 
 use crate::components::latex::{render_latex, render_latex_with};
 use crate::utils::styled::{plain_text, SpanStyle, StyledLine, StyledSpan};
-use crate::theme::{Theme, ThemeColor};
+use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::utils::width::{char_columns, columns};
 
 /// Indentation applied to the body of a fenced code block (upstream
@@ -178,6 +178,146 @@ pub fn render_markdown_with_theme(source: &str, theme: &Theme, width: usize) -> 
         }
     }
     lines
+}
+
+/// Phase 22 (B15) — error a `MarkdownTransform` can return.
+///
+/// The upstream `MarkdownTransform.transform` returns a value or
+/// throws (`packages/tui/src/components/markdown.ts:1083-1117`). The
+/// Rust port mirrors the throw path with a [`Result`] so a plugin
+/// author can reject a transform outcome without panicking; the
+/// caller ([`render_markdown_with_transform`]) catches the error and
+/// falls back to the original lines plus a one-row warning, so the
+/// user still sees the body even when the transform fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransformError {
+    /// Short, human-readable description of what failed.
+    pub message: String,
+}
+
+impl TransformError {
+    /// Convenience constructor — most call sites only need a string.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for TransformError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TransformError {}
+
+/// Phase 22 (B15) — extension point that lets plugins rewrite the
+/// rendered markdown output before it lands in the buffer.
+///
+/// Upstream's `MarkdownTransform` interface
+/// (`packages/tui/src/components/markdown.ts:1083-1117`) is what
+/// powers the `customMarkdownTransform` knob on the editor: a
+/// downstream tool can rewrite links, swap glyphs, redact secrets, or
+/// fold code blocks without touching the renderer. The Rust port
+/// mirrors the same shape on the **rendered lines** (rather than the
+/// AST) so a transform sees exactly what the user would otherwise
+/// see and can apply purely-presentational changes without learning
+/// the internal `Block` enum.
+///
+/// Returning `Err` is the "throw" path: the wrapper catches it and
+/// keeps the original lines, appending a dim warning row so the
+/// reader knows the transform did not apply. Returning `Ok` with an
+/// empty `Vec` is allowed (the wrapper renders nothing in that case);
+/// returning `Ok` with the same input lines is the identity transform.
+pub trait MarkdownTransform {
+    /// Rewrite the rendered markdown lines.
+    ///
+    /// * `lines` — the lines produced by the standard renderer, in
+    ///   wrap order. The transform may inspect, replace, or drop
+    ///   them.
+    /// * `width` — the column budget the renderer was asked to fit
+    ///   into, in case the transform needs to re-wrap or truncate.
+    ///
+    /// Returning `Err` signals "could not apply". The wrapper logs the
+    /// error, returns the unmodified lines, and appends a single
+    /// warning row so the reader can tell something was off.
+    fn transform(
+        &self,
+        lines: Vec<StyledLine>,
+        width: usize,
+    ) -> Result<Vec<StyledLine>, TransformError>;
+}
+
+/// Phase 22 (B15) — render markdown through a [`MarkdownTransform`].
+///
+/// This is the entry point a plugin or driver uses when it wants to
+/// customise the assistant body's appearance without writing a
+/// fork of the renderer. The function:
+///   1. Renders `source` through the standard pipeline (so the
+///      transform sees the same output the buffer would otherwise
+///      receive).
+///   2. Hands the lines to `transform.transform(...)`.
+///   3. On success, returns the transformer's lines verbatim.
+///   4. On error, returns the **original** lines and appends a
+///      dim `⚠ <message>` row so the failure is visible without
+///      obscuring the body.
+///
+/// The wrapper is total: it never panics, never loops, and never
+/// drops the body even when the transformer's `transform` itself
+/// panics — the panic is caught and turned into a [`TransformError`]
+/// with the panic message.
+pub fn render_markdown_with_transform(
+    source: &str,
+    width: usize,
+    transform: &dyn MarkdownTransform,
+) -> Vec<StyledLine> {
+    let original = render_markdown_inner(source, width);
+    // Catch a panicking transform: the contract says the wrapper is
+    // total. A plugin author who panics inside `transform` should not
+    // crash the whole transcript render.
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        transform.transform(original.clone(), width)
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = panic_message(&payload);
+            Err(TransformError::new(message))
+        }
+    };
+    match result {
+        Ok(lines) => lines,
+        Err(err) => {
+            // Swallow the error: keep the original body lines and
+            // append a single warning row so the reader knows the
+            // transform did not apply. The prefix is empty so the
+            // warning aligns with the body indent. When the original
+            // body was empty, no warning is appended — the user has
+            // nothing to look at, and a lone `⚠` row would look like
+            // the renderer itself failed.
+            let mut out = original;
+            if !out.is_empty() {
+                out.push(vec![StyledSpan::new(
+                    format!("⚠ {}", err.message),
+                    SpanStyle::fg(ThemeColor::Dim),
+                )]);
+            }
+            out
+        }
+    }
+}
+
+/// Best-effort panic payload → string conversion. The payload type is
+/// `Box<dyn Any + Send>` so the function has to do the downcast by
+/// hand; unknown payloads fall back to a generic message.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "transform panicked".to_string()
 }
 
 /// A block-level markdown construct.
@@ -942,7 +1082,21 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                 maybe_blank(&mut out, next);
             }
             Block::Heading { level, text } => {
-                let mut style = with_fg(base, ThemeColor::MdHeading).bold();
+                // P20 nanopi borrow: each heading level gets its own
+                // warm colour (see `nanopi/src/render/markdown.rs:57-79`,
+                // H1=`Indexed(214)` / H2=`Indexed(220)` / H3=`Indexed(228)`).
+                // The TS pi-tui uses one colour for every level; the
+                // borrow makes the hierarchy visible before the eye
+                // reaches the `#` prefix. Levels 4–6 fall through to
+                // `MdHeading` because nanopi only specialises the top
+                // three.
+                let heading_color = match *level {
+                    1 => ThemeColor::MdHeading1,
+                    2 => ThemeColor::MdHeading2,
+                    3 => ThemeColor::MdHeading3,
+                    _ => ThemeColor::MdHeading,
+                };
+                let mut style = with_fg(base, heading_color).bold();
                 if *level == 1 {
                     style = style.underline();
                 }
@@ -1019,8 +1173,17 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                 maybe_blank(&mut out, next);
             }
             Block::Quote(inner) => {
+                // Gutter `▏ ` + non-italic body, borrowed from nanopi's
+                // `nanopi/src/render/markdown.rs:96-104`. The italic body
+                // we previously used collided visually with the model's
+                // thinking stream (same `gray` slot, same italic modifier),
+                // so a reply that quoted something rendered identically to
+                // the model muttering to itself. The half-block gutter now
+                // carries the "this is quoted" signal — cheaper than
+                // spending another colour slot, and consistent with the
+                // italic-free body nanopi ships.
                 let inner_width = width.saturating_sub(2).max(1);
-                let quote_base = with_fg(base, ThemeColor::MdQuote).italic();
+                let quote_base = with_fg(base, ThemeColor::MdQuote);
                 let mut inner_lines = render_blocks(inner, inner_width, quote_base);
                 while inner_lines.last().is_some_and(|line| line.is_empty()) {
                     inner_lines.pop();
@@ -1028,7 +1191,7 @@ fn render_blocks(blocks: &[Block], width: usize, base: SpanStyle) -> Vec<StyledL
                 for line in inner_lines {
                     for wrapped in wrap_line(&line, inner_width) {
                         let mut spans: StyledLine = vec![StyledSpan::new(
-                            "│ ",
+                            "▏ ",
                             SpanStyle::fg(ThemeColor::MdQuoteBorder),
                         )];
                         spans.extend(wrapped);
@@ -1438,7 +1601,11 @@ fn parse_inline(chars: &[char], base: SpanStyle, out: &mut StyledLine) {
                 if let Some(end) = find_char(chars, i + 1, '`') {
                     if end > i + 1 {
                         let code: String = chars[i + 1..end].iter().collect();
-                        push_span(out, code, with_fg(base, ThemeColor::MdCode));
+                        // nanopi borrow: inline `code` gets a bg fill so it
+                        // reads as a syntactic token rather than coloured
+                        // prose. See `nanopi/src/render/markdown.rs:166-174`
+                        // (bg=Indexed(236) + fg=Indexed(228)).
+                        push_span(out, code, with_fg_bg(base, ThemeColor::MdCode, ThemeBg::MdCodeBg));
                         i = end + 1;
                         continue;
                     }
@@ -1830,6 +1997,17 @@ fn is_escapable(c: char) -> bool {
 fn with_fg(base: SpanStyle, fg: ThemeColor) -> SpanStyle {
     SpanStyle {
         fg: Some(fg),
+        ..base
+    }
+}
+
+/// `base` with its foreground replaced by `fg` and background replaced by `bg`.
+/// Used by the inline-`code` path to borrow nanopi's "fill + colour" pattern
+/// (`Indexed(236)` bg + `Indexed(228)` fg).
+fn with_fg_bg(base: SpanStyle, fg: ThemeColor, bg: ThemeBg) -> SpanStyle {
+    SpanStyle {
+        fg: Some(fg),
+        bg: Some(bg),
         ..base
     }
 }

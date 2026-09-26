@@ -183,6 +183,8 @@ fn thinking_is_visible_by_default() {
         tool_expanded: None,
         tool_status: Default::default(),
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
     assert!(rendered(&app).contains("weigh the options"));
 }
@@ -200,6 +202,8 @@ fn ctrl_t_toggles_thinking_and_flashes_the_status_hint() {
         tool_expanded: None,
         tool_status: Default::default(),
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
 
     assert_eq!(app.step(ctrl('t')), StepOutcome::Redraw);

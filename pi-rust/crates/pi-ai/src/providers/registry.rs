@@ -39,6 +39,7 @@
 //! [`super::openai_responses::OpenAiResponsesProvider`], and so on.
 
 use pi_protocol::Api;
+use serde::{Deserialize, Serialize};
 
 /// Per-1M-token pricing for one model, in **micro-USD** (USD × 1e6).
 ///
@@ -165,13 +166,47 @@ pub struct ProviderSpec {
     /// providers that need no transport (faux).
     pub default_base_url: &'static str,
     /// Credential env vars in priority order. Empty when no credential
-    /// is required (faux).
+    /// is required (faux) or the provider is OAuth-first.
     pub api_key_env: &'static [&'static str],
     /// Base-URL override env vars in priority order. Empty when the
     /// provider has no override.
     pub base_url_env: &'static [&'static str],
     /// Built-in model catalog.
     pub models: &'static [ModelSpec],
+    /// Optional OAuth login descriptor. Set on OAuth-first providers
+    /// (`github-copilot`, `openai-codex`, `kimi-coding`) — runtime
+    /// discovers the flow via [`crate::auth::oauth_registry`].
+    pub oauth: Option<OAuthSpec>,
+}
+
+/// OAuth login flow descriptor (`packages/ai/src/auth/oauth.ts` mirror).
+///
+/// The flow's actual HTTP work (device-code poll, callback server,
+/// token refresh) lives behind an `OAuthFlow` trait registered in
+/// [`crate::auth::oauth_registry`]; this struct only carries the static
+/// metadata the TUI needs to render the login dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthSpec {
+    /// Login button label, e.g. "Sign in with GitHub".
+    pub login_label: &'static str,
+    /// Authorization URL the user opens (callback flow) or the issuer
+    /// shown beside the device code.
+    pub auth_url: &'static str,
+    /// Flow kind.
+    pub kind: OAuthKindSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum OAuthKindSpec {
+    /// OAuth callback server: open browser to `auth_url`, listen on a
+    /// local port, exchange the callback for a token.
+    Callback { port_range: (u16, u16) },
+    /// OAuth device code: show URL + user code, poll until the user
+    /// completes authorization at the URL.
+    DeviceCode { interval_ms: u32 },
+    /// OAuth manual: user pastes the redirect URL or pasted code.
+    Manual,
 }
 
 impl ProviderSpec {
@@ -719,6 +754,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &[],
         base_url_env: &[],
         models: FAUX_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "openai",
@@ -728,6 +764,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["OPENAI_API_KEY"],
         base_url_env: &["OPENAI_BASE_URL"],
         models: &[ModelSpec::new("gpt-4o-mini", "GPT-4o mini").with_limits(128_000, 16_384)],
+        oauth: None,
     },
     ProviderSpec {
         id: "openai-responses",
@@ -737,6 +774,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["OPENAI_API_KEY"],
         base_url_env: &["OPENAI_BASE_URL"],
         models: OPENAI_RESPONSES_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "azure-openai-responses",
@@ -746,6 +784,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["AZURE_OPENAI_API_KEY"],
         base_url_env: &["AZURE_OPENAI_BASE_URL"],
         models: AZURE_OPENAI_RESPONSES_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "anthropic",
@@ -763,6 +802,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
             ModelSpec::new("claude-opus-4-5", "Claude Opus 4.5").with_limits(200_000, 8_192),
             ModelSpec::new("claude-haiku-4-5", "Claude Haiku 4.5").with_limits(200_000, 8_192),
         ],
+        oauth: None,
     },
     ProviderSpec {
         id: "google",
@@ -782,6 +822,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
                 .with_limits(1_048_576, 65_536)
                 .with_pricing(Pricing::micro_usd(100_000, 400_000, 25_000, 0)),
         ],
+        oauth: None,
     },
     ProviderSpec {
         id: "ant-ling",
@@ -791,6 +832,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["ANT_LING_API_KEY"],
         base_url_env: &["ANT_LING_BASE_URL"],
         models: ANT_LING_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "baseten",
@@ -800,6 +842,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["BASETEN_API_KEY"],
         base_url_env: &["BASETEN_BASE_URL"],
         models: BASETEN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "cerebras",
@@ -809,6 +852,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["CEREBRAS_API_KEY"],
         base_url_env: &["CEREBRAS_BASE_URL"],
         models: CEREBRAS_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "deepseek",
@@ -818,6 +862,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["DEEPSEEK_API_KEY"],
         base_url_env: &["DEEPSEEK_BASE_URL"],
         models: DEEPSEEK_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "fireworks",
@@ -827,6 +872,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["FIREWORKS_API_KEY"],
         base_url_env: &["FIREWORKS_BASE_URL"],
         models: FIREWORKS_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "groq",
@@ -836,6 +882,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["GROQ_API_KEY"],
         base_url_env: &["GROQ_BASE_URL"],
         models: GROQ_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "huggingface",
@@ -845,6 +892,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["HF_TOKEN"],
         base_url_env: &["HUGGINGFACE_BASE_URL"],
         models: HUGGINGFACE_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "minimax",
@@ -854,6 +902,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["MINIMAX_API_KEY"],
         base_url_env: &["MINIMAX_BASE_URL"],
         models: MINIMAX_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "minimax-cn",
@@ -863,6 +912,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["MINIMAX_CN_API_KEY"],
         base_url_env: &["MINIMAX_CN_BASE_URL"],
         models: MINIMAX_CN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "mistral",
@@ -872,6 +922,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["MISTRAL_API_KEY"],
         base_url_env: &["MISTRAL_BASE_URL"],
         models: MISTRAL_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "moonshotai",
@@ -881,6 +932,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["MOONSHOT_API_KEY"],
         base_url_env: &["MOONSHOT_BASE_URL"],
         models: MOONSHOT_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "moonshotai-cn",
@@ -890,6 +942,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["MOONSHOT_API_KEY"],
         base_url_env: &["MOONSHOT_CN_BASE_URL"],
         models: MOONSHOT_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "nvidia",
@@ -899,6 +952,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["NVIDIA_API_KEY"],
         base_url_env: &["NVIDIA_BASE_URL"],
         models: NVIDIA_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "openrouter",
@@ -908,6 +962,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["OPENROUTER_API_KEY"],
         base_url_env: &["OPENROUTER_BASE_URL"],
         models: OPENROUTER_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "qwen-token-plan",
@@ -917,6 +972,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["QWEN_TOKEN_PLAN_API_KEY"],
         base_url_env: &["QWEN_TOKEN_PLAN_BASE_URL"],
         models: QWEN_TOKEN_PLAN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "qwen-token-plan-cn",
@@ -926,6 +982,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["QWEN_TOKEN_PLAN_CN_API_KEY"],
         base_url_env: &["QWEN_TOKEN_PLAN_CN_BASE_URL"],
         models: QWEN_TOKEN_PLAN_CN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "qwen-token-plan-individual",
@@ -935,6 +992,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["QWEN_TOKEN_PLAN_API_KEY"],
         base_url_env: &["QWEN_TOKEN_PLAN_INDIVIDUAL_BASE_URL"],
         models: QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "together",
@@ -944,6 +1002,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["TOGETHER_API_KEY"],
         base_url_env: &["TOGETHER_BASE_URL"],
         models: TOGETHER_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "vercel-ai-gateway",
@@ -953,6 +1012,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["AI_GATEWAY_API_KEY"],
         base_url_env: &["AI_GATEWAY_BASE_URL"],
         models: VERCEL_AI_GATEWAY_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "xai",
@@ -962,6 +1022,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["XAI_API_KEY"],
         base_url_env: &["XAI_BASE_URL"],
         models: XAI_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "xiaomi",
@@ -971,6 +1032,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["XIAOMI_API_KEY"],
         base_url_env: &["XIAOMI_BASE_URL"],
         models: XIAOMI_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "xiaomi-token-plan-ams",
@@ -980,6 +1042,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
         base_url_env: &["XIAOMI_TOKEN_PLAN_AMS_BASE_URL"],
         models: XIAOMI_TOKEN_PLAN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "xiaomi-token-plan-cn",
@@ -989,6 +1052,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
         base_url_env: &["XIAOMI_TOKEN_PLAN_CN_BASE_URL"],
         models: XIAOMI_TOKEN_PLAN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "xiaomi-token-plan-sgp",
@@ -998,6 +1062,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
         base_url_env: &["XIAOMI_TOKEN_PLAN_SGP_BASE_URL"],
         models: XIAOMI_TOKEN_PLAN_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "zai",
@@ -1007,6 +1072,7 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["ZAI_API_KEY"],
         base_url_env: &["ZAI_BASE_URL"],
         models: ZAI_MODELS,
+        oauth: None,
     },
     ProviderSpec {
         id: "zai-coding-cn",
@@ -1016,6 +1082,56 @@ pub const BUILTIN_PROVIDERS: &[ProviderSpec] = &[
         api_key_env: &["ZAI_CODING_CN_API_KEY"],
         base_url_env: &["ZAI_CODING_CN_BASE_URL"],
         models: ZAI_CODING_CN_MODELS,
+        oauth: None,
+    },
+    // OAuth-first providers — credential arrives via OAuth, not via env var.
+    // `api_key_env` is empty so `build_provider_auth_registry()` will not
+    // register an API-key path; `oauth: Some(...)` is what the TUI looks
+    // at to surface the login button. The actual flow (device code, callback
+    // server, manual paste) is registered in `crate::auth::oauth_registry`.
+    ProviderSpec {
+        id: "github-copilot",
+        display_name: "GitHub Copilot",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://api.githubcopilot.com",
+        api_key_env: &[],
+        base_url_env: &[],
+        models: &[],
+        oauth: Some(OAuthSpec {
+            login_label: "Sign in with GitHub",
+            auth_url: "https://github.com/login/device",
+            kind: OAuthKindSpec::DeviceCode { interval_ms: 5_000 },
+        }),
+    },
+    ProviderSpec {
+        id: "openai-codex",
+        display_name: "OpenAI Codex",
+        api: Api::OpenAiResponses,
+        default_base_url: "https://api.openai.com/v1",
+        api_key_env: &[],
+        base_url_env: &[],
+        models: &[],
+        oauth: Some(OAuthSpec {
+            login_label: "Sign in with OpenAI",
+            auth_url: "https://auth.openai.com/codex",
+            kind: OAuthKindSpec::Callback {
+                port_range: (1455, 1455),
+            },
+        }),
+    },
+    ProviderSpec {
+        id: "kimi-coding",
+        display_name: "Kimi Coding",
+        api: Api::OpenAiChatCompletions,
+        default_base_url: "https://api.kimi.com/coding",
+        api_key_env: &[],
+        base_url_env: &[],
+        models: &[],
+        oauth: Some(OAuthSpec {
+            login_label: "Sign in with Kimi",
+            auth_url: "https://kimi.moonshot.cn/oauth",
+            kind: OAuthKindSpec::Manual,
+        }),
     },
 ];
 

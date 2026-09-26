@@ -114,6 +114,8 @@ fn info_block_paints_custom_message_bg_through_box_layout() {
         tool_lines: None,
         tool_expanded: None,
         notice_lines: None,
+        stop_reason: None,
+        elapsed_ms: None,
     });
 
     // Info blocks have no `·` (TS parity — `custom-message.ts` adds

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Widget;
 
 use crate::app::{SearchState, SelectionPoint};
@@ -897,6 +897,17 @@ pub fn paint_prompt(
     };
     let label_style = Some(SpanStyle::fg(label_slot).to_style(theme));
     let label_width = columns(prompt.label()) as u16;
+    // P9 removed the legacy `> ` chevron label from the composer, so
+    // `label_width` is 0 by default — `label_style` would never be applied
+    // and the bash-mode indicator (`!` / `!!`) would land at col 0 in the
+    // composer's default body colour. Detect that case and color the
+    // leading `!` so the bash signal still reads.
+    let bash_indicator_chars = if is_bash_mode(&prompt.text()) {
+        if prompt.text().starts_with("!!") { 2 } else { 1 }
+    } else {
+        0
+    };
+    let label_col_count = label_width.max(bash_indicator_chars) as usize;
     // Paint the border row above the composer (only when the composer is
     // multi-row). The row keeps the parent's background — the message
     // viewport above the prompt — and stamps the border colour as the
@@ -963,11 +974,23 @@ pub fn paint_prompt(
                     // label glyph renders with both colours — the
                     // background painted above is overwritten by the
                     // style's bg slot otherwise.
-                    if row == 0 && col < label_width as usize {
+                    if row == 0 && col < label_col_count {
                         // Ratatui's Style has no `patch_bg`; drop the
                         // existing bg (none for label_style here) and
                         // add the row background.
                         style = style.bg(row_bg_style.bg.unwrap_or(Color::Reset));
+                        cell.set_style(style);
+                    } else if ch == '▍' {
+                        // The cursor glyph (`▍`, a single-cell block)
+                        // carries the **reversed-video** modifier. This
+                        // is what the IME candidate window anchors to:
+                        // the OS reads the cell's column from the
+                        // reversed run, so the candidate overlay lines
+                        // up with the visible caret instead of floating
+                        // one column off. TS does the same in
+                        // `editor.ts` (`paintCursor`) — the visible caret
+                        // and the IME anchor are the *same* cell.
+                        style = style.add_modifier(Modifier::REVERSED);
                         cell.set_style(style);
                     }
                 }
@@ -979,6 +1002,65 @@ pub fn paint_prompt(
                 }
             }
             col += glyph_width;
+        }
+        // Phase N4 — overflow hint. nanopi appends `(line n/N)` DarkGray
+        // italic at the right edge of the *top* visible row when the
+        // draft overflows the composer window so the reader can see
+        // where the caret sits in a long draft. We only paint it on the
+        // first composer row, and only when the draft really overflows
+        // — the upstream rule is "shown once, on the top visible row"
+        // (`nanopi/src/mode/tui.rs:5103-5113`).
+        if row == 0 {
+            if let Some(hint) = prompt.overflow_hint(prompt_rect.width, max_rows) {
+                paint_overflow_hint(buf, prompt_rect, y, &hint, theme, row_bg_style);
+            }
+        }
+    }
+}
+
+/// Paint the N4 overflow hint at the right edge of `row_y` inside
+/// `rect`. The hint is italic DarkGray on the existing row background
+/// (the `selectedBg` slot the composer already paints). Right-aligned
+/// against `rect.width` so it lands one column inside the screen edge
+/// instead of overlapping the rounded corner.
+///
+/// Wide glyphs are skipped if they would push past the right edge —
+/// the hint is best-effort; a clipped hint that drops a paren is
+/// better than a one-character drift left.
+fn paint_overflow_hint(
+    buf: &mut Buffer,
+    rect: Rect,
+    row_y: u16,
+    hint: &str,
+    theme: &Theme,
+    row_bg_style: Style,
+) {
+    use ratatui::style::{Color, Modifier};
+    let hint_cols = columns(hint);
+    if hint_cols == 0 || (rect.width as usize) <= hint_cols + 1 {
+        // Not enough room — drop the hint rather than collide with the
+        // right edge.
+        return;
+    }
+    let start_col = (rect.width as usize).saturating_sub(hint_cols + 1);
+    let x0 = rect.x + start_col as u16;
+    // nanopi paints the hint in `Color::DarkGray` specifically so it
+    // stays readable on the selectedBg slot even when the terminal dims
+    // fg aggressively. We resolve through the Dim slot to honour the
+    // theme palette, but fall back to DarkGray when the theme did not
+    // bind a colour (plain themes / unstyled output).
+    let dim_style = SpanStyle::fg(ThemeColor::Dim).italic().to_style(theme);
+    let fg = dim_style.fg.unwrap_or(Color::DarkGray);
+    let mut style = row_bg_style.fg(fg).add_modifier(Modifier::ITALIC);
+    // Drop the row bg from the merged style — the row already paints it
+    // cell-by-cell above, and ratatui's `set_style` merges with what is
+    // already there, so re-applying `bg` would re-stamp the same slot.
+    style = style.bg(Color::Reset);
+    for (offset, ch) in hint.chars().enumerate() {
+        let x = x0 + offset as u16;
+        if let Some(cell) = buf.cell_mut((x, row_y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
         }
     }
 }

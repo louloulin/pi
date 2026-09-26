@@ -49,9 +49,13 @@
 		"toolOutput": "gray",
 
 		"mdHeading": "#f0c674",
+		"mdHeading1": "#ff875f",
+		"mdHeading2": "#ffaf5f",
+		"mdHeading3": "#ffd75f",
 		"mdLink": "#81a2be",
 		"mdLinkUrl": "dimGray",
 		"mdCode": "accent",
+		"mdCodeBg": "#1e1e24",
 		"mdCodeBlock": "green",
 		"mdCodeBlockBorder": "gray",
 		"mdQuote": "gray",

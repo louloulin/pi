@@ -74,7 +74,7 @@ fn select_list_methods_emit_the_exact_dark_ansi_sequences() {
         format!("{MUTED}  (1/12)\x1b[39m")
     );
     // Upstream `selectedPrefix` (`theme.ts:1211`).
-    assert_eq!(styles.selected_prefix("❯ "), format!("{ACCENT}❯ \x1b[39m"));
+    assert_eq!(styles.selected_prefix("→ "), format!("{ACCENT}→ \x1b[39m"));
 }
 
 #[test]
@@ -87,12 +87,18 @@ fn selector_styles_the_selected_row_and_the_description_column() {
     );
     let themed = sel.render_lines_themed(80, &styles);
 
-    // The selected row is wrapped whole: accent fg over the selectedBg
-    // background (default 32-column primary column => 26 spaces of padding).
-    let spacing = " ".repeat(26);
+    // N7 right-aligns descriptions to the row's right edge. With width=80
+    // and a 6-char label + 6-char description, the label_max = 80 - 2 - 2 - 6
+    // = 70 columns, leaving 64 trailing spaces between the label and the
+    // 2-column gap that precedes "OpenAI". The selected row is wrapped
+    // whole: accent fg over the selectedBg background (with the bold
+    // modifier that `SelectListStyles::selected_text` carries), label and
+    // description alike.
+    let label_padding = " ".repeat(64);
+    let gap = " ".repeat(2);
     assert_eq!(
         themed[2],
-        format!("{SELECTED_BG}{ACCENT}❯ gpt-4o{spacing}OpenAI\x1b[39m\x1b[49m")
+        format!("{SELECTED_BG}{ACCENT}\x1b[1m→ gpt-4o{label_padding}{gap}OpenAI\x1b[22m\x1b[39m\x1b[49m")
     );
     assert_eq!(strip_ansi_lines(&themed), sel.render_lines(80));
 }
@@ -110,9 +116,17 @@ fn selector_styles_a_non_selected_description_on_its_own() {
     );
     let themed = sel.render_lines_themed(80, &styles);
 
-    // Row 3 is not selected, so only the gap + description carry the muted fg.
-    let spacing = " ".repeat(28); // 32-column primary column - "Beta" (4)
-    assert_eq!(themed[3], format!("  Beta{MUTED}{spacing}two\x1b[39m"));
+    // Row 3 is not selected — the arrow + label span is plain, then the
+    // muted fg starts at the gap (2 spaces) and covers the right-aligned
+    // description. N7 layout gives label_max = 73 (80 - 2 - 2 - 3),
+    // so "Beta" (4 chars) is followed by 69 spaces before the muted span
+    // begins.
+    let label_padding = " ".repeat(69);
+    let gap = " ".repeat(2);
+    assert_eq!(
+        themed[3],
+        format!("  Beta{label_padding}{MUTED}{gap}two\x1b[39m")
+    );
     assert_eq!(strip_ansi_lines(&themed), sel.render_lines(80));
 }
 
@@ -196,10 +210,12 @@ fn message_view_themed_layout_matches_the_plain_render() {
     let themed = view.render_lines_themed(40, &styles);
     assert_eq!(strip_ansi_lines(&themed), view.render_lines(40));
     // User messages render with `userMessageBg` so the entire row gets a
-    // background highlight; the SGR order is bg → fg → text → reset.
+    // background highlight; the SGR order is bg → fg → text → reset. P9
+    // removed the `> ` prefix, so the fg span covers zero cells and the
+    // span collapses to a `bg→fg→reset` triple with no glyphs in between.
     assert_eq!(
         themed[0],
-        format!("{USER_MSG_BG}{ACCENT}> \x1b[39m\x1b[49m{USER_MSG_BG}{TEXT}hello\x1b[39m\x1b[49m")
+        format!("{USER_MSG_BG}{ACCENT}\x1b[39m\x1b[49m{USER_MSG_BG}{TEXT}hello\x1b[39m\x1b[49m")
     );
     // Tool success messages get the full `toolSuccessBg` row tint per Phase 1
     // (G1) — matches TS `Box(paddingX, 1, theme.bg("toolSuccessBg", …))`.
@@ -241,12 +257,14 @@ fn a_plain_color_mode_emits_no_escape_sequences_from_any_component() {
 fn the_plain_render_paths_are_unchanged() {
     // Guards the pre-existing `render_lines` / `render` contract the snapshot
     // tests rely on: adding the themed variants must not perturb plain output.
+    // P9 dropped the `> ` chevron from user messages, so the row is just
+    // `hi`; the assistant row keeps its two-cell indent.
     let mut view = MessageView::new();
     view.push(MessageItem::user("hi"));
     view.push(MessageItem::assistant("hello"));
     assert_eq!(
         view.render_lines(40),
-        vec!["> hi".to_string(), "  hello".to_string()]
+        vec!["hi".to_string(), "  hello".to_string()]
     );
 
     let mut sel = Selector::new("Pick", items());

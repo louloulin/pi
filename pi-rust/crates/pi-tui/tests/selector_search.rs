@@ -78,7 +78,7 @@ fn typing_filters_the_list_without_reaching_the_prompt() {
 
     let snapshot = app.render_snapshot(60, 12);
     let joined = snapshot.lines.join("\n");
-    assert!(joined.contains("❯ GPT-5"), "rows were {joined:?}");
+    assert!(joined.contains("→ GPT-5"), "rows were {joined:?}");
     assert!(!joined.contains("Claude Sonnet 4.5"));
     // The snapshot mirrors the filtered rows for harnesses.
     assert_eq!(snapshot.selector_items.len(), 1);
@@ -174,7 +174,7 @@ fn a_windowed_selector_only_renders_max_visible_rows() {
     let snapshot = app.render_snapshot(60, 30);
     let joined = snapshot.lines.join("\n");
     assert!(joined.contains("  (1/12)"), "rows were {joined:?}");
-    assert!(joined.contains("❯ Model 0"));
+    assert!(joined.contains("→ Model 0"));
     assert!(!joined.contains("Model 11"));
 
     // Walking to the end scrolls the window.
@@ -183,9 +183,9 @@ fn a_windowed_selector_only_renders_max_visible_rows() {
     }
     let joined = app.render_snapshot(60, 30).lines.join("\n");
     assert!(joined.contains("  (12/12)"), "rows were {joined:?}");
-    assert!(joined.contains("❯ Model 11"));
+    assert!(joined.contains("→ Model 11"));
     assert!(!joined.contains("  Model 0"));
-    assert!(!joined.contains("❯ Model 0"));
+    assert!(!joined.contains("→ Model 0"));
 }
 
 #[test]

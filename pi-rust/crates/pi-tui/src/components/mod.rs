@@ -50,6 +50,7 @@ pub mod stack;
 pub mod status;
 pub mod status_indicator;
 pub mod text;
+pub mod tool_strip;
 pub mod truncated_text;
 pub mod undo_stack;
 pub mod v_stack;
@@ -116,6 +117,7 @@ pub use status_indicator::{
     WorkingStatusIndicator,
 };
 pub use text::Text;
+pub use tool_strip::{ToolStrip, ToolStripState};
 pub use truncated_text::TruncatedText;
 pub use undo_stack::UndoStack;
 pub use v_stack::VStack;

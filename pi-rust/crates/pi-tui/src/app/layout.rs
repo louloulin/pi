@@ -42,6 +42,42 @@ impl ComponentBoxExt for Box<dyn Component> {
 /// (`packages/tui/src/tui.ts:96-103`).
 pub const CURSOR_MARKER: char = '\u{1}'; // `␁` substitute — non-printable.
 
+/// Build a `StyledLine` whose only span is the public
+/// [`crate::ts_compat::CURSOR_MARKER`] (a zero-width space) at the
+/// composer's `col` cell. This is the IME-facing counterpart of
+/// [`CURSOR_MARKER`]: the layout engine uses the internal `␁`
+/// sentinel for cursor *row* scanning, while this public line is what a
+/// downstream IME-aware renderer can append to the composer's
+/// `render_styled_lines` output to signal the exact cell the IME
+/// candidate window must anchor to.
+///
+/// `row` is the visible row inside the composer's rectangle; `col` is the
+/// cell column (0-indexed from the rectangle's left edge). The function
+/// never panics — `row` out of range collapses to `0`, `col` greater than
+/// `width` clamps to the rectangle's last cell.
+pub fn cursor_marker_line(row: usize, col: usize, width: usize) -> (usize, crate::utils::styled::StyledLine) {
+    use crate::utils::styled::{SpanStyle, StyledSpan};
+    let width = width.max(1);
+    let col = col.min(width.saturating_sub(1));
+    let row = row.min(usize::MAX);
+    let _ = row; // row is recorded separately for the IME bridge
+    let mut line: crate::utils::styled::StyledLine = Vec::new();
+    if col > 0 {
+        line.push(StyledSpan::new(" ".repeat(col), SpanStyle::PLAIN));
+    }
+    line.push(StyledSpan::new(
+        crate::ts_compat::CURSOR_MARKER.to_string(),
+        SpanStyle::PLAIN,
+    ));
+    if col + 1 < width {
+        line.push(StyledSpan::new(
+            " ".repeat(width - col - 1),
+            SpanStyle::PLAIN,
+        ));
+    }
+    (row, line)
+}
+
 /// Rectangle allocated to a layout box.
 ///
 /// Mirrors upstream `LayoutRect`

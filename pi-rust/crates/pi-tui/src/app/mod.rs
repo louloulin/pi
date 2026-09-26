@@ -344,6 +344,7 @@ use crate::components::slash_menu::SlashMenu;
 use crate::components::status::{StatusBar, StatusData};
 use crate::app::viewport::{ScrollbarDrag, ViewportGeometry};
 pub use crate::app::viewport::ScrollbarGeometry;
+pub use crate::app::agent_events::{default_router, AgentEventHandler, AgentEventRouter};
 use crate::utils::styled::{
     buffer_row_text, plain_text, themed_text, write_plain_row, write_styled_line, SpanStyle, StyledLine, StyledSpan,
 };
@@ -1402,6 +1403,14 @@ pub struct App {
     /// per [`SPINNER_INTERVAL_MS`], so a driver that polls faster than the
     /// upstream 80 ms frame rate still animates at that rate.
     spinner_advanced_at: Instant,
+    /// Docked-bottom row that lights up while a tool is running or the model
+    /// is thinking. nanopi's `tui.rs:5305-5322` dedicates a 1-row strip above
+    /// the footer for "tool running / thinking"; the Rust port buries that
+    /// info inside the busy spinner of `status_bar`, so a frozen-looking
+    /// footer leaves the reader guessing. The strip owns its own row and
+    /// its own spinner so a busy state is visible without parsing the
+    /// footer (`N2` in `docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`).
+    tool_strip: crate::components::tool_strip::ToolStrip,
     /// Whether the built-in startup header is currently expanded. Distinct
     /// from [`AppConfig::startup_header`] (visible at all) and from an
     /// extension's `ctx.ui.setHeader`, which replaces the built-in lines.
@@ -1532,6 +1541,7 @@ impl App {
             spinner: Spinner::new(),
             turn_started: None,
             spinner_advanced_at: Instant::now(),
+            tool_strip: crate::components::tool_strip::ToolStrip::new(),
             header_expanded,
             paste_burst: PasteBurst::new(),
             burst_flush_pending: false,
@@ -1814,6 +1824,13 @@ impl App {
         // two-row footer (`pwd` row + stats row), a host that did not keeps
         // the single stats row (`docs/LUM1466_TWO_LINE_FOOTER.md`).
         frame.status = self.status_bar.line_count(&self.status_for_render());
+        // The docked tool strip (N2) reserves a row only while a turn is
+        // in flight — an idle App keeps the pre-N2 single-row geometry.
+        frame.tool_strip = if self.tool_strip_state().is_active() {
+            1
+        } else {
+            0
+        };
         // The queued-messages block is the second data-driven region: it
         // occupies rows exactly when a prompt is waiting behind the
         // in-flight turn, so an idle App is byte-for-byte the pre-LUM-1469
@@ -2542,6 +2559,26 @@ impl App {
         self.turn_busy.load(Ordering::SeqCst)
     }
 
+    /// The current state of the docked tool strip.
+    ///
+    /// Returns [`ToolStripState::Idle`] when no turn is in flight, so an
+    /// idle session stays byte-identical to the pre-N2 frame
+    /// (`docs/NANOPI_VS_PI_RUST_GAP_ANALYSIS.md`). When a turn is in
+    /// flight, the strip shows "thinking" with the elapsed time since
+    /// [`App::turn_started`]. A future wiring will surface a tool's
+    /// display name through this accessor when a tool call is in flight
+    /// — the renderer already handles the `RunningTool` branch.
+    pub fn tool_strip_state(&self) -> crate::components::tool_strip::ToolStripState<'_> {
+        if self.is_busy() {
+            if let Some(started) = self.turn_started {
+                return crate::components::tool_strip::ToolStripState::Thinking {
+                    started_at: started,
+                };
+            }
+        }
+        crate::components::tool_strip::ToolStripState::Idle
+    }
+
     /// Usage of the most recently finished turn.
     ///
     /// Read-only peek at what [`App::take_turn_usage`] would return;
@@ -2992,6 +3029,59 @@ impl App {
     /// The registered widget keys, in insertion order, with their placements.
     pub fn widget_keys(&self) -> Vec<(String, WidgetPlacement)> {
         self.extension.widget_keys()
+    }
+
+    /// Append a keyed component *below* the built-in footer, in insertion
+    /// order (upstream `ctx.ui.appendFooter`).
+    ///
+    /// The built-in status bar / footer keeps rendering; the appended rows
+    /// stack below it. Passing `None` clears the component registered under
+    /// `key`, disposing it. Re-registering an existing `key` replaces the
+    /// previous component (disposing it) and moves it to the end of the
+    /// sequence.
+    pub fn append_footer(&mut self, key: String, component: Option<Box<dyn Component>>) {
+        self.extension.append_footer(key, component);
+    }
+
+    /// Drop the appended footer under `key`, disposing it. Returns whether
+    /// a footer was removed.
+    pub fn remove_appended_footer(&mut self, key: &str) -> bool {
+        self.extension.remove_appended_footer(key)
+    }
+
+    /// Drop every appended footer, disposing each.
+    pub fn clear_appended_footers(&mut self) {
+        self.extension.clear_appended_footers();
+    }
+
+    /// The registered appended-footer keys, in insertion order.
+    pub fn appended_footer_keys(&self) -> Vec<String> {
+        self.extension.appended_footer_keys()
+    }
+
+    /// Prepend a keyed component *above* the built-in header, in insertion
+    /// order (upstream `ctx.ui.prependHeader`).
+    ///
+    /// The built-in header keeps rendering; the prepended rows stack above
+    /// it. Same key-replace / key-clear semantics as [`App::append_footer`].
+    pub fn prepend_header(&mut self, key: String, component: Option<Box<dyn Component>>) {
+        self.extension.prepend_header(key, component);
+    }
+
+    /// Drop the prepended header under `key`, disposing it. Returns whether
+    /// a header was removed.
+    pub fn remove_prepended_header(&mut self, key: &str) -> bool {
+        self.extension.remove_prepended_header(key)
+    }
+
+    /// Drop every prepended header, disposing each.
+    pub fn clear_prepended_headers(&mut self) {
+        self.extension.clear_prepended_headers();
+    }
+
+    /// The registered prepended-header keys, in insertion order.
+    pub fn prepended_header_keys(&self) -> Vec<String> {
+        self.extension.prepended_header_keys()
     }
 
     /// Replace the text in the core input editor (upstream
@@ -3519,6 +3609,19 @@ impl App {
             self.viewport.viewport_width.load(Ordering::Relaxed),
             self.viewport.viewport_height.load(Ordering::Relaxed),
         )
+    }
+
+    /// Set the cached viewport size.
+    ///
+    /// Production drivers write the measured viewport after every paint,
+    /// but tests need to drive [`App::narrow_options`] and
+    /// [`App::composer_max_rows_effective`] at synthetic widths without
+    /// routing through a real terminal. Calling this with `(0, 0)` clears
+    /// the cached size so the helpers fall back to the unmeasured
+    /// (wide) classification.
+    pub fn set_viewport_size(&self, width: u16, height: u16) {
+        self.viewport.viewport_width.store(width, Ordering::Relaxed);
+        self.viewport.viewport_height.store(height, Ordering::Relaxed);
     }
 
     /// Top-left cell of the message viewport as of the last render. Pointer
@@ -5338,6 +5441,42 @@ impl App {
         }
     }
 
+    /// Effective composer row cap for the current viewport.
+    ///
+    /// On terminals narrower than [`crate::EXTREME_NARROW_WIDTH`] columns
+    /// this returns `1` regardless of the configured cap — the
+    /// extreme-narrow band forces the composer to one row so the cell
+    /// budget stays predictable. Everywhere else it returns the configured
+    /// [`AppConfig::composer_max_rows`], clamped to at least one row.
+    pub fn composer_max_rows_effective(&self) -> usize {
+        let opts = self.narrow_options();
+        let cap = self.config.composer_max_rows.max(1);
+        cap.min(opts.max_composer_rows as usize).max(1)
+    }
+
+    /// The configured composer row cap from [`AppConfig::composer_max_rows`].
+    ///
+    /// Tests and tools that need to compare the configured cap against the
+    /// narrow-terminal effective cap reach for this. Production renderers
+    /// should call [`App::composer_max_rows_effective`] so the
+    /// extreme-narrow clamp is honoured.
+    pub fn composer_max_rows_configured(&self) -> usize {
+        self.config.composer_max_rows.max(1)
+    }
+
+    /// [`crate::NarrowOptions`] for the current viewport.
+    ///
+    /// Every narrow-aware component on the App side reaches for this
+    /// single value so the thresholds stay consistent. The width used is
+    /// the cached viewport width; if the viewport hasn't been measured
+    /// yet the function falls back to [`u16::MAX`], which classifies as
+    /// wide.
+    pub fn narrow_options(&self) -> crate::NarrowOptions {
+        let width = self.viewport.viewport_width.load(Ordering::Relaxed);
+        let width = if width == 0 { u16::MAX } else { width };
+        crate::narrow_options(width)
+    }
+
     /// True when the composer's draft needs more rows than the composer
     /// window can show, i.e. when part of the draft is outside it.
     ///
@@ -5756,9 +5895,15 @@ impl App {
             width: area.width,
             height: layout.below,
         };
-        let status_area = Rect {
+        let tool_strip_area = Rect {
             x: area.x,
             y: below_area.y + layout.below,
+            width: area.width,
+            height: layout.tool_strip,
+        };
+        let status_area = Rect {
+            x: area.x,
+            y: tool_strip_area.y + layout.tool_strip,
             width: area.width,
             height: layout.status,
         };
@@ -5806,6 +5951,12 @@ impl App {
             self.viewport.truncated_above.2.store(0, Ordering::Relaxed);
         }
 
+        // Empty-state welcome hint: a single dim line in the middle of the
+        // transcript area when the log is empty, no turn is running, and
+        // the composer has no draft. Without it a fresh session reads as a
+        // wall of blank rows; with it the user sees what to do next.
+        self.paint_empty_hint(message_area, buf);
+
         // The queued-messages block sits between the transcript and the
         // composer (upstream keeps it in the prompt area), on top of whatever
         // the transcript painted there last frame — hence the per-row blank
@@ -5852,6 +6003,15 @@ impl App {
 
         // Below-editor widgets.
         self.paint_extension_lines(below_area, &frame.below, buf);
+
+        // Docked tool strip (N2). nanopi dedicates a 1-row strip above
+        // the status bar so a busy state is visible without parsing the
+        // footer. `layout.tool_strip` is `1` only while a turn is in
+        // flight, so an idle session keeps the pre-N2 geometry.
+        if layout.tool_strip > 0 {
+            self.tool_strip
+                .render(self.tool_strip_state(), tool_strip_area, buf, &self.theme);
+        }
 
         self.status_bar.render_to_buffer_themed(
             &self.status_for_render(),
