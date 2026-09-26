@@ -420,19 +420,50 @@ pub type TuiRegionReceiver = mpsc::UnboundedReceiver<RegionOp>;
 #[derive(Debug, Clone)]
 pub struct TuiRegionHost {
     tx: mpsc::UnboundedSender<RegionOp>,
+    /// Registry of extension-installed shortcuts, shared with the
+    /// interactive keymap. Plan §5 P0-3.
+    extension_shortcuts: Arc<crate::extensions::extension_shortcuts::ExtensionShortcutRegistry>,
 }
 
 impl TuiRegionHost {
     /// Create the host and the receiver the interactive loop drains.
     pub fn channel() -> (Self, TuiRegionReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx }, rx)
+        (
+            Self {
+                tx,
+                extension_shortcuts:
+                    crate::extensions::extension_shortcuts::ExtensionShortcutRegistry::new(),
+            },
+            rx,
+        )
+    }
+
+    /// Construct with an explicit registry. The interactive loop uses
+    /// this when it owns the registry itself; the JS shim only ever sees
+    /// the registry through [`Self::register_shortcut`] calls.
+    pub fn with_registry(
+        registry: Arc<crate::extensions::extension_shortcuts::ExtensionShortcutRegistry>,
+    ) -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            extension_shortcuts: registry,
+        }
     }
 
     /// The sender half, shared with the component proxies so a disposal
     /// triggered by the App reaches the pump.
     pub fn sender(&self) -> mpsc::UnboundedSender<RegionOp> {
         self.tx.clone()
+    }
+
+    /// The shared extension shortcut registry. The interactive keymap
+    /// uses this to look up `register_shortcut` installs.
+    pub fn extension_shortcuts(
+        &self,
+    ) -> Arc<crate::extensions::extension_shortcuts::ExtensionShortcutRegistry> {
+        self.extension_shortcuts.clone()
     }
 }
 
@@ -496,6 +527,20 @@ impl UiRegionHost for TuiRegionHost {
 
     async fn set_editor_text(&self, text: String) {
         let _ = self.tx.send(RegionOp::EditorText(text));
+    }
+
+    fn register_shortcut(&self, chord: String, callback: String) -> Result<u64, String> {
+        // Resolve the current keybinding table from the global manager so
+        // reserved-key collision detection picks up user overrides
+        // (a user that *removed* a reserved chord frees the slot for
+        // extensions, mirroring `runner.ts:71-90`).
+        let keybindings = pi_tui::keybindings::get_keybindings();
+        crate::extensions::extension_shortcuts::register_on(
+            &self.extension_shortcuts,
+            &keybindings,
+            chord,
+            callback,
+        )
     }
 }
 

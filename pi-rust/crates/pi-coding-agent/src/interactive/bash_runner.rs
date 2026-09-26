@@ -19,10 +19,11 @@ use std::sync::Arc;
 
 use pi_protocol::{Content, ToolCall, ToolResult};
 use pi_tui::app::App;
+use pi_tui::ToolBlockRenderer;
 use tokio::sync::mpsc;
 
 use crate::tools::{
-    get_text_output, AbortLike, BashTool, InteractiveToolRenderer, ToolError, ToolOutput,
+    get_text_output, AbortLike, AgentTool, BashTool, InteractiveToolRenderer, ToolError, ToolOutput,
 };
 
 /// State for the local `!` / `!!` command that is currently running.

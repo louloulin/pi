@@ -64,6 +64,9 @@ pub use autocomplete::{
 pub use box_layout::BoxLayout;
 pub use box_layout::BoxLayout as Box;
 pub use cancellable_loader::CancellableLoader;
+pub use crate::component::{
+    ComponentSlot, MouseButton, MouseEvent, MouseKind, Rect as SlotRect, TextComponent,
+};
 pub use dialog::{Dialog, DialogAction, DialogKind};
 pub use dynamic_border::DynamicBorder;
 pub use editor::{

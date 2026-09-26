@@ -37,6 +37,18 @@ pub struct LocalCallbackServer {
     pub path: &'static str,
     cancel_signal: Arc<std::sync::atomic::AtomicBool>,
     server_task: Option<tokio::task::JoinHandle<()>>,
+    rx: Option<oneshot::Receiver<String>>,
+}
+
+impl Drop for LocalCallbackServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.server_task.take() {
+            handle.abort();
+        }
+        // Wake the server task's cancel arm so it doesn't block
+        // forever on the listener after `.abort()`.
+        self.cancel_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl LocalCallbackServer {
@@ -78,12 +90,9 @@ impl LocalCallbackServer {
                                 if let Some(tx) = tx {
                                     let _ = tx.send(code);
                                 }
-                                // Drain anything else for a beat to let the
-                                // client receive our 200 OK before closing.
-                                let _ = tokio::time::timeout(
-                                    std::time::Duration::from_secs(1),
-                                    write_response(&mut stream, 200, &oauth_success_html("Sign-in complete. You can close this window."))
-                                ).await;
+                                // The 200 OK + success HTML was already
+                                // written by `handle_request` so the
+                                // client can close its socket cleanly.
                                 return;
                             }
                             HandleOutcome::Response(status, body) => {
@@ -109,18 +118,12 @@ impl LocalCallbackServer {
             }
         });
 
-        // Spawn a small task that drops `rx` when the server task ends.
-        // The receiver future resolves either with `Ok(code)` or with an
-        // error if the sender was dropped.
-        tokio::spawn(async move {
-            let _ = rx.await;
-        });
-
         Ok(Self {
             bound,
             path,
             cancel_signal: cancel,
             server_task: Some(server_task),
+            rx: Some(rx),
         })
     }
 
@@ -131,20 +134,19 @@ impl LocalCallbackServer {
 
     /// Wait for the callback to fire. Returns `Cancelled` if the wait
     /// was cancelled before the callback arrived.
-    pub async fn wait_for_code(self) -> CallbackOutcome {
-        let cancel_signal = self.cancel_signal.clone();
-        let task = self.server_task;
-        // Poll the cancel flag alongside the underlying server task —
-        // the server task itself completes when it settles the channel
-        // *or* when the cancel flag flips, and we treat both as the
-        // observable end of the wait.
+    pub async fn wait_for_code(mut self) -> CallbackOutcome {
+        let mut rx = self.rx.take().expect("rx taken exactly once");
+        // Poll the channel alongside the cancel flag. The server task
+        // settles `tx` on success or drops it on cancellation; awaiting
+        // `rx` directly resolves with either the code or a recv error
+        // that we map to `Cancelled`.
         let outcome = tokio::select! {
-            _ = wait_for_cancel(&cancel_signal) => CallbackOutcome::Cancelled,
-            _ = async {
-                if let Some(handle) = task {
-                    let _ = handle.await;
-                }
-            } => CallbackOutcome::Cancelled,
+            biased;
+            _ = wait_for_cancel(&self.cancel_signal) => CallbackOutcome::Cancelled,
+            received = &mut rx => match received {
+                Ok(code) => CallbackOutcome::Code(code),
+                Err(_) => CallbackOutcome::Cancelled,
+            },
         };
         outcome
     }
@@ -234,7 +236,16 @@ async fn handle_request(
     let Some(code) = code else {
         return HandleOutcome::Response(400, oauth_error_html("Missing authorization code"));
     };
-    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n").await;
+    // The success response carries the page the browser shows after
+    // sign-in. Write it through `write_response` so the headers are
+    // well-formed (HTTP/1.1 + Content-Length + Connection: close) and
+    // reqwest on the client side can parse them.
+    let _ = write_response(
+        stream,
+        200,
+        &oauth_success_html("Sign-in complete. You can close this window."),
+    )
+    .await;
     HandleOutcome::Settled(code)
 }
 
@@ -374,7 +385,12 @@ mod tests {
         let client = client();
         let url = format!("http://127.0.0.1:{port}/auth/callback?code=abc&state=other");
         let _ = client.get(&url).send().await.unwrap();
-        let _ = server.wait_for_code().await;
+        // The server rejected the request without settling the channel,
+        // so cancel the wait to avoid blocking on a callback that will
+        // never arrive.
+        server.cancel_wait();
+        let outcome = server.wait_for_code().await;
+        assert_eq!(outcome, CallbackOutcome::Cancelled);
     }
 
     #[tokio::test(flavor = "current_thread")]

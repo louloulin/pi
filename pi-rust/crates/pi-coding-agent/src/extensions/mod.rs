@@ -7,6 +7,7 @@
 
 pub mod autocomplete;
 pub mod events;
+pub mod extension_shortcuts;
 pub mod hook;
 pub mod js_loader;
 pub mod lifecycle;

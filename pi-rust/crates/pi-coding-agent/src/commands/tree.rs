@@ -340,6 +340,24 @@ pub fn append_label_change(
     Ok(())
 }
 
+/// The current label string stored for `target_id`, if any.
+///
+/// Wraps [`read_labels`] so the label editor can pre-fill its buffer
+/// with the node's most recent non-empty label (upstream `Input.setValue`
+/// in `tree-selector.ts:1291-1293`).
+pub fn current_label_for_entry(
+    database: &Path,
+    session_id: &str,
+    target_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let reader = SessionReader::open(database)
+        .with_context(|| format!("opening session file {}", database.display()))?;
+    let labels = read_labels(&reader, session_id)?;
+    Ok(labels
+        .get(target_id)
+        .map(|(label, _timestamp)| label.clone()))
+}
+
 /// The `/tree` help footer — upstream `TREE_HELP_ITEMS`
 /// (`tree-selector.ts:1219-1236`), with the current filter folded in so
 /// the active view is visible without opening `/hotkeys`.

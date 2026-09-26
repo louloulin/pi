@@ -41,3 +41,25 @@ pub use kimi_coding::kimi_coding_oauth;
 pub use oauth_page::{oauth_error_html, oauth_success_html};
 pub use openai_codex::openai_codex_oauth;
 pub use pkce::{PkcePair, generate_pkce};
+
+use std::sync::Arc;
+
+use crate::auth::OAuthAuth;
+use crate::providers::registry::OAuthKindSpec;
+
+/// Build an [`OAuthAuth`] trait object for the OAuth-first provider id,
+/// using `spec` to parameterize the kind-specific tunables
+/// (device-code poll cadence, callback port range, …).
+///
+/// Returns `None` for provider ids that are not OAuth-first — callers
+/// (notably `pi-coding-agent`'s `/login` dispatch) treat that as a
+/// routing error rather than a panic so unknown ids surface as a clear
+/// user-visible message instead of a crash.
+pub fn oauth_for(provider_id: &str, spec: OAuthKindSpec) -> Option<Arc<dyn OAuthAuth>> {
+    match provider_id {
+        "github-copilot" => Some(github_copilot_oauth(spec)),
+        "openai-codex" => Some(openai_codex_oauth(spec)),
+        "kimi-coding" => Some(kimi_coding_oauth(spec)),
+        _ => None,
+    }
+}

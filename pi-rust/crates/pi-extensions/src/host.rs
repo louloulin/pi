@@ -1229,6 +1229,204 @@ pub trait UiRegionHost: Send + Sync + 'static {
     /// Set the editor text — `ctx.ui.setEditorText(text)`.
     /// Upstream calls `app.setEditorText(text)`.
     async fn set_editor_text(&self, text: String);
+    /// Paste the given text into the editor at the cursor
+    /// (`ctx.ui.pasteToEditor(text)`).
+    ///
+    /// Upstream calls `app.pasteToEditor(text)`
+    /// (`packages/coding-agent/src/core/extensions/types.ts:205-211`).
+    /// Default impl forwards through [`Self::set_editor_text`] — the
+    /// terminal cursor is irrelevant for the Rust port's editor which
+    /// always inserts at the caret position.
+    async fn paste_to_editor(&self, text: String) {
+        self.set_editor_text(text).await;
+    }
+    /// Replace the streaming working message
+    /// (`ctx.ui.setWorkingMessage(message)`).
+    ///
+    /// Upstream keeps the message in `app.workingMessage`
+    /// (`interactive-mode.ts:2319-2324`) so the spinner row reads from
+    /// it. The Rust port routes it through [`Self::set_status`] under the
+    /// reserved key `__working_message`; the working-indicator loop reads
+    /// it back on the next tick.
+    async fn set_working_message(&self, message: Option<String>) {
+        self.set_status("__working_message".to_string(), message).await;
+    }
+    /// Show or hide the streaming spinner row
+    /// (`ctx.ui.setWorkingVisible(visible)`).
+    ///
+    /// Upstream toggles `app.isWorkingVisible`
+    /// (`interactive-mode.ts:2326-2330`); the port routes the flag
+    /// through the status channel under the reserved key
+    /// `__working_visible`.
+    async fn set_working_visible(&self, visible: bool) {
+        self.set_status(
+            "__working_visible".to_string(),
+            Some(if visible { "true" } else { "false" }.to_string()),
+        )
+        .await;
+    }
+    /// Replace the streaming spinner frames
+    /// (`ctx.ui.setWorkingIndicator(frames)`).
+    ///
+    /// Upstream's `setWorkingIndicator` swaps the spinner frame list
+    /// (`interactive-mode.ts:2331-2336`). The port encodes the frames as
+    /// a JSON array under the reserved key `__working_indicator`; the
+    /// working indicator reads them back on the next tick.
+    async fn set_working_indicator(&self, frames: Vec<String>) {
+        let payload = serde_json::to_string(&frames).unwrap_or_else(|_| "[]".to_string());
+        self.set_status("__working_indicator".to_string(), Some(payload))
+            .await;
+    }
+    /// Replace the hidden-thinking block label
+    /// (`ctx.ui.setHiddenThinkingLabel(label)`).
+    ///
+    /// Upstream keeps the label in `app.hiddenThinkingLabel`
+    /// (`interactive-mode.ts:2338-2341`); the port routes it through the
+    /// status channel under the reserved key `__hidden_thinking_label`.
+    async fn set_hidden_thinking_label(&self, label: Option<String>) {
+        self.set_status("__hidden_thinking_label".to_string(), label)
+            .await;
+    }
+    /// Expand or collapse every tool result block in the transcript
+    /// (`ctx.ui.setToolsExpanded(expanded)`).
+    ///
+    /// Upstream toggles `app.toolsExpanded`
+    /// (`interactive-mode.ts:2343-2347`); the port routes the flag
+    /// through the status channel under the reserved key
+    /// `__tools_expanded`.
+    async fn set_tools_expanded(&self, expanded: bool) {
+        self.set_status(
+            "__tools_expanded".to_string(),
+            Some(if expanded { "true" } else { "false" }.to_string()),
+        )
+        .await;
+    }
+    /// Read the editor's current text synchronously
+    /// (`ctx.ui.getEditorText(): string`).
+    ///
+    /// The default impl returns `None`: most hosts (the QuickJS shim)
+    /// have no editor to query, and returning a string would require
+    /// either blocking the caller or holding a shared reference. A host
+    /// that owns the App can override this to forward to the live
+    /// editor.
+    fn get_editor_text(&self) -> Option<String> {
+        None
+    }
+    /// Resolve a theme by name (`ctx.ui.getTheme(name): Theme | null`).
+    ///
+    /// The default returns `None`: hosts without a theme catalog defer
+    /// to the host's own resolver. The TUI host overrides this to walk
+    /// the installed themes.
+    fn get_theme(&self, _name: &str) -> Option<String> {
+        None
+    }
+    /// Every installed theme, as `(name, path)` pairs
+    /// (`ctx.ui.getAllThemes(): Array<{name, path}>`).
+    ///
+    /// The default returns an empty list — the same caveat as
+    /// [`Self::get_theme`].
+    fn get_all_themes(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// The current tool-block expanded state
+    /// (`ctx.ui.getToolsExpanded(): boolean`).
+    ///
+    /// The default returns `false`. Hosts with a real toggle override
+    /// to read the live App state.
+    fn get_tools_expanded(&self) -> bool {
+        false
+    }
+    /// The currently installed editor component factory, if any
+    /// (`ctx.ui.getEditorComponent(): EditorFactory | null`).
+    ///
+    /// The default returns `None`. The TUI host overrides this to walk
+    /// its [`Self::set_editor_component`] installation.
+    fn get_editor_component(&self) -> Option<String> {
+        None
+    }
+    /// Subscribe to raw terminal input (`ctx.ui.onTerminalInput(fn)`).
+    ///
+    /// Returns a token the caller uses to unsubscribe. The default
+    /// returns `0` (no-op subscription); hosts that own the App's input
+    /// pipeline override this to register a hook.
+    fn on_terminal_input(&self, _handler: Box<dyn std::any::Any + Send + Sync>) -> u64 {
+        0
+    }
+    /// Install an autocomplete provider
+    /// (`ctx.ui.addAutocompleteProvider(provider)`).
+    ///
+    /// The default impl is a no-op; the TUI host overrides this to
+    /// append to the App's provider chain.
+    fn add_autocomplete_provider(&self, _provider: String) {}
+    /// Open a multi-line editor dialog and resolve with the entered
+    /// text (`ctx.ui.editor(title, prefill): Promise<string | null>`).
+    ///
+    /// Upstream returns `Promise<string | null>`
+    /// (`packages/coding-agent/src/core/extensions/types.ts:227-234`):
+    /// the dialog is modal, multi-line, and `null` means the user
+    /// dismissed the dialog without submitting. The default impl
+    /// resolves with `None` — only the TUI host overrides this to open
+    /// a real editor.
+    async fn editor(&self, title: String, prefill: Option<String>) -> Option<String> {
+        let _ = (title, prefill);
+        None
+    }
+    /// Register a markdown AST transformer
+    /// (`ctx.ui.registerMarkdownTransformer(transformer)`).
+    ///
+    /// Upstream applies transformers after `marked()` parses the
+    /// message and before the renderer walks the tree
+    /// (`packages/coding-agent/src/core/extensions/types.ts:236-243`).
+    /// The default impl is a no-op; the TUI host overrides this to
+    /// append to the App's transformer chain. `transformer` is opaque
+    /// here so the extensions crate doesn't pin a concrete type —
+    /// the TUI host decodes the JSON payload itself.
+    fn register_markdown_transformer(&self, _transformer: String) {}
+    /// Register a message renderer for one role
+    /// (`ctx.ui.registerMessageRenderer(role, renderer)`).
+    ///
+    /// Upstream calls the renderer for every message of the given
+    /// role (`packages/coding-agent/src/core/extensions/types.ts:245-253`).
+    /// The default impl is a no-op; the TUI host overrides this to
+    /// append to its renderer registry. `role` is a free-form string so
+    /// extensions can pick custom role names; `renderer` is the
+    /// opaque payload.
+    fn register_message_renderer(&self, _role: String, _renderer: String) {}
+    /// Register an entry renderer for one custom session-entry type
+    /// (`ctx.ui.registerEntryRenderer(customType, renderer)`).
+    ///
+    /// Upstream keeps entry renderers in
+    /// `packages/coding-agent/src/core/extensions/types.ts:255-262`;
+    /// unlike message renderers, entry renderers render *into* the
+    /// transcript but do not feed the LLM context. The default impl
+    /// is a no-op; the TUI host overrides this to install the renderer
+    /// in its entry-renderer chain.
+    fn register_entry_renderer(&self, _custom_type: String, _renderer: String) {}
+    /// Register an extension keybinding
+    /// (`ctx.ui.registerShortcut(chord, callback)`).
+    ///
+    /// Upstream keeps extension shortcuts separate from the app-level
+    /// [`crate::keybindings`] table and runs them after the host
+    /// matching step
+    /// (`packages/coding-agent/src/core/extensions/runner.ts:72-91`).
+    /// The default impl returns `Err` ("not implemented"); the TUI
+    /// host overrides this to install the shortcut and reports a
+    /// conflict with the reserved key set defined in
+    /// [`crate::keybindings`]. The opaque `chord` and `callback`
+    /// payloads let the extensions crate avoid pinning a concrete
+    /// type — the TUI host decodes the JSON itself.
+    fn register_shortcut(&self, _chord: String, _callback: String) -> Result<u64, String> {
+        Err("register_shortcut is not implemented by this host".to_string())
+    }
+    /// Register an extension CLI flag
+    /// (`ctx.ui.registerFlag(flag)`).
+    ///
+    /// Upstream routes extension flags through the CLI parser and
+    /// feeds values back to the extension via
+    /// `packages/coding-agent/src/core/extensions/types.ts:264-273`.
+    /// The default impl is a no-op; the TUI host overrides this to
+    /// install the flag into the extension flag table.
+    fn register_flag(&self, _flag: String) {}
 }
 
 /// One queued region mutation from the shim to the [`UiRegionHost`].

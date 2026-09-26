@@ -19,7 +19,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 
 use super::device_code::{poll_device_code, PollOptions, PollStatus};
@@ -33,7 +32,7 @@ use crate::types::AbortSignal;
 
 /// `SXYxLmI1MDdhMDhjODdlY2ZlOTg=` decoded — the GitHub Copilot Chat VSCode
 /// public client id.
-const CLIENT_ID: &str = "Iy.k507ad8c87ecf98";
+const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
 /// Copilot-issued header prefixes shared between the token refresh and
 /// the model catalog request so both look like the same upstream caller.
@@ -431,6 +430,7 @@ pub fn github_copilot_oauth(spec: OAuthKindSpec) -> Arc<dyn OAuthAuth> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
     #[test]
     fn decode_client_id_matches_upstream() {

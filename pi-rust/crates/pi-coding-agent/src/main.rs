@@ -151,6 +151,10 @@ fn main() -> ExitCode {
             let ui_bridge = extension_ui.as_ref().map(|ui| ui.bridge().clone());
             let ui_region_host = extension_ui.as_ref().map(|ui| ui.region_host());
             let has_ui = ui_bridge.is_some();
+            // `load_extensions` consumes the host; keep a clone for the
+            // interactive options so the driver can consult the
+            // extension shortcut registry later (P0-3).
+            let ui_region_host_for_options = ui_region_host.clone();
             let loaded_extensions =
                 load_extensions(&runtime, &cli, "tui", has_ui, ui_bridge, ui_region_host);
             // The UI-facing projection of the load pass: the startup header's
@@ -220,12 +224,23 @@ fn main() -> ExitCode {
                 extensions: Some(extension_runtime),
                 extension_report,
                 extension_ui: extension_ui.take(),
+                // P0-3: the TuiRegionHost owns the extension shortcut
+                // registry; share its Arc with the interactive driver so
+                // `dispatch_global_chord_table` can claim chords that
+                // `ctx.ui.registerShortcut` installed.
+                extension_shortcut_registry: ui_region_host_for_options
+                    .as_ref()
+                    .map(|h| h.extension_shortcuts()),
                 // `app.clipboard.pasteImage` reads the real system clipboard
                 // (`wl-paste` / `xclip` / `pngpaste` / PowerShell).
                 clipboard: None,
                 // Picker view state (`/resume`, `/tree`) starts at its
                 // defaults; the driver keeps it across selector opens.
                 pickers: Default::default(),
+                // Credential store: the in-memory default; production
+                // would read from the auth helper. Plan §5 P0-3 was
+                // added on top of an already-existing field.
+                credential_store: Arc::new(pi_ai::auth::InMemoryCredentialStore::new()),
                 // `--no-header`: the startup key-hint screen. Upstream's
                 // equivalent is the `quietStartup` setting, which it reads
                 // while constructing the session (`interactive-mode.ts:859`).

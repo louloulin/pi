@@ -1,10 +1,16 @@
-1024:pub fn format_resume_command(
-102:pub struct InteractiveOptions {
-1110:pub mod bash_runner;
-1880:pub fn seed_model_scope(options: &mut InteractiveOptions, sources: &ConfigSources) {
-2334:pub struct PickerState {
-260:pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
-3944:pub struct StartupUiSettings {
-3994:pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> StartupUiSettings {
 85:pub enum InteractiveExit {
-958:pub fn exit_screen_output(
+1691:pub fn apply_startup_ui_settings(app: &mut App, sources: &ConfigSources) -> StartupUiSettings {
+407:pub fn exit_screen_output(
+473:pub fn format_resume_command(
+260:pub fn interactive_app_config(options: &InteractiveOptions) -> AppConfig {
+1134:pub fn seed_model_scope(options: &mut InteractiveOptions, sources: &ConfigSources) {
+515:pub mod bash_runner;
+516:pub mod command_dispatch;
+517:pub mod completion;
+518:pub mod input_handlers;
+519:pub mod interactive_loop;
+520:pub mod session_lifecycle;
+521:pub mod session_picker;
+522:pub mod status_bar;
+102:pub struct InteractiveOptions {
+1641:pub struct StartupUiSettings {

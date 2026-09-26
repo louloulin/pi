@@ -107,6 +107,105 @@ pub trait Component: Send + Sync {
     }
 }
 
+/// A [`Component`] slot the App can host in a UI region.
+///
+/// Mirrors upstream's `Component` (`packages/tui/src/tui.ts:111-134`)
+/// extended with the mouse, focus and bounding-rect hooks this port
+/// routes through its layout host. The plan calls it the foundational
+/// trait for P0: every region (`setHeader` / `setFooter` / `setWidget` /
+/// `setEditorComponent` / `openCustom`) accepts a `Arc<dyn ComponentSlot>`
+/// and dispatches input / mouse / focus to whichever slot owns the
+/// pointer.
+///
+/// Most existing extension components already implement [`Component`];
+/// the blanket impl at the bottom of this module gives them
+/// mouse/focus/bounds defaults so they keep compiling while new
+/// extensions opt into the fuller contract.
+pub trait ComponentSlot: Component {
+    /// Process a mouse event while this slot owns the cursor.
+    ///
+    /// Returns `true` when the event was consumed (the host stops
+    /// dispatching it). Mirrors upstream's `handleMouse?(event)`
+    /// (`packages/tui/src/components/component-base.ts:30-37`).
+    ///
+    /// The default declines every event so a render-only slot is safe.
+    fn handle_mouse(&mut self, _event: MouseEvent) -> bool {
+        false
+    }
+
+    /// Whether this slot currently holds input focus.
+    ///
+    /// Mirrors upstream's `focusable?: boolean` property
+    /// (`packages/tui/src/components/component-base.ts:13`). The default
+    /// is `false` — render-only components stay out of the focus chain.
+    fn focusable(&self) -> bool {
+        false
+    }
+
+    /// The bounding rect the host renders this slot into.
+    ///
+    /// Mirrors upstream's `getBoundingRect?(): { x, y, width, height }`
+    /// (`packages/tui/src/components/component-base.ts:18-23`); a slot
+    /// returns `None` when it has not been laid out yet, which lets the
+    /// host skip mouse dispatch instead of inventing a stale rectangle.
+    fn bounding_rect(&self) -> Option<Rect> {
+        None
+    }
+}
+
+/// The mouse events the host surfaces to a [`ComponentSlot`].
+///
+/// Upstream's `MouseEvent` (`packages/tui/src/tui.ts:95-105`) carries
+/// `event`, `button`, `col`, `row`, plus modifiers; the Rust port
+/// flattens that to a struct whose fields are the ones the slot needs
+/// for hit-testing. The host fills in the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseEvent {
+    /// Which button changed state.
+    pub button: MouseButton,
+    /// Press / release / motion / scroll.
+    pub kind: MouseKind,
+    /// Column (1-based) the event landed on.
+    pub col: u16,
+    /// Row (1-based) the event landed on.
+    pub row: u16,
+}
+
+/// Mouse button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    /// Scroll wheel — paired with [`MouseKind::Scroll`].
+    Wheel,
+}
+
+/// What happened with [`MouseEvent::button`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Press,
+    Release,
+    Move,
+    /// Wheel scroll; [`MouseEvent::col`] is the delta, positive = right,
+    /// negative = left.
+    ScrollH,
+    /// Wheel scroll; [`MouseEvent::row`] is the delta, positive = down,
+    /// negative = up.
+    ScrollV,
+}
+
+/// Top-left origin rectangle in cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl ComponentSlot for TextComponent {}
+
 /// Where a widget renders relative to the editor region.
 ///
 /// Upstream `WidgetPlacement` (`packages/coding-agent/src/core/extensions/types.ts:106`)
