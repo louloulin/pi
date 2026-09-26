@@ -237,6 +237,7 @@ fn six_entry_round_trip_is_field_for_field() {
         is_error: false,
         details: Some(serde_json::json!({"exitCode": 0})),
         added_tool_names: Some(vec!["grep".into()]),
+        images: Vec::new(),
     });
     let compaction = SessionEntry::Compaction {
         summary: "## Goal\nkeep going".into(),

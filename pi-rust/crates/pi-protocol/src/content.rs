@@ -42,7 +42,11 @@ pub struct ToolResult {
     /// output; structured data goes into [`ToolResult::details`].
     ///
     /// `Box<Content>` breaks the otherwise-infinite recursion between
-    /// [`ToolResult`] and [`Content::ToolResult`].
+    /// [`ToolResult`] and [`Content::ToolResult`]. Multi-image results
+    /// surface their first image here (so a downstream renderer always
+    /// sees at least one image) and stash the rest in
+    /// [`ToolResult::images`]; the provider adapter reads both and
+    /// emits one image block per entry in the wire payload.
     pub content: Box<Content>,
     /// True when the tool failed and the model should treat it as an error.
     #[serde(default)]
@@ -62,6 +66,18 @@ pub struct ToolResult {
     /// keep such tools out of the request prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_tool_names: Option<Vec<String>>,
+    /// Every image attached to this tool result, in declaration order.
+    ///
+    /// `ToolResult.content` is a single block (one of the four
+    /// [`Content`] variants), so the tool executor parks the first image
+    /// there and accumulates the rest here. Providers iterate this list
+    /// *in addition to* the single image in `content` when shaping the
+    /// wire payload — the anthropic adapter emits one `image` block per
+    /// entry, the openai adapters pass them through as
+    /// `image_url` parts, and so on. Empty for non-image results so the
+    /// default impl stays `Default`-derivable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageContent>,
 }
 
 // Manual `Default` impl — `Content` is a recursive enum (it contains
@@ -74,6 +90,7 @@ impl Default for ToolResult {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         }
     }
 }

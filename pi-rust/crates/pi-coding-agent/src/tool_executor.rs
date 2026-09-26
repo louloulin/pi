@@ -18,7 +18,9 @@ use pi_agent_core::AgentError;
 use pi_extensions::{
     BuiltinToolDefinition, BuiltinToolOutcome, BuiltinToolRunner, JsExtensionHost,
 };
-use pi_protocol::{Content, ToolCall, ToolDefinition, ToolExecutionMode, ToolResult};
+use pi_protocol::{
+    Content, ImageContent, ToolCall, ToolDefinition, ToolExecutionMode, ToolResult,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::tool_validation::coerce_tool_arguments;
@@ -355,7 +357,7 @@ impl ToolExecutor for ExtensionToolExecutor {
         let args = arguments.to_string();
         match self.host.execute_tool(&call.name, &args).await {
             Ok(outcome) => {
-                let (content, image_text) =
+                let (content, image_text, images) =
                     fold_content(content_blocks_from_json(&outcome.content));
                 Ok(ToolResult {
                     tool_call_id: call.id.clone(),
@@ -366,6 +368,7 @@ impl ToolExecutor for ExtensionToolExecutor {
                     // `pi_extensions::ToolExecutionOutcome` has no
                     // `addedToolNames` field (see `deferred_tools` module docs).
                     added_tool_names: None,
+                    images,
                 })
             }
             // A host-level failure (timeout, JS exception, missing
@@ -381,6 +384,7 @@ impl ToolExecutor for ExtensionToolExecutor {
                 is_error: true,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             }),
         }
     }
@@ -450,7 +454,7 @@ impl ToolExecutor for BuiltinToolExecutor {
         let arguments = coerce_tool_arguments(&tool.parameters(), &call.arguments);
         match tool.execute(arguments, abort).await {
             Ok(output) => {
-                let (content, image_text) = fold_content(output.content);
+                let (content, image_text, images) = fold_content(output.content);
                 Ok(ToolResult {
                     tool_call_id: call.id.clone(),
                     content: Box::new(content),
@@ -460,6 +464,7 @@ impl ToolExecutor for BuiltinToolExecutor {
                     // `addedToolNames` equivalent (upstream `AgentToolResult`);
                     // none of them load tools mid-transcript.
                     added_tool_names: None,
+                    images,
                 })
             }
             // Cancellation keeps a dedicated error path so callers can tell
@@ -474,27 +479,58 @@ impl ToolExecutor for BuiltinToolExecutor {
                 is_error: true,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             }),
         }
     }
 }
 
 /// Collapse a tool's content blocks into the single block
-/// [`ToolResult::content`] carries.
+/// [`ToolResult::content`] carries plus any additional images that need to
+/// reach the model.
 ///
 /// Every built-in tool emits exactly one text block, so the common path just
 /// moves it. Multi-block output is folded differently depending on whether an
 /// image is involved:
 ///
-/// * an image block wins the single `content` slot (upstream sends
+/// * the first image block wins the single `content` slot (upstream sends
 ///   `[text note, image]` for `read`, but `ToolResult::content` is one block)
 ///   and every sibling text block is returned as the second element so the
 ///   caller can park it under `details.image_text`;
+/// * *every* subsequent image (i.e. the ones that did *not* land in
+///   `content`) is also returned as `Vec<ImageContent>` in declaration order,
+///   so the provider adapter can emit one wire image block per attachment —
+///   the
+///   [multi-image round-trip](plan §6 P1-3) depends on this;
 /// * without an image, the blocks flatten into one text block as before, so
 ///   nothing is silently dropped.
-fn fold_content(blocks: Vec<Content>) -> (Content, Option<String>) {
+///
+/// Note: the image that lives in `content` is intentionally **not** repeated
+/// in the returned `Vec<ImageContent>` — that sidecar is the "extras" list,
+/// not a duplicate of the head block. Providers that want one wire image
+/// block per attachment iterate the sidecar and emit an additional block for
+/// each entry, treating `content`'s image as the first one implicitly.
+fn fold_content(blocks: Vec<Content>) -> (Content, Option<String>, Vec<ImageContent>) {
+    // Pull the first image (if any) out of the source list — it becomes
+    // `content` later — and remember every other image so the sidecar
+    // keeps them in declaration order.
+    let mut head_image: Option<ImageContent> = None;
+    let mut sidecar_images: Vec<ImageContent> = Vec::new();
+    for block in &blocks {
+        if let Content::Image(image) = block {
+            if head_image.is_none() {
+                head_image = Some(image.clone());
+            } else {
+                sidecar_images.push(image.clone());
+            }
+        }
+    }
+
+    // Re-implement the original two-step fold without consuming `blocks`
+    // twice: the head iterator takes ownership, while we already have the
+    // image bookkeeping above.
     let mut iter = blocks.into_iter();
-    match (iter.next(), iter.next()) {
+    let (head, image_text) = match (iter.next(), iter.next()) {
         (None, _) => (Content::text(""), None),
         (Some(only), None) => match only {
             Content::Image(image) => (Content::Image(image), None),
@@ -524,7 +560,8 @@ fn fold_content(blocks: Vec<Content>) -> (Content, Option<String>) {
                 }
             }
         }
-    }
+    };
+    (head, image_text, sidecar_images)
 }
 
 /// Join blocks' human-readable text with newlines.
@@ -632,7 +669,7 @@ mod tests {
             mime_type: "image/png".to_string(),
             data: "iVBORw0KGgoAAAANSUhEUgAAAUAAAADw".to_string(),
         });
-        let (content, image_text) = fold_content(vec![
+        let (content, image_text, images) = fold_content(vec![
             Content::text("Read image file [image/png]"),
             image.clone(),
         ]);
@@ -641,6 +678,10 @@ mod tests {
             image_text.as_deref(),
             Some("Read image file [image/png]"),
             "the caption moves to details.image_text"
+        );
+        assert!(
+            images.is_empty(),
+            "the single-image case must not double up into ToolResult.images"
         );
 
         // `ToolResult::content` is one block, so `details.image_text` is where
@@ -651,8 +692,121 @@ mod tests {
         assert_eq!(details["truncation"], 1);
 
         // Without an image the old text folding is unchanged.
-        let (content, image_text) = fold_content(vec![Content::text("a"), Content::text("b")]);
+        let (content, image_text, images) =
+            fold_content(vec![Content::text("a"), Content::text("b")]);
         assert_eq!(content, Content::text("a\nb"));
         assert!(image_text.is_none());
+        assert!(images.is_empty());
+    }
+
+    /// Multi-image round-trip (plan §6 P1-3): a tool returning
+    /// `[caption, image1, image2, image3]` must produce a `ToolResult` whose
+    /// first image lives in `content`, every subsequent image in declaration
+    /// order lives in `images`, and the caption reaches the renderer via
+    /// `details.image_text`. The provider adapter (`anthropic.rs`) emits one
+    /// wire image block per entry — this test is the structural half of that
+    /// contract.
+    #[test]
+    fn multi_image_blocks_round_trip_into_tool_result() {
+        let caption = Content::text("three attachments");
+        let img1 = pi_protocol::ImageContent {
+            mime_type: "image/png".to_string(),
+            data: "PNG1".to_string(),
+        };
+        let img2 = pi_protocol::ImageContent {
+            mime_type: "image/jpeg".to_string(),
+            data: "JPEG2".to_string(),
+        };
+        let img3 = pi_protocol::ImageContent {
+            mime_type: "image/webp".to_string(),
+            data: "WEBP3".to_string(),
+        };
+        let (content, image_text, images) = fold_content(vec![
+            caption,
+            Content::Image(img1.clone()),
+            Content::Image(img2.clone()),
+            Content::Image(img3.clone()),
+        ]);
+        // Fold parks the *first* image in `content`.
+        assert_eq!(
+            content,
+            Content::Image(img1.clone()),
+            "first image must win the single content slot"
+        );
+        // `image_text` carries the caption plus the image-fallback text for
+        // any subsequent images; the contract is "everything that is not the
+        // first image reaches the renderer through this side channel".
+        let joined = image_text.expect("non-empty image_text");
+        assert!(
+            joined.contains("three attachments"),
+            "the caption must survive in image_text; got: {joined:?}"
+        );
+        // The sidecar is the *extras* list — image1 is already in `content`,
+        // so image2 and image3 are the entries the provider adapter emits.
+        let expected = vec![img2, img3];
+        assert_eq!(
+            images, expected,
+            "every image beyond the first must round-trip into ToolResult.images in source order"
+        );
+    }
+
+    /// Mixed blocks: text + image + text must still surface the image in
+    /// `content` and the surrounding text in `image_text`. The single image
+    /// also lives in `content`, so the sidecar is empty.
+    #[test]
+    fn mixed_text_and_image_blocks_fold_cleanly() {
+        let intro = Content::text("caption A");
+        let outro = Content::text("caption B");
+        let img = pi_protocol::ImageContent {
+            mime_type: "image/gif".to_string(),
+            data: "GIF1".to_string(),
+        };
+        let (content, image_text, images) = fold_content(vec![
+            intro,
+            Content::Image(img.clone()),
+            outro,
+        ]);
+        assert_eq!(content, Content::Image(img.clone()));
+        let joined = image_text.expect("non-empty image_text");
+        assert!(joined.contains("caption A"), "leading caption survives");
+        assert!(joined.contains("caption B"), "trailing caption survives");
+        assert!(
+            images.is_empty(),
+            "single-image case has no sidecar; the image is in content"
+        );
+    }
+
+    /// Many images with no captions: the first image wins `content`, every
+    /// remaining image reaches `images`, and `image_text` carries the
+    /// fallback text for the trailing images (none stay dropped).
+    #[test]
+    fn many_images_keep_every_extra_in_the_sidecar() {
+        let img1 = pi_protocol::ImageContent {
+            mime_type: "image/png".to_string(),
+            data: "PNG1".to_string(),
+        };
+        let img2 = pi_protocol::ImageContent {
+            mime_type: "image/png".to_string(),
+            data: "PNG2".to_string(),
+        };
+        let img3 = pi_protocol::ImageContent {
+            mime_type: "image/png".to_string(),
+            data: "PNG3".to_string(),
+        };
+        let (content, image_text, images) = fold_content(vec![
+            Content::Image(img1.clone()),
+            Content::Image(img2.clone()),
+            Content::Image(img3.clone()),
+        ]);
+        assert_eq!(content, Content::Image(img1.clone()));
+        assert!(
+            image_text.is_some(),
+            "the trailing images' fallback text must reach image_text"
+        );
+        assert_eq!(
+            images,
+            vec![img2, img3],
+            "image1 is in content; image2 and image3 round-trip into the sidecar"
+        );
     }
 }

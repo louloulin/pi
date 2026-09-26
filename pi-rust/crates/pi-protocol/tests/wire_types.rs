@@ -164,6 +164,7 @@ fn tool_result_added_tool_names_round_trip() {
         is_error: false,
         details: None,
         added_tool_names: Some(vec!["late_tool".into(), "other_tool".into()]),
+        images: Vec::new(),
     };
     let v = serde_json::to_value(&result).unwrap();
     assert_eq!(v["added_tool_names"], json!(["late_tool", "other_tool"]));
@@ -183,6 +184,7 @@ fn tool_result_omits_added_tool_names_when_none() {
         is_error: false,
         details: None,
         added_tool_names: None,
+            images: Vec::new(),
     };
     let v = serde_json::to_value(&result).unwrap();
     assert!(

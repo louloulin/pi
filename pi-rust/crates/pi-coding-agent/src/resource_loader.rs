@@ -134,12 +134,18 @@ impl LoadedResources {
         // The prompt describes exactly the tools the agent can call: the
         // built-in bundle in registration order, plus every extension
         // tool that declared a prompt contribution.
-        let mut selected_tools: Vec<String> = crate::tools::default_tool_bundle()
+        let bundle = crate::tools::default_tool_bundle();
+        let mut selected_tools: Vec<String> = bundle
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
+        // Walk the live tool objects so each tool's
+        // `prompt_snippet` / `prompt_guidelines` trait methods take
+        // effect (plan §6 P1-1). Tools that do not override the trait
+        // methods fall back to the static `BUILTIN_TOOL_CONTRIBUTIONS`
+        // table via [`system_prompt::tool_prompt_contributions_from`].
         let (mut tool_snippets, mut prompt_guidelines) =
-            builtin_prompt_contributions(&selected_tools);
+            crate::system_prompt::tool_prompt_contributions_from(&bundle);
 
         for tool in extension_tools {
             if let Some(snippet) = tool

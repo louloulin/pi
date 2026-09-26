@@ -1,13 +1,17 @@
 //! `/login` OAuth dispatch — port of `handleLoginCommand` + `loginProvider` in
 //! `packages/coding-agent/src/modes/interactive/runSlashCommand.ts`.
 //!
-//! The driver-side [`AuthInteraction`] impl writes OAuth progress events to
-//! the TUI's info pane via [`App::info_block`]. Prompts are answered with a
-//! conservative default (empty text, first option id) and a one-line
-//! "OAuth asks: …" notice is written so the user understands the flow is
-//! running unattended; rendering an interactive prompt dialog inside the
-//! TUI event loop is a follow-up. The default is enough to drive every
-//! flow currently shipped:
+//! The driver-side [`AuthInteraction`] impl collects OAuth progress events
+//! and flushes them to the caller's `app.info` sink at the end of the flow.
+//! The run_slash_command arm holds an `&mut App` while the OAuth login runs,
+//! so we cannot borrow the App across the OAuth flow's await points —
+//! instead the interaction buffers events and writes them once the flow
+//! returns. Prompts are answered with a conservative default (empty text,
+//! first option id) and a one-line "OAuth asks: …" notice is buffered so
+//! the user understands the flow is running unattended; rendering an
+//! interactive prompt dialog inside the TUI event loop is a follow-up.
+//!
+//! The defaults are enough to drive every flow currently shipped:
 //!
 //! * `github-copilot` asks for a GitHub Enterprise URL; an empty answer
 //!   resolves to `github.com`, which is what the device-code path
@@ -23,17 +27,15 @@
 //! On success the [`OAuthCredential`] is persisted through the
 //! [`CredentialStore`] the [`InteractiveOptions`] carries.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SyncMutex};
 
 use async_trait::async_trait;
 use pi_ai::auth::oauth::oauth_for;
 use pi_ai::auth::{
-    AuthError, AuthEvent, AuthInteraction, AuthPrompt, AuthPromptOption, Credential,
-    CredentialStore, OAuthAuth, OAuthCredential,
+    AuthError, AuthEvent, AuthInfoLink, AuthInteraction, AuthPrompt, AuthPromptOption,
+    Credential, CredentialStore, OAuthAuth, OAuthCredential,
 };
 use pi_ai::types::AbortSignal;
-use pi_tui::app::App;
-use tokio::sync::Mutex as AsyncMutex;
 
 #[cfg(not(target_arch = "wasm32"))]
 use pi_ai::providers::registry::{OAuthKindSpec, ProviderSpec};
@@ -43,6 +45,7 @@ use pi_ai::providers::registry::{OAuthKindSpec, ProviderSpec};
 pub enum LoginOutcome {
     /// Credential was written to the store.
     Stored {
+        /// Provider the credential was written for.
         provider_id: String,
         /// Whether the OAuth credential carries a subscription
         /// (Copilot / ChatGPT subscription flows).
@@ -59,8 +62,32 @@ pub enum LoginOutcome {
     Failed(String),
 }
 
-/// Driver-side [`AuthInteraction`] that pipes events to the TUI info
-/// pane and answers prompts with a conservative default.
+/// Buffered event sink shared between the OAuth flow (which calls
+/// `notify` from any task) and the dispatcher (which flushes them to
+/// `app.info` once the flow returns).
+#[derive(Default)]
+pub(crate) struct EventBuffer {
+    events: SyncMutex<Vec<String>>,
+}
+
+impl EventBuffer {
+    fn push(&self, body: String) {
+        if let Ok(mut guard) = self.events.lock() {
+            guard.push(body);
+        }
+    }
+
+    fn drain(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default()
+    }
+}
+
+/// Driver-side [`AuthInteraction`] that buffers events until the
+/// dispatcher flushes them and answers prompts with a conservative
+/// default.
 ///
 /// The full TUI dialog wired into the upstream TypeScript port is a
 /// larger follow-up; the default answers are sufficient for every
@@ -70,25 +97,21 @@ pub(crate) struct LoginInteraction {
     /// Per-flow cancellation token. Optional — the OAuth flow treats
     /// `None` as "never cancel".
     signal: Option<AbortSignal>,
-    /// Sink for progress events. Held behind an `AsyncMutex` so the
-    /// `notify` callback can borrow it across the `&self` reference
-    /// without violating `Send + Sync`.
-    sink: Arc<AsyncMutex<App>>,
+    /// Buffered events. Cloned into the `notify` callback so the
+    /// future can outlive the caller's `&mut App` borrow.
+    sink: Arc<EventBuffer>,
 }
 
 impl LoginInteraction {
-    pub(crate) fn new(sink: Arc<AsyncMutex<App>>) -> Self {
-        Self {
-            signal: None,
+    pub(crate) fn new() -> (Self, Arc<EventBuffer>) {
+        let sink = Arc::new(EventBuffer::default());
+        (
+            Self {
+                signal: None,
+                sink: sink.clone(),
+            },
             sink,
-        }
-    }
-
-    pub(crate) fn with_signal(sink: Arc<AsyncMutex<App>>, signal: AbortSignal) -> Self {
-        Self {
-            signal: Some(signal),
-            sink,
-        }
+        )
     }
 
     fn render_event(event: &AuthEvent) -> String {
@@ -98,14 +121,7 @@ impl LoginInteraction {
                 if !links.is_empty() {
                     body.push('\n');
                     for link in links {
-                        match &link.label {
-                            Some(label) => {
-                                body.push_str(&format!("  {label}: {}\n", link.url));
-                            }
-                            None => {
-                                body.push_str(&format!("  {}\n", link.url));
-                            }
-                        }
+                        append_link(&mut body, link);
                     }
                 }
                 body
@@ -139,6 +155,13 @@ impl LoginInteraction {
     }
 }
 
+fn append_link(body: &mut String, link: &AuthInfoLink) {
+    match &link.label {
+        Some(label) => body.push_str(&format!("  {label}: {}\n", link.url)),
+        None => body.push_str(&format!("  {}\n", link.url)),
+    }
+}
+
 #[async_trait]
 impl AuthInteraction for LoginInteraction {
     fn signal(&self) -> Option<&AbortSignal> {
@@ -156,12 +179,9 @@ impl AuthInteraction for LoginInteraction {
             | AuthPrompt::ManualCode { message, .. } => message.clone(),
             AuthPrompt::Select { message, .. } => message.clone(),
         };
-        {
-            let mut sink = self.sink.lock().await;
-            sink.info_block(format!(
-                "OAuth asks: {preview}\n(no interactive prompt yet — answering with default; cancel with Ctrl+C to abort)"
-            ));
-        }
+        self.sink.push(format!(
+            "OAuth asks: {preview}\n(no interactive prompt yet — answering with default; cancel with Ctrl+C to abort)"
+        ));
 
         match prompt {
             AuthPrompt::Text { .. } | AuthPrompt::Secret { .. } | AuthPrompt::ManualCode { .. } => {
@@ -175,28 +195,19 @@ impl AuthInteraction for LoginInteraction {
     }
 
     fn notify(&self, event: AuthEvent) {
-        // `notify` is sync and the `App` is behind an `AsyncMutex`,
-        // so we hand the work to a one-shot tokio task instead of
-        // blocking the calling future on the lock. The lock
-        // acquisition does not borrow `self` mutably after the call
-        // returns, so we can move a clone of `Arc` into the task.
-        let body = Self::render_event(&event);
-        let sink = self.sink.clone();
-        tokio::spawn(async move {
-            let mut guard = sink.lock().await;
-            guard.info_block(body);
-        });
+        self.sink.push(Self::render_event(&event));
     }
 }
 
 /// Run the OAuth login flow for the provider identified by `spec` and
 /// persist the resulting credential through `store`.
 ///
-/// Returns the [`LoginOutcome`] describing what happened so the caller
-/// can render the user-visible summary line.
+/// `events_out` is filled with the user-visible progress messages the
+/// flow produced; the caller is responsible for flushing them to the
+/// TUI info pane.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn run_oauth_login(
-    app: Arc<AsyncMutex<App>>,
+    events_out: &mut Vec<String>,
     store: Arc<dyn CredentialStore>,
     spec: &ProviderSpec,
 ) -> LoginOutcome {
@@ -212,13 +223,15 @@ pub(crate) async fn run_oauth_login(
         return LoginOutcome::UnknownProvider(provider_id);
     };
 
-    let interaction = LoginInteraction::new(app.clone());
+    let (interaction, buffer) = LoginInteraction::new();
     let credential = match oauth.login(&interaction).await {
         Ok(credential) => credential,
         Err(AuthError::Aborted) => return LoginOutcome::Aborted,
         Err(err) => return LoginOutcome::Failed(format!("{err}")),
     };
-    persist_credential(store, &provider_id, credential).await
+    let outcome = persist_credential(store, &provider_id, credential).await;
+    events_out.extend(buffer.drain());
+    outcome
 }
 
 async fn persist_credential(
@@ -339,7 +352,7 @@ mod tests {
     fn render_event_info_includes_links() {
         let event = AuthEvent::Info {
             message: "Copilot needs an OAuth token".into(),
-            links: vec![pi_ai::auth::AuthInfoLink {
+            links: vec![AuthInfoLink {
                 url: "https://github.com/settings/tokens".into(),
                 label: Some("Tokens".into()),
             }],
@@ -357,5 +370,105 @@ mod tests {
             spec.oauth.unwrap().kind,
             OAuthKindSpec::DeviceCode { interval_ms: 5000 }
         ));
+    }
+
+    #[test]
+    fn event_buffer_round_trips() {
+        let (interaction, buffer) = LoginInteraction::new();
+        interaction.notify(AuthEvent::Progress {
+            message: "first".into(),
+        });
+        interaction.notify(AuthEvent::Progress {
+            message: "second".into(),
+        });
+        let drained = buffer.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(drained[0].contains("first"));
+        assert!(drained[1].contains("second"));
+        assert!(buffer.drain().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prompt_returns_default_for_text_and_first_option_for_select() {
+        let (interaction, _) = LoginInteraction::new();
+        let text = interaction
+            .prompt(AuthPrompt::Text {
+                signal: None,
+                message: "GitHub Enterprise URL".into(),
+                placeholder: Some("company.ghe.com".into()),
+            })
+            .await
+            .expect("text prompt");
+        assert_eq!(text, "");
+
+        let selected = interaction
+            .prompt(AuthPrompt::Select {
+                signal: None,
+                message: "Pick a method".into(),
+                options: vec![
+                    AuthPromptOption {
+                        id: "browser".into(),
+                        label: "Browser".into(),
+                        description: None,
+                    },
+                    AuthPromptOption {
+                        id: "device".into(),
+                        label: "Device code".into(),
+                        description: None,
+                    },
+                ],
+            })
+            .await
+            .expect("select prompt");
+        assert_eq!(selected, "browser");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_oauth_login_unknown_provider_returns_unknown_outcome() {
+        let store: Arc<dyn CredentialStore> =
+            Arc::new(pi_ai::auth::InMemoryCredentialStore::new());
+        let mut events: Vec<String> = Vec::new();
+        // A provider id not registered as OAuth-first but with no
+        // `api_key_env` either — the `oauth_login` helper still gets a
+        // `find_provider` hit, sees `oauth: Some(…)`, and resolves
+        // through `oauth_for`. Build a `ProviderSpec` for a fictional
+        // id so `oauth_for` rejects it.
+        let spec = ProviderSpec {
+            id: "no-such-provider",
+            display_name: "None",
+            api: pi_protocol::Api::OpenAiChatCompletions,
+            default_base_url: "",
+            api_key_env: &[],
+            base_url_env: &[],
+            models: &[],
+            oauth: Some(OAuthSpec {
+                login_label: "Sign in",
+                auth_url: "",
+                kind: OAuthKindSpec::DeviceCode { interval_ms: 1000 },
+            }),
+        };
+        let outcome = run_oauth_login(&mut events, store, &spec).await;
+        assert!(matches!(outcome, LoginOutcome::UnknownProvider(_)));
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_oauth_login_without_oauth_spec_returns_not_oauth() {
+        let store: Arc<dyn CredentialStore> =
+            Arc::new(pi_ai::auth::InMemoryCredentialStore::new());
+        let mut events: Vec<String> = Vec::new();
+        let spec = ProviderSpec {
+            id: "anthropic",
+            display_name: "Anthropic",
+            api: pi_protocol::Api::AnthropicMessages,
+            default_base_url: "https://api.anthropic.com",
+            api_key_env: &["ANTHROPIC_API_KEY"],
+            base_url_env: &[],
+            models: &[],
+            oauth: None,
+        };
+        let outcome = run_oauth_login(&mut events, store, &spec).await;
+        assert!(matches!(outcome, LoginOutcome::NotOAuthProvider(_)));
+        assert!(events.is_empty());
     }
 }

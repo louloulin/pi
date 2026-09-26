@@ -898,6 +898,7 @@ mod tests {
                 is_error: false,
                 details: None,
                 added_tool_names: None,
+            images: Vec::new(),
             })],
             model: None,
         });
@@ -927,6 +928,7 @@ mod tests {
                     is_error: true,
                     details: None,
                     added_tool_names: None,
+            images: Vec::new(),
                 }),
                 Content::text("second"),
             ],

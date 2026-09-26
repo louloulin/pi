@@ -1493,6 +1493,20 @@ async fn handle_fork_selection(
     }
     match fork_session(&directory, &reader, &options.session_id, entry_id) {
         Ok(created) => {
+            // `session_fork` is the success-side sibling of
+            // `session_before_fork`. Notify extensions after the new
+            // session is committed so a plugin can hand the new id to
+            // its own state, but never veto here — the fork has
+            // already happened.
+            if let Some(runtime) = options.extensions.as_ref() {
+                let _ = runtime
+                    .dispatch_event(&ExtensionEvent::SessionFork {
+                        session_id: created.session_id.clone(),
+                        parent_id: options.session_id.clone(),
+                        entry_id: entry_id.to_string(),
+                    })
+                    .await;
+            }
             clone_into_new_session(app, agent, options, created).await;
         }
         Err(err) => app.info(format!("/fork: {err}")),

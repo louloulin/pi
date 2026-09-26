@@ -276,6 +276,7 @@ impl ToolExecutor for ExtensionToolExecutor {
             is_error: outcome.is_error,
             details: outcome.details,
             added_tool_names: None,
+            images: Vec::new(),
         })
     }
 }

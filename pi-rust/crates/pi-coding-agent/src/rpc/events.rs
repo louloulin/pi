@@ -175,6 +175,7 @@ mod tests {
                 is_error: false,
                 details: Some(json!({"lines": 3})),
                 added_tool_names: None,
+                images: Vec::new(),
             },
             duration_ms: 12,
         };

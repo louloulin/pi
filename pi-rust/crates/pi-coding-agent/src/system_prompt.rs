@@ -143,6 +143,53 @@ pub fn builtin_prompt_contributions(
     (snippets, guidelines)
 }
 
+/// Build the `tool_snippets` / `prompt_guidelines` pair by walking live
+/// [`AgentTool`](crate::tools::AgentTool) trait objects.
+///
+/// This is the extension-visible path that mirrors TS
+/// `ToolDefinition.promptSnippet` / `promptGuidelines` (plan §6 P1-1).
+/// Each tool's [`prompt_snippet`](crate::tools::AgentTool::prompt_snippet) and
+/// [`prompt_guidelines`](crate::tools::AgentTool::prompt_guidelines) methods
+/// drive the prompt; fields the tool did not declare fall back to the
+/// static [`builtin_tool_contribution`] table so the seven built-in tools
+/// keep their hand-curated copy without each of them having to override
+/// the trait methods. Extension tools that override the trait methods
+/// surface their customisation through this path.
+pub fn tool_prompt_contributions_from(
+    tools: &[crate::tools::DynAgentTool],
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut snippets = BTreeMap::new();
+    let mut guidelines = Vec::new();
+
+    for tool in tools {
+        let name = tool.name().to_string();
+        let fallback = builtin_tool_contribution(&name);
+        // Per-field fallback: the static table seeds any field the trait
+        // method left `None` / empty, so a tool that overrides only one
+        // half still picks up the hand-curated copy for the other.
+        let snippet = tool
+            .prompt_snippet()
+            .map(str::to_string)
+            .or_else(|| fallback.map(|c| c.snippet.to_string()));
+        let mut contributed: Vec<String> = tool
+            .prompt_guidelines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        if contributed.is_empty() {
+            if let Some(c) = fallback {
+                contributed = c.guidelines.iter().map(|g| g.to_string()).collect();
+            }
+        }
+        if let Some(s) = snippet {
+            snippets.insert(name, s);
+        }
+        guidelines.extend(contributed);
+    }
+
+    (snippets, guidelines)
+}
+
 /// Options for [`build_system_prompt`].
 #[derive(Debug, Clone, Default)]
 pub struct SystemPromptOptions {

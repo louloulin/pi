@@ -76,6 +76,12 @@ pub enum CommandError {
     /// JSON serialization failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// Anything else surfaced by a subcommand (e.g. refreshing a remote
+    /// catalog). The string is shown verbatim to the user; the exit
+    /// code maps to `EX_SOFTWARE` (70) so callers can distinguish
+    /// genuine I/O failures from runtime / network ones.
+    #[error("{0}")]
+    Other(String),
 }
 
 impl CommandError {
@@ -86,7 +92,7 @@ impl CommandError {
             CommandError::NotFound(_) => 66,                       // EX_NOINPUT
             CommandError::Install(err) => err.exit_code(),         // maps 64/66/69/74
             CommandError::Registry(_) | CommandError::Io(_) => 74, // EX_IOERR
-            CommandError::Json(_) => 70,                           // EX_SOFTWARE
+            CommandError::Json(_) | CommandError::Other(_) => 70,   // EX_SOFTWARE
         }
     }
 }
@@ -187,10 +193,62 @@ fn run_list_models(models: &Models, output: OutputFormat) -> Result<(), CommandE
 }
 
 fn run_update_models(models: &Models) -> Result<(), CommandError> {
-    // The Rust catalog is compiled in (see `main.rs::build_default_models`),
-    // so there is nothing to download. Report the reloaded model count so
-    // scripts can still observe the command succeeded.
+    // P38: when the user has set `PI_MODELS_CATALOG_URL` to a remote
+    // `models.json` (the same envelope shape `pi_ai::Models::load_models_json`
+    // parses), refresh it through `pi_ai::ModelsStore` so ETag /
+    // `Last-Modified` keep the wire quiet on no-op refreshes. The
+    // refreshed body lands in `~/.pi/agent/models-cache.json`; the next
+    // process start picks it up via `ModelsStore::cached_models`. Without
+    // an env var, the catalog is compiled in (see
+    // `main.rs::build_default_models`) and the legacy "0 changes" line
+    // tells scripts the command is a no-op.
+    if let Ok(url) = std::env::var("PI_MODELS_CATALOG_URL") {
+        if let Some(agent_dir) = crate::paths::agent_dir() {
+            return run_update_models_via_store(models, &agent_dir.join("models-cache.json"), &url);
+        }
+    }
     let count = models.iter().count();
+    println!("Model catalogs refreshed: {count} models (0 changes)");
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_update_models_via_store(
+    _models: &Models,
+    cache_path: &std::path::Path,
+    url: &str,
+) -> Result<(), CommandError> {
+    // `ModelsStore::refresh_sync` builds its own runtime + client so this
+    // module does not need a direct `reqwest` dependency.
+    let mut store = pi_ai::ModelsStore::load_or_default(cache_path.to_path_buf());
+    let user_agent = concat!("pi-rust/", env!("CARGO_PKG_VERSION"));
+    match store.refresh_sync(url, user_agent) {
+        Ok(pi_ai::RefreshOutcome::NotModified) => {
+            println!(
+                "Model catalogs refreshed: 0 changes (etag={:?}, last-modified={:?})",
+                store.etag(),
+                store.last_modified(),
+            );
+            Ok(())
+        }
+        Ok(pi_ai::RefreshOutcome::Updated { provider_count }) => {
+            println!(
+                "Model catalogs refreshed: {provider_count} providers updated (cache: {})",
+                cache_path.display()
+            );
+            Ok(())
+        }
+        Err(err) => Err(CommandError::Other(format!("{err}"))),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_update_models_via_store(
+    _models: &Models,
+    _cache_path: &std::path::Path,
+    _url: &str,
+) -> Result<(), CommandError> {
+    let count = _models.iter().count();
     println!("Model catalogs refreshed: {count} models (0 changes)");
     Ok(())
 }

@@ -227,6 +227,7 @@ impl ToolExecutor for TimingExecutor {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         })
     }
 }
@@ -261,6 +262,7 @@ impl ToolExecutor for DefaultModeExecutor {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         })
     }
 }

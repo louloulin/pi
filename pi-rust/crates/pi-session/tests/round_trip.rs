@@ -79,6 +79,7 @@ fn round_trip_user_assistant_extension_toolcall_toolresult() {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         }))
         .expect("tool result");
     writer

@@ -237,10 +237,10 @@ fn main() -> ExitCode {
                 // Picker view state (`/resume`, `/tree`) starts at its
                 // defaults; the driver keeps it across selector opens.
                 pickers: Default::default(),
-                // Credential store: the in-memory default; production
-                // would read from the auth helper. Plan §5 P0-3 was
-                // added on top of an already-existing field.
-                credential_store: Arc::new(pi_ai::auth::InMemoryCredentialStore::new()),
+                // Credential store: the router owns the live store so
+                // `/login` writes land in the same place the resolution
+                // path reads from (`ProviderRouter::resolve_provider_auth`).
+                credential_store: router.credential_store(),
                 // `--no-header`: the startup key-hint screen. Upstream's
                 // equivalent is the `quietStartup` setting, which it reads
                 // while constructing the session (`interactive-mode.ts:859`).
@@ -627,6 +627,34 @@ fn build_default_models() -> Models {
     // `pi_ai::providers::registry::BUILTIN_PROVIDERS`, the same table the
     // `ProviderRouter` uses to build streaming adapters. Adding a provider
     // therefore means one registry entry, not an edit here.
+    //
+    // P38: if `~/.pi/agent/models-cache.json` exists from a previous
+    // `pi --update-models` (driven by `ModelsStore::refresh`), prefer it
+    // — it's the catalog the user pulled last, with a validated schema.
+    // The static user override `models.json` still wins when present.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(agent_dir) = pi_coding_agent::paths::agent_dir() {
+        let cache_path = agent_dir.join("models-cache.json");
+        let store = pi_ai::ModelsStore::load_or_default(cache_path);
+        if let Some(cached) = store.cached_models() {
+            return cached;
+        }
+    }
+    // P35: if the user has dropped a `models.json` at `~/.pi/agent/`,
+    // parse + validate it through [`Models::load_models_json`] and let
+    // it override (or augment) the registry. Missing file is silent (the
+    // registry is the source of truth); schema errors are surfaced so a
+    // typo never silently disables a provider.
+    if let Some(agent_dir) = pi_coding_agent::paths::agent_dir() {
+        let path = agent_dir.join("models.json");
+        match Models::load_models_json(&path) {
+            Ok(overrides) => return overrides,
+            Err(pi_ai::LoadModelsError::Io { .. }) => {}
+            Err(err) => {
+                eprintln!("pi: {err}");
+            }
+        }
+    }
     let mut models = Models::new();
     for spec in pi_ai::providers::registry::BUILTIN_PROVIDERS {
         let entries: Vec<Model> = spec

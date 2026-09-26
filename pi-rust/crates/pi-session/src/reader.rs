@@ -529,6 +529,11 @@ fn upstream_message_entry(payload: &Value) -> SessionEntry {
                         .collect()
                 },
             ),
+            // Replayable session logs don't carry a sidecar image list yet;
+            // the tool executor's `fold_content` only populates it on the
+            // live execution path. The field's `Default` keeps this site
+            // boring when the value is absent.
+            images: Vec::new(),
         }),
         other => {
             tracing::warn!(
@@ -606,6 +611,7 @@ fn upstream_context_message(message: &Value) -> Option<Message> {
                     .unwrap_or(false),
                 details: non_null(message.get("details")),
                 added_tool_names: None,
+                images: Vec::new(),
             })],
             model: None,
         }),

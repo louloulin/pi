@@ -323,8 +323,14 @@ impl ExtensionRuntime {
     /// discovers extensions; a test that already has a loaded host (for
     /// example to drive the interactive event fan-out) does not need a
     /// search path.
-    #[cfg(test)]
-    pub(crate) fn for_test(host: JsExtensionHost, subscribed: &[&str]) -> Self {
+    ///
+    /// Public so integration tests under `tests/` can build a runtime
+    /// against a hand-loaded [`JsExtensionHost`]; the name `for_test` and
+    /// the documentation here are the convention that keeps it out of the
+    /// production code paths. `#[cfg(test)]` is *not* used because
+    /// integration tests are a separate compilation unit and would not see
+    /// the function.
+    pub fn for_test(host: JsExtensionHost, subscribed: &[&str]) -> Self {
         Self {
             host: Some(host),
             subscribed_events: subscribed.iter().map(|name| (*name).to_string()).collect(),

@@ -119,6 +119,7 @@ fn app() -> App {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         },
         duration_ms: 5,
     });

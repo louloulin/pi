@@ -268,6 +268,11 @@ fn message_from_js(value: &Value) -> Option<Message> {
                         .map(str::to_string)
                         .collect()
                 }),
+            // JS tools cannot carry multi-image sidecars through this bridge;
+            // the model-facing `images` list is only populated by the host
+            // adapter once the tool result has been reassembled into
+            // `pi_protocol::ToolResult`.
+            images: Vec::new(),
         };
         return Some(Message {
             role,

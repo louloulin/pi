@@ -60,6 +60,7 @@ fn as_result(id: &str, output: ToolOutput, is_error: bool) -> ToolResult {
         is_error,
         details: output.details,
         added_tool_names: None,
+        images: Vec::new(),
     }
 }
 
@@ -510,6 +511,7 @@ fn interactive_app_renders_the_rich_bash_block_and_ctrl_o_expands_it() {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         },
         duration_ms: 4,
     });
@@ -557,6 +559,7 @@ fn wire_result(
         is_error,
         details,
         added_tool_names: None,
+        images: Vec::new(),
     }
 }
 

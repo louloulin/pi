@@ -14,6 +14,8 @@ pub mod ext_bridge;
 pub mod images;
 pub mod json_parse;
 pub mod models;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod models_store;
 pub mod overflow;
 pub mod providers;
 #[cfg(not(target_arch = "wasm32"))]
@@ -46,7 +48,9 @@ pub use json_parse::{
     close_partial_json, parse_json_with_repair, parse_streaming_json, parse_value_with_repair,
     repair_json,
 };
-pub use models::Models;
+pub use models::{LoadModelsError, Models};
+#[cfg(not(target_arch = "wasm32"))]
+pub use models_store::{ModelsStore, RefreshError, RefreshOutcome};
 pub use overflow::{
     get_non_overflow_patterns, get_overflow_patterns, is_context_overflow,
     is_context_overflow_error_text, is_recoverable_length,

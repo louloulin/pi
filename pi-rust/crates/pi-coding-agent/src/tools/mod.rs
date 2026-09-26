@@ -23,6 +23,8 @@ mod edit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod edit_diff;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod file_mutation_queue;
+#[cfg(not(target_arch = "wasm32"))]
 mod find;
 #[cfg(not(target_arch = "wasm32"))]
 mod grep;
@@ -30,6 +32,8 @@ mod grep;
 mod ls;
 #[cfg(not(target_arch = "wasm32"))]
 mod mod_ignore;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod output_accumulator;
 #[cfg(not(target_arch = "wasm32"))]
 mod read;
 #[cfg(not(target_arch = "wasm32"))]
@@ -222,6 +226,30 @@ pub trait AgentTool: Send + Sync {
             parameters: self.parameters(),
             metadata: None,
         }
+    }
+
+    /// Optional system-prompt snippet embedded inline before this tool's
+    /// parameter schema.
+    ///
+    /// Mirrors upstream `ToolDefinition.promptSnippet` (TS
+    /// `packages/coding-agent/src/core/tools/types.ts`). It is the place a
+    /// tool uses to surface a *minimal* example invocation the model can
+    /// pattern-match against, instead of relying on the prose description.
+    /// Defaults to `None` so existing tools keep their old behaviour.
+    fn prompt_snippet(&self) -> Option<&str> {
+        None
+    }
+
+    /// Optional list of system-prompt guidelines embedded after this tool's
+    /// parameter schema.
+    ///
+    /// Mirrors upstream `ToolDefinition.promptGuidelines` (TS
+    /// `packages/coding-agent/src/core/tools/types.ts`). The list is
+    /// rendered as a bullet block; each entry is one short imperative
+    /// sentence ("Do not …", "Prefer …"). Defaults to empty so existing
+    /// tools keep their old behaviour.
+    fn prompt_guidelines(&self) -> &[&str] {
+        &[]
     }
 }
 

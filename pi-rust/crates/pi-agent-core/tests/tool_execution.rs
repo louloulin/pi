@@ -204,6 +204,7 @@ impl ToolExecutor for MockToolExecutor {
                 is_error: true,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             }),
             "abort" => Err(AgentError::Tool {
                 tool: call.name.clone(),
@@ -215,6 +216,7 @@ impl ToolExecutor for MockToolExecutor {
                 is_error: false,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             }),
         }
     }

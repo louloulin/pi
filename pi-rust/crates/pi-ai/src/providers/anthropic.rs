@@ -47,8 +47,8 @@ use bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use futures::TryStreamExt;
 use pi_protocol::{
-    AssistantMessage, AssistantMessageEvent, Content, Context, Message, Model, Role, StopReason,
-    TextContent, ToolCall, Usage,
+    AssistantMessage, AssistantMessageEvent, Content, Context, ImageContent, Message, Model, Role,
+    StopReason, TextContent, ToolCall, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -338,13 +338,39 @@ pub struct ImageSource {
 }
 
 /// Tool result content — string or array of blocks.
+///
+/// The Anthropic Messages API accepts either a plain string (single textual
+/// result) or an array of blocks when the result needs to mix text and
+/// images. Plan §6 P1-3 multi-image round-trip uses the array form: a tool
+/// returning N images reaches the model as 1 textual block + N image
+/// blocks. The untagged serialiser emits the scalar form whenever
+/// [`ToolResultContent::Blocks`] is empty, so the happy path stays
+/// byte-for-byte compatible with the previous single-image shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolResultContent {
     /// Plain text result.
     Text(String),
     /// Array of blocks.
-    Blocks(Vec<UserContentBlock>),
+    Blocks(Vec<ToolResultInnerBlock>),
+}
+
+/// Inner block types a `tool_result` may carry. Mirrors the Anthropic
+/// `tool_result.content` array shape: text + image only — tool calls and
+/// tool results never appear nested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolResultInnerBlock {
+    /// Textual content accompanying the image(s).
+    Text {
+        /// UTF-8 text.
+        text: String,
+    },
+    /// Inline base64 image attached to the tool result.
+    Image {
+        /// Anthropic image source descriptor.
+        source: ImageSource,
+    },
 }
 
 /// One block in an assistant message.
@@ -443,7 +469,17 @@ fn anthropic_message_from(msg: &Message) -> Result<AnthropicMessage, StreamError
             //
             // Anthropic expects tool results as user-side `tool_result`
             // blocks. Pull the tool call id from the first ToolResult
-            // block; concatenate the textual content of the rest.
+            // block; concatenate the textual content of the rest. When a tool
+            // result carries *additional* images in
+            // [`ToolResult::images`](pi_protocol::ToolResult::images) (the
+            // "extras" list — the first image already lives in
+            // `r.content`), emit one `image` wire block per attachment next
+            // to the text block. This is the multi-image round-trip wired by
+            // plan §6 P1-3: a tool returning N images reaches the model as
+            // 1 textual block + N image blocks. When the head content is
+            // itself an image, fall back to `details.image_text` for the
+            // synthetic text block so the model still gets a description of
+            // what the attachments depict.
             let tool_use_id = msg
                 .content
                 .iter()
@@ -454,22 +490,72 @@ fn anthropic_message_from(msg: &Message) -> Result<AnthropicMessage, StreamError
                 .ok_or_else(|| StreamError::Malformed("tool message missing tool result".into()))?;
             let mut text = String::new();
             let mut is_error = None;
+            let mut extra_images: Vec<ImageContent> = Vec::new();
             for c in &msg.content {
                 match c {
                     Content::Text(t) => text.push_str(&t.text),
                     Content::ToolResult(r) => {
                         is_error = Some(r.is_error);
-                        if let Content::Text(t) = &*r.content {
-                            text.push_str(&t.text);
+                        match &*r.content {
+                            Content::Text(t) => text.push_str(&t.text),
+                            Content::Image(_) => {
+                                // Head image: render the synthetic caption
+                                // from `details.image_text` so the model has
+                                // a textual anchor alongside the image
+                                // blocks. The head image itself is rendered
+                                // separately by the TUI (see
+                                // `tool_executor::fold_content`) and is not
+                                // duplicated on the wire.
+                                if let Some(details) = &r.details {
+                                    if let Some(image_text) =
+                                        details.get("image_text").and_then(|v| v.as_str())
+                                    {
+                                        text.push_str(image_text);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        // `images` is the *extras* list — the head image is
+                        // already in `r.content`, so the wire payload emits
+                        // these as additional `image` blocks. Skip the
+                        // empty-list case so a plain text-only tool result
+                        // still uses the cheap `ToolResultContent::Text`
+                        // variant.
+                        if !r.images.is_empty() {
+                            extra_images.extend(r.images.iter().cloned());
                         }
                     }
                     _ => {}
                 }
             }
+            // When no extra images are present, prefer the scalar text
+            // variant to match upstream's `convertToolResult` shape; the
+            // Anthropic API accepts both, but the scalar form keeps the
+            // happy-path wire payload byte-for-byte identical to before the
+            // multi-image round-trip landed.
+            let tool_result_content = if extra_images.is_empty() {
+                ToolResultContent::Text(text)
+            } else {
+                let mut inner = Vec::with_capacity(1 + extra_images.len());
+                if !text.is_empty() {
+                    inner.push(ToolResultInnerBlock::Text { text });
+                }
+                for image in extra_images {
+                    inner.push(ToolResultInnerBlock::Image {
+                        source: ImageSource {
+                            kind: "base64".to_string(),
+                            media_type: image.mime_type,
+                            data: image.data,
+                        },
+                    });
+                }
+                ToolResultContent::Blocks(inner)
+            };
             Ok(AnthropicMessage::User {
                 content: UserContent::Blocks(vec![UserContentBlock::ToolResult {
                     tool_use_id,
-                    content: ToolResultContent::Text(text),
+                    content: tool_result_content,
                     is_error,
                 }]),
             })
@@ -1256,6 +1342,7 @@ mod tests {
                 is_error: false,
                 details: None,
                 added_tool_names: None,
+            images: Vec::new(),
             })],
             model: None,
         });
@@ -1456,6 +1543,106 @@ mod tests {
         assert!(v.get("temperature").is_none());
         // max_tokens must still be present.
         assert!(v["max_tokens"].is_number());
+    }
+
+    /// Multi-image round-trip (plan §6 P1-3): a tool result carrying the
+    /// head image in `content` plus two extras in `ToolResult::images` must
+    /// surface on the wire as a `tool_result` block whose `content` is an
+    /// array of `text + image + image` (in declaration order). The scalar
+    /// text-only path stays byte-for-byte identical to the pre-round-trip
+    /// shape — no regressions in the happy case.
+    #[test]
+    fn tool_result_multi_image_emits_an_array_with_one_block_per_image() {
+        let mut ctx = Context::new("");
+        let img1 = ImageContent {
+            mime_type: "image/png".to_string(),
+            data: "FIRST".to_string(),
+        };
+        let img2 = ImageContent {
+            mime_type: "image/jpeg".to_string(),
+            data: "SECOND".to_string(),
+        };
+        let img3 = ImageContent {
+            mime_type: "image/webp".to_string(),
+            data: "THIRD".to_string(),
+        };
+        let mut result = pi_protocol::ToolResult {
+            tool_call_id: "toolu_test_01".into(),
+            content: Box::new(Content::Image(img1.clone())),
+            is_error: false,
+            details: Some(serde_json::json!({ "image_text": "three attachments" })),
+            added_tool_names: None,
+            images: vec![img2.clone(), img3.clone()],
+        };
+        ctx.messages.push(Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(result.clone())],
+            model: None,
+        });
+        let req = AnthropicProvider::build_request(&model(), &ctx, &SimpleStreamOptions::default())
+            .expect("build request");
+        let v = serde_json::to_value(&req).expect("serialize request");
+
+        let user_message = &v["messages"][0];
+        let tool_result_block = &user_message["content"][0];
+        assert_eq!(
+            tool_result_block["type"], "tool_result",
+            "the wire payload must use the tool_result block type"
+        );
+        assert_eq!(tool_result_block["tool_use_id"], "toolu_test_01");
+        // Multi-image path: scalar `content` is replaced by an array.
+        let inner_blocks = tool_result_block["content"]
+            .as_array()
+            .expect("content must be an array when images are present");
+        assert_eq!(
+            inner_blocks.len(),
+            3,
+            "text + image + image in declaration order; got {inner_blocks:?}"
+        );
+        assert_eq!(inner_blocks[0]["type"], "text");
+        assert_eq!(inner_blocks[0]["text"], "three attachments");
+        assert_eq!(inner_blocks[1]["type"], "image");
+        assert_eq!(inner_blocks[1]["source"]["type"], "base64");
+        assert_eq!(inner_blocks[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(inner_blocks[1]["source"]["data"], "SECOND");
+        assert_eq!(inner_blocks[2]["type"], "image");
+        assert_eq!(inner_blocks[2]["source"]["media_type"], "image/webp");
+        assert_eq!(inner_blocks[2]["source"]["data"], "THIRD");
+
+        // The single-image path (no extras) keeps the scalar string shape.
+        // Build a fresh, plain (text-head, no extras, no details) result
+        // rather than mutating `result` — the head `Content::Image` plus
+        // the `image_text` synthetic caption would otherwise keep the
+        // scalar/array decision logic busy and turn the wire payload into
+        // a different shape than the one we want to pin here.
+        let mut plain_ctx = Context::new("");
+        plain_ctx.messages.push(Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(pi_protocol::ToolResult {
+                tool_call_id: "toolu_test_01".into(),
+                content: Box::new(Content::Text(TextContent {
+                    text: "ok".into(),
+                })),
+                is_error: false,
+                details: None,
+                added_tool_names: None,
+                images: Vec::new(),
+            })],
+            model: None,
+        });
+        let plain_req =
+            AnthropicProvider::build_request(&model(), &plain_ctx, &SimpleStreamOptions::default())
+                .expect("build request");
+        let plain_v = serde_json::to_value(&plain_req).expect("serialize request");
+        let plain_block = &plain_v["messages"][0]["content"][0];
+        assert!(
+            plain_block["content"].is_string(),
+            "scalar text result must stay a string; got {:?}",
+            plain_block["content"]
+        );
+        assert_eq!(plain_block["content"].as_str().unwrap(), "ok");
+        // Quietly avoid unused-import warnings for img1.
+        let _ = img1;
     }
 
     // Tiny smoke test that exercises the `Stream` shape without

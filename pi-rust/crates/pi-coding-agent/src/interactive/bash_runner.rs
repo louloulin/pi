@@ -176,6 +176,7 @@ pub(super) fn push_bash_block(
         is_error,
         details,
         added_tool_names: None,
+        images: Vec::new(),
     };
 
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

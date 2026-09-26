@@ -986,6 +986,7 @@ async fn prepare_call(hooks: &AgentHookAdapter, call: &ToolCall) -> (CallPrepara
                 is_error: true,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             }),
             decision.terminate,
         )
@@ -1150,6 +1151,7 @@ fn aborted_tool_result(call: &ToolCall) -> ToolResult {
         is_error: true,
         details: None,
         added_tool_names: None,
+        images: Vec::new(),
     }
 }
 
@@ -1194,6 +1196,7 @@ async fn run_call(
                     is_error: true,
                     details: None,
                     added_tool_names: None,
+                    images: Vec::new(),
                 })
         }
     };
@@ -1220,6 +1223,7 @@ async fn dispatch_tool(
                 is_error: true,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             },
         },
         // Backward compatibility: no executor registered, so keep the
@@ -1230,6 +1234,7 @@ async fn dispatch_tool(
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         },
     }
 }

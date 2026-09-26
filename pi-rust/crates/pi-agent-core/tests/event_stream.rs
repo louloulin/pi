@@ -186,6 +186,7 @@ impl ToolExecutor for SleepyExecutor {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         })
     }
 }

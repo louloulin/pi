@@ -33,6 +33,8 @@ use super::{
     run_compact, session_directory, set_session_name, settings_sources, start_new_session,
     InteractiveOptions,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use super::oauth_login;
 
 /// Dispatch a `/<cmd>` line to the matching built-in or extension command.
 ///
@@ -212,20 +214,35 @@ pub(super) async fn run_slash_command(
             // env vars the provider reads, in priority order. Setting any one
             // makes the provider's models appear in `/model` (the model
             // selector filters by configured credential — `Models.getAvailable()`
-            // mirror). OAuth-first providers stay hidden until P33 ships.
+            // mirror). OAuth-first providers (`github-copilot`, `openai-codex`,
+            // `kimi-coding`) have no env vars, so the OAuth flow is what wires
+            // them up — see `oauth_login::run_oauth_login`.
             match provider {
                 Some(p) => {
                     let env_vars = pi_ai::providers::registry::api_key_env_vars(&p);
                     if env_vars.is_empty() {
-                        let oauth_label = pi_ai::providers::registry::find_provider(&p)
-                            .and_then(|spec| spec.oauth)
-                            .map(|oauth| oauth.login_label);
-                        match oauth_label {
-                            Some(label) => app.info(format!(
-                                "/login {p}: OAuth flow not yet implemented in Rust port (would show \"{label}\" once P33 lands)"
+                        // No env-var fallback. If the provider is OAuth-first
+                        // we run the flow; otherwise the id is unknown.
+                        match pi_ai::providers::registry::find_provider(&p) {
+                            Some(spec) if spec.oauth.is_some() => {
+                                let store = options.credential_store.clone();
+                                let mut events: Vec<String> = Vec::new();
+                                let outcome = oauth_login::run_oauth_login(
+                                    &mut events,
+                                    store,
+                                    spec,
+                                )
+                                .await;
+                                for event in events {
+                                    app.info_block(event);
+                                }
+                                app.info(oauth_login::describe_outcome(&outcome));
+                            }
+                            Some(_) => app.info(format!(
+                                "/login {p}: provider is not OAuth-first and has no api_key_env registered"
                             )),
                             None => app.info(format!(
-                                "/login {p}: unknown provider (no api_key_env registered)"
+                                "/login {p}: unknown provider id (no api_key_env registered)"
                             )),
                         }
                     } else {

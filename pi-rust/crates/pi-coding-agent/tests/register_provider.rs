@@ -160,3 +160,175 @@ fn resolve_extension_api_key_handles_literal_and_env_forms() {
     assert!(resolve_extension_api_key(Some("$MISSING"), &env).is_err());
     assert!(resolve_extension_api_key(Some("!op read secret"), &env).is_err());
 }
+
+
+#[test]
+fn registering_with_snake_case_model_fields_is_normalised() {
+    // The Rust port's native catalog format is snake_case (`context_window` /
+    // `max_output_tokens`). The bridge accepts both spellings because plugin
+    // authors writing JSON manually sometimes use one or the other — TS
+    // extensions tend to use camelCase to match the upstream type.
+    let mut router = ProviderRouter::from_env_with(|_| None);
+    let mut models = Models::new();
+    let env = |name: &str| (name == "PROXY_KEY").then(|| "sk-test".to_string());
+    let providers = vec![RegisteredProviderConfig {
+        name: "snake-proxy".to_string(),
+        display_name: Some("Snake Proxy".to_string()),
+        base_url: Some("https://snake.example.com/v1".to_string()),
+        api_key: Some("$PROXY_KEY".to_string()),
+        api: Some("openai-completions".to_string()),
+        models: serde_json::json!([
+            {
+                "id": "snake-model",
+                "label": "Snake Model",
+                "context_window": 64000,
+                "max_output_tokens": 2048,
+            },
+        ]),
+        native: false,
+        has_stream_simple: false,
+        oauth: None,
+    }];
+
+    let applied =
+        apply_registered_providers_with_env(&mut router, &mut models, &providers, &env);
+    assert_eq!(applied, vec!["snake-proxy".to_string()]);
+    let m = models
+        .get_model(&ProviderId::new("snake-proxy"), "snake-model")
+        .expect("snake_model");
+    assert_eq!(m.label.as_deref(), Some("Snake Model"));
+    assert_eq!(m.context_window, 64_000);
+    assert_eq!(m.max_output_tokens, 2_048);
+    assert_eq!(m.api, Api::OpenAiChatCompletions);
+}
+
+#[test]
+fn registering_multiple_models_in_one_provider_makes_each_resolvable() {
+    let mut router = ProviderRouter::from_env_with(|_| None);
+    let mut models = Models::new();
+    let env = |name: &str| (name == "PROXY_KEY").then(|| "sk-test".to_string());
+    let providers = vec![RegisteredProviderConfig {
+        name: "multi-proxy".to_string(),
+        display_name: Some("Multi".to_string()),
+        base_url: Some("https://multi.example.com/v1".to_string()),
+        api_key: Some("$PROXY_KEY".to_string()),
+        api: Some("openai-completions".to_string()),
+        models: serde_json::json!([
+            {"id": "alpha", "name": "Alpha", "contextWindow": 32000, "maxTokens": 1024},
+            {"id": "beta",  "name": "Beta",  "contextWindow": 64000, "maxTokens": 2048},
+            {"id": "gamma", "name": "Gamma", "contextWindow": 128000, "maxTokens": 4096},
+        ]),
+        native: false,
+        has_stream_simple: false,
+        oauth: None,
+    }];
+
+    apply_registered_providers_with_env(&mut router, &mut models, &providers, &env);
+    for id in ["alpha", "beta", "gamma"] {
+        assert!(
+            models
+                .get_model(&ProviderId::new("multi-proxy"), id)
+                .is_some(),
+            "expected model {id} to be registered"
+        );
+    }
+    let gamma = models
+        .get_model(&ProviderId::new("multi-proxy"), "gamma")
+        .unwrap();
+    assert_eq!(gamma.context_window, 128_000);
+}
+
+#[test]
+fn per_model_api_hint_overrides_the_provider_family() {
+    // An extension can mix wire protocols inside one provider — e.g. an
+    // OpenAI-compatible base that also exposes a Responses endpoint.
+    let mut router = ProviderRouter::from_env_with(|_| None);
+    let mut models = Models::new();
+    let env = |name: &str| (name == "PROXY_KEY").then(|| "sk-test".to_string());
+    let providers = vec![RegisteredProviderConfig {
+        name: "mixed-proxy".to_string(),
+        display_name: Some("Mixed".to_string()),
+        base_url: Some("https://mixed.example.com".to_string()),
+        api_key: Some("$PROXY_KEY".to_string()),
+        api: Some("openai-completions".to_string()),
+        models: serde_json::json!([
+            {"id": "chat", "name": "Chat", "contextWindow": 32000, "maxTokens": 1024},
+            {"id": "resp", "name": "Resp", "contextWindow": 32000, "maxTokens": 1024, "api": "openai-responses"},
+        ]),
+        native: false,
+        has_stream_simple: false,
+        oauth: None,
+    }];
+
+    apply_registered_providers_with_env(&mut router, &mut models, &providers, &env);
+    assert_eq!(
+        models
+            .get_model(&ProviderId::new("mixed-proxy"), "chat")
+            .unwrap()
+            .api,
+        Api::OpenAiChatCompletions,
+    );
+    assert_eq!(
+        models
+            .get_model(&ProviderId::new("mixed-proxy"), "resp")
+            .unwrap()
+            .api,
+        Api::OpenAiResponses,
+    );
+}
+
+#[test]
+fn empty_models_array_is_a_silent_no_op_for_the_catalog() {
+    // Pure base-URL override with no models — the provider still gets
+    // registered with the router (so `pi --model my-proxy/foo` errors),
+    // and the catalog simply has no entries for it.
+    let mut router = ProviderRouter::from_env_with(|_| None);
+    let mut models = Models::new();
+    let env = |name: &str| (name == "PROXY_KEY").then(|| "sk-test".to_string());
+    let providers = vec![RegisteredProviderConfig {
+        name: "no-models".to_string(),
+        display_name: Some("No Models".to_string()),
+        base_url: Some("https://empty.example.com".to_string()),
+        api_key: Some("$PROXY_KEY".to_string()),
+        api: Some("openai-completions".to_string()),
+        models: serde_json::json!([]),
+        native: false,
+        has_stream_simple: false,
+        oauth: None,
+    }];
+
+    let applied =
+        apply_registered_providers_with_env(&mut router, &mut models, &providers, &env);
+    assert_eq!(applied, vec!["no-models".to_string()]);
+    assert!(router.has_provider("no-models"));
+    let entries: Vec<_> = models
+        .iter()
+        .filter(|(p, _)| p.0 == "no-models")
+        .collect();
+    assert!(entries.is_empty(), "no entries expected, got {entries:?}");
+}
+
+#[test]
+fn apply_registered_providers_can_be_called_twice_with_different_overrides() {
+    // Idempotency: re-applying with a fresh provider (different name) must
+    // not stomp on prior entries — the catalog should carry both.
+    let mut router = ProviderRouter::from_env_with(|_| None);
+    let mut models = Models::new();
+    let env = |name: &str| (name == "PROXY_KEY").then(|| "sk-test".to_string());
+    let providers = vec![
+        provider_config("first-proxy", "openai-completions", "$PROXY_KEY"),
+        provider_config("second-proxy", "openai-completions", "$PROXY_KEY"),
+    ];
+
+    apply_registered_providers_with_env(&mut router, &mut models, &providers, &env);
+    apply_registered_providers_with_env(&mut router, &mut models, &providers, &env);
+    assert!(router.has_provider("first-proxy"));
+    assert!(router.has_provider("second-proxy"));
+    assert!(models
+        .get_model(&ProviderId::new("first-proxy"), "proxy-model")
+        .is_some());
+    assert!(models
+        .get_model(&ProviderId::new("second-proxy"), "proxy-model")
+        .is_some());
+}
+

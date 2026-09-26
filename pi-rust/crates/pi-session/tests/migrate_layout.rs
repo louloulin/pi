@@ -51,6 +51,7 @@ fn sample_entries() -> Vec<SessionEntry> {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         }),
         SessionEntry::Extension {
             extension: "demo".into(),

@@ -85,6 +85,31 @@ fn result() -> ToolResult {
         is_error: false,
         details: None,
         added_tool_names: None,
+        // The fold's `extras` list — the head image lives in `content`.
+        images: Vec::new(),
+    }
+}
+
+/// Result shape a multi-image tool produces (plan §6 P1-3): the head image is
+/// still in `content`, every subsequent image in declaration order lands in
+/// the sidecar list, and the caption lives under `details.image_text`.
+fn multi_image_result() -> ToolResult {
+    ToolResult {
+        tool_call_id: "call_multi_image".to_string(),
+        content: Box::new(image_block()),
+        is_error: false,
+        details: Some(serde_json::json!({ "image_text": "Read image file [image/png]" })),
+        added_tool_names: None,
+        images: vec![
+            ImageContent {
+                mime_type: "image/jpeg".to_string(),
+                data: "SECOND".to_string(),
+            },
+            ImageContent {
+                mime_type: "image/webp".to_string(),
+                data: "THIRD".to_string(),
+            },
+        ],
     }
 }
 
@@ -261,4 +286,71 @@ async fn read_tool_image_result_renders_through_the_executor() {
         "{rendered:?}"
     );
     assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+}
+
+/// Multi-image round-trip (plan §6 P1-3): the TUI render path keeps its
+/// single-image presentation — the head image is the only thing drawn
+/// inline, and the `details.image_text` carries the surrounding caption.
+/// `ToolResult::images` is the wire-format sidecar the *provider adapter*
+/// iterates; the TUI deliberately does not draw every attachment inline,
+/// since the terminal image protocol already occupies the full viewport
+/// for a single inline image. This test guards the structural separation:
+/// the head image renders as before, the caption stays visible, and the
+/// extras list survives intact for the wire payload to consume.
+#[test]
+fn multi_image_tool_result_keeps_head_inline_and_sidecar_intact() {
+    let _guard = capabilities();
+    set_capabilities(caps(None));
+    set_cell_dimensions(CELLS);
+
+    let dir = std::env::temp_dir();
+    let mut session = session(&dir, false);
+    let tool_call = ToolCall {
+        id: "call_multi_image".to_string(),
+        name: "read".to_string(),
+        arguments: serde_json::json!({ "path": "shot.png" }),
+    };
+    session.call(&tool_call, false);
+    let rendered = render_lines_plain(&session.result(&multi_image_result()));
+
+    // Single inline head image — exactly one `[Image: …]` indicator,
+    // matching the single-image TUI behaviour the fold preserves.
+    assert_eq!(
+        rendered.matches("[Image: [image/png] 320x240]").count(),
+        1,
+        "the head image emits exactly one [Image: …] line; got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Read image file [image/png]"),
+        "caption stays visible next to the inline image: {rendered:?}"
+    );
+    // The extras list is for the wire payload, not the TUI render path —
+    // confirm the sidecar data is still present after the render so the
+    // provider adapter can iterate it later.
+    let result = multi_image_result();
+    assert_eq!(result.images.len(), 2, "extras sidecar intact");
+    assert_eq!(result.images[0].data, "SECOND");
+    assert_eq!(result.images[1].data, "THIRD");
+}
+
+/// Multi-image sidecar is the structural half of the round-trip — the
+/// `ToolResult::images` vector carries every attachment beyond the head.
+/// Provider adapters (anthropic.rs) iterate the list to emit one wire
+/// `image` block per entry; this test guards the list's declaration order.
+#[test]
+fn multi_image_tool_result_preserves_image_declaration_order() {
+    let result = multi_image_result();
+    assert_eq!(result.images.len(), 2, "the sidecar is the *extras* list");
+    assert_eq!(
+        result.images[0].data, "SECOND",
+        "first entry in the sidecar is the second image"
+    );
+    assert_eq!(
+        result.images[1].data, "THIRD",
+        "second entry in the sidecar is the third image"
+    );
+    assert!(
+        matches!(*result.content, Content::Image(ref head) if head.data == PNG),
+        "the head image lives in `content` and is the first image"
+    );
 }

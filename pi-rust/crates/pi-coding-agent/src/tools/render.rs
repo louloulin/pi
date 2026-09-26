@@ -2171,6 +2171,7 @@ mod tests {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         };
         let rendered = session.result(&result);
         assert!(
@@ -2201,6 +2202,7 @@ mod tests {
             is_error: false,
             details: None,
             added_tool_names: None,
+            images: Vec::new(),
         };
         assert!(session.result(&result).is_empty());
     }

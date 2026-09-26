@@ -72,6 +72,7 @@ fn node_reads_a_rust_written_database() {
             is_error: false,
             details: Some(serde_json::json!({"exitCode": 0})),
             added_tool_names: None,
+            images: Vec::new(),
         }),
         SessionEntry::Compaction {
             summary: "## Goal\ndone".into(),

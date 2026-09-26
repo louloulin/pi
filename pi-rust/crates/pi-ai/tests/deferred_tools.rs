@@ -58,6 +58,7 @@ fn tool_result_message_with_added(text: &str, added: Option<Vec<&str>>) -> Messa
             is_error: false,
             details: None,
             added_tool_names: added.map(|names| names.into_iter().map(String::from).collect()),
+            images: Vec::new(),
         })],
         model: None,
     }

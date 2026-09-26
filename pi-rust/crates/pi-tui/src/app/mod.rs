@@ -6768,6 +6768,7 @@ mod tool_stream_tests {
                 is_error: false,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             },
             duration_ms: 3,
         });
@@ -6809,6 +6810,7 @@ mod tool_stream_tests {
                 is_error: false,
                 details: None,
                 added_tool_names: None,
+                images: Vec::new(),
             },
             duration_ms: 1,
         });
